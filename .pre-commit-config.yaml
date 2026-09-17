@@ -1,0 +1,162 @@
+# The single definition of "lint" for this repo. The same file drives the local
+# pre-commit hook, `uv run pre-commit run --all-files`, the CI `lint` job, and the
+# release script's snapshot verification — so those four can never disagree.
+#
+# ruff and mypy run as `repo: local` hooks through `uv run` rather than through their
+# upstream pre-commit mirrors: that keeps exactly ONE version of each tool (the one
+# pinned in uv.lock), and lets mypy see the real project environment, which it needs
+# for the pydantic.mypy plugin configured in pyproject.toml.
+#
+# .sidegraph/ is excluded repo-wide: the store is append-only and machine-written, and
+# letting a whitespace fixer rewrite its records would mutate the store as a side effect
+# of committing. src/sidegraph/viz/assets/ holds a vendored 688 KB bundle that is not
+# ours to reformat. sidegraph-graph.html is the --demo release's generated decision-graph
+# viz (tools/release-public.sh force-adds it since it's gitignored internally): it's over a
+# megabyte and its size tracks the store, so check-added-large-files (--maxkb=1024) would
+# fail the FIRST --demo release at its own verification gate — a generated release artifact,
+# not something to lint or size-cap.
+# The whitepaper's VERBATIM raw-artifact bundle is excluded under BOTH of its paths: it
+# lives at design/whitepaper/evidence/artifact-bundle/ here and the release relocates it
+# to docs/whitepaper/evidence/artifact-bundle/ in the public snapshot, where this same
+# config runs again as the snapshot's verification step. Its scripts ship byte-identical
+# to what produced the published numbers, under a SHA-256 manifest — a formatter "fixing"
+# them falsifies both the verbatim promise and every hash. Measured, not hypothetical:
+# with only the internal path excluded, the first snapshot build reformatted nine bundle
+# scripts and broke 41 of the manifest's hashes. (The corpus leak gate still scans the
+# bundle either way: it walks the filesystem itself and ignores this exclude.)
+exclude: '^(\.sidegraph/|src/sidegraph/viz/assets/|sidegraph-graph\.html|(design|docs)/whitepaper/evidence/artifact-bundle/)'
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]   # keep intentional two-space hard breaks in docs
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      # Catches a malformed pyproject.toml (or other tracked .toml) before it reaches CI's
+      # `uv sync --locked`, which fails on the same file far less legibly.
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: debug-statements
+      # Refuses a commit that adds a real private key (RSA/DSA/EC/OpenSSH) as a tracked file —
+      # the capture-redaction feature (src/sidegraph/capture.py) already regexes decision
+      # CONTENT for this pattern; this guards the source tree itself. Excludes the redaction
+      # feature's own fake-key test fixtures and the design note that quotes them, none of
+      # which is a real key.
+      - id: detect-private-key
+        exclude: |
+          (?x)^(
+            tests/test_capture_redact\.py|
+            tests/test_redaction_seeded\.py|
+            design/superpowers/plans/2026-07-06-capture-ratification\.md
+          )$
+
+  # Broad secret-detection net (AWS/GCP/GitHub/Slack tokens, private keys, etc.) beyond the
+  # corpus leak gate's fixed denylist and the redaction feature's own patterns — catches a
+  # live credential anywhere in a tracked file, not just the paths those two already watch.
+  # `.gitleaks.toml` path-scopes allowlisting for the redaction feature's own fake-token test
+  # fixtures (tests/test_capture_redact.py etc.), never a global disable.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # Finds GitHub Actions supply-chain/security issues (unpinned actions, script injection via
+  # untrusted `${{ }}` template interpolation, excessive `permissions:`) in the workflows that
+  # ship to the public repo — the class of defect a human diff review easily misses.
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.30.1
+    hooks:
+      - id: zizmor
+
+  # Static-checks GitHub Actions workflow YAML (invalid expressions, undefined contexts,
+  # shellcheck issues inside `run:` steps) — complements zizmor's security focus with
+  # correctness checks zizmor does not cover.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+      - id: corpus-leak-gate
+        name: corpus leak gate
+        # `python3`, not `uv run python`: the checker is deliberately stdlib-only, so uv buys
+        # nothing and would couple the gate to uv project discovery — which fails outright in a
+        # tree whose pyproject uv cannot parse (the release script's own test fixtures).
+        # The `test -f` guard exists because THIS FILE SHIPS: .pre-commit-config.yaml is in the
+        # release ALLOWLIST while tools/ is not, and the release script verifies the snapshot by
+        # running `pre-commit run --all-files` inside it. Without the guard, an always_run hook
+        # would look for a checker that by design does not exist there and fail every release,
+        # the public repo's CI, and every public contributor's first commit.
+        entry: bash -c 'test ! -f tools/corpus_leak.py || exec python3 tools/corpus_leak.py'
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+      - id: uv-lock-check
+        name: uv.lock is in sync with pyproject.toml
+        # Catches a dependency bumped in pyproject.toml without refreshing uv.lock, which
+        # `uv sync --locked` (CI, and the release script's VERIFY_CMD/VIZ_CMD) would otherwise
+        # refuse at a much less convenient point — mid-release, or mid-CI-run.
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|uv\.lock)$
+      - id: check-public-twins
+        name: public-twin contract check
+        # A `.public.` twin (plugin manifest, CLAUDE.public.md, CONTRIBUTING.public.md,
+        # AGENTS.public.md) with no base counterpart, or a plugin manifest that still points
+        # at the working tree instead of the released package, would otherwise ship broken
+        # and surface only when a consumer's install fails. Self-guarded like
+        # corpus-leak-gate: tools/ is not in the release ALLOWLIST, so this checker does not
+        # exist in the public snapshot or its CI.
+        entry: bash -c 'test ! -f tools/check_public_twins.py || exec python3 tools/check_public_twins.py'
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+      - id: check-shipped-links
+        name: shipped-docs link check
+        # A relative Markdown link that resolves in THIS repo can still 404 once the release
+        # mapping is applied (design/whitepaper/draft.md -> docs/whitepaper/index.md, `.public.`
+        # twins renamed onto their base names, design/ and tools/ absent) — this catches that
+        # before the commit lands. Self-guarded: tools/ is not in the release ALLOWLIST.
+        entry: bash -c 'test ! -f tools/check_shipped_links.py || exec python3 tools/check_shipped_links.py'
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+      - id: plugin-manifest-validate
+        name: validate plugin/marketplace manifests
+        # Confirms the plugin and marketplace manifests parse and validate under Claude Code's
+        # own schema before they ship, catching a manifest that would fail to install silently
+        # different from how it fails here. Skips cleanly (exit 0) where the `claude` CLI is
+        # not on PATH, e.g. the public repo's CI.
+        entry: bash -c 'command -v claude >/dev/null || exit 0; claude plugin validate .claude-plugin/marketplace.json && claude plugin validate plugin/sidegraph'
+        language: system
+        pass_filenames: false
+        files: ^(\.claude-plugin/|plugin/sidegraph/)

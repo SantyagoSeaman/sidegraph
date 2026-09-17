@@ -1,0 +1,9 @@
+{
+  "sidegraph": {
+    "command": "sh",
+    "args": [
+      "-c",
+      "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json exec uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
+    ]
+  }
+}

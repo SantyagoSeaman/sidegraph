@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "sidegraph-session-start"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "sidegraph-stop"}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "sidegraph-pre-tool-use"}]}]
+  }
+}

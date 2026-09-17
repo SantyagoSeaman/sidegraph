@@ -1,0 +1,28 @@
+{
+  "directed": true,
+  "multigraph": false,
+  "built_at_commit": "6570fd0a7bde37b743aa6fb06b9b7ebdd1379091",
+  "nodes": [
+    {"id": "adapters_bitfinex", "label": "bitfinex.py", "norm_label": "bitfinex.py",
+     "file_type": "code", "source_file": "adapters/bitfinex.py", "source_location": "L1",
+     "community": 4, "_origin": "ast"},
+    {"id": "adapters_bitfinex_bitfinexadapter", "label": "BitfinexAdapter",
+     "norm_label": "bitfinexadapter", "file_type": "code",
+     "source_file": "adapters/bitfinex.py", "source_location": "L39", "community": 18,
+     "_origin": "ast"},
+    {"id": "adapters_bitfinex_bitfinexadapter_init", "label": ".__init__()",
+     "norm_label": ".__init__()", "file_type": "code",
+     "source_file": "adapters/bitfinex.py", "source_location": "L42", "community": 18,
+     "_origin": "ast"},
+    {"id": "adapters_bitfinex_t", "label": "_t()", "norm_label": "_t()", "file_type": "code",
+     "source_file": "adapters/bitfinex.py", "source_location": "L23", "community": 4,
+     "_origin": "ast"}
+  ],
+  "links": [
+    {"source": "adapters_bitfinex", "target": "adapters_bitfinex_bitfinexadapter",
+     "relation": "contains", "confidence": "EXTRACTED"},
+    {"source": "adapters_bitfinex_bitfinexadapter",
+     "target": "adapters_bitfinex_bitfinexadapter_init", "relation": "method",
+     "confidence": "EXTRACTED"}
+  ]
+}

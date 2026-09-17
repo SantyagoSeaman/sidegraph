@@ -1,0 +1,13 @@
+{
+  "name": "sidegraph",
+  "description": "Sidegraph — durable decision memory for AI coding agents.",
+  "owner": { "name": "SantyagoSeaman", "url": "https://github.com/SantyagoSeaman" },
+  "plugins": [
+    {
+      "name": "sidegraph",
+      "source": "./plugin/sidegraph",
+      "description": "Durable decision/lessons memory over your code graph — captured in-session, human-ratified, retrieved mistakes-first, surviving refactors.",
+      "homepage": "https://github.com/SantyagoSeaman/sidegraph"
+    }
+  ]
+}

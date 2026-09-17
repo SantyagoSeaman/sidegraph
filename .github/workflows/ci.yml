@@ -1,0 +1,144 @@
+# Project lint+type+test gate. `lint` runs the SAME .pre-commit-config.yaml a developer
+# runs locally, so there is one definition of lint rather than a CI copy that drifts.
+# Mostly distinct from the sidegraph-recipe workflows in docs/guides/ci-cd-maintenance.md
+# (recipes for USER repos consuming Sidegraph) — except `store-lint`, which is Recipe 2
+# self-applied to this repo's own dogfood store (2026-08-09 maintenance retrospective,
+# cadence lever): the store rides every PR, so its transition rules should gate every PR.
+#
+# Actions are pinned to commit SHAs (the tag comment records the version): a mutable tag
+# is a supply-chain hole, and this workflow ships to the public repo by snapshot.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:   # reused as the pre-publish gate by publish.yml (tag builds)
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # zizmor artipacked: this job never pushes, so the checkout's git credentials should not
+      # persist into the runner's git config where a later step (or an uploaded artifact) could
+      # leak them.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Cache pre-commit hooks
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run pre-commit checks
+        run: uv run pre-commit run --all-files
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      # zizmor artipacked: this job never pushes; do not persist git credentials past checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run pytest -q
+
+  # Recipe 2 (docs/guides/ci-cd-maintenance.md) on our own store: catch a hand-edited or
+  # history-rewritten record no MCP tool would produce. Diffs against the PR's merge base
+  # (never a moving branch name — see the recipe for why). Skips cleanly when the checkout
+  # carries no store: the public snapshot ships .sidegraph only on the demo branch, and
+  # this workflow ships to the public repo.
+  store-lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # zizmor artipacked: this job never pushes; do not persist git credentials past checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0   # full history — merge-base needs it
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: sidegraph-verify --against merge-base
+        run: |
+          if [ ! -d .sidegraph ]; then
+            echo "no .sidegraph in this checkout — store lint not applicable"
+            exit 0
+          fi
+          uv sync --locked
+          git fetch origin "$GITHUB_BASE_REF"
+          base="$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)"
+          uv run sidegraph-verify --against "$base" --json
+
+  # Recipe 1 self-applied: rebuild the graph from scratch and fail on attention findings
+  # (stale decisions, empty/overbroad domains, slug conflicts, refresh failures). A
+  # cache-less rebuild was verified label-identical to the local cached graph and the
+  # check green on it (2026-08-09 retrospective, cadence lever) — so a red here is a real
+  # finding, not CI-environment noise. Lone orphaned/ambiguous entities do NOT fail the
+  # check: multi-anchor tolerates them by design. The engine is version-pinned (engine-
+  # seam invariant); the sync writes only to the ephemeral checkout's .sidegraph/.
+  anchor-health:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # zizmor artipacked: this job never pushes; do not persist git credentials past checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Rebuild graph and run sidegraph-sync --check
+        run: |
+          if [ ! -d .sidegraph ]; then
+            echo "no .sidegraph in this checkout — anchor health not applicable"
+            exit 0
+          fi
+          uvx --from graphifyy==0.9.6 graphify update .
+          uv sync --locked
+          uv run sidegraph-sync --json --check

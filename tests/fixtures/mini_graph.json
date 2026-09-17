@@ -1,0 +1,17 @@
+{
+  "directed": true,
+  "multigraph": false,
+  "built_at_commit": "abc123",
+  "nodes": [
+    {"id": "m_cls", "label": "Trader", "norm_label": "trader", "file_type": "code",
+     "source_file": "trader/exec.py", "source_location": "L10", "community": 1, "_origin": "ast"},
+    {"id": "m_fn", "label": "place_order()", "norm_label": "place_order()", "file_type": "code",
+     "source_file": "trader/exec.py", "source_location": "L20", "community": 1, "_origin": "ast"},
+    {"id": "o_fn", "label": "helper()", "norm_label": "helper()", "file_type": "code",
+     "source_file": "util/misc.py", "source_location": "L3", "community": 2, "_origin": "ast"}
+  ],
+  "links": [
+    {"source": "m_cls", "target": "m_fn", "relation": "contains", "confidence": "EXTRACTED"},
+    {"source": "m_fn", "target": "o_fn", "relation": "calls", "confidence": "EXTRACTED"}
+  ]
+}

@@ -1,0 +1,15 @@
+# Public corpus allowlist — leak-safety invariant #1, default-deny.
+# One corpus_id per line. An id listed here is CLEARED for the public repo: its fixtures
+# under tests/fixtures/corpus/<id>/ ship to the public/demo branches (tests/ ships wholesale).
+# STARTS EMPTY. Add an id ONLY after license clearance AND the leak gate is green.
+
+# This project's own repo. License clearance is trivial — it is ours, Apache-2.0. Its fixture
+# is a SCOPED graph snapshot (the engine/ and host/ seams), not source: the graph carries file
+# paths and symbol names only, and was checked to contain no install refs or dead branch
+# tokens. Cleared 2026-07-25, gate green.
+self-corpus
+
+# Fission-AI/OpenSpec at a pinned public ref (d5788966, v1.8.0). License clearance: MIT
+# upstream; the corpus is a plain clone of a public repo, so measurements over it are
+# externally reproducible. First FOREIGN public corpus. Cleared by owner 2026-08-08.
+openspec

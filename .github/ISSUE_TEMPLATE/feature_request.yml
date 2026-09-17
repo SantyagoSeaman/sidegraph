@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a change to Sidegraph.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What decision memory is failing you today? Describe the situation, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Invariant check
+      description: See CLAUDE.md. Proposals that break these will not land.
+      options:
+        - label: Does not write into the engine's graph.json (read-only input)
+        - label: Does not hard-delete a Decision (the store is append-only)
+        - label: Is obviously useful to an LLM consuming the memory

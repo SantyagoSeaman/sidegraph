@@ -1,0 +1,10 @@
+{
+  "corpus_id": "self-corpus",
+  "generated_from_commit": "3f8dfa534d05a027f1f0e14c811c222f0f5e0591",
+  "graph_scope": [
+    "src/sidegraph/engine/",
+    "src/sidegraph/host/"
+  ],
+  "graphify_version": "graphify 0.9.6",
+  "visibility": "public"
+}

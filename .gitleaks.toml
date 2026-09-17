@@ -1,0 +1,32 @@
+title = "sidegraph gitleaks config"
+
+# Extends gitleaks' default ruleset rather than replacing it.
+[extend]
+useDefault = true
+
+# Path-scoped allowlist, never a global disable: every path below either belongs to the
+# redaction feature's own test fixtures (deliberately shaped like a real credential so the
+# redaction regexes in src/sidegraph/capture.py have something to catch — see
+# tests/test_capture_redact.py's docstring), a design-plan doc quoting the same fixtures, or
+# vendored third-party content we do not edit. A real secret anywhere else in the repo still
+# fails the scan. This file ships to the public repo (tests/ ships wholesale with the same
+# fixtures), so it has to hold there too.
+[allowlist]
+description = "Known-fake secrets in redaction-feature fixtures and vendored/planning content"
+paths = [
+  '''^tests/test_capture_redact\.py$''',
+  '''^tests/test_redaction_seeded\.py$''',
+  '''^tests/test_capture_propose\.py$''',
+  '''^tests/test_capture_integration\.py$''',
+  '''^tests/test_capture_facts\.py$''',
+  '''^tests/test_importer\.py$''',
+  '''^tests/test_doc_import\.py$''',
+  '''^tests/test_domains\.py$''',
+  '''^tests/test_server_capture\.py$''',
+  '''^tests/test_server_domains\.py$''',
+  '''^tests/test_server_facts\.py$''',
+  '''^tests/test_server_redaction\.py$''',
+  '''^design/superpowers/plans/2026-07-06-capture-ratification\.md$''',
+  '''^design/superpowers/plans/2026-07-10-facts-layer\.md$''',
+  '''^src/sidegraph/viz/assets/vis-network\.min\.js$''',
+]

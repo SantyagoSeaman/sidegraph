@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "sidegraph": {"command": "sidegraph-mcp", "args": []}
+  }
+}

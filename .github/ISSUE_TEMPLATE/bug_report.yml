@@ -1,0 +1,37 @@
+name: Bug report
+description: Something in Sidegraph behaves differently than documented.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got.
+      placeholder: |
+        Command: uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
+        Expected: exit 0
+        Got: ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: The smallest sequence that shows the problem.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Sidegraph version
+      description: "Output of: uv run python -c \"import importlib.metadata as m; print(m.version('sidegraph'))\""
+    validations:
+      required: true
+  - type: input
+    id: graphify
+    attributes:
+      label: Graphify version
+      description: The engine version whose graph.json you are reading.
+  - type: markdown
+    attributes:
+      value: "For security issues do **not** open an issue — see [SECURITY.md](../blob/main/SECURITY.md)."

@@ -1,0 +1,10 @@
+{
+  "built_at_commit": "bootstrap-fixture",
+  "nodes": [
+    {"id": "doc-1", "label": "Retry ADR", "norm_label": "retry adr", "file_type": "document", "source_file": "docs/adr/001-retry.md", "community": 1},
+    {"id": "code-1", "label": "RetryClient", "norm_label": "retryclient", "file_type": "code", "source_file": "src/client.py", "community": 1},
+    {"id": "code-2", "label": "Cache", "norm_label": "cache", "file_type": "code", "source_file": "src/a.py", "community": 2},
+    {"id": "code-3", "label": "Cache", "norm_label": "cache", "file_type": "code", "source_file": "src/b.py", "community": 2}
+  ],
+  "links": []
+}

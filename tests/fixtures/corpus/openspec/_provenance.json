@@ -1,0 +1,11 @@
+{
+  "corpus_id": "openspec",
+  "generated_from_commit": "d57889664cab4f2f061d236ec3ff82a5578701bb",
+  "graph_scope": [
+    "src/cli/",
+    "src/commands/",
+    "src/utils/"
+  ],
+  "graphify_version": "graphify 0.9.6",
+  "visibility": "public"
+}

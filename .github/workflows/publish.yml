@@ -1,0 +1,84 @@
+# Build and publish sidegraph to PyPI on a version tag — gated on the full test suite.
+#
+# Trigger: push a semver tag, e.g. `git tag v0.1.0 && git push origin v0.1.0`. Deliberately
+#          no `workflow_dispatch`: a manual run has no tag ref, and the "tag matches pyproject
+#          version" check below only means something against a real tag ref. Keeping a manual
+#          trigger around that can never pass that check is pointless at best; before Trusted
+#          Publishing goes live for 0.1.0 it would be one stray click away from publishing an
+#          untagged tree under whatever version pyproject.toml happens to carry.
+# Gate:    the `test` job reuses ci.yml (pre-commit lint + pytest across the Python matrix);
+#          build/publish only run if it passes. `git-tag == pyproject version` is enforced
+#          unconditionally (not just `if: startsWith(github.ref, 'refs/tags/')`) so a mistyped
+#          tag never ships, and so a future trigger that isn't a tag push fails this check
+#          loudly instead of silently skipping it.
+# Auth:    PyPI Trusted Publishing (OIDC) — no API token stored. One-time PyPI setup:
+#          project `sidegraph` → Trusted Publishers → add owner `SantyagoSeaman`, repo
+#          `sidegraph`, workflow `publish.yml`, environment `pypi`. Also create a GitHub
+#          environment named `pypi` (Settings → Environments) for the protection rule.
+# TestPyPI dry run first (recommended): locally `uv build` then
+#          `uv publish --publish-url https://test.pypi.org/legacy/` (needs a TestPyPI token),
+#          and `pip install -i https://test.pypi.org/simple/ sidegraph` to smoke the wheel.
+name: publish
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # zizmor self-repository: flags this as the older `./...` reusable-workflow reference and
+    # suggests the newer `$/...` form. Not applied: GA support for `$/...` on the runners this
+    # workflow actually executes on is unconfirmed, and this reference is exactly the job graph
+    # the task guardrails say not to touch on a guess — a broken reusable-workflow call here
+    # would silently skip the test gate in front of a PyPI publish. `./...` is GitHub's
+    # documented, stable syntax for a same-repo reusable workflow.
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository] stable syntax kept; see comment above
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # zizmor artipacked: this job never pushes; do not persist git credentials past checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Tag matches pyproject version
+        # Unconditional on purpose: `on:` above only triggers this workflow from a tag push,
+        # but this check is the backstop if that ever changes (e.g. workflow_dispatch comes
+        # back without this comment being read first). A non-tag ref fails it cleanly instead
+        # of silently skipping straight to build/publish.
+        run: |
+          VERSION=$(uv run --no-project python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          TAG="${GITHUB_REF_NAME#v}"
+          [ "$VERSION" = "$TAG" ] || { echo "tag v$TAG != pyproject version $VERSION — bump one to match" >&2; exit 1; }
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # OIDC token for PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

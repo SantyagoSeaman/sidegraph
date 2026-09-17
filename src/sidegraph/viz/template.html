@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sidegraph — decision/fact graph</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0f0f1a; color: #e6e6ef;
+    font: 13px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #net { flex: 1; height: 100%; }
+  #side { width: 340px; box-sizing: border-box; padding: 14px; overflow-y: auto;
+    background: #16162a; border-left: 1px solid #262640; }
+  #side h1 { font-size: 15px; margin: 0 0 8px; }
+  #search { width: 100%; box-sizing: border-box; padding: 6px 8px; margin-bottom: 10px;
+    background: #0f0f1a; color: #e6e6ef; border: 1px solid #33334d; border-radius: 4px; }
+  .stat { display: flex; justify-content: space-between; padding: 2px 0; }
+  .stat b { color: #fff; }
+  .warn b, .warn span { color: #e0533d; }
+  #legend div { padding: 2px 0; }
+  .sw { display: inline-block; width: 10px; height: 10px; margin-right: 6px;
+    border-radius: 2px; vertical-align: middle; }
+  #info { margin-top: 12px; border-top: 1px solid #262640; padding-top: 10px; }
+  #info h2 { font-size: 13px; margin: 0 0 6px; word-break: break-word; }
+  #info .field { margin: 4px 0; }
+  #info .k { color: #9a9ab0; display: block; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .04em; }
+  pre { white-space: pre-wrap; word-break: break-word; margin: 2px 0; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+    color: #9a9ab0; margin: 14px 0 4px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="net"></div>
+  <div id="side">
+    <h1>Sidegraph graph</h1>
+    <input id="search" placeholder="search nodes…" autocomplete="off">
+    <div id="stats"></div>
+    <h3>Legend</h3>
+    <div id="legend"></div>
+    <div id="info"><em>click a node to inspect</em></div>
+  </div>
+</div>
+<script>__SIDEGRAPH_VIS_JS__</script>
+<script>
+const GRAPH = __SIDEGRAPH_GRAPH_JSON__;
+(function () {
+  const nodes = new vis.DataSet(GRAPH.nodes);
+  const edges = new vis.DataSet(GRAPH.edges);
+  const network = new vis.Network(document.getElementById("net"), { nodes, edges }, {
+    physics: {
+      stabilization: false,             // no hidden pre-settle — let the layout play out on screen
+      minVelocity: 2,                   // auto-stop once motion drops below this (~1-2s settle)
+      barnesHut: {
+        theta: 0.6,
+        gravitationalConstant: -16000,  // repulsion — spreads dense hubs apart
+        centralGravity: 0.35,           // pulls loose 2-3 node clusters back toward center
+        springLength: 180,              // rest length between linked nodes
+        springConstant: 0.05,
+        damping: 0.3,                   // higher -> the visible settle stops quickly
+        avoidOverlap: 0.3,              // keep node bodies from overlapping
+      },
+    },
+    interaction: { hover: true, tooltipDelay: 120 },
+    nodes: { font: { color: "#e6e6ef" } },
+    edges: { smooth: { type: "continuous" } },
+  });
+  const byId = {};
+  GRAPH.nodes.forEach(function (n) { byId[n.id] = n; });
+
+  const s = GRAPH.stats || {};
+  const rows = [
+    ["decisions", s.decisions], ["facts", s.facts], ["entities", s.entities],
+    ["orphaned bindings", s.orphaned_bindings], ["degraded bindings", s.degraded_bindings],
+    ["dangling records", s.dangling_records], ["supersede links", s.supersede_links],
+  ];
+  let statHtml = rows.map(function (r) {
+    return '<div class="stat"><span>' + r[0] + "</span><b>" + (r[1] || 0) + "</b></div>";
+  }).join("");
+  if (s.truncated) {
+    statHtml += '<div class="stat warn"><span>truncated</span><b>' + s.truncated + "</b></div>";
+  }
+  document.getElementById("stats").innerHTML = statHtml;
+
+  const legend = [
+    ["ADR", "#4f8ef7"], ["gotcha", "#e0533d"], ["constraint", "#e0913d"],
+    ["lesson", "#c76fe0"], ["fact", "#3dae9c"], ["entity", "#8a94a6"],
+    ["binding live", "#8a94a6"], ["binding degraded", "#e0913d"],
+    ["binding orphaned", "#e0533d"],
+  ];
+  document.getElementById("legend").innerHTML = legend.map(function (l) {
+    return '<div><span class="sw" style="background:' + l[1] + '"></span>' + l[0] + "</div>";
+  }).join("");
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  network.on("click", function (params) {
+    const info = document.getElementById("info");
+    if (!params.nodes.length) { info.innerHTML = "<em>click a node to inspect</em>"; return; }
+    const n = byId[params.nodes[0]];
+    const d = n.detail || {};
+    let html = "<h2>" + escapeHtml(n.label) + "</h2>";
+    html += '<div class="field"><span class="k">type</span>' + escapeHtml(n.type) + "</div>";
+    Object.keys(d).forEach(function (k) {
+      const v = d[k];
+      if (v === null || v === undefined || v === "") return;
+      const val = Array.isArray(v) ? v.join(", ") : String(v);
+      html += '<div class="field"><span class="k">' + escapeHtml(k) + '</span><pre>'
+        + escapeHtml(val) + "</pre></div>";
+    });
+    info.innerHTML = html;
+  });
+
+  document.getElementById("search").addEventListener("input", function (e) {
+    const q = e.target.value.toLowerCase().trim();
+    if (!q) return;
+    const hit = GRAPH.nodes.find(function (n) {
+      return (n.label || "").toLowerCase().indexOf(q) !== -1;
+    });
+    if (hit) { network.selectNodes([hit.id]); network.focus(hit.id, { scale: 1.1 }); }
+  });
+})();
+</script>
+</body>
+</html>
