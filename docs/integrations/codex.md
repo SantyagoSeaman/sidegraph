@@ -140,13 +140,16 @@ plugin-provided variable, is what keeps `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` pointe
 repo.
 
 What was verified live (codex-cli 0.154.0, a throwaway `CODEX_HOME`): `codex plugin
-marketplace add` parses `.agents/plugins/marketplace.json` and resolves the plugin at
+marketplace add SantyagoSeaman/sidegraph` fetches the published repository by the
+`owner/repo` shorthand, parses `.agents/plugins/marketplace.json` and resolves the plugin at
 `./plugin/sidegraph`. `codex plugin add sidegraph@sidegraph` installs it, copying
 `.codex-plugin/plugin.json`, `codex/mcp.json`, `codex/hooks.json`, and every skill's
 `agents/openai.yaml` into the plugin cache unchanged. `codex mcp list --json` shows the
-`sidegraph` server registered with the exact command from `codex/mcp.json`. What was **not**
-independently verified: an actual `SessionStart`/`Stop` hook firing end to end inside a real,
-authenticated Codex session. The CLI exposes no "list installed hooks" introspection command
+`sidegraph` server registered with the exact command from `codex/mcp.json`, and a
+non-interactive `codex exec` session with that server registered called the Sidegraph tools
+(`retrieve_decisions`, `list_proposed`, `query_decisions`, `find_entity`) and got real
+records back. What was **not** independently verified: an actual `SessionStart`/`Stop` hook
+firing end to end inside a real, authenticated Codex session. The CLI exposes no "list installed hooks" introspection command
 this checkout could use to confirm it short of a live session. Also unverified against the
 published docs: the top-level `mcpServers`/`hooks` fields in `.codex-plugin/plugin.json` are
 not documented on `developers.openai.com/plugins/build/plugins` as of this writing, which
