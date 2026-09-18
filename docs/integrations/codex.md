@@ -121,6 +121,13 @@ Sidegraph also ships a Codex plugin, the same one-line install as the Claude Cod
 /plugin install sidegraph@sidegraph
 ```
 
+1. Trust the hooks: start an interactive `codex` session in the repo. Codex detects the two
+   new Sidegraph hook definitions (`SessionStart`, `Stop`) and prompts you in the terminal to
+   trust them. Approve to complete it. Skip or decline and the MCP tools still work, but
+   retrieval at session start and the capture reminder at session end stay silent (see why
+   below). A hook definition change in a later release needs a fresh approval. Review or
+   re-approve anytime with `/hooks`.
+
 This is the same repo-committed manifest set the Claude Code plugin uses, in Codex's own
 shape: `.agents/plugins/marketplace.json` at the repo root, and
 `plugin/sidegraph/.codex-plugin/plugin.json` naming the MCP config
@@ -148,9 +155,29 @@ marketplace add SantyagoSeaman/sidegraph` fetches the published repository by th
 `sidegraph` server registered with the exact command from `codex/mcp.json`, and a
 non-interactive `codex exec` session with that server registered called the Sidegraph tools
 (`retrieve_decisions`, `list_proposed`, `query_decisions`, `find_entity`) and got real
-records back. What was **not** independently verified: an actual `SessionStart`/`Stop` hook
-firing end to end inside a real, authenticated Codex session. The CLI exposes no "list installed hooks" introspection command
-this checkout could use to confirm it short of a live session. Also unverified against the
+records back. `SessionStart` and `Stop` did not fire in that session, and that is expected,
+not a bug. Codex gates hooks with two independent checks. Project trust (`trust_level` in
+`config.toml`) is one. Hook trust is separate and hash-based: Codex records trust against a
+hook definition's current hash and refuses to run a hook it has not seen approved at that
+hash. Installing or enabling a plugin does not grant hook trust. Per the [Codex hooks
+docs](https://learn.chatgpt.com/codex/hooks), Codex skips plugin-bundled hooks until the user
+reviews and trusts the current hook definition. Observed on a real machine running codex-cli
+0.154.0, not documented as a guarantee: after `codex plugin add sidegraph@sidegraph`, the
+first interactive `codex` session detects the two new hook definitions and prompts in the
+terminal to trust them, and answering yes completes the approval. No `/hooks` visit is needed
+for that normal path. A non-interactive `codex exec` session never shows the prompt at all,
+which is exactly why automation needs the bypass below. `/hooks` is the surface for reviewing
+what is trusted and for re-approving after a hook definition changes, since trust is recorded
+per-hash. There is no config-file way to pre-approve it. The only bypass is `codex exec
+--dangerously-bypass-hook-trust`, which the docs themselves flag as dangerous and intended for
+automation that already vets its hook sources, not as the normal path. So after `/plugin
+install sidegraph@sidegraph`, the MCP server works immediately but `SessionStart` and `Stop`
+stay silent until that one-time approval. What was verified without
+a live, trusted Codex session: the hook entry points themselves honor the Codex JSON contract.
+Fed Codex-shaped payloads on stdin, `sidegraph-session-start` wrote the session telemetry row
+and returned `hookSpecificOutput.additionalContext`; `sidegraph-stop` wrote a
+`capture_sessions` row and returned its reminder when the transcript passed the substance
+gate, and correctly wrote nothing when it did not. Also unverified against the
 published docs: the top-level `mcpServers`/`hooks` fields in `.codex-plugin/plugin.json` are
 not documented on `developers.openai.com/plugins/build/plugins` as of this writing, which
 instead sketches an `extensions.com.openai` nesting. The live install above is the evidence

@@ -89,13 +89,15 @@ sidegraph-bootstrap --resume --profile generic-adr --host claude-code
 ## `sidegraph-init`
 
 ```
-sidegraph-init [--db PATH] [--graph PATH]
+sidegraph-init [--db PATH] [--graph PATH] [--no-settings | --ratify-policy VALUE]
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--db` | `$SIDEGRAPH_DIR` if set, else existing `.sidegraph/` if present, else `.sidegraph` | store directory to create — the recommended in-repo location; `$SIDEGRAPH_DB` is honored for back-compat (deprecated). Passing a legacy `*.db` file path still works via one-time migration |
 | `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json` | `graph.json` path to check for (read-only; never created) |
+| `--no-settings` | off | skip the `.claude/settings.json` step described below entirely: no prompt, no write, just the line a person would need to set it up by hand |
+| `--ratify-policy` | unset | `manual`, `auto-low-risk`, or `auto-all`: write this value into `.claude/settings.json` with no prompt (still never overwrites an existing value there); for a scripted, non-interactive setup that wants an explicit answer instead of the interactive question below. Mutually exclusive with `--no-settings` |
 
 Bootstraps a target repo for Sidegraph. Run it once, in the repo you want memory over (not
 the Sidegraph checkout):
@@ -121,6 +123,32 @@ the Sidegraph checkout):
    [`claude-code-setup.md`](../getting-started/claude-code-setup.md) /
    [`codex-setup.md`](../getting-started/codex-setup.md) for hook-by-hook manual wiring.
    Printed on every run, not just the first, so it's easy to re-fetch.
+4. Settles `.claude/settings.json`'s `env.SIDEGRAPH_RATIFY_POLICY`
+   (see [`configuration.md`](configuration.md#environment-variables)), never by writing it
+   silently. The library's own default is `manual` either way; this step only decides what a
+   *fresh* project's committed settings say:
+   - If the file already sets the variable (to any value, including `"manual"`), nothing is
+     asked or written: `<path> already sets SIDEGRAPH_RATIFY_POLICY=<value>. Left unchanged.`
+     A project that chose a policy has chosen.
+   - If the file exists but isn't valid JSON, or isn't a JSON object, it is left untouched on
+     disk and the line to add by hand is printed instead, no prompt either, since nothing
+     could be written regardless of the answer.
+   - Otherwise, in an interactive terminal, it asks one question: lessons, gotchas, and
+     standalone facts self-ratify at write time if you say yes (a bare Enter counts as yes);
+     `adr`/`constraint` decisions and domains always still wait for a person. Either answer is
+     written explicitly (`"auto-low-risk"` or `"manual"`), so the project's choice is
+     committed and visible either way. An unrecognized answer re-asks once, then falls back to
+     the default (yes).
+   - Outside a terminal (CI, a script, an agent-driven session, no TTY on stdin), it asks
+     nothing and writes nothing: a silent write with nobody to answer defeats the point of
+     asking. It prints the one line a person can add by hand instead.
+   - `--no-settings` skips the whole step (no prompt, no write) and prints that same line.
+     `--ratify-policy VALUE` sets the value with no prompt, still never overwriting an
+     existing one, for a fully scripted setup that wants an explicit answer.
+
+   Whatever happens above, a host without `.claude/settings.json` (Codex CLI, CI) gets the
+   equivalent as a plain `export SIDEGRAPH_RATIFY_POLICY=<value>` line. A settings-file
+   problem never fails the store creation in step 1.
 
 **Exit code:** `0` on success, including when the graph is missing (expected and non-fatal)
 and when re-run on an already-initialized repo (idempotent). Non-zero (`1`) only if the store
@@ -235,9 +263,15 @@ recomputes the `SessionStart` TOC cache.
    distinct decisions): `re-pointed N community binding(s)`.
 5. If any accepted domain's `communities` field actually changed this pass:
    `refreshed community mapping for N domain(s)`.
-6. One line per entity whose outcome was `moved`, `orphaned`, `ambiguous`, or `error`:
-   `  <status>: <canonical_name> (<detail or 'no match'>)`. `unchanged`/`rebound` entities are
-   not listed individually (only counted above) since nothing needs attention there.
+6. One line per entity whose outcome was `moved`, `moved_uncommitted`, `orphaned`,
+   `ambiguous`, or `error`: `  <status>: <canonical_name> (<detail or 'no match'>)`.
+   `unchanged`/`rebound` entities are not listed individually (only counted above) since
+   nothing needs attention there. `moved_uncommitted` (dirty-tree guard) fires when the
+   evidence for a move looks right on disk but isn't yet confirmed by committed git
+   history at `HEAD` — nothing is rebound; commit the move (or set
+   `SIDEGRAPH_TRUST_DIRTY_TREE=on`, see [`configuration.md`](configuration.md)) and
+   re-sync. See [`guides/surviving-refactors.md`](../guides/surviving-refactors.md) for
+   why.
 7. If any decisions are now "stale" (every leaf anchor orphaned):
    `possibly stale decisions (all anchors gone — verify):` followed by one
    `  <id>  <title>` line per decision.
@@ -286,13 +320,14 @@ the exact shape the `sync_anchors` MCP tool returns (see
 [`reference/mcp-tools.md#sync_anchors`](mcp-tools.md#sync_anchors) for every key): `{"synced",
 "from_version", "to_version", "counts", "repointed", "outcomes", "stale_decisions",
 "empty_domains", "overbroad_domains", "slug_conflicts", "domains_refreshed",
-"domain_failures"}`. `outcomes` is already filtered to `moved`/`orphaned`/`ambiguous`/`error`
+"domain_failures"}`. `outcomes` is already filtered to
+`moved`/`moved_uncommitted`/`orphaned`/`ambiguous`/`error`
 (never `unchanged`/`rebound`), same as the prose printer above. `domain_failures` is a list of
 `{"slug", "title", "error"}` — one entry per domain whose refresh raised (item 10 above).
 
 `--check` exits **2** when the report has an *attention finding* — an `error` outcome, a
 non-empty `stale_decisions`, a non-empty `slug_conflicts`, or a non-empty `domain_failures`
-(`sync.report_has_findings`). `orphaned`/`ambiguous` outcomes and `empty_domains`/
+(`sync.report_has_findings`). `orphaned`/`ambiguous`/`moved_uncommitted` outcomes and `empty_domains`/
 `overbroad_domains` are deliberately excluded — informational only, never fail the check on
 their own (they're still listed in
 `outcomes` in the JSON report for a human to triage on their own schedule, not because CI
@@ -943,7 +978,7 @@ When any record carries the `ratified_at` stamp (2026-08-04+), the human output 
 Once any record, hot or archived, carries an `auto:` stamp, two more informational lines follow: `auto share: decisions A/B (P%), facts A/B (P%), domains A/B (P%) (E stamp-less record(s) after the first stamp excluded)` — records ever auto-ratified, whatever their status now, over all classified records of the kind — and `auto supersede rate: decisions+facts superseded n/d (p%) vs human n/d (p%); domains retired n/d (p%) vs human n/d (p%) (E stamp-less record(s) after the first stamp excluded)` — auto-ratified records later superseded (domains: dropped or superseded) beside the human-ratified baseline. A zero denominator prints `n/a`; percentages round down. An unstamped accepted or retired record counts as human baseline only if created before the store's earliest stamp; later ones are excluded and counted in the parenthetical. Both lines read hot files plus `archive/*.jsonl`, are never findings, never change the exit code, and never appear in `--json`.
 
 ```
-sidegraph-doctor [--db PATH] [--against GIT_REF] [--check] [--stale-days N] [--json]
+sidegraph-doctor [--db PATH] [--against GIT_REF] [--check] [--stale-days N] [--json] [--graph PATH]
 ```
 
 | Flag | Default | Meaning |
@@ -953,6 +988,7 @@ sidegraph-doctor [--db PATH] [--against GIT_REF] [--check] [--stale-days N] [--j
 | `--check` | off | advisory findings also exit `2` (default: report only; a *skipped* check never fails, even with `--check`) |
 | `--stale-days N` | `30` | flag a proposed decision/domain whose id timestamp is strictly older than `N` days; must be `>= 0` |
 | `--json` | off | print `{"clean", "violations", "findings", "skipped"}` as one JSON object to stdout (nothing else) |
+| `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json` | read-only input used only for the `graph-root-mismatch` advisory check below; missing or unreadable simply skips that one check |
 
 One-stop store health: composes `sidegraph-verify`'s strict snapshot (+ optional
 `--against` transition layer) with an advisory curation lint, rather than reimplementing
@@ -983,6 +1019,7 @@ plain-text line):
 | `stale-instructions` | an auto-injected agent-instructions file beside the store (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`) still carries the distinctive wording of a **superseded** decision — that file reaches the agent at turn zero, before retrieval, so an abandoned rule surviving there outranks the store's correction by default. Verbatim-ish match on normalized text with length/word floors; superseded records only; no git call. Advisory: it reports a quotation, not a proven contradiction — the file may be narrating history |
 | `unratified-accept` | an **accepted** record whose provenance says `agent` and which carries no ratifier stamp — the signature `SIDEGRAPH_AUTO_ACCEPT=on` leaves in a shared store (one environment's setting bypassing the ratification gate for everyone). Scoped to records created at/after the EARLIER of the store's earliest ratifier stamp and its creation marker (`.sidegraph/stamping_live_since`, written once when a store is genuinely new — never backfilled onto an existing one), so a store predating both reports nothing rather than everything; a store that has never ratified anything but was created by a marker-writing version is still in scope from its own creation, closing the blind window an unratified store would otherwise sit in forever. A stamped record — including one stamped `auto:<policy>` by an auto-ratification policy — and a human-sourced one are never flagged. A **supersession successor** (`supersedes` set — `supersede_decision`/`supersede_fact`) is never flagged either: reversal has no ratification queue to bypass and lands accepted immediately by design, so it reproduces the signature with no relation to the env var this check hunts. Narrowed exception: a `supersedes`-bearing record IS still flagged if it carries a `layer`, a `provenance.ref`, or a tier-0 `tag:`/`initiative:` binding absent from its predecessor — neither `supersede_decision` nor `supersede_fact` can produce any of the three, so one present proves the `propose_decisions`/auto-accept path wrote it. (The fact half is defensive only: `supersede_fact` always stamps `source="human"`, so a fact successor never reaches this agent-sourced check, and no draft shape carries `supersedes` on a fact.) Only a MINIMAL superseding draft (none of the three) is indistinguishable from a legitimate successor by the record's own fields, and stays excluded — a known, accepted, narrower trade-off than treating every supersession alike. Advisory: the signature is not proof — verify before concluding |
 | `duplicate-entity` | two or more committed entity files share one logical identity (legal — see below — but ambiguous); reported once per group, at the winner's (lowest-`entity_id`) file, naming every id in the group and its binding count |
+| `graph-root-mismatch` | `graphify update` was likely run from a subdirectory instead of the repository root, so every recorded `source_file` is relative to that subdirectory instead — every anchor in the graph will look orphaned until it's rebuilt from the root. Detected from `--graph`: a sample of anchorable `source_file` values that mostly don't exist relative to the repo root, but DO all exist under one specific subdirectory (named in the finding). Silent on a legitimately partial graph (a doc-only corpus, an `--exclude`d build) and on too small a sample to judge safely; needs `--graph` to resolve (missing/unreadable simply skips it) |
 
 `degraded-binding`/`orphaned-binding` come from `index.db`, opened strictly read-only — it
 is the only source for binding status (canonical `bindings/*.json` files carry identity,

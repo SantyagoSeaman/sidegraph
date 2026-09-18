@@ -109,6 +109,45 @@ jobs:
           base="$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)"
           uv run sidegraph-verify --against "$base" --json
 
+  # A commit-msg hook (see .pre-commit-config.yaml's `no-session-links`) cannot see a pull
+  # request's description, so this is the PR-body half of the same owner ruling: never
+  # publish an external session link. Shares tools/check_no_session_links.py's pattern list
+  # with that hook, rather than a second copy, so the rule cannot drift between the two.
+  # `if: github.event_name == 'pull_request'` matters here specifically: this workflow is
+  # also invoked via `workflow_call` by publish.yml on a tag push, which carries no PR body.
+  # Lives in ci.yml, not its own workflow file: it is a lint-shaped gate exactly like the
+  # local corpus-leak/public-twins/shipped-links checkers, ci.yml already hosts other
+  # `pull_request`-only jobs (store-lint, anchor-health) with the identical self-guard shape,
+  # and a fourth workflow file would buy nothing a job here doesn't already give.
+  # Self-guarded like those checkers: tools/ is not in the public repo's release ALLOWLIST,
+  # so this exits 0 cleanly on an external contributor's PR there instead of failing on a
+  # checker that by design does not exist in that snapshot.
+  pr-description-link-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # zizmor artipacked: this job never pushes; do not persist git credentials past checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Check PR description for forbidden session links
+        # The PR body is untrusted (attacker-controlled on a fork PR), so it goes through an
+        # env var rather than being interpolated into the script text via `${{ }}` — that
+        # would be a script-injection hole. `github.event.pull_request.body` is `null` for an
+        # empty description; GitHub renders that as an empty env var, and `printf '%s'` on an
+        # empty string just produces an empty file, which the checker reports as clean.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ ! -f tools/check_no_session_links.py ]; then
+            echo "tools/check_no_session_links.py not present (public snapshot) — skipping"
+            exit 0
+          fi
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.txt"
+          python3 tools/check_no_session_links.py "$RUNNER_TEMP/pr-body.txt"
+
   # Recipe 1 self-applied: rebuild the graph from scratch and fail on attention findings
   # (stale decisions, empty/overbroad domains, slug conflicts, refresh failures). A
   # cache-less rebuild was verified label-identical to the local cached graph and the

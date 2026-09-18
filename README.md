@@ -108,9 +108,6 @@ install above is all it needs.
 uv tool install sidegraph        # from PyPI — puts sidegraph-init / sidegraph-mcp / … on PATH
 sidegraph-init
 
-# Optional day-one seeding: import the rationale already sitting in your docstrings
-sidegraph-import --dry-run
-
 # Prefer the latest unreleased build straight from git instead of PyPI? Swap step 3 for:
 #   uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
 ```
@@ -162,9 +159,11 @@ commoditize: better models make derivable knowledge cheaper, not the non-derivab
 
 **For the process** — a sidecar, not a reform: it sits beside whatever spec/ADR flow you
 already run, capture is a byproduct of ordinary sessions, and the single ritual is a
-ratification gate — human by default, or a stamped auto-ratification policy where no human is
-in the loop. Provenance on every record (who decided, when, on what evidence)
-is a ready audit trail for the era of agent-made decisions.
+ratification gate, human by default, or `auto-low-risk`: lessons, gotchas, and standalone
+facts self-ratify at write time, while `adr`/`constraint` decisions and domains still wait
+for a human either way. `sidegraph-init` asks which you want (default answer: yes) and
+commits the choice to `.claude/settings.json`. Provenance on every record (who decided,
+when, on what evidence) is a ready audit trail for the era of agent-made decisions.
 
 One honest boundary, stated up front: this is not "cheaper agents in general." Memory
 pays off where it replaces reading prose and where the answer isn't in the code at all;
@@ -192,7 +191,7 @@ real code graph, with temporal history.
 | Knows *what was tried and rejected* | ✗ | ✗ | sometimes | ✗ | ✗ | ✓ first-class `rejected` field |
 | Anchored to the code it concerns | ✗ | ✗ | ✗ | ✓ | partially — concept links, not code | ✓ and survives refactors ([how](docs/guides/surviving-refactors.md)) |
 | Temporal validity & supersession | ✗ edit-in-place | ✗ | sometimes a status header | ✗ | ✗ | ✓ append-only: `valid_from`/`valid_to`, `supersedes` chains |
-| Human gate on what enters memory | ✓ | ✗ | ✓ | ✗ | ✓ curated like code | ✓ ratification loop |
+| Human gate on what enters memory | ✓ | ✗ | ✓ | ✗ | ✓ curated like code | ✓ gated for `adr`/`constraint`/domains, auto for low-risk kinds |
 | Lives in your repo, merges like code | ✓ | ✗ opaque store | ✓ | ✗ per-tool cache | ✓ | ✓ file-per-record log, ratified in the PR diff |
 | Health is CI-gateable | ✗ | ✗ | ✗ | ✗ | ✓ `okf validate` | ✓ `sidegraph-verify` + `sidegraph-doctor` exit codes |
 
@@ -283,24 +282,23 @@ in its own `## Known facts` block — never displacing a mistake line. Details:
 
 CLIs: `sidegraph-bootstrap` (reviewed cold-start import and production proof),
 `sidegraph-init` (initialize the store), `sidegraph-domains` (bootstrap/name domains),
-`sidegraph-import` (seed from existing rationale or ADR/spec markdown), `sidegraph-ratify`
-(gate drafts), `sidegraph-sync` (re-anchor after a rebuild), `sidegraph-compact` (archive
-closed decisions/domains), `sidegraph-verify` (lint store integrity; `--against <git-ref>`
-for CI). See [docs/guides/ci-cd-maintenance.md](docs/guides/ci-cd-maintenance.md) for
-GitHub Actions recipes built on `sidegraph-sync --check`/`sidegraph-verify`.
+`sidegraph-ratify` (gate drafts), `sidegraph-sync` (re-anchor after a rebuild),
+`sidegraph-compact` (archive closed decisions/domains), `sidegraph-verify` (lint store
+integrity; `--against <git-ref>` for CI). See
+[docs/guides/ci-cd-maintenance.md](docs/guides/ci-cd-maintenance.md) for GitHub Actions
+recipes built on `sidegraph-sync --check`/`sidegraph-verify`.
 Reference: [docs/reference/](docs/reference/mcp-tools.md).
 
 ## Works on code and on docs
 
 Anchor decisions to functions and classes — or to **headings in your architecture
-markdown** (LLM-free graph build, non-git folders supported). `sidegraph-import`
-seeds the store from rationale already sitting in your sources: docstrings with zero
-extra setup, and — via `--docs` — your existing ADRs and design specs, parsed into
-anchored decisions deterministically, no LLM.
+markdown** (LLM-free graph build, non-git folders supported). Already have ADRs or
+design specs? `sidegraph-bootstrap` parses them into anchored decisions deterministically,
+no LLM. See the [Bootstrap guide](docs/getting-started/bootstrap.md).
 
 An optional **semantic pass** (`graphify extract`, one API key, cached per file) goes a
-layer deeper on documentation: prose becomes `concept` nodes and thematic clusters, and
-import picks up rationale from the documents themselves. Walkthrough:
+layer deeper on documentation: prose becomes `concept` nodes and thematic clusters, giving
+retrieval a richer graph to anchor against. Walkthrough:
 [docs/guides/semantic-docs.md](docs/guides/semantic-docs.md).
 
 ## Trust & privacy
@@ -313,8 +311,10 @@ import picks up rationale from the documents themselves. Walkthrough:
   session touched afterwards) so you can tell which memory is earning its keep; they never
   travel, and `SIDEGRAPH_TELEMETRY=off` disables them.
 - **Secrets don't enter memory.** Proposed decisions and facts pass redaction before they
-  are stored; a ratification gate — human by default, or an opt-in stamped policy — controls
-  what the agent's drafts can persist.
+  are stored. A ratification gate controls what the agent's drafts can persist: human for
+  `adr`/`constraint` decisions and domains always, and, if you answer yes to `sidegraph-init`'s
+  question (or set `SIDEGRAPH_RATIFY_POLICY` yourself), an auto-ratification stamp for lessons,
+  gotchas, and standalone facts instead of a person's review.
 - **Nothing is silently rewritten.** The store is append-only; every change of mind is
   recorded as a supersession with its reason.
 
@@ -331,7 +331,7 @@ and permanent. That split is the design: **own the memory, rent the graph.**
 
 ## Status
 
-v0.1.0, on PyPI as [`sidegraph`](https://pypi.org/project/sidegraph/) (`pip install sidegraph`)
+v0.2.0, on PyPI as [`sidegraph`](https://pypi.org/project/sidegraph/) (`pip install sidegraph`)
 — also installable via the Claude Code plugin or directly from git (see Quickstart).
 Published by a tag-triggered GitHub Actions workflow that gates on the full test suite
 (trusted publishing, no stored token). Interfaces may still move before 1.0. The full loop — capture, ratification,
@@ -339,8 +339,8 @@ mistakes-first retrieval, refactor-surviving re-anchoring, semantic docs layer, 
 mind-model layer (named domains, `SessionStart` table of contents, `drill_down`), and now the
 facts layer (evidence attached to a decision or anchored standalone) — is exercised
 end-to-end on real code and ADR corpora (a 4,700-node Python trading system and a 15-document
-architecture corpus), with 2,339 tests as of this writing (a public checkout runs 2,196: the
-four release-mechanics test files that read `tools/` aren't shipped, since `tools/` itself
+architecture corpus), with 2,462 tests as of this writing (a public checkout runs 2,240: the
+seven release-mechanics test files that read `tools/` aren't shipped, since `tools/` itself
 isn't shipped, and 3 internal-corpus calibration tests skip — they need a private design
 corpus not included here). Exact counts drift as tests are added; the `tests` badge above
 tracks the suite passing, not a frozen number.

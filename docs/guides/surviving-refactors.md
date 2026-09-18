@@ -53,7 +53,8 @@ deterministic ladder, one rung at a time, and the first rung that fires wins:
 |---|---|---|
 | `unchanged` | Exact `name`+`file_path` match, same node id as last sync | Leaf binding stays `live`; still checks for community re-pointing (below). |
 | `rebound` | Exact `name`+`file_path` match, but the node id changed | Leaf binding stays/returns to `live`, mapping refreshed to the new node id. |
-| `moved` | No exact match, but a *unique* name-only match exists **in a file of the same suffix**, **and the entity's old `file_path` is confirmed gone from disk** | The entity's `descriptor.file_path` is updated to follow it; leaf binding heals to `live`. A same-name hit in a file of a *different* suffix (e.g. a vanished code symbol colliding with an unrelated doc heading) is treated as a collision, not a move, and falls through to orphaned instead — as does any hit whose old path is still on disk (below). |
+| `moved` | No exact match, but a *unique* name-only match exists **in a file of the same suffix**, **the entity's old `file_path` is confirmed gone from disk**, AND that same move is **independently confirmed by committed git history** (old path absent, new path tracked — both at `HEAD`) | The entity's `descriptor.file_path` is updated to follow it; leaf binding heals to `live`. A same-name hit in a file of a *different* suffix (e.g. a vanished code symbol colliding with an unrelated doc heading) is treated as a collision, not a move, and falls through to orphaned instead — as does any hit whose old path is still on disk (below). |
+| `moved_uncommitted` | Same disk-level evidence as `moved` (unique same-suffix hit, old path gone from disk), but git's committed history at `HEAD` does not yet confirm it — an uncommitted delete, rename, or stash on this one working tree | Nothing is touched — the binding, descriptor, and node mapping are all left exactly as they were. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`, see below) and re-sync. |
 | `ambiguous` | More than one node now matches | Leaf binding flips to `degraded` (not deleted). If every candidate shares one community, that community is still used for re-pointing. |
 | `orphaned` | No match at all, exact or loose | Leaf binding flips to `orphaned`. If the entity's file still exists and its nodes agree on a single community, that community is used for re-pointing (see below) — Sidegraph is not guessing which node the entity *became*, only where its code still lives. |
 
@@ -77,6 +78,21 @@ for the whole pass: nothing is adopted, and every candidate that would have move
 `orphaned` instead. A real move that degrades to `orphaned` is visible in `sidegraph-doctor`
 and repairable with [`sidegraph:heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md);
 a wrong adoption is silent, and silence is the worse failure.
+
+The disk check alone is not enough, though: it reflects whatever this one working tree
+looks like *right now*, and an uncommitted `rm`/`git mv`/`git stash` makes the old path
+disappear from disk just as convincingly as a real, shared move. Since `moved` rewrites the
+entity's canonical, **repo-committed** `descriptor` — the same file every other clone reads —
+trusting a purely local, unshared change there would let one person's dirty tree silently
+corrupt the team's memory. So the rung requires a *third* signal before it adopts: the same
+move confirmed by **committed** history, via `git cat-file -e HEAD:<path>` — the old path
+absent from `HEAD`'s tree, and the new path present in it. When the disk-level evidence looks
+like a move but git's `HEAD` doesn't yet back it up, the rung reports `moved_uncommitted` and
+leaves everything untouched instead of guessing; committing the move (or, on a fresh
+repository with no commits yet, making one) and re-running sync heals it the normal way, no
+different from any other rung. For the rare case of someone who has verified their own
+working tree and wants the old, disk-only behavior back, `SIDEGRAPH_TRUST_DIRTY_TREE=on`
+is a documented, off-by-default escape hatch scoped to exactly this one check.
 
 ## Community re-pointing
 
@@ -171,9 +187,11 @@ needing another sync pass.
 
 Nothing in the rebind ladder silently re-anchors a decision to a *different* entity that
 merely looks plausible. `moved` only fires on a **unique** name-only hit within the same file
-type **whose old path is confirmed gone from disk** (see [why `moved` checks the
-disk](#why-moved-checks-the-disk)); anything with more than one candidate is `ambiguous`, not
-resolved, and anything unverifiable stays `orphaned`. An `ambiguous` or
+type **whose old path is confirmed gone from disk AND confirmed by committed git history**
+(see [why `moved` checks the disk](#why-moved-checks-the-disk)); anything with more than one
+candidate is `ambiguous`, not resolved; anything unverifiable stays `orphaned`; and disk-level
+evidence git's `HEAD` doesn't yet back up reports `moved_uncommitted` rather than adopting on
+a dirty tree. An `ambiguous` or
 `orphaned` entity's `last_seen_node_id` is **never** touched by the community re-pointing
 path — only community/Tier-1 bindings move, never the leaf's node mapping. If Sidegraph can't
 say for certain "this is the same thing," it says so (`ambiguous`/`orphaned`) instead of

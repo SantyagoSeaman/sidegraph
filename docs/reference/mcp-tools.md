@@ -834,8 +834,11 @@ transitions (`live`/`degraded`/`orphaned`) per the deterministic resolve ladder,
 community bindings get re-pointed when Leiden renumbered, and every ACCEPTED domain's
 `communities` are refreshed from its `path_prefixes`/`seed_anchors`. An entity's own
 canonical *descriptor* is rewritten only on a `"moved"` rung (a unique, same-suffix name-only
-match after the exact match missed, with the old `file_path` confirmed gone from disk); its
-node-id mapping (`last_seen_node_id`/`last_seen_community`/
+match after the exact match missed, with the old `file_path` confirmed gone from disk **and**
+that same move independently confirmed by COMMITTED git history at `HEAD` — a dirty-tree
+hit that isn't yet committed reports `"moved_uncommitted"` instead and touches nothing; see
+`SIDEGRAPH_TRUST_DIRTY_TREE` in [`configuration.md`](configuration.md) for the off-by-default
+escape hatch); its node-id mapping (`last_seen_node_id`/`last_seen_community`/
 `last_seen_graph_version`) updates on that same `"moved"` rung **and** on an exact-match
 `"rebound"` rung (same `name`+`file_path` descriptor match as last sync, but the resolved
 node id CHANGED since — see the
@@ -881,13 +884,18 @@ from a fresh, un-run report — never the prior (possibly stale) one. Don't read
 as "everything's clean"; pass `force=True` (or re-call after a real graph rebuild) to get an
 actual report.
 
-`outcomes` carries only entities worth a human's attention — `moved`/`ambiguous`/`orphaned`/
+`outcomes` carries only entities worth a human's attention —
+`moved`/`moved_uncommitted`/`ambiguous`/`orphaned`/
 `error` — never the `unchanged`/`rebound` majority, the same filter `sidegraph-sync`'s own
 printer applies; each non-`ok` outcome means:
 
 - **`moved`** — informational, not actionable: a unique same-name match in a same-suffix
   file after the exact match missed, with the entity's old `file_path` confirmed gone from
-  disk. The anchor followed the code; nothing to do.
+  disk AND that move confirmed by committed git history. The anchor followed the code;
+  nothing to do.
+- **`moved_uncommitted`** — informational, not actionable (yet): same disk-level evidence as
+  `moved`, but git's `HEAD` doesn't yet back it up (an uncommitted delete/rename/stash).
+  Nothing is touched. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`) and re-sync.
 - **`ambiguous`** — the name now matches more than one graph node; the leaf is `degraded`,
   not lost. Needs a human judgment call — see the `heal-anchors` skill.
 - **`orphaned`** — no match at all for this entity. Check `stale_decisions` for whether this

@@ -348,15 +348,27 @@ def test_a_moved_entity_DOES_rewrite_its_canonical_file(tmp_path):
     """The converse, pinned deliberately (spec D4): identity is canonical state, not
     derived. A 'moved' adoption rewrites entity.descriptor and that diff is CORRECT --
     someone reading only the test above would otherwise 'fix' it."""
-    # The moved rung fails closed without a resolvable repo_root (sync.py's
-    # _resolve_repo_root) -- git-init tmp_path so it can confirm a.py is genuinely gone
-    # once the graph moves it, same as the live checkout the fix targets.
+    # The moved rung fails closed without a resolvable repo_root AND committed evidence
+    # (dirty-tree guard, sync.py's _committed_evidence_confirms_move) -- git-init tmp_path
+    # so it can confirm a.py is genuinely gone once the graph moves it, same as the live
+    # checkout the fix targets.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
     store, reader = _store_and_reader_for_clean(tmp_path)
     sync(store, reader, force=True)
     before = _snapshot_canonical_dir(store)
 
     # Same symbol, same community, different file — the "moved" rung of rebind_entity.
+    # Commit the new file's real presence at HEAD so the dirty-tree guard's committed-
+    # evidence check confirms the move (a.py was never committed, so its absence is
+    # already confirmed).
+    moved_file = tmp_path / "moved" / "c.py"
+    moved_file.parent.mkdir(parents=True, exist_ok=True)
+    moved_file.write_text("def foo(): pass\n")
+    subprocess.run(["git", "add", "moved/c.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "move to moved/c.py"], cwd=tmp_path, check=True)
+
     moved = dict(GRAPH_A)
     moved["nodes"] = [{**n, "source_file": "moved/c.py"} for n in GRAPH_A["nodes"]]
     moved_graph = tmp_path / "graph_moved.json"

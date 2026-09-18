@@ -5,6 +5,66 @@ All notable changes to this project are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break interfaces). Which
 interfaces, exactly, and what each one promises: [`docs/reference/stability.md`](docs/reference/stability.md).
 
+## [Unreleased]
+
+## [0.2.0] — 2026-09-18
+
+### Added
+
+- **`sidegraph-init` asks before auto-ratifying, instead of writing the policy silently.**
+  In an interactive terminal it now asks one question, ratify low-risk records
+  automatically, default answer yes (`auto-low-risk`), and commits whichever answer the
+  person gives to the project's `.claude/settings.json` explicitly, so the choice is
+  visible and changeable later. Outside a terminal (CI, a script, an agent-driven session)
+  it asks nothing and writes nothing, printing the one line to add by hand instead: a
+  silent write with nobody to answer is exactly what this avoids. An already-set policy,
+  or an unparseable settings file, is reported directly with no prompt, since any write
+  would be a no-op regardless of the answer. Two new flags make a scripted setup possible
+  with no prompt: `--ratify-policy VALUE` sets an explicit value, and `--no-settings`
+  skips the step entirely (the two are mutually exclusive). An existing value is never
+  overwritten, other keys and file shape are preserved, and no settings problem can fail
+  store creation. The README also drops its `sidegraph-import` mentions: that command's
+  rationale-node import is undocumented for now, pending a review of the comment junk it
+  currently writes into the store. See
+  [`docs/reference/cli.md`](docs/reference/cli.md) and
+  [`docs/reference/configuration.md`](docs/reference/configuration.md).
+- **`sidegraph-doctor` gains a `graph-root-mismatch` finding and a `--graph` flag.** When
+  `graphify update` runs from a subdirectory instead of the repo root, every anchor
+  descriptor stops matching the graph's own `source_file` values, and sync used to mass
+  orphan the whole store with no explanation. `sidegraph-doctor --graph <path>` samples the
+  graph's anchorable paths and, only when a high fraction are missing relative to the repo
+  root and one subdirectory resolves them all, reports the mismatch by name instead of
+  leaving a person to hunt through false orphans.
+- **`.github/secret_scanning.yml`** excludes the redaction regression suite's seeded fake
+  secrets from GitHub's own secret scanning, so the fixtures that prove Sidegraph's
+  redaction works stop tripping GitHub's scanner on every push.
+- **Test suite hermeticity**: `tests/conftest.py` now strips every `SIDEGRAPH_`-prefixed
+  environment variable before each test, so a developer's own shell (an exported
+  `SIDEGRAPH_RATIFY_POLICY`, `SIDEGRAPH_TRUST_DIRTY_TREE`, and so on) can no longer change
+  what the suite reports.
+- **Session-link gate**: a `commit-msg`-stage pre-commit hook (`no-session-links`, backed
+  by `tools/check_no_session_links.py`) rejects a commit message carrying a
+  `Claude-Session:` trailer, a claude.ai/chatgpt.com session URL, or a bare `session_<id>`
+  token. `default_install_hook_types` now wires both the `pre-commit` and `commit-msg` git
+  hook types on a plain `pre-commit install`, and CI's new `pr-description-link-gate` job
+  applies the same rule to a pull request's description, which a commit hook cannot see.
+  Ordinary links (a CVE/GHSA advisory, an issue or PR, vendor docs) stay allowed.
+
+### Changed
+
+- **`sidegraph-sync`'s "moved" rung now requires committed evidence before it rewrites an
+  entity's descriptor.** The rung used to decide a symbol moved from the working tree
+  alone: the old path gone from disk, plus a unique same-suffix name match elsewhere, both
+  satisfiable by purely local, uncommitted state such as an unstaged delete or a stash. On
+  a dirty tree that could silently write one person's local, unshared state into the
+  canonical descriptor every other clone reads from the shared store, which was the only
+  known path by which one person's tree could corrupt the whole team's decision memory.
+  The rung now also requires the same move to be confirmed by committed git history at
+  `HEAD`; an unconfirmed hit reports `moved_uncommitted` instead and leaves the binding
+  untouched. `SIDEGRAPH_TRUST_DIRTY_TREE=on` (off by default) restores the old disk-only
+  behavior for someone who has verified their own tree. See
+  [`docs/guides/surviving-refactors.md`](docs/guides/surviving-refactors.md).
+
 ## [0.1.0] — 2026-09-17
 
 First public release.

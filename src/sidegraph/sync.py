@@ -2,8 +2,11 @@
 
 After a Graphify rebuild, node ids shift. ``sync`` re-resolves every tracked concrete
 entity with a deterministic ladder — exact (name+file) -> moved (unique name-only AND the
-old path confirmed gone from disk; the descriptor follows the file) -> ambiguous ->
-orphaned — healing or degrading tier-2 leaf bindings (never deleting) and refreshing the
+old path confirmed gone from disk AND that same move confirmed by COMMITTED git history —
+see ``_committed_evidence_confirms_move``; unconfirmed evidence reports
+``moved_uncommitted`` and leaves the binding untouched rather than guessing — the
+dirty-tree guard, ``SIDEGRAPH_TRUST_DIRTY_TREE=on`` escapes it) -> ambiguous -> orphaned —
+healing or degrading tier-2 leaf bindings (never deleting) and refreshing the
 durable->engine mapping. Gated on
 ``graph_version`` vs the store's ``last_synced_graph_version`` meta stamp, so the lazy
 read-path invocation is a cheap no-op in the common case. No LLM, no fuzzy matching
@@ -32,6 +35,7 @@ the store's method, which recomputes live on every call (a single indexed query)
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -59,7 +63,9 @@ LAST_SYNCED_KEY = "last_synced_graph_version"
 class RebindOutcome(BaseModel):
     entity_id: str
     canonical_name: str
-    status: str  # unchanged | rebound | moved | ambiguous | orphaned | error
+    status: str  # unchanged | rebound | moved | moved_uncommitted | ambiguous | orphaned
+    # | error -- see _committed_evidence_confirms_move for what distinguishes "moved" from
+    # "moved_uncommitted" (dirty-tree guard, defect fixed 2026-09-18).
     node_id: str | None = None
     detail: str | None = None
     repointed: int = 0
@@ -186,6 +192,56 @@ def _resolve_repo_root(reader: GraphifyReader) -> Path | None:
     return Path(result.stdout.strip()).resolve()
 
 
+def _committed_evidence_confirms_move(repo_root: Path, old_path: str, new_path: str) -> bool:
+    """True only when a real, COMMITTED git history confirms the move the "moved" rung is
+    about to adopt: ``old_path`` absent from HEAD's tree, AND ``new_path`` present in it.
+
+    This is the guard the dirty-tree defect needed: the rung's own ``old_confirmed_gone``
+    check (see its call site below) only proves the old path is missing from the WORKING
+    TREE, which an uncommitted delete, rename, or ``git stash`` satisfies just as well as
+    a real, shared move — the syncing person's local, unpushed (or even uncommitted)
+    state would then be enough to make ``rebind_entity`` rewrite the entity's canonical,
+    repo-committed ``descriptor`` for every clone that ever pulls this store. Requiring
+    BOTH halves to be true AT HEAD closes that: a dirty tree can make the old path vanish
+    from disk, but it cannot make git's HEAD lie about what was actually committed.
+
+    Requires a resolvable HEAD first (``git rev-parse --verify -q HEAD``) — an empty
+    repository (``git init`` with zero commits) has none, and this reports "unconfirmed"
+    rather than treating "no HEAD to check" as "path confirmed absent", which would
+    silently reopen the exact hole this function exists to close. Fails CLOSED — returns
+    ``False`` — on any git failure (missing binary, timeout, an unreadable repo): "can't
+    verify" must never collapse into "verified", same discipline
+    ``_resolve_repo_root``'s own ``None`` return already applies one level up.
+    """
+    try:
+        head = _run_git(["rev-parse", "--verify", "-q", "HEAD"], cwd=repo_root, timeout=5.0)
+        if head.returncode != 0:
+            return False  # no commits yet -- nothing is committed, so nothing is confirmed
+        old_gone = (
+            _run_git(["cat-file", "-e", f"HEAD:{old_path}"], cwd=repo_root, timeout=5.0).returncode
+            != 0
+        )
+        new_present = (
+            _run_git(["cat-file", "-e", f"HEAD:{new_path}"], cwd=repo_root, timeout=5.0).returncode
+            == 0
+        )
+    except ValueError:
+        return False
+    return old_gone and new_present
+
+
+def _trust_dirty_tree() -> bool:
+    """``SIDEGRAPH_TRUST_DIRTY_TREE=on`` — off-by-default escape hatch, point-of-use env
+    read (same convention as ``SIDEGRAPH_AUTO_ACCEPT``/the host-hook ``*_NUDGE`` flags):
+    for someone who has verified their own working tree matches what they want anchored
+    and wants the "moved" rung to trust disk state without waiting for a commit, same as
+    every sync before this fix did unconditionally. Overrides ONLY the committed-evidence
+    check in ``_committed_evidence_confirms_move`` — the repo-root, same-suffix, and
+    cross-type guards around it are never bypassed by this flag.
+    """
+    return os.environ.get("SIDEGRAPH_TRUST_DIRTY_TREE") == "on"
+
+
 def rebind_entity(
     entity: Entity, store: Store, reader: GraphifyReader, repo_root: Path | None = None
 ) -> RebindOutcome:
@@ -267,14 +323,44 @@ def rebind_entity(
             )
             old_confirmed_gone = repo_root is not None and not (repo_root / desc.file_path).exists()
             if same_suffix and old_confirmed_gone:
-                entity.descriptor = Descriptor(name=desc.name, file_path=new_file)
-                repointed = _adopt(entity, loose.node_id, version, store, loose.community)
+                # repo_root is not None here (old_confirmed_gone's own short-circuit proves
+                # it), and new_file is not None (same_suffix's own check proves it) -- both
+                # narrowed for the committed-evidence check below.
+                assert repo_root is not None
+                assert new_file is not None
+                # Disk-only evidence stops here (defect fixed 2026-09-18, dirty-tree
+                # corruption): the working tree can show the old path gone -- and the same
+                # unique same-suffix hit -- from nothing more than one person's local,
+                # uncommitted delete/rename/stash. Before rewriting a canonical, shared
+                # descriptor, require the SAME move to be independently confirmed by git's
+                # committed history (HEAD), not just by whatever this one working tree
+                # currently looks like. SIDEGRAPH_TRUST_DIRTY_TREE=on is the documented,
+                # off-by-default override for someone who has verified their own tree and
+                # wants the old (disk-only) behavior back.
+                if _trust_dirty_tree() or _committed_evidence_confirms_move(
+                    repo_root, desc.file_path, new_file
+                ):
+                    entity.descriptor = Descriptor(name=desc.name, file_path=new_file)
+                    repointed = _adopt(entity, loose.node_id, version, store, loose.community)
+                    return RebindOutcome(
+                        **base,
+                        status="moved",
+                        node_id=loose.node_id,
+                        detail=f"{desc.file_path} -> {new_file}",
+                        repointed=repointed,
+                    )
+                # Evidence looks like a move on disk but isn't (yet) committed -- never
+                # guess. Leave the binding exactly as it was (no adopt, no repoint, no
+                # status change) and surface it the same way orphaned/ambiguous outcomes
+                # are surfaced: informational, routed to a human, never a silent rewrite.
                 return RebindOutcome(
                     **base,
-                    status="moved",
-                    node_id=loose.node_id,
-                    detail=f"{desc.file_path} -> {new_file}",
-                    repointed=repointed,
+                    status="moved_uncommitted",
+                    detail=(
+                        f"{desc.file_path} -> {new_file} (uncommitted -- commit the move so "
+                        "sync can verify it, or set SIDEGRAPH_TRUST_DIRTY_TREE=on to trust "
+                        "the working tree)"
+                    ),
                 )
             # fall through to orphan: a cross-suffix hit (collision, not a move), the old
             # path is still on disk (out-of-scope file that never moved), or repo_root is
@@ -704,7 +790,7 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
 # filter, two consumers: ``report_as_dict``'s "outcomes" field below (shared by both
 # ``sidegraph-sync --json`` and the ``sync_anchors`` MCP tool) and ``sidegraph-sync``'s own
 # prose printer (``cli.sync_main``).
-_SYNC_OUTCOME_NOTEWORTHY = ("moved", "orphaned", "ambiguous", "error")
+_SYNC_OUTCOME_NOTEWORTHY = ("moved", "moved_uncommitted", "orphaned", "ambiguous", "error")
 
 # The subset of ``_SYNC_OUTCOME_NOTEWORTHY`` that makes ``--check``/``report_has_findings``
 # fail (design/superpowers/specs/2026-07-11-ci-live-findings-design.md ruling 1). "moved" is
@@ -716,8 +802,12 @@ _SYNC_OUTCOME_NOTEWORTHY = ("moved", "orphaned", "ambiguous", "error")
 # PR, and the default branch after it merged, red forever. When an orphaned/ambiguous anchor
 # actually costs reachability (it was a decision's ONLY live tier-2 leaf), the decision goes
 # stale and ``stale_decisions`` already fires -- the failure signal is redundant where it
-# matters and harmful (permanently red) where it doesn't. Only "error" (the rebind ladder
-# itself raised on an entity) stays a genuine failing outcome.
+# matters and harmful (permanently red) where it doesn't. "moved_uncommitted" (dirty-tree
+# guard) is the same shape as "orphaned"/"ambiguous" on purpose -- a decision anchored only
+# through it goes stale and fires there too, once the commit lands the next sync heals it
+# on its own, and a person just needs to commit their move or use the documented escape
+# hatch, not a red CI run. Only "error" (the rebind ladder itself raised on an entity) stays
+# a genuine failing outcome.
 _FINDING_OUTCOME_STATUSES = ("error",)
 
 
@@ -736,12 +826,12 @@ def report_as_dict(report: SyncReport) -> dict:
     ``report_has_findings`` below happens to still read a skipped dict as clean (nothing to
     find), which is exactly the "version-skip is exit 0" contract ``--check`` wants.
 
-    ``outcomes`` carries only entities worth a human's attention -- moved/orphaned/
-    ambiguous/error -- filtered via ``_SYNC_OUTCOME_NOTEWORTHY``, never the "unchanged"/
-    "rebound" majority, same filter ``sidegraph-sync``'s own printer applies. ``counts`` is
-    ``report.counts()`` rendered as a string (e.g. ``"{'unchanged': 3}"``), ``""`` when
-    nothing is tracked yet. ``repointed`` sums EVERY outcome's ``repointed``, not just the
-    filtered ones.
+    ``outcomes`` carries only entities worth a human's attention -- moved/moved_uncommitted/
+    orphaned/ambiguous/error -- filtered via ``_SYNC_OUTCOME_NOTEWORTHY``, never the
+    "unchanged"/"rebound" majority, same filter ``sidegraph-sync``'s own printer applies.
+    ``counts`` is ``report.counts()`` rendered as a string (e.g. ``"{'unchanged': 3}"``),
+    ``""`` when nothing is tracked yet. ``repointed`` sums EVERY outcome's ``repointed``,
+    not just the filtered ones.
     """
     outcomes = [
         {"status": o.status, "canonical_name": o.canonical_name, "detail": o.detail}

@@ -2,8 +2,14 @@
 
 Two ways a decision enters the store: the agent writes it **directly** mid-session
 (`add_decision`), or the session gets **distilled and proposed** at the end and is ratified
-later — by a human by default (`propose_decisions` → `sidegraph-ratify`), or at write time by
-an opt-in [auto-ratification policy](#5-auto-ratification-policy-opt-in). Both paths write into the same
+later, by a human (`propose_decisions` → `sidegraph-ratify`) or at write time by an
+[auto-ratification policy](#5-auto-ratification-policy-opt-in). The library default is
+`manual`; `sidegraph-init` asks, in an interactive terminal, whether a fresh project should
+auto-ratify instead, defaulting the answer to yes (`auto-low-risk`); a person's choice is
+committed to `.claude/settings.json` either way, and a non-interactive run (CI, a script, an
+agent-driven session) changes nothing. Under `auto-low-risk`, eligible `lesson`/`gotcha`
+decisions and standalone facts self-ratify at write time; `adr`/`constraint` decisions and
+domains still wait for a human regardless of policy. Both paths write into the same
 append-only store; see [`reference/mcp-tools.md`](../reference/mcp-tools.md) for exact tool
 signatures. Three plugin skills carry this guide's discipline into the session itself:
 [`sidegraph:record-decision`](../../plugin/sidegraph/skills/record-decision/SKILL.md) (the

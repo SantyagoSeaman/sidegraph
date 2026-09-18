@@ -144,11 +144,16 @@ def test_rebound_heals_orphaned_leaf(tmp_path):
 
 
 def test_moved_updates_descriptor_and_heals(tmp_path):
-    """The moved rung requires repo_root AND the old path's confirmed absence there (the
-    rung fails closed otherwise -- see test_moved_rung_fails_closed_when_repo_root_unknown
-    below): c.py is a bare string in this synthetic graph, never a real file, so pointing
-    repo_root at tmp_path (where it also does not exist) proves the move genuinely
-    happened, the same signal the live fix is built on."""
+    """The moved rung requires repo_root, the old path's confirmed absence there, AND that
+    absence/presence confirmed by COMMITTED git history (dirty-tree guard fixed
+    2026-09-18 -- see test_moved_rung_fails_closed_on_uncommitted_delete for the negative
+    case this rung now also has to reject): c.py never existed, d.py is committed, so
+    HEAD itself proves the move genuinely happened, the same signal the live fix is built
+    on."""
+    _init_repo(tmp_path)
+    (tmp_path / "d.py").write_text("def mover_fn(): pass\n")
+    _git(["add", "-A"], tmp_path)
+    _git(["commit", "-q", "-m", "d.py lives here now"], tmp_path)
     reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
     s = Store(tmp_path / "t.db")
     e = _entity(s, "mover_fn", "c.py", "m1")  # old file -> exact miss, name-only hit
@@ -210,8 +215,12 @@ def test_loose_rung_rejects_cross_type_collision(tmp_path):
 def test_loose_rung_adopts_doc_to_doc_move(tmp_path):
     """A doc heading that moved file (same suffix) still rebinds via the loose rung, once
     repo_root confirms ADR-001.md (a bare string here, never a real file) is genuinely
-    gone from disk -- see test_moved_updates_descriptor_and_heals for why repo_root is
-    required."""
+    gone from disk AND ADR-002.md's committed HEAD confirms the move -- see
+    test_moved_updates_descriptor_and_heals for why both are required."""
+    _init_repo(tmp_path)
+    (tmp_path / "ADR-002.md").write_text("# context\n")
+    _git(["add", "-A"], tmp_path)
+    _git(["commit", "-q", "-m", "ADR-002.md lives here now"], tmp_path)
     reader = GraphifyReader(_write_graph(tmp_path, "doc.json", GRAPH_DOC))
     s = Store(tmp_path / "t.db")
     e = _entity(s, "context", "ADR-001.md", "old-doc-id")
@@ -265,6 +274,149 @@ def test_moved_rung_fails_closed_when_repo_root_unknown(tmp_path):
     assert s.bindings_for_record(d.id)[0].status == "orphaned"
 
 
+def _git(args, cwd):
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    assert result.returncode == 0, f"git {args} failed: {result.stderr}"
+
+
+def _init_repo(root):
+    _git(["init", "-q"], root)
+    _git(["config", "user.email", "test@example.com"], root)
+    _git(["config", "user.name", "Test"], root)
+
+
+def test_moved_rung_fails_closed_on_uncommitted_delete(tmp_path):
+    """Defect 1 (dirty-tree corruption): the pre-fix rung trusted the WORKING TREE alone
+    -- 'old path missing from disk' + 'unique same-suffix hit' -- and one person's
+    uncommitted `rm c.py` was enough to make it rewrite the canonical, repo-committed
+    descriptor for the whole team. Here c.py is genuinely COMMITTED (HEAD still has it)
+    but locally deleted from disk without `git rm`/a commit -- a dirty tree, not a real
+    move. The rung must NOT adopt: it has no committed evidence the file is gone, only a
+    local, unshared change. Leaves the entity's mapping exactly as it was and reports a
+    'moved_uncommitted' outcome instead of silently guessing.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
+    _git(["add", "-A"], tmp_path)
+    _git(["commit", "-q", "-m", "initial"], tmp_path)
+    (tmp_path / "c.py").unlink()  # dirty, uncommitted delete -- never staged, never committed
+
+    reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
+    s = Store(tmp_path / "t.db")
+    e = _entity(s, "mover_fn", "c.py", "m1")
+    d = _leaf(s, e.entity_id, status="live")
+
+    out = rebind_entity(e, s, reader, repo_root=tmp_path)
+
+    assert out.status == "moved_uncommitted"  # NOT "moved" -- evidence isn't committed
+    kept = s.get_entity(e.entity_id)
+    assert kept.descriptor.file_path == "c.py"  # descriptor UNCHANGED
+    assert kept.last_seen_node_id == "m1"  # node mapping UNCHANGED
+    assert s.bindings_for_record(d.id)[0].status == "live"  # binding left exactly as it was
+
+
+def test_moved_rung_fails_closed_when_old_path_still_committed_at_head(tmp_path):
+    """Isolates the OTHER half of the committed-evidence check: the new path (d.py) IS
+    genuinely committed, but the old path (c.py) is ALSO still committed at HEAD -- only
+    removed from disk by an uncommitted delete. A move needs BOTH halves confirmed;
+    a same-suffix hit whose OLD file git still tracks is not a confirmed move, no matter
+    how convincingly the new file is committed."""
+    _init_repo(tmp_path)
+    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
+    (tmp_path / "d.py").write_text("def mover_fn(): pass\n")
+    _git(["add", "-A"], tmp_path)
+    _git(["commit", "-q", "-m", "both c.py and d.py committed"], tmp_path)
+    (tmp_path / "c.py").unlink()  # dirty, uncommitted delete -- c.py is still at HEAD
+
+    reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
+    s = Store(tmp_path / "t.db")
+    e = _entity(s, "mover_fn", "c.py", "m1")
+    d = _leaf(s, e.entity_id, status="live")
+
+    out = rebind_entity(e, s, reader, repo_root=tmp_path)
+
+    assert out.status == "moved_uncommitted"  # NOT "moved" -- c.py is still at HEAD
+    kept = s.get_entity(e.entity_id)
+    assert kept.descriptor.file_path == "c.py"
+    assert kept.last_seen_node_id == "m1"
+    assert s.bindings_for_record(d.id)[0].status == "live"
+
+
+def test_moved_rung_fails_closed_when_new_path_never_committed(tmp_path):
+    """The mirror-image isolation: the OLD path (c.py) is genuinely, committedly gone
+    from HEAD (a real `git rm` + commit), but the graph's proposed new home (d.py) was
+    never committed at all -- e.g. it's a fresh, un-added file, or doesn't exist on disk
+    either. Confirming only half of the move is not confirming the move."""
+    _init_repo(tmp_path)
+    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
+    _git(["add", "-A"], tmp_path)
+    _git(["commit", "-q", "-m", "initial"], tmp_path)
+    _git(["rm", "-q", "c.py"], tmp_path)
+    _git(["commit", "-q", "-m", "remove c.py"], tmp_path)
+    # d.py is never created or committed anywhere.
+
+    reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
+    s = Store(tmp_path / "t.db")
+    e = _entity(s, "mover_fn", "c.py", "m1")
+    d = _leaf(s, e.entity_id, status="live")
+
+    out = rebind_entity(e, s, reader, repo_root=tmp_path)
+
+    assert out.status == "moved_uncommitted"  # NOT "moved" -- d.py isn't committed
+    kept = s.get_entity(e.entity_id)
+    assert kept.descriptor.file_path == "c.py"
+    assert kept.last_seen_node_id == "m1"
+    assert s.bindings_for_record(d.id)[0].status == "live"
+
+
+def test_moved_rung_adopts_when_the_move_is_actually_committed(tmp_path):
+    """Positive control for the same guard: once the move is genuinely committed (old
+    path really gone from HEAD, new path really tracked at HEAD), the rung still adopts
+    -- the fix must not turn into a guard that never fires."""
+    _init_repo(tmp_path)
+    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
+    _git(["add", "-A"], tmp_path)
+    _git(["commit", "-q", "-m", "initial"], tmp_path)
+    _git(["mv", "c.py", "d.py"], tmp_path)
+    _git(["commit", "-q", "-m", "move c.py -> d.py"], tmp_path)
+
+    reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
+    s = Store(tmp_path / "t.db")
+    e = _entity(s, "mover_fn", "c.py", "m1")
+    d = _leaf(s, e.entity_id, status="live")
+
+    out = rebind_entity(e, s, reader, repo_root=tmp_path)
+
+    assert out.status == "moved" and out.node_id == "m2" and out.detail == "c.py -> d.py"
+    kept = s.get_entity(e.entity_id)
+    assert kept.descriptor.file_path == "d.py"
+    assert s.bindings_for_record(d.id)[0].status == "live"
+
+
+def test_moved_rung_escape_hatch_trusts_dirty_tree(tmp_path, monkeypatch):
+    """SIDEGRAPH_TRUST_DIRTY_TREE=on -- the documented, off-by-default override for
+    someone who has verified their own working tree and wants the old disk-only
+    behavior back. Same dirty-tree setup as
+    test_moved_rung_fails_closed_on_uncommitted_delete, but with the escape hatch set."""
+    monkeypatch.setenv("SIDEGRAPH_TRUST_DIRTY_TREE", "on")
+    _init_repo(tmp_path)
+    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
+    _git(["add", "-A"], tmp_path)
+    _git(["commit", "-q", "-m", "initial"], tmp_path)
+    (tmp_path / "c.py").unlink()
+
+    reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
+    s = Store(tmp_path / "t.db")
+    e = _entity(s, "mover_fn", "c.py", "m1")
+    d = _leaf(s, e.entity_id, status="live")
+
+    out = rebind_entity(e, s, reader, repo_root=tmp_path)
+
+    assert out.status == "moved" and out.node_id == "m2"
+    assert s.get_entity(e.entity_id).descriptor.file_path == "d.py"
+    assert s.bindings_for_record(d.id)[0].status == "live"
+
+
 def test_sync_resolves_repo_root_from_the_graph_not_the_store(tmp_path):
     """Pins the round-2 mistake THIS fix already made once: a first cut of
     _resolve_repo_root took `store`, not `reader` -- and every other sync/cli test in
@@ -285,7 +437,10 @@ def test_sync_resolves_repo_root_from_the_graph_not_the_store(tmp_path):
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    _init_repo(repo)
+    (repo / "d.py").write_text("def mover_fn(): pass\n")
+    _git(["add", "-A"], repo)
+    _git(["commit", "-q", "-m", "d.py lives here now"], repo)
     reader = GraphifyReader(_write_graph(repo, "b.json", GRAPH_B))  # c.py absent in repo
 
     store_dir = tmp_path / "elsewhere" / "not-a-git-repo"

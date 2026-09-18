@@ -2386,7 +2386,11 @@ def sync_anchors(force: bool = False) -> dict:
     bindings get re-pointed when Leiden renumbered, and every ACCEPTED domain's
     ``communities`` are refreshed from its ``path_prefixes``/``seed_anchors``. The
     entity's own canonical DESCRIPTOR is rewritten ONLY on a "moved" rung (a unique
-    name-only match after the exact match missed); the node-id mapping
+    name-only match after the exact match missed, AND the move independently confirmed by
+    COMMITTED git history -- an unconfirmed dirty-tree hit reports "moved_uncommitted"
+    instead and touches nothing; see ``SIDEGRAPH_TRUST_DIRTY_TREE`` in
+    docs/guides/surviving-refactors.md for the off-by-default escape hatch); the node-id
+    mapping
     (``last_seen_node_id``/``last_seen_community``/``last_seen_graph_version``, via
     ``sync.py``'s ``_adopt``) updates on that same "moved" rung AND on an exact-match
     "rebound" rung (same ``name``+``file_path`` descriptor match as last sync, but the
@@ -2419,8 +2423,9 @@ def sync_anchors(force: bool = False) -> dict:
     fresh, un-run ``SyncReport(skipped=True)`` -- NOT the prior (possibly stale) report --
     so a caller must never read a skipped pass as "everything's clean"; pass
     ``force=True`` (or wait for a real graph rebuild) to get an actual report. ``outcomes``
-    carries only entities worth a human's attention -- moved/ambiguous/orphaned/error --
-    never the "unchanged"/"rebound" majority, same filter ``sidegraph-sync``'s own printer
+    carries only entities worth a human's attention -- moved/moved_uncommitted/ambiguous/
+    orphaned/error -- never the "unchanged"/"rebound" majority, same filter
+    ``sidegraph-sync``'s own printer
     applies. ``counts`` is ``report.counts()`` rendered as a string (e.g.
     ``"{'unchanged': 3}"``), ``""`` when nothing is tracked yet. ``domain_failures`` is the
     domain-refresh analog of an ``error`` outcome -- one entry per accepted domain whose

@@ -24,6 +24,11 @@ uv run pytest -q               # full suite must be green
 uv run pre-commit run --all-files   # lint + format + types, exactly what CI runs
 ```
 
+The suite is hermetic to `SIDEGRAPH_*` environment variables: `tests/conftest.py` strips every
+one of them before each test runs, so a variable already set in your shell can never change what
+the suite asserts. A test that needs one set must set it explicitly with `monkeypatch` rather
+than relying on inheriting it.
+
 That gate also runs secret detection (`gitleaks`, `detect-private-key`), GitHub Actions
 security/correctness checks (`zizmor`, `actionlint`), and `check-toml`/a `uv.lock`-in-sync
 check, alongside the usual formatting and type checks.
@@ -39,6 +44,9 @@ check, alongside the usual formatting and type checks.
   lint are mechanical — `pre-commit` decides, not review.
 - **Docs are part of the change.** If a flag, tool, or behavior changes, update the
   matching page under `docs/` in the same change.
+- **Never publish a session link.** No `Claude-Session:` trailer, no claude.ai/chatgpt.com
+  session URL, no bare `session_*` id, in a commit message or a PR description — enforced by
+  the `no-session-links` commit-msg hook and CI's `pr-description-link-gate` job.
 
 Cutting an actual release (version bumps, the tag-driven PyPI publish, post-release checks)
 is a maintainer task: see [`docs/reference/releasing.md`](docs/reference/releasing.md).

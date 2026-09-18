@@ -49,7 +49,11 @@ Run from a clean `main`, in this order.
    `## [0.1.0] — Unreleased` heading) into a dated release heading in the same style,
    `## [X.Y.Z] — YYYY-MM-DD`, and add a fresh empty `## [Unreleased]` section above it for
    whatever lands next. Follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/):
-   group entries under `Added`, `Changed`, `Fixed`, and so on.
+   group entries under `Added`, `Changed`, `Fixed`, and so on. If no `## [Unreleased]`
+   heading survived from the previous release (0.1.0 through 0.2.0 shipped with none), write
+   the new dated heading directly above the previous release's own heading instead of
+   transforming anything, then add the fresh empty `## [Unreleased]` section above that, so
+   the placeholder exists again for next time.
 4. Confirm every file in the version table above already carries the new version, and that
    any behaviour change shipping in this release has its matching page under `docs/` updated
    in the same change (see `CONTRIBUTING.md`).

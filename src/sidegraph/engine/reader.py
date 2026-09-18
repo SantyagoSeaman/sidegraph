@@ -39,6 +39,17 @@ ANCHORABLE_FILE_TYPES = frozenset({"code", "document", "concept", "rationale"})
 # `graphify update --cluster-only`/label commands, absent on a plain semantic-only build).
 _LABELS_FILENAME = ".graphify_labels.json"
 
+# detect_subdir_mismatch: minimum distinct anchorable source_file values before judging a
+# mismatch at all -- a graph with fewer is too small a corpus (a fixture, a tiny doc-only
+# build) to tell "ran from a subdirectory" apart from "small/partial" safely.
+_SUBDIR_MISMATCH_MIN_SAMPLE = 8
+
+# detect_subdir_mismatch: fraction of the sample that must be missing relative to the repo
+# root before even considering a subdir-run mismatch. 90%, not 100% -- a real repo can have
+# a coincidental repo-root-relative collision (a vendored copy, a symlink) for one sampled
+# path, and demanding unanimous absence would let that one collision defeat the whole check.
+_SUBDIR_MISMATCH_THRESHOLD = 0.9
+
 
 class NodeRef(BaseModel):
     node_id: str
@@ -351,3 +362,97 @@ class GraphifyReader:
             return [p for p in out.stdout.split("\n") if p] if out.returncode == 0 else []
         except (OSError, subprocess.SubprocessError):
             return []
+
+    def repo_root(self) -> Path | None:
+        """Best-effort git worktree root containing THIS reader's graph.json —
+        ``git rev-parse --show-toplevel`` run from ``self.path.parent``, never raising.
+        ``None`` when graph.json sits outside any git working tree, or git itself is
+        unavailable.
+
+        Deliberately keyed off graph.json's OWN location, not any other artifact (e.g. a
+        decision store, which is routinely copied elsewhere for safe inspection and would
+        silently report "not a git repo" for the copy even when the real checkout is right
+        there) — every caller needing a git-relative fact about this reader's node
+        ``file_path``s (``sync.py``'s moved-rung dirty-tree guard, ``detect_subdir_mismatch``
+        below) resolves its repo root through this one method rather than inventing a
+        second lookup.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=self.path.parent,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        return Path(result.stdout.strip()).resolve()
+
+    def detect_subdir_mismatch(
+        self, repo_root: Path | None = None, sample_size: int = 25
+    ) -> dict | None:
+        """Best-effort diagnostic for the "ran `graphify update` from a subdirectory
+        instead of the repo root" footgun: when every ``source_file`` Graphify recorded is
+        relative to the directory it was invoked FROM rather than the repository root,
+        every descriptor this reader resolves stops matching the real repo-relative
+        anchors the store expects, and a person sees mass, unexplained ``orphaned``
+        findings with nothing pointing at the real cause.
+
+        ``repo_root`` defaults to :meth:`repo_root` (the graph's own git worktree root);
+        ``None`` (no resolvable repo, or an explicit ``None`` passed by a caller with none)
+        means there is nothing to check existence against, so this always returns ``None``.
+
+        Samples up to ``sample_size`` DISTINCT anchorable ``source_file`` values (code/
+        document/concept/rationale — the same universe :data:`ANCHORABLE_FILE_TYPES`
+        anchors against, in node order — deterministic) and checks each for existence
+        relative to ``repo_root``. Returns ``None`` (no finding, abstain) when ANY of:
+
+        - the sample has fewer than :data:`_SUBDIR_MISMATCH_MIN_SAMPLE` distinct paths —
+          too small a corpus to judge safely (a tiny fixture, a doc-only build);
+        - fewer than :data:`_SUBDIR_MISMATCH_THRESHOLD` (90%) of the sample is missing
+          relative to ``repo_root`` — a LEGITIMATELY PARTIAL graph (an ``--exclude``d
+          corpus, a doc-only build) still has its INCLUDED files sitting at their real
+          repo-relative paths, so it never trips this ratio;
+        - no SINGLE immediate subdirectory of ``repo_root`` resolves EVERY missing sampled
+          path — the positive half of the signal. A graph gone stale after files were
+          deleted or moved for an unrelated reason can also leave most of a sample missing,
+          but it is vanishingly unlikely for ALL of them to coincidentally resolve under
+          one specific subdirectory; only an actual subdirectory-relative build produces
+          that pattern, so requiring it is what keeps a stale graph from being
+          misdiagnosed as a subdir-run one.
+
+        Returns ``{"sampled": N, "missing": M, "likely_run_from": "<subdir>"}`` when a
+        single candidate subdirectory explains the whole missing sample — callers use this
+        to print an actionable "rerun graphify from the repo root" diagnostic instead of
+        letting every one of those paths surface as a separate, unexplained orphaned
+        anchor.
+        """
+        root = repo_root if repo_root is not None else self.repo_root()
+        if root is None:
+            return None
+        sampled: list[str] = []
+        seen: set[str] = set()
+        for n in self._nodes:
+            if n.file_type in ANCHORABLE_FILE_TYPES and n.file_path and n.file_path not in seen:
+                seen.add(n.file_path)
+                sampled.append(n.file_path)
+            if len(sampled) >= sample_size:
+                break
+        if len(sampled) < _SUBDIR_MISMATCH_MIN_SAMPLE:
+            return None
+        missing = [p for p in sampled if not (root / p).exists()]
+        if len(missing) / len(sampled) < _SUBDIR_MISMATCH_THRESHOLD:
+            return None
+        try:
+            subdirs = sorted(
+                d.name for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")
+            )
+        except OSError:
+            return None
+        for sub in subdirs:
+            if all((root / sub / p).exists() for p in missing):
+                return {"sampled": len(sampled), "missing": len(missing), "likely_run_from": sub}
+        return None

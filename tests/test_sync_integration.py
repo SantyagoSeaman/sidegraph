@@ -112,12 +112,17 @@ def _no_ambient_initiative(monkeypatch):
 
 
 def test_rebuild_heals_moved_and_flags_renamed(tmp_path):
-    # The moved rung now fails closed without a resolvable repo_root (see sync.py's
-    # _resolve_repo_root) -- a real git worktree lets it confirm c.py is genuinely gone,
-    # same as the live checkout the fix targets. No commit needed: `git rev-parse
-    # --show-toplevel` only requires a `.git` dir. Same convention as
-    # test_doctor_code_drift.py's `git_repo` fixture.
+    # The moved rung now fails closed without a resolvable repo_root AND committed
+    # evidence (dirty-tree guard, sync.py's _committed_evidence_confirms_move) -- a real
+    # git worktree, plus a commit of d.py (the rebuild's own new home for mover_fn),
+    # lets it confirm c.py -> d.py genuinely happened at HEAD, same as the live checkout
+    # the fix targets.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "d.py").write_text("def mover_fn(): pass\n")
+    subprocess.run(["git", "add", "d.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "d.py lives here now"], cwd=tmp_path, check=True)
     reader_a = GraphifyReader(_write_graph(tmp_path, "a.json", GRAPH_A))
     store = Store(tmp_path / "e.db")
 

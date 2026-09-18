@@ -110,11 +110,16 @@ def test_sync_gates_on_version_and_stamps(tmp_path):
 
 
 def test_sync_reports_all_ladder_outcomes(tmp_path):
-    # The moved rung fails closed without a resolvable repo_root (sync.py's
-    # _resolve_repo_root) -- git-init tmp_path so it can confirm c.py is genuinely absent,
-    # same as the live checkout the fix targets. No commit needed for `git rev-parse
-    # --show-toplevel`.
+    # The moved rung fails closed without a resolvable repo_root AND committed evidence
+    # (dirty-tree guard, sync.py's _committed_evidence_confirms_move) -- git-init tmp_path
+    # and commit d.py so it can confirm c.py -> d.py at HEAD, same as the live checkout
+    # the fix targets.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "d.py").write_text("def mover_fn(): pass\n")
+    subprocess.run(["git", "add", "d.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "d.py lives here now"], cwd=tmp_path, check=True)
     reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
     s = Store(tmp_path / "t.db")
     _entity(s, "f_stable", "a.py", "s1")  # unchanged

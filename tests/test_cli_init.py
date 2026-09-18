@@ -1,8 +1,20 @@
 import contextlib
+import io
 import json
 
 from sidegraph.cli import init_main
+from sidegraph.host.claude_settings import RATIFY_POLICY_DEFAULT, RATIFY_POLICY_ENV_VAR
 from sidegraph.store import Store
+
+
+class _FakeTTY(io.StringIO):
+    """A stdin double that reports itself as a TTY (a plain io.StringIO's ``isatty()`` is
+    always False) -- lets a test drive `sidegraph-init`'s interactive prompt without an
+    actual terminal, the same way the suite fakes stdin elsewhere (`monkeypatch.setattr`
+    on `sys.stdin`), just with `isatty()` overridden too."""
+
+    def isatty(self) -> bool:
+        return True
 
 
 def test_init_creates_store_and_reports_missing_graph(tmp_path, capsys):
@@ -190,3 +202,198 @@ def test_init_reports_already_initialized_for_unmigrated_legacy_directory(tmp_pa
     assert "created store" not in captured.out
     assert "migrated" in captured.err  # Store's own migration notice still fires
     assert (db_dir / "format").is_file()  # migration actually ran
+
+
+# -- Task 1: init and SIDEGRAPH_RATIFY_POLICY in .claude/settings.json ---------------
+#
+# The owner rejected a silent write (self-certification risk is unmeasured; see
+# whitepaper claim C-075) in favor of: ask interactively, with auto-ratification as the
+# default answer; write nothing and ask nothing outside a TTY; flags bypass the prompt
+# either way. `_FakeTTY` (top of file) simulates an interactive stdin without a real
+# terminal.
+
+
+def _settings_data(tmp_path):
+    return json.loads((tmp_path / ".claude" / "settings.json").read_text())
+
+
+def test_init_interactive_prompt_accepted_by_bare_enter_writes_auto_low_risk(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("\n"))
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: RATIFY_POLICY_DEFAULT}}
+    out = capsys.readouterr().out
+    assert "Auto-ratify low-risk records?" in out
+    assert "Enable it? [Y/n]" in out
+    assert (
+        f"wrote .claude/settings.json: env.{RATIFY_POLICY_ENV_VAR}={RATIFY_POLICY_DEFAULT}" in out
+    )
+
+
+def test_init_interactive_prompt_accepted_by_yes_writes_auto_low_risk(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("yes\n"))
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: RATIFY_POLICY_DEFAULT}}
+
+
+def test_init_interactive_prompt_declined_writes_manual(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("no\n"))
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: "manual"}}
+    out = capsys.readouterr().out
+    assert f"wrote .claude/settings.json: env.{RATIFY_POLICY_ENV_VAR}=manual" in out
+    assert f"export {RATIFY_POLICY_ENV_VAR}=manual" in out
+
+
+def test_init_interactive_unrecognized_input_reasks_once_then_falls_back_to_default(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("banana\nbanana\n"))
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    # Fell back to the default (yes) after two unrecognized answers -- never a third ask.
+    assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: RATIFY_POLICY_DEFAULT}}
+    out = capsys.readouterr().out
+    assert out.count("Enable it? [Y/n]") == 2
+
+
+def test_init_interactive_unrecognized_input_then_recognized_answer_is_honored(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("banana\nno\n"))
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: "manual"}}
+
+
+def test_init_interactive_skips_the_prompt_when_a_policy_is_already_set(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("\n"))  # would answer if asked; must not be
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"env": {RATIFY_POLICY_ENV_VAR: "manual"}}) + "\n")
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: "manual"}}
+    out = capsys.readouterr().out
+    assert "Auto-ratify low-risk records?" not in out
+    assert "already sets" in out
+    assert f"{RATIFY_POLICY_ENV_VAR}=manual" in out
+
+
+def test_init_non_interactive_writes_nothing_and_asks_nothing(tmp_path, capsys, monkeypatch):
+    """No TTY (CI, a script, an agent-driven session): a silent write with nobody to
+    answer is exactly what the owner rejected -- the settings file must not be touched or
+    even created, and no prompt (input()) may be attempted."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))  # not a TTY, and EOF if ever read
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+    out = capsys.readouterr().out
+    assert "Auto-ratify low-risk records?" not in out
+    assert RATIFY_POLICY_ENV_VAR in out
+    assert RATIFY_POLICY_DEFAULT in out
+    assert db.exists()
+
+
+def test_init_non_interactive_never_touches_unparseable_settings_file(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    original = "{not valid json"
+    settings_path.write_text(original)
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    assert settings_path.read_text() == original
+    out = capsys.readouterr().out
+    assert RATIFY_POLICY_ENV_VAR in out
+    assert RATIFY_POLICY_DEFAULT in out
+    assert db.exists()  # a settings problem must never be fatal to init
+
+
+def test_init_ratify_policy_flag_bypasses_the_prompt(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("\n"))  # would answer if asked; must not be
+    db = tmp_path / ".sidegraph"
+    assert (
+        init_main(
+            ["--db", str(db), "--graph", str(tmp_path / "no.json"), "--ratify-policy", "manual"]
+        )
+        == 0
+    )
+    assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: "manual"}}
+    out = capsys.readouterr().out
+    assert "Auto-ratify low-risk records?" not in out
+    assert f"wrote .claude/settings.json: env.{RATIFY_POLICY_ENV_VAR}=manual" in out
+
+
+def test_init_ratify_policy_flag_never_overwrites_an_existing_value(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"env": {RATIFY_POLICY_ENV_VAR: "auto-all"}}) + "\n")
+    db = tmp_path / ".sidegraph"
+    assert (
+        init_main(
+            [
+                "--db",
+                str(db),
+                "--graph",
+                str(tmp_path / "no.json"),
+                "--ratify-policy",
+                "auto-low-risk",
+            ]
+        )
+        == 0
+    )
+    assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: "auto-all"}}
+
+
+def test_init_no_settings_flag_skips_the_write_and_the_prompt(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("\n"))  # would answer if asked; must not be
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json"), "--no-settings"]) == 0
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+    out = capsys.readouterr().out
+    assert "Auto-ratify low-risk records?" not in out
+    assert RATIFY_POLICY_ENV_VAR in out
+
+
+def test_init_ratify_policy_and_no_settings_are_mutually_exclusive(capsys):
+    with contextlib.suppress(SystemExit):
+        init_main(["--no-settings", "--ratify-policy", "manual"])
+    err = capsys.readouterr().err
+    assert "not allowed with argument" in err
+
+
+def test_init_ratify_policy_flag_rejects_an_unknown_value(capsys):
+    with contextlib.suppress(SystemExit):
+        init_main(["--ratify-policy", "sometimes"])
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
+
+
+def test_init_help_documents_settings_flags(capsys):
+    with contextlib.suppress(SystemExit):
+        init_main(["--help"])
+    out = capsys.readouterr().out
+    assert "--no-settings" in out
+    assert "--ratify-policy" in out

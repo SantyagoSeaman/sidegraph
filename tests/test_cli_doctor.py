@@ -250,3 +250,44 @@ def test_doctor_latency_line_absent_without_stamps(tmp_path, capsys):
     capsys.readouterr()
     assert doctor_main(["--db", str(db)]) == 0
     assert "time-to-ratify" not in capsys.readouterr().out
+
+
+def test_doctor_cli_surfaces_graph_root_mismatch_via_graph_flag(tmp_path, capsys):
+    """End-to-end wiring for defect 2: --graph is a real CLI flag, doctor_main builds a
+    GraphifyReader from it, and a subdir-relative graph surfaces the advisory finding a
+    person actually sees, not just something curate() can do when called directly."""
+    import subprocess
+
+    db = _seed_healthy(tmp_path)
+    repo_root = tmp_path
+    subprocess.run(["git", "init", "-q"], cwd=repo_root, check=True)
+    paths = [f"pkg/mod_{i}.py" for i in range(10)]
+    for p in paths:
+        real = repo_root / "src" / p
+        real.parent.mkdir(parents=True, exist_ok=True)
+        real.write_text("pass\n")
+    graph = repo_root / "graph.json"
+    graph.write_text(
+        json.dumps(
+            {
+                "built_at_commit": "v1",
+                "nodes": [
+                    {
+                        "id": f"n{i}",
+                        "label": f"fn_{i}()",
+                        "norm_label": f"fn_{i}()",
+                        "file_type": "code",
+                        "source_file": p,
+                        "community": i % 3,
+                    }
+                    for i, p in enumerate(paths)
+                ],
+                "links": [],
+            }
+        )
+    )
+    capsys.readouterr()
+    assert doctor_main(["--db", str(db), "--graph", str(graph)]) == 0
+    out = capsys.readouterr().out
+    assert "graph-root-mismatch" in out
+    assert "src" in out

@@ -35,6 +35,14 @@ It runs everything via `uvx --from git+https://github.com/SantyagoSeaman/sidegra
 under the hood, so it builds straight from this repository, no PyPI publish needed. See
 [the plugin install path](../integrations/codex.md#plugin-install-path) for exactly what
 gets registered and the cwd-pinning details, and what has and hasn't been verified live.
+
+1. Trust the hooks: start an interactive `codex` session in the repo. Codex detects the two
+   new Sidegraph hook definitions (`SessionStart`, `Stop`) and prompts you in the terminal to
+   trust them. Approve to complete it. Skip or decline and the MCP tools still work, but
+   retrieval at session start and the capture reminder at session end stay silent. A hook
+   definition change in a later release needs a fresh approval. Review or re-approve anytime
+   with `/hooks`.
+
 Skip to [Verify](#verify) once installed.
 
 ## Option B: manual registration

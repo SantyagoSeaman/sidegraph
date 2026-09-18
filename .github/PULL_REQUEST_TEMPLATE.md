@@ -18,3 +18,5 @@ Either way, fill in the same two sections.
 - [ ] No hand edits to records under `.sidegraph/` (the store is append-only and written by
       the tools, never by hand)
 - [ ] Any new dependency is called out and justified in this description
+- [ ] No `Claude-Session:` trailer, claude.ai/chatgpt.com session link, or bare `session_*`
+      id in this description or in the branch's commit messages

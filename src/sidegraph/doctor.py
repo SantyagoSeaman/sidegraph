@@ -31,6 +31,7 @@ from typing import Literal, NamedTuple
 
 from ulid import ULID
 
+from .engine.reader import GraphifyReader
 from .schema import DecisionStatus, canonicalize
 from .store import _STAMPING_MARKER_NAME, _TERMINAL_DECISION_STATUSES
 from .verify import _check_archive_dir, _iter_json_files, _load_raw_json, _run_git
@@ -47,6 +48,7 @@ DUPLICATE_ENTITY = "duplicate-entity"
 CODE_DRIFT = "code-drift"
 STALE_INSTRUCTIONS = "stale-instructions"
 UNRATIFIED_ACCEPT = "unratified-accept"
+GRAPH_ROOT_MISMATCH = "graph-root-mismatch"
 
 # Name reported in ``CurationReport.skipped`` when index.db is absent or unusable — the
 # binding-status check has no canonical source to fall back on (statuses are index-only).
@@ -917,6 +919,41 @@ def _check_stale_instructions(
     return findings
 
 
+def _check_graph_root_mismatch(
+    reader: GraphifyReader | None, repo_root: Path | None
+) -> list[Finding]:
+    """graph-root-mismatch (defect fixed 2026-09-18): ``graphify update`` run from a
+    subdirectory instead of the repository root leaves every recorded ``source_file``
+    relative to that subdirectory, so every anchor descriptor stops matching and
+    ``sidegraph-sync`` mass-orphans the whole store with nothing pointing at the real
+    cause. ``GraphifyReader.detect_subdir_mismatch`` (the engine seam — see
+    ``engine/reader.py`` for the sampling/threshold judgment) does the actual detection;
+    this just turns a positive result into one advisory Finding.
+
+    ``reader is None`` (no graph configured, unreadable, or the caller has none to offer —
+    same "fine, just skip" convention every other reader-dependent check in this codebase
+    already uses) reports nothing, not a finding. ``repo_root`` threads straight through to
+    ``detect_subdir_mismatch`` — ``None`` lets it resolve its own via
+    ``GraphifyReader.repo_root()``.
+    """
+    if reader is None:
+        return []
+    mismatch = reader.detect_subdir_mismatch(repo_root=repo_root)
+    if mismatch is None:
+        return []
+    return [
+        Finding(
+            GRAPH_ROOT_MISMATCH,
+            str(reader.path),
+            f"{mismatch['missing']}/{mismatch['sampled']} sampled source_file paths don't "
+            f"exist relative to the repo root, but DO exist under '{mismatch['likely_run_from']}/' "
+            "— graphify was likely run from that subdirectory instead of the repository "
+            "root; rerun `graphify update` from the repository root and re-sync, or every "
+            "anchor in this graph will look orphaned",
+        )
+    ]
+
+
 def _read_stamping_marker(store_dir: Path) -> datetime | None:
     """The store's creation marker (``store.py``'s ``_STAMPING_MARKER_NAME``, written
     once — and only once — by ``Store._ensure_stamping_marker`` the moment a store is
@@ -1360,6 +1397,7 @@ def curate(
     stale_days: int = 30,
     now: datetime | None = None,
     repo_root: Path | None = None,
+    reader: GraphifyReader | None = None,
 ) -> CurationReport:
     """Run every advisory curation check over the store at ``store_dir``.
 
@@ -1367,11 +1405,19 @@ def curate(
     ``datetime.now(UTC)``. Findings are ordered by check (the spec's listing order),
     then by file path within each check — deterministic output.
 
-    ``repo_root`` (design D5, additive): the git repository ``code-drift`` diffs against.
-    ``None`` (the default -- ``sidegraph-doctor`` passes nothing) resolves it the same way
-    ``verify._find_repo_root`` does, from ``store_dir`` itself (the store may be nested
-    inside the repo). Passing it explicitly is mainly a test seam -- it skips that
+    ``repo_root`` (design D5, additive): the git repository ``code-drift`` diffs against
+    (and, additively, that ``graph-root-mismatch`` checks graph paths against — see
+    below). ``None`` (the default -- ``sidegraph-doctor`` passes nothing) resolves it the
+    same way ``verify._find_repo_root`` does, from ``store_dir`` itself (the store may be
+    nested inside the repo). Passing it explicitly is mainly a test seam -- it skips that
     resolution and any git-availability failure it could raise.
+
+    ``reader`` (additive, defect fixed 2026-09-18): an optional :class:`GraphifyReader`
+    over the corpus's ``graph.json``, used ONLY by the ``graph-root-mismatch`` check
+    (a person running `graphify update` from a subdirectory instead of the repo root).
+    ``None`` (no graph configured, or unreadable -- ``sidegraph-doctor`` never fails to
+    load a graph the way it never fails to load a git ref) simply skips that one check,
+    same "advisory, best-effort" contract as every other curation check here.
     # see design/superpowers/specs/2026-07-23-sidegraph-doctor-design.md
     # see design/superpowers/specs/2026-07-30-staleness-machinery-design.md (D5)
     """
@@ -1426,4 +1472,9 @@ def curate(
     # outside its repository simply finds no instructions file — the check stays silent
     # rather than guessing where one might live.
     findings += _check_stale_instructions(decisions, repo_root or root.parent)
+    # Additive (defect fixed 2026-09-18): a person running `graphify update` from a
+    # subdirectory instead of the repo root, surfaced as ONE actionable finding instead
+    # of every anchor in the store silently looking orphaned. Best-effort like every
+    # check above -- reader=None (no graph configured, or unreadable) simply skips it.
+    findings += _check_graph_root_mismatch(reader, repo_root)
     return CurationReport(findings=findings, skipped=skipped)

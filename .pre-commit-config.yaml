@@ -26,6 +26,13 @@
 # bundle either way: it walks the filesystem itself and ignores this exclude.)
 exclude: '^(\.sidegraph/|src/sidegraph/viz/assets/|sidegraph-graph\.html|(design|docs)/whitepaper/evidence/artifact-bundle/)'
 
+# A plain `pre-commit install` (no --hook-types flag) wires up BOTH the pre-commit stage and
+# the commit-msg stage below, so the `no-session-links` hook actually runs for a contributor
+# who only ever typed that once. Without this, `pre-commit install` installs only the
+# pre-commit git hook script, and a commit made through the git CLI never invokes commit-msg
+# hooks at all — the gate would exist in this file but never fire.
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -149,6 +156,23 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+        require_serial: true
+      - id: no-session-links
+        name: no session links in commit message
+        # Reads the commit message file git passes a commit-msg hook, never the changed
+        # files — the forbidden patterns are tools/check_no_session_links.py's four
+        # session-link shapes, the same ones .github/workflows/ci.yml's
+        # `pr-description-link-gate` job checks against a PR body.
+        # `stages: [commit-msg]` is load-bearing, not decoration: a hook with no explicit
+        # `stages` inherits EVERY stage, and `pre-commit run --all-files` (CI's lint job, and
+        # a developer's own habit) defaults to `--hook-stage pre-commit` — without this pin,
+        # that plain run would try to execute this hook anyway, with no COMMIT_EDITMSG file
+        # to check, and fail every lint run for a reason that has nothing to do with lint.
+        # Self-guarded like corpus-leak-gate: tools/ is not in the release ALLOWLIST, so this
+        # exits 0 cleanly in the public snapshot and on a public contributor's first commit.
+        entry: bash -c 'test ! -f tools/check_no_session_links.py || exec python3 tools/check_no_session_links.py "$@"' --
+        language: system
+        stages: [commit-msg]
         require_serial: true
       - id: plugin-manifest-validate
         name: validate plugin/marketplace manifests

@@ -61,6 +61,15 @@ from .doc_import import _MIN_SECTION_LIMIT, _SECTION_LIMIT, import_docs
 from .doctor import curate
 from .domains import DEFAULT_CANDIDATE_LIMIT, bootstrap_domains, collect_domain_candidates
 from .engine.reader import GraphifyReader
+from .host.claude_settings import (
+    RATIFY_POLICY_DEFAULT,
+    RATIFY_POLICY_ENV_VAR,
+    SETTINGS_RELATIVE_PATH,
+    RatifyPolicySettingsResult,
+    current_ratify_policy,
+    ensure_ratify_policy_setting,
+    repo_root_for_settings,
+)
 from .importer import import_rationales
 from .okf import build_bundle, write_bundle
 from .profiles import PROFILES, get_profile
@@ -113,6 +122,60 @@ def _looks_already_initialized(path: Path) -> bool:
     return (path / "decisions.db").is_file()
 
 
+def _report_ratify_policy_write(
+    rel_settings: str, result: RatifyPolicySettingsResult, value: str
+) -> None:
+    """Print the outcome of one `ensure_ratify_policy_setting` call for `init_main` --
+    shared by the interactive-answer path and the `--ratify-policy` flag path, both of
+    which already know `value` (whatever they decided to write) before calling this."""
+    if result.outcome == "written":
+        print(f"wrote {rel_settings}: env.{RATIFY_POLICY_ENV_VAR}={value}")
+    elif result.outcome == "already_set":
+        print(
+            f"{rel_settings} already sets "
+            f"{RATIFY_POLICY_ENV_VAR}={result.existing_value}. Left unchanged."
+        )
+    else:
+        print(
+            f"{rel_settings} exists but isn't valid JSON/an object. Left untouched, "
+            f'add this yourself: "env": {{"{RATIFY_POLICY_ENV_VAR}": "{value}"}}'
+        )
+
+
+def _ask_ratify_policy_interactively(rel_settings: str) -> str:
+    """Ask once, interactively, whether this project should auto-ratify low-risk records
+    -- the owner-specified alternative to a silent write (whitepaper claim C-075: the
+    self-certification risk of an automatic policy is unmeasured, so it must not become a
+    project's setting without a person answering for it).
+
+    A bare Enter or a recognized "yes" returns ``RATIFY_POLICY_DEFAULT`` ("auto-low-risk");
+    a recognized "no" returns "manual" -- both are answers the caller then writes into
+    ``rel_settings`` explicitly, so the project's choice is committed either way. An
+    unrecognized answer re-asks once with a short reminder; a second unrecognized answer
+    (or an EOF, e.g. stdin closing mid-prompt) falls back to the default without asking a
+    third time -- a settings prompt must never be able to hang or fail init.
+    """
+    print(
+        "Auto-ratify low-risk records? Lessons, gotchas, and standalone facts are accepted "
+        "the moment they're written, as long as they anchor to real code. Architecture "
+        "decisions, constraints, and domains still wait for a person either way. The "
+        f"answer is stored in {rel_settings}, committed with the project, and changeable "
+        "later."
+    )
+    prompts = ["Enable it? [Y/n] ", "Please answer y or n. Enable it? [Y/n] "]
+    for prompt in prompts:
+        try:
+            raw = input(prompt)
+        except EOFError:
+            break
+        normalized = raw.strip().lower()
+        if normalized in ("", "y", "yes"):
+            return RATIFY_POLICY_DEFAULT
+        if normalized in ("n", "no"):
+            return "manual"
+    return RATIFY_POLICY_DEFAULT
+
+
 def init_main(argv: list[str] | None = None) -> int:
     """Bootstrap a target repo: create the store, check for the graph, print wiring.
 
@@ -136,6 +199,25 @@ def init_main(argv: list[str] | None = None) -> int:
         "--graph",
         default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json"),
         help="graphify-out/graph.json path to check for (never created here; read-only input)",
+    )
+    settings_flags = parser.add_mutually_exclusive_group()
+    settings_flags.add_argument(
+        "--no-settings",
+        action="store_true",
+        help=(
+            f"skip {SETTINGS_RELATIVE_PATH.as_posix()} entirely: no prompt, no write, "
+            "just print the line to add by hand"
+        ),
+    )
+    settings_flags.add_argument(
+        "--ratify-policy",
+        choices=[p.value for p in RatifyPolicy],
+        default=None,
+        help=(
+            f"set {RATIFY_POLICY_ENV_VAR} in {SETTINGS_RELATIVE_PATH.as_posix()} to this "
+            "value with no prompt (never overwrites an existing value there) -- for a "
+            "scripted, non-interactive setup that still wants an explicit answer"
+        ),
     )
     args = parser.parse_args(argv)
     # Resolved AFTER parse_args, and only when --db was actually omitted (review Minor 4):
@@ -166,6 +248,56 @@ def init_main(argv: list[str] | None = None) -> int:
             f"missing graph: {graph_path} — run `graphify update .`, then `sidegraph-sync`, "
             "to anchor decisions to code (optional; Sidegraph works without it)."
         )
+
+    rel_settings = SETTINGS_RELATIVE_PATH.as_posix()
+    if args.no_settings:
+        export_value = RATIFY_POLICY_DEFAULT
+        print(
+            f"skipped {rel_settings} (--no-settings). Set it yourself: "
+            f'"env": {{"{RATIFY_POLICY_ENV_VAR}": "{export_value}"}}'
+        )
+    elif args.ratify_policy is not None:
+        export_value = args.ratify_policy
+        _report_ratify_policy_write(
+            rel_settings,
+            ensure_ratify_policy_setting(repo_root_for_settings(), export_value),
+            export_value,
+        )
+    else:
+        state = current_ratify_policy(repo_root_for_settings())
+        if state.outcome == "already_set":
+            export_value = state.existing_value or RATIFY_POLICY_DEFAULT
+            print(
+                f"{rel_settings} already sets "
+                f"{RATIFY_POLICY_ENV_VAR}={state.existing_value}. Left unchanged."
+            )
+        elif state.outcome == "skipped":
+            export_value = RATIFY_POLICY_DEFAULT
+            print(
+                f"{rel_settings} exists but isn't valid JSON/an object. Left untouched, "
+                f'add this yourself: "env": {{"{RATIFY_POLICY_ENV_VAR}": "{export_value}"}}'
+            )
+        elif sys.stdin.isatty():
+            export_value = _ask_ratify_policy_interactively(rel_settings)
+            _report_ratify_policy_write(
+                rel_settings,
+                ensure_ratify_policy_setting(repo_root_for_settings(), export_value),
+                export_value,
+            )
+        else:
+            # No TTY: CI, a script, an agent-driven session -- nobody is there to answer,
+            # so a silent write is exactly the self-certification risk the owner rejected
+            # (whitepaper claim C-075). Write nothing, ask nothing, just say how.
+            export_value = RATIFY_POLICY_DEFAULT
+            print(
+                f"non-interactive: leaving {rel_settings} untouched. To auto-ratify "
+                f'low-risk records, add "env": {{"{RATIFY_POLICY_ENV_VAR}": '
+                f'"{export_value}"}} yourself, or re-run sidegraph-init from a terminal.'
+            )
+    print(
+        f"Codex or another host without {rel_settings}: "
+        f"export {RATIFY_POLICY_ENV_VAR}={export_value}"
+    )
 
     print()
     print("Wire up Claude Code — the plugin installs the MCP server and all three hooks")
@@ -592,7 +724,7 @@ def sync_main(argv: list[str] | None = None) -> int:
         if report.domains_refreshed:
             print(f"refreshed community mapping for {report.domains_refreshed} domain(s)")
         for o in report.outcomes:
-            if o.status in ("moved", "orphaned", "ambiguous", "error"):
+            if o.status in ("moved", "moved_uncommitted", "orphaned", "ambiguous", "error"):
                 print(f"  {o.status}: {o.canonical_name} ({o.detail or 'no match'})")
         if report.stale_decisions:
             print("possibly stale decisions (all anchors gone — verify):")
@@ -1498,6 +1630,12 @@ def doctor_main(argv: list[str] | None = None) -> int:
         help="print {'clean','violations','findings','skipped'} as one JSON object to "
         "stdout (nothing else)",
     )
+    parser.add_argument(
+        "--graph",
+        default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json"),
+        help="graph.json path, used only for the graph-root-mismatch advisory check "
+        "(read-only; missing or unreadable simply skips that one check)",
+    )
     args = parser.parse_args(argv)
     if args.stale_days < 0:
         # Reject before touching the store — a bad flag must not affect anything.
@@ -1517,7 +1655,14 @@ def doctor_main(argv: list[str] | None = None) -> int:
             print(f"doctor --against {args.against!r} failed: {e}")
             return 1
 
-    report = curate(args.db, stale_days=args.stale_days)
+    try:
+        reader: GraphifyReader | None = GraphifyReader(args.graph)
+    except Exception:
+        # Same "missing graph is fine" convention every other command with a --graph
+        # default uses — the graph-root-mismatch check just doesn't run.
+        reader = None
+
+    report = curate(args.db, stale_days=args.stale_days, reader=reader)
 
     if args.json:
         # Pure JSON on stdout — nothing else — mirrors sidegraph-verify --json.
