@@ -135,7 +135,7 @@ def test_a_prune_failure_does_not_cost_the_session_map(tmp_path, monkeypatch, ca
     def boom(*args, **kwargs):
         raise RuntimeError("prune exploded")
 
-    monkeypatch.setattr(Store, "prune_retrieval_events", boom)
+    monkeypatch.setattr(Store, "prune_telemetry_events", boom)
     # SIDEGRAPH_DIR, not the deprecated SIDEGRAPH_DB: see `_run_session_start`'s comment —
     # a nonexistent `db` path would otherwise get rescued to its PARENT directory.
     monkeypatch.setenv("SIDEGRAPH_DIR", str(db))

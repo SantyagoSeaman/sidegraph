@@ -118,6 +118,7 @@ setup, scripted/CI use, and the two deliberately human-run jobs (`sidegraph-impo
 | `sidegraph-doctor` | CLI — one-stop store health: composes `sidegraph-verify`'s strict lint with an advisory curation pass (stale proposals, dangling/degraded/orphaned records, never-surfaced decisions); `--check` also fails on advisory findings. |
 | `sidegraph-viz` | CLI — render a read-only interactive HTML graph of the decision/fact store (nodes = decisions + facts + anchored entities; edges colored by anchor status; supersede + fact→decision links) plus a JSON sibling. |
 | `sidegraph-export-okf` | CLI — project the store into a deterministic [Open Knowledge Format v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) bundle any OKF-aware tool can read; strictly one-way, the store stays the source of truth. |
+| `sidegraph-stats` | CLI — one screen of local usage statistics from the gitignored index (how often memory was asked for, how much of the code worked on has memory anchored to it, what the store holds, anchor health); read-only, never creates the index, `--json` for the same report as data. Reachable in a session as `/sidegraph:stats`. |
 | `sidegraph-prepare-commit-msg` | `prepare-commit-msg` git hook — comments candidate `Sidegraph-Decision:` trailers into the commit message template for the human/agent to uncomment; never blocks or stalls `git commit`. See [`reference/git-bindings.md`](../reference/git-bindings.md). |
 | `sidegraph-blame` | CLI — `git blame` a file, joined to the decisions/facts each hunk's commit carries (commit trailers + `provenance.commit`). See [`reference/git-bindings.md`](../reference/git-bindings.md). |
 
@@ -160,8 +161,8 @@ Continue to the [quickstart](quickstart.md) for the shortest path to a first cap
 retrieved decision. If the repository already contains ADRs or supported flow specs, use the
 [Bootstrap existing rationale guide](bootstrap.md) for the preview-first path instead. Once
 you've done that, run through
-[verifying your setup](../guides/verifying-your-setup.md) — an eight-case checklist that
+[verifying your setup](../guides/verifying-your-setup.md) — a nine-case checklist that
 proves domain onboarding, domain management, durability, mistakes-first retrieval, quiet
-capture, refactor survival, git-native merges, and facts evidence and cascade actually work
-on your repo, each with an exact command and an observable
+capture, refactor survival, git-native merges, facts evidence and cascade, and your own usage statistics
+actually work on your repo, each with an exact command and an observable
 result.

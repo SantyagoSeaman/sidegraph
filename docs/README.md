@@ -28,7 +28,7 @@ In order:
 3. [getting-started/claude-code-setup.md](getting-started/claude-code-setup.md) or
    [getting-started/codex-setup.md](getting-started/codex-setup.md) — wire the MCP server
    and hooks into your host.
-4. [guides/verifying-your-setup.md](guides/verifying-your-setup.md) — the eight-case
+4. [guides/verifying-your-setup.md](guides/verifying-your-setup.md) — the nine-case
    checklist that proves the wiring actually works.
 
 Already have ADRs, specs, or design docs? [getting-started/bootstrap.md](getting-started/bootstrap.md)

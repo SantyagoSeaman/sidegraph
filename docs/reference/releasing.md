@@ -22,11 +22,15 @@ restate it in prose or carry it in a manifest field.
 |---|---|
 | `pyproject.toml` | `[project].version`, the canonical version `publish.yml` checks the tag against |
 | `src/sidegraph/__init__.py` | `__version__`, kept in lockstep with `pyproject.toml` |
-| `README.md` | the "Status" section's `vX.Y.Z, on PyPI as ...` line |
 | `CLAUDE.public.md` | the "pre-1.0 (vX.Y.Z)" line near the top |
 | `CHANGELOG.md` | see below, the `[Unreleased]` heading becomes the release heading |
 | `plugin/sidegraph/.claude-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
 | `plugin/sidegraph/.codex-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
+
+`README.md` is deliberately absent from this table. Its Status section carries no version
+string — only a PyPI badge that reads the live index — so there is nothing there to bump and
+nothing that can go stale between releases. It used to carry a `vX.Y.Z, on PyPI as ...` line;
+that line was removed in 0.3.0, and this note replaces its row.
 
 `tests/test_codex_plugin.py` enforces that the two plugin manifests and
 `src/sidegraph/__init__.py` all agree with `pyproject.toml`; a release with a stale copy

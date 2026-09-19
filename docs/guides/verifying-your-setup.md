@@ -1,6 +1,6 @@
 # Verifying your setup
 
-A "does Sidegraph actually work on my repo" checklist to run right after install. Eight
+A "does Sidegraph actually work on my repo" checklist to run right after install. Nine
 cases, each provable in a few minutes, each with an exact command and an observable result —
 not "trust the docs." Run them in order the first time (later cases build lightly on earlier
 ones); re-run any single case independently afterward whenever you want to sanity-check that
@@ -46,7 +46,7 @@ Expected: `created store: .sidegraph` and `found graph: graphify-out/graph.json`
 `already initialized: .sidegraph exists.` on a re-run — safe to repeat). If you see
 `missing graph: ...` instead, run `graphify update .` first.
 
-With those three steps done, work through Cases 1–8 below.
+With those three steps done, work through Cases 1–9 below.
 
 ## Case 1 — Domain onboarding
 
@@ -417,6 +417,93 @@ attached fact's own cascade line, `accepted (evidence of <decision-id>)`; `get_t
 shows the inline evidence line under the decision AND a `## Known facts` block for the
 standalone one; `supersede_fact` retires the old statement from both, replaced cleanly by the
 new one.
+
+## Case 9 — Usage statistics
+
+All of this is local. The counts come from `.sidegraph/index.db`, which is gitignored and
+never leaves your machine; Sidegraph makes no network calls. Turn recording off with
+`SIDEGRAPH_TELEMETRY=off` — pruning keeps running when it is off, so opting out strictly
+reduces what is kept.
+
+**Proves:** you can see, on your own repo, whether memory is being asked for and how many of
+the files you touched have memory anchored to them — without trusting a claim about it. The
+report counts what was shown, asked and touched; it does not observe whether anything shown
+was used in the work, and it never states what was improved, prevented, saved or caused.
+
+**Setup:** a few days of ordinary sessions in the repo. On a fresh install the report says so
+instead of printing a percentage (see below).
+
+**Steps.**
+
+```bash
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stats
+```
+
+or `/sidegraph:stats` in a session, which runs the same command and shows its output
+verbatim. It reads the index and changes nothing.
+
+**Expected observable result:** one screen of at most 80 columns, five blocks, activation
+first. A run from this repository's own store:
+
+```
+Sidegraph · sidegraph                              window: 30 days (12 retained)
+
+ACTIVATION  memory was asked in 24 of 71 sessions
+            every one of those got records back
+            47 sessions touched files without asking
+            226 showings (repeats counted), ~9 per session that got any
+            budget and tried-and-abandoned counts: not recorded yet
+REACH       282 files touched, 38 with memory anchored to them (13%)
+            asked about most, all time: src/sidegraph/store.py ×12 ·
+              src/sidegraph/capture.py ×9 · tests/test_ratify_policy.py ×8
+            silent domains: Implementation Plans — no record is bound to it
+
+MEMORY      accepted: 212 decisions · 118 facts · 17 domains
+            no recorded showing, all time: 230 of 330 decisions and facts (70%)
+            36 more kept as history
+            in this window: 49 accepted (4 automatically), 5 rejected
+GRAPH       9,390 nodes · 541 files · 534 communities
+ANCHORS     2,418 live · 3 degraded · 61 orphaned → sidegraph-doctor
+```
+
+What each block answers:
+
+- **ACTIVATION** — was memory asked for at all, and did it answer? It leads: a store
+  can grow every week while no session ever reads it. `24 of 71` is sessions that made a
+  memory lookup out of all sessions with recorded activity; the sessions that touched files
+  and never asked are counted on their own line, as are lookups that came back empty. A
+  showing is one record, a decision or a fact, placed in one lookup's result, so a record shown
+  in six sessions is six showings: the count is not of distinct records, and it does not
+  divide into the MEMORY block's figures.
+- **REACH** — of the files touched, how many have memory (a decision or a fact) anchored to them, which areas
+  were asked about most, and which accepted domains have no record bound to them.
+- **MEMORY** — what the store holds, and how much of it has no recorded showing in any
+  lookup. That is an absence of a record, not proof of one: a showing while recording was off,
+  or one lost to a recording error, is not counted. Accepted records and history (superseded,
+  rejected, deprecated or dropped) are counted on separate lines.
+- **GRAPH** and **ANCHORS** — the size of the graph and the state of every anchor.
+
+The `budget and tried-and-abandoned counts: not recorded yet` line is a state, not a zero: the
+window holds no record of a lookup, so there is nothing to count. It appears until a session
+runs one on a version that records them. A window whose only lookups are `drill_down` calls
+reads `budget counts: not recorded yet` instead: a drill-down delivers records and applies no
+budget, so it has no budget to count, and the line for lookups that included something already
+tried and abandoned is still printed.
+
+A check-plan run that falls back to `retrieve_decisions` is not counted. Only
+`get_task_context` and `query_decisions` are recorded as budgeted lookups, and
+`retrieve_decisions` is a plain list tool with no journal call, so nothing in this report
+covers that path.
+
+**Below the floor.** Under 5 sessions or 3 days of retained journal in the window, the
+activation block reads `too little to summarize yet — N sessions over M days` and no
+percentage appears anywhere. That is the report working, not failing. `--window DAYS` narrows
+or widens the window (the journal keeps 30 days), and `--json` prints the same report as data.
+See [`reference/cli.md`](../reference/cli.md#sidegraph-stats) for every flag and exit code.
+
+**✅ Success:** the command prints the five blocks with activation first; an install too young
+to summarize says `too little to summarize yet` instead of a ratio; no line claims an effect;
+`git status` is identical before and after the run, and `.sidegraph/index.db` is unchanged.
 
 ## If a case doesn't match
 

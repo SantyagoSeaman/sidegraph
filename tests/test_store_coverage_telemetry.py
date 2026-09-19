@@ -61,7 +61,7 @@ def test_prune_deletes_old_events_and_keeps_fresh_ones(tmp_path):
     )
     store._conn.commit()
 
-    deleted = store.prune_retrieval_events()
+    deleted = store.prune_telemetry_events()
 
     assert deleted == 1
     assert [e["key"] for e in store.retrieval_events()] == ["fresh.py"]

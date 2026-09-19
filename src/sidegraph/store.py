@@ -153,6 +153,24 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     mtime_ns INTEGER NOT NULL,
     PRIMARY KEY (subdir, stem)
 )""",
+    # A journal like retrieval_events, and deliberately NOT in the DROP list of
+    # _reload_index_from_canonical: it survives a `git pull` by absence from that list
+    # (usage-stats spec D4), so history is not lost every time canonical files change.
+    """CREATE TABLE IF NOT EXISTS render_events (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id         TEXT NOT NULL,
+    at                 TEXT NOT NULL,
+    intent             TEXT,
+    selected           INTEGER NOT NULL,
+    emitted            INTEGER NOT NULL,
+    degraded           INTEGER NOT NULL,
+    dropped_for_budget INTEGER NOT NULL,
+    chars_used         INTEGER NOT NULL,
+    had_rejected       INTEGER NOT NULL,
+    had_superseded     INTEGER NOT NULL
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_render_events_session
+    ON render_events (session_id)""",
 )
 
 _SCHEMA_SQL = ";\n".join(_SCHEMA_STATEMENTS) + ";\n"
@@ -2924,18 +2942,83 @@ class Store:
         with self._lock:
             return [dict(row) for row in self._conn.execute(sql, params)]
 
-    def prune_retrieval_events(self, older_than_days: int = 30) -> int:
-        """Delete events older than the retention window; returns the row count.
+    def record_render_event(
+        self,
+        session_id: str,
+        *,
+        intent: str | None,
+        selected: int,
+        emitted: int,
+        degraded: int,
+        dropped_for_budget: int,
+        chars_used: int,
+        had_rejected: bool,
+        had_superseded: bool,
+    ) -> None:
+        """Record what one retrieval render selected and what survived the budget.
+
+        ``degraded`` and ``dropped_for_budget`` are kept apart deliberately: the ranker
+        retries a detailed line at the tight tier before giving up, so one "dropped" number
+        would conflate a record that shrank with one that vanished — the two demand opposite
+        fixes (design/superpowers/specs/2026-09-18-usage-stats-design.md, D5).
+        """
+        with self._mutation():
+            self._conn.execute(
+                "INSERT INTO render_events (session_id, at, intent, selected, emitted, "
+                "degraded, dropped_for_budget, chars_used, had_rejected, had_superseded) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    datetime.now(UTC).isoformat(),
+                    intent,
+                    selected,
+                    emitted,
+                    degraded,
+                    dropped_for_budget,
+                    chars_used,
+                    int(had_rejected),
+                    int(had_superseded),
+                ),
+            )
+
+    def render_events(self, session_id: str | None = None) -> list[dict[str, object]]:
+        """Render-journal rows in insertion order, optionally scoped to one session.
+
+        See design/superpowers/specs/2026-09-18-usage-stats-design.md, D5.
+        """
+        sql = (
+            "SELECT session_id, at, intent, selected, emitted, degraded, "
+            "dropped_for_budget, chars_used, had_rejected, had_superseded FROM render_events"
+        )
+        params: tuple[str, ...] = ()
+        if session_id is not None:
+            sql += " WHERE session_id = ?"
+            params = (session_id,)
+        sql += " ORDER BY id"
+        with self._lock:
+            return [dict(row) for row in self._conn.execute(sql, params)]
+
+    # Every append-only journal table. The prune sweeps this list, so a journal added
+    # without being listed here would grow without bound -- the reason it is one constant.
+    _JOURNAL_TABLES: tuple[str, ...] = ("retrieval_events", "render_events")
+
+    def prune_telemetry_events(self, older_than_days: int = 30) -> int:
+        """Delete events older than the retention window across EVERY journal table.
 
         Called once per session from ``SessionStart`` (D7) — an append-only journal with no
         pruning is a predictable disk-growth bug, and doing it off every hot path keeps the
-        cost invisible.
+        cost invisible. Was ``prune_retrieval_events``, which named one table and so gave a
+        second journal no retention at all (usage-stats spec, D4).
         """
         cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
+        deleted = 0
         with self._mutation():
-            return self._conn.execute(
-                "DELETE FROM retrieval_events WHERE at < ?", (cutoff,)
-            ).rowcount
+            # Safe to interpolate: a private constant of literal identifiers, never input.
+            for table in self._JOURNAL_TABLES:
+                deleted += self._conn.execute(
+                    f"DELETE FROM {table} WHERE at < ?", (cutoff,)
+                ).rowcount
+        return deleted
 
     # -- initiatives --------------------------------------------------------
 

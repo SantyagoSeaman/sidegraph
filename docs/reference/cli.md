@@ -1,7 +1,7 @@
 # CLI reference
 
-17 console scripts are registered in `pyproject.toml` (`[project.scripts]`): thirteen
-commands documented on this page — twelve in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
+18 console scripts are registered in `pyproject.toml` (`[project.scripts]`): fourteen
+commands documented on this page — thirteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
 (including `sidegraph-prepare-commit-msg`, which doubles as a git hook — see
 [`reference/git-bindings.md`](git-bindings.md) for its installation and mechanism) and the
 guided `sidegraph-bootstrap` in
@@ -10,29 +10,33 @@ guided `sidegraph-bootstrap` in
 `sidegraph-stop`, `sidegraph-pre-tool-use`; see [`reference/hooks.md`](hooks.md)).
 `sidegraph-ratify`, `sidegraph-sync`,
 `sidegraph-import`, `sidegraph-domains`, `sidegraph-compact`, `sidegraph-verify`,
-`sidegraph-doctor`, `sidegraph-viz`, `sidegraph-export-okf`, and `sidegraph-blame` take
+`sidegraph-doctor`, `sidegraph-viz`, `sidegraph-export-okf`, `sidegraph-stats`, and
+`sidegraph-blame` take
 `--db`, naming the
 store **directory** (the canonical `.sidegraph/` layout — see
 [`reference/store-format.md`](store-format.md)); a
 legacy single-file `*.db` path is
-still accepted there too, and triggers a one-time migration into the directory layout. When `--db` is
+still accepted there too, and triggers a one-time migration into the directory layout (all but
+`sidegraph-stats`, which only reads `index.db`, never opens the store and so expects the
+directory to exist already). When `--db` is
 omitted, all of them resolve it through the same precedence — an explicit `--db` wins outright,
 otherwise `$SIDEGRAPH_DIR` if set, otherwise the deprecated `$SIDEGRAPH_DB` (a one-line
 deprecation notice prints to stderr the first time it's actually used), otherwise an existing
 `.sidegraph/` if present, otherwise the default `.sidegraph/` — printing a one-line warning to
 stderr if nothing resolved and a brand-new store is about to be created (only commands that
-would actually create one print it; the never-creating four below error out instead).
+would actually create one print it; the never-creating five below error out instead).
 `sidegraph-init` takes
 `--db` too but resolves the same way — see its section below for what differs (idempotent
 "already initialized" reporting). `sidegraph-verify`, `sidegraph-doctor`, `sidegraph-viz`,
-and `sidegraph-export-okf` also resolve `--db` the same way but differ in the *opposite*
+`sidegraph-export-okf`, and `sidegraph-stats` also resolve `--db` the same way but differ in the *opposite*
 direction from every other command here:
 none of them auto-creates a missing store — see [`sidegraph-verify`](#sidegraph-verify) (and
 [`sidegraph-doctor`](#sidegraph-doctor), which composes it) for why;
 [`sidegraph-viz`](#sidegraph-viz) and [`sidegraph-export-okf`](#sidegraph-export-okf) apply
-the same rule (rendering or exporting a store that isn't there helps no one). `sidegraph-init`,
-`sidegraph-sync`, `sidegraph-import`, and `sidegraph-domains bootstrap` additionally take
-`--graph`, defaulting to `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`. See
+the same rule (rendering or exporting a store that isn't there helps no one), and
+[`sidegraph-stats`](#sidegraph-stats) reads only an existing index. `sidegraph-init`,
+`sidegraph-sync`, `sidegraph-import`, `sidegraph-domains bootstrap`, and `sidegraph-stats`
+additionally take `--graph`, defaulting to `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`. See
 [`configuration.md`](configuration.md) for full path-resolution semantics.
 
 ## `sidegraph-bootstrap`
@@ -1136,6 +1140,158 @@ be committed and diffed. `--out` (default `okf-bundle`) is only ever cleared whe
 empty or carries the `generator: sidegraph` marker from a previous export; any other
 non-empty directory is refused. Exit `0` on success, `2` on an operational error
 (uninitialized store — never auto-created — or a refused/unwritable out dir).
+
+## `sidegraph-stats`
+
+All of this is local. The counts come from `.sidegraph/index.db`, which is gitignored and
+never leaves your machine; Sidegraph makes no network calls. Turn recording off with
+`SIDEGRAPH_TELEMETRY=off` — pruning keeps running when it is off, so opting out strictly
+reduces what is kept.
+
+```bash
+sidegraph-stats [--db PATH] [--window DAYS] [--graph PATH] [--json]
+```
+
+One screen of usage statistics, read-only: how often memory was asked for, how much of the
+code being worked on has memory anchored to it, what the store holds, and how the anchors are doing.
+It states what was **shown, asked and touched** — never what was improved, prevented, saved
+or caused. A journal cannot separate "memory sent the agent there" from "the agent was going
+there anyway", so no line of the report claims an effect.
+
+- `--db PATH` — the store **directory**; resolved like every other command (see the top of
+  this page). The command reads `<store>/index.db` and never creates or rebuilds it. It never
+  opens the store, so a legacy single-file `*.db` path is not migrated here: it exits `2` for
+  want of an `index.db`. Run a command that opens the store on it first (`sidegraph-init`).
+- `--window DAYS` — how many days of journal to report on. Default `30`, which is also how
+  long the journal is kept (older rows are pruned at each `SessionStart`), so a larger value
+  reports what is still held and no more. Must be a positive whole number; anything else
+  exits `2` before any path is touched.
+- `--graph PATH` — the Graphify `graph.json`, read only to size the graph, default
+  `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`. A relative path resolves against the
+  STORE's project root, never the shell's directory (so a store elsewhere is not measured
+  against whatever graph sits beside your shell). A graph that is missing or unreadable is
+  stated in the report, not an error.
+- `--json` — print the same report as one JSON object and nothing else. The text and the JSON
+  are two renderings of one computation, so the numbers cannot disagree, and so do their
+  absences: where the text withholds a figure because its source is absent, the JSON carries
+  `null` for it, never a zero. That is `activation` and `retained_days` with recording off (as
+  are `reach.files_touched`, `files_touched_with_memory`, `busiest_seeds` and
+  `memory.no_recorded_showing`); `activation.degraded`, `dropped_for_budget`,
+  `renders_with_abandoned` and `self_reported_intents` when the window holds no lookup at all;
+  `activation.degraded` and `dropped_for_budget` also when the window holds only
+  `drill_down` lookups, which apply no budget; `retained_days` for a window that holds nothing of an older journal; and
+  `graph.nodes`, `files` and `communities` when there is no readable graph. A zero that was
+  measured stays a zero: an empty journal, a built graph with no nodes.
+
+Example, from this repository's own store (the numbers are that store's, on the day it was
+run):
+
+```
+Sidegraph · sidegraph                              window: 30 days (12 retained)
+
+ACTIVATION  memory was asked in 24 of 71 sessions
+            every one of those got records back
+            47 sessions touched files without asking
+            226 showings (repeats counted), ~9 per session that got any
+            budget and tried-and-abandoned counts: not recorded yet
+REACH       282 files touched, 38 with memory anchored to them (13%)
+            asked about most, all time: src/sidegraph/store.py ×12 ·
+              src/sidegraph/capture.py ×9 · tests/test_ratify_policy.py ×8
+            silent domains: Implementation Plans — no record is bound to it
+
+MEMORY      accepted: 212 decisions · 118 facts · 17 domains
+            no recorded showing, all time: 230 of 330 decisions and facts (70%)
+            36 more kept as history
+            in this window: 49 accepted (4 automatically), 5 rejected
+GRAPH       9,390 nodes · 541 files · 534 communities
+ANCHORS     2,418 live · 3 degraded · 61 orphaned → sidegraph-doctor
+```
+
+What each block answers, with activation first, as the question the other blocks build on:
+
+- **ACTIVATION** — did memory get asked for at all? A session counts as having *asked* when the
+  journal holds a memory lookup for it (`get_task_context`, `query_decisions` or `drill_down`);
+  sessions that touched files and never asked are counted separately, and so is a session that
+  asked and got nothing back (no record shown against a file, and no lookup that placed a
+  record: a global-scope decision, or a fact bound to no file, has no file to be shown
+  against, and still counts as delivered). A **showing** is one record, a decision or a fact,
+  placed in one lookup's result, so the same record shown in six sessions is six showings, and
+  one placed by two lookups in a session is two; the count is not of distinct records, which
+  is why the line says `repeats counted` and why it must not be divided by the
+  `decisions and facts` figure in MEMORY. It comes from the lookups' own journal wherever a
+  session has one; a session recorded before that journal existed is counted from the records
+  it was shown against files, one each. In `--json` it is
+  `activation.showings`. `shortened to fit the budget` and `dropped by it` are kept apart
+  on purpose: a record that shrank to a shorter line and one that did not fit at all point at
+  different fixes. `lookups included something already tried and abandoned` counts lookups
+  whose result held at least one record with a non-empty `rejected` field or one that has been
+  superseded; a lookup with both counts once.
+- **REACH** — of the files touched in the window, how many have memory (a decision or a fact) anchored to them,
+  which areas were asked about most, and which accepted domains have no record bound to
+  them.
+- **MEMORY** — what the store holds. `no recorded showing` counts accepted decisions and facts
+  that the running showings counter has no entry for. That is an absence of a record, not a
+  finding that the record was never shown: a showing while `SIDEGRAPH_TELEMETRY=off`, or one
+  lost to a recording error (the server swallows those rather than fail a lookup), is not in
+  the count. The inventory counts accepted records only, and history
+  (records that were superseded, rejected, deprecated or dropped) is a separate line. The last line is the accept/reject verdicts that
+  fell in the window; `automatically` is the part stamped by an auto-ratification policy.
+  In `--json` the same figure is `memory.no_recorded_showing`.
+- **GRAPH** and **ANCHORS** — the size of the code graph, and how many anchors are live,
+  degraded or orphaned. Degraded or orphaned anchors end with a pointer to
+  [`sidegraph-doctor`](#sidegraph-doctor).
+
+Lines the report will not invent:
+
+- **Too little data.** Below 5 sessions or 3 days of retained journal in the window, the
+  activation block says how many sessions over how many days it has and prints no ratio
+  anywhere. A store that is a few hours old has no meaningful percentage to show. This floor is
+  a guess, not a measured threshold.
+- **Recording off.** With `SIDEGRAPH_TELEMETRY=off`, nothing derived from the journal is
+  printed, the header drops its `(N retained)` figure, and the report says recording is off. Lines that come from the store's records
+  (inventory, history, verdicts, silent domains) are unaffected.
+- **Index behind the store files.** After a `git pull` or a hand edit changes committed
+  records, `index.db` still describes the old ones until something opens the store (a session
+  start, or `sidegraph-init`). The command never opens the store, so it compares the index's
+  own per-file record (`canonical_stat`) with the files on disk and, when they differ, prints
+  no figure derived from the records: MEMORY and ANCHORS read `not shown: the index is behind
+  the store files`, and REACH says which of its figures are not counted. The journal-derived
+  lines are unaffected. `--json` carries `"index_stale": true` and `null` for those figures.
+- **Budget and abandoned counts not recorded.** When the window holds no record of a lookup
+  at all, the budget lines are replaced by the single line
+  `budget and tried-and-abandoned counts: not recorded yet`. A zero there would read as a
+  measurement, and nothing was measured. A window whose only lookups are `drill_down` calls
+  is a narrower case: a drill-down delivers records and applies no budget, so the screen
+  reads `budget counts: not recorded yet` and still prints how many lookups included something
+  already tried and abandoned, which a drill-down does have.
+- **A narrowed window over an older journal.** `--window 7` over a journal whose only rows are
+  20 days old holds nothing in the window and something outside it. The screen then says
+  `no sessions recorded in this window` (and `not recorded in this window` for the budget
+  line) instead of `recorded yet`, and the header drops `(N retained)`, which would read as an
+  empty journal. `--json` carries `activation.outside_window`.
+- **A lookup is not counted if it never rendered.** Only `get_task_context` and
+  `query_decisions` are budgeted renders. A `check-plan` run that falls back to
+  `retrieve_decisions` leaves no journal row and is not reflected anywhere in this report.
+- **Windowed and all-time.** The header window cuts the session and file counts. `asked about
+  most` and `no recorded showing` are running totals kept outside the window, and the report labels
+  them `all time`.
+
+**Exit codes:** `0` on success — a store with no activity still exits `0`, the silence is the
+output; `2` on an operational error: a non-positive or unrepresentable `--window`, no store
+index at the resolved path (run `sidegraph-init` first — a fresh clone has the committed
+records but not the derived index, and `sidegraph-init` rebuilds it), an index SQLite cannot
+read, or a record row in it that does not parse (the message names the index file, the table
+and the record id). An index from before the render journal, and a graph that is missing or unreadable, are
+not errors.
+
+The `/sidegraph:stats` skill runs this command and shows its output verbatim. The
+`intent` argument on `get_task_context` and `query_decisions` (see
+[`mcp-tools.md`](mcp-tools.md#get_task_context)) is recorded for these statistics only. It
+appears in `--json` as `activation.self_reported_intents` (lookups in the window per label,
+most used first; a lookup that passed none is not counted; `drill_down` is a label the server
+writes for its own lookups and is not counted here, and a caller cannot pass it; `null` when the
+window holds no lookup) and never on the screen: a prompt
+can always forget to pass one, so the counts are self-reported, not a census.
 
 ## `sidegraph-prepare-commit-msg`
 

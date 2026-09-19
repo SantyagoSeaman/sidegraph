@@ -143,7 +143,7 @@ def test_codex_hooks_config_parses() -> None:
 
 def test_every_skill_has_openai_yaml_naming_sidegraph_dependency() -> None:
     skill_dirs = sorted(p for p in _SKILLS_DIR.iterdir() if (p / "SKILL.md").is_file())
-    assert len(skill_dirs) == 11, f"expected 11 skills, found {len(skill_dirs)}"
+    assert len(skill_dirs) == 12, f"expected 12 skills, found {len(skill_dirs)}"
 
     for skill_dir in skill_dirs:
         openai_yaml = skill_dir / "agents" / "openai.yaml"
@@ -161,7 +161,7 @@ def test_implicit_invocation_matches_human_driven_vs_agent_observed_split() -> N
     to fire from something the agent observes on its own (a plan forming, a `SessionStart`/
     sync signal, a hard-won lesson mid-session) stay `true` — the call is drawn from each
     skill's own SKILL.md trigger text, not a fixed list."""
-    human_driven = {"setup", "import-adrs", "name-domains", "manage-domains"}
+    human_driven = {"setup", "import-adrs", "name-domains", "manage-domains", "stats"}
     agent_observed = {
         "check-plan",
         "explain-why",

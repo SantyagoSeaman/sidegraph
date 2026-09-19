@@ -44,7 +44,14 @@ from .capture import propose_domains as _propose_domain_drafts
 from .config import TELEMETRY_SESSION_KEY, resolve_store_path
 from .domains import DEFAULT_CANDIDATE_LIMIT, collect_domain_candidates, community_group_path
 from .engine.reader import GraphifyReader
-from .retrieval import TOC_CACHE_KEY, RetrievalBudget, Seed, build_toc, proposal_surfaces
+from .retrieval import (
+    TOC_CACHE_KEY,
+    RetrievalBudget,
+    Seed,
+    TaskContext,
+    build_toc,
+    proposal_surfaces,
+)
 from .retrieval import drill_down as _drill_down
 from .retrieval import get_task_context as _retrieve
 from .retrieval import query_structure as _query_structure
@@ -1093,11 +1100,18 @@ def _get_task_context_impl(
     entities: list[dict] | None,
     structure_budget: int,
     memory_budget: int,
+    intent: str | None = None,
 ) -> str:
     """Testable core: build seeds, run retrieval, return the rendered slice."""
     seeds = _seeds_from_args(files, entities)
     ctx = _retrieve(seeds, store, reader, RetrievalBudget(structure_budget, memory_budget))
-    _record(store, ctx.shown_ids, [s.file_path for s in seeds if s.file_path])
+    _record(
+        store,
+        ctx.shown_ids,
+        [s.file_path for s in seeds if s.file_path],
+        ctx=ctx,
+        intent=_caller_intent(intent),
+    )
     return ctx.render()
 
 
@@ -1116,11 +1130,12 @@ def _get_task_context_with_sync(
     entities: list[dict] | None = None,
     structure_budget: int = 4000,
     memory_budget: int = 6000,
+    intent: str | None = None,
 ) -> str:
     """Tool-shell core: lazy sync (best-effort), then retrieval."""
     reader = _synced_reader()
     return _get_task_context_impl(
-        _get_store(), reader, files, entities, structure_budget, memory_budget
+        _get_store(), reader, files, entities, structure_budget, memory_budget, intent
     )
 
 
@@ -1149,6 +1164,7 @@ def _query_decisions_impl(
     files: list[str] | None,
     entities: list[dict] | None,
     budget_chars: int,
+    intent: str | None = None,
 ) -> str:
     """Testable core for the query_decisions thin tool (§5 FR8.2).
 
@@ -1161,7 +1177,13 @@ def _query_decisions_impl(
     """
     seeds = _seeds_from_args(files, entities)
     ctx = _retrieve(seeds, store, reader, RetrievalBudget(memory_chars=budget_chars))
-    _record(store, ctx.shown_ids, [s.file_path for s in seeds if s.file_path])
+    _record(
+        store,
+        ctx.shown_ids,
+        [s.file_path for s in seeds if s.file_path],
+        ctx=ctx,
+        intent=_caller_intent(intent),
+    )
     return ctx.render(include_structure=False)
 
 
@@ -1171,14 +1193,18 @@ def get_task_context(
     entities: list[dict] | None = None,
     structure_budget: int = 4000,
     memory_budget: int = 6000,
+    intent: str | None = None,
 ) -> str:
     """Task-aware context for the files/entities you're working on, mistakes ranked first.
 
     ``files`` are repo-relative paths; ``entities`` are ``{"name": ..., "file_path": ...}``
     refs. Returns a compact slice: known mistakes/gotchas, then decisions, then a structural
     map, then related decisions. Best-effort — degrades if the graph or store is absent.
+
+    ``intent``: optional label for what asked (e.g. a skill name). Recorded for local
+    statistics only; never affects what is returned.
     """
-    return _get_task_context_with_sync(files, entities, structure_budget, memory_budget)
+    return _get_task_context_with_sync(files, entities, structure_budget, memory_budget, intent)
 
 
 @mcp.tool
@@ -1201,6 +1227,7 @@ def query_decisions(
     files: list[str] | None = None,
     entities: list[dict] | None = None,
     budget_chars: int = 6000,
+    intent: str | None = None,
 ) -> str:
     """The decision-memory half of ``get_task_context`` alone (§5 FR8.2 thin tool):
     mistakes, decisions, related — no structural map.
@@ -1211,8 +1238,13 @@ def query_decisions(
     (peripheral) bucket is still gathered by walking the structural subgraph with
     ``RetrievalBudget``'s DEFAULT ``structure_chars`` (the map itself is discarded — only
     the peripheral entities it surfaces feed decision ranking).
+
+    ``intent``: optional label for what asked (e.g. a skill name). Recorded for local
+    statistics only; never affects what is returned.
     """
-    return _query_decisions_impl(_get_store(), _synced_reader(), files, entities, budget_chars)
+    return _query_decisions_impl(
+        _get_store(), _synced_reader(), files, entities, budget_chars, intent
+    )
 
 
 def _auto_accept() -> bool:
@@ -1336,7 +1368,34 @@ def _normalized_seeds(store: Store, seeds: list[str]) -> list[str]:
     return out
 
 
-def _record(store: Store, record_ids: list[str], seeds: list[str]) -> None:
+# The `intent` a `drill_down` render row is written under (usage-stats design D5/D11). A
+# drill-down delivers records and applies no budget, so its row carries `emitted` and zeros for
+# every budget field, and the report reads this label to keep those zeros out of the budget
+# figures. `stats/model.py` mirrors the literal (it imports nothing from here) and a test pins
+# the two together.
+DRILL_DOWN_INTENT = "drill_down"
+
+
+def _caller_intent(intent: str | None) -> str | None:
+    """The label a budgeted lookup's caller passed, with the reserved one removed.
+
+    ``DRILL_DOWN_INTENT`` tells the report a row applied no budget. A caller that passed it to
+    ``get_task_context`` would have that lookup's real budget counts read as no budget at all,
+    so the label is not recorded for a caller; every other label passes through unchanged.
+    """
+    if intent is not None and intent.strip() == DRILL_DOWN_INTENT:
+        return None
+    return intent
+
+
+def _record(
+    store: Store,
+    record_ids: list[str],
+    seeds: list[str],
+    *,
+    ctx: TaskContext | None = None,
+    intent: str | None = None,
+) -> None:
     """Best-effort telemetry. Swallows everything: a retrieval that failed because a
     counter could not be written would be strictly worse than no counters (D9).
 
@@ -1355,6 +1414,9 @@ def _record(store: Store, record_ids: list[str], seeds: list[str]) -> None:
     spec §4: "a seed with no file writes no event") — the aggregate keeps them, since
     `retrieval_seeds` has always counted that key (see `retrieval_seed_queries`'s pinned
     `{"domain:payments": 1}`) and only the journal's storage contract excludes pathless keys.
+
+    A third write, the render journal, runs only when the caller passes the `TaskContext`
+    it rendered from; see the last block. `drill_down` passes one of its own.
     """
     if not _telemetry_enabled():
         return
@@ -1363,10 +1425,17 @@ def _record(store: Store, record_ids: list[str], seeds: list[str]) -> None:
         normalized_seeds = _normalized_seeds(store, seeds)
     with contextlib.suppress(Exception):
         store.record_retrieval(record_ids, normalized_seeds)
+    # Sampled ONCE for this call and passed to both journal writes. The key is a shared `meta`
+    # row that a `SessionStart` overwrites, so reading it once per write let a start landing
+    # between them stamp one call's show rows and render row with two different sessions, which
+    # the report counted as two sessions and two showings. The writes keep their own suppress
+    # blocks below: sharing the value must not couple their failures.
+    session_id: str | None = None
     with contextlib.suppress(Exception):
         session_id = _session_key(store)
-        if session_id is None:
-            return
+    if session_id is None:
+        return
+    with contextlib.suppress(Exception):
         shows = [
             (record_id, path)
             for record_id in dict.fromkeys(record_ids)
@@ -1374,6 +1443,32 @@ def _record(store: Store, record_ids: list[str], seeds: list[str]) -> None:
         ]
         journal_seeds = [s for s in normalized_seeds if not s.startswith("domain:")]
         store.record_retrieval_events(session_id, journal_seeds, shows)
+    # Render accounting (2026-09-18-usage-stats-design.md, D5). Its own suppress, after the
+    # two writes above, so a failure here costs only this journal — and only when a
+    # TaskContext was in hand, so a caller with no render to account for writes no row.
+    if ctx is None:
+        return
+    with contextlib.suppress(Exception):
+        had_rejected = had_superseded = False
+        for record_id in dict.fromkeys(ctx.shown_ids):
+            decision = store.get_decision(record_id)
+            if decision is None:
+                continue
+            if (decision.rejected or "").strip():
+                had_rejected = True
+            if decision.status == DecisionStatus.SUPERSEDED:
+                had_superseded = True
+        store.record_render_event(
+            session_id,
+            intent=intent,
+            selected=ctx.selected,
+            emitted=ctx.emitted,
+            degraded=ctx.degraded,
+            dropped_for_budget=ctx.dropped_for_budget,
+            chars_used=ctx.chars_used,
+            had_rejected=had_rejected,
+            had_superseded=had_superseded,
+        )
 
 
 def _propose_decisions_impl(
@@ -2308,9 +2403,10 @@ def _drill_down_impl(store: Store, reader, domain_slug: str) -> dict:
     """Testable core for drill_down (§5 Axis-1 operation).
 
     Records telemetry only on a found domain — an unknown slug renders no decision memory,
-    so there is nothing to call a "show". ``decision_ids`` is popped before returning: it
-    exists on the ``retrieval.drill_down`` result purely so this wrapper can record it, and
-    is not part of the documented MCP tool contract (see the ``drill_down`` tool docstring).
+    so there is nothing to call a "show" and nothing delivered. ``decision_ids`` is popped
+    before returning: it exists on the ``retrieval.drill_down`` result purely so this wrapper
+    can record it, and is not part of the documented MCP tool contract (see the ``drill_down``
+    tool docstring).
     The seed recorded is the domain itself (``domain:<slug>``, the same key convention
     ``domain:<slug>`` abstract entities already use elsewhere in this store) — a drill-down
     has no file/entity seeds the way get_task_context/query_decisions do.
@@ -2318,7 +2414,21 @@ def _drill_down_impl(store: Store, reader, domain_slug: str) -> dict:
     result = _drill_down(domain_slug, store, reader)
     decision_ids = result.pop("decision_ids", [])
     if result.get("found"):
-        _record(store, decision_ids, [f"domain:{domain_slug}"])
+        # A drill-down delivers records, so it writes a render row like any other lookup: the
+        # report counts a session's showings from that journal, and a drill-down absent from
+        # it would drop out of the count as soon as the session made an ordinary lookup too.
+        # It applies no budget, so the row carries the records returned and zeros elsewhere,
+        # under the reserved intent that keeps those zeros out of the budget figures.
+        delivered = TaskContext(
+            shown_ids=list(decision_ids), selected=len(decision_ids), emitted=len(decision_ids)
+        )
+        _record(
+            store,
+            decision_ids,
+            [f"domain:{domain_slug}"],
+            ctx=delivered,
+            intent=DRILL_DOWN_INTENT,
+        )
     return result
 
 

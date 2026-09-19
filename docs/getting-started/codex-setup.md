@@ -29,7 +29,7 @@ Inside a Codex CLI session, in that repo:
 /plugin install sidegraph@sidegraph
 ```
 
-Installs the MCP server, the `SessionStart`/`Stop` hooks, and all 11 skills in one step,
+Installs the MCP server, the `SessionStart`/`Stop` hooks, and all 12 skills in one step,
 pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by default.
 It runs everything via `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`
 under the hood, so it builds straight from this repository, no PyPI publish needed. See

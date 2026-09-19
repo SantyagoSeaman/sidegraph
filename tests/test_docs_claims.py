@@ -687,7 +687,7 @@ def test_telemetry_retention_described_consistently_across_docs():
     freezes retained events. "A control I cannot determine from shipped documentation is not
     auditable." Both pages now describe the same behaviour as the code."""
     hooks_src = (_ROOT / "src" / "sidegraph" / "host" / "hooks.py").read_text(encoding="utf-8")
-    prune_line = next(ln for ln in hooks_src.splitlines() if "prune_retrieval_events()" in ln)
+    prune_line = next(ln for ln in hooks_src.splitlines() if "prune_telemetry_events()" in ln)
     assert not prune_line.strip().startswith("if "), (
         "pruning is gated again; update the docs and this guard together"
     )
@@ -778,3 +778,22 @@ def test_public_docs_never_send_a_reader_to_an_internal_design_note() -> None:
         "public docs cite internal design notes that never ship; cite the published "
         f"whitepaper section instead, or state the figure without a pointer: {offenders}"
     )
+
+
+def test_readme_states_the_mechanism_and_promises_no_outcome():
+    """A sentence of the form "X, so Y doesn't happen" is a prevention claim, and nothing the
+    product records can show it (usage-stats spec D2: the journal separates "memory sent the
+    agent there" from "the agent was going anyway" for no line of any report, so no sentence
+    about the product may assert an effect either). Guarded on the promise's shapes, not on one
+    sentence, so a rewording that keeps the promise is caught too."""
+    text = (_ROOT / "README.md").read_text()
+    promises = [
+        r"\bdoesn'?t become\b",
+        r"\bwon'?t become\b",
+        r"\bdoes not become\b",
+        r"\bnever (?:drifts?|regress\w*)\b",
+        r"\bprevents?\b",
+        r"\bguarantees?\b",
+    ]
+    hits = [m.group(0) for pat in promises for m in re.finditer(pat, text, re.IGNORECASE)]
+    assert hits == [], f"README promises an outcome instead of describing the mechanism: {hits}"

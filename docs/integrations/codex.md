@@ -132,7 +132,7 @@ This is the same repo-committed manifest set the Claude Code plugin uses, in Cod
 shape: `.agents/plugins/marketplace.json` at the repo root, and
 `plugin/sidegraph/.codex-plugin/plugin.json` naming the MCP config
 (`plugin/sidegraph/codex/mcp.json`), the hooks config
-(`plugin/sidegraph/codex/hooks.json`), and the skills directory (all 11 skills, each with
+(`plugin/sidegraph/codex/hooks.json`), and the skills directory (all 12 skills, each with
 its own `agents/openai.yaml` declaring the `sidegraph` MCP dependency and whether Codex may
 invoke it implicitly). No `PreToolUse` entry ships, for the reason given above.
 

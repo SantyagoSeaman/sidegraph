@@ -164,6 +164,28 @@ class TaskContext:
     # True when at least one placed line carries the ` [drifted]` marker (drift→supersede
     # D3) — `render()` keys the one legend line on it. Not rendered itself.
     drift_shown: bool = False
+    # Budget accounting (2026-09-18-usage-stats-design.md, D5). Not rendered.
+    # `emitted` counts RECORD lines placed, decisions and facts alike: it is the render
+    # journal's statement of what reached the agent, and a fact that rendered reached the
+    # agent as surely as a decision did. A decision is counted where `add()` places it and a
+    # fact where `place_fact` does, each once, so it equals `len(shown_ids)`. It is counted at
+    # each placement rather than derived from that list, so a test can pin the two together.
+    # `selected` stays decision-only (a fact has no selection step), so `emitted` can exceed
+    # it. `degraded` counts records that rendered only after falling back to the tight tier;
+    # `dropped_for_budget` counts RECORDS that were refused and never placed, decisions and
+    # facts alike. Conflating degraded with dropped would hide the difference between
+    # "re-rank" and "prune" — the question the report exists to answer.
+    # For decisions `refused - seen` is the decisions selected and never placed, and facts
+    # have no selection step, so `dropped_for_budget` is that plus the facts refused and never
+    # placed (`refused_facts - rendered_fact_ids`). One case no counter
+    # shows: a detailed-tier candidate refused at the degrade step and then placed by the
+    # related pass at the bare tight line reports degraded 0, dropped 0. That is correctly
+    # "delivered, not dropped", but it did render tight after a detailed selection.
+    selected: int = 0
+    emitted: int = 0
+    degraded: int = 0
+    dropped_for_budget: int = 0
+    chars_used: int = 0
 
     def render(self, include_structure: bool = True) -> str:
         """``include_structure=False`` renders the decision-memory blocks only (mistakes,
@@ -643,6 +665,20 @@ def rank_decisions(
     """
     ctx = TaskContext()
     seen: set[str] = set()
+    # `seen` is filled only on a successful placement, so a record the budget refuses is
+    # re-attempted by every later bucket that reaches it (a decision bound to a seed AND a
+    # peripheral entity). The report reads the budget counters as records, so an attempt must
+    # not count twice: `counted` guards ctx.selected, and refusals are collected in `refused`
+    # and settled once at the end — a record refused here but placed by a later bucket
+    # (the related pass renders the bare tight line, smaller than a degraded detailed one)
+    # was delivered, so it is not "dropped".
+    counted: set[str] = set()
+    refused: set[str] = set()
+    # The fact population, kept apart from the decisions above (a fact has no `selected`
+    # count and no degrade step) but settled the same way: a refusal is recorded, and only
+    # a fact that no later pass placed counts as dropped. Every site that places a fact goes
+    # through `place_fact`, so a site cannot forget to record its refusal.
+    refused_facts: set[str] = set()
     rendered_fact_ids: set[str] = set()  # membership only (see _evidence_candidates)
     fact_order: list[str] = []  # same ids, in the order each was actually placed
     direct_proposed_facts: dict[str, Fact] = {}
@@ -670,6 +706,21 @@ def rank_decisions(
             bucket.append(line)
         else:
             bucket.insert(at, line)
+        return True
+
+    def place_fact(bucket: list[str], fact: Fact, line: str, *, at: int | None = None) -> bool:
+        """Place one fact line, or record that the budget refused it. On success the fact
+        joins ``rendered_fact_ids`` (membership) and ``fact_order`` (placement order) and is
+        counted into ``ctx.emitted``, as a placed decision is in ``add()``; a refusal lands
+        in ``refused_facts`` and is settled once at the end of the call, so a fact refused
+        under one decision and placed as a standalone entry is delivered (and counted once,
+        when it is placed)."""
+        if not add_line(bucket, line, at=at):
+            refused_facts.add(fact.id)
+            return False
+        rendered_fact_ids.add(fact.id)
+        fact_order.append(fact.id)
+        ctx.emitted += 1
         return True
 
     def _evidence_candidates(d: Decision) -> list[tuple[Fact, str]]:
@@ -705,12 +756,16 @@ def rank_decisions(
     ) -> bool:
         if d.id in seen:
             return False
+        if d.id not in counted:
+            counted.add(d.id)
+            ctx.selected += 1
         if detailed is None:
             detailed = bucket is not ctx.related
         drifted = detailed and d.id in drifted_ids
         line = _fmt_decision(d, prefix, detailed=detailed, drifted=drifted)
         if not add_line(bucket, line):
             if not detailed:
+                refused.add(d.id)
                 return False
             # Degrade before drop: re-render at the tight tier, but a record *selected for*
             # the detailed tier keeps its id suffix even on the degraded line (design D4) —
@@ -720,20 +775,21 @@ def rank_decisions(
             # cluster via the explicit flag rather than jumping after the id.
             line = _fmt_decision(d, prefix, detailed=False, drifted=drifted) + _id_suffix(d)
             if not add_line(bucket, line):
+                refused.add(d.id)
                 return False
+            ctx.degraded += 1
         if drifted:
             ctx.drift_shown = True
         seen.add(d.id)
         ctx.shown_ids.append(d.id)
+        ctx.emitted += 1
         proposal_fact_bucket = direct_proposed_facts if detailed else related_proposed_facts
         for fact in _live_facts(store.facts_for_decision(d.id)):
             if fact.status == DecisionStatus.PROPOSED:
                 proposal_fact_bucket.setdefault(fact.id, fact)
         if evidence:
             for fact, fact_line in _evidence_candidates(d):
-                if add_line(bucket, fact_line):
-                    rendered_fact_ids.add(fact.id)
-                    fact_order.append(fact.id)
+                place_fact(bucket, fact, fact_line)
         return True
 
     seed_accepted: dict[str, list[Decision]] = {}
@@ -758,9 +814,7 @@ def rank_decisions(
     for i, d in enumerate(mistake_decisions):
         insert_at = i + 1 + offset
         for fact, fact_line in _evidence_candidates(d):
-            if add_line(ctx.mistakes, fact_line, at=insert_at):
-                rendered_fact_ids.add(fact.id)
-                fact_order.append(fact.id)
+            if place_fact(ctx.mistakes, fact, fact_line, at=insert_at):
                 insert_at += 1
                 offset += 1
 
@@ -830,9 +884,7 @@ def rank_decisions(
         for fact in accepted_facts:
             if fact.id in rendered_fact_ids:
                 continue
-            if add_line(ctx.facts, _fmt_fact(fact)):
-                rendered_fact_ids.add(fact.id)
-                fact_order.append(fact.id)
+            place_fact(ctx.facts, fact, _fmt_fact(fact))
         for fact in unratified_facts:
             direct_proposed_facts.setdefault(fact.id, fact)
 
@@ -844,9 +896,7 @@ def rank_decisions(
         for fact in accepted_facts:
             if fact.id in rendered_fact_ids:
                 continue
-            if add_line(ctx.facts, _fmt_fact(fact)):
-                rendered_fact_ids.add(fact.id)
-                fact_order.append(fact.id)
+            place_fact(ctx.facts, fact, _fmt_fact(fact))
         for fact in unratified_facts:
             if fact.id not in direct_proposed_facts:
                 related_proposed_facts.setdefault(fact.id, fact)
@@ -866,9 +916,8 @@ def rank_decisions(
             ):
                 if fact.status == DecisionStatus.PROPOSED:
                     proposal_fact_bucket.setdefault(fact.id, fact)
-                elif fact.id not in rendered_fact_ids and add_line(ctx.facts, _fmt_fact(fact)):
-                    rendered_fact_ids.add(fact.id)
-                    fact_order.append(fact.id)
+                elif fact.id not in rendered_fact_ids:
+                    place_fact(ctx.facts, fact, _fmt_fact(fact))
 
     direct_records: list[Decision | Fact] = [*direct_proposed, *direct_proposed_facts.values()]
     related_records: list[Decision | Fact] = [
@@ -883,9 +932,8 @@ def rank_decisions(
         for record in sorted(records, key=lambda item: item.valid_from, reverse=True):
             if isinstance(record, Decision):
                 add(ctx.unratified, record, evidence=False, detailed=detailed)
-            elif record.id not in rendered_fact_ids and add_line(ctx.unratified, _fmt_fact(record)):
-                rendered_fact_ids.add(record.id)
-                fact_order.append(record.id)
+            elif record.id not in rendered_fact_ids:
+                place_fact(ctx.unratified, record, _fmt_fact(record))
 
     # fact_order already tracks exactly the facts that made it into the render, in the
     # order each was placed (inline evidence at every bucket plus the standalone
@@ -893,6 +941,8 @@ def rank_decisions(
     # that bookkeeping at each add_line(..., fact_line) call site.
     ctx.shown_ids.extend(fact_order)
 
+    ctx.dropped_for_budget = len(refused - seen) + len(refused_facts - rendered_fact_ids)
+    ctx.chars_used = used
     return ctx
 
 

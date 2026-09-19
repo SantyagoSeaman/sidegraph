@@ -278,7 +278,7 @@ def session_start() -> None:
             # data live LONGER is the wrong way round for GDPR and for a works council.
             # Recording stays off when the flag is off; expiry keeps running regardless,
             # so opting out strictly reduces what is retained.
-            store.prune_retrieval_events()
+            store.prune_telemetry_events()
         except Exception:
             pass
 

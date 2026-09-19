@@ -42,8 +42,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import webbrowser
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -75,6 +77,8 @@ from .okf import build_bundle, write_bundle
 from .profiles import PROFILES, get_profile
 from .retrieval import TOC_CACHE_KEY, build_toc, proposal_surfaces
 from .schema import Decision, DecisionKind, DecisionStatus, Domain, DomainStatus, Fact, Provenance
+from .stats.model import UnreadableRecordError, build_report
+from .stats.render import render_json, render_text
 from .store import VOLATILE_STALE_KEY, Store
 from .sync import (
     activate_accepted_domain,
@@ -100,6 +104,17 @@ _DB_HELP = (
     f"'{DEFAULT_STORE_DIR}/' if present, else '{DEFAULT_STORE_DIR}'; $SIDEGRAPH_DB is "
     "honored for back-compat, deprecated — a legacy *.db file path still works there via "
     "one-time migration)"
+)
+
+# ``sidegraph-stats`` cannot use the shared text: it reads ``<dir>/index.db`` and never opens a
+# ``Store``, and migration happens when a ``Store`` opens. Handed a legacy ``*.db`` file it exits
+# 2 looking for ``<file>/index.db``, so its help says what it does instead of what the others do.
+_STATS_DB_HELP = (
+    "store directory (default: $SIDEGRAPH_DIR if set, else existing "
+    f"'{DEFAULT_STORE_DIR}/' if present, else '{DEFAULT_STORE_DIR}'; $SIDEGRAPH_DB is "
+    "honored for back-compat, deprecated). This command only reads <directory>/index.db and "
+    "never opens the store, so it cannot migrate a legacy *.db file: run a command that opens "
+    "the store first (sidegraph-init)"
 )
 
 
@@ -412,6 +427,29 @@ def _ratified_domain(store: Store, id_: str, result: str) -> bool:
     return store.get_decision(id_) is None and store.get_domain(id_) is not None
 
 
+def _graph_path_for_store(graph_path: str | Path, db_path: str | Path) -> Path:
+    """``graph_path`` as an absolute path: a RELATIVE one is resolved against the STORE's own
+    project root, not the process CWD. Shared by every command that takes a store and a
+    ``--graph`` together (``sidegraph-ratify``, ``sidegraph-stats``): a store in another
+    directory would otherwise pick up whatever ``graphify-out/graph.json`` happened to sit
+    beside the shell, pairing one project's records with a different project's graph.
+
+    The project root is the store path's PARENT. Only a legacy single-FILE store living
+    inside a store directory needs one more level up. A name check on ".sidegraph" was tried
+    and rejected (review R2-4): ``--db mystore`` is a supported invocation, and a name check
+    resolved such a store's root to itself, silently disabling this for anyone not on the
+    default directory name — the exact "dead while looking alive" failure this helper exists
+    to avoid."""
+    path = Path(graph_path)
+    if path.is_absolute():
+        return path
+    store = Path(db_path).resolve()
+    root = store.parent
+    if not store.is_dir() and (root.name == ".sidegraph" or (root / "format").is_file()):
+        root = root.parent
+    return root / path
+
+
 def _ratify_reader(graph_path: str, db_path: str | Path):
     """A best-effort reader for ratify's immediate membership resolve (CLI/MCP parity,
     v0.2-scope). ``None`` when there is no readable graph — ratify must still work in a
@@ -419,28 +457,14 @@ def _ratify_reader(graph_path: str, db_path: str | Path):
     failure here degrades to the pre-existing "schedule the heal" branch rather than
     failing the accept.
 
-    A RELATIVE ``--graph`` is resolved against the STORE's own project root, not the
-    process CWD. Ratifying a store in another directory would otherwise pick up whatever
-    ``graphify-out/graph.json`` happened to sit beside the shell — resolving one project's
-    domain membership against a different project's graph. Pinned by
+    A RELATIVE ``--graph`` is resolved against the STORE's own project root (see
+    :func:`_graph_path_for_store`). Pinned by
     ``test_cli_ratify_ignores_a_graph_belonging_to_another_project``, which builds its own
     graph in a foreign directory and chdirs there — the pre-existing
     ``test_cli_ratify_of_an_accepted_domain_schedules_a_heal`` also catches it, but only
     when a gitignored ``graphify-out/graph.json`` happens to exist in the checkout, so it
     is not a guard CI can rely on (review finding 5)."""
-    path = Path(graph_path)
-    if not path.is_absolute():
-        # The project root is the store path's PARENT. Only a legacy single-FILE store
-        # living inside a store directory needs one more level up. A name check on
-        # ".sidegraph" was tried and rejected (review R2-4): `--db mystore` is a supported
-        # invocation, and a name check resolved such a store's root to itself, silently
-        # disabling this for anyone not on the default directory name — the exact "dead
-        # while looking alive" failure this whole helper exists to avoid.
-        store = Path(db_path).resolve()
-        root = store.parent
-        if not store.is_dir() and (root.name == ".sidegraph" or (root / "format").is_file()):
-            root = root.parent
-        path = root / path
+    path = _graph_path_for_store(graph_path, db_path)
     if not path.is_file():
         return None
     try:
@@ -1844,6 +1868,86 @@ def viz_main(argv: list[str] | None = None) -> int:
         )
     if args.open_browser:
         webbrowser.open(out_html.resolve().as_uri())
+    return 0
+
+
+def stats_main(argv: list[str] | None = None) -> int:
+    """``sidegraph-stats`` — one screen of local usage statistics.
+
+    Read-only. Reports how often memory was asked for in the window, how much of the code
+    being worked in carries memory, what the store holds, and anchor health. It states what
+    was shown, asked and touched — never what was improved or prevented (spec D2).
+
+    ``--json`` prints the serialized report and nothing else; a figure the text withholds
+    (recording off, no render journal, no readable graph) is ``null`` there, never a zero.
+    Exit 0 on success (a silent
+    store still exits 0 — the silence is the output), 2 on an operational error: a bad
+    ``--window``, no store index (never created here), an index SQLite cannot read, or a
+    record row in it that does not parse (named by table and record id). An
+    index from before the render journal, and a graph that is missing or unreadable, are
+    not errors — they are stated in the report.
+
+    # see design/superpowers/specs/2026-09-18-usage-stats-design.md
+    """
+    parser = argparse.ArgumentParser(
+        prog="sidegraph-stats",
+        description="One screen of local usage statistics: how often memory was asked for, "
+        "how much of the code worked in carries it, and what the store holds.",
+    )
+    parser.add_argument("--db", default=None, help=_STATS_DB_HELP)
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=30,
+        metavar="DAYS",
+        help="days of journal to report on (default 30, the journal's retention)",
+    )
+    parser.add_argument(
+        "--graph",
+        default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json"),
+        help="graph.json path (read-only; missing or unreadable is reported, not an error). "
+        "A relative path resolves against the store's project root, not the shell's directory",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print the report as one JSON object to stdout (nothing else)",
+    )
+    args = parser.parse_args(argv)
+
+    # Reject before touching any path — a bad flag must not affect anything. The subtraction
+    # is the same one `build_report` makes, so a window it would overflow on is refused here
+    # rather than surfacing as a traceback from inside the aggregator.
+    try:
+        if args.window <= 0:
+            raise ValueError
+        datetime.now(UTC) - timedelta(days=args.window)
+    except (ValueError, OverflowError):
+        print(f"--window must be a positive number of days, got {args.window}", file=sys.stderr)
+        return 2
+
+    store_dir = Path(resolve_store_path(args.db, warn_on_create=False))
+    index = store_dir / "index.db"
+    if not index.is_file():
+        print(f"no store index at {index} — run `sidegraph-init` first", file=sys.stderr)
+        return 2
+
+    # A relative --graph is the STORE's project's, not the shell's (same rule as ratify).
+    graph_path = _graph_path_for_store(args.graph, store_dir)
+    try:
+        report = build_report(
+            store_dir, graph_path if graph_path.exists() else None, window_days=args.window
+        )
+    except sqlite3.Error as e:
+        print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
+        return 2
+    except UnreadableRecordError as e:
+        # Named by table and record id: the message is all the person has to go on.
+        print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
+        return 2
+
+    # Both renderers are newline-terminated; a `print` here would double it.
+    sys.stdout.write(render_json(report) if args.json else render_text(report))
     return 0
 
 

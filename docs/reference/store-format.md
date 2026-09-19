@@ -287,6 +287,22 @@ stops new events being recorded but never freezes expiry of what is already ther
 engineer's existing behavioural journal live forever while everyone else's aged out; a
 practitioner review caught that inversion. Opting out now strictly reduces retention.
 
+### `render_events` (derived, index-only)
+
+One row per lookup that delivered records — a `get_task_context`, `query_decisions` or
+`drill_down` call — recording what that render selected and what survived the budget: `selected`, `emitted`, `degraded` (shrunk to
+a shorter line), `dropped_for_budget` (did not fit at all), `chars_used`, whether the delivered
+set held a record with a non-empty `rejected` field (`had_rejected`) or a superseded one
+(`had_superseded`), and the optional `intent` label the caller passed. It holds no record
+text. A `drill_down` applies no budget, so its row carries the number of decisions it returned
+as `emitted` and `selected`, zeros for `degraded`, `dropped_for_budget` and `chars_used`, and
+the reserved `intent` `drill_down`, which the statistics use to keep those zeros out of the
+budget figures. A caller of `get_task_context` or `query_decisions` cannot pass that label.
+
+Same contract as `retrieval_events`: gitignored `index.db` only, not dropped by the reload,
+silenced by `SIDEGRAPH_TELEMETRY=off`, and pruned to 30 days at each `SessionStart`
+unconditionally — one sweep covers every journal table. `sidegraph-stats` is its reader.
+
 ## Archive segments (`sidegraph-compact`)
 
 Terminal-status records — decisions `superseded`/`rejected`/`deprecated`, domains

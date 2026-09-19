@@ -421,9 +421,36 @@ def _case_record_retrieval_events(store: Store) -> tuple[str, object]:
     )
 
 
-def _case_prune_retrieval_events(store: Store) -> tuple[str, object]:
+def _case_record_render_event(store: Store) -> tuple[str, object]:
+    return "INSERT INTO render_events", lambda: store.record_render_event(
+        "case-session",
+        intent=None,
+        selected=1,
+        emitted=1,
+        degraded=0,
+        dropped_for_budget=0,
+        chars_used=10,
+        had_rejected=False,
+        had_superseded=False,
+    )
+
+
+def _case_prune_telemetry_events(store: Store) -> tuple[str, object]:
     store.record_touch("case-prune-session", "old.py", "Read")
-    return "DELETE FROM retrieval_events", lambda: store.prune_retrieval_events(older_than_days=0)
+    store.record_render_event(
+        "case-prune-session",
+        intent=None,
+        selected=1,
+        emitted=1,
+        degraded=0,
+        dropped_for_budget=0,
+        chars_used=10,
+        had_rejected=False,
+        had_superseded=False,
+    )
+    # The marker is the LAST journal table swept, so the injected failure lands after the
+    # earlier table's DELETE already ran: one rolled-back transaction must undo both.
+    return "DELETE FROM render_events", lambda: store.prune_telemetry_events(older_than_days=0)
 
 
 def _case_upsert_initiative(store: Store) -> tuple[str, object]:
@@ -471,7 +498,8 @@ _ROLLBACK_CASES = {
     "record_retrieval": _case_record_retrieval,
     "_append_event": _case_append_event,
     "record_retrieval_events": _case_record_retrieval_events,
-    "prune_retrieval_events": _case_prune_retrieval_events,
+    "record_render_event": _case_record_render_event,
+    "prune_telemetry_events": _case_prune_telemetry_events,
     "upsert_initiative": _case_upsert_initiative,
     "compact": _case_compact,
     "set_meta": _case_set_meta,

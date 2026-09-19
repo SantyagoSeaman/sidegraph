@@ -1,10 +1,14 @@
 # Sidegraph
 
-> **Every agent session starts fresh. Your project should not.**
+[![tests](https://img.shields.io/github/actions/workflow/status/SantyagoSeaman/sidegraph/ci.yml?label=tests)](https://github.com/SantyagoSeaman/sidegraph/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/sidegraph)](https://pypi.org/project/sidegraph/)
+![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-green)
+![MCP](https://img.shields.io/badge/MCP-server-8A2BE2)
 
-Sidegraph carries the project's accumulated decision map across sessions, so the next
-agent approaches its task with the context a returning engineer has built over years:
-why the code took its current shape, what was tried, and what the team learned.
+> **Give an AI coding agent the mental model of a project that an experienced engineer carries — what exists,
+> how it is connected, why it is built this way, and what was already tried — served task-aware, within budget,
+> before the first grep; and make that why survive rebuilds, refactors, and time.**
 
 Coding agents broke an old equilibrium: **code is now produced faster than anyone
 accumulates the understanding of why it is the way it is.** The reasoning that shaped
@@ -17,69 +21,17 @@ decides projects is not: **why it's built this way, what was tried and abandoned
 constraint from outside the code forced the shape.** That information isn't in the
 artifact at all. No future model will recover it, because it exists exactly once — at
 decision time — and then evaporates: people leave, sessions end, the ticket from three
-years ago is never found.
-
-Sidegraph keeps that half and serves it back. Specs say what should be true and code
-says what was built; Sidegraph keeps the third line — *how one became the other*: the
-decisions, the rejected alternatives, and the lessons learned by doing — knowledge
-recoverable from neither the documents nor the code. Every record is bound into one
-graph with your code and your own planning artifacts, so the memory knows what it
-governs — and notices when it goes stale. And it reaches the agent at the moment of
-work, **mistakes first, before the first grep** — so no mistake is paid for twice, and
-an agent doesn't confidently re-propose the design your team already rejected.
+years ago is never found. Sidegraph keeps that half and serves it back.
 
 **Deciding whether this is worth your team's time?** Read the
 [engineering whitepaper](docs/whitepaper/index.md) first. It states the idea,
-walks one real decision chain end to end, reports what running it showed
-(including the corpus where memory cost 25.5% more and answered worse), and
+walks one real decision chain end to end, reports what running it showed, and
 gives a fit test you can apply to your own repository before installing anything.
-
-```text
-You: "refactor risk/fee_gate.py"
-
-Injected into the agent's context — before it reads a single file:
-
-  ## ⚠ Known mistakes & gotchas
-  - [gotcha] HFT strategies require 0% maker/taker fees: assert_zero_fees()
-    checks account fees up front and raises FeeGateError — the bot refuses
-    to trade.
-
-  ## Decisions
-  - [adr] Stop levels ratchet monotonically: force_widen() is the only
-    entry point allowed to widen an active stop.
-    evidence: backtest showed ad-hoc re-widening added ~12% drawdown [internal backtest, 2026-03]
-
-  ## Related
-  ~ tried, reverted 2026-01: [adr] threshold-based fee checks
-```
-
-**Maximum relevant context before the first grep — and no mistake paid for twice.**
-
-No vector database, no service, no API key: your team's **decision log as small text
-records in the repo** — decisions, domain definitions, anchors — merging like code and
-readable in the PR diff, plus a local MCP server and three hooks.
-
-[![tests](https://img.shields.io/github/actions/workflow/status/SantyagoSeaman/sidegraph/ci.yml?label=tests)](https://github.com/SantyagoSeaman/sidegraph/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/sidegraph)](https://pypi.org/project/sidegraph/)
-![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue)
-![License](https://img.shields.io/badge/license-Apache--2.0-green)
-![MCP](https://img.shields.io/badge/MCP-server-8A2BE2)
-
-Green `tests` badge = the full suite (ruff · mypy · pytest) passing in CI on every push.
-Install: **`pip install sidegraph`** (or `uv tool install sidegraph`) — a pure-Python package
-(`sidegraph` on PyPI: the MCP server, the three hooks, and the `sidegraph-*` CLIs), no service,
-no API key.
 
 ## Quickstart
 
 Works cold: no existing ADRs required. No API key — the core loop is fully local
-(one optional docs-analysis feature uses one; it's clearly marked below).
-
-Already have ADRs or supported flow specifications? After building the graph, run
-`sidegraph-bootstrap --host claude-code` to preview, review, anchor, and prove one record
-through production retrieval. The 10–15 minute path is an explicitly unmeasured launch target;
-see the [Bootstrap guide](docs/getting-started/bootstrap.md) for the six supported profiles,
-host matrix, recovery contract, and reproducible dogfood path.
+(one optional docs-analysis feature uses one; it's marked below).
 
 ```bash
 # 1. Install the graph engine and build a graph over your repo (code or markdown)
@@ -88,19 +40,15 @@ cd /path/to/your/repo && graphify update .
 ```
 
 `[mcp]` is an **optional** extra on `graphifyy` (`uv tool install "graphifyy[mcp]"`) — it adds
-Graphify's *own* MCP server, a deeper structure-query layer over the same graph. It works fine
-installed alongside Sidegraph; Sidegraph itself only ever reads `graph.json`, so the plain
-install above is all it needs.
+Graphify's *own* MCP server, a deeper structure-query layer over the same graph. Sidegraph
+only ever reads `graph.json`, so the plain install above is all it needs.
 
 ```
 # 2. Inside a Claude Code session in that repo: install the plugin — MCP server + all
-#    three hooks, wired automatically. Builds straight from this repo via uv; no PyPI
-#    publish needed.
+#    three hooks, wired automatically.
 /plugin marketplace add SantyagoSeaman/sidegraph
 /plugin install sidegraph@sidegraph
 ```
-
-> **`@main` is a mutable ref.** These commands track the branch — fine for trying Sidegraph out, but pin a commit SHA (`…/sidegraph@<sha>`) for CI, a shared team setup, or a pilot you intend to measure. See [docs/reference/stability.md](docs/reference/stability.md).
 
 ```bash
 # 3. Install the CLIs + MCP server, then bootstrap the store in your repo
@@ -110,34 +58,25 @@ sidegraph-init
 
 # Prefer the latest unreleased build straight from git instead of PyPI? Swap step 3 for:
 #   uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
+#   `@main` is a mutable ref — it moves under you. Pin a tag or a SHA for CI.
 ```
 
 4. **Name your domains** — turns the graph's communities into a described table of
    contents. Tell your agent *"name my domains"* (or run `/sidegraph:name-domains`) and
-   pick one of the 2–3 ready-made sets it proposes — no long list to hand-curate. CLI
-   alternative for scripted/CI use: `sidegraph-domains bootstrap` + `sidegraph-ratify` —
+   pick one of the 2–3 ready-made sets it proposes. CLI alternative for scripted/CI use:
+   `sidegraph-domains bootstrap` + `sidegraph-ratify` —
    see [naming your domains](docs/guides/naming-your-domains.md).
 
 Then record your first decision in a session — *"record a gotcha: … anchor it to
 `<function or heading>` in `<file>`"* — and watch it come back at the top of the context
-next time the agent works near that code. The moment you accept a domain, `SessionStart`
-starts answering from the top — a named table of contents instead of a bare community
-listing. Full setup (hooks, env vars, Codex, and the source-checkout path for contributors):
-[docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) and
-[docs/getting-started/installation.md](docs/getting-started/installation.md). Existing rationale:
-[docs/getting-started/bootstrap.md](docs/getting-started/bootstrap.md).
+next time the agent works near that code.
 
-**See it in action.** Sidegraph dogfoods itself: a
-[`demo` branch](https://github.com/SantyagoSeaman/sidegraph/tree/demo) will carry Sidegraph's
-own decision store — decisions and facts distilled from this project's design notes and
-anchored to its real code graph. Once it ships, clone it (`git clone -b demo …`), run
-`graphify update .`, and query the corpus to watch retrieval, supersession chains, and
-mistakes-first ranking on a genuine project. The `public`/plugin branch stays lean — the store
-ships only to `demo`, so installing the plugin never drags it along. **The `demo` branch ships
-with a later release** — it does not exist yet, so the link above and the clone command do not
-resolve today; see the
-[Bootstrap guide's reproduce-the-dogfood-path section](docs/getting-started/bootstrap.md#reproduce-the-dogfood-path)
-for the same note.
+Already have ADRs or design specs? `sidegraph-bootstrap --host claude-code` previews,
+imports, anchors, and proves one record through retrieval — see the
+[Bootstrap guide](docs/getting-started/bootstrap.md). Full setup (hooks, env vars, Codex,
+and the source-checkout path for contributors):
+[quickstart](docs/getting-started/quickstart.md) and
+[installation](docs/getting-started/installation.md).
 
 ## Why
 
@@ -147,30 +86,18 @@ same problem, solved once. Settled questions stay settled — reopening one is a
 supersede with a reason, not amnesia.
 
 **For the project** — documentation that knows when it's stale: unlike a wiki, the memory
-is anchored into the code and flags its own decay when the code moves on. Decisions are
-made *in view of* prior decisions, so agent-speed production doesn't become agent-speed
-architectural drift.
-
-**For the business** — opex becomes an asset: today 100% of an agent's reasoning
-amortizes to zero the moment the session ends. With Sidegraph every agent session leaves
-a residue — decision capital that *compounds with project age* while everything else
-(human memory, doc accuracy) decays. And it's the one investment model progress can't
-commoditize: better models make derivable knowledge cheaper, not the non-derivable kind.
+is anchored into the code and flags its own decay when the code moves on. Before an agent
+edits, retrieval puts the decisions and dead ends already recorded for that code in front of
+it, at whatever speed the agent works.
 
 **For the process** — a sidecar, not a reform: it sits beside whatever spec/ADR flow you
 already run, capture is a byproduct of ordinary sessions, and the single ritual is a
-ratification gate, human by default, or `auto-low-risk`: lessons, gotchas, and standalone
-facts self-ratify at write time, while `adr`/`constraint` decisions and domains still wait
-for a human either way. `sidegraph-init` asks which you want (default answer: yes) and
-commits the choice to `.claude/settings.json`. Provenance on every record (who decided,
-when, on what evidence) is a ready audit trail for the era of agent-made decisions.
+ratification gate. Provenance on every record (who decided, when, on what evidence) is a
+ready audit trail for the era of agent-made decisions.
 
-One honest boundary, stated up front: this is not "cheaper agents in general." Memory
-pays off where it replaces reading prose and where the answer isn't in the code at all;
-on a large monorepo where two greps answer the question, it costs more than it saves.
-What you buy is not speed — it's **owning your engineering judgment instead of renting it
-back every session**. And writing decisions down is necessary but not sufficient: records
-nothing surfaces at the moment of work simply go unread — delivery is the product.
+One honest boundary: this is not "cheaper agents in general." Memory pays off where it
+replaces reading prose and where the answer isn't in the code at all; on a large monorepo
+where two greps answer the question, it costs more than it saves.
 
 Three kinds of tools circle this problem, and each misses it:
 
@@ -182,8 +109,7 @@ Three kinds of tools circle this problem, and each misses it:
   matters, with no link to the code it concerns.
 
 None of them can answer: **"which decisions touch *this* function — and how did they
-evolve?"** Sidegraph is built for exactly that question: decision memory, anchored to a
-real code graph, with temporal history.
+evolve?"** Sidegraph is built for exactly that question.
 
 |  | CLAUDE.md / AGENTS.md | Session memory tools | ADR markdown | Code-graph engines | OKF bundle | **Sidegraph** |
 |---|---|---|---|---|---|---|
@@ -196,13 +122,8 @@ real code graph, with temporal history.
 | Health is CI-gateable | ✗ | ✗ | ✗ | ✗ | ✓ `okf validate` | ✓ `sidegraph-verify` + `sidegraph-doctor` exit codes |
 
 [OKF](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/)
-is complementary, not competing: it standardizes portable knowledge *bundles*, not decision
-memory — and `sidegraph-export-okf` ships exactly that projection: the full store, history
-included, as an OKF v0.1 bundle any OKF consumer can read.
-
-The memory that matters most is what was tried, abandoned, and **why** — the mistake
-you'd otherwise pay for twice. Sidegraph keeps it attached to the code and retrievable
-long after everyone forgot.
+standardizes portable knowledge *bundles*, not decision memory; `sidegraph-export-okf`
+projects the full store, history included, into an OKF v0.1 bundle any OKF consumer can read.
 
 ## How it works
 
@@ -219,26 +140,19 @@ long after everyone forgot.
  blind Read/Grep ──▶ nudged back to get_task_context (once per session)
 ```
 
-Under the hood there are two layers that age differently: the **structure** layer
-(the code graph — entities, dependencies, communities: *the what*) and the **decision**
-layer on top (*the why*). The graph is disposable — the engine regenerates it from source at any moment. The
-memory must never be — so it lives in a separate store that nothing regenerates, and
-re-anchors itself as the code moves. The unit of memory is an **entity, never a line
-of code**: functions, classes, modules, document headings. Line numbers shift with every
-edit; entities persist through them.
+Two layers age differently: the **structure** layer (the code graph — entities,
+dependencies, communities: *the what*) and the **decision** layer on top (*the why*). The
+graph is disposable — the engine regenerates it from source at any moment. The memory must
+never be — so it lives in a separate store that nothing regenerates, and re-anchors itself
+as the code moves. The unit of memory is an **entity, never a line of code**: functions,
+classes, modules, document headings. Line numbers shift with every edit; entities persist
+through them.
 
-A third piece sits on top of both: named **domains**. Rather than hand-curate a
-200-line list of raw communities, you tell your agent *"name my domains"* and pick one of
-2–3 ready-made sets it proposes (`/sidegraph:name-domains`); each domain is a described area
-— title, WHY-IT-EXISTS summary, optional subdomains — so the agent's first read of a session
-is a table of contents it can answer from, not a blind community listing. A domain's
-membership anchors to durable entities, not volatile community ids, so it **survives a fresh
-clone and a graph rebuild** — the mind-model layer is repo-committed team memory, same as the
-decisions. See [docs/concepts/mind-model.md](docs/concepts/mind-model.md).
-
-That is the whole design in one line: **a decision log that stays alive — anchored
-precisely to code entities, durably to named domains, delivered mistakes-first before
-the agent's first grep, and merging like code.**
+On top of both sit named **domains**: each is a described area — title, WHY-IT-EXISTS
+summary, optional subdomains — so the agent's first read of a session is a table of
+contents it can answer from, not a bare community listing. A domain's membership anchors
+to durable entities, not volatile community ids, so it survives a fresh clone and a graph
+rebuild. See [docs/concepts/mind-model.md](docs/concepts/mind-model.md).
 
 ## What gets stored
 
@@ -253,11 +167,8 @@ the agent's first grep, and merging like code.**
 Append-only is a feature: a reversed decision is closed and superseded, never deleted —
 *"tried before, abandoned because…"* stays retrievable via `get_entity_history`.
 
-Facts ride the same append-only/ratification rules as decisions, plus a cascade: ratifying
-or dropping a decision carries every still-pending fact that supports it along in the same
-call — one verdict, both records move. Retrieval renders a live fact as an inline
-`evidence: <statement> [<source>]` line under the decision it supports, and a standalone one
-in its own `## Known facts` block — never displacing a mistake line. Details:
+Facts follow the same append-only and ratification rules as decisions; ratifying or
+dropping a decision carries its still-pending facts along in the same verdict. Details:
 [docs/concepts/data-model.md](docs/concepts/data-model.md) and
 [docs/guides/capturing-decisions.md#facts-the-evidence-layer](docs/guides/capturing-decisions.md#facts-the-evidence-layer).
 
@@ -275,7 +186,7 @@ in its own `## Known facts` block — never displacing a mistake line. Details:
 | `retrieve_decisions` / `list_facts` | List current decisions / current facts |
 | `propose_decisions` / `propose_domains` / `add_domain` | Draft a decision (plus attached or standalone facts) or name a domain, from a session or by hand |
 | `supersede_domain` | Lineage-correct rename/re-scope of a domain: closes the old, writes a `proposed` successor |
-| `list_proposed` / `ratify` | The human gate (by default — see `SIDEGRAPH_RATIFY_POLICY` in the configuration reference): review pending decisions, facts, *and* domains, accept/drop (dropping/accepting a decision cascades to its still-pending facts) |
+| `list_proposed` / `ratify` | The human gate (see `SIDEGRAPH_RATIFY_POLICY` in the configuration reference): review pending decisions, facts, *and* domains, accept/drop (a decision's verdict cascades to its still-pending facts) |
 | `sync_anchors` | Diagnostic/heal MCP counterpart to `sidegraph-sync` — re-anchor against the current graph and return the rebind report as data |
 | `verify_store` | Read-only integrity lint of the store's canonical files — the MCP counterpart to `sidegraph-verify` |
 | `add_anchors` | Append bindings to an existing decision or fact — in-place re-anchoring for the `heal-anchors` triage flow |
@@ -292,9 +203,8 @@ Reference: [docs/reference/](docs/reference/mcp-tools.md).
 ## Works on code and on docs
 
 Anchor decisions to functions and classes — or to **headings in your architecture
-markdown** (LLM-free graph build, non-git folders supported). Already have ADRs or
-design specs? `sidegraph-bootstrap` parses them into anchored decisions deterministically,
-no LLM. See the [Bootstrap guide](docs/getting-started/bootstrap.md).
+markdown** (LLM-free graph build, non-git folders supported). `sidegraph-bootstrap` parses
+existing ADRs and design specs into anchored decisions deterministically, no LLM.
 
 An optional **semantic pass** (`graphify extract`, one API key, cached per file) goes a
 layer deeper on documentation: prose becomes `concept` nodes and thematic clusters, giving
@@ -308,8 +218,8 @@ retrieval a richer graph to anchor against. Walkthrough:
   plus a local, gitignored index it can always rebuild. **Nothing leaves your machine** —
   no network calls, no remote telemetry, no account. Sidegraph does keep local usage
   diagnostics in that gitignored index (which stored memory was shown, and which files a
-  session touched afterwards) so you can tell which memory is earning its keep; they never
-  travel, and `SIDEGRAPH_TELEMETRY=off` disables them.
+  session touched afterwards) so you can see which memory was shown and which files
+  those sessions then touched; they never travel, and `SIDEGRAPH_TELEMETRY=off` disables them.
 - **Secrets don't enter memory.** Proposed decisions and facts pass redaction before they
   are stored. A ratification gate controls what the agent's drafts can persist: human for
   `adr`/`constraint` decisions and domains always, and, if you answer yes to `sidegraph-init`'s
@@ -322,30 +232,17 @@ retrieval a richer graph to anchor against. Walkthrough:
 
 Entity extraction and graph construction come from
 [Graphify](https://github.com/safishamsi/graphify) (its LLM-free build covers both code
-and markdown), and Sidegraph never re-implements them or writes into the engine's output.
+and markdown); Sidegraph never re-implements them or writes into the engine's output.
 The engine is optional at runtime: without a graph, records anchor to file paths and
 domains and retrieval still works, but symbol-level anchors, communities, and moved-code
-resolution need it (see the [operations reference](docs/reference/operations.md#the-graph-dependency-stated-plainly)). Everything the engine produces is derived
-and regenerated on every rebuild; everything Sidegraph stores is deliberate, ratified,
-and permanent. That split is the design: **own the memory, rent the graph.**
+resolution need it (see the [operations reference](docs/reference/operations.md#the-graph-dependency-stated-plainly)).
+Everything the engine produces is derived and regenerated on every rebuild; everything
+Sidegraph stores is deliberate, ratified, and permanent. **Own the memory, rent the graph.**
 
 ## Status
 
-v0.2.0, on PyPI as [`sidegraph`](https://pypi.org/project/sidegraph/) (`pip install sidegraph`)
-— also installable via the Claude Code plugin or directly from git (see Quickstart).
-Published by a tag-triggered GitHub Actions workflow that gates on the full test suite
-(trusted publishing, no stored token). Interfaces may still move before 1.0. The full loop — capture, ratification,
-mistakes-first retrieval, refactor-surviving re-anchoring, semantic docs layer, the
-mind-model layer (named domains, `SessionStart` table of contents, `drill_down`), and now the
-facts layer (evidence attached to a decision or anchored standalone) — is exercised
-end-to-end on real code and ADR corpora (a 4,700-node Python trading system and a 15-document
-architecture corpus), with 2,462 tests as of this writing (a public checkout runs 2,240: the
-seven release-mechanics test files that read `tools/` aren't shipped, since `tools/` itself
-isn't shipped, and 3 internal-corpus calibration tests skip — they need a private design
-corpus not included here). Exact counts drift as tests are added; the `tests` badge above
-tracks the suite passing, not a frozen number.
-Honest boundaries: not a code indexer, not general agent memory, not a graph engine —
-decision memory over a rented graph, and nothing else.
+Pre-1.0: interfaces may still move. Not a code indexer, not general agent memory, not a
+graph engine — decision memory over a rented graph, and nothing else.
 
 ## Documentation
 

@@ -7,6 +7,42 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-19
+
+### Added
+
+- **`sidegraph-stats` — one screen of local usage statistics.** Reads the gitignored
+  `.sidegraph/index.db` and reports how often memory was asked for, how much of the code
+  worked on has memory anchored to it, what the store holds, and anchor health, with activation
+  first. It states what was shown, asked and touched, and makes no claim about effect.
+  Flags: `--db`, `--window DAYS` (default 30, the journal's retention), `--graph` and
+  `--json` (the same report as data, with a figure the text withholds as `null`, never a
+  zero). Read-only: it never creates or rebuilds the index,
+  exits `2` on a bad `--window`, a missing index, an unreadable one or an unparseable record
+  row, and says so in the report when there is too little data to print a ratio, when
+  recording is off, when the budget counts were never recorded, or when the index is behind
+  the committed records after a `git pull` (it never opens the store, so it states that
+  rather than printing the old numbers). A new console script, so a committed surface: see
+  [`docs/reference/cli.md`](docs/reference/cli.md) and
+  [`docs/reference/stability.md`](docs/reference/stability.md).
+- **`/sidegraph:stats` skill**, with its Codex twin (explicit invocation only). It runs
+  `sidegraph-stats` and shows the output verbatim, without restating or interpreting the
+  numbers.
+- **A `render_events` journal and an optional `intent` parameter.** `get_task_context` and
+  `query_decisions` now record what each render selected and what survived the budget in a
+  new table of the local index (`drill_down` records the decisions it returned there too, with
+  no budget figures), and accept an optional `intent` label for what asked. The
+  label is recorded for statistics only and never affects what is returned. Both stay local:
+  no network calls, `SIDEGRAPH_TELEMETRY=off` stops the recording, and the 30-day pruning
+  keeps running when it is off, so opting out only reduces what is kept. See
+  [`docs/reference/store-format.md`](docs/reference/store-format.md) and
+  [`docs/reference/mcp-tools.md`](docs/reference/mcp-tools.md).
+
+### Changed
+
+- **The README's privacy note describes the local diagnostics as what was shown and
+  touched**, rather than which memory is "earning its keep".
+
 ## [0.2.0] — 2026-09-18
 
 ### Added

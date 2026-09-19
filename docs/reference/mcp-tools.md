@@ -332,6 +332,7 @@ get_task_context(
     entities: list[dict] | None = None,       # [{"name": str, "file_path": str | None}, ...]
     structure_budget: int = 4000,
     memory_budget: int = 6000,
+    intent: str | None = None,               # optional label for what asked
 ) -> str
 ```
 
@@ -356,6 +357,11 @@ domain can cover the same community at once) — see
 output, and [`configuration.md`](configuration.md) for what the two budgets mean and whether
 they're configurable beyond these call-time defaults.
 
+`intent` is a label for what asked — a skill name, say. It is recorded for local statistics
+only (see [`sidegraph-stats`](cli.md#sidegraph-stats)) and never affects what is returned.
+The label `drill_down` is reserved for the server's own `drill_down` records and is not
+recorded when passed here.
+
 **Returns:** a Markdown string, or the literal `"No context found."` if nothing resolves.
 
 ## `query_structure` / `query_decisions`
@@ -371,6 +377,7 @@ query_decisions(
     files: list[str] | None = None,
     entities: list[dict] | None = None,
     budget_chars: int = 6000,
+    intent: str | None = None,
 ) -> str
 ```
 
@@ -388,6 +395,9 @@ behavior, same underlying ranking code (neither duplicates `get_task_context`'s 
   bucket C, it just never renders the map itself. Degrades exactly like `get_task_context`:
   named-seed resolution needs a reader, but `scope: global` decisions still surface without
   one.
+
+`query_decisions` takes the same optional `intent` as `get_task_context`: a label for what
+asked, recorded for local statistics only, never affecting what is returned.
 
 **Returns:** a Markdown string (or the tool-specific "nothing found" message above).
 
