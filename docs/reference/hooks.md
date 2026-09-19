@@ -7,6 +7,24 @@ a JSON payload from stdin and write a JSON response to stdout, per the Claude Co
 contract. For wiring them into `.claude/settings.json`, see
 [`getting-started/claude-code-setup.md`](../getting-started/claude-code-setup.md).
 
+## Which session a hook is in
+
+Every per-session guard below — the capture ledger, the nudge markers, the recorded events —
+needs to know which session it is in, and the payload field named `session_id` does not mean
+the same thing on every host:
+
+- **Claude Code** gives a fresh `session_id` per session, and names the transcript after it.
+- **Codex** gives the *workspace* session: one id that outlives a single session, survives
+  `resume`, and is shared by every thread under that workspace.
+
+So the session is taken from **`transcript_path` — its file name without the extension** —
+falling back to `session_id` when the payload carries no transcript (the field is nullable in
+Codex's own hook schema). On Claude Code the two are the same string, so nothing changed
+there; on Codex each thread is now its own session instead of a day of work sharing one.
+
+The workspace session, when it differs, is kept separately in the `telemetry:session_group`
+meta key: it is the only thing linking sibling threads.
+
 ## `sidegraph-session-start`
 
 Reads: `$SIDEGRAPH_DIR` (or the deprecated `$SIDEGRAPH_DB`; default `.sidegraph`, resolved via
@@ -19,8 +37,9 @@ single proposal-surfacing policy — `$SIDEGRAPH_UNRATIFIED` and
 [`configuration.md`](configuration.md#environment-variables)): proposed records outside
 the surfacing window, or any proposed record in regulated mode, no longer render as
 content in the TOC's unratified block, while the pending-ratification counter below
-always keeps counting them. The stdin payload is read but its
-contents are currently unused.
+always keeps counting them. From the stdin payload it reads only the session — see
+[Which session a hook is in](#which-session-a-hook-is-in) — used for the duplicate-injection
+guard and published to the store as the telemetry session key.
 
 Behavior:
 
@@ -120,7 +139,8 @@ Reads: `$SIDEGRAPH_DIR` (or the deprecated `$SIDEGRAPH_DB`; default `.sidegraph`
 `$SIDEGRAPH_CAPTURE_NUDGE` (unset by default; set to `off` to disable this hook entirely).
 Reads the stdin JSON payload for three keys: `session_id`, `stop_hook_active`, and
 `transcript_path` (the Claude Code Stop-hook contract — `transcript_path` points at the
-session's transcript JSONL file). Does not read `$SIDEGRAPH_GRAPH` — this hook never touches
+session's transcript JSONL file, and also identifies the session: see
+[Which session a hook is in](#which-session-a-hook-is-in)). Does not read `$SIDEGRAPH_GRAPH` — this hook never touches
 the graph.
 
 Behavior, in order:
@@ -128,8 +148,8 @@ Behavior, in order:
 1. `$SIDEGRAPH_CAPTURE_NUDGE == "off"` → print `{}` (allow), without marking the ledger.
 2. `stop_hook_active` truthy (this Stop is the continuation of our own earlier block) →
    print `{}` (allow). Prevents an infinite block loop.
-3. No `session_id` in the payload → print `{}` (allow) — can't dedup the nudge without an id,
-   so it never risks looping.
+3. No session identity in the payload (neither `transcript_path` nor `session_id`) → print
+   `{}` (allow) — can't dedup the nudge without an id, so it never risks looping.
 4. **Substance gate:** count the transcript's *real* user prompts — JSONL lines with
    `type: "user"` whose `message.content` is a string, or a list containing at least one
    block that is NOT `type: "tool_result"`. Claude Code transcripts use `type: "user"` for
@@ -187,7 +207,7 @@ The banner appears **at most once per session**, and only in sessions that have 
 triggers it.
 
 **Once-per-session behavior:** the `capture_sessions` table in the store (`was_captured` /
-`mark_captured`) is the ledger — one row per `session_id`. Combined with the
+`mark_captured`) is the ledger — one row per session. Combined with the
 `stop_hook_active` check and the substance gate, this guarantees the block-and-nudge fires
 **at most once per session**, and only once the session looks substantial, even though Claude
 Code calls `Stop` every time the agent finishes responding. Ordering matters:
@@ -205,7 +225,8 @@ Reads: `$SIDEGRAPH_DIR` (or the deprecated `$SIDEGRAPH_DB`; default `.sidegraph`
 `$SIDEGRAPH_GREP_NUDGE` (unset by default; set to `off` to disable this hook entirely). Does
 not read `$SIDEGRAPH_GRAPH` — this hook, like
 `stop`, never touches the graph. Reads the stdin JSON payload for three keys: `tool_name`,
-`tool_input`, `session_id`.
+`tool_input`, and the session (`transcript_path`, else `session_id` — see
+[Which session a hook is in](#which-session-a-hook-is-in)).
 
 Behavior, in order — any `{}` below means the tool call proceeds through Claude Code's normal
 permission flow, untouched:
@@ -216,8 +237,8 @@ permission flow, untouched:
 3. `tool_input` has no string `file_path`/`path`/`pattern` argument (and no other non-empty
    string argument at all) → print `{}`. Deliberately permissive otherwise — any string arg is
    treated as "looks like a file/pattern target," not just a particular path shape.
-4. No `session_id` in the payload → print `{}`.
-5. A per-session marker (`pretool_nudge:<session_id>` in `store.meta` — deliberately **not**
+4. No session identity in the payload → print `{}`.
+5. A per-session marker (`pretool_nudge:<session>` in `store.meta` — deliberately **not**
    the `Stop` hook's `capture_sessions` ledger, so the two one-shot guards can't consume each
    other) already set → print `{}`.
 6. The store has zero accepted domains **and** zero currently-valid (non-superseded,

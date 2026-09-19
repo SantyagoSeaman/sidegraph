@@ -251,3 +251,28 @@ def test_a_store_failure_does_not_break_the_hook(tmp_path, monkeypatch, capsys):
         root,
     )
     assert isinstance(out, dict)  # valid JSON, hook did not crash
+
+
+def test_a_codex_touch_is_recorded_against_its_thread_not_the_workspace(
+    tmp_path, monkeypatch, capsys
+):
+    """Codex's payload `session_id` is the umbrella workspace session — stable across days and
+    every thread beneath it (hooks._session_identity). Recording against it put a whole
+    store's history in one bucket: 1928 of 1929 events in a live store, across 27 hours.
+    Red against reading that field directly."""
+    db = tmp_path / "db"
+    root = tmp_path
+    (root / "a.py").write_text("x = 1\n")
+    umbrella = "01a0b3e2-39d2-7180-86a5-408a6f9ce058"
+    thread = "rollout-2026-09-19T12-16-06-01a0b961-7463"
+    payload = {
+        "session_id": umbrella,
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(root / "a.py")},
+        "transcript_path": f"/w/.codex/sessions/2026/09/19/{thread}.jsonl",
+    }
+
+    _run(monkeypatch, capsys, payload, db, root)
+
+    assert _events(db, umbrella) == []
+    assert len(_events(db, thread)) == 1

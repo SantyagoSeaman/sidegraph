@@ -344,3 +344,36 @@ def test_title_is_clipped_and_sanitised(tmp_path, monkeypatch, capsys):
     assert "\n" not in text
     assert text.count('"') == 2  # exactly the pair this nudge adds
     assert "…" in text
+
+
+# -- Codex: one umbrella session id, several threads ----------------------------------------
+#
+# Codex's payload `session_id` is the workspace session, not this session: it spans days and
+# covers every thread under it (see hooks._session_identity). The one-shot ledger is keyed on
+# the session, so reading that field directly spent the nudge for a whole workspace on the
+# first thread that read a file.
+
+_CODEX_ROLLOUTS = (
+    "/w/.codex/sessions/2026/09/19/rollout-2026-09-19T12-00-31-01a0b953-2d7c.jsonl",
+    "/w/.codex/sessions/2026/09/19/rollout-2026-09-19T12-16-06-01a0b961-7463.jsonl",
+)
+
+
+def test_each_codex_thread_gets_its_own_nudge(tmp_path, monkeypatch, capsys):
+    """Red against a ledger keyed on payload['session_id']: the second thread — a different
+    session reporting the same umbrella id — was silently treated as already nudged."""
+    db = tmp_path / "s.db"
+    _seed_one_decision(db)
+    umbrella = "01a0b3e2-39d2-7180-86a5-408a6f9ce058"
+
+    outs = [
+        _run(
+            monkeypatch,
+            capsys,
+            dict(READ_PAYLOAD, session_id=umbrella, transcript_path=rollout),
+            db,
+        )
+        for rollout in _CODEX_ROLLOUTS
+    ]
+
+    assert all("hookSpecificOutput" in out for out in outs), outs

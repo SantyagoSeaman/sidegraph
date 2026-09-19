@@ -73,7 +73,8 @@ def _substantial(tmp_path, name="transcript.jsonl"):
 
 def test_first_stop_blocks_with_nudge_and_marks_ledger(tmp_path, monkeypatch, capsys):
     db = tmp_path / "s.db"
-    transcript = _substantial(tmp_path)
+    # Named after the session, as both hosts do — the ledger key comes from this path.
+    transcript = _substantial(tmp_path, name="s1.jsonl")
     out = _run(
         monkeypatch,
         capsys,
@@ -273,7 +274,7 @@ def test_one_shot_session_with_tool_work_arms_the_gate(tmp_path, monkeypatch, ca
         [_user_prompt()] + [_assistant_tool_use() for _ in range(hooks._MIN_TOOL_USES)],
         "sdk-cli",
     )
-    transcript = _write_transcript(tmp_path / "transcript.jsonl", entries)
+    transcript = _write_transcript(tmp_path / "os1.jsonl", entries)
     out = _run(
         monkeypatch,
         capsys,
@@ -707,3 +708,31 @@ def test_stop_hook_honors_legacy_sidegraph_db_with_deprecation_notice(
 
     assert "SIDEGRAPH_DB is deprecated" in captured.err
     assert "SIDEGRAPH_DIR" in captured.err
+
+
+def test_each_codex_thread_earns_its_own_capture_nudge(tmp_path, monkeypatch, capsys):
+    """The capture ledger is per session, and Codex reports one umbrella `session_id` for
+    every thread under a workspace (hooks._session_identity). Red against reading that field
+    directly: the first thread to finish spent the nudge for all of them — a day of Codex
+    threads got one capture prompt between them."""
+    db = tmp_path / "s.db"
+    umbrella = "01a0b3e2-39d2-7180-86a5-408a6f9ce058"
+    outs = []
+    for thread in (
+        "rollout-2026-09-19T12-00-31-01a0b953-2d7c",
+        "rollout-2026-09-19T12-16-06-01a0b961-7463",
+    ):
+        outs.append(
+            _run(
+                monkeypatch,
+                capsys,
+                {
+                    "session_id": umbrella,
+                    "stop_hook_active": False,
+                    "transcript_path": _substantial(tmp_path, name=f"{thread}.jsonl"),
+                },
+                db,
+            )
+        )
+
+    assert [out.get("decision") for out in outs] == ["block", "block"], outs

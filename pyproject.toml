@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.3.0"
+version = "0.3.1"
 description = "Own the memory, rent the graph — a durable decision/lessons layer as a sidecar over a code-graph engine."
 readme = "README.md"
 requires-python = ">=3.13"

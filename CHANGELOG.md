@@ -7,6 +7,26 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-09-19
+
+### Fixed
+
+- **A session is now identified by its transcript, not by the host's `session_id`.** That
+  field does not mean the same thing on every host: Claude Code mints one per session (and
+  names the transcript after it), while Codex reports the *workspace* session — one id that
+  outlives a single session, survives `resume`, and is shared by every thread beneath it. On
+  Codex that put a whole store's history in one bucket (measured: 1928 of 1929 recorded events
+  in one live store, spanning 27 hours) and, worse, made every per-session guard fire once per
+  workspace instead of once per session: the second thread opened within a minute had its
+  context map dropped as a duplicate injection, and the first thread to finish spent the
+  capture nudge for all of them. All four hook sites now take the session from
+  `transcript_path`'s file name, falling back to `session_id` when no transcript is given.
+  On Claude Code this is the same string it already recorded — verified against a live store,
+  where all 74 recorded session ids are exactly transcript names — so nothing moves there.
+  The workspace session is kept beside it in the new `telemetry:session_group` meta key, as
+  the only link between sibling threads. See
+  [`docs/reference/hooks.md`](docs/reference/hooks.md#which-session-a-hook-is-in).
+
 ## [0.3.0] — 2026-09-19
 
 ### Added

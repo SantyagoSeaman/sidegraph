@@ -41,8 +41,11 @@ def _assistant(text="ok"):
     }
 
 
-def _transcript(tmp_path, real_prompts=2):
-    path = tmp_path / "transcript.jsonl"
+def _transcript(tmp_path, real_prompts=2, name="s1"):
+    # Named after the session, as both hosts do (Claude Code: `<session_id>.jsonl`; Codex:
+    # the per-thread rollout file) — hooks._session_identity takes the session from this
+    # path, so two sessions sharing one file name would share their per-session ledgers.
+    path = tmp_path / f"{name}.jsonl"
     with open(path, "w") as fh:
         for _ in range(real_prompts):
             fh.write(json.dumps(_user_prompt()) + "\n")
@@ -123,7 +126,7 @@ def test_session_start_survives_refresh_raising(tmp_path, monkeypatch, capsys):
 
 
 def _stop_payload(tmp_path, session="s1"):
-    return {"session_id": session, "transcript_path": _transcript(tmp_path)}
+    return {"session_id": session, "transcript_path": _transcript(tmp_path, name=session)}
 
 
 @pytest.mark.parametrize("n", [5, 10**6])
@@ -175,12 +178,12 @@ def test_stop_refresh_runs_after_substance_gate_only(tmp_path, monkeypatch, caps
     refresh calls — no git work on trivial sessions — and a substantial one makes ≥1.
     The ≥1 half is the honest red half against unfixed code."""
     calls = _fake_refresh(monkeypatch, 1)
-    gated = {"session_id": "s-gated", "transcript_path": _transcript(tmp_path, real_prompts=1)}
+    gated = {"session_id": "s-gated", "transcript_path": _transcript(tmp_path, 1, "s-gated")}
     out = _run_stop(monkeypatch, capsys, gated, tmp_path / ".sidegraph")
     assert out == {}
     assert len(calls) == 0
 
-    substantial = {"session_id": "s-full", "transcript_path": _transcript(tmp_path)}
+    substantial = {"session_id": "s-full", "transcript_path": _transcript(tmp_path, name="s-full")}
     out = _run_stop(monkeypatch, capsys, substantial, tmp_path / ".sidegraph")
     assert out["decision"] == "block"
     assert len(calls) == 1

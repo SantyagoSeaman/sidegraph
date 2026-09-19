@@ -144,3 +144,96 @@ def test_a_prune_failure_does_not_cost_the_session_map(tmp_path, monkeypatch, ca
     out = json.loads(capsys.readouterr().out)
 
     assert "hookSpecificOutput" in out, "the map must survive a telemetry failure"
+
+
+# -- Codex: session identity comes from the transcript, not the host's session_id ----------
+#
+# Measured 2026-09-19 on two live stores. Claude Code's `session_id` is per session and its
+# transcript is named after it: all 74 session ids in this repo's own store are exactly
+# transcript stems. Codex's `session_id` is the umbrella workspace session — it spans days,
+# survives resume, and covers every thread beneath it: 1928 of 1929 events in a second live
+# store landed in ONE bucket across 27 hours, while each thread had its own rollout file.
+# Codex's SessionStart payload carries no thread id and no agent_type (schema
+# `session-start.command.input`), so `transcript_path` is the only field that identifies a
+# session on both hosts.
+
+
+def _codex_payload(rollout: str, umbrella: str = "01a0b3e2-39d2-7180-86a5-408a6f9ce058"):
+    """A Codex SessionStart payload: one umbrella id, one per-thread rollout file."""
+    return {
+        "session_id": umbrella,
+        "source": "startup",
+        "transcript_path": f"/w/.codex/sessions/2026/09/19/{rollout}.jsonl",
+        "cwd": "/w/project",
+    }
+
+
+def test_two_codex_threads_sharing_one_umbrella_id_are_two_sessions(tmp_path, monkeypatch, capsys):
+    """The defect, red against reading payload['session_id']: two Codex threads report the
+    same umbrella `session_id`, so every event from both was attributed to one session and
+    the second thread's SessionStart was swallowed by the 60s double-injection dedupe."""
+    db = tmp_path / "db"
+    keys = []
+    for rollout in (
+        "rollout-2026-09-19T12-00-31-01a0b953-2d7c-76e3-9dac-7d375dad7954",
+        "rollout-2026-09-19T12-16-06-01a0b961-7463-7b21-bd3b-bab64d9d5d8b",
+    ):
+        _run_session_start(monkeypatch, capsys, _codex_payload(rollout), db)
+        store = Store(db)
+        raw = store.get_meta(hooks.TELEMETRY_SESSION_KEY)
+        store.close()
+        assert raw is not None
+        keys.append(raw.partition("|")[0])
+
+    assert keys[0] != keys[1], "two threads under one umbrella id must be two sessions"
+    assert keys[1].endswith("01a0b961-7463-7b21-bd3b-bab64d9d5d8b")
+
+
+def test_the_umbrella_id_is_kept_so_codex_threads_can_be_grouped(tmp_path, monkeypatch, capsys):
+    """The workspace session is the only link between a Codex thread and its siblings, so it
+    is recorded beside the key rather than discarded."""
+    db = tmp_path / "db"
+    _run_session_start(
+        monkeypatch, capsys, _codex_payload("rollout-2026-09-19T12-16-06-01a0b961-7463"), db
+    )
+
+    store = Store(db)
+    group = store.get_meta(hooks.TELEMETRY_SESSION_GROUP_KEY)
+    store.close()
+
+    assert group == "01a0b3e2-39d2-7180-86a5-408a6f9ce058"
+
+
+def test_claude_code_keeps_the_session_id_it_already_recorded(tmp_path, monkeypatch, capsys):
+    """No-regression control, and the reason this change is safe to ship: under Claude Code
+    the transcript stem IS the session id, so the recorded key does not move and no group
+    key is written (there is no umbrella above a Claude Code session)."""
+    db = tmp_path / "db"
+    sid = "134960fe-2641-48d5-aaf7-223d9129df38"
+    _run_session_start(
+        monkeypatch,
+        capsys,
+        {"session_id": sid, "transcript_path": f"/w/.claude/projects/repo/{sid}.jsonl"},
+        db,
+    )
+
+    store = Store(db)
+    raw = store.get_meta(hooks.TELEMETRY_SESSION_KEY)
+    group = store.get_meta(hooks.TELEMETRY_SESSION_GROUP_KEY)
+    store.close()
+
+    assert raw is not None and raw.partition("|")[0] == sid
+    assert group is None
+
+
+def test_a_null_transcript_path_falls_back_to_the_session_id(tmp_path, monkeypatch, capsys):
+    """`transcript_path` is nullable in Codex's own schema, so its absence must leave the
+    previous behaviour exactly as it was rather than record nothing."""
+    db = tmp_path / "db"
+    _run_session_start(monkeypatch, capsys, {"session_id": "abc-123", "transcript_path": None}, db)
+
+    store = Store(db)
+    raw = store.get_meta(hooks.TELEMETRY_SESSION_KEY)
+    store.close()
+
+    assert raw is not None and raw.partition("|")[0] == "abc-123"

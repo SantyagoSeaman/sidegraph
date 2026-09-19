@@ -45,6 +45,15 @@ package version.
 
 Run from a clean `main`, in this order.
 
+0. `uv run python tools/preflight_release.py`. Seconds, no network. It checks what the rest
+   of this checklist cannot: that every restatement of the version agrees with
+   `pyproject.toml`, that the changelog carries a dated heading with a fresh `[Unreleased]`
+   above it, that both checkouts are clean and on `main`, that the tag does not already
+   exist — and, above all, **which repository the tag belongs to**, derived from the
+   checkout rather than assumed. Add `--online` for the two remote lookups. It reports every
+   finding in one run rather than stopping at the first, so a release is prepared in one
+   sitting instead of five.
+
 1. `uv run pytest -q`. Full suite green.
 2. `uv run pre-commit run --all-files`. Lint, format, and types clean; this is exactly what
    CI runs, and now also gitleaks, zizmor, actionlint, and the shipped-surface/public-twin/
@@ -79,6 +88,13 @@ one. Cut the release with:
 ```bash
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
+
+**Run that in the public checkout, not the internal one.** PyPI's trusted publisher is
+configured against `SantyagoSeaman/sidegraph`, so a tag pushed to the internal repository
+produces a valid OIDC token with the wrong `repository` claim and the publish job dies on
+`invalid-publisher` — after the whole test matrix has run. The public snapshot is therefore
+cut and pushed *first*, and the tag goes on the commit that snapshot created. Pushing the
+internal `main` is a separate step that triggers no publish at all.
 
 That push triggers [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml),
 three jobs in sequence.

@@ -23,13 +23,14 @@ import json
 import os
 import sys
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import NamedTuple
 
 # Defined in config.py, not here: server.py (core) needs this constant too (Task 4), and
 # core importing from host/ would invert this project's seam rule (host may depend on the
 # core, never the reverse). Re-exported so `hooks.TELEMETRY_SESSION_KEY` still resolves for
 # callers and tests that reach it through this module.
-from ..config import TELEMETRY_SESSION_KEY
+from ..config import TELEMETRY_SESSION_GROUP_KEY, TELEMETRY_SESSION_KEY
 
 CAPTURE_NUDGE = (
     "Sidegraph: if this session produced a durable decision, lesson, or gotcha — or a "
@@ -66,6 +67,41 @@ STANDING_SEARCH_INSTRUCTION = (
 # and `TELEMETRY_SESSION_KEY` (config.py).
 _SESSION_START_KEY = "session_start"
 _SESSION_START_DEDUPE_SECONDS = 60
+
+
+def _session_identity(payload: dict) -> tuple[str | None, str | None]:
+    """The session this payload belongs to, and the workspace session above it.
+
+    ``payload["session_id"]`` does not mean the same thing on both hosts, and reading it
+    directly attributed a Codex store's whole history to one session. Measured 2026-09-19:
+
+    - Claude Code: per session, and the transcript is named after it — all 74 session ids in
+      this repository's own store are exactly transcript stems.
+    - Codex: the *umbrella* workspace session. It spans days, survives ``resume``, and covers
+      every thread beneath it — 1928 of 1929 events in a second live store landed in one
+      bucket across 27 hours. The thread's own identity is its rollout file; Codex's
+      ``session-start.command.input`` schema carries no thread id and no ``agent_type``.
+
+    So the transcript path is the one field that identifies a session on both hosts, and its
+    stem is the id on the host where the two agree. Returns ``(key, group)``: ``group`` is the
+    host's own ``session_id`` when it differs from ``key``, else ``None`` — nothing extra to
+    record on a host whose session id already IS the key.
+
+    Beyond attribution, this is what unblocks the 60s double-injection dedupe
+    (:func:`_session_start_duplicate`): two Codex threads opened within a minute reported the
+    same id, so the second one's context map was suppressed as a duplicate. Observed in the
+    live rollouts, which start in pairs seconds apart.
+    """
+    raw_id = payload.get("session_id")
+    session_id = raw_id if isinstance(raw_id, str) and raw_id else None
+    raw_path = payload.get("transcript_path")
+    stem = None
+    if isinstance(raw_path, str) and raw_path:
+        # PurePosixPath, not Path: the stem of a host-written path, never touched on disk.
+        stem = PurePosixPath(raw_path).stem or None
+    key = stem or session_id
+    group = session_id if session_id and session_id != key else None
+    return key, group
 
 
 def _session_start_duplicate(store, session_id: str, now: datetime) -> bool:
@@ -245,24 +281,22 @@ def session_start() -> None:
 
         payload = _read_payload()
         store = Store(resolve_store_path(root=os.environ.get("CLAUDE_PROJECT_DIR")))
-        session_id = payload.get("session_id")
+        # Not payload["session_id"] directly: that field is the umbrella workspace session
+        # on Codex, not this session — see _session_identity.
+        session_id, session_group = _session_identity(payload)
 
         # D7.2: double-injection dedupe, checked BEFORE any other work (sync/TOC/nudges) —
         # a duplicate SessionStart call for the same session within the window exits
         # silently, same "print {} and return" shape the Stop hook's own one-shot ledger
         # uses. Gated on a real session id (see _session_start_duplicate's docstring).
-        if (
-            isinstance(session_id, str)
-            and session_id
-            and _session_start_duplicate(store, session_id, datetime.now(UTC))
-        ):
+        if session_id and _session_start_duplicate(store, session_id, datetime.now(UTC)):
             print(json.dumps({}))
             return
 
         # Own try/except, like the ratification nudge below: telemetry must never cost the
         # map, which is this hook's only real deliverable.
         try:
-            if isinstance(session_id, str) and session_id:
+            if session_id:
                 # D7.3 (staleness-machinery wave, E8: author=None session=None on
                 # Stop-channel captures): this write is now UNCONDITIONAL — no longer
                 # gated on telemetry_enabled() — because capture._propose_one falls back
@@ -272,6 +306,8 @@ def session_start() -> None:
                     TELEMETRY_SESSION_KEY,
                     f"{session_id}|{datetime.now(UTC).isoformat()}",
                 )
+                if session_group:
+                    store.set_meta(TELEMETRY_SESSION_GROUP_KEY, session_group)
             # Pruning is deliberately NOT gated on telemetry_enabled() (practitioner
             # re-review round 2): it used to be, which meant opting out froze the 30-day
             # retention of whatever journal already existed — an opt-out that makes the
@@ -416,7 +452,7 @@ def stop() -> None:
         if payload.get("stop_hook_active"):
             print(json.dumps({}))
             return
-        session_id = payload.get("session_id")
+        session_id, _ = _session_identity(payload)
         if not session_id:
             print(json.dumps({}))
             return
@@ -540,8 +576,8 @@ def _record_touch_event(payload: dict) -> None:
         tool = payload.get("tool_name")
         if tool not in _TOUCH_TOOLS:
             return
-        session_id = payload.get("session_id")
-        if not isinstance(session_id, str) or not session_id:
+        session_id, _ = _session_identity(payload)
+        if not session_id:
             return
         root = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
         path = _touch_path(payload.get("tool_input"), root)
@@ -684,7 +720,7 @@ def pre_tool_use() -> None:
         if not _looks_like_source_target(payload.get("tool_input")):
             print(json.dumps({}))
             return
-        session_id = payload.get("session_id")
+        session_id, _ = _session_identity(payload)
         if not session_id:
             print(json.dumps({}))
             return

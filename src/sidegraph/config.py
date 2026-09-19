@@ -87,6 +87,14 @@ def _warn_deprecated_sidegraph_db(value: str) -> None:
 # without importing the host seam — host/hooks.py re-exports it for its own callers/tests.
 TELEMETRY_SESSION_KEY = "telemetry:session"
 
+# The workspace session a recorded session sits beneath, when the host has one (Codex: its
+# `session_id` is an umbrella that spans days, survives resume and covers every thread under
+# it — see host/hooks._session_identity). Written only when it differs from the recorded key,
+# so a Claude Code store never carries it: there, the two are the same string. Kept because it
+# is the only link between sibling threads, which is what separates "how many tasks" from
+# "how many agents under one task" on that host.
+TELEMETRY_SESSION_GROUP_KEY = "telemetry:session_group"
+
 
 def telemetry_enabled() -> bool:
     """True unless ``SIDEGRAPH_TELEMETRY=off``. Opt-out, read at point of use and never
