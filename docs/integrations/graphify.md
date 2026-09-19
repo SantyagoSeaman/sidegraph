@@ -174,8 +174,8 @@ serving context.
   code entities by name and the LLM's mention-nodes collide with the AST's code nodes;
   the engine keeps whichever arrived first. See the "When your docs reference your code
   heavily" note in [the semantic-docs guide](../guides/semantic-docs.md) for the
-  per-subfolder extract + merge pattern, or reset with `rm -rf graphify-out && graphify
-  update .`.
+  per-subfolder extract + merge pattern, or force a clean rebuild with
+  `graphify update . --force`.
 
 - **Graph looks stale** — re-run `graphify update .`; the git hook only rebuilds the
   **code** graph, not prose/ADR extraction, so doc changes need a manual re-run.

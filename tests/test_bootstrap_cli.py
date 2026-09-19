@@ -465,7 +465,7 @@ def test_eof_during_final_confirmation_is_cancelled_without_writes_or_traceback(
     [
         (
             "missing-hooks",
-            "Configure sidegraph-session-start in .codex/hooks/hooks.json, then rerun "
+            "Configure sidegraph-session-start in .codex/hooks.json, then rerun "
             "sidegraph-bootstrap",
         ),
         (

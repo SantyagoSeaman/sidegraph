@@ -9,7 +9,8 @@ auto-ratify instead, defaulting the answer to yes (`auto-low-risk`); a person's 
 committed to `.claude/settings.json` either way, and a non-interactive run (CI, a script, an
 agent-driven session) changes nothing. Under `auto-low-risk`, eligible `lesson`/`gotcha`
 decisions and standalone facts self-ratify at write time; `adr`/`constraint` decisions and
-domains still wait for a human regardless of policy. Both paths write into the same
+domains still wait. `auto-all` can also ratify eligible ADRs, constraints, and domains. Both
+paths write into the same
 append-only store; see [`reference/mcp-tools.md`](../reference/mcp-tools.md) for exact tool
 signatures. Three plugin skills carry this guide's discipline into the session itself:
 [`sidegraph:record-decision`](../../plugin/sidegraph/skills/record-decision/SKILL.md) (the
@@ -286,7 +287,7 @@ inherits the decision's:
 | What | Wrap httpx with an explicit retry policy for the exchange client |
 | Why | The exchange API returns transient 5xx under load; a request must not silently fail once |
 | Where | `[{"name": "ExchangeClient", "file_path": "src/exchange/client.py"}]` |
-| (rejected) | httpx's own retry support — it doesn't ship one |
+| (rejected) | Rely on HTTPX transport retries — they cover connection establishment, not transient HTTP 5xx responses |
 | Facts | one attached `DraftFact`: the statement below, sourced to the httpx docs |
 
 ```python
@@ -296,12 +297,13 @@ propose_decisions(drafts=[{
     "context": "The exchange API returns transient 5xx under load; a request must not "
                "silently fail once.",
     "choice": "Wrap httpx.Client with a tenacity-based retry policy scoped to 5xx/timeout.",
-    "rejected": "httpx's own retry support — it doesn't ship one.",
+    "rejected": "Rely on HTTPX transport retries; they cover connection establishment, "
+                "not transient HTTP 5xx responses.",
     "anchors": [{"name": "ExchangeClient", "file_path": "src/exchange/client.py"}],
     "facts": [{
-        "statement": "httpx has no built-in retry — a transient 5xx is not retried "
-                     "automatically.",
-        "source": "httpx docs, 'Timeouts and retries' section"
+        "statement": "HTTPX HTTPTransport retries ConnectError and ConnectTimeout only; "
+                     "it does not retry HTTP 5xx responses.",
+        "source": "HTTPX Transports documentation"
     }]
 }])
 ```
@@ -362,8 +364,9 @@ for the full flag reference.
 - **Fill `rejected`.** This is the highest-value field — what was tried, considered, or hit before
   landing on `choice` — and it is the reason Sidegraph exists at all. Gotchas and lessons rank
   first in every retrieval precisely because `rejected` is what saves the next person (or
-  agent) from re-discovering the same rake. A decision with an empty `rejected` is a plain
-  fact; one with a filled `rejected` is durable team memory.
+  agent) from re-discovering the same rake. Leave it empty when no alternative was actually
+  considered; do not invent rejected options. A record is a fact only when it states
+  non-derivable evidence without making a choice.
 - **Anchor to what the decision is actually about**, not everything touched incidentally.
   Weak or off-target anchors show up as noise in someone else's task context later.
 - **Pick the right `kind`.** `gotcha`, `lesson`, and `constraint` all ride the mistakes-first

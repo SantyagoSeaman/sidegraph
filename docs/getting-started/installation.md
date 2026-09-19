@@ -11,6 +11,15 @@ Sidegraph has two parts: **Sidegraph itself** (the decision store + MCP server +
 - An MCP- and hooks-capable agent host: [Claude Code](claude-code-setup.md) or
   [OpenAI Codex CLI](codex-setup.md).
 
+## Mutable development references
+
+The `git+…@main` examples below track a mutable branch: a later `uvx` cache refresh can
+install different code. That is useful while trying Sidegraph. For CI, shared setup, or a
+measured pilot, replace `@main` with a release tag or commit SHA, for example
+`git+https://github.com/SantyagoSeaman/sidegraph.git@<sha>`. The plugin marketplace is the
+exception: its public manifests intentionally track `main`. See
+[`reference/stability.md`](../reference/stability.md) for the promises made by each surface.
+
 ## Install Sidegraph
 
 ### Option A — PyPI (recommended for the package + CLIs)
@@ -26,28 +35,24 @@ That puts `sidegraph-mcp` and every `sidegraph-*` CLI on your PATH. Pin a versio
 `uvx --from sidegraph sidegraph-mcp` works — the entry-point name differs from the package
 name, so `--from sidegraph` is required (a bare `uvx sidegraph-mcp` will not resolve).
 
-### Option B — Claude Code plugin (recommended for Claude Code — auto-wires the hooks)
+### Option B — host plugin (recommended for Claude Code and Codex)
 
-Inside a Claude Code session, in the repo you want memory over:
-
-> **`@main` is a mutable ref.** Every `git+…@main` command on this page tracks the
-> branch: what you install today is not what you installed yesterday, and a `uvx` cache
-> refresh can change it under you. Fine for trying Sidegraph out; for anything you depend
-> on — CI, a shared team setup, a pilot you intend to measure — replace `@main` with a
-> commit SHA (`git+https://github.com/SantyagoSeaman/sidegraph@<sha>`) so the version is a
-> decision you made rather than whatever HEAD happened to be. See [`reference/stability.md`](../reference/stability.md) for what each surface promises.
+Inside an interactive host session, in the repo you want memory over:
 
 ```
 /plugin marketplace add SantyagoSeaman/sidegraph
 /plugin install sidegraph@sidegraph
 ```
 
-Installs the MCP server and all three hooks (`SessionStart`, `Stop`, `PreToolUse`)
-automatically. The plugin's bundled config runs everything via `uvx --from
-git+https://github.com/SantyagoSeaman/sidegraph.git@main`, so it builds straight from this
-repository with `uv` — **no PyPI publish needed, works today**. See
-[the plugin install path](../integrations/claude-code.md#plugin-install-path) for what the
-bundled `.mcp.json`/`hooks.json` actually run, and the cwd-pinning details.
+The Claude Code host installs the MCP server and all three hooks (`SessionStart`, `Stop`,
+`PreToolUse`). Codex installs the MCP server, `SessionStart`/`Stop`, and the bundled skills;
+its tool surface has no equivalent target for the Claude-specific Read/Grep nudge. The
+plugin's bundled config runs everything via `uvx --from
+git+https://github.com/SantyagoSeaman/sidegraph.git@main`: unlike the package install, the
+plugin deliberately follows the public repository's `main` branch and does not use the
+PyPI package. See
+the integration details for [Claude Code](../integrations/claude-code.md#plugin-install-path)
+or [Codex](../integrations/codex.md#plugin-install-path).
 
 ### Option C — uvx directly from git (latest / unreleased)
 
@@ -92,7 +97,7 @@ runs against Sidegraph's own `.venv`. Silence it with `uv run --no-active --proj
 deactivating the other venv first.
 
 
-### Entry points
+## Entry points
 
 This table is the terminal reference. In day-to-day use you rarely type any of it: everyday
 operations (recording, ratifying, syncing, domain work) run conversationally inside a
@@ -109,25 +114,23 @@ setup, scripted/CI use, and the two deliberately human-run jobs (`sidegraph-impo
 | `sidegraph-pre-tool-use` | `PreToolUse` hook — redirects a blind `Read`/`Grep` toward `get_task_context`/`drill_down`. |
 | `sidegraph-bootstrap` | Guided CLI — scan one of six supported ADR/spec profiles, preview and review candidates, write only after confirmation, verify anchors/host integration, and prove production retrieval. |
 | `sidegraph-init` | CLI — bootstrap `.sidegraph/` in a repo: create the store, check for the graph, print the plugin install path (and the no-plugin `claude mcp add` alternative). |
-| `sidegraph-ratify` | CLI — review/accept/drop proposed decisions and domains. |
+| `sidegraph-ratify` | CLI — review/accept/drop proposed decisions, facts, and domains. |
 | `sidegraph-sync` | CLI — re-anchor the store after a Graphify rebuild. |
 | `sidegraph-import` | CLI — bootstrap decisions from Graphify rationale nodes (code docstrings, or ADR/SAD prose after a semantic pass), or from existing ADR/spec markdown directly (`--docs`). |
 | `sidegraph-domains` | CLI — author Domain proposals: `bootstrap` from graph communities, or `add` manually. |
 | `sidegraph-compact` | CLI — pack terminal-status (superseded/rejected/dropped) decisions and domains into an immutable archive segment. |
 | `sidegraph-verify` | CLI — lint the store's canonical files against its write-path invariants (schema, validity windows, referential integrity, ULID uniqueness); `--against <git-ref>` additionally checks that every store file changed vs that ref was mutated legally (CI mode). |
 | `sidegraph-doctor` | CLI — one-stop store health: composes `sidegraph-verify`'s strict lint with an advisory curation pass (stale proposals, dangling/degraded/orphaned records, never-surfaced decisions); `--check` also fails on advisory findings. |
-| `sidegraph-viz` | CLI — render a read-only interactive HTML graph of the decision/fact store (nodes = decisions + facts + anchored entities; edges colored by anchor status; supersede + fact→decision links) plus a JSON sibling. |
+| `sidegraph-viz` | CLI — render an interactive HTML/JSON view of decisions, facts, entities, anchor status, supersession, and evidence links. |
 | `sidegraph-export-okf` | CLI — project the store into a deterministic [Open Knowledge Format v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) bundle any OKF-aware tool can read; strictly one-way, the store stays the source of truth. |
 | `sidegraph-stats` | CLI — one screen of local usage statistics from the gitignored index (how often memory was asked for, how much of the code worked on has memory anchored to it, what the store holds, anchor health); read-only, never creates the index, `--json` for the same report as data. Reachable in a session as `/sidegraph:stats`. |
-| `sidegraph-prepare-commit-msg` | `prepare-commit-msg` git hook — comments candidate `Sidegraph-Decision:` trailers into the commit message template for the human/agent to uncomment; never blocks or stalls `git commit`. See [`reference/git-bindings.md`](../reference/git-bindings.md). |
+| `sidegraph-prepare-commit-msg` | `prepare-commit-msg` git hook — comments candidate `Sidegraph-Decision:` trailers into the commit message template; fail-open with bounded git/SQLite stages. See [`reference/git-bindings.md`](../reference/git-bindings.md). |
 | `sidegraph-blame` | CLI — `git blame` a file, joined to the decisions/facts each hunk's commit carries (commit trailers + `provenance.commit`). See [`reference/git-bindings.md`](../reference/git-bindings.md). |
 
-All of them read `SIDEGRAPH_GRAPH` (default `graphify-out/graph.json`) from the environment,
-resolved relative to the process's working directory. Same for `SIDEGRAPH_DIR` — every command
-(`sidegraph-mcp`, the three hooks, and every `cli.py` subcommand including `sidegraph-init`)
-resolves the store directory through the same shared precedence: an explicit `--db` flag,
-then `$SIDEGRAPH_DIR`, then the deprecated `$SIDEGRAPH_DB`, then an existing `.sidegraph/`,
-then the default `.sidegraph` — see
+Commands that need the graph use `SIDEGRAPH_GRAPH` (default
+`graphify-out/graph.json`). Store-aware entry points resolve `SIDEGRAPH_DIR` through the same
+shared precedence: an explicit `--db` flag where available, then `$SIDEGRAPH_DIR`, then the
+deprecated `$SIDEGRAPH_DB`, then an existing `.sidegraph/`, then the default `.sidegraph` — see
 [`reference/configuration.md`](../reference/configuration.md#store-path-resolution) for the
 exact rules.
 
@@ -150,7 +153,7 @@ Fallback if you don't use `uv`: `pip install 'graphifyy==0.9.6'`.
 `[mcp]` is an **optional** extra (`uv tool install "graphifyy[mcp]==0.9.6"`) that adds Graphify's
 *own* MCP server — a deeper structure-query layer over the same `graph.json`. It coexists
 fine with Sidegraph; Sidegraph only ever reads `graph.json` directly and doesn't need it. Add
-`[pdf]` if your corpus includes PDFs (extras compose: `"graphifyy[mcp,pdf]"`).
+`[pdf]` if your corpus includes PDFs (extras compose: `"graphifyy[mcp,pdf]==0.9.6"`).
 
 See [`integrations/graphify.md`](../integrations/graphify.md) for how Sidegraph reads
 Graphify's output, corpus types, and troubleshooting.
@@ -161,8 +164,5 @@ Continue to the [quickstart](quickstart.md) for the shortest path to a first cap
 retrieved decision. If the repository already contains ADRs or supported flow specs, use the
 [Bootstrap existing rationale guide](bootstrap.md) for the preview-first path instead. Once
 you've done that, run through
-[verifying your setup](../guides/verifying-your-setup.md) — a nine-case checklist that
-proves domain onboarding, domain management, durability, mistakes-first retrieval, quiet
-capture, refactor survival, git-native merges, facts evidence and cascade, and your own usage statistics
-actually work on your repo, each with an exact command and an observable
-result.
+[verifying your setup](../guides/verifying-your-setup.md) — a four-case checklist for host
+wiring, durable capture/retrieval, ratification with evidence, and sync/repository hygiene.

@@ -35,11 +35,11 @@ Works cold: no existing ADRs required. No API key — the core loop is fully loc
 
 ```bash
 # 1. Install the graph engine and build a graph over your repo (code or markdown)
-uv tool install graphifyy                # double "y" — that's the PyPI name; CLI is `graphify`
+uv tool install "graphifyy==0.9.6"       # double "y" — that's the PyPI name; CLI is `graphify`
 cd /path/to/your/repo && graphify update .
 ```
 
-`[mcp]` is an **optional** extra on `graphifyy` (`uv tool install "graphifyy[mcp]"`) — it adds
+`[mcp]` is an **optional** extra on `graphifyy` (`uv tool install "graphifyy[mcp]==0.9.6"`) — it adds
 Graphify's *own* MCP server, a deeper structure-query layer over the same graph. Sidegraph
 only ever reads `graph.json`, so the plain install above is all it needs.
 
@@ -63,7 +63,8 @@ sidegraph-init
 
 4. **Name your domains** — turns the graph's communities into a described table of
    contents. Tell your agent *"name my domains"* (or run `/sidegraph:name-domains`) and
-   pick one of the 2–3 ready-made sets it proposes. CLI alternative for scripted/CI use:
+   review its proposed grouping (larger graphs may get 2–3 alternatives). CLI alternative
+   for scripted/CI use:
    `sidegraph-domains bootstrap` + `sidegraph-ratify` —
    see [naming your domains](docs/guides/naming-your-domains.md).
 

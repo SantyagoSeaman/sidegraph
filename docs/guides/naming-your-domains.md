@@ -15,9 +15,9 @@ in the repo:
 
 (or run `/sidegraph:name-domains` directly, or say "give this project a table of contents").
 The skill calls the read-only `list_domain_candidates` MCP tool, studies the result —
-reading the actual code behind an ambiguous candidate rather than trusting a label blindly —
-and composes 2–3 alternative domain sets at different granularities (Coarse: ~8 top-level
-areas; Medium: ~15; Fine: ~25, close to the raw communities).
+reading the actual code behind an ambiguous candidate rather than trusting a label blindly.
+With roughly 20 or fewer candidates it proposes one sensible set. For a larger result it
+composes 2–3 alternatives at different granularities (typically Coarse, Medium, and Fine).
 
 **On a big repo, the skill sees the top ~100 candidates by default**, not the full list —
 `list_domain_candidates` caps at 100 significant communities (deterministic community-id
@@ -191,8 +191,8 @@ uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-ratify --accept 01J... 01
 domains — or well over a hundred if you've explicitly widened `--limit` — and nobody reads a
 hundred-line list end to end and hand-picks the ones worth naming — that's exactly the gap
 [the skill](#the-fast-path-ask-your-agent) closes: instead of a human reading and curating a
-flat list, an agent studies the same candidates and offers 2–3 already-curated sets to pick
-from. Reach for `sidegraph-ratify --accept <ids>` here only when you're scripting a pipeline or
+flat list, an agent studies the same candidates and offers either one sensible small-repo set
+or 2–3 curated alternatives to pick from. Reach for `sidegraph-ratify --accept <ids>` here only when you're scripting a pipeline or
 already know precisely which ids you want.
 
 ### Why selective, not `--all`

@@ -34,7 +34,7 @@ use — see [`configuration.md`](configuration.md#store-path-resolution)) and a 
 | [`ratify`](#ratify) | Accept/drop pending proposals of any kind (decisions, facts, domains) | Ratifying from within a session (CLI equivalent: `sidegraph-ratify`) |
 | [`ratify_decisions`](#ratify_decisions-deprecated) | Deprecated alias for `ratify` | Existing callers only — prefer `ratify` |
 | [`sync_anchors`](#sync_anchors) | Re-anchor the store against the current graph and report what happened | The diagnostic/heal path, after a `graphify update`; the `heal-anchors` skill's MCP-first path |
-| [`verify_store`](#verify_store) | Read-only integrity lint of the store's canonical files | CI or ad hoc — checking the store hasn't been hand-corrupted |
+| [`verify_store`](#verify_store) | Integrity lint of the store's canonical files | CI or ad hoc — checking the store hasn't been hand-corrupted |
 | [`add_anchors`](#add_anchors) | Append bindings to an EXISTING decision or fact | The `heal-anchors` triage flow — "code moved, decision still valid" |
 
 ## `add_decision`
@@ -74,7 +74,8 @@ in CI as defense in depth. An all-secret tag redacts to `[REDACTED]` and is skip
 `tag:redacted` entity — same rule as `propose_decisions`. Each `anchors` entry is resolved against the
 current graph and multi-anchored (leaf + domain/community, plus an initiative Tier-0 binding if
 `initiative` is given) via `resolve_and_bind` — best-effort: with no graph present the
-decision still writes, with an orphaned leaf. An anchor's optional `relation` (one of
+decision still writes, but the requested code anchors are skipped and both anchor feedback
+lists are empty. An anchor's optional `relation` (one of
 `creates`/`modifies`/`affects`/`deprecates`/`considered`, default `"affects"`) overrides the
 default on that anchor's leaf + Tier-1 bindings only; an invalid `relation` is rejected
 *before any write happens* — the whole call fails atomically rather than leaving a
@@ -143,12 +144,18 @@ supersede_decision(
     rejected: str | None = None,
     consequences: str | None = None,
     anchors: list[dict] | None = None,  # [{"name": str, "file_path": str | None}, ...]
+    session_id: str | None = None,
+    author: str | None = None,
+    source: str = "human",
 ) -> dict
 ```
 
-Writes a replacement `Decision` (`status="accepted"`, `provenance.source="human"`) with
-`supersedes=old_decision_id`. The store closes the predecessor in the same transaction
-(`valid_to` set, `status` flipped to `superseded`) — it is never deleted.
+Writes a replacement `Decision` (`status="accepted"`, provenance source defaults to
+`"human"`) with
+`supersedes=old_decision_id`. Under one serialized store mutation, the successor is written
+first and the predecessor is then closed (`valid_to` set, `status` flipped to `superseded`).
+The predecessor is never deleted. `session_id`, `author`, and `source` are stamped into the
+successor's provenance; use `source="agent"` when an agent initiates the reversal.
 
 Anchoring: pass `anchors` (same shape as `add_decision`'s) to `resolve_and_bind` the
 replacement to ONLY those refs, exactly like `add_decision`. Omit `anchors` (the default) and
@@ -186,8 +193,10 @@ library capabilities), trial-learned knowledge — never 'the code does X'.
 
 `statement` is the fact itself (1-2 sentences, hard-compact); `source` is the epistemics —
 how it's known ("benchmark run 2026-07-09", "httpx docs"). `supports` is a list of decision
-ids this fact informed; every id must already reference an existing `Decision` (any status)
-or the write raises `ValueError` before anything is committed. `anchors` is the same
+ids this fact informed; every id must already reference an existing `Decision` or the write
+raises `ValueError` before anything is committed. An anchorless fact additionally needs at
+least one supported decision that is still live (`proposed` or `accepted`); terminal-only
+support is rejected as unreachable. `anchors` is the same
 `{"name", "file_path", "relation"?}` ref shape `add_decision` takes, resolved against the
 current Graphify graph and multi-anchored (leaf + community, best-effort) when a reader is
 present. **With no graph present, an anchor still gets an ORPHANED Tier-2 leaf** — unlike
@@ -214,12 +223,15 @@ supersede_fact(
     source: str,
     supports: list[str] | None = None,   # defaults to the predecessor's own `supports`
     anchors: list[dict] | None = None,
+    session_id: str | None = None,
+    author: str | None = None,
 ) -> dict
 ```
 
 Falsifies a fact: closes the predecessor (`valid_to` set, `status` flipped to `superseded`)
 and writes a replacement (`status="accepted"`, `provenance.source="human"`) with
-`supersedes=old_fact_id`, both in the same transaction — the predecessor is never deleted,
+`supersedes=old_fact_id`, under one serialized store mutation with the successor written
+first — the predecessor is never deleted,
 it stays retrievable as "believed before, corrected because…". Raises `ValueError` if
 `old_fact_id` doesn't resolve to an existing fact. Every text field is redacted exactly like
 `add_fact`'s. `supports` defaults to the **predecessor's own** `supports` when omitted — a
@@ -338,9 +350,10 @@ get_task_context(
 
 The main day-to-day read path. Runs a best-effort lazy `maybe_sync()` first (a sync failure
 degrades to un-synced retrieval, never an error), resolves `files`/`entities` into seed nodes,
-and returns a single rendered Markdown string with up to five sections — mistakes (with
-inline evidence facts), decisions (with inline evidence facts), known facts (standalone),
-structural map, related — under the given character budgets. See
+and returns a rendered Markdown string with up to six sections — accepted mistakes (with
+accepted inline evidence facts), accepted decisions (with accepted inline evidence), accepted
+known facts (standalone), structural map, related accepted memory, and unratified proposals —
+under the given character budgets. See
 [retrieval: facts](../concepts/retrieval.md#facts-inline-evidence-and-the-known-facts-bucket)
 for the inline-vs-standalone split and the guarantee that facts never displace a mistake. The
 structural map omits
@@ -938,14 +951,14 @@ verify_store() -> dict
 
 Lints the store's canonical files against the write-path invariants `store.py`'s write API
 enforces at write time — the MCP counterpart to `sidegraph-verify` run *without*
-`--against`. **Read-only:** this never writes anything, never touches `index.db`, and never
-migrates a legacy store — it opens the canonical JSON files directly, the same pure-read
-pass `sidegraph-verify` runs.
+`--against`. The snapshot checker itself only reads canonical files. The MCP wrapper first
+opens the normal `Store`, so that open may create/rebuild `index.db` or run a supported legacy
+migration; it does not mutate valid canonical record content merely to perform the lint.
 
 Checks (snapshot layer, always everything): every hot record file parses against its schema;
 `schema_version` is present and known; `valid_to >= valid_from`; a `superseded` record has a
 successor (its `supersedes` chain resolves); every `supersedes` target exists; every binding
-references an existing entity; every fact `supports` references an existing record; ULIDs
+references an existing entity; every fact `supports` references an existing decision; ULIDs
 are unique across hot files *and* archive segments (byte-identical archive-archive
 duplicates from a sanctioned cross-branch `sidegraph-compact` merge are exempt — see
 [`store-format.md#archive-segments-sidegraph-compact`](store-format.md#archive-segments-sidegraph-compact));

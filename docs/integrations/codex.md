@@ -13,9 +13,9 @@ docs** before relying on them if some time has passed since mid-2026.
 
 ## `config.toml` reference
 
-Codex CLI reads MCP server definitions from `~/.codex/config.toml` under `[mcp_servers.*]`
-tables. Note this file is **global**, not per-project, so each entry should pin its own
-working directory rather than relying on ambient cwd:
+Codex CLI reads MCP server definitions under `[mcp_servers.*]` from project
+`.codex/config.toml` and user `~/.codex/config.toml`. Prefer the project file for a server
+that belongs to one repository. Pin the working directory rather than relying on ambient cwd:
 
 ```toml
 [mcp_servers.sidegraph]
@@ -38,7 +38,7 @@ reads — see [`claude-code.md`](claude-code.md#environment-variables) for their
 
 ## Hooks (GA)
 
-Project-scoped, at `.codex/hooks/hooks.json`:
+Project-scoped, at `.codex/hooks.json`:
 
 ```json
 {
@@ -86,12 +86,12 @@ Codex only loads project-local `.codex/` hooks (like the ones above) when the pr
 is marked trusted — if these hooks silently don't fire, check the trust prompt/settings before
 assuming the JSON above is wrong.
 
-No `PreToolUse` entry is offered above: Codex CLI does have a `PreToolUse` event, but as of
-this writing it only intercepts Bash/patch/MCP tool calls (file-read tools like Read/Grep don't
-fire hook events there yet), so the `sidegraph-pre-tool-use` Read/Grep redirect nudge (see
+No `PreToolUse` entry is offered above. Codex can invoke the event for local function tools
+(including shell, patch, and MCP calls), but it has no stable `Read`/`Grep` pair equivalent to
+Claude Code's. The `sidegraph-pre-tool-use` Read/Grep redirect nudge (see
 [`claude-code.md`](claude-code.md#pretooluse--sidegraph-pre-tool-use)) has nothing to attach
-to on Codex today — verify against current Codex CLI docs before assuming otherwise, and wire
-it (same entry point) once tool coverage catches up.
+to on Codex today. Re-check the current [Codex hooks documentation](https://learn.chatgpt.com/codex/hooks)
+before adding one; hosted tools are outside the hook surface.
 
 ## AGENTS.md pattern
 
@@ -140,7 +140,7 @@ invoke it implicitly). No `PreToolUse` entry ships, for the reason given above.
 servers and hooks do not get a project-root variable. That was confirmed live with `codex mcp
 list --json` against a locally installed build of this plugin (codex-cli 0.154.0): the
 registered `sidegraph` server carries `"cwd": null`. So both `codex/mcp.json` and
-`codex/hooks.json` wrap their commands the same way the manual `.codex/hooks/hooks.json`
+`codex/hooks.json` wrap their commands the same way the manual `.codex/hooks.json`
 recipe above does. They run `cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"` before
 anything else, instead of assuming an ambient project directory. That wrapper, not a
 plugin-provided variable, is what keeps `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` pointed at the right

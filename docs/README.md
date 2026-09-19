@@ -1,78 +1,56 @@
 # Sidegraph documentation
 
-Durable, repo-committed decision memory for AI coding agents. This page routes by what
-you came to do; [`llms.txt`](llms.txt) is the flat annotated index of every page (point
-your agent at it).
+Sidegraph stores durable decisions and non-derivable facts beside the repository they
+describe. Start with the task you have now; [`llms.txt`](llms.txt) is the flat index for an
+agent.
 
-## Deciding whether to adopt
+## Install and prove it works
 
-Start with the engineering whitepaper — `whitepaper/index.md` in the published
-documentation — for what decision-provenance memory is, what the measurement programme
-established *and failed to establish*, and which repositories it fits. Then:
+1. [Install Sidegraph and Graphify](getting-started/installation.md).
+2. Follow the [end-to-end quickstart](getting-started/quickstart.md).
+3. Use the recommended host path for [Claude Code](getting-started/claude-code-setup.md) or
+   [Codex](getting-started/codex-setup.md).
+4. Run the [four-case verification checklist](guides/verifying-your-setup.md).
 
-- [concepts/decision-memory.md](concepts/decision-memory.md) — the core idea in one page:
-  what counts as a decision, why mistakes rank first.
-- [pilot-kit/README.md](pilot-kit/README.md) — run the paper's adoption gates on your own
-  repository, with a kill rule and default stop conditions.
-- [reference/stability.md](reference/stability.md) — what is contract, what is
-  experimental, what may change under you.
+If the repository already has ADRs or specs, use the
+[preview-first bootstrap](getting-started/bootstrap.md) after installation.
 
-## Setting up
+## Use it during normal work
 
-In order:
+- [Retrieve context before editing](guides/retrieval-in-sessions.md).
+- [Capture decisions and supporting facts](guides/capturing-decisions.md).
+- [Name domains for the SessionStart table of contents](guides/naming-your-domains.md).
+- [Share and review the store as a team](guides/team-workflow.md).
 
-1. [getting-started/installation.md](getting-started/installation.md) — Sidegraph and its
-   Graphify dependency.
-2. [getting-started/quickstart.md](getting-started/quickstart.md) — first decision
-   captured and retrieved, end to end.
-3. [getting-started/claude-code-setup.md](getting-started/claude-code-setup.md) or
-   [getting-started/codex-setup.md](getting-started/codex-setup.md) — wire the MCP server
-   and hooks into your host.
-4. [guides/verifying-your-setup.md](guides/verifying-your-setup.md) — the nine-case
-   checklist that proves the wiring actually works.
+## Operate and maintain it
 
-Already have ADRs, specs, or design docs? [getting-started/bootstrap.md](getting-started/bootstrap.md)
-is the preview-first onboarding over an existing corpus;
-[guides/semantic-docs.md](guides/semantic-docs.md) covers the deeper doc-import workflow.
+- [Survive refactors and heal anchors](guides/surviving-refactors.md).
+- [Run CI and scheduled maintenance](guides/ci-cd-maintenance.md).
+- [Import decision-shaped documents](guides/semantic-docs.md).
+- [See runtime cost and operational boundaries](reference/operations.md).
+- [Cut a Sidegraph release](reference/releasing.md) (maintainers).
 
-## Using it day to day
+The [pilot kit](pilot-kit/README.md) is an evaluation protocol for teams deciding whether to
+adopt Sidegraph. The engineering whitepaper is generated in the published snapshot at
+[`docs/whitepaper/index.md`](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/whitepaper/index.md);
+it is optional background on evidence, limits, and repository fit.
 
-- [guides/capturing-decisions.md](guides/capturing-decisions.md) — **the full write loop
-  in plain language**: recording mid-session, the Stop-hook propose → ratify pipeline,
-  facts as the evidence layer, and what makes a good record.
-- [guides/retrieval-in-sessions.md](guides/retrieval-in-sessions.md) — the read side:
-  what SessionStart injects, seeding task questions, reading the output blocks.
-- [guides/naming-your-domains.md](guides/naming-your-domains.md) — giving the codebase a
-  human-named table of contents.
-- [guides/team-workflow.md](guides/team-workflow.md) — the store in a team: committing
-  `.sidegraph/`, ratifying in PR review, merges and disputes, onboarding.
+## Understand the model
 
-## Keeping it healthy
+- [Decision memory](concepts/decision-memory.md) — what belongs in the store.
+- [Mind model](concepts/mind-model.md) — domains, TOC, and drill-down.
+- [Data model](concepts/data-model.md) — persisted record shapes.
+- [Anchoring](concepts/anchoring.md) — how records stay attached to code and docs.
+- [Retrieval](concepts/retrieval.md) — ranking, trust quarantine, and budgets.
 
-- [guides/surviving-refactors.md](guides/surviving-refactors.md) — graph rebuilds, anchor
-  sync, healing stale decisions.
-- [guides/ci-cd-maintenance.md](guides/ci-cd-maintenance.md) — CI recipes, and the two
-  hard rules (CI never ratifies; CI never auto-pushes canonical).
-- [reference/operations.md](reference/operations.md) — day-2 operations reference.
-- [reference/cli.md](reference/cli.md) — every command, including `sidegraph-doctor`.
-- [reference/releasing.md](reference/releasing.md) — how a release is cut: version bumps,
-  the pre-release checklist, the tag-driven PyPI publish flow, and post-release checks.
+## Look up an exact contract
 
-## Building against it
-
-- [reference/mcp-tools.md](reference/mcp-tools.md) — exact signatures and return shapes
-  of every MCP tool.
-- [reference/store-format.md](reference/store-format.md) — the file-per-record store
-  format (the public contract).
-- [reference/hooks.md](reference/hooks.md) and
-  [reference/configuration.md](reference/configuration.md) — host wiring and every knob.
-- [reference/git-bindings.md](reference/git-bindings.md) — commit/branch anchoring.
-- [integrations/graphify.md](integrations/graphify.md) — the engine seam, if you wonder
-  where the code graph comes from.
-
-## Concepts, when you want the why
-
-[concepts/](concepts/) explains the design: [decision-memory](concepts/decision-memory.md),
-[mind-model](concepts/mind-model.md) (domains as a table of contents),
-[data-model](concepts/data-model.md), [anchoring](concepts/anchoring.md), and
-[retrieval](concepts/retrieval.md) (budget-bounded, mistakes first).
+- [MCP tools](reference/mcp-tools.md)
+- [CLI](reference/cli.md)
+- [Hooks](reference/hooks.md)
+- [Configuration](reference/configuration.md)
+- [Store format](reference/store-format.md)
+- [Stability levels](reference/stability.md)
+- [Git bindings](reference/git-bindings.md)
+- Integrations: [Claude Code](integrations/claude-code.md),
+  [Codex](integrations/codex.md), [Graphify](integrations/graphify.md)

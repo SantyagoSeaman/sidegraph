@@ -28,10 +28,10 @@ contains aggregate onboarding facts rather than source content, and is never upl
 `SIDEGRAPH_TELEMETRY=off` remains the single opt-out for local production retrieval and
 touch diagnostics during the later agent-session maintenance loop.
 
-`SIDEGRAPH_GRAPH` is read once at the point of use (`os.environ.get(NAME, default)`); there's
-no other config file or settings mechanism. `SIDEGRAPH_GREP_NUDGE`, `SIDEGRAPH_CAPTURE_NUDGE`,
-`SIDEGRAPH_RATIFY_NUDGE`, and `SIDEGRAPH_TELEMETRY` are on/off switches, not paths — they have
-no default-value semantics to resolve, each is just checked for the literal string `"off"`.
+`SIDEGRAPH_GRAPH` is read once at the point of use (`os.environ.get(NAME, default)`).
+`SIDEGRAPH_GREP_NUDGE`, `SIDEGRAPH_CAPTURE_NUDGE`, and `SIDEGRAPH_RATIFY_NUDGE` disable only
+on the literal string `"off"`. `SIDEGRAPH_TELEMETRY` is more forgiving: it trims whitespace
+and compares case-insensitively, so `OFF` also disables recording.
 `SIDEGRAPH_AUTO_ACCEPT` is the inverse convention — off unless it's exactly `"on"` — since an
 opt-in that removes a safety gate should default closed, not open. `SIDEGRAPH_RATIFY_POLICY` is
 neither: a three-value knob matched exactly (after trimming), failing safe to `manual`.

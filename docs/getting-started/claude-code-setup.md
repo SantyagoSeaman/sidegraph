@@ -13,12 +13,8 @@ Run these in the repo you want memory over (not the Sidegraph checkout).
 
 Inside a Claude Code session, in that repo:
 
-> **`@main` is a mutable ref.** Every `git+…@main` command on this page tracks the
-> branch: what you install today is not what you installed yesterday, and a `uvx` cache
-> refresh can change it under you. Fine for trying Sidegraph out; for anything you depend
-> on — CI, a shared team setup, a pilot you intend to measure — replace `@main` with a
-> commit SHA (`git+https://github.com/SantyagoSeaman/sidegraph@<sha>`) so the version is a
-> decision you made rather than whatever HEAD happened to be. See [`reference/stability.md`](../reference/stability.md) for what each surface promises.
+The commands below follow the current development branch. For durable environments, see
+[how to pin mutable development references](installation.md#mutable-development-references).
 
 ```
 /plugin marketplace add SantyagoSeaman/sidegraph
@@ -73,10 +69,10 @@ flag if you want a private, user-local registration instead.
 `uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp` (CLI form: `-- uv run --project
 /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp`).
 
-> **Once Sidegraph is published to PyPI**, both shorten further, to `uvx --from sidegraph
-> sidegraph-mcp` — see
-> [`integrations/claude-code.md`](../integrations/claude-code.md#plugin-install-path)
-> for the pin-at-1.0 policy.
+The released package is available from PyPI, so both shorten further, to `uvx --from
+sidegraph sidegraph-mcp` — see
+[`integrations/claude-code.md`](../integrations/claude-code.md#plugin-install-path)
+for the pinning policy. Use `sidegraph==X.Y.Z` in automation.
 
 The store (`SIDEGRAPH_DIR`) is meant to live **inside the repo it documents** — commit
 `.sidegraph/` alongside your code (its committed record directories, not the gitignored

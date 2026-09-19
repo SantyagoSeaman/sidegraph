@@ -1,10 +1,9 @@
 # Pilot kit
 
-The procedure and prompts for running the whitepaper's adoption gates on **your**
-repository, at a size a team can afford. The research program behind the paper cost ~$160 and several
-weeks. This kit is the ~two-engineer-DAYS-of-effort version of the same questions — that
-is effort, not calendar: stage 2 alone runs for two to three weeks of ordinary work before
-the measured stages begin.
+This directory is an **evaluation protocol**, not an automated harness. It provides prompts,
+rubric conventions, isolation requirements, and suggested decision gates for testing
+Sidegraph on your repository. Budget roughly two engineer-days of active work plus two to
+three weeks of ordinary shadow capture.
 
 Order matters. Stage 0 can disqualify your corpus before you install anything.
 
@@ -30,7 +29,18 @@ Rubric conventions: [`rubric-template.md`](rubric-template.md).
 
 ## Stage 2 — shadow capture (2–3 weeks, no delivery)
 
-Install with capture on and delivery off. Measure, before any agent ever reads memory:
+Use a separate store such as `.sidegraph-shadow/` and keep it out of the normal host wiring.
+Do not enable the `SessionStart` or `PreToolUse` hooks for the measured sessions. Give the
+agent an explicit end-of-session capture instruction and allow only the write-side
+`propose_decisions` MCP path; deny `get_task_context`, `query_decisions`,
+`retrieve_decisions`, `list_facts`, `drill_down`, and other store reads. Review the queue
+outside the measured agent session with `sidegraph-ratify --db .sidegraph-shadow`.
+
+`SIDEGRAPH_UNRATIFIED=off` alone is **not** delivery isolation: accepted memory and the
+SessionStart map can still reach the agent. Verify the effective hook and tool configuration
+with a dry session before collecting data, and keep its transcript as evidence.
+
+Measure, before any measured agent reads memory:
 
 - proposals per week, and how many survive review;
 - **minutes per review** — write them down; nobody has this number yet, including us;
@@ -42,10 +52,13 @@ worth the two weeks by itself.
 ## Stage 3 — the paired battery (1 engineer-day, ~$20–40 of model spend)
 
 Run each question four times: twice with memory enabled, twice with every memory channel
-denied (tools deny-listed, hooks disarmed). Two repeats per item per arm is enough to see
-a signal; k=1 measures noise.
+denied (tools deny-listed, hooks disarmed). With 16 questions that is **64 answer sessions**:
+16 × 2 arms × 2 repeats. Randomize run order and keep the same model, repository commit,
+prompt, and tool budget across arms. Two repeats are a small pilot sample, not a precision
+estimate; report uncertainty and inspect item-level disagreements.
 
-Then blind the answers and judge them: [`judge-prompt.md`](judge-prompt.md). The
+Then blind all 64 answers, create one judge input per question/repeat without revealing the
+arm, and judge them with [`judge-prompt.md`](judge-prompt.md). The
 harness the paper used — `run_cell.py`, `extract.py`, `blind.py`, `pool.py`, and
 `verify_public.py`, which recomputes the numbers that rest on public corpora — is part of
 the internal research archive and is not published with this documentation. The
@@ -58,8 +71,9 @@ for exactly this reason.
 
 ## Stage 4 — the gates
 
-Decide with numbers you set **before** stage 3. Defaults, derived from measured results
-and meant to be edited deliberately:
+Decide with numbers you set **before** stage 3. The values below are starting points from one
+measurement programme, not universal acceptance criteria; edit and freeze them before seeing
+your results:
 
 | Gate | Default stop condition |
 |---|---|

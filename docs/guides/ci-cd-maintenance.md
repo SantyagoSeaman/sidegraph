@@ -11,18 +11,21 @@ unattended.
 1. **CI never ratifies.** Nothing in these recipes calls `ratify`/`sidegraph-ratify --accept`
    (or `--drop`, for that matter). A scheduled job may *propose* a superseding decision
    (`propose_decisions` with `supersedes`) or *recommend* a drop in its summary, but turning
-   a proposal into `accepted` — or a decision into `dropped` — stays a human action, every
+   a proposal into an accepted/rejected terminal state stays a human action, every
    time. See [`heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md#triage-decision-tree-add_anchors-propose_decisions-or-recommend-a-drop)
    for the triage tree these jobs run. An auto-ratification policy would break this rule
    without any `ratify` call — the transition rides `propose_decisions` itself, which the
-   deny list below cannot block — so every recipe here pins `SIDEGRAPH_RATIFY_POLICY` to
-   `manual` in the MCP server's `env` (a deployment that does want a policy pins it instead
-   in a committed `.claude/settings.json` `env` block, never left to the ambient shell).
+   deny list below cannot block. Legacy `SIDEGRAPH_AUTO_ACCEPT=on` bypasses the queue too.
+   The scheduled recipe therefore pins `SIDEGRAPH_RATIFY_POLICY=manual` and
+   `SIDEGRAPH_AUTO_ACCEPT=off` in the MCP server's `env`. A deployment that does want a
+   policy pins it in a committed `.claude/settings.json` `env` block, never in the ambient
+   shell.
 2. **CI never auto-pushes canonical files to a branch nobody reviewed.** `sidegraph-sync`
-   and the triage playbook's tools (`add_anchors`, `propose_decisions`) all **write** —
-   re-pointed bindings, a moved entity's refreshed `descriptor`, a newly proposed decision's
-   record file. That's fine in an ephemeral CI checkout (the writes vanish with the runner
-   unless something commits them), but nothing here ever pushes those files straight to a
+   and the triage playbook's tools (`add_anchors`, `propose_decisions`) can **write** — sync
+   normally changes derived `index.db` state and may canonically update a confirmed moved
+   leaf's descriptor; re-anchoring and proposals write canonical files. That's fine in an
+   ephemeral CI checkout (the writes vanish with the runner unless something commits them),
+   but nothing here ever pushes those files straight to a
    protected branch. The scheduled recipe below opens a **pull request** with whatever it
    wrote, same as a human's own change — merging that PR is a separate, reviewed step, and
    ratifying any proposed decisions inside it is a separate step again.
@@ -30,15 +33,13 @@ unattended.
 ## Recipe 1: anchor-health required check
 
 Runs `sidegraph-sync --json --check` on every PR (and on pushes to the default branch) and
-fails the job when the report has an attention finding. This is the cheapest of the three —
-no git-history plumbing, just a rebuild-and-check.
+fails the job when the report has an attention finding. It needs no explicit comparison
+ref: rebuild the graph, sync, then classify the report.
 
-> **`@main` is a mutable ref.** Every `git+…@main` command on this page tracks the
-> branch: what you install today is not what you installed yesterday, and a `uvx` cache
-> refresh can change it under you. Fine for trying Sidegraph out; for anything you depend
-> on — CI, a shared team setup, a pilot you intend to measure — replace `@main` with a
-> commit SHA (`git+https://github.com/SantyagoSeaman/sidegraph@<sha>`) so the version is a
-> decision you made rather than whatever HEAD happened to be. See [`reference/stability.md`](../reference/stability.md) for what each surface promises.
+Create a repository variable named `SIDEGRAPH_REF` containing a reviewed Sidegraph commit
+SHA. Every recipe reads it as `${{ vars.SIDEGRAPH_REF }}`. See
+[mutable development references](../getting-started/installation.md#mutable-development-references)
+for why CI should not follow a branch.
 
 ```yaml
 name: sidegraph-anchor-health
@@ -55,19 +56,19 @@ jobs:
       contents: read
       pull-requests: write   # the github-script comment step below needs this
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
       - name: Rebuild the graph
-        run: uvx --from graphifyy graphify update .
+        run: uvx --from graphifyy==0.9.6 graphify update .
 
       - name: sidegraph-sync --json --check
         id: sync
         continue-on-error: true   # let later steps run even when this exits non-zero
         run: |
-          uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main \
+          uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@${{ vars.SIDEGRAPH_REF }} \
             sidegraph-sync --json --check > sync-report.json
           cat sync-report.json
 
@@ -86,14 +87,14 @@ jobs:
 
       - name: Upload the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sidegraph-sync-report
           path: sync-report.json
 
       - name: Comment findings on the PR
         if: github.event_name == 'pull_request' && steps.classify.outputs.kind == 'findings'
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const fs = require('fs');
@@ -129,50 +130,29 @@ jobs:
           exit 1
 ```
 
-Only an `error` outcome, a stale decision, a slug conflict, or a domain refresh failure fails
-`steps.sync.outcome`. `orphaned`/`ambiguous` outcomes and `empty_domains`/`overbroad_domains`
-never do — they're
-informational-only per `sync.report_has_findings` — see
-[`reference/cli.md#sidegraph-sync`](../reference/cli.md#sidegraph-sync) — so a rename+heal
-that leaves a renamed-away entity's leaf orphaned for good turns this check green instead of
-staying red forever. They're still in the uploaded JSON artifact — and, when the run also
-has a hard finding, in the PR comment above — for a human to look at, just never a reason to
-fail the job (a comment only posts on failure, so an informational-only run is green with
-the details in the artifact).
+Only an `error` outcome, stale decision, slug conflict, or domain refresh failure fails the
+job. `orphaned`/`ambiguous` outcomes and `empty_domains`/`overbroad_domains` are informational
+per [`sidegraph-sync`](../reference/cli.md#sidegraph-sync). They remain in the artifact; the
+PR comment includes them only when the same run also has a hard finding.
 
-**Why the `permissions:` block:** GitHub's default `GITHUB_TOKEN` is read-only on many repos
-(org-level defaults, or any workflow triggered from a forked PR) — without `pull-requests:
-write` declared explicitly, the `github-script` comment step 403s instead of posting.
-`contents: read` is enough for `actions/checkout`; this job never writes to the repo itself.
+**Why the `permissions:` block:** GitHub's default `GITHUB_TOKEN` may be read-only. Declaring
+`pull-requests: write` is required for the comment step, but it cannot override GitHub's
+security downgrade for fork-originated PRs unless repository administrators explicitly allow
+write tokens for fork workflows. On those PRs, skip the comment or use a separately reviewed
+workflow; the required check and artifact can still run with read access.
 
-**This job writes to the checkout's `.sidegraph/`** — `sidegraph-sync` re-points bindings
-and, on a "moved" rebind, rewrites the affected entity's `descriptor`. That's expected (hard
-rule 2 above): the job never commits or pushes those files; they exist only for the
-duration of the report.
+**This job writes local derived state** and, on a confirmed `moved` rebind, may rewrite the
+affected entity's durable descriptor. Binding status, community mappings, domain communities,
+and community re-pointing remain index-only. The job never commits or pushes either kind.
 
 ## Recipe 2: store lint on PR
 
 Runs the transition layer — `sidegraph-verify --against <ref>` — to catch a hand-edited or
 history-rewritten store file that no MCP tool would ever produce.
 
-**Diff against the merge base, not a moving branch name.** `sidegraph-verify --against <ref>`
-runs `git diff <ref>` internally, which compares `<ref>`'s snapshot against the *current
-working tree* — not two fixed points in history. `git merge-base` is what makes that safe
-regardless of checkout shape: it always resolves to the real common ancestor between the
-base ref and whatever `HEAD` is, so the diff only ever covers what the current branch itself
-changed. Passing a moving branch name directly (`--against origin/main`) skips that and
-risks the exact failure mode this recipe exists to avoid: if `HEAD` doesn't already include
-everything `origin/main`'s current tip does (a plain checkout of the PR branch's own tip
-commit, a rebase workflow, a local run against a stale fetch), the diff also picks up every
-legitimate transition that landed on the base branch after `HEAD` diverged from it — those
-look like the base's own records reversing status, and the transition layer correctly, but
-uselessly, flags them as illegal. (One wrinkle worth knowing: on GitHub's default
-`pull_request` trigger, `actions/checkout`'s default ref is actually a *synthetic merge
-commit* — `refs/pull/<pr>/merge`, merging the PR branch onto the base's current tip — so
-`git merge-base origin/$GITHUB_BASE_REF HEAD` resolves to that current base tip itself, not
-an older fork-point commit; the diff is still exactly the PR's own edits either way. The
-point of computing it explicitly is that this stays true even if the checkout ref changes —
-e.g. to the PR's raw head SHA — later.) Compute the merge base explicitly:
+**Diff against the merge base, not a moving branch name.** Passing `origin/main` directly can
+include legitimate base-branch changes when the checkout is a raw PR head or the fetch is
+stale. Use the common ancestor so the transition diff contains only branch changes:
 
 ```yaml
 name: sidegraph-store-lint
@@ -184,12 +164,12 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # full history — merge-base needs it
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
       - name: Compute the PR's merge base
         id: base
@@ -201,7 +181,7 @@ jobs:
         id: verify
         continue-on-error: true   # let later steps run even when this exits non-zero
         run: |
-          uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main \
+          uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@${{ vars.SIDEGRAPH_REF }} \
             sidegraph-verify --against "${{ steps.base.outputs.ref }}" --json \
             > verify-report.json
           cat verify-report.json
@@ -221,7 +201,7 @@ jobs:
 
       - name: Upload the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sidegraph-verify-report
           path: verify-report.json
@@ -233,9 +213,9 @@ jobs:
           exit 1
 ```
 
-`sidegraph-verify` is read-only in both layers (see
-[`reference/cli.md#sidegraph-verify`](../reference/cli.md#sidegraph-verify)) — this job
-writes nothing, so it needs no PR/push step at all, unlike Recipes 1 and 3.
+`sidegraph-verify` is a pure read: it opens canonical JSON directly, never constructs a
+`Store`, and therefore cannot migrate the store or rebuild `index.db`. See
+[`reference/cli.md#sidegraph-verify`](../reference/cli.md#sidegraph-verify).
 
 ## Recipe 3: scheduled triage
 
@@ -243,12 +223,15 @@ Runs the [`heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md) p
 headlessly, on a schedule, and opens a PR with whatever it proposed — proposals only,
 never a push straight to the default branch, never a `ratify` call.
 
-**Prerequisites — three one-time repo settings, verified live:**
+**Prerequisites — four one-time repo settings:**
 
 1. **`ANTHROPIC_API_KEY` repo (or org) secret** — Settings → Secrets and variables →
    Actions → New repository secret; the workflow reads it via `secrets.ANTHROPIC_API_KEY`
    below. Without it the `claude -p` step fails outright.
-2. **"Allow GitHub Actions to create and approve pull requests"** — Settings → Actions →
+2. **`SIDEGRAPH_TRIAGE_MODEL` repository variable** — set it to a model ID supported by the
+   installed Claude Code version. Keeping the value outside this guide prevents a model
+   rename from turning the example into stale copy-paste configuration.
+3. **"Allow GitHub Actions to create and approve pull requests"** — Settings → Actions →
    General → Workflow permissions. This is off by default on a new repo; without it the
    `create-pull-request` step below 403s (measured live). Toggle it in the UI, or set it
    from the CLI:
@@ -256,7 +239,7 @@ never a push straight to the default branch, never a `ratify` call.
    gh api -X PUT repos/OWNER/REPO/actions/permissions/workflow \
      -f default_workflow_permissions=read -F can_approve_pull_request_reviews=true
    ```
-3. **Bot-authored PRs wait for a maintainer's approval to run checks.** A PR opened by
+4. **Bot-authored PRs wait for a maintainer's approval to run checks.** A PR opened by
    `github-actions[bot]` via the default `GITHUB_TOKEN` sits with its checks in "action
    required" until a maintainer clicks "Approve and run" on the PR (measured live) — this
    is **expected behavior, not a misconfiguration**: a human gate before CI executes
@@ -280,16 +263,16 @@ jobs:
       contents: write        # create-pull-request needs to push its new branch
       pull-requests: write   # ...and open the PR itself
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Rebuild the graph
-        run: uvx --from graphifyy graphify update .
+        run: uvx --from graphifyy==0.9.6 graphify update .
 
       - name: Write the MCP config
         run: |
@@ -298,11 +281,12 @@ jobs:
             "mcpServers": {
               "sidegraph": {
                 "command": "uvx",
-                "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp"],
+                "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@${{ vars.SIDEGRAPH_REF }}", "sidegraph-mcp"],
                 "env": {
                   "SIDEGRAPH_DIR": ".sidegraph",
                   "SIDEGRAPH_GRAPH": "graphify-out/graph.json",
-                  "SIDEGRAPH_RATIFY_POLICY": "manual"
+                  "SIDEGRAPH_RATIFY_POLICY": "manual",
+                  "SIDEGRAPH_AUTO_ACCEPT": "off"
                 }
               }
             }
@@ -312,6 +296,7 @@ jobs:
       - name: Run the heal-anchors triage — proposals only
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SIDEGRAPH_TRIAGE_MODEL: ${{ vars.SIDEGRAPH_TRIAGE_MODEL }}
         run: |
           claude -p 'Run the heal-anchors playbook: call sync_anchors(force=True), then for
           every orphaned/ambiguous entity and every stale decision, follow the triage tree —
@@ -319,7 +304,7 @@ jobs:
           that is genuinely outdated, and a plain-text recommendation (never a tool call)
           for anything to drop. Summarize every action taken and every recommendation at
           the end.' \
-            --model claude-sonnet-5 \
+            --model "$SIDEGRAPH_TRIAGE_MODEL" \
             --mcp-config mcp-config.json --strict-mcp-config \
             --allowedTools "mcp__sidegraph__sync_anchors mcp__sidegraph__find_entity mcp__sidegraph__query_structure mcp__sidegraph__query_decisions mcp__sidegraph__add_anchors mcp__sidegraph__propose_decisions mcp__sidegraph__list_proposed mcp__sidegraph__retrieve_decisions mcp__sidegraph__get_entity_history mcp__sidegraph__list_facts mcp__sidegraph__verify_store" \
             --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__ratify_decisions,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact" \
@@ -333,13 +318,13 @@ jobs:
           cat triage-summary.md
 
       - name: Upload the raw transcript
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sidegraph-triage-transcript
           path: triage.jsonl
 
       - name: Open a PR with whatever the triage proposed
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           commit-message: "chore(sidegraph): scheduled anchor triage"
           branch: sidegraph/triage-${{ github.run_id }}
@@ -349,50 +334,21 @@ jobs:
           labels: sidegraph-triage
 ```
 
-See **Prerequisites** above for the `ANTHROPIC_API_KEY` secret, the PR-creation toggle, and
-the bot-approval gate this workflow depends on.
+See **Prerequisites** above for the API key, pinned model, PR-creation toggle, and bot-approval
+gate. The command passes the repository variable explicitly instead of inheriting a changing
+CLI default.
 
-**Model.** The `--model claude-sonnet-5` flag pins the triage model explicitly rather than
-riding the CLI default. Triage is mechanical — `sync_anchors` plus a walk down the
-`heal-anchors` decision tree — so a mid-tier model is the right cost/quality point; bump it
-only if your corpus needs deeper judgment to tell "moved" from "genuinely outdated". Prefer
-the flag over an `ANTHROPIC_MODEL` env var: it keeps the model visible in the command.
+Do not add `--permission-mode bypassPermissions`: it disables both tool lists. The
+`--disallowedTools` list is the load-bearing ratification guard; the allowlist only narrows
+normal MCP access and can be widened by ambient host settings. Keep both. Read-only built-in
+tools can still inspect the checkout in a headless run; the troubleshooting note below states
+that boundary explicitly. The matching
+[`heal-anchors` headless example](../../plugin/sidegraph/skills/heal-anchors/SKILL.md#running-this-playbook-headlessly-ci)
+uses the same deny-list rule.
 
-**No `--permission-mode bypassPermissions` here either**, for the same reason as the
-`heal-anchors` skill's own headless example: bypass skips the permission system outright, so
-neither `--allowedTools` nor `--disallowedTools` would bind anything under it and the run
-could call any tool, `ratify` included. **The `--disallowedTools` deny list is the
-load-bearing enforcement of hard rule 1** — it blocks the write-gate tools no matter what
-the ambient permission configuration says. The `--allowedTools` list is scoping, not
-enforcement: on a pristine CI runner a headless `-p` run auto-denies *MCP* tool calls
-outside it (no terminal to prompt), but any permissive permission configuration on the
-machine — a user- or project-level `settings.json` with a broad allow policy, exactly what a
-developer laptop or a shared self-hosted runner may carry — silently overrides
-allowlist-only narrowing (measured live: a ratify call went through a narrowed allowlist on
-a permissively-configured machine, and only the deny list stopped it). Always ship both, as
-above; never rely on the allowlist alone. Separately, read-only built-in tools (`Read`, a
-simple read-only `Bash` invocation) are auto-permitted in headless runs regardless of
-`--allowedTools` — that flag only scopes `mcp__sidegraph__*` calls; see the Troubleshooting
-note below for what this does and doesn't mean for what the run can touch.
-
-The list names the exact triage tools — `sync_anchors`, `find_entity`, `query_structure`,
-`query_decisions`, `add_anchors`, `propose_decisions`, `list_proposed`, plus the read-only
-`retrieve_decisions`, `get_entity_history`, `list_facts`, `verify_store` — narrower than the
-wildcard (`mcp__sidegraph__*`) the
-[`heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md#running-this-playbook-headlessly-ci)
-skill uses for its own illustrative example; both shapes carry the same deny list. The four
-read-only tools are worth naming explicitly rather than leaving to an implicit wildcard: a
-live run without them on the allowlist still completed the triage, but by falling back to
-raw `Read`/`Bash` reads of the committed store JSON instead of the MCP tools built for it.
-
-`create-pull-request` stages only `.sidegraph/` (`add-paths`), commits it to a **new**
-branch, and opens a PR — it never touches the default branch directly, satisfying hard rule
-2 (this is what the job's `contents: write`/`pull-requests: write` permissions above are
-for — GitHub's default token can't push a branch or open a PR without them). Merging that PR
-lands the sync-healed bindings and any `propose_decisions` output (still `status=proposed`)
-in the store; a human still runs `ratify`/`sidegraph-ratify` afterward for anything the
-triage proposed to actually take effect — under the `manual` policy this recipe pins.
-Nothing this job wrote is live memory until both of those human steps happen.
+`create-pull-request` stages only `.sidegraph/`, pushes a new branch, and opens a PR. Merging
+it lands re-anchors and adds drafts to the unratified queue; a human still ratifies those
+drafts. Proposed content stays below accepted memory and may be hidden by regulated mode.
 
 ## Troubleshooting
 
@@ -404,30 +360,21 @@ Nothing this job wrote is live memory until both of those human steps happen.
   If Recipe 2 does flag a `duplicate-ulid`, the segments differ in content, which is a real
   problem, not this exemption misfiring.
 - **Exit codes, all three CLIs used above:** `0` clean (or, for `sidegraph-sync`, a
-  version-skip), `1` an *operational* error (unreadable graph/store, an unresolvable
-  `--against` ref, no git repository), `2` findings/violations actually present. Recipes 1
+  version-skip), `1` an *operational* error (unreadable graph/store; for verification's
+  transition layer, an unresolvable `--against` ref or no git repository), `2`
+  findings/violations actually present. Recipes 1
   and 2 fail the job on either `1` or `2` (`continue-on-error` + a manual `exit 1` at the
   end) but classify which one first, since an operational error usually means the runner's
   environment is broken (wrong `SIDEGRAPH_DIR`, `graphify update .` never ran, a shallow
   checkout with no merge base) rather than a real integrity problem in the store.
-- **`sidegraph-sync` writes locally — that's expected, not a bug.** In an ephemeral CI
-  checkout, re-pointed bindings and a moved entity's refreshed `descriptor` are real writes
-  to tracked files under `.sidegraph/` (`index.db` itself stays gitignored and never
-  appears). Recipe 1 never commits them; if you want those routine, non-controversial
-  rebind fixes to land on the default branch, commit and push `.sidegraph/` yourself after
-  a local `sidegraph-sync` run, the same way you'd commit any other change — CI's job here
-  is to *detect* drift, not to fix it silently.
+- **`sidegraph-sync` writes locally — mostly to derived state.** Binding status, community
+  bindings, domain communities, and the TOC cache stay in gitignored `index.db`. A confirmed
+  leaf-file move is the exception: sync updates that entity's committed descriptor. Recipe 1
+  never commits either result; CI's job is to detect drift, not silently publish it.
 - **`fetch-depth: 0` missing → merge-base fails.** `actions/checkout`'s default
   (`fetch-depth: 1`) only fetches the tip commit, so `git merge-base` in Recipe 2 has
   nothing to search and errors out (an operational error, exit `1`, not a false-clean
   result) — the workflow above sets `fetch-depth: 0` for exactly this reason.
-- **"Node.js 20 actions are deprecated" warning.** `actions/checkout@v4`,
-  `actions/upload-artifact@v4`, `astral-sh/setup-uv@v5`, and `create-pull-request@v7` all
-  still target the Node 20 runtime; GitHub's runners now warn on every step that uses one
-  (and transparently run it under Node 24 anyway). This is a platform-wide deprecation
-  cycle, not a problem with these recipes — the warning is harmless and safe to ignore.
-  Bump each action to its next major once that major ships a node24 target; don't pin an
-  untested newer major in these recipes preemptively.
 - **A headless `claude -p` run can still read the repo — that's by design, not a leak.**
   Read-only built-in tools (`Read`, a plain read-only `Bash` invocation) are auto-permitted
   in headless runs independently of `--allowedTools`/`--disallowedTools`, which here name

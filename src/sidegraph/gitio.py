@@ -18,10 +18,11 @@ vs. Python's ``sqlite3`` default of 5.0s against a concurrent writer's lock -- a
 rebuild ever happens here: if the index is absent or the ro-open fails (including timing
 out), every caller degrades to writing/resolving nothing rather than raising.
 
-The prepare-commit-msg hook additionally bounds itself to a hard wall-clock budget (2s,
-:data:`HOOK_WALL_CLOCK_BUDGET_SECONDS`) -- see :func:`collect_prepare_commit_candidates`
-and :func:`apply_prepare_commit_msg`, both of which re-check the deadline between stages
-and give up (write nothing) rather than run over. ``sidegraph-blame`` (П2) is an explicit,
+The prepare-commit-msg hook additionally uses a 2s best-effort deadline
+(:data:`HOOK_WALL_CLOCK_BUDGET_SECONDS`) -- see :func:`collect_prepare_commit_candidates`
+and :func:`apply_prepare_commit_msg`, both of which re-check it between stages and give up
+(write nothing) once expired. It is not a hard process kill: an already-running bounded
+git/SQLite operation returns first. ``sidegraph-blame`` (П2) is an explicit,
 interactive user command, not a commit-path hook, so it carries no such budget -- but it
 still never opens a writable ``Store()``, for the same read-only-over-records reason.
 """
@@ -45,7 +46,7 @@ _GIT_TIMEOUT_SECONDS = 1.0
 # §0: sqlite ro-open busy-timeout fallback -- default Python sqlite3 timeout is 5.0s.
 RO_OPEN_TIMEOUT_SECONDS = 0.5
 
-# §0/§1 step 3: the hook's hard wall-clock budget -- after this, write nothing, exit 0.
+# §0/§1 step 3: best-effort deadline checked between bounded stages.
 HOOK_WALL_CLOCK_BUDGET_SECONDS = 2.0
 
 # §1 step 1(b): "cap at the 5 strongest by weight."

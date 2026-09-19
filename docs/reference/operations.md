@@ -11,15 +11,16 @@ corpus, not with ours. Re-measure before quoting these numbers elsewhere.
 | Trigger | What runs | Cost here | Notes |
 |---|---|---|---|
 | Every agent session start | `sidegraph-session-start` hook: opens the store, best-effort sync, renders the memory map | **~350 ms** | Degrades to a shorter map without a graph; a failure never blocks the session |
-| Every `Read`/`Grep`/`Edit`/`Write` tool call | `sidegraph-pre-tool-use` hook: path lookup + at most one nudge per session per kind | **~110 ms** | Pure read; failure is swallowed by design |
+| Every `Read`/`Grep`/`Edit`/`Write` tool call | `sidegraph-pre-tool-use` hook: path lookup + at most one nudge per session per kind | **~110 ms** | May write local touch/one-shot telemetry to `index.db`; failure is swallowed by design |
 | Every agent session end | `sidegraph-stop` hook: capture nudge | ~110 ms | Same failure posture |
 | First store open after a `git pull` (or any change to canonical files) | SQLite index rebuild from the canonical JSON | **~160 ms** (1,106 files) | Automatic, no command to run; the index is gitignored and derived |
 | Store open with a fresh index | open + full decision scan | **~13 ms** | |
 | Code-graph rebuild (`graphify update .`) | The **engine's** job, not Sidegraph's | **~8 s** (5,508 nodes) | Optional layer; runs when you choose (commit hook / CI / manually). Sidegraph degrades to file-path anchors without it |
 | CI (recommended) | `sidegraph-verify` (strict) and `sidegraph-doctor` (advisory) | < 1 s on this store | `verify` gates; `doctor --check` escalates advisories if you want that |
 
-**Nothing runs in the background.** There is no daemon, no scheduler, no watcher — every
-number above is a process that starts, does one pass, and exits.
+**Sidegraph starts no background daemon, scheduler, or watcher.** Each hook and CLI entry
+above does one pass and exits. A host may keep the stdio MCP server process alive for the
+session; work still happens only when the host calls a tool.
 
 **Do the multiplication before you adopt.** The PreToolUse number is per *tool call*, and a
 heavy session makes hundreds: at ~110 ms, 200 calls is ~22 s and 500 calls is ~55 s of added
@@ -42,12 +43,14 @@ property that makes two branches ratifying different decisions merge without con
 
 ## The graph dependency, stated plainly
 
-The code-graph engine is **optional**. Without it: entity resolution falls back to file
-paths and domains, the SessionStart map renders from records alone, and retrieval works.
-With it: symbol-level anchors, community-derived domain candidates, and drift detection
-against moved code. If you adopt it, its rebuild cost (≈8 s here) is on your commit or CI
-path, not on your agents' sessions — and a rebuild never dirties git (verified by the
-sync-clean invariant: `graphify update .` followed by `git status` shows no store change).
+The code-graph engine is **optional for the store, but required for task-seeded structure and
+name/file resolution**. Without it, the SessionStart TOC, proposal queue, raw store listings,
+and global memory still work; `get_task_context` cannot resolve file/name seeds and returns no
+structural map. With it, Sidegraph adds symbol-level anchors, task-scoped retrieval,
+community-derived domain candidates, and rebind support. Its rebuild cost (≈8 s here) is on
+your commit or CI path, not on ordinary tool calls. A rebuild may update Graphify's own output,
+but ordinary Sidegraph sync does not dirty canonical store files except for a durable leaf-file
+move recorded in an entity descriptor.
 
 ## Session cost
 

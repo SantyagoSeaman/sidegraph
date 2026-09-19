@@ -706,13 +706,16 @@ def test_telemetry_retention_described_consistently_across_docs():
 
 
 def test_every_doc_showing_a_mutable_install_ref_warns_about_it():
-    """Red against the 2026-08-04 state a cross-family security reviewer found: 35 copyable
-    `git+…@main` install commands across the shipped docs, zero of them noting that `@main`
-    is mutable — while `operations.md` told CI readers to "pin a SHA or a tag, not a
-    branch". Advice that never appears where the command is copied is advice nobody follows.
+    """Every page that exposes ``@main`` must either carry the canonical warning or link it.
 
-    Derives the file set from the docs themselves, so a NEW page with an unpinned example
-    fails here rather than shipping quietly."""
+    The warning used to be copied in full across setup pages, which made it noisy and easy
+    for wording to drift. Installation now owns the explanation; other pages may give a
+    local one-line warning or link directly to that heading.
+    """
+    canonical = (_ROOT / "docs/getting-started/installation.md").read_text(encoding="utf-8")
+    assert "## Mutable development references" in canonical
+    assert "track a mutable branch" in canonical
+
     roots = [_ROOT / "docs", _ROOT / "README.md"]
     offenders = []
     for root in roots:
@@ -721,11 +724,104 @@ def test_every_doc_showing_a_mutable_install_ref_warns_about_it():
             text = f.read_text(encoding="utf-8")
             if "@main" not in text:
                 continue
-            if "mutable ref" not in text:
+            has_local_warning = "mutable ref" in text or "mutable branch" in text
+            links_canonical = "mutable-development-references" in text
+            if not (has_local_warning or links_canonical):
                 offenders.append(str(f.relative_to(_ROOT)))
     assert not offenders, (
         f"these docs show a mutable `@main` install ref with no pinning caveat: {offenders}"
     )
+
+
+def test_graphify_install_pins_are_consistent_across_docs():
+    """Keep every copyable Graphify install command on the verified engine version."""
+    pins: dict[str, set[str]] = {}
+    for path in sorted((_ROOT / "docs").rglob("*.md")):
+        versions = set(
+            re.findall(
+                r"graphifyy(?:\[[^]]+\])?==([0-9.]+)",
+                path.read_text(encoding="utf-8"),
+            )
+        )
+        if versions:
+            pins[str(path.relative_to(_ROOT))] = versions
+
+    all_versions = set().union(*pins.values())
+    assert len(all_versions) == 1, f"Graphify install pins disagree across docs: {pins}"
+
+    install_lines = []
+    for path in [*sorted((_ROOT / "docs").rglob("*.md")), _ROOT / "README.md"]:
+        install_lines.extend(
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if "uv tool install" in line and "graphifyy" in line
+        )
+    unpinned = [line for line in install_lines if "==" not in line]
+    assert not unpinned, f"copyable Graphify installs must pin a version: {unpinned}"
+
+
+def test_ci_recipe_actions_use_reviewable_immutable_pins():
+    """Copyable workflow actions stay on exact commits with a readable release label."""
+    guide = (_ROOT / "docs/guides/ci-cd-maintenance.md").read_text(encoding="utf-8")
+    uses_lines = [line.strip() for line in guide.splitlines() if "uses:" in line]
+    assert uses_lines
+    offenders = [line for line in uses_lines if not re.search(r"@[0-9a-f]{40}\s+# v\d", line)]
+    assert not offenders, f"CI recipe actions are not pinned to immutable commits: {offenders}"
+
+
+def test_codex_hook_path_matches_the_bootstrap_verifier() -> None:
+    """The supported Codex path is project-root ``.codex/hooks.json``.
+
+    Bootstrap keeps a legacy nested-path fallback for existing installations, but public
+    setup docs must not keep teaching that old layout.
+    """
+    pages = (
+        "docs/getting-started/codex-setup.md",
+        "docs/integrations/codex.md",
+    )
+    for rel in pages:
+        text = (_ROOT / rel).read_text(encoding="utf-8")
+        assert ".codex/hooks.json" in text
+        assert ".codex/hooks/hooks.json" not in text
+
+    source = (_ROOT / "src/sidegraph/bootstrap/integrations.py").read_text(encoding="utf-8")
+    assert 'root / ".codex" / "hooks.json"' in source
+    assert 'root / ".codex" / "hooks" / "hooks.json"' in source
+
+
+def test_removed_stale_claims_do_not_return() -> None:
+    """Guard the exact high-impact inaccuracies corrected in the 2026-09-19 audit."""
+    corpus = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [*sorted((_ROOT / "docs").rglob("*.md")), _ROOT / "README.md"]
+    )
+    normalized = re.sub(r"\s+", " ", corpus.replace(">", " ")).lower()
+    banned = (
+        ".codex/hooks/hooks.json",
+        "once sidegraph publishes to pypi",
+        "up to five markdown sections",
+        "rm -rf graphify-out",
+    )
+    for phrase in banned:
+        assert phrase not in normalized
+
+
+def _task_context_render_headings() -> list[str]:
+    """Section headings, in source order, from ``TaskContext.render`` itself."""
+    source = (_ROOT / "src/sidegraph/retrieval.py").read_text(encoding="utf-8")
+    start = source.index("    def render(self, include_structure: bool = True) -> str:")
+    end = source.index("        return text", start)
+    return re.findall(r'blocks\.append\("(## [^"\n]+)\\n"', source[start:end])
+
+
+def test_retrieval_guide_block_table_matches_task_context_render() -> None:
+    """The human-facing block table mirrors the renderer, including order and quarantine."""
+    source_headings = _task_context_render_headings()
+    assert source_headings, "parsed no section headings from TaskContext.render"
+
+    guide = (_ROOT / "docs/guides/retrieval-in-sessions.md").read_text(encoding="utf-8")
+    table_headings = re.findall(r"^\| `(## [^`]+)` \|", guide, re.M)
+    assert table_headings == source_headings
 
 
 def test_public_docs_never_send_a_reader_to_an_internal_design_note() -> None:

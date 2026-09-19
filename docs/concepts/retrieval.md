@@ -55,12 +55,12 @@ at two points:
    rebuild it.
 2. **Every `ratify` call (MCP tool or `sidegraph-ratify` CLI) that actually accepted or dropped
    at least one domain** — immediately, without waiting for the next sync. This is what makes
-   `bootstrap → ratify` visibly turn the TOC on in the very same session: a lazy sync alone
-   only refreshes `last_synced_graph_version`, never the TOC cache, so without this the domain
-   layer would look inert until the next real graph rebuild.
+   `bootstrap → ratify` visibly turn the TOC on in the very same session, even when no graph
+   sync is needed.
 
-A decisions-only ratify (no domain ids in the batch) leaves the cache untouched — it wouldn't
-change the TOC anyway.
+A decisions-only ratify (no domain ids in the batch) does not rebuild the cache immediately.
+It can change a rendered mistake count; the next completed or skipped sync refreshes that
+count. Domain acceptance is the special case refreshed in the ratify operation itself.
 
 ## `drill_down(domain_slug)` — the Axis-1 operation
 
@@ -104,8 +104,10 @@ render actually deliver on real ADR-scale content instead of dropping it.)
 
 ### Ranking buckets, and why mistakes come first
 
-Decisions are gathered from seeds outward and ranked into ordered buckets, each sorted by
-recency (`valid_from` descending) within itself:
+Decisions are gathered from seeds outward and ranked into ordered buckets. Each source list
+(a seed entity, community/domain, peripheral entity, or global scope) is sorted by recency
+before it is appended; the implementation does not perform a second global recency sort across
+all sources in the same bucket.
 
 | Bucket | Section | Contents |
 |---|---|---|
@@ -154,20 +156,19 @@ not the other way around.
 A `Fact` rides the same `memory_chars` budget as decisions, spent strictly after them, in two
 forms:
 
-- **Inline evidence.** In buckets B-D, the moment a decision line is placed
-  (`rank_decisions.add()`), its live supporting facts (`store.facts_for_decision` — "live" =
-  status `accepted` or `proposed`, `valid_to` unset; a `superseded` fact never renders
-  inline, only its successor does, via its own anchors) render immediately as adjacent
-  `  evidence: <statement> [<source>]` lines directly under that decision, tagged
-  `[unratified]` when still `proposed` (a decision line can also carry `[drifted]` — see
-  the code-drift marker below). Bucket A (mistakes) defers this to a second pass
+- **Inline evidence.** In buckets B-D, the moment an accepted decision line is placed
+  (`rank_decisions.add()`), its live **accepted** supporting facts render immediately as
+  adjacent `  evidence: <statement> [<source>]` lines. A live proposed supporting fact is
+  quarantined in the final **Unratified proposals** section instead; a superseded fact does
+  not render. Bucket A (mistakes) defers accepted evidence to a second pass
   instead of rendering it immediately — see the mistakes-budget guarantee below for why.
   Either way, evidence lines degrade/drop with their decision under budget pressure — a fact
   only ever renders next to a decision that itself made the cut.
 - **The Known-facts bucket** (`## Known facts`, rendered right after `## Decisions`, ahead of
-  the structural map). Standalone facts — ones not already rendered inline under a decision
-  above — bound to a seed or peripheral entity, walked in the same seed-then-peripheral order
-  every other bucket uses, sorted by fact id for determinism. Populated only AFTER every
+  the structural map). Accepted standalone facts — ones not already rendered inline under a
+  decision above — bound to a seed or peripheral entity, walked in the same
+  seed-then-peripheral order every other bucket uses, sorted by fact id for determinism.
+  Proposed facts go to **Unratified proposals**. This bucket is populated only AFTER every
   decision bucket (A-D) and the superseded one-liners have already had first claim on the
   budget.
 
@@ -304,9 +305,10 @@ too (see [mind model](mind-model.md#how-domains-relate-to-engine-communities)).
 ### Rendering
 
 `TaskContext.render()` emits, in order: **Known mistakes & gotchas**, **Decisions** (with any
-inline `evidence:` lines nested under the decision they support), **Known facts** (standalone
-facts — see above), **Structural map** (the budgeted subgraph around the seeds, rendered as
-pointers — `- name (file_type) [file_path:line]`, never inlined code), then **Related**.
+accepted inline `evidence:` lines nested under the decision they support), **Known facts**
+(accepted standalone facts — see above), **Structural map** (the budgeted subgraph around the
+seeds, rendered as pointers — `- name (file_type) [file_path:line]`, never inlined code),
+**Related**, then **Unratified proposals**.
 Missing sections are omitted; an empty result renders `"No context found."`.
 
 ## See also

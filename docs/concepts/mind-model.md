@@ -187,7 +187,7 @@ Three ways to group decisions across entities exist now, and they answer differe
 |---|---|---|---|
 | **Tag** (`tag:<slug>`) | "which decisions carry this cross-cutting label?" | a bare slug, no prose | none — get-or-create, no ratification, no supersession |
 | **Domain** | "what is this named area of the system, and what do I need to know about it?" | slug + title + required WHY-IT-EXISTS summary + optional parent/communities/path_prefixes | full record: proposed → accepted, append-only supersession to revise |
-| **Initiative** | "which decisions belong to this piece of work?" | a name + optional description | flat container, no ratification gate of its own |
+| **Initiative** (`initiative:<label>`) | "which decisions belong to this piece of work?" | a Tier-0 label on captured decisions | flat grouping, no ratification gate of its own |
 
 A tag is the cheapest of the three — free-form text slugified into a durable entity at capture
 (`add_decision(tags=[...])`, or a draft's `tags` field), many-to-many, tier-0, no lifecycle to
@@ -196,7 +196,8 @@ describing *why performance work exists here* — that's what a domain's summary
 domain is the only one of the three that is itself ratified content: it has a required summary,
 it can be superseded, and it is what the TOC and `drill_down` are built from. An initiative
 groups decisions around a unit of *work* (a branch, a project) rather than a unit of the
-*system* — it has no summary field and nothing renders a description-first view of it the way
+*system*. Current capture paths implement it as an abstract entity and binding, not as an
+`Initiative` record with a description; nothing renders a description-first view of it the way
 `drill_down` does for a domain.
 
 ## See also

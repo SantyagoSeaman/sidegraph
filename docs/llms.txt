@@ -8,7 +8,7 @@
 ## Getting started
 
 - [getting-started/installation.md](getting-started/installation.md) — installing Sidegraph and its Graphify dependency
-- [getting-started/quickstart.md](getting-started/quickstart.md) — first decision captured and retrieved, end to end
+- [getting-started/quickstart.md](getting-started/quickstart.md) — one end-to-end path: graph, store, host plugin, anchored gotcha, retrieval, commit
 - [getting-started/bootstrap.md](getting-started/bootstrap.md) — preview-first onboarding from exactly six supported ADR/spec profiles, scan and review boundaries, recovery statuses, Claude Code/Codex completion matrix, local report privacy, and the four-stage demo-branch dogfood loop; the 10–15 minute launch target is unmeasured
 - [getting-started/claude-code-setup.md](getting-started/claude-code-setup.md) — wiring the MCP server and hooks into Claude Code
 - [getting-started/codex-setup.md](getting-started/codex-setup.md) — wiring Sidegraph into Codex
@@ -30,12 +30,12 @@
 ## Guides
 
 - [guides/capturing-decisions.md](guides/capturing-decisions.md) — recording decisions mid-session, the propose/ratify capture loop, and facts (the evidence layer): attached vs. standalone, falsifying with supersede_fact
-- [guides/naming-your-domains.md](guides/naming-your-domains.md) — the sidegraph:name-domains skill (agent-curated 2-3 domain-set pick) as the primary onboarding path, bootstrap → ratify as the scripted/CI alternative, tuning proposal volume, guardrails against over-broad path rules, doc-corpus per-document domains, recovering from a mass-drop
-- [guides/retrieval-in-sessions.md](guides/retrieval-in-sessions.md) — reading SessionStart context and get_task_context output day to day, including inline evidence: lines nested under decisions and the ## Known facts block
+- [guides/naming-your-domains.md](guides/naming-your-domains.md) — the sidegraph:name-domains skill as the primary onboarding path, bootstrap → ratify as the scripted alternative, tuning volume, membership guardrails, and recovery
+- [guides/retrieval-in-sessions.md](guides/retrieval-in-sessions.md) — reading SessionStart and get_task_context output, including accepted inline evidence, accepted standalone facts, and the final unratified block
 - [guides/surviving-refactors.md](guides/surviving-refactors.md) — rebuilding the graph, syncing anchors, healing stale decisions
 - [guides/team-workflow.md](guides/team-workflow.md) — the git-native store in a team: committing `.sidegraph/`, ratifying in PR review, branches merging silently vs. a same-record conflict, compaction as team hygiene, onboarding, disagreement
 - [guides/semantic-docs.md](guides/semantic-docs.md) — the two-pass (AST + LLM) workflow over docs, concept/rationale anchoring, and the sidegraph-import bootstrap walkthrough
-- [guides/verifying-your-setup.md](guides/verifying-your-setup.md) — a nine-case post-install checklist: domain onboarding, domain management, durability, mistakes-first retrieval, quiet capture, refactor survival, git-native merges, facts evidence and cascade, usage statistics
+- [guides/verifying-your-setup.md](guides/verifying-your-setup.md) — a four-case post-install checklist: host wiring, durable capture/retrieval, ratification with evidence, and sync/repository hygiene
 - [guides/ci-cd-maintenance.md](guides/ci-cd-maintenance.md) — three GitHub Actions recipes (anchor-health required check, store lint on PR, scheduled LLM triage) built on sidegraph-sync --check/sidegraph-verify/the heal-anchors playbook, plus the two hard rules (CI never ratifies; CI never auto-pushes canonical)
 
 ## Reference
@@ -43,10 +43,10 @@
 - [reference/mcp-tools.md](reference/mcp-tools.md) — all 24 MCP tools (including add_fact/supersede_fact, list_facts, sync_anchors, verify_store, add_anchors): parameters, return shape, when they're called
 - [reference/cli.md](reference/cli.md) — all fourteen commands documented on the page: sidegraph-bootstrap, sidegraph-init, sidegraph-ratify, sidegraph-sync (including --json/--check), sidegraph-import (rationale nodes and `--docs` markdown, including the profile scope filter and --any-doc), sidegraph-domains, sidegraph-compact, sidegraph-verify (snapshot + --against transition layer), sidegraph-doctor, sidegraph-viz, sidegraph-export-okf, sidegraph-stats (local usage statistics, `--window`/`--json`), sidegraph-prepare-commit-msg, and sidegraph-blame: flags, output, exit codes
 - [reference/hooks.md](reference/hooks.md) — sidegraph-session-start, sidegraph-stop, and sidegraph-pre-tool-use: env, JSON I/O, guarantees
-- [reference/git-bindings.md](reference/git-bindings.md) — commit trailers (sidegraph-prepare-commit-msg: candidate rules, the comment-char/auto degrade, the never-stall budget, install one-liners incl. the pre-commit framework stanza) and sidegraph-blame (trailer + provenance joins, superseded-record pointers, the 50-row/6000-char output cap)
+- [reference/git-bindings.md](reference/git-bindings.md) — commit trailers (candidate rules, comment-char handling, fail-open bounded stages, installation) and sidegraph-blame (trailer + provenance joins and output caps)
 - [reference/configuration.md](reference/configuration.md) — every environment variable (SIDEGRAPH_DIR primary, SIDEGRAPH_DB deprecated), store path resolution, budget defaults, graph version semantics, the domain sync/TOC cache
 - [reference/stability.md](reference/stability.md) — what is committed, provisional, or not a contract at all: the store format and CLI are committed, MCP return shapes and flow profiles are provisional, rendered retrieval text and archive segments are not a contract; plus the behaviours (mistakes-first, quarantine, drift marking, no egress) that stay guaranteed even where their surface is not
-- [reference/operations.md](reference/operations.md) — what runs when (session hooks ~350 ms, PreToolUse ~110 ms, index rebuild ~160 ms, graph rebuild ~8 s), disk footprint per record, the optional-graph boundary, CI wiring, and the scale questions this page cannot answer
+- [reference/operations.md](reference/operations.md) — what runs when, local writes and measured costs, the graph boundary, CI wiring, and unmeasured scale questions
 - [reference/store-format.md](reference/store-format.md) — the on-disk store contract: file-per-record canonical layout (including facts/), committed vs. derived, format marker, freshness/digest, archive segments, the 0.4.0→0.5.0→0.6.0 upgrades (community bindings now derived), append-only rules, merge semantics
 - [reference/releasing.md](reference/releasing.md) — how a release is cut: SemVer policy, every file that carries the version string, the pre-release checklist, the tag-driven publish.yml flow (test/build/publish jobs, the tag-to-version guard), the GitHub Release step, post-release checks, and the public-snapshot note
 
@@ -60,4 +60,4 @@
 
 ## Engineering whitepaper
 
-- [whitepaper/index.md](whitepaper/index.md) — the decision paper: what decision-provenance memory is, what the measurement programme established and failed to establish (including the corpus where memory cost +25.5% and answered worse), repository fit, a staged pilot with default stop conditions, and the exit story. Read this before installing.
+- [published whitepaper](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/whitepaper/index.md) — the decision paper generated in the public snapshot: what decision-provenance memory is, what the measurement programme established and failed to establish (including the corpus where memory cost +25.5% and answered worse), repository fit, a staged pilot with default stop conditions, and the exit story. Read this before installing.

@@ -7,12 +7,8 @@ The deep dive on how Sidegraph wires into Claude Code. For the copy-paste happy 
 
 Add to the target repo's `.mcp.json` (create it if absent):
 
-> **`@main` is a mutable ref.** Every `git+…@main` command on this page tracks the
-> branch: what you install today is not what you installed yesterday, and a `uvx` cache
-> refresh can change it under you. Fine for trying Sidegraph out; for anything you depend
-> on — CI, a shared team setup, a pilot you intend to measure — replace `@main` with a
-> commit SHA (`git+https://github.com/SantyagoSeaman/sidegraph@<sha>`) so the version is a
-> decision you made rather than whatever HEAD happened to be. See [`reference/stability.md`](../reference/stability.md) for what each surface promises.
+The commands below follow the current development branch. For durable environments, see
+[how to pin mutable development references](../getting-started/installation.md#mutable-development-references).
 
 ```json
 {
@@ -38,7 +34,8 @@ claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRA
 replace the `uvx --from git+...` invocation in either form above with `uv run --project
 /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp`.
 
-**Once Sidegraph is published to PyPI**, both shorten further — no git/checkout path needed:
+The released package is available from PyPI, so both shorten further — no git/checkout path
+needed:
 
 ```bash
 claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from sidegraph sidegraph-mcp
@@ -171,17 +168,12 @@ the recommended install path, and it works today, no PyPI publish required:
 /plugin install sidegraph@sidegraph
 ```
 
-> **Works without PyPI.** The plugin's bundled `.mcp.json`/`hooks.json`
-> (`plugin/sidegraph/.mcp.json`, `plugin/sidegraph/hooks/hooks.json`) run
-> `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp` —
-> installed straight from the repository, so the plugin is functional as soon as the repo
-> exists, PyPI or not. `uv` caches the build after the first run; a private repository works
-> too as long as your local git credentials can clone it (if you authenticate over SSH,
-> substitute `git+ssh://git@github.com/...` in the two files after installing). Once
-> Sidegraph publishes to PyPI, the commands switch to the package form (`uvx --from
-> sidegraph`), and the policy is to pin an exact `sidegraph==X.Y.Z` starting with the first
-> stable (1.0) release — pinning earlier would add a version axis that drifts during fast
-> iteration.
+> **Public and development manifests differ.** The marketplace receives
+> `plugin/sidegraph/.mcp.public.json` and `plugin/sidegraph/hooks/hooks.public.json`, renamed
+> to the canonical filenames during the public release. Those variants run `uvx --from
+> git+https://github.com/SantyagoSeaman/sidegraph.git@main …`, so the plugin deliberately
+> follows the public repository rather than the PyPI package. The unsuffixed files in this
+> development repository run the local checkout with `uv run --no-active` instead.
 
 ## Environment variables
 
@@ -210,9 +202,9 @@ Two mitigations, both config-level (no source change needed to use them):
 - **MCP servers**: `.mcp.json` supports a `"cwd"` field per server, but it is **not** part of
   Claude Code's documented MCP server schema (documented fields are `command`/`args`/`env`
   and a couple of transport-specific ones) — so the plugin doesn't actually rely on it to pin
-  the working directory. Instead, `plugin/sidegraph/.mcp.json` wraps the real command in a
-  shell that `cd`s into the project root first (`env` omitted below for brevity — the real
-  file also carries `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` there, same as the hook command below):
+  the working directory. Instead, the published `.mcp.json` (sourced from
+  `plugin/sidegraph/.mcp.public.json`) wraps the real command in a shell that `cd`s into the
+  project root first (`env` omitted below for brevity):
   ```json
   {
     "command": "sh",
@@ -224,8 +216,11 @@ Two mitigations, both config-level (no source change needed to use them):
   shell with the `uvx` process, so no extra process is left in between. The `"cwd"` field is
   kept alongside it as harmless belt-and-braces: if a future Claude Code version does start
   honoring it, that's a free bonus, not something the plugin depends on today.
-- **Hooks**: hook command entries have no `cwd`/`env` fields at all, so the command itself
-  carries a `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start` (the actual, current content of `plugin/sidegraph/hooks/hooks.json`; a source-checkout wiring would use `uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start` in its place instead).
+- **Hooks**: hook command entries have no `cwd`/`env` fields, so the public command carries a
+  `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from
+  git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start`. This is
+  the content of `plugin/sidegraph/hooks/hooks.public.json`; the release renames it to
+  `hooks.json`. The development variant uses `uv run --no-active` with the same prefix.
 
 Belt and braces: the hook entry points themselves also anchor relative
 `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` values to `CLAUDE_PROJECT_DIR` when Claude Code exports it,

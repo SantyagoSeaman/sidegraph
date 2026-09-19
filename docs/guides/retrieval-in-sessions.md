@@ -83,16 +83,17 @@ on — be concrete about the file or symbol so the retrieval has something to re
 
 ## Reading the output blocks
 
-`get_task_context` renders up to five Markdown sections, in this order, each one skipped
+`get_task_context` renders up to six Markdown sections, in this order, each one skipped
 entirely if empty:
 
 | Block | What it means |
 |---|---|
 | `## ⚠ Known mistakes & gotchas` | `gotcha`/`lesson`/`constraint` decisions bound directly to your seed entities, newest first. Read this first — these are the "someone already stepped on this" warnings. |
-| `## Decisions` | `adr` decisions bound directly to your seed entities, newest first — each with its own still-live supporting facts nested directly under it (see below). |
-| `## Known facts` | `Fact` records bound to your seed/peripheral entities that aren't already shown inline under a decision above — standalone evidence, not tied to any one decision you can see (see below). |
+| `## Decisions` | Accepted `adr` decisions bound directly to your seed entities — accepted supporting facts may nest under them. |
+| `## Known facts` | Accepted facts bound to seed/peripheral entities that were not already shown inline. |
 | `## Structural map` | The budgeted structural subgraph around your seeds (`- name (file_type) [path:line]`) — a map, not memory. |
-| `## Related` | Decisions reached indirectly: via a shared community, via a peripheral entity that showed up in the structural map, or scoped `global`; plus one-liner call-outs for superseded decisions on your seed entities (`~ tried, reverted 2026-01: ...`). |
+| `## Related` | Accepted decisions reached indirectly, plus one-line superseded history for seed entities. |
+| `## Unratified proposals` | Proposed decisions and facts, always after accepted memory and omitted by the proposal policy when required. |
 
 If nothing resolves at all, the tool returns the literal string `No context found.`
 
@@ -102,28 +103,27 @@ Each decision line looks like:
 - [gotcha] Use locks in Trader: lock around order placement (rejected: no lock, relied on GIL)
 ```
 
-`[unratified]` is appended to the tag when the underlying decision's status is still
-`proposed` — see below.
+Proposed records use the final quarantine block instead of the accepted sections above.
 
 ## Facts: inline evidence, and the `## Known facts` block
 
 A `Fact` you attached to a decision (its own `facts` list — see
 [`guides/capturing-decisions.md#facts-the-evidence-layer`](capturing-decisions.md#facts-the-evidence-layer))
-rides that decision's line: the moment a decision is rendered in `## ⚠ Known mistakes &
-gotchas`, `## Decisions`, or the community/peripheral/global entries under `## Related`, its
-still-live supporting facts render right under it, one indented line each. The one exception:
+rides that decision's line after both records are accepted: the moment an accepted decision is
+rendered in `## ⚠ Known mistakes & gotchas`, `## Decisions`, or `## Related`, its accepted
+supporting facts render right under it, one indented line each. A proposed fact is collected
+for `## Unratified proposals` instead. The one exception:
 the `~ tried, reverted 2026-01: ...` superseded one-liners also shown under `## Related` never
 get evidence — a reverted decision's evidence isn't useful at that tight, unbudgeted-for-detail
 tier.
 
 ```
-- [adr] Wrap httpx with an explicit retry policy for the exchange client: ...
-  evidence: httpx has no built-in retry — a transient 5xx is not retried automatically. [httpx docs, 'Timeouts and retries' section]
+- [adr] Wrap HTTPX with an explicit retry policy for the exchange client: ...
+  evidence: HTTPX HTTPTransport retries connection establishment errors, not HTTP 5xx responses. [HTTPX Transports documentation]
 ```
 
-Same convention as a decision's own tag, just moved inside the word: a still-`proposed` fact
-renders `  evidence [unratified]: ...` instead of `  evidence: ...`. And the mistakes-first
-guarantee holds here too — evidence is spent from the exact same character budget as
+The mistakes-first guarantee holds here too — accepted evidence is spent from the same
+character budget as
 decisions, strictly after them, so a fact can never eat the budget a **mistake** line needed;
 that's the one hard guarantee. It's narrower than "never displaces any decision," though:
 within `## Decisions`/`## Related`, an inline evidence line CAN still crowd out a
@@ -136,11 +136,11 @@ after `## Decisions`, ahead of the structural map:
 
 ```
 ## Known facts
-- fact: httpx has no built-in retry — a transient 5xx is not retried automatically. [httpx docs, 'Timeouts and retries' section]
+- fact: HTTPX HTTPTransport retries connection establishment errors, not HTTP 5xx responses. [HTTPX Transports documentation]
 ```
 
-Same tag, same rule, just on the `fact` word instead: `- fact [unratified]: ...` for one still
-awaiting `sidegraph-ratify`.
+Only accepted facts appear here. A proposed standalone fact appears in the final unratified
+block while the proposal policy allows it to surface.
 
 ## When `related`-via-community appears
 
@@ -166,17 +166,16 @@ A `propose_decisions` draft writes with `status="proposed"` immediately (unless
 `SIDEGRAPH_AUTO_ACCEPT=on`, in which case it lands `accepted` directly and carries no tag at
 all — see
 [`guides/capturing-decisions.md#4-auto-accept-opt-in`](capturing-decisions.md#4-auto-accept-opt-in))
-— and while it is **inside the surfacing window** it is not hidden from retrieval. It appears in both
-`get_task_context` and the raw `retrieve_decisions` MCP listing exactly like an accepted
-decision, except every rendered line carries an explicit `[unratified]` tag:
+— and while it is **inside the surfacing window** it remains visible, but quarantined.
+`get_task_context` places it after every accepted-memory section:
 
 ```
-- [gotcha] [unratified] Use locks in Trader: lock around order placement
+## Unratified proposals
+- [gotcha] Use locks in Trader: lock around order placement [unratified]
 ```
 
-The tag is the signal, not an exclusion: a proposed decision is genuinely useful to see
-immediately (the session that just ended might be the most relevant context for the very
-next session), but the tag tells you and the agent it hasn't been reviewed yet — treat it
+The section and tag both signal lower trust: a proposed decision can be useful immediately,
+but it cannot outrank accepted memory. Treat it
 as provisional until someone runs `sidegraph-ratify --accept` (see
 [`guides/capturing-decisions.md`](capturing-decisions.md)). Once ratified, the tag is gone
 and the line is indistinguishable from a manually recorded decision. A **dropped** proposal

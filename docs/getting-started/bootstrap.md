@@ -152,12 +152,8 @@ supported-document path against it:
 > cannot run today. This is the intended reproduction path once it ships; there is no working
 > substitute before then.
 
-> **`@main` is a mutable ref.** Every `git+…@main` command on this page tracks the
-> branch: what you install today is not what you installed yesterday, and a `uvx` cache
-> refresh can change it under you. Fine for trying Sidegraph out; for anything you depend
-> on — CI, a shared team setup, a pilot you intend to measure — replace `@main` with a
-> commit SHA (`git+https://github.com/SantyagoSeaman/sidegraph@<sha>`) so the version is a
-> decision you made rather than whatever HEAD happened to be. See [`reference/stability.md`](../reference/stability.md) for what each surface promises.
+This command follows the current development branch. For durable environments, see
+[how to pin mutable development references](installation.md#mutable-development-references).
 
 ```bash
 git clone --branch demo https://github.com/SantyagoSeaman/sidegraph.git sidegraph-demo

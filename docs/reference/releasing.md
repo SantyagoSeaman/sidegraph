@@ -34,50 +34,38 @@ that line was removed in 0.3.0, and this note replaces its row.
 
 `tests/test_codex_plugin.py` enforces that the two plugin manifests and
 `src/sidegraph/__init__.py` all agree with `pyproject.toml`; a release with a stale copy
-fails the test suite rather than shipping silently. Find any remaining stragglers before a
-release with `grep -rn "0\.1\.0" . --include=*.md --include=*.toml --include=*.py
---include=*.json` from the repo root (excluding `.venv/` and `uv.lock`), then substitute the
-actual current version. Historical mentions (old CHANGELOG entries, dated design notes, store
-`schema_version` fixtures) are not part of this list. Only the ones above assert the *current*
-package version.
+fails the test suite rather than shipping silently. Use `rg '<old-version>'` to find other
+mentions, then distinguish current-version claims from historical changelog, design, and
+schema-fixture references.
 
 ## Pre-release checklist
 
-Run from a clean `main`, in this order.
+Prepare the release on internal `main`, then run the clean-tree preflight:
 
-0. `uv run python tools/preflight_release.py`. Seconds, no network. It checks what the rest
-   of this checklist cannot: that every restatement of the version agrees with
-   `pyproject.toml`, that the changelog carries a dated heading with a fresh `[Unreleased]`
-   above it, that both checkouts are clean and on `main`, that the tag does not already
-   exist — and, above all, **which repository the tag belongs to**, derived from the
-   checkout rather than assumed. Add `--online` for the two remote lookups. It reports every
-   finding in one run rather than stopping at the first, so a release is prepared in one
-   sitting instead of five.
-
-1. `uv run pytest -q`. Full suite green.
-2. `uv run pre-commit run --all-files`. Lint, format, and types clean; this is exactly what
+1. Update `CHANGELOG.md`: keep a fresh empty `## [Unreleased]` first and add
+   `## [X.Y.Z] — YYYY-MM-DD` beneath it. Group changes using Keep a Changelog headings.
+2. Update every file in the version table above and any affected `docs/` page.
+3. `uv run pytest -q`. Full suite green.
+4. `uv run pre-commit run --all-files`. Lint, format, and types clean; this is exactly what
    CI runs, and now also gitleaks, zizmor, actionlint, and the shipped-surface/public-twin/
    docs-link checkers described in `CONTRIBUTING.md`.
-3. `CHANGELOG.md`: turn the `## [Unreleased]` heading (or, before the first release, the top
-   `## [0.1.0] — Unreleased` heading) into a dated release heading in the same style,
-   `## [X.Y.Z] — YYYY-MM-DD`, and add a fresh empty `## [Unreleased]` section above it for
-   whatever lands next. Follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/):
-   group entries under `Added`, `Changed`, `Fixed`, and so on. If no `## [Unreleased]`
-   heading survived from the previous release (0.1.0 through 0.2.0 shipped with none), write
-   the new dated heading directly above the previous release's own heading instead of
-   transforming anything, then add the fresh empty `## [Unreleased]` section above that, so
-   the placeholder exists again for next time.
-4. Confirm every file in the version table above already carries the new version, and that
-   any behaviour change shipping in this release has its matching page under `docs/` updated
-   in the same change (see `CONTRIBUTING.md`).
 5. `uv build`. Must succeed and produce both `dist/sidegraph-X.Y.Z.tar.gz` and
    `dist/sidegraph-X.Y.Z-py3-none-any.whl`.
 6. A real-install smoke test against the freshly built wheel, before anything is tagged:
    `uvx --from ./dist/sidegraph-X.Y.Z-py3-none-any.whl sidegraph-doctor --help`. This confirms
    the package actually installs standalone and its console scripts resolve, which `pytest`
    alone (running against the editable checkout) does not exercise.
+7. Commit the release preparation on internal `main`. Both the internal and public checkouts
+   must now be clean.
+8. Run `uv run python tools/preflight_release.py --online`. It verifies version agreement,
+   changelog shape, clean branches, target repository, and tag availability. Run it **after**
+   the release changes are committed: running it first can only report the work you have not
+   prepared yet.
+9. Cut the allowlisted public snapshot with
+   `tools/release-public.sh "release: vX.Y.Z" --push`. This creates and pushes the public
+   `main` commit that will receive the release tag. Refresh `demo` separately when required.
 
-Only once all six pass is the tree ready to tag.
+Only after all nine steps pass is the public snapshot ready to tag.
 
 ## Tag-driven publish flow
 
@@ -130,16 +118,20 @@ Green CI and a pushed tag are not proof the release actually works for a consume
 - The PyPI project page (`https://pypi.org/project/sidegraph/`) shows the new version.
 - `uv tool install sidegraph==X.Y.Z` (or `uvx --from sidegraph==X.Y.Z sidegraph-doctor
   --help`) succeeds against the real published package, not the local checkout.
-- The plugin marketplace path still installs from the tag it now points at:
+- The plugin marketplace path still installs from its intentional mutable `@main` source
+  (plugin manifests do not switch to the release tag):
   `/plugin marketplace add SantyagoSeaman/sidegraph` then `/plugin install
-  sidegraph@sidegraph` inside Claude Code.
+  sidegraph@sidegraph` inside Claude Code. This is the deliberate plugin exception to the
+  normal [pinning guidance](../getting-started/installation.md#mutable-development-references).
 
-The internal repo also carries a network-bound install smoke script
-(`tools/verify-release.sh`, not part of the public snapshot, see below) that exercises
+The internal maintainer checkout also carries a network-bound install smoke script
+(`tools/verify-release.sh`; it is intentionally absent from the public snapshot) that exercises
 `sidegraph-init`, `sidegraph-bootstrap --help`, an MCP `initialize` handshake, and the
-released plugin hooks' install ref, all against the real published source. It is deliberately
+public plugin hooks' `@main` install ref, all against the real published source. It is deliberately
 not wired into CI, since it clones and installs over the network. The maintainer runs it by
-hand after a push.
+hand after the snapshot push, using its default `main` ref. A tag argument tests package
+installation at that tag but cannot assert that mutable plugin refs changed to it, because
+they intentionally do not.
 
 ## The public snapshot
 

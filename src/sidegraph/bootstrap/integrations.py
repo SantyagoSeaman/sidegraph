@@ -49,6 +49,8 @@ def _command_strings(value: object) -> tuple[str, ...]:
             for key, child in current.items():
                 if key == "command" and isinstance(child, str):
                     commands.append(child)
+                elif key == "args" and isinstance(child, list):
+                    commands.extend(item for item in child if isinstance(item, str))
                 stack.append(child)
         elif isinstance(current, list):
             stack.extend(current)
@@ -150,7 +152,10 @@ def _verify_claude(root: Path) -> IntegrationResult:
 
 def _verify_codex(root: Path, codex_config: Path | None) -> IntegrationResult:
     mcp_path = codex_config or root / ".codex" / "config.toml"
-    hooks_path = root / ".codex" / "hooks" / "hooks.json"
+    hooks_path = root / ".codex" / "hooks.json"
+    legacy_hooks_path = root / ".codex" / "hooks" / "hooks.json"
+    if not hooks_path.is_file() and legacy_hooks_path.is_file():
+        hooks_path = legacy_hooks_path
     mcp_config, mcp_invalid = _load_toml(mcp_path)
     hooks_config, hooks_invalid = _load_json(hooks_path)
     mcp_status = _status(mcp_config, mcp_invalid, "sidegraph-mcp")

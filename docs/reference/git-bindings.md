@@ -84,7 +84,7 @@ permanent-wrong-attribution failure mode the whole comment-gate exists to preven
 a *different* character, so a hook that assumes `#` writes lines that are never actually
 comments). Degrading to "write nothing" beats guessing.
 
-### Never blocks, never stalls
+### Fail-open, bounded stages
 
 `git commit` must never fail, warn, or hang because this hook did:
 
@@ -96,8 +96,9 @@ comments). Degrading to "write nothing" beats guessing.
 - the index is **never rebuilt** inside the hook — a missing or unreadable `index.db`
   degrades to "write nothing" rather than attempting a first-commit-after-clone rebuild;
   a commit is not the place for that;
-- the whole candidate-collection pass is bounded by a 2-second wall-clock budget, past
-  which it gives up and writes nothing.
+- candidate collection checks a 2-second deadline between stages and gives up without writing
+  once it has expired. This is not a hard process deadline: an already-running git call (itself
+  capped at one second) or SQLite lock wait (0.5 seconds) is allowed to return first.
 
 ## `sidegraph-blame` — derived line-level "why"
 

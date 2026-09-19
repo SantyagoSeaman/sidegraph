@@ -2576,15 +2576,15 @@ def verify_store() -> dict:
     MCP counterpart to ``sidegraph-verify`` (design/superpowers/specs/
     2026-07-11-ci-integrity-design.md ruling 2).
 
-    READ-ONLY: this never writes anything, never touches ``index.db``, and never migrates
-    a legacy store -- it opens the canonical JSON files directly, the exact same pure-read
-    pass ``sidegraph-verify`` runs without ``--against``.
+    The snapshot pass itself is a pure read over canonical files. This MCP wrapper obtains
+    the ordinary already-open ``Store`` first, so store opening may create/rebuild
+    ``index.db`` or run a supported legacy migration before verification begins.
 
     Checks (snapshot layer, always everything below): every hot record file parses
     against its schema; ``schema_version`` is present and known; ``valid_to >=
     valid_from``; a ``superseded`` record has a successor (its ``supersedes`` chain
     resolves); every ``supersedes`` target exists; every binding references an existing
-    entity; every fact ``supports`` references an existing record; ULIDs are unique
+    entity; every fact ``supports`` references an existing decision; ULIDs are unique
     across hot files AND archive segments (byte-IDENTICAL archive-archive duplicates from
     a sanctioned cross-branch ``sidegraph-compact`` merge are exempt); archive segments
     parse as JSONL; every hot record file is named ``<its own internal id>.json``.

@@ -8,36 +8,18 @@ guided `sidegraph-bootstrap` in
 [`src/sidegraph/bootstrap/cli.py`](../../src/sidegraph/bootstrap/cli.py) — plus the MCP server
 (`sidegraph-mcp`) and the three Claude Code hook entry points (`sidegraph-session-start`,
 `sidegraph-stop`, `sidegraph-pre-tool-use`; see [`reference/hooks.md`](hooks.md)).
-`sidegraph-ratify`, `sidegraph-sync`,
-`sidegraph-import`, `sidegraph-domains`, `sidegraph-compact`, `sidegraph-verify`,
-`sidegraph-doctor`, `sidegraph-viz`, `sidegraph-export-okf`, `sidegraph-stats`, and
-`sidegraph-blame` take
-`--db`, naming the
-store **directory** (the canonical `.sidegraph/` layout — see
-[`reference/store-format.md`](store-format.md)); a
-legacy single-file `*.db` path is
-still accepted there too, and triggers a one-time migration into the directory layout (all but
-`sidegraph-stats`, which only reads `index.db`, never opens the store and so expects the
-directory to exist already). When `--db` is
-omitted, all of them resolve it through the same precedence — an explicit `--db` wins outright,
-otherwise `$SIDEGRAPH_DIR` if set, otherwise the deprecated `$SIDEGRAPH_DB` (a one-line
-deprecation notice prints to stderr the first time it's actually used), otherwise an existing
-`.sidegraph/` if present, otherwise the default `.sidegraph/` — printing a one-line warning to
-stderr if nothing resolved and a brand-new store is about to be created (only commands that
-would actually create one print it; the never-creating five below error out instead).
-`sidegraph-init` takes
-`--db` too but resolves the same way — see its section below for what differs (idempotent
-"already initialized" reporting). `sidegraph-verify`, `sidegraph-doctor`, `sidegraph-viz`,
-`sidegraph-export-okf`, and `sidegraph-stats` also resolve `--db` the same way but differ in the *opposite*
-direction from every other command here:
-none of them auto-creates a missing store — see [`sidegraph-verify`](#sidegraph-verify) (and
-[`sidegraph-doctor`](#sidegraph-doctor), which composes it) for why;
-[`sidegraph-viz`](#sidegraph-viz) and [`sidegraph-export-okf`](#sidegraph-export-okf) apply
-the same rule (rendering or exporting a store that isn't there helps no one), and
-[`sidegraph-stats`](#sidegraph-stats) reads only an existing index. `sidegraph-init`,
-`sidegraph-sync`, `sidegraph-import`, `sidegraph-domains bootstrap`, and `sidegraph-stats`
-additionally take `--graph`, defaulting to `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`. See
-[`configuration.md`](configuration.md) for full path-resolution semantics.
+Commands with `--db` use the shared path precedence documented in
+[`configuration.md`](configuration.md): explicit flag, `SIDEGRAPH_DIR`, deprecated
+`SIDEGRAPH_DB`, an existing `.sidegraph/`, then `.sidegraph`. Commands that construct a
+`Store` can migrate a supported legacy single-file `*.db` path and rebuild the derived index
+on open. `sidegraph-verify` and `sidegraph-doctor` instead inspect a canonical store directory
+directly; `sidegraph-stats` and `sidegraph-blame` read an existing `index.db` without opening
+the store. Do not rely on a read-oriented command to migrate legacy data.
+
+Health, visualization, export, and stats commands refuse a missing store instead of creating
+an empty one. Mutating commands warn before the shared resolver would create a new default
+store. Commands with `--graph` default to `$SIDEGRAPH_GRAPH` or
+`graphify-out/graph.json`; the individual sections state whether a missing graph is an error.
 
 ## `sidegraph-bootstrap`
 
@@ -176,32 +158,35 @@ sidegraph-ratify [--db PATH] [--accept ID ...] [--drop ID ...] [--all]
 | Flag | Default | Meaning |
 |---|---|---|
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated); warns on stderr if the resolved path doesn't exist yet (see above) |
-| `--accept ID ...` | `[]` | ratify these ids — decisions AND domains, routed by lookup (decision id checked first, then domain) |
+| `--accept ID ...` | `[]` | ratify these ids — decisions, standalone facts, or domains, routed by lookup |
 | `--drop ID ...` | `[]` | reject these ids — same routing as `--accept` |
-| `--all` | off | accept every currently pending proposal, decisions **and** domains (overrides `--accept`, computed from `store.iter_proposed()` + `store.iter_domains(status=proposed)` at run time — see the [naming guide](../guides/naming-your-domains.md#why-selective-not---all) for why `--all` on a large auto-bootstrapped domain batch is usually the wrong call) |
+| `--all` | off | accept every pending decision, standalone fact, and domain; a fact attached to a proposed decision rides that decision's cascade instead of being processed twice (see the [naming guide](../guides/naming-your-domains.md#why-selective-not---all) for why this is risky after a large domain bootstrap) |
 | `--graph` | `$SIDEGRAPH_GRAPH` → `graphify-out/graph.json` | read-only input used to resolve an accepted **domain's** membership immediately, the way the MCP `ratify` tool does. A relative path resolves against the STORE's project root, never the shell's CWD. Missing or unreadable is fine — the accept still lands and the membership heal is scheduled for the next `sidegraph-sync` |
 
-One gate for both authoring surfaces (decisions and [domains](../concepts/mind-model.md)) — see
+One gate for decisions, facts, and [domains](../concepts/mind-model.md) — see
 [mind model](../concepts/mind-model.md#domain-lifecycle).
 
 **No flags** (or `--accept`/`--drop`/`--all` all absent): lists every pending proposal
-human-readably, sectioned **"Decisions:"** then **"Domains:"** (each printed only when
-non-empty; domains render as `<id>  [domain] <slug> — <title>` with `summary:`/`paths:`/
+human-readably, sectioned **"Decisions:"**, **"Facts:"**, then **"Domains:"** (each printed
+only when non-empty). Proposed facts supporting a proposed decision are nested with that
+decision and omitted from the standalone Facts section because they ride its verdict.
+Domains render as `<id>  [domain] <slug> — <title>` with `summary:`/`paths:`/
 `communities:`/`from:` lines always present, plus a `parent:` line only when the domain has a
-parent (`parent_id` set) — `paths:`/`communities:` always render, `(none)` when empty rather
-than being omitted, so an over-broad membership rule is visible at this gate), or
-prints `No proposed decisions, facts, or domains pending ratification.` if there are none, followed by
-`N pending. Use --accept ID... / --drop ID... / --all.` (`N` = decisions + domains combined)
-when there are.
+parent (`parent_id` set). `paths:`/`communities:` always render, `(none)` when empty rather
+than being omitted, so an over-broad membership rule is visible at this gate. When the queue
+is empty the command prints `No proposed decisions, facts, or domains pending ratification.`;
+otherwise it ends with `N pending. Use --accept ID... / --drop ID... / --all.` (`N` counts
+decisions, standalone facts, and domains; nested facts are represented by their decision).
 
 **With `--accept`/`--drop`/`--all`:** prints one line per id — `accepted <id>` / `dropped
 <id>` on success, `error <id>: <message>` if the id isn't in a state that action allows, or
-doesn't resolve to either a decision or a domain at all. `--accept` always requires
-`proposed`, for either kind. `--drop` requires `proposed` for a **decision** (unchanged —
-an accepted decision is memory, not something you retire by dropping it; see
-[`concepts/mind-model.md`](../concepts/mind-model.md#domain-lifecycle) for why domains are
-different) but accepts `proposed` **or accepted** for a **domain** — retiring an
-already-accepted domain (e.g. to resolve a [cross-branch slug
+doesn't resolve to a decision, fact, or domain at all. Accepting or dropping a decision also
+prints one `accepted/dropped (evidence of <decision-id>) <fact-id>` line for every supporting
+proposed fact cascaded by that verdict. `--accept` always requires `proposed`. `--drop`
+requires `proposed` for a **decision or fact** (an accepted record is memory, not something
+you retire by dropping; supersede it instead) but accepts `proposed` or accepted for a
+**domain** —
+retiring an already-accepted domain (e.g. to resolve a [cross-branch slug
 conflict](store-format.md#merge-semantics-git-resolves-it-not-the-store)) is a legitimate,
 append-only-safe operation (the file stays, only its status flips to `dropped`). An id in
 both lists (or repeated) still just gets processed once per list, in `--accept` order then
@@ -212,7 +197,8 @@ dropping one mints nothing (an entity already minted by a prior accept is left a
 run, the `SessionStart` TOC cache is rebuilt immediately (no need to wait for the next
 `sidegraph-sync`) — see
 [retrieval: when the TOC goes live](../concepts/retrieval.md#when-the-toc-goes-live). A
-decisions-only run leaves the cache untouched.
+A run that changes no domain leaves the cache untouched; the next completed or skipped sync
+refreshes content-derived counts.
 
 **Exit code:** `0` on success — including the no-flags listing case and the case where every
 id passed to `--accept`/`--drop` succeeds. Returns `1` if the store can't be opened (e.g. an
@@ -415,7 +401,7 @@ Two independent importers behind one command, switched by `--docs` and/or `--pro
 | `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json` | graph.json path |
 | `--kind` | `adr` (rationale mode); auto per document (`--docs` mode — see below) | one of `adr`/`lesson`/`constraint`/`gotcha`; passed explicitly, pins every decision imported this run to that kind |
 | `--propose` | off | write as `proposed` (ratify gate) instead of `accepted` by default; a `--docs`-mode document whose own status reads as draft/pending review lands `proposed` regardless (see below); under a non-`manual` `SIDEGRAPH_RATIFY_POLICY` an eligible `--propose` write is auto-ratified at write time (see [configuration](configuration.md)) |
-| `--dry-run` | off | list what would be imported; write nothing to the store |
+| `--dry-run` | off | list candidates without writing canonical records; store open may still migrate supported legacy data or rebuild `index.db` |
 | `--limit N` | unlimited | cap the number processed (rationale nodes after `--path` filtering, or markdown files in `--docs` mode); must be `>= 0` |
 | `--path PREFIX` | none | only import rationales whose `file_path` starts with `PREFIX` (repeatable); **rationale mode only** — combining with `--docs` is a hard error |
 | `--docs PATH` | none | switch to markdown-import mode: `PATH` is a file or a directory (recursed for `*.md`); repeatable. Bare (no `PATH`) imports the active profile's ingest globs — `generic-adr`'s by default, or the profile named by `--profile` — see below |
@@ -662,7 +648,8 @@ skipped-anchor reasons indented underneath (`    anchor skipped: <name> (<reason
 followed by a blank line, `would import N decision(s), supersede M (...)` (same skip breakdown
 as the real-run line above), the status-derived-proposed line when applicable (`N would land
 proposed (...)`), the template-skip line and the degenerate-parent line above when
-applicable, and a per-file breakdown. Nothing is written to the store.
+applicable, and a per-file breakdown. No decision or binding is written; opening the store
+may still migrate supported legacy data or rebuild the derived index.
 
 **Exit code:** `0` on success, including an empty run and every `--dry-run` invocation.
 Returns `1` before touching the graph or store if `--profile` names an unknown profile
@@ -708,7 +695,7 @@ never does).
 | `--min-members N` | `5` | minimum anchorable member count for a community to be proposed; must be `>= 1` |
 | `--paths PREFIX` | none | only consider communities with >= 1 anchorable member whose `file_path` starts with `PREFIX` (repeatable) |
 | `--limit N` | `100` | cap the number of *significant* communities considered, after threshold/path filtering, in deterministic community-id order; must be `>= 0`; `0` means unlimited — the full list |
-| `--dry-run` | off | list what would be proposed; write nothing |
+| `--dry-run` | off | list candidates without writing domain records; store open may still migrate supported legacy data or rebuild `index.db` |
 
 One `Domain` draft per community at or above `--min-members` (counting only anchorable
 members): slug/title/summary come from the engine's community label
@@ -751,8 +738,8 @@ the number about to be proposed exceeds 50, `note: about to propose N domains �
 --min-members/--limit and ratify selectively`.
 
 **Output, `--dry-run`:** one line per candidate — `<community_id>: <slug> — <title>` — followed
-by `would propose N domain(s) (skipped: X existing, Y below threshold, Z filtered)`. Nothing is
-written. The same `--limit`-truncation note as above prints on stderr when it applies; the
+by `would propose N domain(s) (skipped: X existing, Y below threshold, Z filtered)`. No domain
+record is written. The same `--limit`-truncation note as above prints on stderr when it applies; the
 "ratify selectively" nag does not (dry runs are for tuning `--min-members`/`--limit` before
 committing to a real run — see the
 [naming guide](../guides/naming-your-domains.md#2-bootstrap-as-a-dry-run-first)).
@@ -811,7 +798,7 @@ sidegraph-compact [--db PATH] [--older-than N] [--dry-run]
 |---|---|---|
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated) |
 | `--older-than N` | unlimited | only compact records that have been in a terminal state for at least `N` days (uses a decision's `valid_to`; domains carry no terminal timestamp at all and are conservatively excluded — kept hot — whenever this flag is set); must be `>= 0` |
-| `--dry-run` | off | list what would be compacted (and any interrupted-prior-run leftovers that would be cleaned up); write nothing |
+| `--dry-run` | off | list candidates without creating a segment or removing hot files; store open may still migrate supported legacy data or rebuild `index.db` |
 
 Packs every **terminal**-status record — decisions `superseded`/`rejected`/`deprecated`,
 domains `superseded`/`dropped` — into a new immutable
@@ -890,8 +877,8 @@ on-disk layout this walks). Two layers, combined into one report:
   *changed* vs `GIT_REF` (compared against the current working tree — not two fixed
   points) against the store's own write-path rules, derived from `store.py` rather than a
   blanket "committed files never change" lint, which would be wrong: a real supersede
-  legally closes a predecessor, `ratify` legally flips statuses, `sidegraph-sync` legally
-  refreshes an entity's `descriptor`/community mapping, `sidegraph-compact` legally deletes
+  legally closes a predecessor, `ratify` legally flips statuses, `sidegraph-sync` may record
+  a durable leaf-file move in an entity descriptor, and `sidegraph-compact` legally deletes
   a hot file once archived. See "What's legally mutable" below for the exact table.
 
 **Violation codes** (the `code` field in `--json`'s `violations`, or the first column of a
@@ -929,12 +916,13 @@ not invented — see `verify.py`'s module docstring for the line-numbered deriva
   `proposed→rejected`, `proposed→superseded`, `accepted→superseded`. Everything else
   (`statement`, `source`, `supports`, `valid_from`, `supersedes`, `provenance`) is immutable.
 - **Domains:** `status` (`proposed→accepted`, `proposed→dropped`, `accepted→dropped`,
-  `proposed→superseded`, `accepted→superseded`, `dropped→superseded`), `communities`.
+  `proposed→superseded`, `accepted→superseded`, `dropped→superseded`). `communities` is
+  index-only and never appears in the canonical file.
   Everything else (`domain_id`, `slug`, `title`, `summary`, `parent_id`, `path_prefixes`,
   `seed_anchors`, `provenance`) is immutable.
-- **Entities:** `descriptor`, `last_seen_node_id`, `last_seen_graph_version`,
-  `last_seen_community`. Everything else (`entity_id`, `canonical_name`, `kind`) is
-  immutable.
+- **Entities:** `descriptor` may change when sync confirms a durable leaf-file move.
+  `last_seen_node_id`, `last_seen_graph_version`, and `last_seen_community` are index-only;
+  canonical `entity_id`, `canonical_name`, and `kind` are immutable.
 - **Bindings:** referential integrity only — any change to a `bindings/<record_id>.json`
   file, including deletion, is never flagged here (machine-managed payload; the snapshot
   layer's `dangling-binding-entity` check covers correctness of the new state).
@@ -956,12 +944,9 @@ lint on PR) and why the false positive happens.
 
 **Exit code:** `0` clean (snapshot layer, and the transition layer too when `--against` is
 given, report zero violations). `1` **operational error** — the store directory doesn't
-exist or isn't readable, `--against` names an unresolvable ref, or `--db` isn't inside any
-git repository at all (never a violation — see design ruling 2: "not-a-git-repo / unknown
-ref → operational error"). **This is the one command on this page that does NOT
-auto-create a missing store:** every other CLI here opens the store via `Store(...)`, which
-idiomatically creates an empty, schema-stamped store on first use; `sidegraph-verify` never
-constructs a `Store` at all, so a missing/non-directory `--db` raises instead — a lint has
+exist or isn't readable; when `--against` is present, an unresolvable ref or a store outside
+git is also operational error. Snapshot verification alone does not require git.
+`sidegraph-verify` never constructs a `Store`, so a missing/non-directory `--db` raises instead — a lint has
 nothing to lint if there's nothing to open, and silently reporting "clean" against a store
 it just created would be actively misleading in CI. `2` violations found (printed one line
 each as `<code>  <path>  <detail>`, or in `--json`'s `violations` list).
@@ -1002,8 +987,9 @@ never constructs a `Store`.
 - **Strict section** — `verify.verify_snapshot` (+ `verify.verify_against` when
   `--against` is given): exactly what `sidegraph-verify` runs, same violation codes (see
   [`sidegraph-verify`](#sidegraph-verify) above) and the same operational-error rules — a
-  missing store is never auto-created; a bad git ref or a store outside any git repo is
-  exit `1`, never a violation.
+  missing store is never auto-created. A bad git ref or a store outside any git repo is an
+  exit `1` operational error only when `--against` requests the git-backed transition layer;
+  the snapshot layer works without git.
 - **Advisory section** — `doctor.curate`: curation findings that never gate the exit code
   by default; `--check` escalates them to exit `2`, mirroring `sidegraph-sync --check`.
 
@@ -1064,8 +1050,8 @@ still protects a decision from a false flag.
 `clean` is `true` only when both `violations` and `findings` are empty.
 
 **Exit code:** `0` healthy — advisory findings alone stay `0` without `--check`. `1`
-operational error — same paths as `sidegraph-verify` (unreadable store, bad `--against`
-ref, store outside any git repo), plus a negative `--stale-days`, rejected before the
+operational error — same paths as `sidegraph-verify` (unreadable store; or, when `--against`
+is used, a bad ref or store outside any git repo), plus a negative `--stale-days`, rejected before the
 store is touched (same hard-usage treatment as `sidegraph-import --limit`). `2` strict
 violations, or — with `--check` — advisory findings too.
 
@@ -1081,7 +1067,7 @@ uv run sidegraph-doctor --against "$(git merge-base origin/main HEAD)"   # + tra
 
 ## `sidegraph-viz`
 
-Render a **read-only** interactive graph of the owned decision/fact store — a diagnostic view
+Render an interactive graph of the owned decision/fact store — a diagnostic view
 of what is anchored where, what is orphaned or degraded, and how supersede chains and
 fact→decision links look. It writes a self-contained offline HTML (vis-network is vendored
 inline — no network needed to open it) plus a machine-readable JSON sibling.
@@ -1101,7 +1087,8 @@ sidegraph-viz [--db PATH] [--out sidegraph-graph] [--open] \
   is reported (never silent). Default 800.
 - `--json` — print the `{nodes, edges, stats}` JSON to stdout and write no HTML.
 
-The command never writes to the store and never touches `graph.json`. Binding status
+Rendering does not mutate canonical records or `graph.json`. It opens the ordinary `Store`,
+so startup may migrate supported legacy data or rebuild `index.db`. Binding status
 (live/degraded/orphaned) reflects the last `sidegraph-sync`; run sync first for a fresh view.
 Exit code 0 on success (a store with problems still exits 0 — the problems are the output), 2
 on an operational error (uninitialized store or unwritable output path).
@@ -1307,8 +1294,10 @@ path plus git's own `<source>`/`<sha1>` positional args. Comments candidate
 records plus decisions anchored to files you've staged — for you (or your agent) to
 uncomment; never auto-appends one. Acts only when `<source>` is absent (a plain `git
 commit`) or `template`; every other source, and any internal error, leaves the message
-file untouched. Never blocks and never stalls: always exits `0`, bounded by a 2-second
-wall-clock budget and a read-only, short-timeout store open.
+file untouched. It always exits `0`, opens `index.db` read-only with a short lock timeout,
+and checks a two-second deadline between collection stages. That deadline is fail-open
+best effort, not a hard process kill: one already-running bounded git/SQLite operation may
+finish after it.
 
 ## `sidegraph-blame`
 

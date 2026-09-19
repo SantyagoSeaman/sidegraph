@@ -44,7 +44,7 @@ an ordinary, human-readable git conflict in one small JSON file — not a corrup
 | `Fact` — full row, incl. `status`/`valid_to` (non-derivable knowledge; falsification is supersession, same as a `Decision`) | — |
 | `Domain` — everything except `communities` | `AnchorBinding.status` (`live`/`degraded`/`orphaned`) |
 | `Entity` — `entity_id`/`canonical_name`/`kind`/`descriptor`, for every entity EXCEPT a `community:*` abstract entity (index-only — see below) | `Domain.communities` |
-| `AnchorBinding` set per decision — `entity_id`/`tier`/`relation`/`weight`, no `status`, EXCLUDING any binding whose entity is a `community:*` abstract entity | `toc_cache` (the `SessionStart` table-of-contents render) |
+| `AnchorBinding` set per decision or fact — `entity_id`/`tier`/`relation`/`weight`, no `status`, EXCLUDING any binding whose entity is a `community:*` abstract entity | `toc_cache` (the `SessionStart` table-of-contents render) |
 | `Initiative` — full row | the per-session capture ledger (`capture_sessions`, dedup markers) |
 | `archive/*.jsonl` segments (once compaction has run) | `last_synced_graph_version`, `schema_version`, the canonical-digest freshness stamp |
 | — | retrieval telemetry (`retrieval_shows`, `retrieval_seeds` — records that reached a render, areas that were asked about; see [Retrieval telemetry](#retrieval-telemetry) below) |
@@ -320,15 +320,13 @@ status — a `superseded`/`rejected` `Fact` is never packed into `archive/` the 
 
 **Filename shape:** `archive/<date>-<seq>-<hash12>.jsonl`, e.g.
 `archive/2026-07-08-1-a1b2c3d4e5f6.jsonl` — the date and a same-day sequence number, plus the
-first 12 hex characters of a sha256 over the segment's own content. The hash suffix exists
-specifically so two branches that both run `sidegraph-compact` on the same day, archiving
-*different* records, can never collide on a filename: different content always produces a
-different filename (both segments survive a merge as separate files, no conflict — the loader
-dedups any overlapping ULID between them), and identical content always produces the identical
-filename *and* bytes (also no conflict — trivially the same file arriving twice). A segment is
-published via exclusive-create and, once written, is **never rewritten** — publishing retries
-under the next sequence number in the rare case the exact name is already taken, rather than
-overwriting anything.
+first 12 hex characters of a sha256 over the segment's own content. The suffix makes accidental
+same-day branch collisions unlikely; it is a 48-bit prefix, not a mathematical uniqueness
+proof. A segment is published via exclusive-create and, once written, is **never rewritten**.
+If the target name is already taken — whether because of the sequence or a hash-prefix
+collision — publishing retries under the next sequence number rather than overwriting it.
+Identical content normally produces identical bytes and a matching hash suffix; the loader
+deduplicates overlapping ULIDs after branches merge.
 
 The loader reads hot files **and** every archive segment on every load, deduping by ULID (a
 record can legitimately appear in more than one segment — e.g. compaction run independently on
@@ -438,18 +436,19 @@ engine-coupling state — specifically, community labels — could still touch g
 - **No hard deletes, anywhere, ever.** No code path in `store.py` issues a file delete for a
   live record (only compaction removes a hot file, and only after the same content is durably
   archived — see above).
-- **Supersede = close + link, atomically.** `add_decision(decision)`, when `decision.supersedes`
-  is set, first loads the predecessor, sets its `valid_to` (to the max of its own `valid_from`
-  and the new decision's `valid_from`, if not already closed) and flips its `status` to
-  `superseded`, writes it, *then* writes the new decision — both committed files land in the
-  same call, so a `superseded` decision is never observed on disk without its successor already
-  present.
+- **Supersede = append successor, then close predecessor.** `add_decision(decision)`, when
+  `decision.supersedes` is set, validates the predecessor and writes the successor first. It
+  then sets the still-open predecessor's `valid_to` and flips it to `superseded`. Both writes
+  run under one serialized `Store._mutation`, but two canonical JSON replacements are not a
+  cross-file filesystem transaction. Successor-first ordering ensures an interrupted write
+  cannot durably close a predecessor before the successor exists; the tolerated failure shape
+  is two live records, which verification and a retry can resolve.
 - **Status transitions, not rewrites.** `ratify(id)` flips `proposed -> accepted`. `drop(id)`
   flips `proposed -> rejected` and closes `valid_to`. Both raise if the decision isn't
   currently `proposed`; decision *content* (`context`, `choice`, `rejected`, ...) is never
-  mutated after write, only `status`/`valid_to` and successor linkage — and every such
-  transition rewrites that one committed `decisions/<id>.json` file, it never touches any other
-  record's file.
+  mutated after write, only `status`/`valid_to` and successor linkage. A simple transition
+  rewrites that decision file; ratifying a deferred supersession may also close its predecessor,
+  and decision ratification/drop may cascade into supporting fact files as described next.
 - **Fact status transitions mirror a decision's.** `ratify_fact(id)`/`drop_fact(id)` flip a
   fact's own `status` the same way, and both raise if it isn't currently `proposed`. A fact
   never has to be ratified by hand just because it rides a decision, though: `ratify(id)`/
@@ -471,7 +470,8 @@ engine-coupling state — specifically, community labels — could still touch g
   `parent_id`, and `path_prefixes` live in the committed file and are never touched by sync.
 - Every write path also enforces the schema-level invariants from
   [data model](../concepts/data-model.md): `valid_to >= valid_from`; every `AnchorBinding`
-  must reference an existing `Entity` and `Decision` (`add_binding` raises otherwise);
+  must reference an existing `Entity` and an existing `Decision` or `Fact` (`add_binding`
+  raises otherwise);
   `Provenance` is always present on a `Decision`.
 
 ## What tools may and may not do to this store

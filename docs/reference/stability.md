@@ -37,17 +37,17 @@ changes it, we follow the host; that is the point of keeping the host seam thin.
 
 | Surface | Why it is not committed |
 |---|---|
-| **The MCP tool set and return shapes** (24 tools) | Still moving, demonstrably. `ratify_decisions` was deprecated before 1.0 shipped. `anchors_orphaned` was added on 2026-08-03 and gained a `reason` field the same day, both for good reasons. Tool *names* are stable in practice; return dicts gain keys. The latest: `ratified_by`/`auto_ratify_error` joined all three propose result shapes — `null` under the default policy, so the key set grew even where nothing else did. |
+| **The MCP tool set and return shapes** (24 tools) | Fields and tools may still be added or deprecated; `ratify_decisions` is already a deprecated alias. Pin a version if a client depends on an exact shape. |
 | **Flow profiles** — the six names and their ingest globs | `spec-kit`'s glob reads `specs/*/plan.md`, while that flow writes its rejected alternatives to `research.md`, which nothing reads. Fixing that changes a glob. |
 | **`doctor` finding codes** | Advisory lint; the set grows as checks are added. Guarded against the docs, not frozen. |
-| **Auto-ratification policy** — `SIDEGRAPH_RATIFY_POLICY`'s `auto-low-risk`/`auto-all` values and eligibility gates, the `, auto-ratified N` CLI summary segment, and `sidegraph-doctor`'s `auto share`/`auto supersede rate` lines | New, and not yet run on a real corpus: the supersede-rate signal it relies on is unmeasured, so the gates may tighten. `manual` stays the default and changes nothing. |
+| **Auto-ratification policy** — `SIDEGRAPH_RATIFY_POLICY`'s `auto-low-risk`/`auto-all` values and eligibility gates, the `, auto-ratified N` CLI summary segment, and `sidegraph-doctor`'s `auto share`/`auto supersede rate` lines | Eligibility and reporting may tighten. `manual` remains the committed default. |
 
 ### Not a contract
 
 | Surface | Why |
 |---|---|
-| **The text retrieval renders** — `[unratified]` / `[drifted]` markers, mistakes-first line format, budget splits, the `SessionStart` map layout | It is unversioned prose written for a model to read, and the delivery layer is this project's most active open question: between two releases 130 commits apart, the share of sessions that never call retrieval fell from 43% to 26%, with no single change able to take the credit (whitepaper §8.3), and a quarter still skip it. Expect it to keep changing. |
-| **Archive segment format** — `archive/<date>-<seq>-<hash>.jsonl` | Declared, implemented, and **never exercised**: `archive/` does not exist even in this project's own 173-decision store. A format nobody has run is not something to promise. |
+| **The text retrieval renders** — `[unratified]` / `[drifted]` markers, line format, budget splits, the `SessionStart` map layout | It is unversioned prose written for a model to read. Assert on structured records or tool return values, not formatting. |
+| **Archive segment format** — `archive/<date>-<seq>-<hash>.jsonl` | Implemented but still provisional; consumers should load records through Sidegraph rather than parse filenames. |
 | **`index.db`** — every table and column | Derived, gitignored, rebuilt from the canonical files whenever stale. It is a cache. Read the JSON. |
 
 ## Guarantees vs. the surfaces that express them
@@ -58,8 +58,8 @@ change; what it is telling you is not.
 
 | Committed behaviour | Expressed through (not a contract) |
 |---|---|
-| **Mistakes-first.** A gotcha or lesson about the code in hand ranks ahead of ADRs and constraints. The one hard ranking guarantee. | the order of lines in `get_task_context` output |
-| **Unratified memory cannot outrank ratified memory.** Proposed records are quarantined below all accepted memory on the five **delivery** surfaces: `get_task_context`, the thin queries, the `SessionStart` TOC, `drill_down`, and the `PreToolUse` nudge — and may stop rendering there entirely: outside the surfacing window (`SIDEGRAPH_PROPOSAL_WINDOW_DAYS`, default 30) or in regulated mode (`SIDEGRAPH_UNRATIFIED=off`). Withheld from rendering never means removed — the record stays in the store, in `sidegraph-ratify`, and in the SessionStart counter, which is exempt from both switches. `retrieve_decisions`/`list_facts` are raw listings, not ranked delivery — they are unranked and never tagged, but they are **not exempt from the policy**: since 2026-08-04 they apply the same surfacing window and regulated mode, so no agent-reachable read API returns unratified content that the two switches withhold. (Before that date they did return it — a reviewer correctly called the exemption a documented bypass of an advertised control.) | the `[unratified]` tag, where the block appears, and the window's default value |
+| **Mistakes-first.** Direct gotcha, constraint, and lesson records rank ahead of direct ADRs and related/global memory. | the order of lines in `get_task_context` output |
+| **Unratified memory cannot outrank accepted memory.** Proposed records render only in a final quarantine block and may be withheld entirely by the surfacing window or `SIDEGRAPH_UNRATIFIED=off`. Raw MCP listings apply the same policy. Withholding never deletes the record or removes it from the ratification queue. | the `[unratified]` tag, block placement, and default window |
 | **Memory signals its own decay.** A record anchored to code that changed since capture is marked, not silently served as current. | the `[drifted]` tag |
 | **Nothing leaves your machine.** No network calls, no remote telemetry. Optional local diagnostics live in the gitignored index and switch off with one variable. | `SIDEGRAPH_TELEMETRY` (the variable name is committed; the diagnostics tables are not) |
 

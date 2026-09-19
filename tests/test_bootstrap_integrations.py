@@ -70,6 +70,70 @@ def test_entrypoint_substrings_do_not_satisfy_a_supported_check(tmp_path: Path):
     assert result.mcp == "missing"
 
 
+def test_claude_mcp_entrypoint_in_args_is_verified(tmp_path: Path):
+    """Published uvx configs put the executable in args, not command."""
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    (tmp_path / ".mcp.json").write_text(
+        """{
+  "mcpServers": {
+    "sidegraph": {
+      "command": "uvx",
+      "args": ["--from", "sidegraph", "sidegraph-mcp"]
+    }
+  }
+}
+"""
+    )
+
+    result = verify_integration(tmp_path, HostKind.CLAUDE_CODE)
+
+    assert result.mcp == "verified"
+
+
+def test_codex_canonical_hooks_and_entrypoints_in_args_are_verified(tmp_path: Path):
+    """Codex supports project hooks at .codex/hooks.json and shell launchers."""
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    config = codex_dir / "config.toml"
+    config.write_text(
+        """[mcp_servers.sidegraph]
+command = "uvx"
+args = ["--from", "sidegraph", "sidegraph-mcp"]
+"""
+    )
+    (codex_dir / "hooks.json").write_text(
+        """{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash",
+        "args": ["-lc", "uvx --from sidegraph sidegraph-session-start"]
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash",
+        "args": ["-lc", "uvx --from sidegraph sidegraph-stop"]
+      }]
+    }]
+  }
+}
+"""
+    )
+
+    result = verify_integration(tmp_path, HostKind.CODEX, codex_config=config)
+
+    assert result.mcp == "verified"
+    assert result.session_start == "verified"
+    assert result.stop == "verified"
+    assert result.next_action is None
+
+
 def test_swapped_or_misplaced_claude_commands_do_not_verify_hook_events(tmp_path: Path):
     """Searching the whole hooks document makes event-specific checks meaningless."""
     from sidegraph.bootstrap.integrations import verify_integration

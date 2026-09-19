@@ -21,14 +21,14 @@ git commit -m "record: gotcha on Trader order-locking"
 
 `.sidegraph/index.db` (the local, derived query index) is **not part of that commit** — the
 store writes `.sidegraph/.gitignore` itself the first time it opens, so `index.db` and any
-crash-debris temp files never show up in `git status` in the first place. It holds nothing a
-teammate needs: everything in it is either recomputed from the committed files (a fresh
-`git clone` rebuilds it on first open) or re-derived from the engine's graph on the next sync.
-Losing it is a non-event.
+crash-debris temp files never show up in `git status` in the first place. Record/query state
+and anchor mappings are rebuilt from canonical files and the graph. Local retrieval/touch
+telemetry is not reconstructible; deleting the index loses those local statistics, but never
+loses the team's durable decisions or facts.
 
-The committed files under `decisions/`, `domains/`, `entities/`, `bindings/`, and
-`initiatives/` **are** the team's memory. Every fact lives in one of them, append-only. Never
-`.gitignore` those directories, and never treat them as disposable local cache the way you
+The committed files under `decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`, and
+`initiatives/`, plus optional `archive/` segments, **are** the team's memory. Never
+`.gitignore` those paths, and never treat them as disposable local cache the way you
 might Graphify's `graph.json` — that one really is regenerated on every build; the decision
 store is the opposite, deliberately durable, and is the one piece of Sidegraph's state that
 must survive a laptop being wiped.
@@ -143,11 +143,11 @@ This is explicit, human-run maintenance — run it on the default branch periodi
 every commit, and never from sync/retrieval/ratify (nothing calls it for you). It's also
 designed so it never causes the cross-branch pain the rest of this page is about: the segment
 filename bakes in a content hash, so two branches compacting on the same day, archiving
-different records, land two different filenames with no conflict; two branches that happen to
-compact the exact same record produce byte-identical output, so that "collides" on the same
-filename too, but the content is trivially identical, and the loader dedups any record ULID
-seen in more than one segment. Compaction never removes anything — records *move* into an
-archive segment, and stay retrievable exactly the way they were before.
+different records normally land different content-hash filenames; exclusive creation and a
+sequence retry prevent overwrites even in the unlikely event of a 48-bit hash-prefix
+collision. The loader deduplicates a record ULID seen in more than one segment. Compaction
+never removes a record — it *moves* into an archive segment and stays retrievable exactly
+the way it was before.
 
 ## The onboarding effect
 

@@ -45,13 +45,9 @@ Graphify itself, e.g. for Claude:
 uv tool install "graphifyy[anthropic]==<ver>" --force
 ```
 
-**Model choice.** Each backend has a default model (Claude: `claude-sonnet-4-6`, Gemini:
-`gemini-3-flash-preview`, OpenAI: `gpt-4.1-mini` at the time of writing) — override with
-`--model` or the backend's env var (`ANTHROPIC_MODEL`, `OPENAI_MODEL`). Concept extraction
-from prose is not a hard reasoning task: a cheaper tier such as
-`--model claude-haiku-4-5-20251001` typically cuts cost several-fold with little quality
-loss, and Gemini Flash is cheaper still. Start cheap; move up only if the extracted
-concepts look shallow on your corpus.
+**Model choice.** Backend defaults change faster than this guide. Pin `--model` (or the
+backend's model environment variable) when reproducibility matters. Start with a low-cost
+model and move up only if the extracted concepts look shallow on your corpus.
 
 **Cost and cache expectations.** Graphify keeps a per-file SHA cache: re-running `extract`
 only pays for files that actually changed, so the first run is the expensive one and every
@@ -93,7 +89,13 @@ design rationale, glossaries), the semantic pass is still the right tool — jus
 the engine's own advice: extract only that subfolder and merge, e.g.
 `graphify extract docs/architecture --backend claude` followed by `graphify merge-graphs`.
 
-To reset a graph after a noisy extract: `rm -rf graphify-out && graphify update .`.
+To rebuild after a noisy extract, use Graphify's supported overwrite path:
+
+```bash
+graphify update . --force
+```
+
+This preserves Graphify's managed output structure and avoids a broad recursive delete.
 
 ## What changes for anchoring
 

@@ -260,14 +260,18 @@ newer/future version, or an unrecognized string) is a hard rejection: use a fres
 
 ## `Initiative` — the Tier-0 grouping container
 
-Not a record type in its own right: a flat label a decision can be bound to at tier 0, so
-"everything decided during the retry-hardening work" is retrievable as a set even when
-those decisions touch unrelated code. Created implicitly at capture (a draft's
-`initiative` field, or the git branch name when one is not given).
+The high-level capture APIs use an initiative as a flat Tier-0 abstract entity named
+`initiative:<label>`. Passing a draft's `initiative` field creates that entity and binding;
+omitting it creates neither. Capture may derive the label from a branch before it reaches
+this step, but the storage layer does not do so implicitly.
+
+The `Initiative` model below is a separate low-level persisted record supported by
+`Store.upsert_initiative`. Current MCP capture paths do not create one, so do not expect an
+`initiatives/<id>.json` file merely because a decision has an `initiative:*` binding.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | ULID | Record identity. |
 | `name` | str | The label as written at capture — a branch name or a short phrase. |
 | `description` | str \| `null` | Optional one-liner; usually absent for branch-derived initiatives. |
-| `tags` | list[str] | Free-text tags, slugified into `tag:<slug>` entities like a decision's own. |
+| `tags` | list[str] | Stored strings on the low-level record; `upsert_initiative` does not slugify them or create `tag:*` entities. |

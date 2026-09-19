@@ -17,12 +17,8 @@ and AGENTS.md registered separately, for fine control or a source checkout).
 
 Inside a Codex CLI session, in that repo:
 
-> **`@main` is a mutable ref.** Every `git+…@main` command on this page tracks the
-> branch: what you install today is not what you installed yesterday, and a `uvx` cache
-> refresh can change it under you. Fine for trying Sidegraph out. For anything you depend
-> on, such as CI, a shared team setup, or a pilot you intend to measure, replace `@main`
-> with a commit SHA (`git+https://github.com/SantyagoSeaman/sidegraph@<sha>`) so the version
-> is a decision you made rather than whatever HEAD happened to be. See [`reference/stability.md`](../reference/stability.md) for what each surface promises.
+The commands below follow the current development branch. For durable environments, see
+[how to pin mutable development references](installation.md#mutable-development-references).
 
 ```
 /plugin marketplace add SantyagoSeaman/sidegraph
@@ -47,7 +43,7 @@ Skip to [Verify](#verify) once installed.
 
 ## Option B: manual registration
 
-Prefer explicit `config.toml`/`.codex/hooks/hooks.json` files (e.g. for review in a PR), or
+Prefer explicit `.codex/config.toml`/`.codex/hooks.json` files (e.g. for review in a PR), or
 want to point at a source checkout? Register the pieces yourself.
 
 ### 1. Register the MCP server
@@ -58,7 +54,7 @@ Via the CLI:
 codex mcp add sidegraph -- bash -lc "cd /ABSOLUTE/PATH/TO/your-repo && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp"
 ```
 
-Or add directly to `~/.codex/config.toml`:
+Or add it to the repo's `.codex/config.toml` (recommended for project-specific setup):
 
 ```toml
 [mcp_servers.sidegraph]
@@ -69,9 +65,10 @@ args = [
 ]
 ```
 
-`config.toml` is a single global file, not per-project, so the `cd` wrapper pins each
-registration to the repo whose `.sidegraph/` it should read — use a distinct
-`[mcp_servers.*]` name per repo if you wire up more than one.
+Codex also reads `~/.codex/config.toml`. Use the project file when the registration belongs
+to this repository; use the global file only when you intentionally want the server in every
+project. The `cd` wrapper remains useful in either scope because Sidegraph's relative paths
+must resolve against the repository whose memory it serves.
 
 ### 2. Tell the agent about Sidegraph
 
@@ -89,7 +86,7 @@ first. When you make a real decision or hit a hard-won gotcha, call `propose_dec
 
 ### 3. Add the hooks
 
-Create `.codex/hooks/hooks.json` in the repo:
+Create `.codex/hooks.json` in the repo:
 
 ```json
 {
@@ -125,9 +122,9 @@ working on a non-git corpus too (Sidegraph doesn't require the corpus to be a gi
 [`integrations/graphify.md`](../integrations/graphify.md#non-git-and-doc-only-corpora)), where a
 bare `git rev-parse --show-toplevel` would fail and leave `cd` with no argument.
 
-No `PreToolUse` entry is included above: Codex CLI's `PreToolUse` event (as of this writing)
-only intercepts Bash/patch/MCP tool calls, not file-read tools like `Read`/`Grep`, so Claude
-Code's Read/Grep redirect nudge
+No `PreToolUse` entry is included above. Codex can invoke that event for local function tools,
+but it has no stable `Read`/`Grep` tool pair to which Sidegraph's Claude-specific redirect can
+attach. Therefore Claude Code's Read/Grep redirect nudge
 (`sidegraph-pre-tool-use`) has no Codex counterpart to wire up yet — see
 [`integrations/codex.md`](../integrations/codex.md) for details.
 
