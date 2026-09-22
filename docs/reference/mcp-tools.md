@@ -77,9 +77,11 @@ current graph and multi-anchored (leaf + domain/community, plus an initiative Ti
 decision still writes, but the requested code anchors are skipped and both anchor feedback
 lists are empty. An anchor's optional `relation` (one of
 `creates`/`modifies`/`affects`/`deprecates`/`considered`, default `"affects"`) overrides the
-default on that anchor's leaf + Tier-1 bindings only; an invalid `relation` is rejected
-*before any write happens* — the whole call fails atomically rather than leaving a
-half-anchored decision behind.
+default on that anchor's leaf + Tier-1 bindings only. The anchor list is validated *before
+any write happens*: an invalid `relation`, a `name` or `file_path` that is not a string, or
+a non-empty list in which no anchor has a `name` fails the whole call atomically rather
+than leaving a half-anchored decision behind. In a list with at least one named anchor, an
+anchor without a `name` is skipped.
 
 `tags` are free-form labels, slugified (lowercase, spaces→`-`, `[a-z0-9-]` only) into durable
 `tag:<slug>` abstract entities (tier-0, many-to-many — a decision can carry several, and
@@ -163,7 +165,8 @@ the replacement instead **inherits the predecessor's bindings verbatim** — sam
 `entity_id`/`tier`/`status`, copied via `Store.add_binding` — since a reversal concerns the
 same entities the original decision did; task-seeded retrieval finds the successor everywhere
 it found the predecessor. The two paths are exclusive: passing `anchors` replaces inheritance,
-it never adds to it.
+it never adds to it. Explicit `anchors` are validated exactly like `add_decision`'s, before the
+successor is written or the predecessor closed.
 
 **Returns:** `{"id": str, "supersedes": str, "bindings": int, "entities": list[dict],
 "anchors_skipped": list[dict], "anchors_orphaned": list[dict], "redactions": int}` — same `bindings`/`entities`/
@@ -191,17 +194,17 @@ ratify hop, the same rationale `add_decision` uses. Only facts the code graph ca
 belong here: empirics (benchmarks, observed behavior), external constraints (API limits,
 library capabilities), trial-learned knowledge — never 'the code does X'.
 
-`statement` is the fact itself (1-2 sentences, hard-compact); `source` is the epistemics —
-how it's known ("benchmark run 2026-07-09", "httpx docs"). `supports` is a list of decision
-ids this fact informed; every id must already reference an existing `Decision` or the write
-raises `ValueError` before anything is committed. An anchorless fact additionally needs at
-least one supported decision that is still live (`proposed` or `accepted`); terminal-only
-support is rejected as unreachable. `anchors` is the same
-`{"name", "file_path", "relation"?}` ref shape `add_decision` takes, resolved against the
-current Graphify graph and multi-anchored (leaf + community, best-effort) when a reader is
-present. **With no graph present, an anchor still gets an ORPHANED Tier-2 leaf** — unlike
-`add_decision`, which silently *drops* anchors when there's no reader — so a fact never
-writes unreachable; the binding heals once a graph exists.
+`statement` is the fact itself (1-2 sentences, hard-compact); `source` is the epistemics — how
+it's known ("benchmark run 2026-07-09", "httpx docs"). `supports` is a list of decision ids
+this fact informed; every id must already reference an existing `Decision` or the write raises
+`ValueError` before anything is committed. An anchorless fact additionally needs at least one
+supported decision that is still live (`proposed` or `accepted`); terminal-only support is
+rejected as unreachable. `anchors` is the same `{"name", "file_path", "relation"?}` ref shape
+`add_decision` takes, resolved against the current Graphify graph and multi-anchored (leaf +
+community, best-effort) when a reader is present. **With no graph present, an anchor still gets
+an ORPHANED Tier-2 leaf** — unlike `add_decision`, which silently *drops* anchors when there's
+no reader — so a fact never writes unreachable; the binding heals once a graph exists.
+`anchors` are validated exactly like `add_decision`'s, before anything is written.
 
 Every text field (`statement`/`source`) is redacted first, same secret patterns as
 `add_decision`'s.
@@ -241,7 +244,9 @@ Anchoring mirrors `supersede_decision`'s two exclusive paths: pass `anchors` to 
 bind the successor to ONLY those refs (same no-graph orphaned-leaf fallback `add_fact`
 gives); omit `anchors` (the default) to **inherit the predecessor's bindings verbatim** —
 same `entity_id`/`tier`/`weight`/`relation`/`status`, *including* any `orphaned` ones,
-carried as-is. Passing `anchors` replaces inheritance; it never adds to it.
+carried as-is. Passing `anchors` replaces inheritance; it never adds to it. Explicit
+`anchors` are validated exactly like `add_decision`'s, before the successor is written or
+the predecessor closed.
 
 **Returns:** `{"id": str, "statement": str, "status": str, "redactions": int, "entities":
 list[dict], "anchors_skipped": list[dict], "anchors_orphaned": list[dict], "supersedes": str}` — same shape as `add_fact`'s
@@ -999,9 +1004,10 @@ intact (a record's content fields otherwise being immutable outside real status/
 transitions).
 
 Routing tries `record_id` as a decision, then as a fact; an id resolving to neither writes
-nothing and returns `{"error": "unknown record '<id>'"}` (never a guess). Relations are
-validated *before* anything is written, exactly like `add_decision`/`add_fact` — an invalid
-`relation` raises, and the whole call fails atomically rather than leaving a
+nothing and returns `{"error": "unknown record '<id>'"}` (never a guess). Anchors are
+validated *before* anything is written, exactly like `add_decision`/`add_fact`: an invalid
+`relation`, a `name` or `file_path` that is not a string, or a non-empty list in which no
+anchor has a `name` raises, and the whole call fails atomically rather than leaving a
 half-anchored write behind.
 
 Per anchor: resolved against the graph via the same `resolve_and_bind` ladder every other

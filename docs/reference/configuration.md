@@ -61,9 +61,9 @@ Your old `SIDEGRAPH_DB=.sidegraph/decisions.db` config keeps working — it reso
 `.sidegraph/`. The exact dispatch rule, applied only when `SIDEGRAPH_DIR` is unset (this is
 also the moment a one-line deprecation notice prints to stderr, at most once per process):
 
-- **An existing legacy `*.db` FILE** (e.g. a pre-0.4.0 `decisions.db`) → passed through
+- **An existing legacy `*.db` FILE** (e.g. a legacy `decisions.db` from before schema 0.4.0) → passed through
   unchanged; `Store` migrates it to the canonical directory layout on open (see
-  [`reference/store-format.md`](store-format.md#migration-to-040-from-02x-and-03x)).
+  [`reference/store-format.md`](store-format.md#migration-to-schema-040-from-schema-02x-and-03x)).
 - **An existing DIRECTORY** (canonical layout or not) → used directly.
 - **A nonexistent path that looks like a file sitting inside a directory** (e.g. the classic
   `SIDEGRAPH_DB=.sidegraph/decisions.db` from before this wave) → rescued to its **parent**

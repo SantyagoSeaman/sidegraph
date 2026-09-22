@@ -16,9 +16,10 @@ Sidegraph is a local-only tool. Its entire data surface:
   (`.sidegraph/` by convention) — small, human-readable JSON record files meant to be
   committed to your repo, a derived and gitignored `index.db` (a local SQLite index
   rebuilt from those files for fast queries, never itself committed), a committed format
-  marker, and a `.gitignore` the store writes for itself. Opening a pre-0.4.0 single-file
-  store (`decisions.db`) triggers a one-time migration that renames the legacy file to
-  `decisions.db.migrated-backup` (kept, never deleted) alongside writing the new
+  marker, and a `.gitignore` the store writes for itself. Opening a legacy single-file
+  store (`decisions.db`, from before store schema 0.4.0) triggers a one-time migration
+  that renames the legacy file to `decisions.db.migrated-backup` (kept, never deleted)
+  alongside writing the new
   directory layout. Outside `.sidegraph/`, the only filesystem writes are the standard
   config snippets you install yourself (`.mcp.json`, hook entries) — Sidegraph touches
   nothing else. See [`docs/reference/store-format.md`](docs/reference/store-format.md)

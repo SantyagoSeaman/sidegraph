@@ -1,6 +1,6 @@
 {
   "name": "sidegraph",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Durable decision/lessons memory over your code graph — ADRs, gotchas, and constraints that survive refactors, retrieved mistakes-first.",
   "license": "Apache-2.0",
   "skills": "./skills/",

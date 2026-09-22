@@ -1,6 +1,6 @@
 """Migration of legacy (0.2.x / 0.3.x) single-file SQLite stores into the git-native
 file-per-record canonical layout (see
-docs/reference/store-format.md#migration-to-040-from-02x-and-03x). Legacy fixture dbs
+docs/reference/store-format.md#migration-to-schema-040-from-schema-02x-and-03x). Legacy fixture dbs
 are hand-crafted with raw sqlite3 (same technique the pre-rewrite schema_version gate
 tests used — see tests/test_schema_descriptor.py) so this suite never depends on an OLD
 copy of Store to produce them."""

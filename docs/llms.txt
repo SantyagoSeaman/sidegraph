@@ -47,7 +47,7 @@
 - [reference/configuration.md](reference/configuration.md) — every environment variable (SIDEGRAPH_DIR primary, SIDEGRAPH_DB deprecated), store path resolution, budget defaults, graph version semantics, the domain sync/TOC cache
 - [reference/stability.md](reference/stability.md) — what is committed, provisional, or not a contract at all: the store format and CLI are committed, MCP return shapes and flow profiles are provisional, rendered retrieval text and archive segments are not a contract; plus the behaviours (mistakes-first, quarantine, drift marking, no egress) that stay guaranteed even where their surface is not
 - [reference/operations.md](reference/operations.md) — what runs when, local writes and measured costs, the graph boundary, CI wiring, and unmeasured scale questions
-- [reference/store-format.md](reference/store-format.md) — the on-disk store contract: file-per-record canonical layout (including facts/), committed vs. derived, format marker, freshness/digest, archive segments, the 0.4.0→0.5.0→0.6.0 upgrades (community bindings now derived), append-only rules, merge semantics
+- [reference/store-format.md](reference/store-format.md) — the on-disk store contract: file-per-record canonical layout (including facts/), committed vs. derived, format marker, freshness/digest, archive segments, the schema 0.4.0→0.5.0→0.6.0 upgrades (community bindings now derived), append-only rules, merge semantics
 - [reference/releasing.md](reference/releasing.md) — how a release is cut: SemVer policy, every file that carries the version string, the pre-release checklist, the tag-driven publish.yml flow (test/build/publish jobs, the tag-to-version guard), the GitHub Release step, post-release checks, and the public-snapshot note
 
 ## Pilot kit

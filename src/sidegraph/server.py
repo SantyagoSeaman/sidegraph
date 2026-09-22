@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Literal, cast, get_args
 
 from fastmcp import FastMCP
+from pydantic import ValidationError
 
 from .anchoring import entity_summaries as _entity_summaries
 from .anchoring import orphan_reason, resolve_and_bind
@@ -138,7 +139,7 @@ def _load_reader() -> GraphifyReader | None:
 
 
 # The only legal AnchorBinding.relation values (Relation is a Literal, not an enum) — used
-# to validate `anchors[i]["relation"]` BEFORE any store write (see _validate_anchor_relations).
+# to validate `anchors[i]["relation"]` BEFORE any store write (see _validate_anchors).
 _VALID_RELATIONS = frozenset(get_args(Relation))
 
 
@@ -173,22 +174,32 @@ def _redact_fields(*fields: str | None) -> tuple[list[str | None], int]:
     return out, total
 
 
-def _validate_anchor_relations(anchors: list[dict] | None) -> None:
-    """Raise before ANY write when an anchor's `relation` isn't a legal value (M2 review
-    fold-in): without this, an invalid relation only surfaced when ``resolve_and_bind``
-    constructed the offending ``AnchorBinding`` — by which point the decision row (and any
-    earlier anchors in the same call) were already written, leaving a half-anchored
-    decision behind. Validating the whole batch up front keeps the write atomic: either
-    every anchor is legal and the decision writes with all of them, or nothing writes at
-    all.
+def _validate_anchors(anchors: list[dict] | None) -> None:
+    """Raise ``ValueError`` before any store write if the anchor list is invalid: an anchor's
+    ``relation`` is not a legal ``Relation``; a named anchor's ``(name, file_path)`` is not a
+    valid ``Descriptor``; or a non-empty list has no named anchor at all. Every anchor-taking
+    write path calls this first, so a call either writes with its anchors or writes nothing
+    (see design/superpowers/specs/2026-09-22-pre-write-anchor-validation-design.md).
     """
-    for raw in anchors or []:
+    if not anchors:
+        return
+    for raw in anchors:
         relation = raw.get("relation")
         if relation is not None and relation not in _VALID_RELATIONS:
             raise ValueError(
                 f"invalid relation {relation!r} for anchor {raw.get('name')!r}: must be "
                 f"one of {sorted(_VALID_RELATIONS)}"
             )
+        name = raw.get("name")
+        if name:
+            try:
+                Descriptor(name=name, file_path=raw.get("file_path"))
+            except ValidationError as e:
+                raise ValueError(
+                    f"invalid anchor {name!r}: name and file_path must be strings"
+                ) from e
+    if not any(raw.get("name") for raw in anchors):
+        raise ValueError("anchors: none of the given anchors has a name")
 
 
 def _require_fact_reachability(store, anchors: list[dict] | None, supports: list[str]) -> None:
@@ -197,7 +208,7 @@ def _require_fact_reachability(store, anchors: list[dict] | None, supports: list
     moment it lands — exactly the shape doctor's tightened ``dangling-record`` check (D4/D5/
     D6) would flag. A fact WITH an anchor is untouched.
 
-    Raise before ANY write, same discipline as ``_validate_anchor_relations`` above. Shared by
+    Raise before ANY write, same discipline as ``_validate_anchors`` above. Shared by
     ``_add_fact_impl`` and ``_supersede_fact_impl``'s no-anchors path — the two human-asked
     fact-writing entry points — mirroring ``capture.py``'s own anchorless-fact gate for the
     agent-initiated path (``_resolves_to_live_decision``, imported from there, is the one
@@ -229,7 +240,7 @@ def _add_decision_impl(
     layer: str | None = None,
 ) -> dict:
     """Testable core: redact, write the decision, then best-effort multi-anchor it (+ tag it)."""
-    _validate_anchor_relations(anchors)
+    _validate_anchors(anchors)
     # title/context/choice are required (non-Optional) here, so they're redacted directly
     # (keeps them typed `str`, not the `str | None` `_redact_fields` returns uniformly);
     # only the genuinely optional pair goes through `_redact_fields`.
@@ -393,7 +404,9 @@ def add_decision(
     decision is about (``relation`` optional: creates|modifies|affects|deprecates|
     considered, defaults to "affects"); each is resolved against the current Graphify graph
     and multi-anchored (leaf + domain/community [+ initiative]). Anchoring is best-effort:
-    with no graph present, the decision still writes.
+    with no graph present, the decision still writes. A malformed anchor list — an invalid
+    ``relation``, a non-string ``name``/``file_path``, or a non-empty list with no named
+    anchor — is rejected before anything is written, graph or not.
 
     Every text field (title/context/choice/rejected/consequences, and tag text before
     slugification) is redacted first — same secret patterns as the propose/import
@@ -475,6 +488,7 @@ def _supersede_decision_impl(
     stamps them too — ``graph_version`` from the reader when present, ``commit`` via the
     same best-effort ``git rev-parse HEAD`` (:func:`sidegraph.capture._capture_commit`).
     """
+    _validate_anchors(anchors)
     # See _add_decision_impl: title/context/choice are required, redacted directly (stays
     # `str`); only the optional pair goes through `_redact_fields` (returns `str | None`).
     title, n1 = redact(title)
@@ -571,6 +585,7 @@ def supersede_decision(
     verbatim instead — the successor concerns the same entities the original decision did,
     so it should be reachable via task-seeded retrieval everywhere the predecessor was.
     Passing ``anchors`` replaces inheritance; it never adds to it.
+    Explicit ``anchors`` are validated like ``add_decision``'s before anything is written.
 
     ``session_id``/``author`` (optional) and ``source`` (default ``"human"``, this tool's
     historical hardcoded value — pass ``"agent"`` when an agent calls this itself, e.g. off
@@ -671,7 +686,7 @@ def _add_fact_impl(
     ``add_fact(..., supports=[<terminal id>])`` wrote one born flagged by doctor's tightened
     ``dangling-record`` check. ``_require_fact_reachability`` closes both.
     """
-    _validate_anchor_relations(anchors)
+    _validate_anchors(anchors)
     _require_fact_reachability(store, anchors, supports or [])
     # statement/source are both required (non-Optional) — redact directly, same reasoning
     # as _add_decision_impl (keeps them typed `str`, not `_redact_fields`'s `str | None`).
@@ -801,7 +816,7 @@ def _supersede_fact_impl(
     predecessor = store.get_fact(old_fact_id)
     if predecessor is None:
         raise ValueError(f"unknown fact {old_fact_id!r}")
-    _validate_anchor_relations(anchors)
+    _validate_anchors(anchors)
     effective_supports = supports if supports is not None else predecessor.supports
     if not anchors and not store.bindings_for_record(old_fact_id):
         _require_fact_reachability(store, anchors, effective_supports)
@@ -2631,7 +2646,7 @@ def _add_anchors_impl(
 
     Routing: ``store.get_decision(record_id)``, else ``store.get_fact(record_id)``, else
     an error dict — never a raised exception, never a guess at which kind an id belongs
-    to. Relations are validated up front via ``_validate_anchor_relations``, before any
+    to. Anchors are validated up front via ``_validate_anchors``, before any
     binding is written — the same atomic-batch guarantee ``add_decision``/``add_fact``
     give: either every anchor in the call is legal and all of them bind, or nothing does.
 
@@ -2649,7 +2664,7 @@ def _add_anchors_impl(
     """
     if store.get_decision(record_id) is None and store.get_fact(record_id) is None:
         return {"error": f"unknown record {record_id!r}"}
-    _validate_anchor_relations(anchors)
+    _validate_anchors(anchors)
 
     bound: list[dict] = []
     orphaned: list[dict] = []
@@ -2699,8 +2714,9 @@ def add_anchors(record_id: str, anchors: list[dict]) -> dict:
 
     Routing tries ``record_id`` as a decision, then as a fact; an id that resolves to
     neither writes nothing and returns ``{"error": "unknown record '<id>'"}`` (never a
-    guess). Relations are validated before anything is written — an invalid ``relation``
-    raises, same as ``add_decision``/``add_fact``.
+    guess). Anchors are validated before anything is written — an invalid ``relation``, a
+    non-string ``name``/``file_path``, or a list with no named anchor raises, same as
+    ``add_decision``/``add_fact``.
 
     Returns ``{"record_id", "bound": [...], "orphaned": [...], "ambiguous": [...]}`` —
     ``bound``/``orphaned`` entries are ``{"entity_id", "canonical_name", "tier": 2}``

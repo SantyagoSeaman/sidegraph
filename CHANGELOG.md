@@ -7,6 +7,25 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-22
+
+### Fixed
+
+- **`supersede_decision` no longer half-applies when an anchor is invalid.** It wrote the
+  successor and closed the predecessor before checking the anchors, so an illegal `relation`
+  left an accepted successor with none, or only some, of its bindings: wholly or partly
+  invisible to task-seeded retrieval, and permanent in an append-only store. An anchor list
+  in which no anchor had a `name` reached the same state without any error.
+- **All five anchor-taking tools (`add_decision`, `supersede_decision`, `add_fact`,
+  `supersede_fact`, `add_anchors`) now validate the whole anchor list before their first
+  write.** An illegal `relation` is now rejected on every path; `supersede_decision` used to
+  accept it silently when no graph was present or the anchor had no `name`. Two cases are
+  newly rejected. The first is a `name` or `file_path` that is not a string, which used to
+  half-write on the fact paths and `add_anchors`, and on the decision paths whenever a graph
+  was present. The second is a non-empty list in which no anchor has a `name`, which used to
+  succeed while binding nothing. On `add_fact` it also bypassed the check that an anchorless
+  fact supports a live decision.
+
 ## [0.3.1] — 2026-09-19
 
 ### Fixed

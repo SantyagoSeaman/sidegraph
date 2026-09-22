@@ -254,7 +254,7 @@ written; a garbled row raises and leaves the legacy file untouched) into the can
 file-per-record layout, stamped at the running code's current `SCHEMA_VERSION`; the legacy
 file is renamed to `<name>.migrated-backup` (never deleted) rather than removed. Both `0.2.0`
 and `0.3.0` sources go through this same export, not a stamp-only rewrite — see
-[store format: migration to 0.4.0](../reference/store-format.md#migration-to-040-from-02x-and-03x)
+[store format: migration to schema 0.4.0](../reference/store-format.md#migration-to-schema-040-from-schema-02x-and-03x)
 for the full four-step sequence. Any other mismatch (a version older than `0.2.0`, a
 newer/future version, or an unrecognized string) is a hard rejection: use a fresh store.
 

@@ -347,7 +347,7 @@ compaction moves stays retrievable afterward — the append-only invariant holds
 
 Recommended on the default branch, as periodic team hygiene, not on every commit.
 
-## Migration to 0.4.0 (from 0.2.x and 0.3.x)
+## Migration to schema 0.4.0 (from schema 0.2.x and 0.3.x)
 
 Opening a legacy single-file SQLite store (`decisions.db`, or any store stamped
 `schema_version` `0.2.0`/`0.3.0`) triggers a one-time, fail-closed export into the canonical
