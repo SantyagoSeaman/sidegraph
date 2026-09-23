@@ -658,6 +658,72 @@ def test_cli_import_docs_dry_run_writes_nothing(tmp_path, capsys):
     assert list(store.iter_decisions()) == []
 
 
+# -- a file that is not valid UTF-8 is a named skip, not an aborted run
+# (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md D4) --------------------
+
+_CP1251_FIXTURE = "# Решение\n\nТекст не в UTF-8.\n".encode("cp1251")
+
+
+def test_cli_import_encoding_undecodable_file_named_and_run_continues(tmp_path, capsys):
+    graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
+    db = tmp_path / "t.db"
+    bad = tmp_path / "docs" / "0001-legacy.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(_CP1251_FIXTURE)
+    _write_md(tmp_path, "docs/0002-good.md", _adr_md("Use SQLite"))
+
+    rc = import_main(
+        ["--db", str(db), "--graph", str(graph), "--docs", str(tmp_path / "docs"), "--any-doc"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 file(s) skipped: not valid UTF-8, re-save as UTF-8 to import:" in out
+    assert f"  {bad}" in out
+    assert (
+        "imported 1 decision(s), superseded 0 (skipped: 0 existing, 0 unanchorable, "
+        "0 not-decision-shaped, 0 unparseable, 0 superseded-frontmatter, 0 outside-profile)" in out
+    )
+
+    store = Store(db)
+    assert len(list(store.iter_decisions())) == 1
+
+
+def test_cli_import_encoding_undecodable_file_named_in_dry_run(tmp_path, capsys):
+    graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
+    db = tmp_path / "t.db"
+    bad = tmp_path / "docs" / "0001-legacy.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(_CP1251_FIXTURE)
+    good = _write_md(tmp_path, "docs/0002-good.md", _adr_md("Use SQLite"))
+
+    rc = import_main(
+        [
+            "--db",
+            str(db),
+            "--graph",
+            str(graph),
+            "--docs",
+            str(tmp_path / "docs"),
+            "--dry-run",
+            "--any-doc",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 file(s) skipped: not valid UTF-8, re-save as UTF-8 to import:" in out
+    assert f"  {bad}" in out
+
+    # The good file's by_file line comes BEFORE the undecodable block -- both share the
+    # same two-space indent, and the block must come last or its lines would read as more
+    # undecodable files (D4).
+    by_file_idx = out.index(f"  {good}: 1")
+    block_idx = out.index("file(s) skipped: not valid UTF-8")
+    assert by_file_idx < block_idx
+
+    store = Store(db)
+    assert list(store.iter_decisions()) == []
+
+
 def test_cli_import_docs_missing_path_exits_one(tmp_path, capsys):
     graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
     db = tmp_path / "t.db"

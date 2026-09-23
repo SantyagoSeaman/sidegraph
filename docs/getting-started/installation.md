@@ -17,7 +17,8 @@ The `git+…@main` examples below track a mutable branch: a later `uvx` cache re
 install different code. That is useful while trying Sidegraph. For CI, shared setup, or a
 measured pilot, replace `@main` with a release tag or commit SHA, for example
 `git+https://github.com/SantyagoSeaman/sidegraph.git@<sha>`. The plugin marketplace is the
-exception: its public manifests intentionally track `main`. See
+exception: its public manifests intentionally track `main`, and the release process moves
+that `main` only when it cuts a release. See
 [`reference/stability.md`](../reference/stability.md) for the promises made by each surface.
 
 ## Install Sidegraph
@@ -54,11 +55,13 @@ PyPI package. See
 the integration details for [Claude Code](../integrations/claude-code.md#plugin-install-path)
 or [Codex](../integrations/codex.md#plugin-install-path).
 
-### Option C — uvx directly from git (latest / unreleased)
+### Option C — uvx directly from git
 
-Want the latest unreleased build, prefer manual wiring, or need an entry point outside Claude
-Code (e.g. `sidegraph-init` from a plain terminal)? Run it straight from the repository with
-[`uvx`](https://docs.astral.sh/uv/guides/tools/) — no persistent install, no local checkout:
+Prefer manual wiring, or need an entry point outside Claude Code (e.g. `sidegraph-init` from
+a plain terminal)? Run it straight from the repository with
+[`uvx`](https://docs.astral.sh/uv/guides/tools/), with no persistent install and no local
+checkout. `@main` moves only when a release is cut. For reproducibility, pin a tag or commit SHA instead
+(see "Mutable development references" above):
 
 ```bash
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init

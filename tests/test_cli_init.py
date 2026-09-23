@@ -366,6 +366,73 @@ def test_init_ratify_policy_flag_never_overwrites_an_existing_value(tmp_path, ca
     assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: "auto-all"}}
 
 
+_RESTART_HINT = "restart your Claude Code session"
+
+
+def test_init_written_policy_tells_the_user_to_restart_the_session(tmp_path, capsys, monkeypatch):
+    """A session started before init already has its MCP server running, and the server
+    reads the policy from its own environment, fixed at start: a freshly written value
+    reaches it only after a restart, so the write says so."""
+    monkeypatch.chdir(tmp_path)
+    db = tmp_path / ".sidegraph"
+    assert (
+        init_main(
+            [
+                "--db",
+                str(db),
+                "--graph",
+                str(tmp_path / "no.json"),
+                "--ratify-policy",
+                "auto-low-risk",
+            ]
+        )
+        == 0
+    )
+    assert _RESTART_HINT in capsys.readouterr().out
+
+
+def test_init_interactive_answer_tells_the_user_to_restart_the_session(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("\n"))
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    assert _RESTART_HINT in capsys.readouterr().out
+
+
+def test_init_existing_policy_prints_no_restart_hint(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"env": {RATIFY_POLICY_ENV_VAR: "auto-all"}}) + "\n")
+    db = tmp_path / ".sidegraph"
+    assert (
+        init_main(
+            ["--db", str(db), "--graph", str(tmp_path / "no.json"), "--ratify-policy", "manual"]
+        )
+        == 0
+    )
+    assert _RESTART_HINT not in capsys.readouterr().out
+
+
+def test_init_unwritable_settings_file_prints_no_restart_hint(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text("not json\n")
+    db = tmp_path / ".sidegraph"
+    assert (
+        init_main(
+            ["--db", str(db), "--graph", str(tmp_path / "no.json"), "--ratify-policy", "manual"]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "isn't valid JSON" in out
+    assert _RESTART_HINT not in out
+
+
 def test_init_no_settings_flag_skips_the_write_and_the_prompt(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.stdin", _FakeTTY("\n"))  # would answer if asked; must not be

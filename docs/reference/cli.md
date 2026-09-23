@@ -132,6 +132,11 @@ the Sidegraph checkout):
      `--ratify-policy VALUE` sets the value with no prompt, still never overwriting an
      existing one, for a fully scripted setup that wants an explicit answer.
 
+   When the value is written, the line after it says to restart the Claude Code session:
+   the Sidegraph MCP server reads the policy from the environment it started with, so a
+   server started before `sidegraph-init` keeps proposing under the old policy until the
+   session restarts.
+
    Whatever happens above, a host without `.claude/settings.json` (Codex CLI, CI) gets the
    equivalent as a plain `export SIDEGRAPH_RATIFY_POLICY=<value>` line. A settings-file
    problem never fails the store creation in step 1.
@@ -632,24 +637,39 @@ import on their own. Both the real run and `--dry-run` print an extra line whene
 `skipped_degenerate_parent > 0`: `N split parent(s) skipped as degenerate (echoed context
 or empty choice) — children imported on their own`.
 
+**A file that is not valid UTF-8 is skipped, named, and the run continues.** Every document
+is decoded as `utf-8-sig` — plain UTF-8, with a leading byte-order mark stripped when one is
+present. No encoding is guessed. A file whose bytes don't decode (for example, one saved in
+`cp1251`) is counted `skipped_undecodable` instead of raising and aborting the whole run.
+Both the real run and `--dry-run` print an extra block, last, whenever
+`skipped_undecodable > 0`:
+
+```
+N file(s) skipped: not valid UTF-8, re-save as UTF-8 to import:
+  path/to/bad-file.md
+```
+
 **Real run:** `imported N decision(s), superseded M (skipped: A existing, B unanchorable,
 C not-decision-shaped, D unparseable, E superseded-frontmatter, F outside-profile)`, followed
 by the status-derived-proposed line above when applicable, followed by the template-skip line
-and the degenerate-parent line above when applicable. A non-zero `F` is the profile scope
-filter, not a parse failure — see the `--any-doc` note under the flag table above. Under a
-non-`manual` `SIDEGRAPH_RATIFY_POLICY`: `imported N decision(s), superseded M, auto-ratified K
-(skipped: …)` — only fresh `--propose` writes that land as a new `proposed` record are
-eligible; status-derived and `superseded` re-imports never auto-ratify; each failed
-auto-ratify attempt prints `auto-ratify failure: <id>: <reason>` on stderr; `--dry-run`
-never carries the segment.
+and the degenerate-parent line above when applicable, and the undecodable-file block above
+last when applicable. A non-zero `F` is the profile scope filter, not a parse failure — see
+the `--any-doc` note under the flag table above. Under a non-`manual`
+`SIDEGRAPH_RATIFY_POLICY`: `imported N decision(s), superseded M, auto-ratified K (skipped:
+…)` — only fresh `--propose` writes that land as a new `proposed` record are eligible;
+status-derived and `superseded` re-imports never auto-ratify; each failed auto-ratify attempt
+prints `auto-ratify failure: <id>: <reason>` on stderr; `--dry-run` never carries the
+segment.
 
 **`--dry-run`:** one line per candidate — `<path>: [imported|superseded] <title>`, with any
 skipped-anchor reasons indented underneath (`    anchor skipped: <name> (<reason>)`) —
 followed by a blank line, `would import N decision(s), supersede M (...)` (same skip breakdown
 as the real-run line above), the status-derived-proposed line when applicable (`N would land
 proposed (...)`), the template-skip line and the degenerate-parent line above when
-applicable, and a per-file breakdown. No decision or binding is written; opening the store
-may still migrate supported legacy data or rebuild the derived index.
+applicable, and a per-file breakdown. The undecodable-file block above prints last, after
+the per-file breakdown. Both indent their lines by two spaces, so breakdown lines printed
+after the block would read as more undecodable files. No decision or binding is written; opening the
+store may still migrate supported legacy data or rebuild the derived index.
 
 **Exit code:** `0` on success, including an empty run and every `--dry-run` invocation.
 Returns `1` before touching the graph or store if `--profile` names an unknown profile
@@ -903,21 +923,28 @@ plain-text line):
 | `illegal-deletion` | transition | a record file — or an already-published archive segment — was deleted with no sanctioned reason. The one exception: a decision/domain whose id is present in an `archive/*.jsonl` segment in the new tree (a legitimate `sidegraph-compact`) |
 
 **What's legally mutable** (transition layer only; derived from `store.py`'s write methods,
-not invented — see `verify.py`'s module docstring for the line-numbered derivation):
+not invented — see `verify.py`'s module comment above the mutable-field tables for exactly
+which methods):
 
 - **Decisions:** `status` (only along a real transition — `proposed→accepted`,
   `proposed→rejected`, `proposed→superseded`, `accepted→superseded`, `accepted→deprecated`),
-  `valid_to` (`null → value`, once). Everything else (`title`, `kind`, `context`, `choice`,
-  `rejected`, `consequences`, `layer`, `valid_from`, `supersedes`, `provenance`) is immutable.
-- **Facts:** the same shape, `status`/`valid_to`, but **without** `accepted→deprecated`
-  — no live write path ever sets a fact `deprecated` (`schema.py`: "DEPRECATED unused for
-  facts", unlike the decision-side forward-compat carve-out above), so that jump is *not*
-  legal here and is flagged `illegal-status-jump` if it appears. Legal: `proposed→accepted`,
-  `proposed→rejected`, `proposed→superseded`, `accepted→superseded`. Everything else
-  (`statement`, `source`, `supports`, `valid_from`, `supersedes`, `provenance`) is immutable.
+  `valid_to` (`null → value`, once). `ratified_at`/`ratified_by` may be set once, when a
+  proposed record is accepted — even if it moves on to a later state (`superseded`) within the
+  same diffed range — and never changes again after that. Everything else (`title`, `kind`,
+  `context`, `choice`, `rejected`, `consequences`, `layer`, `valid_from`, `supersedes`,
+  `provenance`) is immutable.
+- **Facts:** the same shape, `status`/`valid_to`/the ratifier stamp, but **without**
+  `accepted→deprecated` — no live write path ever sets a fact `deprecated` (`schema.py`:
+  "DEPRECATED unused for facts", unlike the decision-side forward-compat carve-out above), so
+  that jump is *not* legal here and is flagged `illegal-status-jump` if it appears. Legal:
+  `proposed→accepted`, `proposed→rejected`, `proposed→superseded`, `accepted→superseded`.
+  Everything else (`statement`, `source`, `supports`, `valid_from`, `supersedes`,
+  `provenance`) is immutable.
 - **Domains:** `status` (`proposed→accepted`, `proposed→dropped`, `accepted→dropped`,
   `proposed→superseded`, `accepted→superseded`, `dropped→superseded`). `communities` is
-  index-only and never appears in the canonical file.
+  index-only and never appears in the canonical file. `ratified_at`/`ratified_by` may be set
+  once, when a proposed record is accepted — even if it moves on to a later state (`dropped`,
+  `superseded`) within the same diffed range — and never changes again after that.
   Everything else (`domain_id`, `slug`, `title`, `summary`, `parent_id`, `path_prefixes`,
   `seed_anchors`, `provenance`) is immutable.
 - **Entities:** `descriptor` may change when sync confirms a durable leaf-file move.
@@ -932,6 +959,21 @@ not invented — see `verify.py`'s module docstring for the line-numbered deriva
 - **Archive segments** (`archive/*.jsonl`): write-once — a brand-new segment (git status
   `A`) is legal; any modification or deletion of an already-published one is always
   illegal.
+
+A field an older file was written before its schema even had is simply absent from that
+file — whether its default is `null` (`Provenance.commit` today) or an empty list/object
+(`Domain.seed_anchors`/`path_prefixes` today). The next legal rewrite re-serializes the record
+and fills the field back in with that default. That alone is never a change: an absent field
+counts as the same value as an explicit `null` or an empty list/object, inside nested objects
+and inside the items of a list, everywhere this table calls a field immutable. A field whose
+default is a *non-empty* value (`Decision.scope`, `"repo"`) is **not** covered by this — an
+absent key there still reads as changed — but no file in this store lacks `scope` today.
+
+**Known limit:** `verify_against` compares only the net change across the whole diffed range
+(see "diffs the CURRENT WORKING TREE" below), not each intermediate commit. So a ratifier
+stamp appearing on a record that ends up `dropped`/`superseded` in that same range cannot be
+told apart from a record that was legally accepted and only later dropped or superseded — the
+store's own git history, not this lint, is the evidence for who ratified what and when.
 
 **`--against <ref>` diffs the CURRENT WORKING TREE against `<ref>`'s snapshot — not two fixed
 points in history.** Passing a moving branch name directly (`--against origin/main`) is only

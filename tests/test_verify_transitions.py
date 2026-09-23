@@ -26,7 +26,9 @@ from sidegraph.schema import (
     Decision,
     DecisionKind,
     Descriptor,
+    Domain,
     Entity,
+    Fact,
     Initiative,
     Provenance,
 )
@@ -437,6 +439,28 @@ def _decision() -> Decision:
     )
 
 
+def _fact(**overrides) -> Fact:
+    base = dict(
+        statement="httpx retries idempotent requests by default.",
+        source="httpx docs",
+        valid_from=datetime(2026, 1, 10, tzinfo=UTC),
+        provenance=Provenance(source="manual"),
+    )
+    base.update(overrides)
+    return Fact(**base)
+
+
+def _domain(**overrides) -> Domain:
+    base = dict(
+        slug="payments",
+        title="Payments",
+        summary="Order settlement.",
+        provenance=Provenance(source="manual"),
+    )
+    base.update(overrides)
+    return Domain(**base)
+
+
 def test_verify_against_clean_on_legal_supersede_commit(git_repo):
     store_dir = git_repo / ".sidegraph"
     with Store(store_dir) as s:
@@ -658,3 +682,347 @@ def test_verify_against_from_repo_subdirectory_with_relative_store_path(git_repo
     monkeypatch.chdir(sub)
     violations = verify_against(Path(".sidegraph"), "HEAD~1")
     assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
+
+
+# -- ratifier stamp (Rule A) + absent-equals-null (Rule B) ------------------------------------
+#
+# design/superpowers/specs/2026-09-23-verify-ratifier-stamp-design.md rev 2, §4. T1-T14 exercise
+# Rule A (the ratifier stamp `store.ratify`/`ratify_fact`/`ratify_domains` write on acceptance);
+# T15-T17 exercise Rule B (a field absent on one side and `null` on the other, at any nesting
+# depth, is not a change). Names: `test_ratifier_stamp_*` for T1-T14, `test_absent_equals_null_*`
+# for T15-T17. Git-backed tests monkeypatch `sidegraph.store._ratifier_identity` to a fixed
+# name, because the real one reads the process's own git identity.
+
+
+def test_ratifier_stamp_decision_proposed_to_accepted_stamps():
+    # T1
+    old = _decision_payload(status="proposed")
+    new = _decision_payload(
+        status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Tester"
+    )
+    assert classify_transition("decision", old, new) == []
+
+
+def test_ratifier_stamp_decision_ratified_by_stays_null():
+    # T2
+    old = _decision_payload(status="proposed")
+    new = _decision_payload(
+        status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by=None
+    )
+    assert classify_transition("decision", old, new) == []
+
+
+def test_ratifier_stamp_fact_proposed_to_accepted_stamps():
+    # T3
+    old = _fact_payload(status="proposed")
+    new = _fact_payload(
+        status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Tester"
+    )
+    assert classify_transition("fact", old, new) == []
+
+
+def test_ratifier_stamp_domain_proposed_to_accepted_stamps():
+    # T4
+    old = _domain_payload(status="proposed")
+    new = _domain_payload(
+        status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Tester"
+    )
+    assert classify_transition("domain", old, new) == []
+
+
+def test_ratifier_stamp_rejected_never_stamps():
+    # T5 -- guard: drop stamps nothing, so a stamp appearing alongside proposed->rejected
+    # stays illegal.
+    old = _decision_payload(status="proposed")
+    new = _decision_payload(
+        status="rejected", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Tester"
+    )
+    violations = classify_transition("decision", old, new)
+    assert len(violations) == 2
+    assert all(v.code == ILLEGAL_FIELD_CHANGE for v in violations)
+
+
+def test_ratifier_stamp_never_changes_once_set():
+    # T6 -- guard: an already-accepted record's stamp never changes again.
+    old = _decision_payload(
+        status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Alice"
+    )
+    new = _decision_payload(
+        status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Bob"
+    )
+    violations = classify_transition("decision", old, new)
+    assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
+    assert "ratified_by" in violations[0].detail
+
+
+def test_ratifier_stamp_requires_old_side_unset():
+    # T7 -- guard: the old side must be fully unset ("from unset") for a stamp to be legal.
+    old = _decision_payload(
+        status="proposed", ratified_at="2026-01-14T00:00:00+00:00", ratified_by="Alice"
+    )
+    new = _decision_payload(
+        status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Bob"
+    )
+    violations = classify_transition("decision", old, new)
+    assert len(violations) == 2
+    assert all(v.code == ILLEGAL_FIELD_CHANGE for v in violations)
+
+
+def test_ratifier_stamp_stampless_accept_is_not_this_checks_business():
+    # T8 -- guard: an accept with no stamp at all isn't this check's concern.
+    old = _decision_payload(status="proposed")
+    new = _decision_payload(status="accepted")
+    assert classify_transition("decision", old, new) == []
+
+
+def test_ratifier_stamp_ratify_cascade_over_committed_files(git_repo, monkeypatch):
+    # T9 -- git-backed: a proposed decision plus a supporting proposed fact; ratify cascades
+    # the stamp onto the fact too.
+    monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as s:
+        d = s.add_decision(_decision())
+        s.add_fact(_fact(supports=[d.id]))
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
+
+    with Store(store_dir) as s:
+        s.ratify(d.id)
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "ratify"], cwd=git_repo)
+
+    assert verify_against(store_dir, "HEAD~1") == []
+
+
+def test_ratifier_stamp_ratify_domains_over_committed_files(git_repo, monkeypatch):
+    # T10 -- git-backed: a proposed domain, ratified via ratify_domains.
+    monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as s:
+        dm = s.add_domain(_domain())
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
+
+    with Store(store_dir) as s:
+        s.ratify_domains(accept=[dm.domain_id])
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "ratify domain"], cwd=git_repo)
+
+    assert verify_against(store_dir, "HEAD~1") == []
+
+
+def test_ratifier_stamp_only_a_proposed_record_may_be_stamped():
+    # T11 -- guard: an accepted->accepted record picking up a stamp stays illegal.
+    old = _decision_payload(status="accepted")
+    new = _decision_payload(
+        status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Tester"
+    )
+    violations = classify_transition("decision", old, new)
+    assert len(violations) == 2
+    assert all(v.code == ILLEGAL_FIELD_CHANGE for v in violations)
+
+
+def test_ratifier_stamp_requires_ratified_at_set():
+    # T12 -- guard: ratified_by set with ratified_at still null is not a legal stamp.
+    old = _decision_payload(status="proposed")
+    new = _decision_payload(status="accepted", ratified_at=None, ratified_by="Tester")
+    violations = classify_transition("decision", old, new)
+    assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
+    assert "ratified_by" in violations[0].detail
+
+
+def test_ratifier_stamp_ratify_then_supersede_in_one_range(git_repo, monkeypatch):
+    # T13 -- git-backed, the PR #42 shape: ratify, then supersede, then commit once. The net
+    # diff is proposed->superseded (not proposed->accepted), so a rule keyed on
+    # `new.status == "accepted"` alone (rev 1) misses it -- Rule A must allow any status
+    # reached through accepted within the range.
+    monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as s:
+        d1 = s.add_decision(_decision())
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
+
+    with Store(store_dir) as s:
+        s.ratify(d1.id)
+        s.add_decision(
+            Decision(
+                title="v2",
+                kind=DecisionKind.ADR,
+                context="Context.",
+                choice="A revised choice.",
+                valid_from=datetime(2026, 2, 1, tzinfo=UTC),
+                supersedes=d1.id,
+                provenance=Provenance(source="manual"),
+            )
+        )
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "ratify and supersede"], cwd=git_repo)
+
+    assert verify_against(store_dir, "HEAD~1") == []
+
+
+@pytest.mark.parametrize("kind", ["fact", "domain"])
+def test_ratifier_stamp_runs_for_fact_and_domain_too(kind):
+    # T14 -- guard: the stamp check runs for facts and domains too, not only decisions.
+    payload_fn = {"fact": _fact_payload, "domain": _domain_payload}[kind]
+    old = payload_fn(
+        status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Alice"
+    )
+    new = payload_fn(status="accepted", ratified_at="2026-01-15T00:00:00+00:00", ratified_by="Bob")
+    violations = classify_transition(kind, old, new)
+    assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
+    assert "ratified_by" in violations[0].detail
+
+
+def test_absent_equals_null_provenance_commit_added_on_rewrite():
+    # T15 -- Rule B: an old file that predates Provenance.commit lacks the key; any rewrite
+    # re-serializes the model and adds it back as null. That alone must not read as a changed
+    # `provenance`.
+    old_provenance = {"source": "manual", "ref": None, "author": None, "session_id": None}
+    old = _decision_payload(status="accepted", valid_to=None, provenance=old_provenance)
+    new = _decision_payload(
+        status="superseded",
+        valid_to="2026-02-01T00:00:00+00:00",
+        provenance={**old_provenance, "commit": None},
+    )
+    assert classify_transition("decision", old, new) == []
+
+
+def test_absent_equals_null_still_catches_a_real_provenance_change():
+    # T16 -- guard: Rule B equates an absent key with an explicit null, never with a real
+    # value -- an old-format file's missing `commit` picking up an actual commit sha (not
+    # just the `null` a mere rewrite adds, see T15) is a genuine change.
+    old_provenance = {"source": "manual", "ref": None, "author": None, "session_id": None}
+    old = _decision_payload(provenance=old_provenance)
+    new = _decision_payload(provenance={**old_provenance, "commit": "def456"})
+    violations = classify_transition("decision", old, new)
+    assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
+    assert "provenance" in violations[0].detail
+
+
+def test_absent_equals_null_old_format_file_superseded_through_store(git_repo, monkeypatch):
+    # T17 -- git-backed: an accepted decision whose committed file lacks provenance.commit
+    # (deleted from the JSON before the first commit, reproducing an old-format record), then
+    # superseded through the store -- the supersede rewrites the file, and Provenance.commit
+    # reappears as null.
+    monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as s:
+        d1 = s.add_decision(_decision())
+        s.ratify(d1.id)
+        path = store_dir / "decisions" / f"{d1.id}.json"
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["provenance"]["commit"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "initial (old-format provenance)"], cwd=git_repo)
+
+    with Store(store_dir) as s:
+        s.add_decision(
+            Decision(
+                title="v2",
+                kind=DecisionKind.ADR,
+                context="Context.",
+                choice="A revised choice.",
+                valid_from=datetime(2026, 2, 1, tzinfo=UTC),
+                supersedes=d1.id,
+                provenance=Provenance(source="manual"),
+            )
+        )
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "supersede"], cwd=git_repo)
+
+    assert verify_against(store_dir, "HEAD~1") == []
+
+
+# -- Rule B, final panel: empty-container defaults and list recursion -----------------------
+#
+# The four-model final review found Rule B stopped one field short: an absent key was equated
+# only with `null`, and lists were compared whole (`==`). Two real cases: `Domain.seed_anchors`/
+# `path_prefixes` default to `[]`, not `null` (schema.py), so an old domain file written before
+# either field existed lacks the key entirely -- any rewrite (ratify_domains, supersede_domain)
+# serializes it back in as `[]`, and the old top-level-only `_same` read that as a changed
+# field. And a `seed_anchors` entry gaining a `file_path: null` the schema always had is a
+# change to the WHOLE `seed_anchors` list under a plain `==`, even though nothing inside that
+# entry actually changed.
+
+
+def test_absent_equals_null_old_format_domain_rewrite_is_clean(git_repo, monkeypatch):
+    # Git-backed, T17's shape: a domain file written before `seed_anchors`/`path_prefixes`
+    # existed (both keys deleted from the committed JSON before any rewrite) is accepted
+    # through `ratify_domains`, which rewrites the file and fills both back in as `[]`. That
+    # alone must not read as a changed field.
+    monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as s:
+        dm = s.add_domain(_domain())
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
+
+    path = store_dir / "domains" / f"{dm.domain_id}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["seed_anchors"]
+    del data["path_prefixes"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "old-format domain (no seed_anchors/path_prefixes)"], cwd=git_repo)
+
+    with Store(store_dir) as s:
+        s.ratify_domains(accept=[dm.domain_id])
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "ratify"], cwd=git_repo)
+
+    assert verify_against(store_dir, "HEAD~1") == []
+
+
+def test_absent_equals_null_recurses_into_list_items():
+    # Pure: a `seed_anchors` entry rewritten with a `file_path: null` the schema always had
+    # (Descriptor.file_path defaults to None -- see schema.py) is not a change to the entry,
+    # so it must not read as a change to the list, even though the two lists differ under a
+    # plain `==`.
+    old = _domain_payload(status="proposed", seed_anchors=[{"name": "e"}])
+    new = _domain_payload(
+        status="accepted",
+        seed_anchors=[{"name": "e", "file_path": None}],
+        ratified_at="2026-01-15T00:00:00+00:00",
+        ratified_by="Tester",
+    )
+    assert classify_transition("domain", old, new) == []
+
+
+# -- guards: Rule B still catches a real change, at the container and the list-item level ---
+
+
+def test_absent_equals_null_guard_absent_to_non_empty_list_is_flagged():
+    old = _domain_payload(seed_anchors=[])
+    del old["seed_anchors"]
+    new = _domain_payload(seed_anchors=[{"name": "e"}])
+    violations = classify_transition("domain", old, new)
+    assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
+    assert "seed_anchors" in violations[0].detail
+
+
+def test_absent_equals_null_guard_empty_list_to_non_empty_list_is_flagged():
+    old = _domain_payload(seed_anchors=[])
+    new = _domain_payload(seed_anchors=[{"name": "e"}])
+    violations = classify_transition("domain", old, new)
+    assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
+    assert "seed_anchors" in violations[0].detail
+
+
+def test_absent_equals_null_guard_list_item_value_changed_is_flagged():
+    old = _domain_payload(seed_anchors=[{"name": "e"}])
+    new = _domain_payload(seed_anchors=[{"name": "f"}])
+    violations = classify_transition("domain", old, new)
+    assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
+    assert "seed_anchors" in violations[0].detail
+
+
+def test_absent_equals_null_guard_different_list_length_is_flagged():
+    old = _domain_payload(seed_anchors=[{"name": "e"}])
+    new = _domain_payload(seed_anchors=[{"name": "e"}, {"name": "f"}])
+    violations = classify_transition("domain", old, new)
+    assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
+    assert "seed_anchors" in violations[0].detail

@@ -2,7 +2,9 @@
 ``SIDEGRAPH_``-prefixed variable may reach a test's ``os.environ`` just because the
 process pytest itself runs in already had one -- from the developer's shell, or from
 the repo's committed ``.claude/settings.json`` (``env.SIDEGRAPH_RATIFY_POLICY``, since
-ebbd93e). A test that wants a variable must set it explicitly with ``monkeypatch``.
+ebbd93e). A test that wants a variable must set it explicitly with ``monkeypatch``
+(except the sandbox-hygiene guards, which check the ambient environment on purpose; see
+conftest.py).
 
 Without the autouse fixture in ``conftest.py``, this goes red as soon as the *outer*
 process exports a ``SIDEGRAPH_`` variable before pytest's own per-test fixtures ever

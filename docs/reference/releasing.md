@@ -58,14 +58,40 @@ Prepare the release on internal `main`, then run the clean-tree preflight:
 7. Commit the release preparation on internal `main`. Both the internal and public checkouts
    must now be clean.
 8. Run `uv run python tools/preflight_release.py --online`. It verifies version agreement,
-   changelog shape, clean branches, target repository, and tag availability. Run it **after**
-   the release changes are committed: running it first can only report the work you have not
-   prepared yet.
+   changelog shape, clean branches, and target repository, and that `vX.Y.Z` is not already
+   tagged in the **internal** checkout or its origin. Run it **after** the release changes are
+   committed: running it first can only report the work you have not prepared yet.
 9. Cut the allowlisted public snapshot with
    `tools/release-public.sh "release: vX.Y.Z" --push`. This creates and pushes the public
-   `main` commit that will receive the release tag. Refresh `demo` separately when required.
+   `main` commit that will receive the release tag. `--push` itself refuses unless `vX.Y.Z`
+   is untagged in the **public** repository and `CHANGELOG.md` dates it (see "The public
+   main moves only at releases" below). Refresh `demo` separately when required.
 
 Only after all nine steps pass is the public snapshot ready to tag.
+
+### The public main moves only at releases
+
+Every plugin manifest installs from the public repository's `main`, and `uv` re-resolves that
+branch reference on every call, so pushing `main` reaches every plugin user at once. For that
+reason the public `main` moves only as part of a release: `tools/release-public.sh --push`
+refuses to push it unless the version being published is untagged in the public repository
+and `CHANGELOG.md` dates it, checked before anything is written and again right before the
+push. A docs-only or other non-release change waits for the next release, or ships in an
+urgent patch release.
+
+Two consequences follow. First, bump the version in `pyproject.toml` and date its
+`CHANGELOG.md` heading only as part of release preparation (steps 1 and 2 above). Once both
+are on `main`, every snapshot counts as a release until the tag exists, so doing them ahead of
+the release defeats the guard. Second, re-cutting a version whose tag-driven publish failed still needs
+its tag deleted in both the public checkout and its origin before the next `--push`;
+otherwise the push is refused.
+
+Between the release-preparation commit and the tag, every `--push` is a re-cut of that same
+release, and the tag goes on the last one. Tag promptly after the push, so the window stays
+short.
+
+Never push the public `main` by hand: the gate lives in `tools/release-public.sh`, and a
+manual `git push` from the public checkout bypasses it.
 
 ## Tag-driven publish flow
 

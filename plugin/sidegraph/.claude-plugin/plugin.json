@@ -1,7 +1,7 @@
 {
   "name": "sidegraph",
   "displayName": "Sidegraph",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Durable decision/lessons memory over your code graph — ADRs, gotchas, and constraints that survive refactors, retrieved mistakes-first.",
   "author": { "name": "SantyagoSeaman", "url": "https://github.com/SantyagoSeaman" },
   "homepage": "https://github.com/SantyagoSeaman/sidegraph",

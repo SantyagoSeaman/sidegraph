@@ -56,9 +56,10 @@ only ever reads `graph.json`, so the plain install above is all it needs.
 uv tool install sidegraph        # from PyPI — puts sidegraph-init / sidegraph-mcp / … on PATH
 sidegraph-init
 
-# Prefer the latest unreleased build straight from git instead of PyPI? Swap step 3 for:
+# Prefer running straight from git instead of PyPI? Swap step 3 for:
 #   uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
-#   `@main` is a mutable ref — it moves under you. Pin a tag or a SHA for CI.
+#   `@main` moves only when a release is cut. It is still a mutable ref: a later cache refresh can
+#   install a newer one. Pin a tag or a SHA for CI.
 ```
 
 4. **Name your domains** — turns the graph's communities into a described table of

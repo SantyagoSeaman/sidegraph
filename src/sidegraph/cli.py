@@ -145,6 +145,12 @@ def _report_ratify_policy_write(
     which already know `value` (whatever they decided to write) before calling this."""
     if result.outcome == "written":
         print(f"wrote {rel_settings}: env.{RATIFY_POLICY_ENV_VAR}={value}")
+        # The MCP server reads the policy once, from the environment it started with; a
+        # server already running keeps proposing under the old value.
+        print(
+            "  restart your Claude Code session so the Sidegraph MCP server picks it up: "
+            "a running server keeps the environment it started with"
+        )
     elif result.outcome == "already_set":
         print(
             f"{rel_settings} already sets "
@@ -923,6 +929,16 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
             )
         for fp, n in sorted(report.by_file().items()):
             print(f"  {fp}: {n}")
+        # D4 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): printed
+        # LAST. The by_file lines share the block's two-space indent, so any printed after
+        # the block would read as more undecodable files.
+        if report.skipped_undecodable:
+            print(
+                f"{report.skipped_undecodable} file(s) skipped: not valid UTF-8, re-save as "
+                "UTF-8 to import:"
+            )
+            for fp in report.undecodable_files:
+                print(f"  {fp}")
         return 0
 
     # Design D6: the count is added to the non-dry-run summary line only, only when the
@@ -954,6 +970,16 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
             f"{report.skipped_degenerate_parent} split parent(s) skipped as degenerate "
             "(echoed context or empty choice) — children imported on their own"
         )
+    # D4 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): printed last
+    # on stdout, after the degenerate-parent line — the auto-ratify-failures loop below
+    # goes to stderr, so this stays the last stdout line either way.
+    if report.skipped_undecodable:
+        print(
+            f"{report.skipped_undecodable} file(s) skipped: not valid UTF-8, re-save as "
+            "UTF-8 to import:"
+        )
+        for fp in report.undecodable_files:
+            print(f"  {fp}")
     for entry in report.auto_ratify_failures:
         print(f"auto-ratify failure: {entry}", file=sys.stderr)
     return 0

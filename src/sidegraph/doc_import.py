@@ -290,11 +290,8 @@ class _DocDisposition:
 class DocImportReport(BaseModel):
     """Counts (+ dry-run-only listing) for one ``import_docs`` run. Mirrors
     ``importer.ImportReport``'s shape, widened for doc-import's extra outcomes: a doc can
-    be *superseded* (edited since its last import) as well as freshly *imported*, and can
-    be skipped for four distinct reasons (existing/unanchorable/not-decision-shaped/
-    unparseable) plus a fifth doc-import-only reason (superseded/deprecated frontmatter —
-    a history doc, never (re-)imported as live) and a sixth (a document TEMPLATE — see
-    ``skipped_template``)."""
+    be *superseded* (edited since its last import) as well as freshly *imported*, and each
+    reason a document can be skipped for has its own ``skipped_*`` counter below."""
 
     imported: int = 0
     superseded: int = 0
@@ -332,6 +329,15 @@ class DocImportReport(BaseModel):
     # `any_doc=True` was NOT passed and at least one enumerated file falls outside the
     # profile's globs (the CLI's `--any-doc` flag restores today's no-filter behavior).
     skipped_outside_profile: int = 0
+    # design/superpowers/specs/2026-09-23-doc-import-encoding-design.md D1/D2/D3: a file
+    # that passed the profile-glob check above but whose bytes are not valid `utf-8-sig`
+    # (plain UTF-8, plus a stripped BOM — no encoding guessing). The decode is wrapped in a
+    # narrow try/except right where it happens, AFTER the profile check, so the file is a
+    # named skip and the run continues instead of raising `UnicodeDecodeError` and aborting
+    # the whole import. Distinct from `skipped_unparseable` (decision-shaped but no usable
+    # `choice`): this file was never even decoded far enough to be parsed.
+    skipped_undecodable: int = 0
+    undecodable_files: list[str] = Field(default_factory=list)  # on-disk rel_path, in order
     # E3 (design note §7, review Major 4/Blocker N1): a split-produced parent that is
     # never written because it is degenerate — either an echo of its own `context` (rule
     # 1) or empty even after every fallback (rule 2, which previously discarded the whole
@@ -1645,7 +1651,18 @@ def import_docs(
 
         source_bytes = Path(rel_path).read_bytes()
         source_hash = hashlib.sha256(source_bytes).hexdigest()
-        raw_text = source_bytes.decode().replace("\r\n", "\n").replace("\r", "\n")
+        # D1/D2 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): decode
+        # as utf-8-sig (plain UTF-8 plus a stripped BOM, never guessed) inside a narrow
+        # try/except right where the decode happens — a file that fails is a named skip,
+        # not an aborted run. D3: this sits AFTER the profile-scope check above, so an
+        # out-of-profile file is still never even opened.
+        try:
+            decoded = source_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            report.skipped_undecodable += 1
+            report.undecodable_files.append(rel_path)
+            continue
+        raw_text = decoded.replace("\r\n", "\n").replace("\r", "\n")
         # E2 (design note §6): the NORMALIZED path — not the on-disk `rel_path` — is what
         # gets stamped into `context`/children's `effective_ref`/`provenance.ref` (via
         # `DocWriteRequest.rel_path` below), so an unedited doc re-imported after an

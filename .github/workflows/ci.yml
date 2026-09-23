@@ -105,7 +105,6 @@ jobs:
             exit 0
           fi
           uv sync --locked
-          git fetch origin "$GITHUB_BASE_REF"
           base="$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)"
           uv run sidegraph-verify --against "$base" --json
 

@@ -7,6 +7,67 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-23
+
+### Changed
+
+- **The public `main`, which the plugin manifests install from, moves only at releases.**
+  The plugin runs whatever `main` holds, so a snapshot pushed between releases used to reach
+  every plugin user at once. The release script now pushes `main` only for a release: it
+  refuses unless the version it carries is untagged in the public repository and
+  `CHANGELOG.md` dates it.
+
+### Fixed
+
+- **`sidegraph-init` now says to restart the Claude Code session after it writes
+  `SIDEGRAPH_RATIFY_POLICY`.** The Sidegraph MCP server reads the policy from the
+  environment it started with, so a server started before `sidegraph-init` kept proposing
+  under the old policy until the session restarted, and nothing said so.
+- **`sidegraph-verify --against` no longer flags a ratification of an already-committed
+  proposal, or a supersede/drop that touches a record written before a later schema addition
+  (`Provenance.commit`, `Domain.seed_anchors`/`path_prefixes`) existed.** Ratifying a
+  decision, fact, or domain stamps `ratified_at`/`ratified_by`, and neither field was on the
+  transition layer's mutable allow-list, so the stamp alone was reported as an illegal field
+  change. Separately, rewriting an old record that predates a field added to its schema
+  serializes that field back in as its default, which a plain top-level or whole-list
+  comparison also read as a change. The ratifier stamp may now be set once, from a proposed
+  record, landing on any state reached through accepted within the diffed range; an absent
+  field now counts as the same value as an explicit `null` or an empty list/object, at every
+  nesting depth and inside list items. A field whose default is a non-empty value is not
+  covered by this.
+- **`sidegraph-import --docs` no longer aborts on a file that is not valid UTF-8.** It
+  decoded every document as strict UTF-8 with no handler, so one document saved in
+  `cp1251` (or carrying a stray non-UTF-8 byte) raised and stopped the whole run, with
+  nothing after it imported and no report printed. The file is now a named skip
+  (`skipped_undecodable`) instead: the run continues, and both the real run and
+  `--dry-run` print the skipped path(s), last.
+- **`sidegraph-import --docs` now reads a UTF-8 document that starts with a byte-order mark
+  (BOM).** The BOM used to survive into the parsed text, so the H1 and any frontmatter never
+  matched, and a real decision document was silently counted `skipped_not_decision`. It is
+  now stripped before parsing. `sidegraph-bootstrap` still reads such a file without
+  stripping it.
+
+  Re-importing a BOM document that an earlier version did import can change its record,
+  once:
+  - On the `openspec` profile, a BOM `proposal.md` had imported under a title built from its
+    path. The re-import supersedes it with the real H1 title.
+  - Frontmatter the BOM hid is now honoured. A document marked `status: superseded` now
+    counts `skipped_superseded_frontmatter`, and its earlier live record stays as it is.
+  - A document marked as a draft, proposed, pending or under review keeps its earlier
+    `accepted` record: a re-import compares content, not status, and the content is
+    unchanged.
+
+  Retiring or re-proposing such a record is manual.
+
+### Security
+
+- **The lockfile moves `anyio` from 4.14.1 to 4.15.1**, past three advisories fixed in
+  4.14.2: TLS certificate spoofing through IDNA 2003 host-name encoding (critical),
+  `run_process` keeping the parent's supplementary groups (high), and process-pool workers
+  blocking on undrained stderr (moderate). The published package does not pin `anyio`, so
+  this changes development and CI environments and installs made from `uv.lock`; a fresh
+  install already resolves a fixed version.
+
 ## [0.4.0] — 2026-09-22
 
 ### Fixed

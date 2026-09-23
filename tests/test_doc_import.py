@@ -2268,6 +2268,73 @@ def test_no_registered_profile_uses_unsupported_glob_features():
             )
 
 
+# ---------------------------------------------------------------------------------------
+# import_docs: a file that is not valid UTF-8 is a named skip, not an aborted run
+# (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md D1-D3).
+# ---------------------------------------------------------------------------------------
+
+# Real cp1251 bytes -- not valid UTF-8 (or utf-8-sig), so `.decode("utf-8-sig")` raises
+# `UnicodeDecodeError` on it. Named to sort BEFORE the good ADR below, since
+# `_collect_markdown_files` sorts a directory's files (doc_import.py:1381) -- "the run
+# continues" is only actually exercised if the bad file is processed first.
+CP1251_FIXTURE = "# Решение\n\nТекст не в UTF-8.\n".encode("cp1251")
+
+
+def test_import_docs_encoding_undecodable_file_skipped_and_continues(tmp_path):
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    store = Store(tmp_path / "s.db")
+    bad = tmp_path / "docs" / "0001-legacy.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(CP1251_FIXTURE)
+    _write_md(tmp_path, "docs/0002-good.md", _adr("Use SQLite", decision="Wire `submit_order` in."))
+
+    report = import_docs(store, reader, [str(tmp_path / "docs")], any_doc=True)
+
+    assert report.imported == 1
+    assert report.skipped_undecodable == 1
+    assert report.undecodable_files == [str(bad)]
+    # The only kill for M5 (fall through with `decoded = ""` instead of `continue`): an
+    # empty string is not decision-shaped either, so a fall-through would ALSO count this
+    # file not-decision-shaped, on top of skipped_undecodable.
+    assert report.skipped_not_decision == 0
+    d = next(store.iter_decisions())
+    assert d.title == "Use SQLite"
+
+
+def test_import_docs_encoding_bom_stripped_and_imports(tmp_path):
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    store = Store(tmp_path / "s.db")
+    doc = _adr("Use SQLite", decision="Wire `submit_order` in.")
+    path = tmp_path / "docs" / "a.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(doc, encoding="utf-8-sig")  # leading BOM
+
+    report = import_docs(store, reader, [str(path)], any_doc=True)
+
+    assert report.imported == 1
+    assert report.skipped_not_decision == 0
+    d = next(store.iter_decisions())
+    assert d.title == "Use SQLite"
+    assert "﻿" not in d.title
+
+
+def test_import_docs_encoding_outside_profile_skipped_before_decode(tmp_path, monkeypatch):
+    # D3: the profile-glob check runs BEFORE the decode, so an undecodable file outside the
+    # active profile's scope is never even opened -- counted skipped_outside_profile, never
+    # skipped_undecodable.
+    monkeypatch.chdir(tmp_path)
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    store = Store(tmp_path / "s.db")
+    bad = tmp_path / "notes" / "bad.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(CP1251_FIXTURE)
+
+    report = import_docs(store, reader, ["notes/bad.md"])
+
+    assert report.skipped_outside_profile == 1
+    assert report.skipped_undecodable == 0
+
+
 # -- rejected-status predicate (v0.2-scope item 7) -------------------------------------------
 
 

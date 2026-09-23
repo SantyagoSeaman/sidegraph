@@ -589,12 +589,29 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
 #   unconditional upsert — see store.py) — so field-level mutation is never checked for
 #   initiatives here (:func:`classify_transition` has no ``"initiative"`` kind;
 #   :func:`verify_against` handles the type directly, deletion-only — see its docstring).
+#
+# Two more legal rewrites, beyond the mutable-field tables, that this module must not flag
+# (design/superpowers/specs/2026-09-23-verify-ratifier-stamp-design.md): ``Store.ratify``,
+# ``Store.ratify_fact`` and ``Store.ratify_domains`` stamp ``ratified_at``/``ratified_by`` on a
+# decision, fact or domain the moment it is accepted — see :func:`_check_ratifier_stamp`, which
+# allows exactly that one move (unset on a still-``proposed`` record, landing on any status
+# reached through ``accepted`` within the diffed range) and flags every other change to those
+# two fields. Separately, a field added to a schema after some records were already written
+# (``Provenance.commit``, or ``Domain.seed_anchors``/``path_prefixes``, whose defaults are the
+# empty list) is absent from an old file's JSON and appears back in as that default the next
+# time anything rewrites the file — a ratify, a drop, a supersede-close, or a domain
+# drop/supersede all do this incidentally, not because the field itself changed. :func:`_same`
+# treats an absent key as equal to ``null``/``[]``/``{}``, recursing into nested objects and
+# into the items of a list, so this never reads as an ``illegal-field-change`` on its own; a
+# key that actually changes value, or that is removed while holding a non-empty value, still
+# does. A field whose default is a non-empty value is not covered by this (see :func:`_same`'s
+# own docstring).
 
-# Decisions/facts (store.py ``add_decision`` :1261-1289, ``add_fact`` :1405-1435, ``ratify``
-# :1962-1987, ``drop`` :1998-2014, ``ratify_fact``/``drop_fact`` :2026-2047): the only fields
-# any write path ever changes on an EXISTING record are ``status`` (along a real transition)
-# and ``valid_to`` (null -> a value, once, when a record closes). Everything else is written
-# once, at creation, and never touched again by any of those methods.
+# Decisions/facts (store.py's ``add_decision``, ``add_fact``, ``ratify``, ``drop``,
+# ``ratify_fact``, ``drop_fact``): the only fields any write path ever changes on an EXISTING
+# record are ``status`` (along a real transition) and ``valid_to`` (null -> a value, once,
+# when a record closes). Everything else is written once, at creation, and never touched
+# again by any of those methods.
 _DECISION_STATUS_TRANSITIONS = frozenset(
     {
         ("proposed", "accepted"),  # ratify
@@ -622,9 +639,9 @@ _FACT_STATUS_TRANSITIONS = frozenset(
 DECISION_MUTABLE_FIELDS = frozenset({"status", "valid_to"})
 FACT_MUTABLE_FIELDS = frozenset({"status", "valid_to"})
 
-# Domains (store.py ``add_domain`` :1626-1632 [creation only], ``supersede_domain``
-# :1659-1678, ``ratify_domains`` :1880-1910, ``refresh_domain_communities`` :1822-1831):
-# status moves along ratify_domains'/supersede_domain's transitions; ``communities`` is
+# Domains (store.py's ``add_domain`` [creation only], ``supersede_domain``,
+# ``ratify_domains``, ``refresh_domain_communities``): status moves along
+# ratify_domains'/supersede_domain's transitions; ``communities`` is
 # sync's engine-mapping refresh (see the module-level note above -- never actually present
 # in the canonical file).
 _DOMAIN_STATUS_TRANSITIONS = frozenset(
@@ -635,7 +652,7 @@ _DOMAIN_STATUS_TRANSITIONS = frozenset(
         # (review round 3, design §6: cross-branch slug-conflict resolution)
         ("proposed", "superseded"),  # supersede_domain
         ("accepted", "superseded"),  # supersede_domain
-        # Fix-round review (Important-1): supersede_domain (store.py :1661-1674) flips
+        # Fix-round review (Important-1): supersede_domain (store.py) flips
         # old.status to SUPERSEDED with NO gate on old's current status at all -- unlike
         # ratify_domains, it never checks old is proposed/accepted first. find_domain_by_slug
         # deliberately keeps a DROPPED domain resolvable by slug ("accepted > proposed >
@@ -648,7 +665,7 @@ _DOMAIN_STATUS_TRANSITIONS = frozenset(
 )
 DOMAIN_MUTABLE_FIELDS = frozenset({"status", "communities"})
 
-# Entities (store.py ``upsert_entity`` :1123-1150, ``_entity_identity_payload`` :295-303):
+# Entities (store.py's ``upsert_entity``, ``_entity_identity_payload``):
 # the canonical file holds ONLY entity_id/canonical_name/kind/descriptor -- upsert_entity
 # rewrites the file solely when the IDENTITY payload changes (i.e. ``descriptor`` -- a
 # "moved" rebind, see ``sync._adopt``). ``entity_id``/``canonical_name``/``kind`` are minted
@@ -709,19 +726,86 @@ def _check_valid_to_transition(old: dict, new: dict, path: str) -> list[Violatio
     return [_violation(VALID_TO_CHANGED, path, f"valid_to changed {old_vt!r} -> {new_vt!r}")]
 
 
+# The ratifier stamp (store.py's ``ratify``/``ratify_fact``/``ratify_domains``, design D4) —
+# see the module comment above the mutable-field tables for why this pair needs its own rule
+# rather than a plain mutable-field entry: unlike ``status``/``valid_to``, a stamp may be set
+# only once, and only alongside a specific status move.
+_RATIFIER_STAMP = ("ratified_at", "ratified_by")
+
+# An absent key (``dict.get`` already turns it into ``None``) and these two defaults are the
+# other information-free shapes a field can serialize back in as, once a rewrite touches the
+# record it lives on — see :func:`_same`.
+_EMPTY_DEFAULTS: tuple[dict, list] = ({}, [])
+
+
+def _absent_or_empty(v: object) -> bool:
+    return v is None or v in _EMPTY_DEFAULTS
+
+
+def _same(a: object, b: object) -> bool:
+    """Equality where an absent key counts as the same value as ``null`` or an empty
+    list/object (Rule B) — see the module comment above the mutable-field tables: a field
+    added to a model after a record was written (``Provenance.commit``, the ratifier stamp,
+    ``Domain.seed_anchors``/``path_prefixes``) is missing from an old file and appears as its
+    default — ``null``, ``[]``, or ``{}`` — the next time anything rewrites it. Recurses into
+    nested dicts key-by-key and into lists element-by-element (so a change buried inside a
+    ``seed_anchors`` entry is still caught), and treats two lists of different length as
+    different. A field whose default is a NON-empty value (``Decision.scope``, ``"repo"``) is
+    not covered: an absent key there still reads as changed. That is a known, accepted gap —
+    no file in this store lacks ``scope`` today — not something this function papers over.
+    """
+    if isinstance(a, dict) and isinstance(b, dict):
+        return all(_same(a.get(k), b.get(k)) for k in set(a) | set(b))
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b, strict=True))
+    if _absent_or_empty(a) or _absent_or_empty(b):
+        return _absent_or_empty(a) and _absent_or_empty(b)
+    return a == b
+
+
+def _check_ratifier_stamp(old: dict, new: dict, path: str) -> list[Violation]:
+    """Rule A: ``ratified_at``/``ratified_by`` may change in exactly one way — both unset on
+    a still-``proposed`` old side, ``ratified_at`` newly set, and the new status anything
+    reached through ``accepted`` within the diffed range (not ``proposed`` or ``rejected`` —
+    ``drop``/``drop_fact`` stamp nothing). Any other change to either field — appearing on a
+    record that wasn't proposed, appearing alongside a drop, ``ratified_by`` set without
+    ``ratified_at``, or an edit/removal of an already-set stamp — stays
+    :data:`ILLEGAL_FIELD_CHANGE`."""
+    old_stamp = {k: old.get(k) for k in _RATIFIER_STAMP}
+    new_stamp = {k: new.get(k) for k in _RATIFIER_STAMP}
+    if old_stamp == new_stamp:
+        return []
+    stamping = (
+        old.get("status") == "proposed"
+        and all(v is None for v in old_stamp.values())
+        and new_stamp["ratified_at"] is not None
+        and new.get("status") not in ("proposed", "rejected")
+    )
+    if stamping:
+        return []
+    return [
+        _violation(ILLEGAL_FIELD_CHANGE, path, f"field {k!r} changed")
+        for k in _RATIFIER_STAMP
+        if old_stamp[k] != new_stamp[k]
+    ]
+
+
 def _check_immutable_fields(
-    old: dict, new: dict, mutable: frozenset[str], path: str
+    old: dict, new: dict, mutable: frozenset[str], path: str, exempt: tuple[str, ...] = ()
 ) -> list[Violation]:
-    """Every key present in ``old`` or ``new`` but not in ``mutable`` must be identical
-    across the two — covers a changed value, a field that disappeared, AND a field that
-    newly appeared (all three are "this immutable field changed"). One violation per
-    offending field (design ruling 2: "detail names the field"), in sorted key order for a
-    deterministic report."""
+    """Every key present in ``old`` or ``new`` but not in ``mutable`` or ``exempt`` must be
+    the same value on both sides (:func:`_same`, Rule B — an absent key counts as equal to
+    ``null`` or an empty list/object) — covers a changed value, a field that disappeared, AND
+    a field that newly appeared (all three are "this immutable field changed"). One violation
+    per offending field (design ruling 2: "detail names the field"), in sorted key order for a
+    deterministic report. ``exempt`` (the ratifier stamp, for decisions/facts/domains) is
+    skipped here entirely — its own rule is :func:`_check_ratifier_stamp`, run alongside this
+    one by :func:`classify_transition`, never by this function."""
     violations: list[Violation] = []
     for key in sorted(set(old) | set(new)):
-        if key in mutable:
+        if key in mutable or key in exempt:
             continue
-        if old.get(key) != new.get(key):
+        if not _same(old.get(key), new.get(key)):
             violations.append(_violation(ILLEGAL_FIELD_CHANGE, path, f"field {key!r} changed"))
     return violations
 
@@ -784,12 +868,15 @@ def classify_transition(kind: str, old: dict | None, new: dict | None) -> list[V
         return (
             _check_status_transition(old, new, legal, path)
             + _check_valid_to_transition(old, new, path)
-            + _check_immutable_fields(old, new, mutable, path)
+            + _check_immutable_fields(old, new, mutable, path, exempt=_RATIFIER_STAMP)
+            + _check_ratifier_stamp(old, new, path)
         )
     if kind == "domain":
-        return _check_status_transition(
-            old, new, _DOMAIN_STATUS_TRANSITIONS, path
-        ) + _check_immutable_fields(old, new, DOMAIN_MUTABLE_FIELDS, path)
+        return (
+            _check_status_transition(old, new, _DOMAIN_STATUS_TRANSITIONS, path)
+            + _check_immutable_fields(old, new, DOMAIN_MUTABLE_FIELDS, path, exempt=_RATIFIER_STAMP)
+            + _check_ratifier_stamp(old, new, path)
+        )
     # entity
     return _check_immutable_fields(old, new, ENTITY_MUTABLE_FIELDS, path)
 

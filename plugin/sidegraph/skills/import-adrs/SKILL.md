@@ -49,8 +49,8 @@ Costs nothing, writes nothing, and shows exactly what a real run would do. Read 
 report closely:
 
 - `would import N decision(s), supersede M (skipped: A existing, B unanchorable, C
-  not-decision-shaped, D unparseable, E superseded-frontmatter)` — plus per-file breakdown
-  and per-anchor `anchor skipped: <name> (<reason>)` lines.
+  not-decision-shaped, D unparseable, E superseded-frontmatter, F outside-profile)` — plus
+  per-file breakdown and per-anchor `anchor skipped: <name> (<reason>)` lines.
 - **Lots of `unanchorable` + you passed an absolute path?** That's the wrong-cwd trap from
   preflight — the command itself warns when ≥ half of anchor-attempted docs miss. Re-run
   from the repo root with a relative path.
@@ -63,6 +63,11 @@ report closely:
   (Context/Decision/Status/... or Trigger/Design/...); narrative or table-structured docs
   don't qualify (by design, for now) — record their content via
   `sidegraph:record-decision` if it matters.
+- **`N file(s) skipped: not valid UTF-8, re-save as UTF-8 to import:`** (printed last, with
+  the listed paths) — a file whose bytes aren't valid UTF-8 is skipped and named instead of
+  aborting the run. Re-save the listed file(s) as UTF-8 and re-run to import them. No
+  encoding is guessed on your behalf. A UTF-8 byte-order mark is fine: it is stripped and the
+  file imports, so it never appears in this list.
 
 ## Gate the real run on the human
 

@@ -21,7 +21,10 @@ the same thing.
 
 A test that genuinely wants one of these set must do so explicitly with
 ``monkeypatch.setenv``/``monkeypatch.delenv`` -- never by relying on inheritance from
-the environment pytest happens to run in.
+the environment pytest happens to run in. The one exception is the sandbox-hygiene
+guards (tests/test_sandbox_hygiene.py): their whole point is to check the environment
+the suite runs in, so they read it at import time, and a test drives them through a
+child pytest process, not ``monkeypatch``.
 
 Deliberately function-scoped, not session- or module-scoped: ``monkeypatch`` itself is
 a function-scoped fixture (pytest has no built-in session-scoped variant), and function
@@ -34,12 +37,13 @@ Note for two known intentional exceptions this deliberately does NOT special-cas
 ``SIDEGRAPH_SANDBOX``/``SIDEGRAPH_SANDBOXES`` (tests/test_sandbox_hygiene.py,
 tests/test_pilot_kit_corpus_fit.py) and ``SIDEGRAPH_RELEASE_GATE``
 (tests/test_twin_sync.py) are opt-in gates for a developer's own sandbox checkout, read
-only by test code, never by src/. Clearing them here just makes those already-optional
-checks as vacuous under pytest as they already are in CI (their bodies already treat
-"unset" as the expected default and no-op); the one test that exercises the
-misconfiguration path they guard against already sets the variable explicitly via
-``monkeypatch`` rather than relying on an ambient value, so nothing here weakens that
-guard.
+only by test code, never by src/. Clearing them here does not weaken those checks:
+tests/test_sandbox_hygiene.py captures both SIDEGRAPH_SANDBOX and SIDEGRAPH_SANDBOXES at
+*import time*, before this fixture (or any fixture) runs, precisely so this scrub cannot
+hide a value actually configured in the environment -- their bodies still treat "unset"
+as the expected default, but now by calling ``pytest.skip`` rather than by silently
+returning, so a guard that never ran is visible as skipped rather than indistinguishable
+from one that ran and approved.
 """
 
 from __future__ import annotations
