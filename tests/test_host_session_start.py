@@ -483,3 +483,43 @@ def test_session_start_duplicate_helper_never_raises_on_store_failure(monkeypatc
             raise RuntimeError("boom")
 
     assert hooks._session_start_duplicate(_BrokenStore(), "s1", datetime.now(UTC)) is False
+
+
+def test_session_start_duplicate_ignores_a_stamp_far_in_the_future(tmp_path):
+    """A future stamp is not a duplicate: the ledger is re-stamped with `now`."""
+    from sidegraph.store import Store
+
+    store = Store(tmp_path / "s.db")
+    now = datetime.now(UTC)
+    future = (now + timedelta(hours=1)).isoformat()
+    store.set_meta(hooks._SESSION_START_KEY, f"dup-future|{future}")
+
+    assert hooks._session_start_duplicate(store, "dup-future", now) is False
+    assert store.get_meta(hooks._SESSION_START_KEY) == f"dup-future|{now.isoformat()}"
+    store.close()
+
+
+def test_session_start_duplicate_true_for_a_recent_same_session_stamp(tmp_path):
+    from sidegraph.store import Store
+
+    store = Store(tmp_path / "s.db")
+    now = datetime.now(UTC)
+    store.set_meta(
+        hooks._SESSION_START_KEY, f"dup-recent|{(now - timedelta(seconds=10)).isoformat()}"
+    )
+
+    assert hooks._session_start_duplicate(store, "dup-recent", now) is True
+    store.close()
+
+
+def test_session_start_duplicate_tolerates_a_stamp_one_second_ahead(tmp_path):
+    """A parallel sibling hook may commit a later `now` first: a genuine duplicate can
+    carry a small negative age and must still be suppressed."""
+    from sidegraph.store import Store
+
+    store = Store(tmp_path / "s.db")
+    now = datetime.now(UTC)
+    store.set_meta(hooks._SESSION_START_KEY, f"dup-skew|{(now + timedelta(seconds=1)).isoformat()}")
+
+    assert hooks._session_start_duplicate(store, "dup-skew", now) is True
+    store.close()

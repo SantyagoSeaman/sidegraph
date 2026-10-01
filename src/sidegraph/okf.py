@@ -5,17 +5,27 @@ with YAML frontmatter whose cross-links form a graph (spec:
 https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf). Portable core:
 reads only :class:`~sidegraph.store.Store` — no engine reader, no host specifics.
 ``build_bundle`` is pure (store -> in-memory ``{path: content}``, deterministic);
-``write_bundle`` owns the out-directory safety rules. Strictly one-way: the bundle is a
-derived artifact and the store stays the source of truth; nothing here writes to the
-store.
+``write_bundle`` owns the out-directory safety rules (a symlinked out dir is refused; a
+previous export is replaced only once the new bundle is fully written, except when the
+write goes in place: a mount point, ``--out`` being the current directory, an unwritable,
+missing or non-directory parent, or a failed rename aside). Strictly one-way:
+the bundle is a derived artifact and the store stays the source of truth; nothing here
+writes to the store.
 
-# see design/superpowers/specs/2026-07-23-okf-export-design.md
+# see design/superpowers/specs/2026-07-23-okf-export-design.md and
+# design/superpowers/specs/2026-09-29-okf-export-safe-write-design.md
 """
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
+import os
 import shutil
+import stat
+import sys
+import tempfile
 from pathlib import Path
 
 from ulid import ULID
@@ -30,6 +40,7 @@ from .schema import (
     EntityKind,
     Fact,
     Provenance,
+    is_safe_record_id,
     slugify,
 )
 from .store import Store
@@ -38,7 +49,7 @@ from .store import Store
 OKF_VERSION = "0.1"
 
 #: Root-index frontmatter line marking a directory as a previous export. ``write_bundle``
-#: only ever clears a directory carrying it (or an empty one) — see the spec's out-dir
+#: only ever replaces a directory carrying it (or an empty one) — see the spec's out-dir
 #: safety rules.
 GENERATOR_LINE = "generator: sidegraph"
 
@@ -75,6 +86,14 @@ def _frontmatter(pairs: list[tuple[str, str]]) -> str:
     return "\n".join(["---", *[f"{k}: {v}" for k, v in pairs], "---"])
 
 
+def _warn_unsafe_id(kind: str, record_id: object) -> None:
+    print(
+        f"sidegraph: WARNING okf export skips {kind} {record_id!r}: its id is not a safe "
+        "filename, so it cannot name a bundle file.",
+        file=sys.stderr,
+    )
+
+
 def build_bundle(store: Store) -> dict[str, str]:
     """Project ``store`` into an OKF bundle: bundle-relative posix path -> file content.
 
@@ -87,6 +106,9 @@ def build_bundle(store: Store) -> dict[str, str]:
     # is deliberately retained ("tried before, abandoned…" is the product). Everything
     # downstream (paths, bindings, entities, indexes, log) derives from these lists, so
     # filtering here is the single, complete cut. Facts reuse DecisionStatus.
+    # An id that is not a safe filename would name a path outside the bundle (design/
+    # superpowers/specs/2026-09-29-record-identity-design.md D6): such a record is skipped
+    # with a warning, and links to it render as plain ids through ``_record_ref``.
     decisions = sorted(
         (d for d in store.iter_decisions() if d.status is not DecisionStatus.PROPOSED),
         key=lambda d: d.id,
@@ -95,6 +117,14 @@ def build_bundle(store: Store) -> dict[str, str]:
         (f for f in store.iter_facts() if f.status is not DecisionStatus.PROPOSED),
         key=lambda f: f.id,
     )
+    for d in decisions:
+        if not is_safe_record_id(d.id):
+            _warn_unsafe_id("decision", d.id)
+    for f in facts:
+        if not is_safe_record_id(f.id):
+            _warn_unsafe_id("fact", f.id)
+    decisions = [d for d in decisions if is_safe_record_id(d.id)]
+    facts = [f for f in facts if is_safe_record_id(f.id)]
     domain_rows = [r for r in store.iter_domains() if r.status is not DomainStatus.PROPOSED]
 
     # Domains collapse to one concept per slug: greatest domain_id (ULID = creation time)
@@ -130,9 +160,17 @@ def build_bundle(store: Store) -> dict[str, str]:
     kept_bindings: dict[str, list[AnchorBinding]] = {}
     records_by_entity: dict[str, list[tuple[str, str]]] = {}  # entity_id -> [(rid, relation)]
     records_by_domain_slug: dict[str, list[str]] = {}
+    warned_entities: set[str] = set()
     for rid in [*dec_path, *fact_path]:
         kept: list[AnchorBinding] = []
         for b in store.bindings_for_record(rid):
+            if not is_safe_record_id(b.entity_id):
+                # as if the entity were missing: filtering the entity list later would
+                # leave this binding pointing at a path that does not exist (KeyError)
+                if b.entity_id not in warned_entities:
+                    warned_entities.add(b.entity_id)
+                    _warn_unsafe_id("entity", b.entity_id)
+                continue
             ent = entity_by_id.get(b.entity_id) or store.get_entity(b.entity_id)
             if ent is None or ent.canonical_name.startswith(_COMMUNITY_PREFIX):
                 continue
@@ -443,29 +481,228 @@ def _is_previous_export(out_dir: Path) -> bool:
     return False
 
 
+def _emit_tree(bundle: dict[str, str], root: Path) -> None:
+    """Write ``bundle`` under ``root``. A directory it creates is opened to owner write and
+    search while it fills (a restrictive umask would make ``mkdir`` hide both), then given
+    back the mode ``mkdir`` chose. On a failure the open directories stay removable."""
+    made: list[tuple[Path, int]] = []
+
+    def ensure_dir(directory: Path) -> None:
+        if directory.is_dir():
+            return
+        ensure_dir(directory.parent)
+        directory.mkdir()
+        mode = stat.S_IMODE(directory.stat().st_mode)
+        if mode & 0o300 != 0o300:
+            directory.chmod(mode | 0o300)
+            made.append((directory, mode))
+
+    for rel in sorted(bundle):
+        target = root / rel
+        ensure_dir(target.parent)
+        target.write_text(bundle[rel], encoding="utf-8")
+    for directory, mode in reversed(made):
+        directory.chmod(mode)
+
+
+def _must_emit_in_place(target: Path) -> bool:
+    """True when swapping ``target`` for a staged directory is impossible or harmful: a
+    mount point (a rename there fails), the working directory itself (the swap would delete
+    it), or a parent the process cannot write to, that does not exist yet, or that is not
+    a directory (a regular file: ``os.access`` says writable, ``mkdtemp`` cannot stage in it)."""
+    if target.exists() and os.path.ismount(target):
+        return True
+    if Path.cwd().resolve() == target:
+        return True
+    if not target.parent.is_dir():
+        return True
+    return not os.access(target.parent, os.W_OK)
+
+
+def _remove_tree(path: Path) -> None:
+    """Remove the directory tree ``path`` even when directories inside it are read-only.
+    On a permission error the handler grants owner write+search on the entry's parent (and
+    on the entry itself when it is a directory) inside the tree, then retries once."""
+
+    def grant(directory: Path) -> None:
+        if directory.is_dir() and not directory.is_symlink():
+            mode = stat.S_IMODE(directory.stat().st_mode)
+            directory.chmod(mode | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRUSR)
+
+    def onexc(func: object, failed: str, exc: BaseException) -> None:
+        if not isinstance(exc, PermissionError):
+            raise exc
+        entry = Path(failed)
+        for directory in (entry.parent, entry):
+            if directory == path or path in directory.parents:
+                grant(directory)
+        if func is os.scandir or func is os.open:
+            _remove_tree(entry)  # the walk skipped an unreadable directory: redo it
+        else:
+            func(failed)  # type: ignore[operator]
+
+    shutil.rmtree(path, onexc=onexc)
+
+
+def _remove_tree_quietly(path: Path) -> None:
+    """``_remove_tree`` for a cleanup that must not mask the error being handled."""
+    with contextlib.suppress(OSError):
+        _remove_tree(path)
+
+
+def _writable_tree(target: Path) -> bool:
+    """True when every directory under ``target`` (itself included) is writable and
+    searchable, so an in-place clear cannot stop half way. Symlinks are not followed."""
+    unreadable: list[OSError] = []
+    for dirpath, _dirnames, _filenames in os.walk(target, onerror=unreadable.append):
+        if not os.access(dirpath, os.W_OK | os.X_OK):
+            return False
+    return not unreadable
+
+
+def _emit_in_place(
+    bundle: dict[str, str], target: Path, children: list[Path], out_dir: Path
+) -> None:
+    """Clear ``children`` and write ``bundle`` into ``target``, the validated resolved path.
+    An ``OSError`` is re-raised naming ``out_dir``, the spelling the caller used. Nothing is
+    cleared unless the directory is writable, so a refusal never leaves a partial export."""
+    try:
+        if target.exists() and not _writable_tree(target):
+            raise OSError(errno.EACCES, os.strerror(errno.EACCES))
+        for child in children:
+            if child.is_dir() and not child.is_symlink():
+                _remove_tree(child)
+            else:
+                child.unlink()
+        _emit_tree(bundle, target)
+    except OSError as e:
+        raise OSError(e.errno, e.strerror, str(out_dir)) from e
+
+
 def write_bundle(bundle: dict[str, str], out_dir: Path) -> None:
     """Write ``bundle`` as an exact snapshot of ``out_dir``.
 
-    Safety rules (spec §CLI contract): create the directory if missing; use it if empty;
-    clear and rewrite it ONLY when its root ``index.md`` marks it as a previous sidegraph
-    export. Anything else raises ``ValueError`` — clearing a directory the user pointed
-    at by mistake would be destructive.
+    Safety rules (spec §CLI contract): refuse a symlinked ``out_dir``; create the directory
+    if missing; use it if empty; replace it ONLY when its root ``index.md`` marks it as a
+    previous sidegraph export. Anything else raises ``ValueError`` — replacing a directory
+    the user pointed at by mistake would be destructive.
+
+    The bundle is staged beside ``out_dir`` and swapped in by rename, so a failed write
+    leaves a previous export intact. A mount point, the working directory itself, an
+    unwritable or non-directory parent, or a previous export whose rename-aside fails is
+    written in place instead (not atomic: a later write failure can leave a partial export).
+    The in-place clear and write use the resolved, validated ``target``.
+
+    # see design/superpowers/specs/2026-09-29-okf-export-safe-write-design.md
     """
-    if out_dir.exists():
-        if not out_dir.is_dir():
+    if out_dir.is_symlink():
+        raise ValueError(f"refusing to write {out_dir}: it is a symlink")
+    target = out_dir.resolve()
+    children: list[Path] = []
+    old_mode: int | None = None
+    if target.exists():
+        if not target.is_dir():
             raise ValueError(f"refusing to overwrite {out_dir}: not a directory")
-        children = sorted(out_dir.iterdir())
-        if children and not _is_previous_export(out_dir):
+        try:
+            children = sorted(target.iterdir())
+        except OSError as e:
+            raise OSError(e.errno, e.strerror, str(out_dir)) from e
+        if children and not _is_previous_export(target):
             raise ValueError(
                 f"refusing to overwrite {out_dir}: not an empty directory or a "
                 "sidegraph-generated bundle"
             )
-        for child in children:
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-    for rel in sorted(bundle):
-        target = out_dir / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(bundle[rel], encoding="utf-8")
+        old_mode = stat.S_IMODE(target.stat().st_mode)
+    if _must_emit_in_place(target):
+        _emit_in_place(bundle, target, children, out_dir)
+        return
+
+    # keep the staging name inside NAME_MAX (a byte limit)
+    name64 = target.name.encode("utf-8")[:64].decode("utf-8", "ignore")
+    staging_root = Path(tempfile.mkdtemp(dir=target.parent, prefix=f".{name64}.okf-new-"))
+    old: Path | None = None
+    swapped = in_place = widened = False
+    try:
+        if stat.S_IMODE(staging_root.stat().st_mode) & 0o300 != 0o300:
+            staging_root.chmod(0o700)  # mkdtemp's 0o700 is masked by a restrictive umask
+        bundle_dir = staging_root / "bundle"
+        bundle_dir.mkdir()  # the kernel applies the umask, as for a fresh mkdir
+        publish_mode = stat.S_IMODE(bundle_dir.stat().st_mode)
+        if publish_mode & 0o300 != 0o300:
+            # A restrictive umask: the dir must stay writable to fill and searchable to
+            # rename across directories; the post-swap chmod gives back the mode mkdir chose.
+            bundle_dir.chmod(publish_mode | 0o300)
+        if old_mode is not None:
+            publish_mode = old_mode
+        _emit_tree(bundle, bundle_dir)
+        if old_mode is not None:
+            old = Path(tempfile.mkdtemp(dir=target.parent, prefix=f".{name64}.okf-old-"))
+            if stat.S_IMODE(old.stat().st_mode) & 0o300 != 0o300:
+                old.chmod(0o700)  # mkdtemp's 0o700 is masked by a restrictive umask
+            try:
+                target.rename(old)
+            except OSError:
+                # A read-only previous export (APFS refuses to rename it): grant owner write
+                # and retry once; the post-swap chmod gives the published copy its mode back.
+                # Otherwise (e.g. a bind mount `ismount` cannot see, or a sticky target)
+                # write in place, which refuses to clear a directory it cannot write.
+                in_place = True
+                if not old_mode & stat.S_IWUSR:
+                    try:
+                        target.chmod(old_mode | stat.S_IWUSR)
+                        widened = True
+                        try:
+                            target.rename(old)
+                            in_place = False
+                        except OSError:
+                            target.chmod(old_mode)
+                            widened = False
+                    except OSError:
+                        pass
+        if not in_place:
+            bundle_dir.rename(target)
+            swapped = True
+    except BaseException:
+        try:
+            if old is not None and not swapped:
+                # Decide from the filesystem, not the flags: an interrupt can land
+                # between the rename and the swap.
+                try:
+                    if not target.exists():
+                        old.rename(target)
+                        if widened and old_mode is not None:
+                            target.chmod(old_mode)
+                    else:
+                        old.rmdir()
+                except OSError:
+                    print(f"previous export is preserved at {old}", file=sys.stderr)
+        finally:
+            _remove_tree_quietly(staging_root)
+        raise
+    if in_place:
+        assert old is not None
+        try:
+            old.rmdir()
+        except OSError as e:
+            print(f"warning: could not remove {old}: {e}", file=sys.stderr)
+        _remove_tree_quietly(staging_root)
+        _emit_in_place(bundle, target, children, out_dir)
+        return
+    # After the swap: chmod before it would break the cross-parent rename of a 0o555 dir.
+    # The read sits in the same `try`: the export is published, so a failed stat must
+    # still reach the leftover cleanup below.
+    try:
+        if stat.S_IMODE(target.stat().st_mode) != publish_mode:
+            target.chmod(publish_mode)
+    except OSError as e:
+        print(f"warning: could not restore mode on {out_dir}: {e}", file=sys.stderr)
+    for leftover, clean in (
+        (staging_root, staging_root.rmdir),
+        (old, (lambda: _remove_tree(old)) if old is not None else None),
+    ):
+        if leftover is None or clean is None:
+            continue
+        try:
+            clean()
+        except OSError as e:
+            print(f"warning: could not remove {leftover}: {e}", file=sys.stderr)

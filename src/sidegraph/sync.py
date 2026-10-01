@@ -4,8 +4,10 @@ After a Graphify rebuild, node ids shift. ``sync`` re-resolves every tracked con
 entity with a deterministic ladder — exact (name+file) -> moved (unique name-only AND the
 old path confirmed gone from disk AND that same move confirmed by COMMITTED git history —
 see ``_committed_evidence_confirms_move``; unconfirmed evidence reports
-``moved_uncommitted`` and leaves the binding untouched rather than guessing — the
-dirty-tree guard, ``SIDEGRAPH_TRUST_DIRTY_TREE=on`` escapes it) -> ambiguous -> orphaned —
+``moved_uncommitted`` and leaves the binding untouched rather than guessing, remembering
+the entity so a later sync re-verifies it once git HEAD moves, even when the graph did not
+change — the dirty-tree guard, ``SIDEGRAPH_TRUST_DIRTY_TREE=on`` escapes it) -> ambiguous
+-> orphaned —
 healing or degrading tier-2 leaf bindings (never deleting) and refreshing the
 durable->engine mapping. Gated on
 ``graph_version`` vs the store's ``last_synced_graph_version`` meta stamp, so the lazy
@@ -58,6 +60,18 @@ from .store import VOLATILE_STALE_KEY, Store
 from .verify import _run_git
 
 LAST_SYNCED_KEY = "last_synced_graph_version"
+# Derived meta (design/superpowers/specs/2026-09-29-sync-pending-moves-and-shared-
+# communities-design.md D1): the entities a pass left as ``moved_uncommitted`` plus the git
+# HEAD it saw, as ``{"head": <sha or null>, "entity_ids": [...]}``. Committing the rename
+# does not move graph.json's version, so without this the gate would skip forever.
+PENDING_MOVES_KEY = "pending_uncommitted_moves"
+# Derived meta: the ``(record_id, vacated communities)`` pairs whose Tier-1 reconcile
+# raised or abstained, as ``{"<record_id>": ["<community>", ...]}``. The adopts had already
+# committed and the pass stamps the graph version anyway, so without this the vacated set is
+# lost and the stale ``community:*`` row stays live. Every ``sync()`` call retries these
+# first; a pair is kept on an exception or an abstain and cleared when the reconcile
+# settles.
+PENDING_TIER1_META = "pending_tier1_reconcile"
 
 
 class RebindOutcome(BaseModel):
@@ -79,18 +93,26 @@ def _set_leaf_status(entity_id: str, store: Store, status: str) -> None:
             store.add_binding(b)
 
 
-def _repoint_communities(entity: Entity, new_community: str | None, store: Store) -> int:
+def _repoint_communities(
+    entity: Entity,
+    new_community: str | None,
+    store: Store,
+    vacated: dict[str, set[str]] | None = None,
+) -> int:
     """Re-point Tier-1 bindings when Leiden renumbered this entity's community.
 
     Community ids are snapshot labels, not identities — every rebuild may renumber them
     (dogfood: 149 -> 19). For each decision leaf-bound to this entity: ensure a live Tier-1
-    binding to the current community and flip the binding to the old baseline community to
-    orphaned (status-only; append-only preserved). Returns the number of decisions re-pointed.
+    binding to the current community (a new row takes the leaf's relation; an existing row
+    keeps its own) and record ``(record_id, old_community)`` in ``vacated``. It does NOT
+    orphan the old row: two leaves of one decision in one community share that one row, so
+    only ``_reconcile_tier1_communities``, once every leaf has settled, may say whether
+    anything still holds it (design/superpowers/specs/2026-09-29-sync-pending-moves-and-
+    shared-communities-design.md D4). Returns the number of decisions re-pointed.
     """
     old = entity.last_seen_community
     if new_community is None or new_community == old:
         return 0
-    old_entity = store.find_abstract_entity(f"community:{old}") if old is not None else None
     new_entity = store.get_or_create_abstract_entity(f"community:{new_community}")
 
     repointed = 0
@@ -98,24 +120,92 @@ def _repoint_communities(entity: Entity, new_community: str | None, store: Store
         if b.tier != 2:
             continue
         repointed += 1
-        store.add_binding(
-            AnchorBinding(
-                record_id=b.record_id,
-                entity_id=new_entity.entity_id,
-                tier=1,
-                status="live",
-            )
+        existing = next(
+            (
+                tb
+                for tb in store.bindings_for_record(b.record_id)
+                if tb.entity_id == new_entity.entity_id
+            ),
+            None,
         )
-        if old_entity is not None:
-            for tb in store.bindings_for_record(b.record_id):
-                if (
-                    tb.tier == 1
-                    and tb.entity_id == old_entity.entity_id
-                    and tb.status != "orphaned"
-                ):
-                    tb.status = "orphaned"
-                    store.add_binding(tb)
+        if existing is None:
+            store.add_binding(
+                AnchorBinding(
+                    record_id=b.record_id,
+                    entity_id=new_entity.entity_id,
+                    tier=1,
+                    status="live",
+                    relation=b.relation,
+                )
+            )
+        elif existing.status != "live":
+            store.add_binding(
+                AnchorBinding(
+                    record_id=b.record_id,
+                    entity_id=new_entity.entity_id,
+                    tier=1,
+                    weight=existing.weight,
+                    status="live",
+                    relation=existing.relation,
+                )
+            )
+        if vacated is not None and old is not None:
+            vacated.setdefault(b.record_id, set()).add(old)
     return repointed
+
+
+def _reconcile_tier1_communities(record_id: str, vacated: set[str], store: Store) -> bool:
+    """Settle one record's Tier-1 ``community:*`` rows after every leaf has been rebound.
+
+    Returns ``True`` when the record was settled (restored and orphaned as computed) and
+    ``False`` when it abstained because a live/degraded leaf has no baseline. A raise means
+    the reconcile failed.
+
+    *held* is the ``last_seen_community`` of each live/degraded Tier-2 leaf. Restore: a row
+    for a held community that was orphaned goes live again. Orphan: a row for a community a
+    leaf *vacated* in this pass and no leaf holds any more. Skipped when a live/degraded
+    leaf has no baseline (its community is unknown, so the record's communities cannot be
+    told apart). Rows nothing vacated (an ambiguous anchor's Tier-1-only row, an orphan-rung
+    repoint, inherited rows) and ``domain:*`` rows are never orphaned here. Status-only,
+    append-only preserved. See design/superpowers/specs/2026-09-29-sync-pending-moves-and-
+    shared-communities-design.md D4.
+    """
+    held: set[str] = set()
+    unknown_baseline = False
+    for b in store.bindings_for_record(record_id):
+        if b.tier != 2 or b.status not in ("live", "degraded"):
+            continue
+        leaf = store.get_entity(b.entity_id)
+        if leaf is None:
+            continue
+        if leaf.last_seen_community is None:
+            unknown_baseline = True
+        else:
+            held.add(leaf.last_seen_community)
+
+    def rows_for(community: str) -> list[AnchorBinding]:
+        ent = store.find_abstract_entity(f"community:{community}")
+        if ent is None:
+            return []
+        return [
+            tb
+            for tb in store.bindings_for_record(record_id)
+            if tb.tier == 1 and tb.entity_id == ent.entity_id
+        ]
+
+    for community in held:
+        for tb in rows_for(community):
+            if tb.status == "orphaned":
+                tb.status = "live"
+                store.add_binding(tb)
+    if unknown_baseline:
+        return False
+    for community in vacated - held:
+        for tb in rows_for(community):
+            if tb.status != "orphaned":
+                tb.status = "orphaned"
+                store.add_binding(tb)
+    return True
 
 
 def _observed_community_for_orphan(desc: Descriptor, reader: GraphifyReader) -> str | None:
@@ -134,20 +224,32 @@ def _observed_community_for_orphan(desc: Descriptor, reader: GraphifyReader) -> 
     return communities.pop() if len(communities) == 1 else None
 
 
-def _repoint_off_path(entity: Entity, community: str | None, store: Store) -> int:
+def _repoint_off_path(
+    entity: Entity,
+    community: str | None,
+    store: Store,
+    vacated: dict[str, set[str]] | None = None,
+) -> int:
     """Re-point on a non-adopted rung: bindings + baseline only; the node mapping is
     NEVER touched here (never guess the entity)."""
     if community is None:
         return 0
-    repointed = _repoint_communities(entity, community, store)
+    repointed = _repoint_communities(entity, community, store, vacated)
     if entity.last_seen_community != community:
         entity.last_seen_community = community
         store.upsert_entity(entity)
     return repointed
 
 
-def _adopt(entity: Entity, node_id: str, version: str, store: Store, community: str | None) -> int:
-    repointed = _repoint_communities(entity, community, store)
+def _adopt(
+    entity: Entity,
+    node_id: str,
+    version: str,
+    store: Store,
+    community: str | None,
+    vacated: dict[str, set[str]] | None = None,
+) -> int:
+    repointed = _repoint_communities(entity, community, store, vacated)
     entity.last_seen_node_id = node_id
     entity.last_seen_graph_version = version
     entity.last_seen_community = community
@@ -170,7 +272,8 @@ def _resolve_repo_root(reader: GraphifyReader) -> Path | None:
     descriptors are relative to the checkout the graph was built from, and the store (a
     directory of small JSON files) is routinely copied elsewhere for safe inspection --
     e.g. to sync a copy against the real, uncopied graph without touching the committed
-    store -- which would make a store-rooted lookup report "not a git repo" and silently
+    store (run from the checkout with an explicit ``--graph``: the default graph follows the
+    store) -- which would make a store-rooted lookup report "not a git repo" and silently
     fall back to treating every candidate as unverifiable even when the real checkout is
     right there. Called once per real (non-skipped) sync pass, not per entity -- one
     subprocess call, not O(entities).
@@ -182,6 +285,9 @@ def _resolve_repo_root(reader: GraphifyReader) -> Path | None:
     treats "no ``built_at_commit``" as an ordinary, supported case (falls back to a content
     hash), so a document corpus with no ``.git`` at all is expected to reach this code path
     routinely, not just on a misconfigured git checkout.
+
+    The repository is found from the graph's directory with git's repository-local
+    variables (``GIT_DIR`` and friends) dropped, never from the ambient environment.
     """
     try:
         result = _run_git(["rev-parse", "--show-toplevel"], cwd=reader.path.parent, timeout=5.0)
@@ -243,7 +349,34 @@ def _trust_dirty_tree() -> bool:
 
 
 def rebind_entity(
-    entity: Entity, store: Store, reader: GraphifyReader, repo_root: Path | None = None
+    entity: Entity,
+    store: Store,
+    reader: GraphifyReader,
+    repo_root: Path | None = None,
+    vacated: dict[str, set[str]] | None = None,
+) -> RebindOutcome:
+    """One entity through the deterministic rebind ladder, then (with no ``vacated``
+    collector) reconcile the Tier-1 community rows of the records it touched.
+
+    ``sync()`` passes one collector across the whole ladder and reconciles once after it,
+    because the sibling leaves' final state decides whether a vacated community is still
+    held (design D4). A direct caller (tests, scripts) passes none and gets its own records
+    reconciled immediately. See ``_rebind_ladder`` for the ladder itself.
+    """
+    collector: dict[str, set[str]] = {} if vacated is None else vacated
+    outcome = _rebind_ladder(entity, store, reader, repo_root, collector)
+    if vacated is None:
+        for record_id, gone in collector.items():
+            _reconcile_tier1_communities(record_id, gone, store)
+    return outcome
+
+
+def _rebind_ladder(
+    entity: Entity,
+    store: Store,
+    reader: GraphifyReader,
+    repo_root: Path | None,
+    vacated: dict[str, set[str]],
 ) -> RebindOutcome:
     """One entity through the deterministic rebind ladder.
 
@@ -269,7 +402,7 @@ def rebind_entity(
         # engine/reader.py) — never both "resolved" and node_id=None.
         assert exact.node_id is not None
         unchanged = exact.node_id == entity.last_seen_node_id
-        repointed = _adopt(entity, exact.node_id, version, store, exact.community)
+        repointed = _adopt(entity, exact.node_id, version, store, exact.community, vacated)
         return RebindOutcome(
             **base,
             status="unchanged" if unchanged else "rebound",
@@ -278,7 +411,7 @@ def rebind_entity(
         )
     if exact.status == "ambiguous":
         _set_leaf_status(entity.entity_id, store, "degraded")
-        repointed = _repoint_off_path(entity, exact.community, store)
+        repointed = _repoint_off_path(entity, exact.community, store, vacated)
         return RebindOutcome(
             **base,
             status="ambiguous",
@@ -341,7 +474,9 @@ def rebind_entity(
                     repo_root, desc.file_path, new_file
                 ):
                     entity.descriptor = Descriptor(name=desc.name, file_path=new_file)
-                    repointed = _adopt(entity, loose.node_id, version, store, loose.community)
+                    repointed = _adopt(
+                        entity, loose.node_id, version, store, loose.community, vacated
+                    )
                     return RebindOutcome(
                         **base,
                         status="moved",
@@ -367,7 +502,7 @@ def rebind_entity(
             # unknown and the old path's fate can't be verified either way (fail closed)
         if loose.status == "ambiguous":
             _set_leaf_status(entity.entity_id, store, "degraded")
-            repointed = _repoint_off_path(entity, loose.community, store)
+            repointed = _repoint_off_path(entity, loose.community, store, vacated)
             return RebindOutcome(
                 **base,
                 status="ambiguous",
@@ -376,7 +511,7 @@ def rebind_entity(
             )
 
     observed = _observed_community_for_orphan(desc, reader)
-    repointed = _repoint_off_path(entity, observed, store)
+    repointed = _repoint_off_path(entity, observed, store, vacated)
     _set_leaf_status(entity.entity_id, store, "orphaned")
     return RebindOutcome(**base, status="orphaned", repointed=repointed)
 
@@ -692,20 +827,265 @@ class SyncReport(BaseModel):
         return out
 
 
+def _current_head(path: Path) -> str | None:
+    """The git HEAD sha of the repo containing ``path``, or ``None`` when it cannot be
+    resolved (no repo, no commits yet, a git failure). Never raises. Git's repository-local
+    variables (``GIT_DIR`` and friends) are dropped, so the answer is for ``path``'s own
+    repository, never an ambient one."""
+    try:
+        result = _run_git(["rev-parse", "--verify", "-q", "HEAD"], cwd=path, timeout=5.0)
+    except ValueError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _record_pending_moves(
+    store: Store,
+    head: str | None,
+    outcomes: list[RebindOutcome],
+    watched: frozenset[str] = frozenset(),
+) -> None:
+    """Remember which entities ended this pass as ``moved_uncommitted``, plus any ``watched``
+    id (an abandoned move, design D2), with ``head`` -- the HEAD read BEFORE the ladder ran,
+    so a commit landing mid-pass differs from it and the next gated call re-checks. Drops
+    the key when there is nothing to watch. It replaces the key, never merges into it, so a
+    full pass keeps only what its own outcomes say (design D1)."""
+    ids = [
+        o.entity_id for o in outcomes if o.status == "moved_uncommitted" or o.entity_id in watched
+    ]
+    if not ids:
+        store.delete_meta(PENDING_MOVES_KEY)
+        return
+    store.set_meta(PENDING_MOVES_KEY, json.dumps({"head": head, "entity_ids": ids}))
+
+
+def _load_pending_moves(store: Store) -> tuple[str | None, list[str]] | None:
+    """The remembered pending moves as ``(head, entity_ids)``, or ``None`` when there are
+    none. A key that does not parse or has the wrong shape is removed and read as empty: it
+    must never raise on every gated call."""
+    raw = store.get_meta(PENDING_MOVES_KEY)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+        head = data["head"]
+        ids = data["entity_ids"]
+        valid = (
+            (head is None or isinstance(head, str))
+            and isinstance(ids, list)
+            and all(isinstance(i, str) for i in ids)
+        )
+    except (ValueError, KeyError, TypeError):
+        valid = False
+    if not valid or not ids:
+        store.delete_meta(PENDING_MOVES_KEY)
+        return None
+    return head, ids
+
+
+def _reconcile_vacated(
+    vacated: dict[str, set[str]], store: Store, outcomes: list[RebindOutcome]
+) -> None:
+    """Reconcile every record's Tier-1 community rows, one record at a time. A failure is
+    isolated and reported as an ``error`` outcome (never silent: both lazy-sync callers
+    suppress exceptions), so the rest of the pass, including the pending-moves key, still
+    lands. Callers record the key BEFORE calling this: it says what the adopts did."""
+    failed: dict[str, set[str]] = {}
+    for record_id, gone in vacated.items():
+        try:
+            _reconcile_tier1_communities(record_id, gone, store)
+        except Exception as e:  # the adopts have committed; do not lose the rest of the pass
+            failed[record_id] = gone
+            outcomes.append(_tier1_error(record_id, e))
+    if failed:
+        pending = _load_pending_tier1(store)
+        for record_id, gone in failed.items():
+            pending.setdefault(record_id, set()).update(gone)
+        _save_pending_tier1(store, pending)
+
+
+def _tier1_error(record_id: str, error: Exception) -> RebindOutcome:
+    return RebindOutcome(
+        entity_id=record_id,
+        canonical_name=f"community rows of record {record_id}",
+        status="error",
+        detail=f"tier-1 community reconcile failed: {error}",
+    )
+
+
+def _load_pending_tier1(store: Store) -> dict[str, set[str]]:
+    """The remembered failed reconciles, ``{}`` when none. A key that does not parse or has
+    the wrong shape is removed and read as empty: it must never raise on every sync."""
+    raw = store.get_meta(PENDING_TIER1_META)
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw)
+        pending = {str(k): {str(c) for c in v} for k, v in data.items() if v}
+    except (ValueError, TypeError, AttributeError):
+        store.delete_meta(PENDING_TIER1_META)
+        return {}
+    return pending
+
+
+def _save_pending_tier1(store: Store, pending: dict[str, set[str]]) -> None:
+    if not pending:
+        store.delete_meta(PENDING_TIER1_META)
+        return
+    store.set_meta(PENDING_TIER1_META, json.dumps({k: sorted(v) for k, v in pending.items()}))
+
+
+def _retry_pending_tier1(store: Store) -> list[RebindOutcome]:
+    """Re-run the Tier-1 reconcile for the pairs an earlier pass failed on. Runs at the
+    start of every ``sync()``, gated or not. A pair that fails again stays in the key and is
+    reported as an ``error`` outcome. A pair that now succeeds is cleared and reported as a
+    ``moved`` outcome (noteworthy, not a finding), so a gated call that repaired a binding
+    does not look like a skip. A pair whose reconcile abstained (a live/degraded Tier-2 leaf
+    has no community baseline yet) stays in the key and reports nothing: it is a specified
+    non-event, not a finding, and a later pass re-baselines the leaf, and the next sync then
+    settles it."""
+    pending = _load_pending_tier1(store)
+    if not pending:
+        return []
+    outcomes: list[RebindOutcome] = []
+    remaining: dict[str, set[str]] = {}
+    for record_id, gone in pending.items():
+        try:
+            settled = _reconcile_tier1_communities(record_id, gone, store)
+        except Exception as e:
+            remaining[record_id] = gone
+            outcomes.append(_tier1_error(record_id, e))
+        else:
+            if not settled:
+                remaining[record_id] = gone
+                continue
+            outcomes.append(
+                RebindOutcome(
+                    entity_id=record_id,
+                    canonical_name=f"community rows of record {record_id}",
+                    status="moved",
+                    detail="tier-1 community reconcile retried",
+                )
+            )
+    _save_pending_tier1(store, remaining)
+    return outcomes
+
+
+def _stale_decisions(store: Store) -> list[dict]:
+    """Live decisions whose every Tier-2 leaf is orphaned."""
+    stale: list[dict] = []
+    for d in store.iter_decisions():
+        if d.status in (DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED):
+            continue
+        # Leaf-based: surviving Tier-1/Tier-0 bindings keep the decision retrievable
+        # (the escalation), but do not vouch for the claim — the concrete code is gone.
+        leaves = [b for b in store.bindings_for_record(d.id) if b.tier == 2]
+        if leaves and all(b.status == "orphaned" for b in leaves):
+            stale.append({"id": d.id, "title": d.title})
+    return stale
+
+
+def _reverify_pending_moves(
+    store: Store, reader: GraphifyReader, entity_ids: list[str], version: str, head: str
+) -> SyncReport:
+    """The narrow pass (design D2): HEAD moved since a pass left entities
+    ``moved_uncommitted`` and the graph did not change, so re-run the ladder over only
+    those entities. ``head`` is the HEAD the gate read before this pass started, and is what
+    gets recorded. Everything per entity, the store lookup included, sits inside one guard:
+    an error is isolated, becomes an ``error`` outcome and drops that id from the key, as
+    does an id the store no longer resolves. An entity whose old path is back on disk (the
+    rename was reverted or stashed) is left untouched and reported ``unchanged``, but stays
+    in the key with the current HEAD: the rename may come back, and it is re-checked only
+    after the next HEAD change. Domain membership reads graph nodes and the graph did not
+    change, so the domain fields of the report stay empty; slug conflicts and the stale scan
+    are recomputed and the TOC cache is rebuilt the way a skipped pass does.
+    """
+    outcomes: list[RebindOutcome] = []
+    vacated: dict[str, set[str]] = {}
+    watched: set[str] = set()
+    repo_root = _resolve_repo_root(reader)
+    for entity_id in entity_ids:
+        entity = None
+        try:
+            entity = store.get_entity(entity_id)
+            if entity is None or entity.descriptor is None:
+                continue
+            old_path = entity.descriptor.file_path
+            if reader.resolve(entity.descriptor).status == "resolved":
+                # The graph already has this entity at its recorded path: it was adopted
+                # (a pass that adopted it but did not finish leaves the key stale). The
+                # file existing there is the adoption, not a reverted rename: run the
+                # ladder's first rung and drop it from the key.
+                outcomes.append(rebind_entity(entity, store, reader, repo_root, vacated))
+                continue
+            if repo_root is not None and old_path is not None and (repo_root / old_path).exists():
+                # The descriptor still names the pre-move path (moved_uncommitted never
+                # repoints), so the file being back means the rename was reverted or
+                # stashed. The ladder would fall through to orphan on a graph built on the
+                # dirty tree: leave the leaf untouched and keep watching the entity.
+                outcomes.append(
+                    RebindOutcome(
+                        entity_id=entity.entity_id,
+                        canonical_name=entity.canonical_name,
+                        status="unchanged",
+                        detail=f"pending move of {old_path} abandoned (file is back on disk)",
+                    )
+                )
+                watched.add(entity_id)
+                continue
+            outcomes.append(rebind_entity(entity, store, reader, repo_root, vacated))
+        except Exception as e:  # one bad entity must not abort the pass
+            outcomes.append(
+                RebindOutcome(
+                    entity_id=entity_id,
+                    canonical_name=entity.canonical_name if entity is not None else entity_id,
+                    status="error",
+                    detail=str(e),
+                )
+            )
+    # The key first: it records what the adopts above did, so a reconcile failure cannot
+    # leave an adopted entity remembered as pending.
+    _record_pending_moves(store, head, outcomes, frozenset(watched))
+    _reconcile_vacated(vacated, store, outcomes)
+    if next(store.iter_domains(status=DomainStatus.ACCEPTED), None) is not None:
+        store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store, reader)))
+    return SyncReport(
+        from_version=version,
+        to_version=version,
+        outcomes=outcomes,
+        stale_decisions=_stale_decisions(store),
+        slug_conflicts=store.domain_slug_conflicts(),
+    )
+
+
 def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncReport:
     """Full rebind pass, gated on graph_version AND the volatile-reload flag. Stamps
     last_synced, and clears the reload flag, only on completion.
 
     Entities that error during rebind are not retried until the next graph-version change
-    (or force=True) — the stamp records a completed visit, not universal success. The gate
-    below skips the rebind ladder itself when the version already matches, the store's
-    volatile state isn't cold (`VOLATILE_STALE_KEY`), and `force` wasn't passed — but the
-    gate does NOT skip the TOC cache refresh: a skipped pass still rewrites `toc_cache` when
-    at least one accepted domain exists, since that cache can go stale from content-only
-    changes the graph never sees (see the gate's own comment below).
+    (or force=True) — the stamp records a completed visit, not universal success. The
+    exceptions are an entity left ``moved_uncommitted`` and a remembered Tier-1 reconcile
+    (``PENDING_TIER1_META``; see ``_retry_pending_tier1``: a retry that repairs the record
+    or fails again reports an outcome and also prevents the skip, an abstain does not). A
+    ``moved_uncommitted`` entity is remembered under
+    ``PENDING_MOVES_KEY`` with the git HEAD read before the ladder ran, and when the gate
+    would skip, a resolvable HEAD that differs from the recorded one runs a NARROW pass —
+    the rebind ladder over only those entities, returning a non-skipped report whose
+    ``outcomes`` cover just them, whose ``stale_decisions`` and ``slug_conflicts`` are
+    recomputed, and whose domain fields stay empty (the graph did not change, so domain
+    membership was not recomputed). The gate below skips the rebind ladder itself when the
+    version already matches, the store's volatile state isn't cold (`VOLATILE_STALE_KEY`),
+    and `force` wasn't passed — but the gate does NOT skip the TOC cache refresh: a skipped
+    pass still rewrites `toc_cache` when at least one accepted domain exists, since that
+    cache can go stale from content-only changes the graph never sees (see the gate's own
+    comment below).
     """
     to_version = reader.graph_version()
     from_version = store.get_meta(LAST_SYNCED_KEY)
+    # An earlier pass's failed Tier-1 reconcile is retried first, whatever the gate says.
+    retried = _retry_pending_tier1(store)
     # A canonical reload (pull, merge, branch switch, hand edit — even a bare touch, since
     # the digest hashes mtime_ns) resets every derived table but deliberately PRESERVES the
     # meta table, so graph_version alone cannot see that volatile state went cold. This is
@@ -714,6 +1094,17 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
     # read here for the first time.
     volatile_stale = store.get_meta(VOLATILE_STALE_KEY) == "1"
     if to_version == from_version and not volatile_stale and not force:
+        # A committed move does not change graph.json, so a pass that left entities
+        # `moved_uncommitted` would otherwise never revisit them. Re-check them once HEAD has
+        # resolvably moved (design D2); an unresolvable HEAD keeps the key and skips.
+        pending = _load_pending_moves(store)
+        if pending is not None:
+            recorded_head, pending_ids = pending
+            head = _current_head(reader.path.parent)
+            if head is not None and head != recorded_head:
+                report = _reverify_pending_moves(store, reader, pending_ids, to_version, head)
+                report.outcomes[:0] = retried
+                return report
         # TOC cache is volatile state (§5/§6), and `sync` is the store's one volatile-refresh
         # verb (see docs/reference/store-format.md) — a content-only change (e.g. `add_decision`
         # bound to an already-accepted domain, via capture or import) never moves
@@ -725,16 +1116,30 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
         # domain exists" purely to avoid a pointless write when there is nothing to refresh.
         if next(store.iter_domains(status=DomainStatus.ACCEPTED), None) is not None:
             store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store, reader)))
+        if retried:
+            # The retry repaired a record or failed again: report it (a narrow-style report),
+            # not a silent skip.
+            return SyncReport(
+                from_version=to_version,
+                to_version=to_version,
+                outcomes=retried,
+                stale_decisions=_stale_decisions(store),
+                slug_conflicts=store.domain_slug_conflicts(),
+            )
         return SyncReport(from_version=from_version, to_version=to_version, skipped=True)
 
-    outcomes: list[RebindOutcome] = []
+    # Read BEFORE the ladder: a commit landing after it must differ from what is recorded,
+    # or the gate would skip that move indefinitely (design D2).
+    head_before = _current_head(reader.path.parent)
+    outcomes: list[RebindOutcome] = list(retried)
+    vacated: dict[str, set[str]] = {}
     # Resolved once for the whole pass (one subprocess call, not one per entity) and
     # threaded through every rebind_entity call — see _resolve_repo_root / the moved
     # rung's own comment for what this guards against and how it degrades when unknown.
     repo_root = _resolve_repo_root(reader)
     for entity in store.iter_concrete_entities():
         try:
-            outcomes.append(rebind_entity(entity, store, reader, repo_root))
+            outcomes.append(rebind_entity(entity, store, reader, repo_root, vacated))
         except Exception as e:  # one bad entity must not abort the pass
             outcomes.append(
                 RebindOutcome(
@@ -745,19 +1150,17 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
                 )
             )
 
+    # Reconciled after the whole ladder, not per entity: a sibling leaf may still be
+    # unvisited (or orphaned later in the pass) when an earlier leaf leaves a community.
+    # The pending key is recorded before the reconcile (see _reverify_pending_moves).
+    _record_pending_moves(store, head_before, outcomes)
+    _reconcile_vacated(vacated, store, outcomes)
+
     domains_refreshed, empty_domains, overbroad_domains, domain_failures = _refresh_domains(
         store, reader
     )
 
-    stale: list[dict] = []
-    for d in store.iter_decisions():
-        if d.status in (DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED):
-            continue
-        # Leaf-based: surviving Tier-1/Tier-0 bindings keep the decision retrievable
-        # (the escalation), but do not vouch for the claim — the concrete code is gone.
-        leaves = [b for b in store.bindings_for_record(d.id) if b.tier == 2]
-        if leaves and all(b.status == "orphaned" for b in leaves):
-            stale.append({"id": d.id, "title": d.title})
+    stale = _stale_decisions(store)
 
     store.set_meta(LAST_SYNCED_KEY, to_version)
     # Cleared HERE, beside the version stamp and BEFORE build_toc: volatile state has been
@@ -803,11 +1206,11 @@ _SYNC_OUTCOME_NOTEWORTHY = ("moved", "moved_uncommitted", "orphaned", "ambiguous
 # actually costs reachability (it was a decision's ONLY live tier-2 leaf), the decision goes
 # stale and ``stale_decisions`` already fires -- the failure signal is redundant where it
 # matters and harmful (permanently red) where it doesn't. "moved_uncommitted" (dirty-tree
-# guard) is the same shape as "orphaned"/"ambiguous" on purpose -- a decision anchored only
-# through it goes stale and fires there too, once the commit lands the next sync heals it
-# on its own, and a person just needs to commit their move or use the documented escape
-# hatch, not a red CI run. Only "error" (the rebind ladder itself raised on an entity) stays
-# a genuine failing outcome.
+# guard) is informational on purpose: the leaf stays live and silent, and nothing is stale.
+# The move is remembered (``PENDING_MOVES_KEY``), and the first sync after HEAD moves
+# re-verifies it, lazily or explicitly, even when the graph was not rebuilt. A person just
+# needs to commit their move or use the documented escape hatch, not a red CI run. Only "error"
+# (the rebind ladder itself raised on an entity) stays a genuine failing outcome.
 _FINDING_OUTCOME_STATUSES = ("error",)
 
 
@@ -817,7 +1220,11 @@ def report_as_dict(report: SyncReport) -> dict:
     callers (design/superpowers/specs/2026-07-11-ci-integrity-design.md ruling 1).
 
     ``synced`` is ``False`` when the pass was skipped outright (``graph_version``
-    unchanged, no ``force``) -- every OTHER field is then an EMPTY default (``outcomes:
+    unchanged, no ``force``, no pending move to re-verify, and no remembered Tier-1
+    reconcile whose retry repaired the record or failed again; a retry that abstains
+    because a live or degraded Tier-2 anchor has no recorded community reports nothing)
+    -- every OTHER field is then
+    an EMPTY default (``outcomes:
     []``, ``counts: ""``, ``repointed: 0``, ``stale_decisions: []``, ``empty_domains:
     []``, ``overbroad_domains: []``, ``slug_conflicts: []``, ``domains_refreshed: 0``,
     ``domain_failures: []``) from a fresh, un-run ``SyncReport(skipped=True)`` -- NOT a
@@ -826,8 +1233,16 @@ def report_as_dict(report: SyncReport) -> dict:
     ``report_has_findings`` below happens to still read a skipped dict as clean (nothing to
     find), which is exactly the "version-skip is exit 0" contract ``--check`` wants.
 
+    A third kind, the NARROW report (a pending ``moved_uncommitted`` move re-verified after
+    HEAD moved, graph unchanged): ``synced: true`` with ``from_version == to_version``,
+    ``outcomes`` limited to the re-verified entities, ``stale_decisions`` and
+    ``slug_conflicts`` recomputed, and ``empty_domains``/``overbroad_domains``/
+    ``domain_failures`` empty and ``domains_refreshed`` 0 because domain membership was not
+    recomputed. ``--check`` implies force, so it never sees one.
+
     ``outcomes`` carries only entities worth a human's attention -- moved/moved_uncommitted/
-    orphaned/ambiguous/error -- filtered via ``_SYNC_OUTCOME_NOTEWORTHY``, never the
+    orphaned/ambiguous/error (``moved`` also reports a repaired Tier-1 community reconcile,
+    ``tier-1 community reconcile retried``) -- filtered via ``_SYNC_OUTCOME_NOTEWORTHY``, never the
     "unchanged"/"rebound" majority, same filter ``sidegraph-sync``'s own printer applies.
     ``counts`` is ``report.counts()`` rendered as a string (e.g. ``"{'unchanged': 3}"``),
     ``""`` when nothing is tracked yet. ``repointed`` sums EVERY outcome's ``repointed``,

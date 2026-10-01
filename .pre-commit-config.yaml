@@ -115,10 +115,11 @@ repos:
         # nothing and would couple the gate to uv project discovery — which fails outright in a
         # tree whose pyproject uv cannot parse (the release script's own test fixtures).
         # The `test -f` guard exists because THIS FILE SHIPS: .pre-commit-config.yaml is in the
-        # release ALLOWLIST while tools/ is not, and the release script verifies the snapshot by
-        # running `pre-commit run --all-files` inside it. Without the guard, an always_run hook
-        # would look for a checker that by design does not exist there and fail every release,
-        # the public repo's CI, and every public contributor's first commit.
+        # release ALLOWLIST while tools/ ships only the session-link checker, and the release
+        # script verifies the snapshot by running `pre-commit run --all-files` inside it.
+        # Without the guard, an always_run hook would look for a checker that by design does
+        # not exist there and fail every release, the public repo's CI, and every public
+        # contributor's first commit.
         entry: bash -c 'test ! -f tools/corpus_leak.py || exec python3 tools/corpus_leak.py'
         language: system
         pass_filenames: false
@@ -139,8 +140,8 @@ repos:
         # AGENTS.public.md) with no base counterpart, or a plugin manifest that still points
         # at the working tree instead of the released package, would otherwise ship broken
         # and surface only when a consumer's install fails. Self-guarded like
-        # corpus-leak-gate: tools/ is not in the release ALLOWLIST, so this checker does not
-        # exist in the public snapshot or its CI.
+        # corpus-leak-gate: tools/ ships only the session-link checker, so this checker does
+        # not exist in the public snapshot or its CI.
         entry: bash -c 'test ! -f tools/check_public_twins.py || exec python3 tools/check_public_twins.py'
         language: system
         pass_filenames: false
@@ -150,8 +151,8 @@ repos:
         name: shipped-docs link check
         # A relative Markdown link that resolves in THIS repo can still 404 once the release
         # mapping is applied (design/whitepaper/draft.md -> docs/whitepaper/index.md, `.public.`
-        # twins renamed onto their base names, design/ and tools/ absent) — this catches that
-        # before the commit lands. Self-guarded: tools/ is not in the release ALLOWLIST.
+        # twins renamed onto their base names, design/ absent, tools/ reduced to the
+        # session-link checker) — this catches that before the commit lands. Self-guarded: tools/ ships only the session-link checker.
         entry: bash -c 'test ! -f tools/check_shipped_links.py || exec python3 tools/check_shipped_links.py'
         language: system
         pass_filenames: false
@@ -161,15 +162,15 @@ repos:
         name: no session links in commit message
         # Reads the commit message file git passes a commit-msg hook, never the changed
         # files — the forbidden patterns are tools/check_no_session_links.py's four
-        # session-link shapes, the same ones .github/workflows/ci.yml's
-        # `pr-description-link-gate` job checks against a PR body.
+        # session-link shapes, the same ones .github/workflows/session-link-gate.yml
+        # checks against a PR's title, body and recorded commit messages.
         # `stages: [commit-msg]` is load-bearing, not decoration: a hook with no explicit
         # `stages` inherits EVERY stage, and `pre-commit run --all-files` (CI's lint job, and
         # a developer's own habit) defaults to `--hook-stage pre-commit` — without this pin,
         # that plain run would try to execute this hook anyway, with no COMMIT_EDITMSG file
         # to check, and fail every lint run for a reason that has nothing to do with lint.
-        # Self-guarded like corpus-leak-gate: tools/ is not in the release ALLOWLIST, so this
-        # exits 0 cleanly in the public snapshot and on a public contributor's first commit.
+        # Self-guarded like corpus-leak-gate, though the checker does ship: the guard only covers a
+        # deleted checker, and the session-link-gate workflow is the gate that fails then.
         entry: bash -c 'test ! -f tools/check_no_session_links.py || exec python3 tools/check_no_session_links.py "$@"' --
         language: system
         stages: [commit-msg]

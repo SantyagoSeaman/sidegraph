@@ -76,6 +76,7 @@ from .schema import (
     Initiative,
     Scope,
     canonicalize,
+    is_safe_record_id,
 )
 
 # One definition, two consumers: __init__ bootstraps with executescript (not inside a
@@ -274,6 +275,11 @@ _RACE_TOLERANT_ATTEMPTS = 3
 # exists to stop unbounded accumulation, not to be prompt.
 _TMP_DEBRIS_MIN_AGE_SECONDS = 60.0
 
+# A legacy migration takes seconds, so a migration sentinel younger than this is a LIVE
+# migration by another process, never a crash's leftover (design D10): the open-time check
+# refuses instead of cleaning up under it.
+_LIVE_MIGRATION_SECONDS = 60.0
+
 # Attempts Store._write_archive_segment makes to publish a new segment under an unused
 # name before giving up (review Important-1). Higher than _RACE_TOLERANT_ATTEMPTS above:
 # that helper's racers are all writing IDENTICAL content and converge once the single
@@ -289,6 +295,17 @@ _ARCHIVE_SEGMENT_PUBLISH_ATTEMPTS = 10
 VOLATILE_STALE_KEY = "volatile_stale"
 
 _CANONICAL_DIGEST_KEY = "canonical_digest"
+
+# Meta key: JSON list of the canonical files the last reload skipped for a record-identity
+# problem (design/superpowers/specs/2026-09-29-record-identity-design.md D3, D4). Each entry
+# is {"path", "reason", "size", "mtime_ns"}; deleted when empty. ``__init__`` repeats the
+# warning from it on every open and reloads once if a listed file changed or vanished.
+SKIPPED_CANONICAL_KEY = "skipped_canonical_files"
+
+# Folded into the canonical digest (D5): an index certified by code that predates the
+# identity rule mismatches once, reloads through the rule and is re-certified — otherwise a
+# poisoned index with a matching digest would keep serving a crafted id on the fast path.
+_IDENTITY_RULE = "record-identity-v1"
 
 
 def _atomic_write_text(path: Path, text: str) -> os.stat_result:
@@ -324,6 +341,36 @@ def _atomic_write_text(path: Path, text: str) -> os.stat_result:
     st = tmp.stat()
     os.replace(tmp, path)
     return st
+
+
+def _record_file(root: Path, subdir: str, record_id: str) -> Path:
+    """``root/<subdir>/<record_id>.json``, refusing an id that is not a single path segment.
+
+    Every canonical file's name IS its record's id, so an id like ``../../x`` would be a
+    path outside the store (see design/superpowers/specs/2026-09-29-record-identity-design.md
+    D1, D2). The one place an id becomes a path: writes, reads and deletes all come here."""
+    if not is_safe_record_id(record_id):
+        raise ValueError(f"unsafe record id {record_id!r}: must be a single path segment")
+    return root / subdir / f"{record_id}.json"
+
+
+def _record_identity_problem(data: object, id_field: str, stem: str) -> str | None:
+    """Why the canonical file named ``<stem>.json`` cannot be indexed as a record, or None.
+
+    A file is a record only when its JSON is an object whose ``id_field`` is a safe id equal
+    to the filename stem (design/superpowers/specs/2026-09-29-record-identity-design.md D3,
+    D12): the id then IS the filename, and a crafted or missing id can neither become a
+    path nor mint a fresh ULID on every rebuild."""
+    if not isinstance(data, dict):
+        return "not a JSON object"
+    if id_field not in data:
+        return f"missing {id_field}"
+    value = data[id_field]
+    if not is_safe_record_id(value):
+        return f"unsafe {id_field} {value!r}"
+    if value != stem:
+        return f"{id_field} {value!r} does not match the filename"
+    return None
 
 
 def _atomic_write_json(path: Path, obj: object) -> os.stat_result:
@@ -387,6 +434,42 @@ def _atomic_write_text_race_tolerant(path: Path, text: str) -> None:
             last_error = e
     assert last_error is not None  # the loop always sets it before falling through
     raise last_error
+
+
+# Store-owned entries that must be real directories/files, never symlinks (see
+# ``symlinked_internals``). The three SQLite sidecars are created by SQLite itself next to
+# ``index.db``, so no ``self.path /`` join in this module names them.
+_SQLITE_SIDECAR_NAMES = ("index.db-journal", "index.db-wal", "index.db-shm")
+_STORE_INTERNAL_NAMES = (
+    *_CANONICAL_SUBDIRS,
+    _ARCHIVE_SUBDIR,
+    _FORMAT_MARKER_NAME,
+    _STAMPING_MARKER_NAME,
+    "index.db",
+    _GITIGNORE_NAME,
+    *_SQLITE_SIDECAR_NAMES,
+)
+
+
+def symlinked_internals(store_path: Path) -> list[str]:
+    """Every store-owned entry directly under ``store_path`` that is a symlink, in
+    ``_STORE_INTERNAL_NAMES`` order. ``is_symlink`` is ``lstat``-based, so a dangling link
+    counts. A symlinked store ROOT is not an internal and is not reported.
+    # see design/superpowers/specs/2026-09-29-store-symlinks-and-bootstrap-guards-design.md D1"""
+    return [name for name in _STORE_INTERNAL_NAMES if (store_path / name).is_symlink()]
+
+
+def refuse_symlinked_internals(store_path: Path) -> None:
+    """Raise ``ValueError`` naming the first symlinked store-owned entry, if any: a symlinked
+    ``decisions/`` would send every record write to the link's target, and a symlinked
+    ``index.db`` would make SQLite write there.
+    # see design/superpowers/specs/2026-09-29-store-symlinks-and-bootstrap-guards-design.md D1"""
+    found = symlinked_internals(store_path)
+    if found:
+        raise ValueError(
+            f"{store_path / found[0]} inside the store is a symlink; the store refuses to use "
+            "a symlinked directory or store file inside itself. Replace it with a real one."
+        )
 
 
 def _store_has_any_records(path: Path) -> bool:
@@ -476,6 +559,45 @@ def _warn_hot_archive_mismatch(kind: str, record_id: str) -> None:
     )
 
 
+def _warn_skipped_canonical(entries: list[dict]) -> None:
+    """A reload skipped canonical files whose identity does not hold (see
+    ``_record_identity_problem``). Repeated on every open while the list is non-empty."""
+    shown = "; ".join(f"{e['path']} ({e['reason']})" for e in entries[:3])
+    more = f" and {len(entries) - 3} more" if len(entries) > 3 else ""
+    print(
+        f"sidegraph: WARNING {len(entries)} record file(s) were left out of the index: "
+        f"{shown}{more}. Run `sidegraph-verify` to list them; fix or remove them.",
+        file=sys.stderr,
+    )
+
+
+_ARCHIVE_ID_FIELDS = {"decision": "id", "domain": "domain_id"}
+
+
+def _archive_line_problem(record_type: object, payload: dict) -> str | None:
+    """Why an archive line cannot be indexed, or None. A line of an unrecognized (or
+    non-string) ``record_type`` is fine here: it is skipped silently by the callers
+    (forward-compat). Otherwise its id field must be present, a string and a safe filename
+    stem. Shared with ``bootstrap.catalog`` so both readers skip the same lines."""
+    id_field = _ARCHIVE_ID_FIELDS.get(record_type) if isinstance(record_type, str) else None
+    if id_field is None:
+        return None
+    if id_field not in payload:
+        return f"missing {id_field}"
+    if not is_safe_record_id(payload[id_field]):
+        return f"unsafe {id_field} {payload[id_field]!r}"
+    return None
+
+
+def _warn_skipped_archive_line(segment: Path, reason: str) -> None:
+    """An archive segment line whose record cannot be indexed: it is skipped and the rest
+    of the segment loads (segments are immutable, so it is never rewritten)."""
+    print(
+        f"sidegraph: WARNING skipping a line of archive segment {segment.name}: {reason}.",
+        file=sys.stderr,
+    )
+
+
 def _warn_domain_slug_conflict(slug: str, domain_ids: list[str]) -> None:
     """A slug held by more than one LIVE (proposed|accepted) domain at once — design §6's
     cross-branch race: two branches independently proposed/accepted a domain with the same
@@ -521,6 +643,20 @@ def _hot_file_matches(path: Path, expected_payload: dict) -> bool | None:
     if not path.is_file():
         return None
     return json.loads(path.read_text(encoding="utf-8")) == expected_payload
+
+
+def _hot_file_skipped_by_reload(path: Path, id_field: str) -> bool:
+    """True when ``path`` exists, parses, and fails the record identity rule, i.e. the
+    reload left it out of the index. Such a file is not a second copy of the archived
+    record, so the compact leftover comparison ignores it (design D3). An unparseable file
+    is not decided here: the comparison reports it as it always did."""
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return False
+    return _record_identity_problem(data, id_field, path.stem) is not None
 
 
 class CompactedRecord(BaseModel):
@@ -598,6 +734,15 @@ def _ratifier_identity(actor: str | None = None) -> str | None:
         return None
 
 
+def _sentinel_age_seconds(sentinel: Path) -> float:
+    """Seconds since the sentinel was written; infinite when its mtime cannot be read, so
+    that an unreadable sentinel is treated as old (design D10)."""
+    try:
+        return time.time() - sentinel.stat().st_mtime
+    except OSError:
+        return float("inf")
+
+
 class Store:
     """Thin persistence layer that owns the invariants. Use as a context manager.
 
@@ -618,6 +763,18 @@ class Store:
         self._mutation_depth = 0
         self.path = raw
 
+        # Before the legacy dispatch: `_migrate_legacy` would otherwise move records through
+        # a symlinked subdirectory before anything refused it.
+        if raw.is_dir():
+            refuse_symlinked_internals(raw)
+
+        # A bare-file migration (``Store("old.db")``) that was interrupted after its point of
+        # no return leaves a sentinel beside the legacy file (design D10). A nameless path
+        # such as ``Store(".")`` cannot be a legacy file and has no sentinel.
+        sentinel = self._migration_sentinel_path(raw)
+        if sentinel is not None and sentinel.is_file():
+            self._check_migration_sentinel(raw, sentinel)
+
         if raw.is_file():
             self._reject_file_inside_a_store(raw)
             self._migrate_legacy(raw)
@@ -636,11 +793,73 @@ class Store:
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA_SQL)
             self._refresh_freshness()
+            self._warn_skipped_files()
         except BaseException:
             self._conn.close()
             raise
 
     # -- canonical layout / migration ----------------------------------------
+
+    @staticmethod
+    def _migration_sentinel_path(raw: Path) -> Path | None:
+        """``<name>.migration-incomplete`` beside ``raw``, or None when ``raw`` has no name
+        (``Store(".")``: ``with_name`` would raise on it)."""
+        if not raw.name:
+            return None
+        return raw.absolute().with_name(raw.name + ".migration-incomplete")
+
+    @staticmethod
+    def _check_migration_sentinel(raw: Path, sentinel: Path) -> None:
+        """Resolve a leftover migration sentinel before opening ``raw`` (design D10).
+
+        A sentinel younger than ``_LIVE_MIGRATION_SECONDS`` is another process's live
+        migration, in either state below: refuse and touch nothing (a stale cleanup here
+        deleted the live opener's staging directory). Only an older sentinel is resolved:
+
+        Legacy file still intact: the interruption came before the rename, so the sentinel
+        is stale. Remove it, and the staging directory it names ONLY when that is a real
+        directory (not a symlink) in the legacy file's own directory with a staging name: a
+        file must never choose what gets ``rmtree``-d. Legacy file gone: the migration was
+        interrupted after the rename, and the staged export is the only copy of the
+        records still to be moved, so refuse to open and say how to finish by hand. An
+        unreadable mtime counts as old."""
+        if _sentinel_age_seconds(sentinel) < _LIVE_MIGRATION_SECONDS:
+            raise ValueError(
+                f"another process is migrating {raw} now, or was a moment ago (sentinel "
+                f"{sentinel} is younger than {_LIVE_MIGRATION_SECONDS:.0f}s); nothing was "
+                "changed; retry in a minute, and do not delete the sentinel; if no other sidegraph "
+                "process is running and this persists past a minute, the next open gives the "
+                "recovery steps."
+            )
+        try:
+            info = json.loads(sentinel.read_text(encoding="utf-8"))
+            staging_text = str(info["staging"])
+            backup_text = str(info["backup"])
+        except (OSError, ValueError, KeyError, TypeError):
+            staging_text = backup_text = "(unreadable sentinel)"
+        if not raw.is_file():
+            raise ValueError(
+                f"an earlier legacy migration of {raw} was interrupted (sentinel {sentinel}): "
+                f"the staged export is at {staging_text} and the original is at "
+                f"{backup_text}. Move each subdirectory of the staging directory into "
+                f"{raw}, then delete the staging directory and the sentinel. If the staging "
+                "directory is empty, the migration had finished: delete it and the sentinel."
+            )
+        staging = Path(staging_text)
+        if (
+            staging.is_dir()
+            and not staging.is_symlink()
+            and Path(os.path.abspath(staging)).parent == Path(os.path.abspath(raw)).parent
+            and staging.name.startswith(".sidegraph-migrating-")
+        ):
+            shutil.rmtree(staging, ignore_errors=True)
+        elif staging_text != "(unreadable sentinel)":
+            print(
+                f"sidegraph: WARNING stale migration sentinel {sentinel} names {staging_text}, "
+                "which is not a staging directory next to the legacy file; leaving it alone.",
+                file=sys.stderr,
+            )
+        sentinel.unlink(missing_ok=True)
 
     def _reject_file_inside_a_store(self, target: Path) -> None:
         """A file sitting inside a canonical store is an artifact OF that store — never a
@@ -907,8 +1126,9 @@ class Store:
         raises a clear error naming the offending table and id, leaving the legacy db
         exactly as it was — retryable, never partially migrated. Only once every row is
         known-good is the export written, and only into a private staging directory (see
-        below); the legacy file's RENAME to ``.migrated-backup`` is the point of no return,
-        immediately followed by moving the staged export into ``self.path``.
+        below); the legacy file's RENAME to ``.migrated-backup`` comes last in the directory case,
+        so an interruption leaves it and the next open re-migrates (design D10 covers the
+        bare-file case, where the rename must come first).
 
         Staging, not writing ``self.path`` directly, is required because ``self.path`` can
         BE ``legacy_file`` itself (the bare-file dispatch, e.g. ``Store("old.db")``) — a
@@ -951,28 +1171,35 @@ class Store:
         validated = self._validate_legacy_rows(legacy_file, legacy_rows)
 
         staging = Path(tempfile.mkdtemp(prefix=".sidegraph-migrating-", dir=legacy_file.parent))
+        # Bare-file case: ``self.path`` IS the legacy file, so it must be renamed away before
+        # the staged directories can move in. A sentinel beside it, written BEFORE that
+        # point of no return, tells the next open the staged export is all that is left.
+        bare = legacy_file == self.path
+        sentinel = self._migration_sentinel_path(legacy_file) if bare else None
+        backup = legacy_file.with_name(legacy_file.name + ".migrated-backup")
+        created_sentinel = False  # True only once THIS call made the sentinel file
         try:
             for sub in _CANONICAL_SUBDIRS:
                 (staging / sub).mkdir(parents=True, exist_ok=True)
 
             for entity in validated["entities"]:
                 _atomic_write_json(
-                    staging / "entities" / f"{entity.entity_id}.json",
+                    _record_file(staging, "entities", entity.entity_id),
                     _entity_identity_payload(entity),
                 )
             for decision in validated["decisions"]:
                 _atomic_write_json(
-                    staging / "decisions" / f"{decision.id}.json",
+                    _record_file(staging, "decisions", decision.id),
                     decision.model_dump(mode="json"),
                 )
             for domain in validated["domains"]:
                 _atomic_write_json(
-                    staging / "domains" / f"{domain.domain_id}.json",
+                    _record_file(staging, "domains", domain.domain_id),
                     _domain_canonical_payload(domain),
                 )
             for initiative in validated["initiatives"]:
                 _atomic_write_json(
-                    staging / "initiatives" / f"{initiative.id}.json",
+                    _record_file(staging, "initiatives", initiative.id),
                     initiative.model_dump(mode="json"),
                 )
 
@@ -983,26 +1210,67 @@ class Store:
                 )
             for record_id, items in by_decision.items():
                 ordered = sorted(items, key=lambda x: (x["tier"], x["entity_id"]))
-                _atomic_write_json(staging / "bindings" / f"{record_id}.json", ordered)
+                _atomic_write_json(_record_file(staging, "bindings", record_id), ordered)
 
-            # -- commit: the legacy file's rename is the point of no return (everything
-            # above is fully staged and known-good); moving the staged subdirs into place
-            # is then just directory-level renames, not per-record writes.
-            backup = legacy_file.with_name(legacy_file.name + ".migrated-backup")
-            legacy_file.rename(backup)
+            # -- commit (design D10). Directory case: move the staged subdirectories in
+            # FIRST and rename the legacy file LAST, so an interruption leaves the legacy
+            # file and the next open simply re-migrates (per-file ``os.replace`` makes that
+            # idempotent). Bare-file case: the rename must come first (see above), guarded
+            # by the sentinel, which is unlinked again if the rename itself raises.
+            #
+            # The sentinel is created EXCLUSIVELY and unlinked only by the call that created
+            # it: two openers of one legacy file share its path, and a plain overwrite let
+            # the loser delete the winner's sentinel (design D10). The open-time
+            # check (`_check_migration_sentinel`) refuses a sentinel younger than
+            # `_LIVE_MIGRATION_SECONDS` as a live migration, so it never cleans up under
+            # one; only a live migration older than that (not a realistic case for a
+            # seconds-long move) could still be called stale. No cross-process lock.
+            if sentinel is not None:
+                try:
+                    try:
+                        fh = sentinel.open("x", encoding="utf-8")
+                    except FileExistsError:
+                        raise ValueError(
+                            f"another process is migrating {legacy_file} (sentinel {sentinel} "
+                            "exists); retry once it has finished."
+                        ) from None
+                    created_sentinel = True
+                    with fh:
+                        fh.write(
+                            json.dumps({"staging": str(staging.absolute()), "backup": str(backup)})
+                        )
+                    legacy_file.rename(backup)
+                except BaseException:
+                    if created_sentinel:
+                        sentinel.unlink(missing_ok=True)
+                    raise
 
             self.path.mkdir(parents=True, exist_ok=True)
             for sub in _CANONICAL_SUBDIRS:
                 target = self.path / sub
                 if target.exists():
-                    # pre-existing (empty, by construction of the dispatch above) subdir —
-                    # move each staged file into it individually.
+                    # pre-existing subdir (empty by construction of the dispatch above, or
+                    # left by an interrupted earlier attempt) — move each staged file into
+                    # it individually.
                     for f in (staging / sub).iterdir():
                         os.replace(f, target / f.name)
                 else:
                     os.replace(staging / sub, target)
+
+            if sentinel is not None:
+                sentinel.unlink(missing_ok=True)
+            else:
+                legacy_file.rename(backup)
         finally:
-            shutil.rmtree(staging, ignore_errors=True)
+            # Keep staging only when the export is now the sole copy: the sentinel exists
+            # and the legacy path is no longer a file (it is a directory again, or gone).
+            if not (
+                sentinel is not None
+                and created_sentinel
+                and sentinel.exists()
+                and not legacy_file.is_file()
+            ):
+                shutil.rmtree(staging, ignore_errors=True)
 
         print(
             f"sidegraph: migrated legacy store {legacy_file} (schema {stamped}) -> "
@@ -1062,6 +1330,16 @@ class Store:
         "anchor_bindings": AnchorBinding,
     }
 
+    # The field of each legacy model that becomes a canonical filename (a binding's file is
+    # named after its ``record_id``).
+    _LEGACY_ID_FIELD: dict[str, str] = {
+        "entities": "entity_id",
+        "decisions": "id",
+        "domains": "domain_id",
+        "initiatives": "id",
+        "anchor_bindings": "record_id",
+    }
+
     @classmethod
     def _validate_legacy_rows(
         cls, legacy_file: Path, rows: dict[str, list[tuple[str, str]]]
@@ -1085,7 +1363,24 @@ class Store:
                             payload["record_id"] = payload.pop("decision_id")
                         validated.append(model.model_validate(payload))
                     else:
-                        validated.append(model.model_validate_json(data))
+                        # The SQL primary key is the row's stable identity. It is checked
+                        # raw (before any model default could mint an id), and it fills an
+                        # id the JSON omits: `default_factory` would otherwise mint a fresh
+                        # ULID per validation, so a retried migration wrote a second file.
+                        if not is_safe_record_id(row_id):
+                            raise ValueError(
+                                f"unsafe record id {row_id!r}: must be a single path segment"
+                            )
+                        payload = json.loads(data)
+                        if isinstance(payload, dict):
+                            payload.setdefault(cls._LEGACY_ID_FIELD[table], row_id)
+                        validated.append(model.model_validate_json(json.dumps(payload)))
+                    # Every id becomes a filename (design D9): refuse before staging exists.
+                    record_id = getattr(validated[-1], cls._LEGACY_ID_FIELD[table])
+                    if not is_safe_record_id(record_id):
+                        raise ValueError(
+                            f"unsafe record id {record_id!r}: must be a single path segment"
+                        )
                 except Exception as e:
                     raise ValueError(
                         f"legacy store {legacy_file} has an invalid row in table "
@@ -1126,40 +1421,40 @@ class Store:
 
     def _write_entity_canonical(self, entity: Entity) -> None:
         st = _atomic_write_json(
-            self.path / "entities" / f"{entity.entity_id}.json",
+            _record_file(self.path, "entities", entity.entity_id),
             _entity_identity_payload(entity),
         )
         self._record_canonical_stat("entities", entity.entity_id, st)
 
     def _write_decision_canonical(self, decision: Decision) -> None:
         st = _atomic_write_json(
-            self.path / "decisions" / f"{decision.id}.json", decision.model_dump(mode="json")
+            _record_file(self.path, "decisions", decision.id), decision.model_dump(mode="json")
         )
         self._record_canonical_stat("decisions", decision.id, st)
 
     def _write_fact_canonical(self, fact: Fact) -> None:
         st = _atomic_write_json(
-            self.path / "facts" / f"{fact.id}.json", fact.model_dump(mode="json")
+            _record_file(self.path, "facts", fact.id), fact.model_dump(mode="json")
         )
         self._record_canonical_stat("facts", fact.id, st)
 
     def _write_domain_canonical(self, domain: Domain) -> None:
         st = _atomic_write_json(
-            self.path / "domains" / f"{domain.domain_id}.json",
+            _record_file(self.path, "domains", domain.domain_id),
             _domain_canonical_payload(domain),
         )
         self._record_canonical_stat("domains", domain.domain_id, st)
 
     def _write_initiative_canonical(self, initiative: Initiative) -> None:
         st = _atomic_write_json(
-            self.path / "initiatives" / f"{initiative.id}.json",
+            _record_file(self.path, "initiatives", initiative.id),
             initiative.model_dump(mode="json"),
         )
         self._record_canonical_stat("initiatives", initiative.id, st)
 
     def _write_bindings_file(self, record_id: str, items: list[dict]) -> None:
         ordered = sorted(items, key=lambda x: (x["tier"], x["entity_id"]))
-        st = _atomic_write_json(self.path / "bindings" / f"{record_id}.json", ordered)
+        st = _atomic_write_json(_record_file(self.path, "bindings", record_id), ordered)
         self._record_canonical_stat("bindings", record_id, st)
 
     def _write_bindings_canonical_for_record(self, record_id: str) -> None:
@@ -1213,6 +1508,7 @@ class Store:
         if marker.is_file():
             st = marker.stat()
             entries.append(f"{_FORMAT_MARKER_NAME}\0{st.st_size}\0{st.st_mtime_ns}")
+        entries.append(f"identity-rule\0{_IDENTITY_RULE}")
         for sub in _CANONICAL_SUBDIRS:
             d = self.path / sub
             if not d.is_dir():
@@ -1324,6 +1620,45 @@ class Store:
             # that closed the rebuild's implicit transaction; leaving it now would invite
             # removing the rebuild's own commit, which would silently restore mechanism 1.
 
+    def _warn_skipped_files(self) -> None:
+        """Repeat the skip warning from meta on every open while the list is non-empty
+        (design D4). Each listed file is stat-ed first: one that vanished or changed since
+        the reload means the list is stale (a long-lived Store re-certified the digest after
+        the user fixed the file, and ``_canonical_stat_mismatch`` is one-directional), so
+        reload once, which rewrites the list."""
+        entries = self._read_skip_list()
+        if not entries:
+            return
+        for e in entries:
+            try:
+                st = (self.path / e["path"]).stat()
+                fresh = (st.st_size, st.st_mtime_ns) == (e["size"], e["mtime_ns"])
+            except (OSError, KeyError, TypeError):
+                fresh = False
+            if not fresh:
+                with self._lock:
+                    current, _stats = self._compute_canonical_digest()
+                    self._reload_index_from_canonical(current)
+                entries = self._read_skip_list()
+                break
+        if entries:
+            _warn_skipped_canonical(entries)
+
+    def _read_skip_list(self) -> list[dict]:
+        """The meta skip list, tolerating a missing key, bad JSON or a wrong shape as empty."""
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (SKIPPED_CANONICAL_KEY,)
+        ).fetchone()
+        if row is None:
+            return []
+        try:
+            entries = json.loads(row["value"])
+        except ValueError:
+            return []
+        if not isinstance(entries, list):
+            return []
+        return [e for e in entries if isinstance(e, dict) and isinstance(e.get("path"), str)]
+
     def _reload_index_from_canonical(self, digest: str) -> None:
         """Rebuild the ENTIRE index from the canonical files on disk. Every volatile field
         resets to its cold default (design §3): entity ``last_seen_*`` -> None, binding
@@ -1406,27 +1741,61 @@ class Store:
                     # later digest walk and forces one more reload -- D3's tolerated heal
                     # path); a stat taken AFTER the read could describe content NEWER than
                     # what got parsed, which is the same lie in the other direction (§3).
+                    # A file whose identity does not hold (``_record_identity_problem``) is
+                    # NOT indexed but still gets its ``canonical_stat`` row -- this reload
+                    # did examine it in its current state, so a later write must not clear
+                    # the digest over it (design D3/D4) -- and joins the skip list.
+                    skipped: list[dict] = []
+                    indexed_stems: dict[str, set[str]] = {"decisions": set(), "domains": set()}
+
+                    def load_identified(subdir: str, f: Path, id_field: str) -> dict | None:
+                        st = f.stat()
+                        data = json.loads(f.read_text())
+                        problem = _record_identity_problem(data, id_field, f.stem)
+                        self._record_canonical_stat(subdir, f.stem, st)
+                        if problem is not None:
+                            skipped.append(
+                                {
+                                    "path": f"{subdir}/{f.name}",
+                                    "reason": problem,
+                                    "size": st.st_size,
+                                    "mtime_ns": st.st_mtime_ns,
+                                }
+                            )
+                            return None
+                        indexed_stems.get(subdir, set()).add(f.stem)
+                        return data
+
                     for f in sorted((self.path / "entities").glob("*.json")):
-                        st = f.stat()
-                        self._index_write_entity(Entity.model_validate(json.loads(f.read_text())))
-                        self._record_canonical_stat("entities", f.stem, st)
+                        data = load_identified("entities", f, "entity_id")
+                        if data is not None:
+                            self._index_write_entity(Entity.model_validate(data))
                     for f in sorted((self.path / "decisions").glob("*.json")):
-                        st = f.stat()
-                        self._index_write_decision(
-                            Decision.model_validate(json.loads(f.read_text()))
-                        )
-                        self._record_canonical_stat("decisions", f.stem, st)
+                        data = load_identified("decisions", f, "id")
+                        if data is not None:
+                            self._index_write_decision(Decision.model_validate(data))
                     for f in sorted((self.path / "facts").glob("*.json")):
-                        st = f.stat()
-                        self._index_write_fact(Fact.model_validate(json.loads(f.read_text())))
-                        self._record_canonical_stat("facts", f.stem, st)
+                        data = load_identified("facts", f, "id")
+                        if data is not None:
+                            self._index_write_fact(Fact.model_validate(data))
                     for f in sorted((self.path / "domains").glob("*.json")):
-                        st = f.stat()
-                        self._index_write_domain(Domain.model_validate(json.loads(f.read_text())))
-                        self._record_canonical_stat("domains", f.stem, st)
+                        data = load_identified("domains", f, "domain_id")
+                        if data is not None:
+                            self._index_write_domain(Domain.model_validate(data))
                     for f in sorted((self.path / "bindings").glob("*.json")):
                         record_id = f.stem
                         st = f.stat()
+                        if not is_safe_record_id(record_id):
+                            skipped.append(
+                                {
+                                    "path": f"bindings/{f.name}",
+                                    "reason": "unsafe filename",
+                                    "size": st.st_size,
+                                    "mtime_ns": st.st_mtime_ns,
+                                }
+                            )
+                            self._record_canonical_stat("bindings", record_id, st)
+                            continue
                         for item in json.loads(f.read_text()):
                             binding = AnchorBinding.model_validate({**item, "record_id": record_id})
                             self._index_write_binding(binding)
@@ -1436,11 +1805,9 @@ class Store:
                         # there is no branch left to wedge on it (spec item 7).
                         self._record_canonical_stat("bindings", record_id, st)
                     for f in sorted((self.path / "initiatives").glob("*.json")):
-                        st = f.stat()
-                        self._index_write_initiative(
-                            Initiative.model_validate(json.loads(f.read_text()))
-                        )
-                        self._record_canonical_stat("initiatives", f.stem, st)
+                        data = load_identified("initiatives", f, "id")
+                        if data is not None:
+                            self._index_write_initiative(Initiative.model_validate(data))
 
                     # Archive segments (design Task 2 item 3): stat every segment BEFORE
                     # `_archived_records()` reads its content below, same stat-before-read
@@ -1464,17 +1831,19 @@ class Store:
                     # archive over live disk state. Only ids with NO hot file are indexed
                     # from the archive.
                     archived_decisions, archived_domains = self._archived_records()
-                    hot_decision_ids = {f.stem for f in (self.path / "decisions").glob("*.json")}
-                    hot_domain_ids = {f.stem for f in (self.path / "domains").glob("*.json")}
+                    # Built from the files actually indexed, not every stem: an archived
+                    # copy of a SKIPPED id must still load (design D3).
+                    hot_decision_ids = indexed_stems["decisions"]
+                    hot_domain_ids = indexed_stems["domains"]
                     for did, payload in archived_decisions.items():
-                        hot_path = self.path / "decisions" / f"{did}.json"
+                        hot_path = _record_file(self.path, "decisions", did)
                         if did in hot_decision_ids:
                             if json.loads(hot_path.read_text(encoding="utf-8")) != payload:
                                 _warn_hot_archive_mismatch("decision", did)
                             continue
                         self._index_write_decision(Decision.model_validate(payload))
                     for dmid, payload in archived_domains.items():
-                        hot_path = self.path / "domains" / f"{dmid}.json"
+                        hot_path = _record_file(self.path, "domains", dmid)
                         if dmid in hot_domain_ids:
                             if json.loads(hot_path.read_text(encoding="utf-8")) != payload:
                                 _warn_hot_archive_mismatch("domain", dmid)
@@ -1508,6 +1877,18 @@ class Store:
                             "INSERT INTO meta (key, value) VALUES (?, ?) "
                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                             (key, value),
+                        )
+                    # In the reload's own transaction (design D4): the list is exactly as
+                    # current as the tables it explains.
+                    if skipped:
+                        self._conn.execute(
+                            "INSERT INTO meta (key, value) VALUES (?, ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            (SKIPPED_CANONICAL_KEY, json.dumps(skipped)),
+                        )
+                    else:
+                        self._conn.execute(
+                            "DELETE FROM meta WHERE key = ?", (SKIPPED_CANONICAL_KEY,)
                         )
                     self._conn.commit()
                 except BaseException:
@@ -2190,7 +2571,7 @@ class Store:
         ``status``) is rewritten ONLY when this binding is new, or its identity
         (entity_id/tier/relation/weight) actually changed. A pure status flip (sync's
         live/degraded/orphaned transitions — see ``sync._set_leaf_status``,
-        ``_repoint_communities``) touches ONLY the index.
+        ``_reconcile_tier1_communities``) touches ONLY the index.
 
         An identity change on a binding whose entity is DERIVED (a ``community:*``
         abstract entity — see ``_is_derived_entity``) never triggers a canonical rewrite
@@ -3076,11 +3457,21 @@ class Store:
         domains: dict[str, dict] = {}
         for segment in self._list_archive_segments():
             for raw in self._read_archive_segment(segment):
+                # One bad line in an immutable segment must wedge nothing (design D8): a
+                # non-object, or an id that is not a safe filename stem, is skipped with a
+                # warning before ``setdefault`` (a list id would raise ``TypeError``).
+                if not isinstance(raw, dict):
+                    _warn_skipped_archive_line(segment, "not a JSON object")
+                    continue
                 record_type = raw.get("record_type")
                 payload = {k: v for k, v in raw.items() if k != "record_type"}
-                if record_type == "decision" and "id" in payload:
+                problem = _archive_line_problem(record_type, payload)
+                if problem is not None:
+                    _warn_skipped_archive_line(segment, problem)
+                    continue
+                if record_type == "decision":
                     decisions.setdefault(payload["id"], payload)
-                elif record_type == "domain" and "domain_id" in payload:
+                elif record_type == "domain":
                     domains.setdefault(payload["domain_id"], payload)
                 # an unrecognized record_type is silently skipped -- forward-compat with a
                 # future record kind this version of the code doesn't know how to load yet,
@@ -3108,14 +3499,24 @@ class Store:
         safe_domains: set[str] = set()
         mismatches = 0
         for did, archived_payload in archived_decisions.items():
-            match = _hot_file_matches(self.path / "decisions" / f"{did}.json", archived_payload)
+            hot = _record_file(self.path, "decisions", did)
+            match = (
+                None
+                if _hot_file_skipped_by_reload(hot, "id")
+                else _hot_file_matches(hot, archived_payload)
+            )
             if match is True:
                 safe_decisions.add(did)
             elif match is False:
                 mismatches += 1
                 _warn_hot_archive_mismatch("decision", did)
         for dmid, archived_payload in archived_domains.items():
-            match = _hot_file_matches(self.path / "domains" / f"{dmid}.json", archived_payload)
+            hot = _record_file(self.path, "domains", dmid)
+            match = (
+                None
+                if _hot_file_skipped_by_reload(hot, "domain_id")
+                else _hot_file_matches(hot, archived_payload)
+            )
             if match is True:
                 safe_domains.add(dmid)
             elif match is False:
@@ -3374,14 +3775,14 @@ class Store:
             # `_hot_file_matches`'s own skip exactly, so a diverged-but-kept file is never
             # treated as though this index stopped having loaded it.
             for d in new_decisions:
-                p = self.path / "decisions" / f"{d.id}.json"
+                p = _record_file(self.path, "decisions", d.id)
                 if _hot_file_matches(p, d.model_dump(mode="json")) is False:
                     _warn_hot_archive_mismatch("decision", d.id)
                     continue
                 p.unlink(missing_ok=True)
                 self._delete_canonical_stat("decisions", d.id)
             for dom in new_domains:
-                p = self.path / "domains" / f"{dom.domain_id}.json"
+                p = _record_file(self.path, "domains", dom.domain_id)
                 if _hot_file_matches(p, _domain_canonical_payload(dom)) is False:
                     _warn_hot_archive_mismatch("domain", dom.domain_id)
                     continue
@@ -3389,10 +3790,10 @@ class Store:
                 self._delete_canonical_stat("domains", dom.domain_id)
             # Crash-window leftovers: _leftover_archived_hot already did the compare above.
             for did in safe_decisions:
-                (self.path / "decisions" / f"{did}.json").unlink(missing_ok=True)
+                (_record_file(self.path, "decisions", did)).unlink(missing_ok=True)
                 self._delete_canonical_stat("decisions", did)
             for dmid in safe_domains:
-                (self.path / "domains" / f"{dmid}.json").unlink(missing_ok=True)
+                (_record_file(self.path, "domains", dmid)).unlink(missing_ok=True)
                 self._delete_canonical_stat("domains", dmid)
 
             cleaned_up = len(safe_decisions) + len(safe_domains)
@@ -3434,6 +3835,14 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+
+    def delete_meta(self, key: str) -> None:
+        """Remove a derived meta key (a no-op when absent). Refuses ``schema_version``, as
+        ``set_meta`` does."""
+        if key == "schema_version":
+            raise ValueError("schema_version is stamped at store creation and must not be removed")
+        with self._mutation():
+            self._conn.execute("DELETE FROM meta WHERE key = ?", (key,))
 
     def close(self) -> None:
         with self._lock:

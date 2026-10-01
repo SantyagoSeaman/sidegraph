@@ -1,6 +1,9 @@
 import contextlib
 import io
 import json
+import os
+
+import pytest
 
 from sidegraph.cli import init_main
 from sidegraph.host.claude_settings import RATIFY_POLICY_DEFAULT, RATIFY_POLICY_ENV_VAR
@@ -433,6 +436,24 @@ def test_init_unwritable_settings_file_prints_no_restart_hint(tmp_path, capsys, 
     assert _RESTART_HINT not in out
 
 
+def test_init_env_null_settings_is_skipped_not_a_traceback(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text('{"env": null}\n')
+    db = tmp_path / ".sidegraph"
+    assert (
+        init_main(
+            ["--db", str(db), "--graph", str(tmp_path / "no.json"), "--ratify-policy", "manual"]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert f'"env": {{"{RATIFY_POLICY_ENV_VAR}": "manual"}}' in out
+    assert settings_path.read_text() == '{"env": null}\n'
+    assert db.exists()
+
+
 def test_init_no_settings_flag_skips_the_write_and_the_prompt(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.stdin", _FakeTTY("\n"))  # would answer if asked; must not be
@@ -464,3 +485,95 @@ def test_init_help_documents_settings_flags(capsys):
     out = capsys.readouterr().out
     assert "--no-settings" in out
     assert "--ratify-policy" in out
+
+
+# -- a symlinked or unwritable settings.json is reported, never a traceback ---------------
+
+
+def test_init_with_flag_prints_the_manual_line_for_a_symlinked_settings(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.symlink_to(tmp_path / "missing_dir" / "settings.json")
+    db = tmp_path / ".sidegraph"
+    assert (
+        init_main(
+            ["--db", str(db), "--graph", str(tmp_path / "no.json"), "--ratify-policy", "manual"]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "symlink" in out
+    assert f'"env": {{"{RATIFY_POLICY_ENV_VAR}": "manual"}}' in out
+    assert db.exists()
+
+
+def test_init_without_flag_names_the_symlink(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))  # not a TTY
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.symlink_to(tmp_path / "missing_dir" / "settings.json")
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    out = capsys.readouterr().out
+    assert "symlink" in out
+    assert "isn't valid JSON" not in out
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
+def test_init_unsearchable_dot_claude_prints_the_manual_line(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"hooks": {}}) + "\n")
+    settings_path.parent.chmod(0o444)  # no search bit: lstat of settings.json is EACCES
+    try:
+        rc = init_main(
+            [
+                "--db",
+                str(tmp_path / ".sidegraph"),
+                "--graph",
+                str(tmp_path / "no.json"),
+                "--ratify-policy",
+                "manual",
+            ]
+        )
+    finally:
+        settings_path.parent.chmod(0o755)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "could not be written" in out
+    assert "wrote .claude/settings.json" not in out
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
+def test_init_readonly_dot_claude_prints_the_manual_line(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"hooks": {}}) + "\n")
+    db = tmp_path / ".sidegraph"
+    settings_path.parent.chmod(0o555)
+    try:
+        assert (
+            init_main(
+                [
+                    "--db",
+                    str(db),
+                    "--graph",
+                    str(tmp_path / "no.json"),
+                    "--ratify-policy",
+                    "manual",
+                ]
+            )
+            == 0
+        )
+    finally:
+        settings_path.parent.chmod(0o755)
+    out = capsys.readouterr().out
+    assert "could not be written" in out
+    assert "wrote .claude/settings.json" not in out
+    assert f'"env": {{"{RATIFY_POLICY_ENV_VAR}": "manual"}}' in out

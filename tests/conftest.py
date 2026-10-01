@@ -52,6 +52,8 @@ import os
 
 import pytest
 
+from sidegraph.gitenv import GIT_LOCAL_ENV_VARS
+
 
 @pytest.fixture(autouse=True)
 def _hermetic_sidegraph_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,3 +62,26 @@ def _hermetic_sidegraph_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for key in [k for k in os.environ if k.startswith("SIDEGRAPH_")]:
         monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _git_discovery_stays_in_temp_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Stop git discovery from climbing out of pytest's temp tree into an enclosing repo.
+
+    A store under ``tmp_path`` derives no initiative because git finds no repository above
+    it. With a basetemp placed inside a checkout (a reviewer's setup), discovery would walk
+    up into that repository and name its branch. ``GIT_CEILING_DIRECTORIES`` is exclusive:
+    a repository a test builds inside ``tmp_path`` sits below the ceiling and is still found.
+    # see design/superpowers/specs/2026-09-30-initiative-from-store-repo-design.md D3
+    """
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path_factory.getbasetemp().parent))
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_git_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    """git sets ``GIT_DIR``/``GIT_INDEX_FILE`` in hooks; the git test helpers must never
+    write into a foreign repository or index."""
+    for var in GIT_LOCAL_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)

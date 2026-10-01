@@ -36,7 +36,8 @@ loop when you asked for it.
 ### The multi-anchor rule: always pair the symbol or heading with its file
 
 `anchors` is a list of `{"name": ..., "file_path": ...}` refs. Each is resolved against the
-current Graphify graph and bound at up to three tiers (leaf, community, initiative) — see
+current Graphify graph and bound at up to two tiers (leaf, community). An initiative, when
+named, is a separate decision-level Tier-0 binding made by the write path, not per anchor — see
 [`concepts/anchoring.md`](../concepts/anchoring.md). For a documentation corpus, the anchor
 `name` is a **heading text** or the **file name itself**; for code, a **function/class name**
 or the file — all valid entity names in a Graphify graph.

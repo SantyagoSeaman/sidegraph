@@ -20,11 +20,19 @@ Sidegraph is a local-only tool. Its entire data surface:
   store (`decisions.db`, from before store schema 0.4.0) triggers a one-time migration
   that renames the legacy file to `decisions.db.migrated-backup` (kept, never deleted)
   alongside writing the new
-  directory layout. Outside `.sidegraph/`, the only filesystem writes are the standard
-  config snippets you install yourself (`.mcp.json`, hook entries) — Sidegraph touches
-  nothing else. See [`docs/reference/store-format.md`](docs/reference/store-format.md)
-  for the full layout.
-- **Network:** none. No telemetry, no phone-home, nothing leaves your machine. The only
+  directory layout. The store is the default persistence location, not the only one:
+  `sidegraph-init` can write `.claude/settings.json` (the ratification-policy env entry);
+  the visualization, OKF export and bootstrap-report commands write to the output paths you
+  give them; and the optional `sidegraph-prepare-commit-msg` git hook, once you install it,
+  adds commented decision trailers to the commit message file git hands it
+  (normally `.git/COMMIT_EDITMSG`). Beyond those, the only filesystem writes are the standard config
+  snippets you install yourself (`.mcp.json`, hook entries) — Sidegraph touches nothing
+  else. See [`docs/reference/store-format.md`](docs/reference/store-format.md) for the full
+  layout.
+- **Network:** none. No remote telemetry, no phone-home, nothing leaves your machine. Local
+  retrieval telemetry is recorded in the gitignored `index.db` by default (which records
+  were shown and which files were touched, never uploaded); set `SIDEGRAPH_TELEMETRY=off` to
+  stop new recording. The only
   network-using feature is the *optional* semantic documentation pass, which is executed
   by the separate Graphify CLI against the LLM provider you configure — not by Sidegraph.
 

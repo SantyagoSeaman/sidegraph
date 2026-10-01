@@ -173,6 +173,17 @@ class Descriptor(BaseModel):
         return v.strip() or None
 
 
+_SAFE_RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def is_safe_record_id(value: object) -> bool:
+    """True iff ``value`` can be a record's canonical filename stem: a string that is one
+    path segment (no separator, no traversal, no leading ``.``, no NUL) of bounded length.
+    ``fullmatch``, so a trailing newline fails. Every ULID passes (see
+    design/superpowers/specs/2026-09-29-record-identity-design.md D1)."""
+    return isinstance(value, str) and _SAFE_RECORD_ID.fullmatch(value) is not None
+
+
 class Entity(BaseModel):
     """Internal identity + engine mapping. Minted once, ``entity_id`` never changes.
 

@@ -545,3 +545,15 @@ def test_cli_sync_explicit_db_wins_over_everything(tmp_path, capsys, monkeypatch
     captured = capsys.readouterr()
     assert "orphaned" in captured.out and "old_fn" in captured.out
     assert captured.err == ""
+
+
+def test_sync_check_help_names_domain_failures(capsys):
+    import pytest
+
+    import sidegraph.cli as cli
+
+    with pytest.raises(SystemExit):
+        sync_main(["--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "domain-refresh failure" in help_text
+    assert "domain-refresh failure" in " ".join((cli.__doc__ or "").split())

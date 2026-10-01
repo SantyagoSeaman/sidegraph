@@ -1,4 +1,6 @@
-"""Shared store-path resolution (design §5: Configuration & wiring).
+"""Shared store-path resolution (design §5: Configuration & wiring) and the default graph
+path (``graph_path_for_store``, ``default_graph_path``) that pairs a store with its own
+project's graph.
 
 The ONE place ``cli.py``, ``server.py``, and ``host/hooks.py`` resolve a bare
 ``Store(...)`` path from, so all three agree on env-var precedence and the
@@ -20,6 +22,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 
 #: The canonical, directory-based store convention (design §1) — the primary default.
 DEFAULT_STORE_DIR = ".sidegraph"
@@ -37,8 +40,8 @@ def _dispatch_sidegraph_db(value: str, anchor) -> str:
       on open (see ``Store._migrate_legacy``).
     - an existing DIRECTORY (canonical layout or not — ``Store`` already knows how to
       open or populate either shape) -> use it directly, never its parent.
-    - a NONEXISTENT path that looks like a file sitting inside a directory (e.g.
-      ``.sidegraph/decisions.db``) -> use its PARENT directory instead. This rescues
+    - a NONEXISTENT path whose leaf ends in ``.db`` (case-insensitive) and sits inside a
+      directory (e.g. ``.sidegraph/decisions.db``) -> use its PARENT directory instead. This rescues
       every old config snippet in the wild (``SIDEGRAPH_DB=.sidegraph/decisions.db``) by
       pointing ``Store`` at the ``.sidegraph`` directory, rather than creating a fresh
       canonical layout literally named ``decisions.db``.
@@ -51,6 +54,13 @@ def _dispatch_sidegraph_db(value: str, anchor) -> str:
       whatever else happens to live there. Checked against the RAW (pre-anchor) value:
       anchoring a bare filename still doesn't give it a real "directory it lives in" to
       rescue to, it just moves the ambiguity from cwd onto the anchor root instead.
+    - a symlink that resolves to nothing (dangling), whatever its suffix, -> returned as
+      given, never its parent: ``is_file()``/``is_dir()`` are both false for it, so without
+      this a ``.db``-suffixed dangling link would be rescued to the project root.
+      ``Store`` then raises instead of creating anything.
+    - any other NONEXISTENT path (``/proj/.sidegraph`` not created yet) -> returned as
+      given, never its parent: rescuing it would scaffold a store into the project root.
+      See design/superpowers/specs/2026-09-29-cli-graph-and-store-paths-design.md D6.
 
     ``anchor`` is the same relative-path anchoring callable ``resolve_store_path`` builds
     (identity when no ``root`` was given) — reused both to resolve ``value`` against the
@@ -59,10 +69,14 @@ def _dispatch_sidegraph_db(value: str, anchor) -> str:
     """
     anchored = anchor(value)
     path = Path(anchored)
-    if path.is_file() or path.is_dir():
+    if path_is_file(path) or path_is_dir(path):
+        return anchored
+    if path_is_symlink(path):
         return anchored
     if Path(value).parent == Path("."):
         return anchor(DEFAULT_STORE_DIR)
+    if Path(value).suffix.lower() != ".db":
+        return anchored
     return str(path.parent)
 
 
@@ -144,7 +158,7 @@ def resolve_store_path(
         return _dispatch_sidegraph_db(db_env, _anchor)
 
     default_path = _anchor(DEFAULT_STORE_DIR)
-    if Path(default_path).exists():
+    if path_exists(Path(default_path)):
         return default_path
 
     if warn_on_create:
@@ -154,3 +168,92 @@ def resolve_store_path(
             file=sys.stderr,
         )
     return default_path
+
+
+#: Graphify's default output, relative to the project that owns the store.
+DEFAULT_GRAPH = "graphify-out/graph.json"
+
+
+def _probe(path: Path, name: str) -> bool:
+    """``path.is_file()`` / ``exists()`` / ``is_dir()`` with one answer on every Python: an
+    ``OSError`` (``EACCES`` on an unreadable directory) means "not there". Python 3.13 re-raises
+    it from these predicates and 3.14 swallows it."""
+    try:
+        return bool(getattr(path, name)())
+    except OSError:
+        return False
+
+
+def path_is_file(path: Path) -> bool:
+    return _probe(path, "is_file")
+
+
+def path_exists(path: Path) -> bool:
+    return _probe(path, "exists")
+
+
+def path_is_dir(path: Path) -> bool:
+    return _probe(path, "is_dir")
+
+
+def path_is_symlink(path: Path) -> bool:
+    return _probe(path, "is_symlink")
+
+
+def path_state(path: Path) -> Literal["present", "missing", "unknown"]:
+    """Whether ``path`` exists, without mistaking "cannot look" for "not there": ``os.stat`` raises
+    ``PermissionError`` for a path under an unreadable directory on every Python, where
+    ``Path.is_file`` swallows it on 3.14. ``"unknown"`` is any ``OSError`` other than
+    not-found / not-a-directory; callers that would advise on a missing file stay silent on it."""
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return "missing"
+    except OSError:
+        return "unknown"
+    return "present"
+
+
+def graph_path_for_store(graph_path: str | Path, store_path: str | Path) -> Path:
+    """``graph_path`` as an absolute path: a RELATIVE one is resolved against the STORE's own
+    project root, not the process CWD. Backs :func:`_resolve_cli_graph` (used by every
+    command that takes a store and a ``--graph``) and :func:`_ratify_reader`: a store in
+    another directory would otherwise pick up whatever ``graphify-out/graph.json`` happened
+    to sit beside the shell, pairing one project's records with a different project's graph.
+
+    The project root is the store path's PARENT. Only a legacy single-FILE store living
+    inside a store directory needs one more level up: an existing file, a path ending in
+    ``.db`` that is not created yet, or an existing directory ending in ``.db`` (what such a
+    file becomes when the first open migrates it, so the hop must survive that). An absent
+    path without that suffix (a new store directory such as ``.sidegraph/nested``) is a
+    directory-to-be, not a legacy file.
+
+    A name check on ".sidegraph" was tried and rejected (review R2-4): ``--db mystore`` is a
+    supported invocation, and a name check resolved such a store's root to itself, silently
+    disabling this for anyone not on the default directory name — the exact "dead while
+    looking alive" failure this helper exists to avoid.
+
+    See design/superpowers/specs/2026-09-30-graph-path-one-rule-design.md."""
+    path = Path(graph_path)
+    if path.is_absolute():
+        return path
+    # abspath, not resolve(): a symlinked `.sidegraph` belongs to the project that holds the
+    # link, not to the directory the link points into.
+    store = Path(os.path.abspath(store_path))
+    root = store.parent
+    legacy_file = (
+        path_is_file(store)
+        or (not path_exists(store) and store.suffix.lower() == ".db")
+        # a migrated legacy store is a DIRECTORY that keeps its `.db` name
+        or (path_is_dir(store) and store.suffix.lower() == ".db")
+    )
+    if legacy_file and (root.name == ".sidegraph" or path_is_file(root / "format")):
+        root = root.parent
+    return root / path
+
+
+def default_graph_path(store_path: str | Path) -> Path:
+    """The graph a process reads when no path was typed: ``$SIDEGRAPH_GRAPH`` (an empty value
+    counts as unset) or :data:`DEFAULT_GRAPH`, a relative value resolved against the store's
+    project."""
+    return graph_path_for_store(os.environ.get("SIDEGRAPH_GRAPH") or DEFAULT_GRAPH, store_path)

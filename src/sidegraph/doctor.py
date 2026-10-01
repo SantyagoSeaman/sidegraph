@@ -20,6 +20,7 @@ halves, and a second copy of the same complaint would be noise.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -28,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, NamedTuple
+from urllib.parse import quote
 
 from ulid import ULID
 
@@ -432,7 +434,7 @@ def _check_binding_statuses(store_dir: Path) -> tuple[list[Finding], list[str]]:
     if not index_path.is_file():
         return [], [BINDING_STATUS_CHECK]
     try:
-        conn = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True)
         try:
             rows = conn.execute("SELECT record_id, entity_id, data FROM anchor_bindings").fetchall()
         finally:
@@ -481,7 +483,7 @@ def _check_never_surfaced(store_dir: Path) -> tuple[list[Finding], list[str]]:
     if not index_path.is_file():
         return [], [NEVER_SURFACED_CHECK]
     try:
-        conn = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True)
         try:
             shows = dict(conn.execute("SELECT record_id, shows FROM retrieval_shows").fetchall())
             queries = dict(conn.execute("SELECT seed, queries FROM retrieval_seeds").fetchall())
@@ -560,7 +562,7 @@ def _binding_status_by_key(store_dir: Path) -> dict[tuple[str, str], str]:
     if not index_path.is_file():
         return {}
     try:
-        conn = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True)
         try:
             rows = conn.execute("SELECT record_id, entity_id, data FROM anchor_bindings").fetchall()
         finally:

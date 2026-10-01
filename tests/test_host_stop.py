@@ -736,3 +736,102 @@ def test_each_codex_thread_earns_its_own_capture_nudge(tmp_path, monkeypatch, ca
         )
 
     assert [out.get("decision") for out in outs] == ["block", "block"], outs
+
+
+# -- the ledger peek before the transcript parse ---------------------------------------------
+
+
+def test_stop_skips_transcript_parse_for_a_captured_session(tmp_path, monkeypatch, capsys):
+    from sidegraph.store import Store
+
+    db = tmp_path / "s.db"
+    transcript = _substantial(tmp_path, name="s1.jsonl")
+    Store(db).mark_captured("s1")
+    seen = []
+
+    def _recorder(path):
+        seen.append(path)
+        raise RuntimeError("must not be parsed")
+
+    monkeypatch.setattr(hooks, "_transcript_stats", _recorder)
+    out = _run(
+        monkeypatch,
+        capsys,
+        {"session_id": "s1", "stop_hook_active": False, "transcript_path": transcript},
+        db,
+    )
+    assert seen == []
+    assert out == {}
+
+
+def test_stop_peek_none_falls_back(tmp_path, monkeypatch, capsys):
+    from sidegraph.store import Store
+
+    db = tmp_path / "s.db"
+    Store(db)  # without it the real open_index_ro returns None anyway
+    transcript = _substantial(tmp_path, name="s1.jsonl")
+    monkeypatch.setattr("sidegraph.gitio.open_index_ro", lambda _d: None)
+    out = _run(
+        monkeypatch,
+        capsys,
+        {"session_id": "s1", "stop_hook_active": False, "transcript_path": transcript},
+        db,
+    )
+    assert out["decision"] == "block"
+
+
+def test_zero_byte_index_still_nudges(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "s.db"
+    db.mkdir()
+    (db / "index.db").write_bytes(b"")
+    transcript = _substantial(tmp_path, name="s1.jsonl")
+    out = _run(
+        monkeypatch,
+        capsys,
+        {"session_id": "s1", "stop_hook_active": False, "transcript_path": transcript},
+        db,
+    )
+    assert out["decision"] == "block"
+
+
+def test_stop_peek_uses_the_ledger_key_not_the_umbrella_id(tmp_path, monkeypatch, capsys):
+    """Codex reports one umbrella `session_id`; the ledger is keyed by the rollout stem
+    (`hooks._session_identity`). The peek must query that key, or a captured thread is
+    re-parsed on every later Stop. Red against querying `payload["session_id"]`."""
+    from sidegraph.store import Store
+
+    db = tmp_path / "s.db"
+    transcript = _substantial(tmp_path, name="rollout-a.jsonl")
+    Store(db).mark_captured("rollout-a")
+    seen = []
+
+    def _recorder(path):
+        seen.append(path)
+        raise RuntimeError("must not be parsed")
+
+    monkeypatch.setattr(hooks, "_transcript_stats", _recorder)
+    out = _run(
+        monkeypatch,
+        capsys,
+        {"session_id": "umbrella", "stop_hook_active": False, "transcript_path": transcript},
+        db,
+    )
+    assert seen == []
+    assert out == {}
+
+
+def test_stop_peek_does_not_create_a_store(tmp_path, monkeypatch, capsys):
+    """The peek resolves the store path without the "creating new store" notice and
+    creates nothing. Red when `warn_on_create=False` is dropped."""
+    for var in ("SIDEGRAPH_DIR", "SIDEGRAPH_DB", "SIDEGRAPH_STORE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(json.dumps({"session_id": "s1", "stop_hook_active": False})),
+    )
+    hooks.stop()
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == ""
+    assert not (tmp_path / ".sidegraph").exists()

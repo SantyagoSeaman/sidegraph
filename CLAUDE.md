@@ -13,7 +13,7 @@ task-aware retrieval + decision memory riding on the engine's entity graph.
 continuing participant in the project. A core feature must preserve, organize, or deliver
 accumulated project understanding. Document search by itself is not the product.
 
-Sidegraph is pre-1.0 (v0.5.0) — the full loop (capture, ratification, mistakes-first
+Sidegraph is pre-1.0 (v0.6.0) — the full loop (capture, ratification, mistakes-first
 retrieval, refactor-surviving re-anchoring, semantic docs layer, mind-model domains, and the
 facts evidence layer) ships and is exercised end-to-end, but interfaces may still move before
 a stable release. See
@@ -30,10 +30,11 @@ away for convenience.
 2. **The store is append-only — and sync-clean.** Never hard-delete a `Decision`, `Fact`, or
    `Domain`. Reversal = set `valid_to`/flip status on the old record + create a new one with
    `supersedes`. Superseded records stay retrievable as "tried before, abandoned because…" —
-   that history *is* the product. A graph rebuild (`sidegraph-sync`) must never produce a git
-   diff: it only ever touches derived, gitignored state (the local index, entity mappings,
-   binding status, the TOC cache), never a committed record file (community labels are
-   derived state, never committed).
+   that history *is* the product. A graph rebuild (`sidegraph-sync`) must not produce a git
+   diff from regenerable state: it only ever touches derived, gitignored state (the local
+   index, entity mappings, binding status, the TOC cache), never a committed record file
+   (community labels are derived state, never committed). The one exception: a confirmed
+   leaf-file move may update that entity's committed descriptor.
 3. **The store format is a public contract.** File-per-record JSON, a stamped
    `schema_version`, and the append-only/merge rules are specified in
    [`docs/reference/store-format.md`](docs/reference/store-format.md) — that page is the

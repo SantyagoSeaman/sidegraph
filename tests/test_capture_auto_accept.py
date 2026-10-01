@@ -14,14 +14,6 @@ def store(tmp_path) -> Store:
         yield s
 
 
-@pytest.fixture(autouse=True)
-def _no_ambient_initiative(monkeypatch):
-    """Tests must not depend on the ambient git branch (mirrors test_capture_facts.py's
-    identical fixture): without this, `_derive_initiative()` picks up whatever branch the
-    repo happens to be checked out on and silently adds a Tier-0 binding."""
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: None)
-
-
 def _draft(**kw):
     base = dict(
         title="use httpx",

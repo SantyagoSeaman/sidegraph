@@ -9,7 +9,7 @@ a per-call parameter, not an environment/config setting.
 |---|---|---|
 | `SIDEGRAPH_DIR` | unset | The primary store knob. `server.py`, `host/hooks.py`, every `cli.py` subcommand, and `sidegraph-bootstrap` resolve the store path through the shared `config.resolve_store_path` (see [path resolution](#store-path-resolution) below); when `SIDEGRAPH_DIR` is set, it wins over everything except an explicit `--db`. |
 | `SIDEGRAPH_DB` | — | **Deprecated.** Kept for back-compat only — honored when `SIDEGRAPH_DIR` is unset; see [SIDEGRAPH_DB (deprecated)](#sidegraph_db-deprecated) below for the exact dispatch rules. |
-| `SIDEGRAPH_GRAPH` | `graphify-out/graph.json` | `server.py` (`_load_reader`), `cli.py` (`sync_main`'s, `import_main`'s, `init_main`'s, and `sidegraph-domains bootstrap`'s `--graph` default), `bootstrap/cli.py` (`sidegraph-bootstrap`'s `--graph` default), and `host/hooks.py` (`session_start` only — it builds a `GraphifyReader` from this path; `stop` and `pre_tool_use` do not read it, neither ever touches the graph) |
+| `SIDEGRAPH_GRAPH` | `graphify-out/graph.json` | `config.py` (`default_graph_path`, the one place the default is resolved for both the CLI and the MCP server), `server.py` (`_load_reader`, through it), `cli.py` (the `--graph` default of `init_main`, `ratify_main`, `sync_main`, `import_main`, `sidegraph-domains bootstrap`, `doctor_main` and `stats_main`; a relative value resolves against the store's project, see [path resolution](#path-resolution-semantics)), `bootstrap/cli.py` (`sidegraph-bootstrap`'s `--graph` default), and `host/hooks.py` (`session_start` only — it builds a `GraphifyReader` from this path; `stop` and `pre_tool_use` do not read it, neither ever touches the graph) |
 | `SIDEGRAPH_GREP_NUDGE` | unset | `host/hooks.py` (`pre_tool_use` only). Set to `off` to disable the `PreToolUse` Read/Grep redirect nudge entirely — no other value has any effect. See [`reference/hooks.md`](hooks.md#sidegraph-pre-tool-use). |
 | `SIDEGRAPH_CAPTURE_NUDGE` | unset | `host/hooks.py` (`stop` only). Set to `off` to disable the `Stop` block-to-distill nudge entirely — no other value has any effect. See [`reference/hooks.md`](hooks.md#sidegraph-stop). |
 | `SIDEGRAPH_RATIFY_NUDGE` | unset | `host/hooks.py` (`session_start` only). Set to `off` to disable the pending-ratification line entirely — no other value has any effect. See [`reference/hooks.md`](hooks.md#sidegraph-session-start). |
@@ -28,7 +28,7 @@ contains aggregate onboarding facts rather than source content, and is never upl
 `SIDEGRAPH_TELEMETRY=off` remains the single opt-out for local production retrieval and
 touch diagnostics during the later agent-session maintenance loop.
 
-`SIDEGRAPH_GRAPH` is read once at the point of use (`os.environ.get(NAME, default)`).
+`SIDEGRAPH_GRAPH` is read once at the point of use; an empty value counts as unset.
 `SIDEGRAPH_GREP_NUDGE`, `SIDEGRAPH_CAPTURE_NUDGE`, and `SIDEGRAPH_RATIFY_NUDGE` disable only
 on the literal string `"off"`. `SIDEGRAPH_TELEMETRY` is more forgiving: it trims whitespace
 and compares case-insensitively, so `OFF` also disables recording.
@@ -65,13 +65,17 @@ also the moment a one-line deprecation notice prints to stderr, at most once per
   unchanged; `Store` migrates it to the canonical directory layout on open (see
   [`reference/store-format.md`](store-format.md#migration-to-schema-040-from-schema-02x-and-03x)).
 - **An existing DIRECTORY** (canonical layout or not) → used directly.
-- **A nonexistent path that looks like a file sitting inside a directory** (e.g. the classic
-  `SIDEGRAPH_DB=.sidegraph/decisions.db` from before this wave) → rescued to its **parent**
-  directory, so this old snippet keeps pointing at `.sidegraph/` rather than trying to create a
+- **A nonexistent path whose leaf ends in `.db`** (case-insensitive, and inside a directory;
+  e.g. the classic `SIDEGRAPH_DB=.sidegraph/decisions.db` from before this wave) → rescued to
+  its **parent** directory, so this old snippet keeps pointing at `.sidegraph/` rather than trying to create a
   fresh canonical layout literally named `decisions.db`.
 - **A nonexistent bare filename with no directory component** (e.g. the historic default
   `SIDEGRAPH_DB=sidegraph.db`) → falls through to the default `.sidegraph` instead of being
-  "rescued" to the current directory, which would make the entire repo root the store.
+  "rescued" to the current directory, which would make the entire repo root the store. A
+  bare `SIDEGRAPH_DB=mystore` therefore also resolves to `.sidegraph`.
+- **Any other nonexistent path** (`SIDEGRAPH_DB=/proj/.sidegraph` before it is created, or a
+  dangling symlink) → used **as given**, never rescued to its parent, which would scaffold a
+  store into `/proj`. A dangling link makes the store fail to open and creates nothing.
 
 `sidegraph-init`'s `--db` resolves through the exact same precedence as every other command now
 (it used to default unconditionally to `.sidegraph/decisions.db`) — see
@@ -89,10 +93,10 @@ This matters because the MCP server and the three hooks are typically launched a
 by Claude Code, and different launch mechanisms handle cwd differently:
 
 - **`uv run --project /path/to/sidegraph <script>`** runs the script using the Sidegraph
-  project's dependencies/venv, but does **not** change the process's working directory — the
-  relative `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` paths still resolve against wherever the command
-  was invoked from (normally the corpus/project root Claude Code was started in). This is the
-  form to use.
+  project's dependencies/venv, but does **not** change the process's working directory: a
+  relative `SIDEGRAPH_DIR` still resolves against wherever the command was invoked from
+  (normally the corpus/project root Claude Code was started in), and a relative
+  `SIDEGRAPH_GRAPH` against that store's project. This is the form to use.
 - **`uv run --directory /path/to/sidegraph <script>`** does change the cwd to that directory
   first — this silently breaks relative `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` paths meant to point
   at the corpus repo, since they'd now resolve inside the Sidegraph checkout instead. Avoid
@@ -101,6 +105,29 @@ by Claude Code, and different launch mechanisms handle cwd differently:
 If a hook or MCP server ever appears to be reading/writing an unexpected `.sidegraph/` or
 missing an expected `graphify-out/graph.json`, check the launching command's cwd handling
 first — this is the most common cause. When in doubt, set both env vars to absolute paths.
+
+The CLI commands that take a store and a `--graph` (`sidegraph-init`, `-ratify`, `-sync`,
+`-import`, `-domains bootstrap`, `-doctor`, `-stats`) and the MCP server treat the graph differently from the
+description above. A relative default or `SIDEGRAPH_GRAPH` value (an empty value counts as
+unset) resolves against the **store's project**, the store path's parent, so a store in
+another directory is paired with its own project's graph. A `--graph` you type on the command
+line still resolves against the directory you typed it in. A store in a nested directory
+(`SIDEGRAPH_DIR=.config/sidegraph`) has `.config` as its project, so a relative
+`SIDEGRAPH_GRAPH` is looked up there. A command that needs the graph (`-sync`, `-import`,
+`-domains bootstrap`) fails with a hint, and one for which the graph is optional
+(`-init`, `-ratify`, `-doctor`, and `-stats`, whose graph metrics are unavailable) continues
+and prints the hint: set an absolute
+`SIDEGRAPH_GRAPH` or pass `--graph`. The MCP server applies the same rule to the store it
+serves: the default and `SIDEGRAPH_GRAPH` resolve against that store's project, never the
+server's cwd (there is no typed `--graph`). For a nested store its `sync_anchors` tool reports
+`graph not readable (<path>)` and names the graph beside the cwd; the lazy sync behind the
+retrieval tools degrades silently. The hooks still anchor a relative `SIDEGRAPH_GRAPH` to
+`$CLAUDE_PROJECT_DIR` when the host sets it. A store or graph path that cannot be read
+(permission denied) counts as missing and never raises a traceback. `-sync`, `-import` and
+`-domains bootstrap`, which need the graph, stop with `graph not readable (<path>)`; `-init`,
+`-ratify`, `-doctor` and `-stats` carry on without it and exit 0. The cwd hint is given only
+when the store's graph is genuinely missing, never when it exists but cannot be read. See
+[Graph path resolution in `cli.md`](cli.md) for the hints the CLI prints.
 
 ## Retrieval budget defaults
 

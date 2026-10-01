@@ -30,6 +30,7 @@ still never opens a writable ``Store()``, for the same read-only-over-records re
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -150,7 +151,7 @@ def open_index_ro(store_dir: Path) -> sqlite3.Connection | None:
     nothing rather than blocking or raising. Never rebuilds the index; never write-opens
     the store."""
     index_path = Path(store_dir) / "index.db"
-    uri = f"file:{quote(str(index_path))}?mode=ro&immutable=0"
+    uri = f"file:{quote(os.fsencode(str(index_path)))}?mode=ro&immutable=0"
     try:
         conn = sqlite3.connect(uri, uri=True, timeout=RO_OPEN_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row

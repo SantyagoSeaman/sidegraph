@@ -209,6 +209,26 @@ def test_an_aware_session_key_timestamp_records_events(tmp_path):
     assert s.retrieval_events("aware-sess") != []
 
 
+def test_a_future_session_key_timestamp_records_no_events(tmp_path):
+    """A stamp ahead of the clock is not a live session: `_session_key` returns None and
+    the retrieval journals nothing."""
+    from datetime import timedelta
+
+    from sidegraph import server
+
+    s, r, _d = _store_with_seed_mistake(tmp_path)
+    s.set_meta(
+        TELEMETRY_SESSION_KEY, f"future-sess|{(datetime.now(UTC) + timedelta(hours=1)).isoformat()}"
+    )
+
+    assert server._session_key(s) is None
+    out = _get_task_context_impl(s, r, ["trader/exec.py"], None, 4000, 6000)
+
+    # The retrieval surfaced a record, so the empty journal below is meaningful.
+    assert "deadlock" in out
+    assert s.retrieval_events("future-sess") == []
+
+
 def test_query_structure_records_nothing_at_all(tmp_path):
     """Spec correction (fix-wave review): the never-surfaced denominator counts
     opportunities for a decision to surface, and query_structure returns no decision

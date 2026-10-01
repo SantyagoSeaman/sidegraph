@@ -58,7 +58,7 @@ add_decision(
 
 Appends a `Decision` with `status="accepted"` and `provenance.source="human"` (graph_version
 stamped from the current reader, if any). Every text field (`title`/`context`/`choice`/
-`rejected`/`consequences`, and tag text before slugification) is **redacted first** — the
+`rejected`/`consequences`, tag text before slugification, and `initiative`) is **redacted first** — the
 same secret patterns as the propose/import pipelines; the scrubbed text is the only text
 that reaches the repo-committed store, and the result's `redactions` counts the
 replacements. Pattern coverage is measured, not assumed: against a seeded 14-class corpus
@@ -70,12 +70,16 @@ classes are **deliberately** out of scope and pinned by test: e-mail addresses (
 necessarily secret — blanket redaction would destroy legitimate provenance) and bare hex
 tokens (they collide with commit SHAs and digests that records legitimately quote). This is
 a defense, not a data-loss-prevention proof; run your own secret scanner over the store path
-in CI as defense in depth. An all-secret tag redacts to `[REDACTED]` and is skipped, never minted as a
+in CI as defense in depth. A quoted secret value is redacted whole (`password: "one two"`,
+`{"token": "…"}`, or a backtick-quoted value), not only up to its first space. An escaped quote inside a quoted
+value does not end it, and a quoted JSON key does not consume the next field. An all-secret
+`initiative` is dropped and binds nothing, as an all-secret tag does. An all-secret tag redacts to `[REDACTED]` and is skipped, never minted as a
 `tag:redacted` entity — same rule as `propose_decisions`. Each `anchors` entry is resolved against the
-current graph and multi-anchored (leaf + domain/community, plus an initiative Tier-0 binding if
-`initiative` is given) via `resolve_and_bind` — best-effort: with no graph present the
-decision still writes, but the requested code anchors are skipped and both anchor feedback
-lists are empty. An anchor's optional `relation` (one of
+current graph and multi-anchored (leaf + domain/community) via `resolve_and_bind` —
+best-effort: with no graph present the decision still writes, but the requested code anchors
+are skipped and both anchor feedback lists are empty. The initiative Tier-0 binding, when
+`initiative` is given, is decision-level: it is made whether or not a graph or any anchor is
+present, and never takes an anchor's `relation`. An anchor's optional `relation` (one of
 `creates`/`modifies`/`affects`/`deprecates`/`considered`, default `"affects"`) overrides the
 default on that anchor's leaf + Tier-1 bindings only. The anchor list is validated *before
 any write happens*: an invalid `relation`, a `name` or `file_path` that is not a string, or
@@ -216,6 +220,10 @@ created; `anchors_skipped` is `[{"name": str, "reason": "ambiguous", "candidates
 list[str]}, ...]` (candidates capped at 5) — populated only when a graph is present and an
 anchor's name matched more than one node, since there's nothing to be ambiguous against
 otherwise.
+`anchors_orphaned` is `[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]` when a graph
+is present and the name resolved to nothing; with no graph every anchor lands there as
+`{"entity_id", "canonical_name", "tier": 2}` with no `reason` key, and heals on the next sync.
+Repair either with [`add_anchors`](#add_anchors).
 
 ## `supersede_fact`
 
@@ -250,8 +258,8 @@ the predecessor closed.
 
 **Returns:** `{"id": str, "statement": str, "status": str, "redactions": int, "entities":
 list[dict], "anchors_skipped": list[dict], "anchors_orphaned": list[dict], "supersedes": str}` — same shape as `add_fact`'s
-plus `supersedes` (the predecessor's id); `anchors_skipped` is always `[]` on the inherited
-path.
+plus `supersedes` (the predecessor's id), with the same `anchors_orphaned` shapes;
+`anchors_skipped` is always `[]` on the inherited path.
 
 ## `retrieve_decisions`
 
@@ -568,11 +576,13 @@ Each `drafts` entry is a `DraftDecision`: `{"title", "kind": adr|lesson|constrai
 "relation"?}], "initiative"?, "supersedes"?, "tags"? ([str], free text), "layer"?
 ("business"|"technical"), "facts"? ([DraftFact], attached — see below)}`. Runs the
 deterministic pipeline in `capture.propose`: redact secrets (title/context/choice/rejected/
-consequences **and** tag text) → dedup (conservative, same kind+canonicalized-title on a
-shared anchor entity) → validate → write with `status="proposed"` → anchor best-effort
+consequences **and** tag and initiative text) → dedup (conservative, same kind+canonicalized
+redacted title on a shared anchor entity) → validate → write with `status="proposed"` → anchor best-effort
 (per-anchor `relation` carried through) → bind an initiative if named or derivable from the
-current git branch → bind tags → write each of the draft's own `facts` (attached — see
-below). Per-draft failures don't abort the batch.
+current branch of the repository the store lives in → bind tags → write each of the draft's
+own `facts` (attached — see below). Per-draft failures don't abort the batch: a step that
+fails after the write leaves the result `written` with a `reason` naming the step; an error
+before the write makes that draft `rejected` with an `internal error` reason.
 
 **Returns:** a list of `ProposeResult` dicts, one per draft, in the same order:
 `{"status": "written" | "deduped" | "rejected", "decision_id": str | None, "reason": str |
@@ -592,7 +602,14 @@ first. `ratified_by` is the `auto:<policy>` stamp when an
 [auto-ratification policy](../guides/capturing-decisions.md#5-auto-ratification-policy-opt-in)
 accepted the record at write time (`null` otherwise — always under the default `manual`);
 `auto_ratify_error` is `null` unless an attempt failed. `status` keeps its write-action
-meaning: an auto-ratified draft still reports `"written"`.
+meaning: an auto-ratified draft still reports `"written"`. A `written` result may carry a
+`reason`: the record is on disk, but a step after the write (anchors, initiative, tags,
+attached facts, auto-ratify) failed and the later steps did not run. For a proposed record
+the remedy is to drop it with `ratify(drop=[...])` and propose the complete draft again; for
+an accepted one (`SIDEGRAPH_AUTO_ACCEPT=on`), anchors can be added with `add_anchors`, while
+initiative and tags cannot be added afterwards. A `rejected` result whose `reason` starts with
+`internal error` may have left the record on disk unindexed until the store is reopened: do not
+re-propose it in the same session, and check `list_proposed` in the next one.
 
 **Auto-accept:** when the `SIDEGRAPH_AUTO_ACCEPT` environment variable is `"on"` (read at
 point of use in this tool shell; any other value, including unset, is off), every decision
@@ -669,7 +686,10 @@ When that membership step hits a problem, the domain stays accepted anyway, and
 `auto_ratify_error` opens with `activation:` followed by one of two things: the error that
 stopped membership from resolving, or a `path rule too broad` notice, which means the
 `path_prefixes` claim was rejected and only the `seed_anchors` that resolve, if any, are
-still applied. Per-draft failures don't abort the batch.
+still applied. Per-draft failures don't abort the batch: a step that fails after the write
+leaves the result `proposed` with a `reason` telling you to review the domain's
+`path_prefixes` and anchors before ratifying, and a failed TOC rebuild adds a `toc:` line to
+the `warnings` of every auto-ratified result.
 
 **Returns:** a list of `ProposeDomainResult` dicts, one per draft, in the same order:
 `{"status": "proposed" | "skipped" | "rejected", "domain_id": str | None, "reason": str |
@@ -707,7 +727,11 @@ stabilizer inputs to that refresh and are never themselves rewritten (see
 separate, optional immediate seed for a caller that already knows current (volatile) community
 ids and wants them visible before the next resolve pass.
 
-**Returns:** `{"domain_id": str, "status": str}` (`status` is always `"proposed"`).
+`title` and `summary` are **redacted first**, with the same patterns as every other prose
+field; the slug is an identifier and is not.
+
+**Returns:** `{"domain_id": str, "status": str, "redactions": int}` (`status` is always
+`"proposed"`; `redactions` counts the secret replacements made in the title and summary).
 
 ## `supersede_domain`
 
@@ -736,7 +760,9 @@ The predecessor is flipped to `superseded` immediately (append-only: the record 
 retrievable, never deleted) in the same transaction that writes the successor. The successor
 itself always lands `status="proposed"` — same rule `add_domain` always follows (and
 `propose_domains` under the default policy): a human still calls
-`ratify(accept=[...])` before the new name/scope is TOC-visible.
+`ratify(accept=[...])` before the new name/scope is TOC-visible. The new title and summary
+are redacted first, and the result carries `"redactions": int` next to `domain_id`, `status`
+and `supersedes`.
 
 Raises (before anything is written) if: `old_slug_or_id` doesn't resolve to any domain;
 `parent_slug` is given but doesn't resolve to any domain; or `new_slug` collides with some
@@ -747,7 +773,7 @@ dropped domain with a successor that gets no matching `path_prefixes`/`seed_anch
 `communities` stays empty — freeing the community for a future `sidegraph-domains bootstrap`
 pass to reconsider.
 
-**Returns:** `{"domain_id": str, "status": str, "supersedes": str}` — `status` is always
+**Returns:** `{"domain_id": str, "status": str, "supersedes": str, "redactions": int}` — `status` is always
 `"proposed"`, `domain_id` is the successor's, `supersedes` is the predecessor's resolved
 `domain_id`.
 
@@ -884,6 +910,17 @@ after a canonical reload (`git pull`, merge, branch switch) leaves the store's v
 state cold; `force=True` still forces an unconditional rerun (e.g. after hand-editing a
 domain's `path_prefixes`).
 
+A move a previous pass left as `moved_uncommitted` is also re-verified once git `HEAD` has
+moved, even when the graph was not rebuilt. That is a *narrow* pass: `synced` is `true`,
+`from_version` equals `to_version`, `outcomes` covers only the re-verified entities,
+`stale_decisions` and `slug_conflicts` are recomputed, and the domain fields
+(`domains_refreshed`, `empty_domains`, `overbroad_domains`, `domain_failures`) stay empty
+because domain membership was not recomputed. If the rename was reverted or stashed, the old
+path is back on disk and the entity is left untouched and reported `unchanged`, and it stays
+watched: it is re-checked after the next `HEAD` change, so a rename that comes back later is
+still noticed. A new file that takes the old path before the move is committed and synced
+hides it: the move surfaces as `orphaned` after the next graph rebuild.
+
 **Returns:**
 
 ```python
@@ -904,7 +941,11 @@ domain's `path_prefixes`).
 ```
 
 `synced` is `False` when the pass was skipped outright (`graph_version` unchanged, no
-`force`, and no cold-reload flag pending) — when skipped, **every other field is an empty
+`force`, no cold-reload flag pending, no remembered `moved_uncommitted` entity to
+re-verify after `HEAD` moved, and no remembered Tier-1 community reconcile whose retry
+repaired the record or failed again (a retry that abstains reports nothing); with a
+`moved_uncommitted` entity, the narrow pass runs and `synced` is `True` with
+`outcomes` covering just those entities) — when skipped, **every other field is an empty
 default** (`outcomes: []`,
 `counts: ""`, `repointed: 0`, `stale_decisions: []`, `empty_domains: []`,
 `overbroad_domains: []`, `slug_conflicts: []`, `domains_refreshed: 0`, `domain_failures: []`)
@@ -920,7 +961,10 @@ printer applies; each non-`ok` outcome means:
 - **`moved`** — informational, not actionable: a unique same-name match in a same-suffix
   file after the exact match missed, with the entity's old `file_path` confirmed gone from
   disk AND that move confirmed by committed git history. The anchor followed the code;
-  nothing to do.
+  nothing to do. Also reported, with `detail` `tier-1 community reconcile retried` and a
+  `canonical_name` of `community rows of record <id>`, when a remembered Tier-1 community
+  reconcile that failed earlier has now been repaired. That is a record's bindings, not a
+  file move, and needs no action.
 - **`moved_uncommitted`** — informational, not actionable (yet): same disk-level evidence as
   `moved`, but git's `HEAD` doesn't yet back it up (an uncommitted delete/rename/stash).
   Nothing is touched. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`) and re-sync.
@@ -929,7 +973,9 @@ printer applies; each non-`ok` outcome means:
 - **`orphaned`** — no match at all for this entity. Check `stale_decisions` for whether this
   orphan took a whole decision down with it (every one of its Tier-2 leaves orphaned).
 - **`error`** — the entity raised during rebind; `detail` carries the exception text. One bad
-  entity never aborts the rest of the pass.
+  entity never aborts the rest of the pass. Also reported when a Tier-1 community reconcile
+  (`community rows of record <id>`) failed; it stays remembered and is retried on the next
+  sync.
 
 `domain_failures` is the domain-refresh analog of an `error` outcome: one entry per accepted
 domain whose refresh itself raised (a malformed `seed_anchors` descriptor, a domain that
@@ -944,7 +990,9 @@ one's precise meaning) — this tool is the same diagnostic, surfaced as data in
 stdout text.
 
 **With no Graphify graph present:** returns `{"synced": false, "error": "graph not readable
-(<resolved path>)"}` instead of crashing — explanatory, not silent, since this tool *is* the
+(<resolved path>)"}`, where the path is the store-anchored one; when the same relative value
+exists beside the server's cwd the message adds `; <cwd path> exists beside the server's cwd --
+set SIDEGRAPH_GRAPH to an absolute path to use it`, instead of crashing — explanatory, not silent, since this tool *is* the
 diagnostic path (contrast every other tool's best-effort, no-graph-present degrade, which
 never surfaces an error at all).
 

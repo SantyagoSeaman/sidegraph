@@ -540,3 +540,42 @@ def test_cli_dropping_a_domain_does_NOT_schedule_a_heal(tmp_path):
     ratify_main(["--db", str(tmp_path / "t.db"), "--drop", domain.domain_id])
 
     assert Store(tmp_path / "t.db").get_meta(VOLATILE_STALE_KEY) == "0"
+
+
+def test_cli_domains_add_redacts_title_and_summary(tmp_path, capsys):
+    # gitleaks-safe shapes: this file is not path-allowlisted.
+    db = tmp_path / "t.db"
+    assert (
+        domains_main(
+            [
+                "add",
+                "--db",
+                str(db),
+                "--slug",
+                "payments",
+                "--title",
+                "Payments AKIAIOSFODNN7EXAMPLE",
+                "--summary",
+                "Settles orders, token=abc123secret",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "proposed 1 domain(s) (skipped: 0 existing)" in out
+    assert "redacted 2 secret(s) from the title/summary" in out
+
+    d = Store(db).find_domain_by_slug("payments")
+    assert d is not None
+    assert "AKIAIOSFODNN7EXAMPLE" not in d.title
+    assert "abc123secret" not in d.summary
+    text = "".join(f.read_text() for f in tmp_path.rglob("*.json"))
+    assert "AKIAIOSFODNN7EXAMPLE" not in text and "abc123secret" not in text
+
+
+def test_cli_domains_add_prints_no_redaction_line_when_clean(tmp_path, capsys):
+    db = tmp_path / "t.db"
+    domains_main(
+        ["add", "--db", str(db), "--slug", "payments", "--title", "Payments", "--summary", "ok."]
+    )
+    assert "redacted" not in capsys.readouterr().out

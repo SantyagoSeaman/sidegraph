@@ -23,11 +23,13 @@ and are never behind, so the activation figures stand.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Sequence
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 from pydantic import BaseModel, ValidationError
 
@@ -289,7 +291,11 @@ def build_report(
     # before it nor the one after. One explicit read transaction on this one connection pins a
     # single snapshot for every figure below. Still `mode=ro`; no retry, no lock of our own.
     with closing(
-        sqlite3.connect(f"file:{store_dir / 'index.db'}?mode=ro", uri=True, isolation_level=None)
+        sqlite3.connect(
+            f"file:{quote(os.fsencode(str(store_dir / 'index.db')))}?mode=ro",
+            uri=True,
+            isolation_level=None,
+        )
     ) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN")

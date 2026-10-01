@@ -598,7 +598,8 @@ def collect_domain_candidates(
     concept/rationale nodes only — never-guess extends to file types, same filter as
     ``GraphifyReader.ANCHORABLE_FILE_TYPES``) is ``>= min_members``. ``paths``, when
     given, further restricts candidates to communities with at least one anchorable
-    member whose ``file_path`` starts with one of the given prefixes (mirrors
+    member whose ``file_path`` is under one of the given directory prefixes, or is that
+    exact file (mirrors
     ``import_rationales``'s per-node ``--path`` filter, applied existentially at the
     community level since a community has no single file_path of its own). ``limit``
     caps the number of *significant* communities considered, applied after the

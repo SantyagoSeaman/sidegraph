@@ -33,8 +33,8 @@ search instruction**, once, ahead of the rest of the text (not inside either ren
 > When you need to find or understand code in this project, call get_task_context(seeds)
 > before any grep or file search — decisions, gotchas and a domain map are indexed here.
 
-Unlike the `PreToolUse` nudge (`Read`/`Grep` only, once per session — see below), this line is
-unconditional and covers every search surface behaviorally, not just those two tools — bash
+Unlike the `PreToolUse` nudge (`Read`/`Grep` only, each of its two forms at most once per
+session — see below), this line is unconditional and covers every search surface behaviorally, not just those two tools — bash
 `grep`/`rg`/`find` and MCP structure-query tools included.
 
 Both renderers also inject:

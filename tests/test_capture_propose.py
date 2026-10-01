@@ -3,22 +3,19 @@ from pathlib import Path
 
 import pytest
 
-from sidegraph.capture import format_proposal, propose
+from sidegraph import capture
+from sidegraph.capture import (
+    RatifyPolicy,
+    format_proposal,
+    propose,
+    propose_domains,
+    propose_facts,
+)
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_initiative(monkeypatch):
-    """Tests must not depend on the ambient git branch (see test 5's explicit initiative=).
-
-    Without this, `_derive_initiative()` picks up whatever branch the repo happens to be on
-    and silently adds a Tier-0 binding, which the other tests don't account for.
-    """
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: None)
 
 
 def _draft(**over):
@@ -302,6 +299,35 @@ def test_propose_ignores_stale_telemetry_session_marker(tmp_path):
     assert d.provenance.session_id is None
 
 
+def test_session_id_fallback_ignores_a_marker_stamped_in_the_future(tmp_path):
+    """A negative age (clock stepped back, or a malformed stamp) is not fresh: the
+    fallback returns None rather than attributing a stale session id."""
+    from datetime import timedelta
+
+    from sidegraph.config import TELEMETRY_SESSION_KEY
+
+    store = Store(tmp_path / "t.db")
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    store.set_meta(TELEMETRY_SESSION_KEY, f"future-session|{future}")
+
+    assert capture._session_id_fallback(store) is None
+    results = propose([_draft(anchors=[])], store, None)
+    assert results[0].status == "written"
+    assert store.get_decision(results[0].decision_id).provenance.session_id is None
+
+
+def test_session_id_fallback_keeps_a_recent_marker(tmp_path):
+    from datetime import timedelta
+
+    from sidegraph.config import TELEMETRY_SESSION_KEY
+
+    store = Store(tmp_path / "t.db")
+    recent = (datetime.now(UTC) - timedelta(seconds=10)).isoformat()
+    store.set_meta(TELEMETRY_SESSION_KEY, f"recent-session|{recent}")
+
+    assert capture._session_id_fallback(store) == "recent-session"
+
+
 def test_propose_no_telemetry_marker_leaves_session_id_none(tmp_path):
     store = Store(tmp_path / "t.db")
     results = propose([_draft(anchors=[])], store, None)
@@ -415,3 +441,362 @@ def test_propose_resolved_anchor_reports_no_orphans(tmp_path):
     )
     assert result.status == "written"
     assert result.anchors_orphaned == []
+
+
+SECRET_INITIATIVE = "AKIAQWERTYUIOPASDFGH"
+
+
+def _initiative_names(store):
+    rows = store._conn.execute(
+        "SELECT canonical_name FROM entities WHERE canonical_name LIKE 'initiative:%'"
+    ).fetchall()
+    return [r["canonical_name"] for r in rows]
+
+
+def _all_entity_names(store):
+    rows = store._conn.execute("SELECT canonical_name FROM entities").fetchall()
+    return [r["canonical_name"] for r in rows]
+
+
+def test_propose_redacts_initiative(tmp_path):
+    store = Store(tmp_path / "t.db")
+    results = propose([_draft(anchors=[], initiative=f"proj-{SECRET_INITIATIVE}")], store, None)
+    assert results[0].status == "written"
+    assert results[0].redactions >= 1
+    names = _all_entity_names(store)
+    assert names
+    assert not any(SECRET_INITIATIVE in n for n in names)
+    assert "initiative:proj-[REDACTED]" in names
+
+
+@pytest.mark.parametrize("initiative", [SECRET_INITIATIVE, "   "])
+def test_propose_all_secret_or_blank_initiative_binds_nothing(tmp_path, initiative):
+    store = Store(tmp_path / "t.db")
+    results = propose([_draft(anchors=[], initiative=initiative)], store, None)
+    assert results[0].status == "written"
+    assert _initiative_names(store) == []
+    assert not [b for b in store.bindings_for_record(results[0].decision_id) if b.tier == 0]
+
+
+def test_propose_redacts_a_secret_derived_branch_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "sidegraph.capture._derive_initiative", lambda *a, **k: f"feature-{SECRET_INITIATIVE}"
+    )
+    store = Store(tmp_path / "t.db")
+    results = propose([_draft(anchors=[])], store, None)
+    assert results[0].redactions >= 1
+    names = _initiative_names(store)
+    assert names and not any(SECRET_INITIATIVE in n for n in names)
+
+
+def test_deduped_result_counts_initiative_redaction(tmp_path):
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+    first = propose([_draft()], store, reader)
+    store.ratify(first[0].decision_id)
+    second = propose([_draft(initiative=SECRET_INITIATIVE)], store, reader)
+    assert second[0].status == "deduped"
+    assert second[0].redactions >= 1
+
+
+def test_explicit_blank_initiative_does_not_fall_back(tmp_path, monkeypatch):
+    # An explicit blank is an explicit answer: it does not fall back to the branch name.
+    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda *a, **k: "feature-x")
+    store = Store(tmp_path / "t.db")
+    propose([_draft(anchors=[], initiative="   ")], store, None)
+    assert _initiative_names(store) == []
+
+
+def test_empty_string_initiative_falls_back_to_the_derived_one(tmp_path, monkeypatch):
+    # Agents send "" for an unset optional field; that is not an explicit answer.
+    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda *a, **k: "feature-x")
+    store = Store(tmp_path / "t.db")
+    propose([_draft(anchors=[], initiative="")], store, None)
+    assert _initiative_names(store) == ["initiative:feature-x"]
+
+
+def test_padded_initiative_name_is_trimmed(tmp_path):
+    store = Store(tmp_path / "t.db")
+    propose([_draft(anchors=[], initiative="  proj  ")], store, None)
+    assert _initiative_names(store) == ["initiative:proj"]
+
+
+def test_propose_dedups_a_secret_bearing_title(tmp_path):
+    # The store holds the redacted title, so dedup must compare that, not the raw one.
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+    draft = _draft(title=f"Rotate key {SECRET_INITIATIVE} monthly")
+    first = propose([draft], store, reader)
+    store.ratify(first[0].decision_id)
+    second = propose([draft], store, reader)
+    assert first[0].status == "written"
+    assert second[0].status == "deduped"
+    assert second[0].reason == f"duplicate of {first[0].decision_id}"
+
+
+# -- failure isolation (per draft, per fact, per domain) ----------------------------------
+
+
+def _raise_once(exc, default=None):
+    """A stand-in that raises ``exc`` on its first call and returns ``default`` after."""
+    calls = {"n": 0}
+
+    def _fn(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise exc
+        return default
+
+    return _fn
+
+
+def test_post_write_failure_keeps_the_batch_going(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    real = Store.get_or_create_abstract_entity
+    state = {"raised": False}
+
+    def flaky(self, canonical_name):
+        if canonical_name.startswith("initiative:") and not state["raised"]:
+            state["raised"] = True
+            raise OSError("disk full")
+        return real(self, canonical_name)
+
+    monkeypatch.setattr(Store, "get_or_create_abstract_entity", flaky)
+    d1 = _draft(
+        context=f"key {SECRET_INITIATIVE} leaked",
+        anchors=[{"name": "NoSuchThing"}],
+        initiative="proj",
+    )
+    d2 = _draft(title="A second, unrelated lesson", anchors=[], initiative="proj")
+    r1, r2 = propose([d1, d2], store, None)
+
+    assert r1.status == "written"
+    assert r1.decision_id is not None
+    assert "initiative" in (r1.reason or "")
+    assert "OSError" in r1.reason
+    assert "ratify(drop=" in r1.reason
+    assert r1.redactions >= 1  # the guard falls through to the normal return
+    assert r1.anchors_orphaned  # ...so do the fields the earlier steps filled
+    assert r2.status == "written" and r2.reason is None
+    assert [b for b in store.bindings_for_record(r2.decision_id) if b.tier == 0]
+
+
+def test_accepted_record_reason_names_what_cannot_be_added(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    monkeypatch.setattr(capture, "_bind_orphaned", _raise_once(OSError("disk full")))
+    [r] = propose([_draft()], store, None, auto_accept=True)
+    assert r.status == "written"
+    assert "add_anchors" in r.reason
+    assert "initiative and tags cannot be added" in r.reason
+    assert store.get_decision(r.decision_id).status == DecisionStatus.ACCEPTED
+
+
+def test_attached_fact_failure_is_isolated(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    real = capture._is_duplicate_fact
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("index gone")
+        return real(*a, **k)
+
+    monkeypatch.setattr(capture, "_is_duplicate_fact", flaky)
+    facts = [{"statement": f"fact number {i}", "source": "src"} for i in (1, 2, 3)]
+    [r] = propose([_draft(anchors=[], facts=facts)], store, None)
+    assert r.status == "written"
+    assert [f.status for f in r.facts] == ["written", "rejected", "written"]
+    assert "internal error: RuntimeError" in r.facts[1].reason
+
+
+def test_fact_post_write_failure_is_isolated(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    monkeypatch.setattr(capture, "_bind_orphaned", _raise_once(OSError("disk full")))
+    facts = [
+        {"statement": f"fact number {i}", "source": "src", "anchors": [{"name": f"Thing{i}"}]}
+        for i in (1, 2)
+    ]
+    r1, r2 = propose_facts(facts, store, None)
+    assert r1.status == "written" and r1.fact_id is not None
+    assert "anchors" in r1.reason and "OSError" in r1.reason
+    assert r2.status == "written" and r2.reason is None
+
+
+def test_accepted_fact_reason_names_add_anchors_not_drop(tmp_path, monkeypatch):
+    # Store.drop_fact refuses a fact that is not proposed, so an auto-accepted fact's guard
+    # reason must not send the caller to ratify(drop=...).
+    store = Store(tmp_path / "t.db")
+    monkeypatch.setattr(capture, "_bind_orphaned", _raise_once(OSError("disk full")))
+    facts = [{"statement": "fact number 1", "source": "src", "anchors": [{"name": "Thing1"}]}]
+    [r] = propose_facts(facts, store, None, auto_accept=True)
+    assert r.status == "written" and r.fact_id is not None
+    assert "add_anchors" in r.reason
+    assert "drop" not in r.reason
+    assert store.get_fact(r.fact_id).status == DecisionStatus.ACCEPTED
+
+
+def test_failed_attached_fact_keeps_the_decision_proposed(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+    monkeypatch.setattr(capture, "_is_duplicate_fact", _raise_once(RuntimeError("index gone")))
+    facts = [{"statement": "fact number 1", "source": "src"}]
+    d1 = _draft(facts=facts)
+    d2 = _draft(title="A second, unrelated lesson", choice="another choice entirely")
+    r1, r2 = propose([d1, d2], store, reader, ratify_policy=RatifyPolicy.AUTO_ALL)
+    assert r1.status == "written"
+    assert r1.facts[0].status == "rejected"
+    assert store.get_decision(r1.decision_id).status == DecisionStatus.PROPOSED
+    assert r1.ratified_by is None
+    assert r1.reason == "attached fact failed; left proposed for review"
+    assert r2.status == "written" and r2.reason is None
+    assert store.get_decision(r2.decision_id).status == DecisionStatus.ACCEPTED
+
+
+def test_attached_fact_post_write_failure_keeps_the_decision_proposed(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+    # The decision binds first, then its attached fact inherits the anchor: the SECOND
+    # resolve_and_bind call is the fact's, and it raises.
+    real = capture.resolve_and_bind
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        return real(*a, **k)
+
+    monkeypatch.setattr(capture, "resolve_and_bind", flaky)
+    facts = [{"statement": "fact number 1", "source": "src"}]
+    [r] = propose([_draft(facts=facts)], store, reader, ratify_policy=RatifyPolicy.AUTO_ALL)
+    assert r.facts[0].status == "written" and r.facts[0].reason
+    assert store.get_decision(r.decision_id).status == DecisionStatus.PROPOSED
+    assert r.reason == "attached fact failed; left proposed for review"
+
+
+def test_rejected_attached_fact_keeps_the_decision_proposed(tmp_path):
+    # A whitespace-only statement passes draft validation but fails Fact validation: the
+    # fact is REJECTED (no exception, no guard), yet the requested draft is not fully
+    # recorded, so the decision must not auto-ratify.
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+    facts = [{"statement": " ", "source": "src"}]
+    d2 = _draft(title="A second, unrelated lesson", choice="another choice entirely")
+    r1, r2 = propose([_draft(facts=facts), d2], store, reader, ratify_policy=RatifyPolicy.AUTO_ALL)
+    assert r1.status == "written"
+    assert r1.facts[0].status == "rejected"
+    assert store.get_decision(r1.decision_id).status == DecisionStatus.PROPOSED
+    assert r1.ratified_by is None
+    assert r1.reason == "attached fact failed; left proposed for review"
+    assert r2.status == "written" and r2.reason is None
+    assert store.get_decision(r2.decision_id).status == DecisionStatus.ACCEPTED
+
+
+def test_deduped_attached_fact_still_lets_the_decision_auto_ratify(tmp_path):
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+    facts = [{"statement": "fact number 1", "source": "src"}]
+    d2 = _draft(title="A second, unrelated lesson", choice="another choice entirely", facts=facts)
+    r1, r2 = propose([_draft(facts=facts), d2], store, reader, ratify_policy=RatifyPolicy.AUTO_ALL)
+    assert r1.facts[0].status == "written"
+    assert r2.facts[0].status == "deduped"
+    assert r2.reason is None
+    assert store.get_decision(r2.decision_id).status == DecisionStatus.ACCEPTED
+
+
+def test_attached_fact_remedy_names_supports_not_a_standalone_repropose(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+    real = capture.resolve_and_bind
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        return real(*a, **k)
+
+    monkeypatch.setattr(capture, "resolve_and_bind", flaky)
+    facts = [{"statement": "fact number 1", "source": "src"}]
+    [r] = propose([_draft(facts=facts)], store, reader)
+    reason = r.facts[0].reason
+    assert f"supports=[{r.decision_id}]" in reason
+    assert "propose the complete draft again" not in reason
+
+
+def _domain_drafts():
+    return [
+        {"slug": "one", "title": "One", "summary": "First area."},
+        {"slug": "two", "title": "Two", "summary": "Second area."},
+    ]
+
+
+def test_domain_post_write_failure_is_isolated(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    monkeypatch.setattr(
+        capture, "_lint_domain_path_prefixes", _raise_once(OSError("disk full"), [])
+    )
+    r1, r2 = propose_domains(_domain_drafts(), store, None)
+    assert r1.status == "proposed" and r1.domain_id is not None
+    assert "path_prefixes" in r1.reason and "OSError" in r1.reason
+    assert r2.status == "proposed" and r2.reason is None
+
+
+@pytest.mark.parametrize("what", ["decision", "fact", "domain"])
+def test_pre_write_internal_error_is_rejected_not_raised(tmp_path, monkeypatch, what):
+    store = Store(tmp_path / "t.db")
+    boom = RuntimeError("index gone")
+    if what == "decision":
+        monkeypatch.setattr(capture, "_is_duplicate", _raise_once(boom))
+        r1, r2 = propose([_draft(anchors=[]), _draft(title="Another", anchors=[])], store, None)
+    elif what == "fact":
+        monkeypatch.setattr(capture, "_is_duplicate_fact", _raise_once(boom))
+        facts = [
+            {"statement": f"fact {i}", "source": "s", "anchors": [{"name": f"T{i}"}]}
+            for i in (1, 2)
+        ]
+        r1, r2 = propose_facts(facts, store, None)
+    else:
+        real = Store.find_domain_by_slug
+        state = {"n": 0}
+
+        def flaky(self, slug):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise boom
+            return real(self, slug)
+
+        monkeypatch.setattr(Store, "find_domain_by_slug", flaky)
+        r1, r2 = propose_domains(_domain_drafts(), store, None)
+    assert r1.status == "rejected"
+    assert "internal error: RuntimeError" in r1.reason
+    assert "may be on disk" in r1.reason
+    assert r2.status in ("written", "proposed")
+
+
+def test_toc_rebuild_failure_surfaces_as_a_warning(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+
+    def boom(_store):
+        raise OSError("toc gone")
+
+    monkeypatch.setattr(capture, "build_toc", boom)
+    draft = {
+        "slug": "trading",
+        "title": "Trading",
+        "summary": "Order execution path.",
+        "seed_anchors": [{"name": "Trader", "file_path": "trader/exec.py"}],
+    }
+    [r] = propose_domains([draft], store, reader, ratify_policy=RatifyPolicy.AUTO_ALL)
+    assert r.status == "proposed"
+    assert r.ratified_by == "auto:auto-all"
+    assert any(w.startswith("toc: OSError") and "next sync rebuilds it" in w for w in r.warnings)
+
+
+def test_keyboard_interrupt_still_propagates(tmp_path, monkeypatch):
+    store = Store(tmp_path / "t.db")
+    monkeypatch.setattr(capture, "_bind_orphaned", _raise_once(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        propose([_draft()], store, None)

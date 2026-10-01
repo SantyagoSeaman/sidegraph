@@ -457,6 +457,48 @@ def test_import_path_prefix_filters_and_counts(tmp_path):
     assert d.title == "Reason C"
 
 
+def _rationale_pair(name, source_file, community):
+    return [
+        {
+            "id": f"rat_{name}",
+            "label": f"Reason {name}",
+            "norm_label": f"reason {name}",
+            "file_type": "rationale",
+            "source_file": source_file,
+            "community": community,
+        },
+        {
+            "id": f"file_{name}",
+            "label": source_file,
+            "norm_label": source_file,
+            "file_type": "document",
+            "source_file": source_file,
+            "community": community,
+        },
+    ]
+
+
+BOUNDARY_GRAPH = {
+    "nodes": [
+        *_rationale_pair("pay", "payments/a.py", 1),
+        *_rationale_pair("pay2", "payments_v2/b.py", 2),
+    ],
+    "links": [],
+}
+
+
+def test_rationale_path_prefix_respects_directory_boundary(tmp_path):
+    reader = _reader(tmp_path, BOUNDARY_GRAPH)
+    store = Store(tmp_path / "s.db")
+    report = import_rationales(store, reader, path_prefixes=["payments"])
+    assert (report.imported, report.filtered) == (1, 1)
+    assert [d.title for d in store.iter_decisions()] == ["Reason pay"]
+
+    everything = Store(tmp_path / "all.db")
+    report = import_rationales(everything, reader, path_prefixes=[""])
+    assert (report.imported, report.filtered) == (2, 0)
+
+
 def test_import_limit_caps_processed_nodes(tmp_path):
     reader = _reader(tmp_path, MULTI_FILE_GRAPH)
     store = Store(tmp_path / "s.db")

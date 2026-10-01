@@ -22,7 +22,15 @@ from .capture import (
     redact,
 )
 from .engine.reader import GraphifyReader, RationaleNode
-from .schema import Decision, DecisionKind, DecisionStatus, Descriptor, Provenance, canonicalize
+from .schema import (
+    Decision,
+    DecisionKind,
+    DecisionStatus,
+    Descriptor,
+    Provenance,
+    canonicalize,
+    matches_path_prefix,
+)
 from .store import Store
 
 # Cap per design decision 3: a well-connected rationale node must not fan out into an
@@ -151,11 +159,15 @@ def import_rationales(
     graph_version = reader.graph_version()
 
     all_nodes = reader.rationale_nodes()
-    if path_prefixes:
+    # Empty prefixes are dropped, so `--path ""` still matches everything; a non-empty one
+    # matches on a directory boundary (or the exact file) via `matches_path_prefix`.
+    prefixes = [p for p in (path_prefixes or []) if p]
+    if prefixes:
         kept = [
             n
             for n in all_nodes
-            if n.file_path is not None and any(n.file_path.startswith(p) for p in path_prefixes)
+            if n.file_path is not None
+            and any(matches_path_prefix(n.file_path, p) for p in prefixes)
         ]
     else:
         kept = all_nodes

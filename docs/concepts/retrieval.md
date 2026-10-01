@@ -296,7 +296,8 @@ Before rendering, every retrieval-facing MCP tool — `get_task_context`, `query
 `query_decisions`, and `drill_down` — plus the `SessionStart` hook calls `maybe_sync(store,
 reader)` — best-effort, wrapped so a sync failure degrades to un-synced retrieval rather than
 erroring. `maybe_sync` is itself cheap in the common case: it compares the graph's current
-version against the store's `last_synced_graph_version` meta stamp and no-ops if they match.
+version against the store's `last_synced_graph_version` meta stamp and skips the full pass if they match (an entity remembered under
+`pending_uncommitted_moves` is still re-verified once `HEAD` has moved).
 This is the self-healing mechanism described in
 [anchoring](anchoring.md#what-happens-on-rename-or-move): a missed post-commit hook is simply
 caught by the next read, and it's what keeps each accepted domain's `communities` field current

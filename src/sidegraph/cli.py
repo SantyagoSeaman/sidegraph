@@ -10,14 +10,15 @@ ids alike. Non-interactive flags keep it scriptable; drop is append-only (sets v
 rejected, never deletes). ``sidegraph-sync`` re-anchors the store after a
 Graphify rebuild; ``--json`` prints the report as one JSON object (``sync.report_as_dict``
 -- the same shape the ``sync_anchors`` MCP tool returns) and ``--check`` exits 2 when
-``sync.report_has_findings`` flags an error outcome, a stale decision, or a slug conflict
--- orphaned/ambiguous outcomes stay informational, a live-experiment refinement (design/
-superpowers/specs/2026-07-11-ci-live-findings-design.md ruling 1: a legitimate rename+heal
-must not red-flag forever). ``sidegraph-import`` bootstraps decisions from rationale nodes
-(code AST + LLM docs) via ``importer.import_rationales``, or (with ``--docs``) from decision-shaped
-markdown via ``doc_import.import_docs``. ``sidegraph-domains`` authors Domain proposals:
-``bootstrap`` (from graph communities, via ``domains.bootstrap_domains``) and ``add`` (manual,
-mirrors the ``add_domain`` MCP tool). ``sidegraph-compact`` packs terminal-status decisions/
+``sync.report_has_findings`` flags an error outcome, a stale decision, a slug conflict, or a
+domain-refresh failure -- orphaned/ambiguous outcomes stay informational, a live-experiment
+refinement (design/superpowers/specs/2026-07-11-ci-live-findings-design.md ruling 1: a
+legitimate rename+heal must not red-flag forever). ``sidegraph-import`` bootstraps decisions
+from rationale nodes (code AST + LLM docs) via ``importer.import_rationales``, or (with
+``--docs``) from decision-shaped markdown via ``doc_import.import_docs``.
+``sidegraph-domains`` authors Domain proposals: ``bootstrap`` (from graph communities, via
+``domains.bootstrap_domains``) and ``add`` (manual, mirrors the ``add_domain`` MCP tool).
+``sidegraph-compact`` packs terminal-status decisions/
 domains into an immutable ``archive/`` segment via ``Store.compact`` — explicit, human-run
 maintenance; never called by sync/retrieval/ratify. ``sidegraph-verify`` lints the store's
 canonical files against the write-path invariants ``store.py`` enforces at write time
@@ -57,9 +58,24 @@ from .capture import (
     format_fact_proposal,
     format_proposal,
     parse_ratify_policy,
+    redact,
 )
-from .config import DEFAULT_STORE_DIR, resolve_store_path
-from .doc_import import _MIN_SECTION_LIMIT, _SECTION_LIMIT, import_docs
+from .config import (
+    DEFAULT_GRAPH,
+    DEFAULT_STORE_DIR,
+    default_graph_path,
+    graph_path_for_store,
+    path_exists,
+    path_is_file,
+    path_state,
+    resolve_store_path,
+)
+from .doc_import import (
+    _MIN_SECTION_LIMIT,
+    _SECTION_LIMIT,
+    _glob_repo_root_info,
+    import_docs,
+)
 from .doctor import curate
 from .domains import DEFAULT_CANDIDATE_LIMIT, bootstrap_domains, collect_domain_candidates
 from .engine.reader import GraphifyReader
@@ -109,6 +125,13 @@ _DB_HELP = (
 # ``sidegraph-stats`` cannot use the shared text: it reads ``<dir>/index.db`` and never opens a
 # ``Store``, and migration happens when a ``Store`` opens. Handed a legacy ``*.db`` file it exits
 # 2 looking for ``<file>/index.db``, so its help says what it does instead of what the others do.
+_INSPECT_DB_HELP = (
+    "store directory (default: $SIDEGRAPH_DIR if set, else existing "
+    f"'{DEFAULT_STORE_DIR}/' if present, else '{DEFAULT_STORE_DIR}'; $SIDEGRAPH_DB is "
+    "honored for back-compat, deprecated). This command never opens the store, so it cannot "
+    "migrate a legacy *.db file: run a command that opens the store first (sidegraph-init)"
+)
+
 _STATS_DB_HELP = (
     "store directory (default: $SIDEGRAPH_DIR if set, else existing "
     f"'{DEFAULT_STORE_DIR}/' if present, else '{DEFAULT_STORE_DIR}'; $SIDEGRAPH_DB is "
@@ -130,11 +153,11 @@ def _looks_already_initialized(path: Path) -> bool:
     happened. A bare ``path.exists()`` used to false-positive on any pre-existing-but-empty
     directory too, reporting "already initialized" for a directory ``sidegraph-init`` was
     about to populate for the first time."""
-    if path.is_file():
+    if path_is_file(path):
         return True
-    if (path / "format").exists():
+    if path_exists(path / "format"):
         return True
-    return (path / "decisions.db").is_file()
+    return path_is_file(path / "decisions.db")
 
 
 def _report_ratify_policy_write(
@@ -157,10 +180,18 @@ def _report_ratify_policy_write(
             f"{RATIFY_POLICY_ENV_VAR}={result.existing_value}. Left unchanged."
         )
     else:
-        print(
-            f"{rel_settings} exists but isn't valid JSON/an object. Left untouched, "
-            f'add this yourself: "env": {{"{RATIFY_POLICY_ENV_VAR}": "{value}"}}'
-        )
+        print(_skip_message(result, rel_settings, value))
+
+
+def _skip_message(result: RatifyPolicySettingsResult, rel_settings: str, value: str) -> str:
+    """The line for a `skipped` settings outcome, worded per `skip_reason`, always ending
+    with the `env` entry the person adds by hand."""
+    manual = f'add this yourself: "env": {{"{RATIFY_POLICY_ENV_VAR}": "{value}"}}'
+    if result.skip_reason == "symlink":
+        return f"{rel_settings} (or .claude/) is a symlink. Left untouched, {manual}"
+    if result.skip_reason == "write_failed":
+        return f"{rel_settings} could not be written. Left untouched, {manual}"
+    return f"{rel_settings} exists but isn't valid JSON/an object. Left untouched, {manual}"
 
 
 def _ask_ratify_policy_interactively(rel_settings: str) -> str:
@@ -218,7 +249,7 @@ def init_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--graph",
-        default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json"),
+        default=None,
         help="graphify-out/graph.json path to check for (never created here; read-only input)",
     )
     settings_flags = parser.add_mutually_exclusive_group()
@@ -250,6 +281,9 @@ def init_main(argv: list[str] | None = None) -> int:
 
     db_path = Path(args.db)
     already_initialized = _looks_already_initialized(db_path)
+    # Before Store(): opening a legacy single-file --db migrates it into a directory, after
+    # which the legacy-file rule no longer applies and init would report another graph than sync.
+    graph_path = _resolve_cli_graph(args.graph, args.db)
     try:
         Store(args.db)  # creates parent dir(s) + schema-stamped store; idempotent itself
     except Exception as e:
@@ -261,14 +295,14 @@ def init_main(argv: list[str] | None = None) -> int:
     else:
         print(f"created store: {db_path}")
 
-    graph_path = Path(args.graph)
-    if graph_path.exists():
+    if path_exists(graph_path):
         print(f"found graph: {graph_path}")
     else:
         print(
             f"missing graph: {graph_path} — run `graphify update .`, then `sidegraph-sync`, "
             "to anchor decisions to code (optional; Sidegraph works without it)."
         )
+    _graph_hint(args.graph, graph_path)
 
     rel_settings = SETTINGS_RELATIVE_PATH.as_posix()
     if args.no_settings:
@@ -294,10 +328,7 @@ def init_main(argv: list[str] | None = None) -> int:
             )
         elif state.outcome == "skipped":
             export_value = RATIFY_POLICY_DEFAULT
-            print(
-                f"{rel_settings} exists but isn't valid JSON/an object. Left untouched, "
-                f'add this yourself: "env": {{"{RATIFY_POLICY_ENV_VAR}": "{export_value}"}}'
-            )
+            print(_skip_message(state, rel_settings, export_value))
         elif sys.stdin.isatty():
             export_value = _ask_ratify_policy_interactively(rel_settings)
             _report_ratify_policy_write(
@@ -433,27 +464,66 @@ def _ratified_domain(store: Store, id_: str, result: str) -> bool:
     return store.get_decision(id_) is None and store.get_domain(id_) is not None
 
 
-def _graph_path_for_store(graph_path: str | Path, db_path: str | Path) -> Path:
-    """``graph_path`` as an absolute path: a RELATIVE one is resolved against the STORE's own
-    project root, not the process CWD. Shared by every command that takes a store and a
-    ``--graph`` together (``sidegraph-ratify``, ``sidegraph-stats``): a store in another
-    directory would otherwise pick up whatever ``graphify-out/graph.json`` happened to sit
-    beside the shell, pairing one project's records with a different project's graph.
+def _resolve_cli_graph(args_graph: str | None, store_path: str | Path) -> Path:
+    """The graph a command reads, as an absolute path. One rule for every command that takes a
+    store and a ``--graph`` (init, ratify, sync, import in both modes, domains bootstrap,
+    doctor, stats); see design/superpowers/specs/2026-09-29-cli-graph-and-store-paths-design.md D1.
 
-    The project root is the store path's PARENT. Only a legacy single-FILE store living
-    inside a store directory needs one more level up. A name check on ".sidegraph" was tried
-    and rejected (review R2-4): ``--db mystore`` is a supported invocation, and a name check
-    resolved such a store's root to itself, silently disabling this for anyone not on the
-    default directory name — the exact "dead while looking alive" failure this helper exists
-    to avoid."""
-    path = Path(graph_path)
-    if path.is_absolute():
-        return path
-    store = Path(db_path).resolve()
-    root = store.parent
-    if not store.is_dir() and (root.name == ".sidegraph" or (root / "format").is_file()):
-        root = root.parent
-    return root / path
+    - ``--graph`` typed: a relative value is the shell's, resolved against the cwd where the
+      user typed it; an absolute value is used as given. An empty or whitespace-only value
+      counts as absent, like an empty env.
+    - ``--graph`` absent: ``$SIDEGRAPH_GRAPH`` (an empty value counts as unset) or
+      ``graphify-out/graph.json``, and a relative value belongs to the STORE's project
+      (:func:`sidegraph.config.graph_path_for_store`), so ``--db A/.sidegraph`` run from B
+      never pairs A's records with B's graph."""
+    if args_graph is not None and args_graph.strip():
+        typed = Path(args_graph)
+        return typed if typed.is_absolute() else Path(os.path.abspath(typed))
+    return default_graph_path(store_path)
+
+
+def _graph_hint(args_graph: str | None, graph: Path) -> None:
+    """Say which graph was used when the default or env value left a choice (D2). Silent when
+    ``--graph`` was typed. Called by every command that reads a graph through
+    :func:`_resolve_cli_graph`, init included (after its found/missing line). ``graph`` is the
+    resolved path.
+
+    - The store-anchored file is missing but the same relative value exists beside the shell:
+      the copy-and-sync setup. One stderr hint names the flag that uses it.
+    - Both exist and are different files: a note that the store's project won."""
+    if args_graph is not None and args_graph.strip():
+        return
+    env_value = os.environ.get("SIDEGRAPH_GRAPH")
+    value = env_value or DEFAULT_GRAPH
+    if Path(value).is_absolute():
+        return
+    try:
+        here = Path(os.path.abspath(value))  # getcwd() raises when the cwd is unreadable
+        if not here.is_file():
+            return
+    except OSError:  # an unreadable directory: the hint cannot tell, so it stays silent
+        return
+    state = path_state(graph)
+    if state == "unknown":  # unreadable, not missing: advising another graph would mispair records
+        return
+    graph_present = state == "present" and path_is_file(graph)
+    if not graph_present:
+        tail = " (or set SIDEGRAPH_GRAPH to an absolute path)" if env_value else ""
+        print(
+            f"sidegraph: no graph at {graph}; {here} exists — pass --graph {here} to use it "
+            f"with this store{tail}",
+            file=sys.stderr,
+        )
+    else:
+        try:
+            same = here.samefile(graph)
+        except OSError:  # a graph vanished between the checks: the hint is best-effort
+            return
+        if not same:
+            print(
+                f"sidegraph: using {graph} (the store's project); {here} also exists",
+                file=sys.stderr,
+            )
 
 
 def _ratify_reader(graph_path: str, db_path: str | Path):
@@ -463,15 +533,17 @@ def _ratify_reader(graph_path: str, db_path: str | Path):
     failure here degrades to the pre-existing "schedule the heal" branch rather than
     failing the accept.
 
-    A RELATIVE ``--graph`` is resolved against the STORE's own project root (see
-    :func:`_graph_path_for_store`). Pinned by
+    A RELATIVE ``graph_path`` is resolved against the STORE's own project root (see
+    :func:`sidegraph.config.graph_path_for_store`); ``ratify_main`` passes it the
+    already-resolved path from :func:`_resolve_cli_graph`, so a typed relative ``--graph``
+    never reaches this branch. Pinned by
     ``test_cli_ratify_ignores_a_graph_belonging_to_another_project``, which builds its own
     graph in a foreign directory and chdirs there — the pre-existing
     ``test_cli_ratify_of_an_accepted_domain_schedules_a_heal`` also catches it, but only
     when a gitignored ``graphify-out/graph.json`` happens to exist in the checkout, so it
     is not a guard CI can rely on (review finding 5)."""
-    path = _graph_path_for_store(graph_path, db_path)
-    if not path.is_file():
+    path = graph_path_for_store(graph_path, db_path)
+    if not path_is_file(path):
         return None
     try:
         return GraphifyReader(str(path))
@@ -482,7 +554,8 @@ def _ratify_reader(graph_path: str, db_path: str | Path):
 def ratify_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="sidegraph-ratify",
-        description="Review and ratify Sidegraph decisions and domains awaiting acceptance.",
+        description="Review and ratify Sidegraph decisions, standalone facts, and domains awaiting "
+        "acceptance.",
     )
     parser.add_argument(
         "--db",
@@ -492,16 +565,19 @@ def ratify_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--accept", nargs="*", default=[], metavar="ID")
     parser.add_argument("--drop", nargs="*", default=[], metavar="ID")
     parser.add_argument(
-        "--all", action="store_true", help="accept every pending proposal (decisions AND domains)"
+        "--all",
+        action="store_true",
+        help="accept every pending proposal (decisions, standalone facts, and domains)",
     )
     parser.add_argument(
         "--graph",
-        default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json"),
+        default=None,
         help=(
             "graph to resolve an accepted domain's membership against, immediately, the "
             "way the MCP ratify tool does (CLI/MCP parity). Read-only input, same meaning "
-            "as every other subcommand's --graph. A relative path resolves against the "
-            "STORE's project root, not the shell's CWD. Missing or unreadable is fine: the "
+            "as every other subcommand's --graph. Default: $SIDEGRAPH_GRAPH or "
+            "graphify-out/graph.json, resolved against the STORE's project root; a path you "
+            "type resolves against the shell's directory. Missing or unreadable is fine: the "
             "accept still lands and the membership heal is scheduled for the next sync."
         ),
     )
@@ -635,7 +711,9 @@ def ratify_main(argv: list[str] | None = None) -> int:
         # belt-and-suspenders flag set below) and renders the "path rule too broad"
         # sentence, which the helper deliberately leaves to its callers (a literal trigger
         # phrase in the sidegraph:heal-anchors skill).
-        reader = _ratify_reader(args.graph, args.db)
+        graph = _resolve_cli_graph(args.graph, args.db)
+        _graph_hint(args.graph, graph)
+        reader = _ratify_reader(str(graph), args.db)
         all_resolved = bool(accepted_domain_ids)
         for domain_id in accepted_domain_ids:
             domain = store.get_domain(domain_id)
@@ -693,9 +771,7 @@ def sync_main(argv: list[str] | None = None) -> int:
         default=None,
         help=_DB_HELP,
     )
-    parser.add_argument(
-        "--graph", default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json")
-    )
+    parser.add_argument("--graph", default=None)
     parser.add_argument("--force", action="store_true", help="rerun even if version matches")
     parser.add_argument(
         "--json",
@@ -707,16 +783,18 @@ def sync_main(argv: list[str] | None = None) -> int:
         "--check",
         action="store_true",
         help="exit 2 when the report has an attention finding (error outcome, stale "
-        "decision, or slug conflict — orphaned/ambiguous outcomes stay informational) "
-        "— for CI",
+        "decision, slug conflict, or domain-refresh failure — orphaned/ambiguous outcomes "
+        "stay informational) — for CI",
     )
     args = parser.parse_args(argv)
     args.db = resolve_store_path(args.db)
 
+    graph = _resolve_cli_graph(args.graph, args.db)
+    _graph_hint(args.graph, graph)
     try:
-        reader = GraphifyReader(args.graph)
+        reader = GraphifyReader(str(graph))
     except Exception as e:
-        print(f"graph not readable ({args.graph}): {e}")
+        print(f"graph not readable ({graph}): {e}")
         return 1
 
     try:
@@ -805,7 +883,9 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
 
     ``--profile`` selects the reader dialect and default ingest globs — resolved before any
     store/graph I/O, so an unknown profile name is a clean exit-1; with no explicit PATH, its
-    ingest globs are expanded (relative to the current directory) into repo-relative paths.
+    ingest globs are expanded from the repository root (any directory inside the repository
+    finds the same files) and handed to ``import_docs``, which keys each document by its
+    repository path whatever the current directory.
     """
     profile_name = args.profile or "generic-adr"
     try:
@@ -818,6 +898,7 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
     # appends `None` to the list via nargs="?" — filter those out to find any REAL explicit
     # paths; guards `args.docs is None` too (flag omitted entirely, --profile-only mode).
     explicit_docs = [p for p in args.docs if p is not None] if args.docs is not None else []
+    discovery_refused = 0
     if explicit_docs:
         docs_paths: list[str] = explicit_docs
         missing = [p for p in docs_paths if not Path(p).exists()]
@@ -825,24 +906,28 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
             print(f"--docs path(s) not found: {', '.join(missing)}")
             return 1
     else:
-        # Profile-only: discover files via the profile's ingest globs, relative to cwd.
-        # Profile globs are repo-relative; keep the expanded paths repo-relative too, so
-        # provenance.ref / the "imported from" context are deterministic across machines and
-        # dedup against an equivalent relative `--docs <path>` run (see cross-invocation
-        # idempotency test). Path.cwd().glob(...) always yields paths under cwd, so
-        # relative_to(Path.cwd()) never raises.
-        docs_paths = sorted(
-            str(p.relative_to(Path.cwd()))
-            for glob in profile.ingest_globs
-            for p in Path.cwd().glob(glob)
-        )
+        # Profile-only: discover files via the profile's ingest globs, which are repo-root
+        # relative, so glob from the repo root (any directory inside the repository finds
+        # the same files). Each hit goes to import_docs relative to the cwd, a path that
+        # exists from here; import_docs itself keys provenance.ref on the repository path,
+        # so the ref is the same wherever the command runs.
+        glob_root, _ = _glob_repo_root_info()
+        hits = sorted(p for glob in profile.ingest_globs for p in glob_root.glob(glob))
+        # `glob` follows a symlinked directory, so a hit can resolve outside the repository
+        # (D2): refuse it here, counted with import_docs's own refusals, never passed on.
+        real_root = glob_root.resolve()
+        inside = [p for p in hits if p.resolve().is_relative_to(real_root)]
+        discovery_refused = len(hits) - len(inside)
+        docs_paths = [os.path.relpath(p) for p in inside]
 
     args.db = resolve_store_path(args.db)
 
+    graph = _resolve_cli_graph(args.graph, args.db)
+    _graph_hint(args.graph, graph)
     try:
-        reader = GraphifyReader(args.graph)
+        reader = GraphifyReader(str(graph))
     except Exception as e:
-        print(f"graph not readable ({args.graph}): {e}")
+        print(f"graph not readable ({graph}): {e}")
         return 1
 
     try:
@@ -872,27 +957,25 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
     if args.section_limit is not None:
         import_docs_kwargs["section_limit"] = args.section_limit
     report = import_docs(store, reader, docs_paths, **import_docs_kwargs)
+    report.skipped_outside_repo += discovery_refused
 
-    # BUG F: an absolute `--docs` path is resolved relative to the current working directory
-    # to match the graph's repo-relative `source_file`, so running `sidegraph-import` from
-    # anywhere but the repo root makes every doc-node anchor miss — yielding a silent
-    # "0 imported, N unanchorable". When (almost) every anchor-attempted doc came back
-    # unanchorable AND an absolute path was passed, that footgun is the likeliest cause:
-    # warn loudly on stderr instead of leaving the empty result unexplained. Guarded on an
-    # absolute path being present so the common case (relative paths from the repo root) is
-    # byte-identical and never triggers a spurious warning.
+    # BUG F, reworded (design/superpowers/specs/2026-09-29-import-paths-design.md D5): a
+    # document is keyed by its repository path, so from anywhere inside a git work tree the
+    # doc-node anchor matches. Only when the repo root came from the cwd FALLBACK (no git
+    # work tree) does the cwd decide what "repository path" means; if then (almost) every
+    # anchor-attempted doc came back unanchorable, running from somewhere other than the
+    # project root is the likeliest cause. Hedged: the user may already be at the root.
     anchor_attempted = report.imported + report.superseded + report.skipped_unanchorable
     if (
-        report.skipped_unanchorable > 0
+        not _glob_repo_root_info()[1]
+        and report.skipped_unanchorable > 0
         and anchor_attempted > 0
         and report.skipped_unanchorable / anchor_attempted >= 0.5
-        and any(os.path.isabs(p) for p in docs_paths)
     ):
         print(
-            f"warning: {report.skipped_unanchorable} doc(s) unanchorable — if you passed an "
-            "absolute --docs path, run sidegraph-import from the repo root (doc paths are "
-            "resolved relative to the current directory, so they only match graph.json's "
-            "root-relative source_file entries when the current directory IS the repo root).",
+            f"warning: {report.skipped_unanchorable} doc(s) unanchorable — not inside a git "
+            "work tree, so doc paths resolve against the current directory; if this is not "
+            "the project root, run sidegraph-import from there.",
             file=sys.stderr,
         )
 
@@ -926,6 +1009,11 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
             print(
                 f"{report.skipped_degenerate_parent} split parent(s) skipped as degenerate "
                 "(echoed context or empty choice) — children imported on their own"
+            )
+        if report.skipped_outside_repo:
+            print(
+                f"{report.skipped_outside_repo} doc(s) refused: a symlink pointing outside "
+                "the repository"
             )
         for fp, n in sorted(report.by_file().items()):
             print(f"  {fp}: {n}")
@@ -970,6 +1058,13 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
             f"{report.skipped_degenerate_parent} split parent(s) skipped as degenerate "
             "(echoed context or empty choice) — children imported on their own"
         )
+    if report.skipped_outside_repo:
+        print(
+            f"{report.skipped_outside_repo} doc(s) refused: a symlink pointing outside "
+            "the repository"
+        )
+    if report.anchors_repaired:
+        print(f"{report.anchors_repaired} existing record(s) had their anchors repaired")
     # D4 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): printed last
     # on stdout, after the degenerate-parent line — the auto-ratify-failures loop below
     # goes to stderr, so this stays the last stdout line either way.
@@ -1021,9 +1116,7 @@ def import_main(argv: list[str] | None = None) -> int:
         default=None,
         help=_DB_HELP,
     )
-    parser.add_argument(
-        "--graph", default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json")
-    )
+    parser.add_argument("--graph", default=None)
     parser.add_argument(
         "--kind",
         choices=[k.value for k in DecisionKind],
@@ -1048,8 +1141,8 @@ def import_main(argv: list[str] | None = None) -> int:
         action="append",
         default=None,
         metavar="PREFIX",
-        help="only import rationales whose file_path starts with PREFIX (repeatable); "
-        "rationale mode only, incompatible with --docs",
+        help="only import rationales whose file_path is under directory PREFIX, or is that exact "
+        "file (repeatable); rationale mode only, incompatible with --docs",
     )
     parser.add_argument(
         "--docs",
@@ -1068,7 +1161,7 @@ def import_main(argv: list[str] | None = None) -> int:
         metavar="NAME",
         help="flow-profile selecting the reader dialect and default ingest globs (--docs mode; "
         f"one of: {', '.join(sorted(PROFILES))}). With no explicit PATH, "
-        "the profile's ingest globs (relative to the current directory) are used.",
+        "the profile's ingest globs (relative to the repository root) are used.",
     )
     parser.add_argument(
         "--tag",
@@ -1114,10 +1207,12 @@ def import_main(argv: list[str] | None = None) -> int:
 
     args.db = resolve_store_path(args.db)
 
+    graph = _resolve_cli_graph(args.graph, args.db)
+    _graph_hint(args.graph, graph)
     try:
-        reader = GraphifyReader(args.graph)
+        reader = GraphifyReader(str(graph))
     except Exception as e:
-        print(f"graph not readable ({args.graph}): {e}")
+        print(f"graph not readable ({graph}): {e}")
         return 1
 
     try:
@@ -1210,10 +1305,12 @@ def _domains_bootstrap(args: argparse.Namespace) -> int:
 
     args.db = resolve_store_path(args.db)
 
+    graph = _resolve_cli_graph(args.graph, args.db)
+    _graph_hint(args.graph, graph)
     try:
-        reader = GraphifyReader(args.graph)
+        reader = GraphifyReader(str(graph))
     except Exception as e:
-        print(f"graph not readable ({args.graph}): {e}")
+        print(f"graph not readable ({graph}): {e}")
         return 1
 
     try:
@@ -1294,11 +1391,17 @@ def _domains_add(args: argparse.Namespace) -> int:
     ordering as ``import_main``'s ``--limit`` guard) — a bad ``--slug`` must not create an
     empty store next to the real one.
     """
+    # Title and summary are prose in a repo-committed store: same gate as every other
+    # domain write path. The slug is an identifier and stays as given.
+    title, n_title = redact(args.title)
+    summary, n_summary = redact(args.summary)
+    redacted = n_title + n_summary
+
     try:
         Domain(
             slug=args.slug,
-            title=args.title,
-            summary=args.summary,
+            title=title,
+            summary=summary,
             path_prefixes=args.path or [],
             provenance=Provenance(source="manual"),
         )
@@ -1324,8 +1427,8 @@ def _domains_add(args: argparse.Namespace) -> int:
 
     domain = Domain(
         slug=args.slug,
-        title=args.title,
-        summary=args.summary,
+        title=title,
+        summary=summary,
         parent_id=parent_id,
         path_prefixes=args.path or [],
         provenance=Provenance(source="manual"),
@@ -1338,6 +1441,8 @@ def _domains_add(args: argparse.Namespace) -> int:
 
     print("proposed 1 domain(s) (skipped: 0 existing)")
     print(f"{domain.domain_id}  {domain.slug}")
+    if redacted:
+        print(f"redacted {redacted} secret(s) from the title/summary")
     return 0
 
 
@@ -1359,9 +1464,7 @@ def domains_main(argv: list[str] | None = None) -> int:
         default=None,
         help=_DB_HELP,
     )
-    boot.add_argument(
-        "--graph", default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json")
-    )
+    boot.add_argument("--graph", default=None)
     boot.add_argument(
         "--min-members",
         type=int,
@@ -1374,8 +1477,8 @@ def domains_main(argv: list[str] | None = None) -> int:
         action="append",
         default=None,
         metavar="PREFIX",
-        help="only consider communities with a member whose file_path starts with PREFIX "
-        "(repeatable)",
+        help="only consider communities with a member whose file_path is under directory "
+        "PREFIX, or is that exact file (repeatable)",
     )
     boot.add_argument(
         "--limit",
@@ -1570,7 +1673,7 @@ def verify_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--db",
         default=None,
-        help=_DB_HELP,
+        help=_INSPECT_DB_HELP,
     )
     parser.add_argument(
         "--against",
@@ -1654,7 +1757,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
         "decayed bindings, stale proposals, unreferenced entities, expired-but-open "
         "validity). Advisory findings never fail the run unless --check.",
     )
-    parser.add_argument("--db", default=None, help=_DB_HELP)
+    parser.add_argument("--db", default=None, help=_INSPECT_DB_HELP)
     parser.add_argument(
         "--against",
         default=None,
@@ -1682,7 +1785,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--graph",
-        default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json"),
+        default=None,
         help="graph.json path, used only for the graph-root-mismatch advisory check "
         "(read-only; missing or unreadable simply skips that one check)",
     )
@@ -1706,7 +1809,9 @@ def doctor_main(argv: list[str] | None = None) -> int:
             return 1
 
     try:
-        reader: GraphifyReader | None = GraphifyReader(args.graph)
+        graph = _resolve_cli_graph(args.graph, args.db)
+        _graph_hint(args.graph, graph)
+        reader: GraphifyReader | None = GraphifyReader(str(graph))
     except Exception:
         # Same "missing graph is fine" convention every other command with a --graph
         # default uses — the graph-root-mismatch check just doesn't run.
@@ -1930,9 +2035,10 @@ def stats_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--graph",
-        default=os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json"),
+        default=None,
         help="graph.json path (read-only; missing or unreadable is reported, not an error). "
-        "A relative path resolves against the store's project root, not the shell's directory",
+        "Default: $SIDEGRAPH_GRAPH or graphify-out/graph.json, resolved against the store's "
+        "project root; a path you type resolves against the shell's directory",
     )
     parser.add_argument(
         "--json",
@@ -1954,15 +2060,15 @@ def stats_main(argv: list[str] | None = None) -> int:
 
     store_dir = Path(resolve_store_path(args.db, warn_on_create=False))
     index = store_dir / "index.db"
-    if not index.is_file():
+    if not path_is_file(index):
         print(f"no store index at {index} — run `sidegraph-init` first", file=sys.stderr)
         return 2
 
-    # A relative --graph is the STORE's project's, not the shell's (same rule as ratify).
-    graph_path = _graph_path_for_store(args.graph, store_dir)
+    graph_path = _resolve_cli_graph(args.graph, store_dir)
+    _graph_hint(args.graph, graph_path)
     try:
         report = build_report(
-            store_dir, graph_path if graph_path.exists() else None, window_days=args.window
+            store_dir, graph_path if path_exists(graph_path) else None, window_days=args.window
         )
     except sqlite3.Error as e:
         print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
@@ -1984,11 +2090,16 @@ def export_okf_main(argv: list[str] | None = None) -> int:
     Fact (full append-only history, superseded included), domains collapsed one-per-slug,
     and the entities decisions anchor to — OKF concept files with YAML frontmatter and
     bundle-absolute cross-links. Deterministic: same store ⇒ byte-identical bundle. The
-    out dir is only ever cleared when empty or marked ``generator: sidegraph`` in its
-    root ``index.md``; anything else is refused. Exit 0 on success, 2 on an operational
-    error (uninitialized store — never auto-created; refused or unwritable out dir).
+    out dir is only ever replaced when empty or marked ``generator: sidegraph`` in its
+    root ``index.md``, and normally only once the new bundle is complete. A mount point, an
+    ``--out`` that is the current directory, an unwritable, missing or non-directory parent,
+    or a previous export that cannot be renamed aside is written in place instead, and a
+    write failure there can leave a partial export. A symlinked out dir and anything else
+    are refused. Exit 0 on success, 2 on an operational error (uninitialized
+    store — never auto-created; refused or unwritable out dir or its parent).
 
-    # see design/superpowers/specs/2026-07-23-okf-export-design.md
+    # see design/superpowers/specs/2026-07-23-okf-export-design.md and
+    # design/superpowers/specs/2026-09-29-okf-export-safe-write-design.md
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-export-okf",
@@ -2092,7 +2203,7 @@ def blame_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("file", help="path to blame, relative to the current directory")
     parser.add_argument("--range", default=None, metavar="A,B", help="line range, e.g. 10,42")
-    parser.add_argument("--db", default=None, help=_DB_HELP)
+    parser.add_argument("--db", default=None, help=_INSPECT_DB_HELP)
     parser.add_argument("--json", action="store_true", help="print the result as JSON")
     args = parser.parse_args(argv)
 

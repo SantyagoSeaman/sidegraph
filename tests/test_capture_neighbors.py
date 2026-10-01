@@ -9,18 +9,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from sidegraph.capture import propose
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.store import Store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_initiative(monkeypatch):
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: None)
 
 
 def _draft(**over):

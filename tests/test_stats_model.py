@@ -310,6 +310,23 @@ def test_anchor_statuses_are_counted_from_the_index_rows(tmp_path):
     assert (r.anchors.live, r.anchors.degraded, r.anchors.orphaned) == (2, 1, 1)
 
 
+@pytest.mark.parametrize("name", ["C#", "C?Y", "X%41Y"])
+def test_stats_reads_a_store_under_a_hash_dir(tmp_path, name):
+    store_dir = tmp_path / "B" / name / "app" / ".sidegraph"
+    store = Store(store_dir)
+    d = _decision(store)
+    for i, status in enumerate(["live", "degraded"]):
+        e = store.get_or_create_entity(Descriptor(name=f"f{i}", file_path=f"f{i}.py"))
+        store.add_binding(
+            AnchorBinding(record_id=d.id, entity_id=e.entity_id, tier=2, status=status)
+        )
+    store.close()
+    r = build_report(store_dir, None, window_days=30, now=NOW)
+    assert (r.anchors.live, r.anchors.degraded, r.anchors.orphaned) == (1, 1, 0)
+    # no empty database is created at the path cut short at the special character
+    assert sorted(p.name for p in (tmp_path / "B").iterdir()) == [name]
+
+
 def test_the_reader_never_opens_the_index_for_writing(tmp_path, monkeypatch):
     """Spec §5 #9: the connect string carries mode=ro and never immutable=1."""
     import sqlite3

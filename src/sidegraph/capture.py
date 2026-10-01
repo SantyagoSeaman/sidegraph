@@ -9,12 +9,14 @@ ratifies via the store's ``ratify``/``drop`` (see docs/guides/capturing-decision
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -22,6 +24,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from .anchoring import entity_summaries, orphan_reason, resolve_and_bind
 from .config import TELEMETRY_SESSION_KEY
 from .engine.reader import GraphifyReader
+from .gitenv import git_env
 from .retrieval import TOC_CACHE_KEY, build_toc
 from .schema import (
     AnchorBinding,
@@ -50,9 +53,30 @@ _SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{20,}"),
+    # Assignment: `key = value` / `key: value`. A quoted value is taken whole (`password:
+    # "one two"`), plus any non-space text glued to it, so no input redacts less than a bare
+    # `\S+` would; a backtick value likewise. Quoted values are escape-aware (`\"` does not
+    # close them). An unterminated escape-aware value falls back to the plain quote pair, so
+    # nothing redacts less than the plain form did (`"a \" b"c` keeps its glued tail).
+    # `(?![a-z0-9])` after a single-quoted value keeps a later apostrophe in prose (`don't`)
+    # from closing a false "quoted value".
+    # Two entries, in this order. A QUOTED key (`{"password": ...}`) needs its own entry
+    # with the quote REQUIRED: folded into one pattern as an optional quote, a match could
+    # start at a quoted keyword key and its `\S+` value would swallow the next keyword
+    # (`` `password`: DB_PASSWORD = hunter2 ``), leaving the secret behind. The unquoted-key
+    # entry runs first, so it takes such a secret before the quoted-key entry can shadow it.
+    # The quoted-key entry also stops at `,;}])`, so it does not eat the next JSON field.
     re.compile(
         r"(?i)\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|secret|password)"
-        r"(?:[_-][a-z0-9]+)*\s*[=:]\s*\S+"
+        r"(?:[_-][a-z0-9]+)*\s*[=:]\s*"
+        r"(?:(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'(?![a-z0-9])|`[^`\n]*`)\S*"
+        r"|(?:\"[^\"\n]*\"|'[^'\n]*'(?![a-z0-9]))\S*|\S+)"
+    ),
+    re.compile(
+        r"(?i)\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|secret|password)"
+        r"(?:[_-][a-z0-9]+)*[\"'`]\s*[=:]\s*"
+        r"(?:(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'(?![a-z0-9])|`[^`\n]*`)"
+        r"[^\s,;}\])]*|(?:\"[^\"\n]*\"|'[^'\n]*'(?![a-z0-9]))[^\s,;}\])]*|[^\s,;}\])]+)"
     ),
     # 2026-08-04 seeded-leak eval additions (design/testing/2026-08-04-redaction-seeded-leak.md):
     # the five adjacent classes the eval showed leaking that admit low-false-positive
@@ -459,7 +483,7 @@ class DraftDecision(BaseModel):
     rejected: str | None = None  # what was tried and abandoned
     consequences: str | None = None  # Learned / trade-offs accepted
     anchors: list[AnchorDraft] = Field(default_factory=list)  # Where
-    initiative: str | None = None  # else derived from the git branch
+    initiative: str | None = None  # else derived from the store repo's branch
     supersedes: str | None = None
     tags: list[str] = Field(default_factory=list)  # free text; slugified below
     facts: list[DraftFact] = Field(default_factory=list)  # attached, non-derivable knowledge
@@ -577,16 +601,80 @@ class ProposeDomainResult(BaseModel):
     auto_ratify_error: str | None = None
 
 
-def _derive_initiative() -> str | None:
-    """feature/aaa branch -> 'feature-aaa'. Best-effort; None on main/master or any error."""
+def _derive_initiative(store: Store) -> str | None:
+    """feature/aaa branch -> 'feature-aaa'. Best-effort; None on main/master or any error.
+
+    The branch is the one of the repository the store LOGICALLY lives in, never the ambient
+    process cwd's: git runs from the logical parent of the store path
+    (``os.path.abspath``, not ``resolve``), so a symlinked ``.sidegraph`` belongs to the
+    project that holds the link, the rule ``config.graph_path_for_store`` follows. Only when
+    that parent is inside no repository (non-zero exit) does it retry from ``store.path``
+    itself, which keeps a store directory that is its own repository working. "Non-zero"
+    also covers a parent repository git refuses (dubious ownership) or finds corrupt: the
+    retry then reads ``store.path``'s repository, accepted as rare. A store directory that
+    is itself a repository or submodule NESTED inside another repository takes the
+    enclosing repository's branch, the project being worked on; a detached enclosing HEAD
+    gives ``None``. A zero exit with empty output (detached HEAD) or main/master is final:
+    ``None``, no retry. Both runs drop git's repository-local variables (``GIT_DIR`` and
+    friends, not the config-injection ones) from the environment.
+    # see design/superpowers/specs/2026-09-30-initiative-from-store-repo-design.md §6 (D4, D5)
+    """
+    env = git_env()
     try:
-        out = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True)
+        for cwd in (Path(os.path.abspath(store.path)).parent, store.path):
+            out = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if out.returncode == 0:
+                break
+        else:
+            return None
         branch = out.stdout.strip()
-        if out.returncode != 0 or not branch or branch in ("main", "master"):
+        if not branch or branch in ("main", "master"):
             return None
         return branch.replace("/", "-")
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _clean_initiative(value: str | None) -> tuple[str | None, int]:
+    """Redact and strip an initiative name; ``(None, n)`` when nothing usable is left.
+
+    The initiative becomes part of a canonical entity name (``initiative:{name}``) in the
+    repo-committed store, so it goes through the same gate as every prose field. Blank, or
+    nothing but a secret (``[REDACTED]``), binds nothing: a nameless initiative entity
+    means nothing to a reader. No slugification -- existing names keep their key.
+    # see design/superpowers/specs/2026-09-29-capture-write-path-design.md D2
+    """
+    if value is None:
+        return None, 0
+    scrubbed, n = redact(value)
+    scrubbed = scrubbed.strip()
+    if not scrubbed or scrubbed == "[REDACTED]":
+        return None, n
+    return scrubbed, n
+
+
+def _bind_initiative(store: Store, record_id: str, initiative: str) -> None:
+    """Get-or-create ``initiative:{initiative}`` and bind it to ``record_id`` (Tier-0, live).
+
+    ``initiative`` must already have passed :func:`_clean_initiative`. Decision-level, not
+    per-anchor: it never takes an anchor's relation override.
+    # see design/superpowers/specs/2026-09-29-capture-write-path-design.md D2
+    """
+    init = store.get_or_create_abstract_entity(f"initiative:{initiative}")
+    store.add_binding(
+        AnchorBinding(
+            record_id=record_id,
+            entity_id=init.entity_id,
+            tier=0,
+            status="live",
+        )
+    )
 
 
 def _capture_commit(store: Store) -> str | None:
@@ -601,10 +689,17 @@ def _capture_commit(store: Store) -> str | None:
     silently degrade every batch to the git-unavailable note. ``None`` on any failure (no
     repo containing the store, git missing, non-zero exit), never raising. Also used by
     ``server._supersede_decision_impl`` (D6) so both write paths that ever construct a
-    fresh ``Provenance`` stamp ``commit`` identically."""
+    fresh ``Provenance`` stamp ``commit`` identically. Repository-local variables such as
+    ``GIT_DIR`` are dropped from the environment for the same reason as in
+    ``_derive_initiative``; the symlinked-root behaviour is unchanged on purpose.
+    # see design/superpowers/specs/2026-09-30-initiative-from-store-repo-design.md §6"""
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=store.path, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=store.path,
+            env=git_env(),
+            capture_output=True,
+            text=True,
         )
         commit = out.stdout.strip()
         if out.returncode != 0 or not commit:
@@ -650,7 +745,8 @@ def _session_id_fallback(store: Store) -> str | None:
     if written.tzinfo is None:
         return None  # schema requires aware timestamps; a naive one can't be compared safely
     age = (datetime.now(UTC) - written).total_seconds()
-    if age >= _SESSION_ID_FALLBACK_MAX_AGE_SECONDS:
+    # A negative age is a stamp ahead of the clock (a step back, a malformed value): not fresh.
+    if not 0 <= age < _SESSION_ID_FALLBACK_MAX_AGE_SECONDS:
         return None
     return session_id
 
@@ -730,10 +826,14 @@ def _neighbor_dict(d: Decision) -> dict:
     return {"id": d.id, "kind": d.kind.value, "title": d.title, "status": d.status.value}
 
 
-def _is_duplicate(draft: DraftDecision, store: Store) -> str | None:
+def _is_duplicate(clean_title: str, draft: DraftDecision, store: Store) -> str | None:
     """Deterministic minimal dedup: same kind + canonical title among the draft's live
-    neighbors (:func:`_live_neighbors` — shared-anchor walk, design D2)."""
-    target = canonicalize(draft.title)
+    neighbors (:func:`_live_neighbors` — shared-anchor walk, design D2).
+
+    ``clean_title`` is the redacted title -- the one the store holds -- so a title that
+    carried a secret still matches the record it produced.
+    # see design/superpowers/specs/2026-09-29-capture-write-path-design.md D5"""
+    target = canonicalize(clean_title)
     for d in _live_neighbors(draft, store):
         if d.kind == draft.kind and canonicalize(d.title) == target:
             return d.id
@@ -813,6 +913,21 @@ def _supports_a_still_proposed_decision(store: Store, supports: Sequence[str]) -
     return any(
         (d := store.get_decision(sid)) is not None and d.status == DecisionStatus.PROPOSED
         for sid in supports
+    )
+
+
+def _internal_error_reason(exc: Exception) -> str:
+    """The ``reason`` for an item whose pipeline raised before its own result was built.
+
+    ``Store`` may already have written the canonical file while the SQLite index step
+    failed, and ``verify_store`` reads canonical files only, so it would report clean for
+    exactly this state -- hence the wording about the next session, not a verify pointer.
+    # see design/superpowers/specs/2026-09-29-capture-write-path-design.md D6
+    """
+    return (
+        f"internal error: {type(exc).__name__}: {exc} \u2014 the record may be on disk but "
+        "not indexed until the store is reopened; do not re-propose it in this session, "
+        "check list_proposed in the next one"
     )
 
 
@@ -937,87 +1052,118 @@ def _propose_fact_one(
     # attached fact survive its decision independently.
     anchors_skipped: list[dict] = []
     anchors_orphaned: list[dict] = []
-    if reader is not None:
-        for anchor in anchors:
-            result = resolve_and_bind(
-                fact.id,
-                Descriptor(name=anchor.name, file_path=anchor.file_path),
-                reader,
-                store,
-                relation=anchor.relation,
-            )
-            if result.status == "ambiguous":
-                anchors_skipped.append(
-                    {
-                        "name": anchor.name,
-                        "reason": "ambiguous",
-                        "candidates": result.candidates[:5],
-                    }
-                )
-            elif result.status == "unresolved":
-                reason = orphan_reason(
-                    Descriptor(name=anchor.name, file_path=anchor.file_path), reader
-                )
-                anchors_orphaned.extend(
-                    {**s, "reason": reason}
-                    for s in entity_summaries(store, [b for b in result if b.tier == 2])
-                )
-    else:
-        for anchor in anchors:
-            before = {b.entity_id for b in store.bindings_for_record(fact.id)}
-            _bind_orphaned(
-                fact.id,
-                Descriptor(name=anchor.name, file_path=anchor.file_path),
-                store,
-                relation=anchor.relation,
-            )
-            anchors_orphaned.extend(
-                {**s, "reason": "no-graph"}
-                for s in entity_summaries(
-                    store,
-                    [
-                        b
-                        for b in store.bindings_for_record(fact.id)
-                        if b.tier == 2 and b.entity_id not in before
-                    ],
-                )
-            )
-
-    # 7. Auto-ratify (design D2/D3) — standalone facts ONLY: a fact is a standalone
-    # candidate iff `attached_to is None` (not created inside a `DraftDecision.facts`
-    # entry — an attached fact is never independently eligible, it rides its decision's
-    # cascade instead, see _propose_one's own post-write block, after its facts loop) AND
-    # none of its `supports` ids resolves to a still-proposed decision (rev 12 erratum:
-    # such a fact rides THAT decision's verdict too, even when it arrives later through
-    # its own propose_facts call — see _supports_a_still_proposed_decision). Skipped
-    # outright when `auto_accept` is true — the fact already landed ACCEPTED above, and the
-    # hook runs ONLY on writes that landed proposed (D2).
     ratified_by: str | None = None
     auto_ratify_error: str | None = None
-    if (
-        attached_to is None
-        and not auto_accept
-        and ratify_policy != RatifyPolicy.MANUAL
-        and not _supports_a_still_proposed_decision(store, fact.supports)
-    ):
-        live_tier12, ambiguous_or_orphan_only = _anchor_signal(store, fact.id)
-        signal = AutoEligibility(
-            kind="fact",
-            live_tier12=live_tier12,
-            ambiguous_or_orphan_only=ambiguous_or_orphan_only,
-            pipeline_clean=True,
-            has_provenance=True,
-            domain_anchored=False,
-            has_supersedes=fact.supersedes is not None,
-        )
-        if auto_ratify_eligible(signal, ratify_policy):
-            outcome = _auto_ratify(store, fact.id, "fact", ratify_policy)
-            ratified_by = outcome.ratified_by
-            auto_ratify_error = outcome.error
+    guard_reason: str | None = None
+    step = "anchors"
+    # Post-write guard (design D6): the fact is already on disk, so a failure below reports
+    # itself on the written result rather than raising past the batch.
+    try:
+        if reader is not None:
+            for anchor in anchors:
+                result = resolve_and_bind(
+                    fact.id,
+                    Descriptor(name=anchor.name, file_path=anchor.file_path),
+                    reader,
+                    store,
+                    relation=anchor.relation,
+                )
+                if result.status == "ambiguous":
+                    anchors_skipped.append(
+                        {
+                            "name": anchor.name,
+                            "reason": "ambiguous",
+                            "candidates": result.candidates[:5],
+                        }
+                    )
+                elif result.status == "unresolved":
+                    reason = orphan_reason(
+                        Descriptor(name=anchor.name, file_path=anchor.file_path), reader
+                    )
+                    anchors_orphaned.extend(
+                        {**s, "reason": reason}
+                        for s in entity_summaries(store, [b for b in result if b.tier == 2])
+                    )
+        else:
+            for anchor in anchors:
+                before = {b.entity_id for b in store.bindings_for_record(fact.id)}
+                _bind_orphaned(
+                    fact.id,
+                    Descriptor(name=anchor.name, file_path=anchor.file_path),
+                    store,
+                    relation=anchor.relation,
+                )
+                anchors_orphaned.extend(
+                    {**s, "reason": "no-graph"}
+                    for s in entity_summaries(
+                        store,
+                        [
+                            b
+                            for b in store.bindings_for_record(fact.id)
+                            if b.tier == 2 and b.entity_id not in before
+                        ],
+                    )
+                )
+
+        step = "auto-ratify"
+        # 7. Auto-ratify (design D2/D3) — standalone facts ONLY: a fact is a standalone
+        # candidate iff `attached_to is None` (not created inside a `DraftDecision.facts`
+        # entry — an attached fact is never independently eligible, it rides its decision's
+        # cascade instead, see _propose_one's own post-write block, after its facts loop) AND
+        # none of its `supports` ids resolves to a still-proposed decision (rev 12 erratum:
+        # such a fact rides THAT decision's verdict too, even when it arrives later through
+        # its own propose_facts call — see _supports_a_still_proposed_decision). Skipped
+        # outright when `auto_accept` is true — the fact already landed ACCEPTED above, and the
+        # hook runs ONLY on writes that landed proposed (D2).
+        if (
+            attached_to is None
+            and not auto_accept
+            and ratify_policy != RatifyPolicy.MANUAL
+            and not _supports_a_still_proposed_decision(store, fact.supports)
+        ):
+            live_tier12, ambiguous_or_orphan_only = _anchor_signal(store, fact.id)
+            signal = AutoEligibility(
+                kind="fact",
+                live_tier12=live_tier12,
+                ambiguous_or_orphan_only=ambiguous_or_orphan_only,
+                pipeline_clean=True,
+                has_provenance=True,
+                domain_anchored=False,
+                has_supersedes=fact.supersedes is not None,
+            )
+            if auto_ratify_eligible(signal, ratify_policy):
+                outcome = _auto_ratify(store, fact.id, "fact", ratify_policy)
+                ratified_by = outcome.ratified_by
+                auto_ratify_error = outcome.error
+    except Exception as e:
+        cause = f"{type(e).__name__}: {e}"
+        if auto_accept:
+            # Accepted already: Store.drop_fact refuses it, so the remedy is add_anchors (it
+            # takes fact ids). Facts carry no initiative or tags.
+            guard_reason = (
+                f"written (accepted), but {step} and the later steps did not run ({cause}); "
+                "anchors can be added with add_anchors"
+            )
+        else:
+            if attached_to is not None:
+                # An attached fact has no anchors or supports of its own: re-proposed as a
+                # standalone fact it would be rejected, so the remedy names its decision.
+                remedy = (
+                    f"drop {fact.id} with ratify(drop=[...]) and re-propose it "
+                    f"with supports=[{attached_to}]"
+                )
+            else:
+                remedy = (
+                    f"drop {fact.id} with ratify(drop=[...]) and propose the complete draft again"
+                )
+            guard_reason = (
+                f"written, but {step} and the later steps did not run ({cause}); {remedy}"
+            )
 
     return ProposeFactResult(
         status="written",
         fact_id=fact.id,
+        reason=guard_reason,
         redactions=redactions,
         anchors_skipped=anchors_skipped,
         anchors_orphaned=anchors_orphaned,
@@ -1094,8 +1240,16 @@ def _propose_one(
         if slug and slug != "redacted":
             tag_slugs.append(slug)
 
+    # The initiative names a canonical entity, so it is cleaned with the other fields --
+    # before dedup, so a `deduped` result still counts what it redacted. An empty string
+    # (an agent's "unset") falls back to the branch-derived name; whitespace-only or all-secret
+    # text is an explicit answer and binds nothing.
+    initiative, n = _clean_initiative(draft.initiative or _derive_initiative(store))
+    redactions += n
+
     # 2. Dedup (conservative: when unsure, write; the human drops at ratify).
-    dup_id = _is_duplicate(draft, store)
+    assert clean["title"] is not None
+    dup_id = _is_duplicate(clean["title"], draft, store)
     if dup_id is not None:
         dup = store.get_decision(dup_id)
         return ProposeResult(
@@ -1118,7 +1272,6 @@ def _propose_one(
     neighbors = [_neighbor_dict(d) for d in _live_neighbors(draft, store)]
 
     # 3-4. Package + validate + write (append-only; supersede closes the predecessor).
-    initiative = draft.initiative or _derive_initiative()
     # title/context/choice are required (non-Optional) on DraftDecision, and the loop above
     # only maps None -> None — they can only be None here if they went in None, which the
     # schema forbids. Only rejected/consequences are genuinely optional.
@@ -1176,144 +1329,182 @@ def _propose_one(
     # S3) without a second resolve() call.
     anchors_skipped: list[dict] = []
     anchors_orphaned: list[dict] = []
-    if reader is not None:
-        for anchor in draft.anchors:
-            result = resolve_and_bind(
-                decision.id,
-                Descriptor(name=anchor.name, file_path=anchor.file_path),
-                reader,
-                store,
-                relation=anchor.relation,
-            )
-            if result.status == "ambiguous":
-                anchors_skipped.append(
-                    {
-                        "name": anchor.name,
-                        "reason": "ambiguous",
-                        "candidates": result.candidates[:5],
-                    }
-                )
-            elif result.status == "unresolved":
-                reason = orphan_reason(
-                    Descriptor(name=anchor.name, file_path=anchor.file_path), reader
-                )
-                anchors_orphaned.extend(
-                    {**s, "reason": reason}
-                    for s in entity_summaries(store, [b for b in result if b.tier == 2])
-                )
-    else:
-        for anchor in draft.anchors:
-            before = {b.entity_id for b in store.bindings_for_record(decision.id)}
-            _bind_orphaned(
-                decision.id,
-                Descriptor(name=anchor.name, file_path=anchor.file_path),
-                store,
-                relation=anchor.relation,
-            )
-            anchors_orphaned.extend(
-                {**s, "reason": "no-graph"}
-                for s in entity_summaries(
-                    store,
-                    [
-                        b
-                        for b in store.bindings_for_record(decision.id)
-                        if b.tier == 2 and b.entity_id not in before
-                    ],
-                )
-            )
-    if initiative:
-        init = store.get_or_create_abstract_entity(f"initiative:{initiative}")
-        store.add_binding(
-            AnchorBinding(
-                record_id=decision.id,
-                entity_id=init.entity_id,
-                tier=0,
-                status="live",
-            )
-        )
-    # 6. Tags — durable, cross-cutting `tag:<slug>` entities (tier-0, no lifecycle; see
-    # spec §2). Bound at propose time, same as initiative, so they carry through ratify.
-    for slug in tag_slugs:
-        tag_entity = store.get_or_create_abstract_entity(f"tag:{slug}")
-        store.add_binding(
-            AnchorBinding(
-                record_id=decision.id,
-                entity_id=tag_entity.entity_id,
-                tier=0,
-            )
-        )
-
-    # 7. Attached facts (draft.facts) -- each runs through the same deterministic pipeline,
-    # supporting THIS decision and, absent their own anchors, inheriting its anchors (see
-    # _propose_fact_one's docstring). A bad fact never aborts the decision or its siblings:
-    # _propose_fact_one already catches every anticipated failure internally (mirrors this
-    # function's own per-stage try/except), same isolation guarantee `propose` gives
-    # per-draft.
-    fact_results = [
-        _propose_fact_one(
-            raw_fact,
-            store,
-            reader,
-            session_id,
-            author,
-            graph_version,
-            attached_to=decision.id,
-            inherited_anchors=draft.anchors,
-            auto_accept=auto_accept,
-            ratify_policy=ratify_policy,
-        )
-        for raw_fact in draft.facts
-    ]
-
-    # 8. Auto-ratify (design D2/D3) — runs AFTER step 7 so this call's own attached facts
-    # already exist and can be checked as the cascade set. Skipped outright when
-    # `auto_accept` is true (this decision already landed ACCEPTED, and the hook runs ONLY
-    # on writes that landed proposed). The decision's own gates run first (cheaper); the
-    # cascade rule (`_cascade_eligible`) runs only when the decision itself is already
-    # eligible, and blocks the WHOLE auto-block when any fact in the cascade set is not —
-    # decision AND facts stay proposed together, to leave the queue by one human verdict.
+    fact_results: list[ProposeFactResult] = []
     ratified_by: str | None = None
     auto_ratify_error: str | None = None
-    if not auto_accept and ratify_policy != RatifyPolicy.MANUAL:
-        live_tier12, ambiguous_or_orphan_only = _anchor_signal(store, decision.id)
-        decision_signal = AutoEligibility(
-            kind=draft.kind.value,
-            live_tier12=live_tier12,
-            ambiguous_or_orphan_only=ambiguous_or_orphan_only,
-            pipeline_clean=True,
-            has_provenance=True,
-            domain_anchored=False,
-            has_supersedes=decision.supersedes is not None,
-        )
-        if auto_ratify_eligible(decision_signal, ratify_policy) and _cascade_eligible(
-            store, decision.id, ratify_policy
-        ):
-            # _cascade_eligible above is the cheap pre-check, run before Store.ratify takes
-            # its write lock (design D2 checkpoint-2 fix, Ruling Q). _auto_ratify's own
-            # decision route builds the authoritative re-check guard itself (Ruling T) and
-            # hands it to Store.ratify, which re-runs the same per-fact test on a cascade set
-            # re-queried fresh under that lock — closing the race where a fact could land
-            # supporting this decision between the pre-check and the transition (external
-            # review finding A1, scratchpad/probe_race.py).
-            outcome = _auto_ratify(store, decision.id, decision_signal.kind, ratify_policy)
-            ratified_by = outcome.ratified_by
-            auto_ratify_error = outcome.error
-            if outcome.cascaded_fact_ids:
-                # Result truthfulness (design D6/T11/T14): the canonical cascade just
-                # accepted these facts through Store.ratify -- stamp the matching NESTED
-                # ProposeFactResult objects too, so the public result cannot say
-                # `ratified_by=None` for a fact whose canonical row was just accepted.
-                cascaded_ids = set(outcome.cascaded_fact_ids)
-                fact_results = [
-                    fr.model_copy(update={"ratified_by": ratified_by})
-                    if fr.fact_id in cascaded_ids
-                    else fr
-                    for fr in fact_results
-                ]
+    guard_reason: str | None = None
+    step = "anchors"
+    # Post-write guard (design D6): the decision is already on disk, so a failure below
+    # reports itself on the written result -- and falls through to the one return, so every
+    # field the earlier steps filled survives -- rather than raising past the batch.
+    try:
+        if reader is not None:
+            for anchor in draft.anchors:
+                result = resolve_and_bind(
+                    decision.id,
+                    Descriptor(name=anchor.name, file_path=anchor.file_path),
+                    reader,
+                    store,
+                    relation=anchor.relation,
+                )
+                if result.status == "ambiguous":
+                    anchors_skipped.append(
+                        {
+                            "name": anchor.name,
+                            "reason": "ambiguous",
+                            "candidates": result.candidates[:5],
+                        }
+                    )
+                elif result.status == "unresolved":
+                    reason = orphan_reason(
+                        Descriptor(name=anchor.name, file_path=anchor.file_path), reader
+                    )
+                    anchors_orphaned.extend(
+                        {**s, "reason": reason}
+                        for s in entity_summaries(store, [b for b in result if b.tier == 2])
+                    )
+        else:
+            for anchor in draft.anchors:
+                before = {b.entity_id for b in store.bindings_for_record(decision.id)}
+                _bind_orphaned(
+                    decision.id,
+                    Descriptor(name=anchor.name, file_path=anchor.file_path),
+                    store,
+                    relation=anchor.relation,
+                )
+                anchors_orphaned.extend(
+                    {**s, "reason": "no-graph"}
+                    for s in entity_summaries(
+                        store,
+                        [
+                            b
+                            for b in store.bindings_for_record(decision.id)
+                            if b.tier == 2 and b.entity_id not in before
+                        ],
+                    )
+                )
+        step = "initiative"
+        if initiative:
+            _bind_initiative(store, decision.id, initiative)
+        step = "tags"
+        # 6. Tags — durable, cross-cutting `tag:<slug>` entities (tier-0, no lifecycle; see
+        # spec §2). Bound at propose time, same as initiative, so they carry through ratify.
+        for slug in tag_slugs:
+            tag_entity = store.get_or_create_abstract_entity(f"tag:{slug}")
+            store.add_binding(
+                AnchorBinding(
+                    record_id=decision.id,
+                    entity_id=tag_entity.entity_id,
+                    tier=0,
+                )
+            )
+
+        step = "attached facts"
+        # 7. Attached facts (draft.facts) -- each runs through the same deterministic pipeline,
+        # supporting THIS decision and, absent their own anchors, inheriting its anchors (see
+        # _propose_fact_one's docstring). A bad fact never aborts the decision or its siblings:
+        # _propose_fact_one already catches every anticipated failure internally (mirrors this
+        # function's own per-stage try/except), same isolation guarantee `propose` gives
+        # per-draft.
+        # A fact that failed (an isolation guard, or a rejection; not a dedup) blocks THIS
+        # decision's auto-ratification below: it would otherwise be accepted as if its write
+        # were clean.
+        fact_failed = False
+        for raw_fact in draft.facts:
+            try:
+                fact_result = _propose_fact_one(
+                    raw_fact,
+                    store,
+                    reader,
+                    session_id,
+                    author,
+                    graph_version,
+                    attached_to=decision.id,
+                    inherited_anchors=draft.anchors,
+                    auto_accept=auto_accept,
+                    ratify_policy=ratify_policy,
+                )
+                # The fact's own post-write guard reports on a "written" result's reason;
+                # no other written fact result carries one.
+                # A REJECTED attached fact (any reason) also means the requested draft was not
+                # fully recorded. A deduped one is complete: its content already exists.
+                if fact_result.status == "rejected" or (
+                    fact_result.status == "written" and fact_result.reason
+                ):
+                    fact_failed = True
+                fact_results.append(fact_result)
+            except Exception as e:
+                # One fact never takes down its siblings or the decision it hangs on.
+                fact_failed = True
+                fact_results.append(
+                    ProposeFactResult(status="rejected", reason=_internal_error_reason(e))
+                )
+
+        step = "auto-ratify"
+        # 8. Auto-ratify (design D2/D3) — runs AFTER step 7 so this call's own attached facts
+        # already exist and can be checked as the cascade set. Skipped outright when
+        # `auto_accept` is true (this decision already landed ACCEPTED, and the hook runs ONLY
+        # on writes that landed proposed). The decision's own gates run first (cheaper); the
+        # cascade rule (`_cascade_eligible`) runs only when the decision itself is already
+        # eligible, and blocks the WHOLE auto-block when any fact in the cascade set is not —
+        # decision AND facts stay proposed together, to leave the queue by one human verdict.
+        if fact_failed and not auto_accept and ratify_policy != RatifyPolicy.MANUAL:
+            guard_reason = "attached fact failed; left proposed for review"
+        elif not auto_accept and ratify_policy != RatifyPolicy.MANUAL:
+            live_tier12, ambiguous_or_orphan_only = _anchor_signal(store, decision.id)
+            decision_signal = AutoEligibility(
+                kind=draft.kind.value,
+                live_tier12=live_tier12,
+                ambiguous_or_orphan_only=ambiguous_or_orphan_only,
+                pipeline_clean=True,
+                has_provenance=True,
+                domain_anchored=False,
+                has_supersedes=decision.supersedes is not None,
+            )
+            if auto_ratify_eligible(decision_signal, ratify_policy) and _cascade_eligible(
+                store, decision.id, ratify_policy
+            ):
+                # _cascade_eligible above is the cheap pre-check, run before Store.ratify takes
+                # its write lock (design D2 checkpoint-2 fix, Ruling Q). _auto_ratify's own
+                # decision route builds the authoritative re-check guard itself (Ruling T) and
+                # hands it to Store.ratify, which re-runs the same per-fact test on a cascade set
+                # re-queried fresh under that lock — closing the race where a fact could land
+                # supporting this decision between the pre-check and the transition (external
+                # review finding A1, scratchpad/probe_race.py).
+                outcome = _auto_ratify(store, decision.id, decision_signal.kind, ratify_policy)
+                ratified_by = outcome.ratified_by
+                auto_ratify_error = outcome.error
+                if outcome.cascaded_fact_ids:
+                    # Result truthfulness (design D6/T11/T14): the canonical cascade just
+                    # accepted these facts through Store.ratify -- stamp the matching NESTED
+                    # ProposeFactResult objects too, so the public result cannot say
+                    # `ratified_by=None` for a fact whose canonical row was just accepted.
+                    cascaded_ids = set(outcome.cascaded_fact_ids)
+                    fact_results = [
+                        fr.model_copy(update={"ratified_by": ratified_by})
+                        if fr.fact_id in cascaded_ids
+                        else fr
+                        for fr in fact_results
+                    ]
+
+    except Exception as e:
+        cause = f"{type(e).__name__}: {e}"
+        if auto_accept:
+            guard_reason = (
+                f"written (accepted), but {step} and the later steps did not run ({cause}); "
+                "anchors can be added with add_anchors; initiative and tags cannot be "
+                "added to an accepted record"
+            )
+        else:
+            guard_reason = (
+                f"written, but {step} and the later steps did not run ({cause}); "
+                f"drop {decision.id} with ratify(drop=[...]) and propose the complete draft again"
+            )
 
     return ProposeResult(
         status="written",
         decision_id=decision.id,
+        reason=guard_reason,
         redactions=redactions,
         anchors_skipped=anchors_skipped,
         anchors_orphaned=anchors_orphaned,
@@ -1353,20 +1544,25 @@ def propose(
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2
     """
     graph_version = reader.graph_version() if reader is not None else None
-    return [
-        _propose_one(
-            raw,
-            store,
-            reader,
-            session_id,
-            author,
-            ref,
-            graph_version,
-            auto_accept=auto_accept,
-            ratify_policy=ratify_policy,
-        )
-        for raw in drafts
-    ]
+    results: list[ProposeResult] = []
+    for raw in drafts:
+        try:
+            results.append(
+                _propose_one(
+                    raw,
+                    store,
+                    reader,
+                    session_id,
+                    author,
+                    ref,
+                    graph_version,
+                    auto_accept=auto_accept,
+                    ratify_policy=ratify_policy,
+                )
+            )
+        except Exception as e:
+            results.append(ProposeResult(status="rejected", reason=_internal_error_reason(e)))
+    return results
 
 
 def propose_facts(
@@ -1402,19 +1598,24 @@ def propose_facts(
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2
     """
     graph_version = reader.graph_version() if reader is not None else None
-    return [
-        _propose_fact_one(
-            raw,
-            store,
-            reader,
-            session_id,
-            author,
-            graph_version,
-            auto_accept=auto_accept,
-            ratify_policy=ratify_policy,
-        )
-        for raw in drafts
-    ]
+    results: list[ProposeFactResult] = []
+    for raw in drafts:
+        try:
+            results.append(
+                _propose_fact_one(
+                    raw,
+                    store,
+                    reader,
+                    session_id,
+                    author,
+                    graph_version,
+                    auto_accept=auto_accept,
+                    ratify_policy=ratify_policy,
+                )
+            )
+        except Exception as e:
+            results.append(ProposeFactResult(status="rejected", reason=_internal_error_reason(e)))
+    return results
 
 
 def format_proposal(d: Decision) -> str:
@@ -1579,68 +1780,82 @@ def _propose_domain_one(
     except (ValidationError, ValueError) as e:
         return ProposeDomainResult(status="rejected", reason=str(e), redactions=redactions)
 
-    warnings = _lint_domain_path_prefixes(draft.path_prefixes, reader, store)
-
-    # Auto-ratify (design D2/D3) — auto-all only; never under auto-low-risk or manual.
+    warnings: list[str] = []
     ratified_by: str | None = None
     auto_ratify_error: str | None = None
-    if ratify_policy == RatifyPolicy.AUTO_ALL:
-        domain_anchored = _domain_anchored(
-            reader, warnings, draft.seed_anchors, draft.path_prefixes
+    guard_reason: str | None = None
+    step = "the path_prefixes lint"
+    # Post-write guard (design D6): the domain is already on disk as `proposed`.
+    try:
+        warnings = _lint_domain_path_prefixes(draft.path_prefixes, reader, store)
+
+        # Auto-ratify (design D2/D3) — auto-all only; never under auto-low-risk or manual.
+        if ratify_policy == RatifyPolicy.AUTO_ALL:
+            step = "the auto-ratify eligibility check"
+            domain_anchored = _domain_anchored(
+                reader, warnings, draft.seed_anchors, draft.path_prefixes
+            )
+            signal = AutoEligibility(
+                kind="domain",
+                live_tier12=0,
+                ambiguous_or_orphan_only=True,
+                pipeline_clean=True,
+                has_provenance=True,
+                domain_anchored=domain_anchored,
+                has_supersedes=False,
+            )
+            if auto_ratify_eligible(signal, ratify_policy):
+                outcome = _auto_ratify(store, domain.domain_id, "domain", ratify_policy)
+                ratified_by = outcome.ratified_by
+                auto_ratify_error = outcome.error
+                if outcome.ratified_by is not None:
+                    # domain_anchored required `reader is not None` for eligibility, so this
+                    # transition's own reader is guaranteed present here.
+                    #
+                    # Ruling R (design D2/D6 checkpoint-2 fix): the domain transition already
+                    # committed by this point, so an activation failure must report and continue,
+                    # never abort the batch (external review finding A2,
+                    # scratchpad/probe_activation.py — an unprotected write inside the helper's
+                    # own refresh-failure handler could raise past this call). `Exception`, not
+                    # `BaseException`, consistent with `_auto_ratify`'s own catch, so
+                    # `KeyboardInterrupt`/`SystemExit` still propagate.
+                    # `sync.activate_accepted_domain` itself is deliberately NOT changed: the
+                    # human MCP/CLI wrappers carried the identical unprotected stale-marker
+                    # write before the Task 4 extraction, and changing the helper would change
+                    # those byte-identical-proven paths too.
+                    try:
+                        activation = activate_accepted_domain(domain, store, reader)
+                    except Exception as e:
+                        auto_ratify_error = f"activation: {e}"
+                    else:
+                        # `resolved` and `overbroad` are independent fields on
+                        # `sync.DomainActivation` (checked separately, not elif'd, so neither
+                        # depends on the other ever staying mutually exclusive) — rev 12
+                        # erratum: a claim-cap rejection used to report a clean success here,
+                        # while the human MCP/CLI wrappers (server.py, cli.py) rendered their
+                        # own "path rule too broad" sentence for the identical outcome. This
+                        # is that same sentence, the literal `sidegraph:heal-anchors` trigger
+                        # phrase, so an unattended auto-all caller gets it too (D2, D6).
+                        if not activation.resolved:
+                            auto_ratify_error = f"activation: {activation.error}"
+                        if activation.overbroad is not None:
+                            prefixes = ", ".join(repr(p) for p in domain.path_prefixes)
+                            broad = activation.overbroad
+                            auto_ratify_error = (
+                                f"activation: path rule too broad: {prefixes} match "
+                                f"{broad['matched']}/{broad['total']} "
+                                "communities — not applied; seed_anchors, if any, still applied"
+                            )
+    except Exception as e:
+        guard_reason = (
+            f"proposed, but {step} failed ({type(e).__name__}: {e}); review the domain's "
+            "path_prefixes and anchors before ratifying"
         )
-        signal = AutoEligibility(
-            kind="domain",
-            live_tier12=0,
-            ambiguous_or_orphan_only=True,
-            pipeline_clean=True,
-            has_provenance=True,
-            domain_anchored=domain_anchored,
-            has_supersedes=False,
-        )
-        if auto_ratify_eligible(signal, ratify_policy):
-            outcome = _auto_ratify(store, domain.domain_id, "domain", ratify_policy)
-            ratified_by = outcome.ratified_by
-            auto_ratify_error = outcome.error
-            if outcome.ratified_by is not None:
-                # domain_anchored required `reader is not None` for eligibility, so this
-                # transition's own reader is guaranteed present here.
-                #
-                # Ruling R (design D2/D6 checkpoint-2 fix): the domain transition already
-                # committed by this point, so an activation failure must report and continue,
-                # never abort the batch (external review finding A2,
-                # scratchpad/probe_activation.py — an unprotected write inside the helper's
-                # own refresh-failure handler could raise past this call). `Exception`, not
-                # `BaseException`, consistent with `_auto_ratify`'s own catch, so
-                # `KeyboardInterrupt`/`SystemExit` still propagate. `sync.activate_accepted_domain`
-                # itself is deliberately NOT changed: the human MCP/CLI wrappers carried the
-                # identical unprotected stale-marker write before the Task 4 extraction, and
-                # changing the helper would change those byte-identical-proven paths too.
-                try:
-                    activation = activate_accepted_domain(domain, store, reader)
-                except Exception as e:
-                    auto_ratify_error = f"activation: {e}"
-                else:
-                    # `resolved` and `overbroad` are independent fields on
-                    # `sync.DomainActivation` (checked separately, not elif'd, so neither
-                    # depends on the other ever staying mutually exclusive) — rev 12
-                    # erratum: a claim-cap rejection used to report a clean success here,
-                    # while the human MCP/CLI wrappers (server.py, cli.py) rendered their
-                    # own "path rule too broad" sentence for the identical outcome. This
-                    # is that same sentence, the literal `sidegraph:heal-anchors` trigger
-                    # phrase, so an unattended auto-all caller gets it too (D2, D6).
-                    if not activation.resolved:
-                        auto_ratify_error = f"activation: {activation.error}"
-                    if activation.overbroad is not None:
-                        prefixes = ", ".join(repr(p) for p in domain.path_prefixes)
-                        auto_ratify_error = (
-                            f"activation: path rule too broad: {prefixes} match "
-                            f"{activation.overbroad['matched']}/{activation.overbroad['total']} "
-                            "communities — not applied; seed_anchors, if any, still applied"
-                        )
 
     return ProposeDomainResult(
         status="proposed",
         domain_id=domain.domain_id,
+        reason=guard_reason,
         redactions=redactions,
         warnings=warnings,
         ratified_by=ratified_by,
@@ -1675,20 +1890,34 @@ def propose_domains(
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2
     """
     graph_version = reader.graph_version() if reader is not None else None
-    results = [
-        _propose_domain_one(
-            raw,
-            store,
-            reader,
-            session_id,
-            author,
-            graph_version,
-            ratify_policy=ratify_policy,
-        )
-        for raw in drafts
-    ]
+    results: list[ProposeDomainResult] = []
+    for raw in drafts:
+        try:
+            results.append(
+                _propose_domain_one(
+                    raw,
+                    store,
+                    reader,
+                    session_id,
+                    author,
+                    graph_version,
+                    ratify_policy=ratify_policy,
+                )
+            )
+        except Exception as e:
+            results.append(ProposeDomainResult(status="rejected", reason=_internal_error_reason(e)))
     if any(r.ratified_by is not None for r in results):
-        store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store)))
+        try:
+            store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store)))
+        except Exception as e:
+            # The domains are already accepted; an unhealed TOC must not be silent.
+            warning = f"toc: {type(e).__name__}: {e} \u2014 the next sync rebuilds it"
+            results = [
+                r.model_copy(update={"warnings": [*r.warnings, warning]})
+                if r.ratified_by is not None
+                else r
+                for r in results
+            ]
     return results
 
 

@@ -30,13 +30,17 @@ rebuild), two equivalent paths:
   `sidegraph-sync` (no `--db`) resolves the store as `$SIDEGRAPH_DIR` if set, else the
   deprecated `$SIDEGRAPH_DB` dispatch, else the default `.sidegraph` (existing or about to
   be created) — pass `--db`/set `SIDEGRAPH_DIR` explicitly if that's not the store you mean
-  (see [`reference/cli.md`](../reference/cli.md)).
+  (see [`reference/cli.md`](../reference/cli.md)). The default graph is the store's own
+  project's; to sync a store copied elsewhere against the real checkout, run from the
+  checkout and pass `--graph graphify-out/graph.json`.
 
 Sync is gated on `graph_version` — `<built_at_commit>:<content hash>` when the corpus is a
 git repo, or a `content:<hash>` fallback for non-git corpora (see
 [`reference/configuration.md`](../reference/configuration.md)): if the graph hasn't changed
-since the last sync, both the CLI and the lazy read-path trigger are a no-op — **unless** a
-canonical reload (`git pull`, merge, branch switch, even a bare `touch`) has reset the
+since the last sync, both the CLI and the lazy read-path trigger skip the full pass —
+except that an entity remembered under `pending_uncommitted_moves` (a move the last pass
+left as `moved_uncommitted`) is re-verified once `HEAD` has moved, in a narrow pass over just
+those entities, and **unless** a canonical reload (`git pull`, merge, branch switch, even a bare `touch`) has reset the
 store's volatile state (domain `communities`, entity `last_seen_*`, binding statuses) since
 the last sync; that always reruns the pass once automatically, even though `graph_version`
 itself hasn't moved. The content hash is folded into both forms because Graphify can rewrite
@@ -54,7 +58,7 @@ deterministic ladder, one rung at a time, and the first rung that fires wins:
 | `unchanged` | Exact `name`+`file_path` match, same node id as last sync | Leaf binding stays `live`; still checks for community re-pointing (below). |
 | `rebound` | Exact `name`+`file_path` match, but the node id changed | Leaf binding stays/returns to `live`, mapping refreshed to the new node id. |
 | `moved` | No exact match, but a *unique* name-only match exists **in a file of the same suffix**, **the entity's old `file_path` is confirmed gone from disk**, AND that same move is **independently confirmed by committed git history** (old path absent, new path tracked — both at `HEAD`) | The entity's `descriptor.file_path` is updated to follow it; leaf binding heals to `live`. A same-name hit in a file of a *different* suffix (e.g. a vanished code symbol colliding with an unrelated doc heading) is treated as a collision, not a move, and falls through to orphaned instead — as does any hit whose old path is still on disk (below). |
-| `moved_uncommitted` | Same disk-level evidence as `moved` (unique same-suffix hit, old path gone from disk), but git's committed history at `HEAD` does not yet confirm it — an uncommitted delete, rename, or stash on this one working tree | Nothing is touched — the binding, descriptor, and node mapping are all left exactly as they were. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`, see below) and re-sync. |
+| `moved_uncommitted` | Same disk-level evidence as `moved` (unique same-suffix hit, old path gone from disk), but git's committed history at `HEAD` does not yet confirm it — an uncommitted delete, rename, or stash on this one working tree | Nothing is touched — the binding, descriptor, and node mapping are all left exactly as they were. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`, see below). Sidegraph remembers the entity, and the first sync after `HEAD` moves re-verifies it even if the graph was not rebuilt. If the old path is back on disk (the rename was reverted or stashed) the leaf is left untouched, and the entity stays watched until a later `HEAD` change or a rebuild settles it. A new file that takes the old path before the move is committed and synced hides the move: it surfaces as `orphaned` after the next graph rebuild. |
 | `ambiguous` | More than one node now matches | Leaf binding flips to `degraded` (not deleted). If every candidate shares one community, that community is still used for re-pointing. |
 | `orphaned` | No match at all, exact or loose | Leaf binding flips to `orphaned`. If the entity's file still exists and its nodes agree on a single community, that community is used for re-pointing (see below) — Sidegraph is not guessing which node the entity *became*, only where its code still lives. |
 
@@ -89,10 +93,13 @@ move confirmed by **committed** history, via `git cat-file -e HEAD:<path>` — t
 absent from `HEAD`'s tree, and the new path present in it. When the disk-level evidence looks
 like a move but git's `HEAD` doesn't yet back it up, the rung reports `moved_uncommitted` and
 leaves everything untouched instead of guessing; committing the move (or, on a fresh
-repository with no commits yet, making one) and re-running sync heals it the normal way, no
-different from any other rung. For the rare case of someone who has verified their own
-working tree and wants the old, disk-only behavior back, `SIDEGRAPH_TRUST_DIRTY_TREE=on`
-is a documented, off-by-default escape hatch scoped to exactly this one check.
+repository with no commits yet, making one) heals it the normal way, no different from any
+other rung. The entity is remembered along with `HEAD`, so the first sync after `HEAD` moves
+re-verifies it — lazily or explicitly, and even when the graph was not rebuilt. If the rename
+was reverted or stashed instead, the old path is back on disk and the leaf is left as it was.
+For the rare case of someone who has verified their own working tree and wants the old,
+disk-only behavior back, `SIDEGRAPH_TRUST_DIRTY_TREE=on` is a documented, off-by-default
+escape hatch scoped to exactly this one check.
 
 ## Community re-pointing
 
@@ -103,7 +110,9 @@ baseline, Sidegraph:
 
 1. Creates (or reuses) a Tier-1 abstract entity for the new `community:<id>`, and adds a
    `live` binding to it for every decision leaf-bound to that entity.
-2. Flips the binding to the *old* `community:<id>` to `orphaned` (never deletes it).
+2. Reconciles the old `community:<id>` per record, once the whole pass has run: its
+   binding flips to `orphaned` (never deleted) only when no other live leaf of that same
+   record still sits in that community. While a sibling leaf does, the old row stays `live`.
 
 Both of those are **index-only**: the `community:<id>` entity and the Tier-1 binding pointing
 at it are derived state, not committed to a canonical file — old or new. Repointing a hundred

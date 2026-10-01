@@ -1,7 +1,5 @@
 import json
 
-import pytest
-
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import Seed, get_task_context
 from sidegraph.server import _propose_decisions_impl, _ratify_decisions_impl
@@ -32,11 +30,6 @@ DOC_GRAPH_A = {
 }
 # Rebuild: identical headings, Leiden renumbered 3 -> 11.
 DOC_GRAPH_B = {"nodes": [dict(n, community=11) for n in DOC_GRAPH_A["nodes"]], "links": []}
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_initiative(monkeypatch):
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: None)
 
 
 def _write(tmp_path, name, data):

@@ -979,3 +979,43 @@ def test_ratify_whose_refresh_raises_still_schedules_a_heal(tmp_path, monkeypatc
 
     assert out[domain.domain_id] == "accepted"  # a ratify never fails on this
     assert store.get_meta(VOLATILE_STALE_KEY) == "1"
+
+
+def _domain_files_text(root: Path) -> str:
+    return "".join(f.read_text() for f in root.rglob("*.json"))
+
+
+def test_manual_domain_paths_redact_add(tmp_path):
+    store = Store(tmp_path / "t.db")
+    out = _add_domain_impl(
+        store,
+        None,
+        slug="payments",
+        title="Payments AKIAQWERTYUIOPASDFGH",
+        summary="settles orders, password: hunter2 two",
+    )
+    assert out["redactions"] == 2
+    domain = store.get_domain(out["domain_id"])
+    assert "AKIAQWERTYUIOPASDFGH" not in domain.title
+    assert "hunter2" not in domain.summary
+    text = _domain_files_text(tmp_path)
+    assert "AKIAQWERTYUIOPASDFGH" not in text and "hunter2" not in text
+
+
+def test_manual_domain_paths_redact_supersede(tmp_path):
+    store = Store(tmp_path / "t.db")
+    old = store.add_domain(_new_domain(slug="payments"))
+    out = _supersede_domain_impl(
+        store,
+        None,
+        old.domain_id,
+        "payments-v2",
+        "Payments AKIAQWERTYUIOPASDFGH",
+        "settles orders, password: hunter2 two",
+    )
+    assert out["redactions"] == 2
+    domain = store.get_domain(out["domain_id"])
+    assert "AKIAQWERTYUIOPASDFGH" not in domain.title
+    assert "hunter2" not in domain.summary
+    text = _domain_files_text(tmp_path)
+    assert "AKIAQWERTYUIOPASDFGH" not in text and "hunter2" not in text

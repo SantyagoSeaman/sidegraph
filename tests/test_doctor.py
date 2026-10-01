@@ -7,10 +7,14 @@ files without schema validation, so tests pin exactly the fields each check cons
 
 import inspect
 import json
+import os
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote, unquote_to_bytes
 
+import pytest
 from ulid import ULID
 
 from sidegraph import doctor
@@ -23,6 +27,7 @@ from sidegraph.doctor import (
     ORPHANED_BINDING,
     STALE_PROPOSAL,
     UNREFERENCED_ENTITY,
+    _binding_status_by_key,
     curate,
 )
 
@@ -361,3 +366,100 @@ def test_doctor_opens_the_index_without_immutable():
     # alone would satisfy a looser substring count without proving either connect string
     # still opens read-only.
     assert source.count('?mode=ro"') >= 2, "both connect strings still open read-only"
+
+
+# -- read-only URI: a store path with URI-special characters ------------------------------
+# In a SQLite URI `#` starts the fragment, `?` the query, and `%` + two hex digits is an
+# escape, so an unquoted path is cut short or decoded and the index is silently not read.
+
+_URI_SPECIAL_DIRS = ["C#", "C?Y", "X%41Y"]
+
+
+def _store_under(tmp_path: Path, name: str) -> Path:
+    store_dir = tmp_path / "B" / name / "app" / ".sidegraph"
+    store_dir.mkdir(parents=True)
+    return store_dir
+
+
+@pytest.mark.parametrize("name", _URI_SPECIAL_DIRS)
+def test_binding_status_check_reads_a_store_under_a_hash_dir(tmp_path, name):
+    store_dir = _store_under(tmp_path, name)
+    _index_with_bindings(store_dir, [("R1", "E1", "degraded")])
+    # Decoy at the path a URI would be cut short to (`B/C` for `C#` and `C?Y`): a live row
+    # under other keys, so a read of the wrong file yields no finding and shows up as bytes.
+    decoy = tmp_path / "B" / "C"
+    decoy_names = [name]
+    if name.startswith("C"):
+        _index_with_bindings(decoy.parent, [("R9", "E9", "live")])
+        (decoy.parent / "index.db").rename(decoy)
+        decoy_names = sorted(["C", name])
+    before = decoy.read_bytes() if decoy.exists() else None
+    report = curate(store_dir, now=NOW)
+    assert BINDING_STATUS_CHECK not in report.skipped
+    assert _codes(report) == [DEGRADED_BINDING]
+    assert (decoy.read_bytes() if decoy.exists() else None) == before
+    # no empty database is created at the path cut short at the special character
+    assert sorted(p.name for p in (tmp_path / "B").iterdir()) == decoy_names
+
+
+@pytest.mark.parametrize("name", _URI_SPECIAL_DIRS)
+def test_binding_status_by_key_reads_a_store_under_a_hash_dir(tmp_path, name):
+    store_dir = _store_under(tmp_path, name)
+    _index_with_bindings(store_dir, [("R1", "E1", "degraded")])
+    assert _binding_status_by_key(store_dir) == {("R1", "E1"): "degraded"}
+
+
+@pytest.mark.parametrize("name", _URI_SPECIAL_DIRS)
+def test_never_surfaced_reads_a_store_under_a_hash_dir(tmp_path, name):
+    store_dir = _store_under(tmp_path, name)
+    _index_with_bindings(store_dir, [])
+    conn = sqlite3.connect(store_dir / "index.db")
+    conn.execute("CREATE TABLE retrieval_shows (record_id TEXT, shows INTEGER)")
+    conn.execute("CREATE TABLE retrieval_seeds (seed TEXT, queries INTEGER)")
+    conn.commit()
+    conn.close()
+    assert NEVER_SURFACED_CHECK not in curate(store_dir, now=NOW).skipped
+
+
+def test_no_unquoted_sqlite_uri_in_src():
+    """Every ``file:`` URI in src/ quotes its path. No ``connect(`` prefix in the pattern:
+    ``ruff format`` reflows a long connect call onto several lines."""
+    src = Path(inspect.getfile(doctor)).parent
+    unquoted = re.compile(r"""[fF]["']file:\{(?!quote\()""")
+    hits = [
+        f"{path.relative_to(src)}:{text.count(chr(10), 0, m.start()) + 1}"
+        for path in sorted(src.rglob("*.py"))
+        for text in [path.read_text()]
+        for m in unquoted.finditer(text)
+    ]
+    assert hits == []
+
+
+# -- read-only URI: a path holding undecodable bytes --------------------------------------
+# `quote(str)` raises UnicodeEncodeError for a surrogate-escaped byte (Linux can hold one in
+# a directory name), so the URI is built from the raw bytes: `quote(os.fsencode(path))`.
+
+_SURROGATE_PATH = Path("/nonexistent") / "d\udc80x" / ".sidegraph"
+
+
+def test_raw_byte_quoting_round_trips_a_surrogate_path():
+    index_path = _SURROGATE_PATH / "index.db"
+    uri = f"file:{quote(os.fsencode(str(index_path)))}?mode=ro"
+    assert unquote_to_bytes(uri[len("file:") : uri.index("?")]) == os.fsencode(index_path)
+
+
+def test_open_index_ro_survives_a_surrogate_path():
+    from sidegraph.gitio import open_index_ro
+
+    assert open_index_ro(_SURROGATE_PATH) is None
+
+
+def test_binding_status_reads_a_store_under_an_undecodable_dir(tmp_path):
+    raw = os.fsencode(str(tmp_path)) + b"/d\x80x/.sidegraph"
+    try:
+        os.makedirs(raw)
+    except OSError:
+        pytest.skip("filesystem refuses undecodable file names")
+    store_dir = Path(os.fsdecode(raw))
+    _index_with_bindings(store_dir, [("R1", "E1", "degraded")])
+    assert _binding_status_by_key(store_dir) == {("R1", "E1"): "degraded"}

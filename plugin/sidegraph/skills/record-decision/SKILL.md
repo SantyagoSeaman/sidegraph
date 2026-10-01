@@ -60,7 +60,7 @@ parameters, minus `supersedes` — reversal on the accepted path is `supersede_d
 - **Optional axes:** `tags` (free text — slugified into durable `tag:<slug>` entities; a
   comma-separated string works too), `layer` (`"business"` | `"technical"`, a filter axis
   for mixed corpora), `initiative` (binds a Tier-0 initiative entity; derivable from the
-  git branch in the propose path when omitted).
+  branch of the store's repository in the propose path when omitted).
 
 ## Anchor discipline
 
@@ -68,7 +68,8 @@ Anchor to what the decision is **about**, not everything touched incidentally �
 anchors resurface as noise in someone else's task context later.
 
 - Each anchor is `{"name", "file_path", "relation"?}`, resolved against the current graph
-  and bound at up to three tiers (leaf + community + initiative). `relation` is one of
+  and bound at up to two tiers (leaf + community); an `initiative`, when named, is a separate
+  decision-level binding. `relation` is one of
   `creates`/`modifies`/`affects`/`deprecates`/`considered` (default `affects`); an invalid
   value fails before anything is written — the whole call on `add_decision`, that one
   draft (`rejected`, rest of the batch still writes) on `propose_decisions`.

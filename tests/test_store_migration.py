@@ -8,11 +8,15 @@ copy of Store to produce them."""
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+import sidegraph.store as store_module
 from sidegraph.schema import (
     SCHEMA_VERSION,
     AnchorBinding,
@@ -421,3 +425,403 @@ def test_a_non_migratable_legacy_version_states_the_real_condition(tmp_path):
     assert "0.1.0" in msg
     assert "0.2.0" in msg and "0.3.0" in msg, "must name what this migrator DOES handle"
     assert "!= code" not in msg, "the old, false comparison must be gone"
+
+
+# --- record identity in the legacy migration (design/superpowers/specs/
+# 2026-09-29-record-identity-design.md D9, D10) -------------------------------------------
+
+
+def _fail_third_staged_move(monkeypatch):
+    """Make the third ``os.replace`` whose source lives under a ``.sidegraph-migrating-*``
+    staging directory (and is not a ``*.tmp`` write buffer) raise."""
+    calls = {"n": 0}
+    real = os.replace
+
+    def fake(src, dst, *args, **kwargs):
+        s = str(src)
+        if ".sidegraph-migrating-" in s and not s.endswith(".tmp"):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise OSError("injected: third staged move")
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(store_module.os, "replace", fake)
+
+
+def _staging_dirs(parent) -> list:
+    return [p for p in parent.iterdir() if p.name.startswith(".sidegraph-migrating-")]
+
+
+def _assert_fully_migrated(s: Store, entity, decision, binding, domain) -> None:
+    assert s.get_decision(decision.id) is not None
+    assert s.get_entity(entity.entity_id) is not None
+    assert [b.entity_id for b in s.bindings_for_record(decision.id)] == [binding.entity_id]
+    assert s.get_domain(domain.domain_id) is not None
+
+
+def test_legacy_row_with_unsafe_id_fails_closed(tmp_path, monkeypatch):
+    db = tmp_path / "old.db"
+    _build_legacy_db(db, _0_2_0_SCHEMA_SQL, "0.2.0")
+    bad = _decision(id="../../x", title="crafted")
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO decisions VALUES (?, ?, ?, ?)",
+        (bad.id, bad.status.value, None, bad.model_dump_json()),
+    )
+    conn.commit()
+    conn.close()
+    calls: list = []
+    real = tempfile.mkdtemp
+
+    def recording(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store_module.tempfile, "mkdtemp", recording)
+    with pytest.raises(ValueError, match="unsafe record id"):
+        Store(db)
+    assert calls == []
+    assert db.is_file()
+    assert {p.name for p in tmp_path.iterdir()} == {"old.db"}
+
+
+def _insert_decision_row_without_id(db, pk: str) -> None:
+    """A legacy decision row whose JSON omits ``id``: the models default it to a fresh ULID
+    on every validation, so the SQL primary key is the only stable identity it has."""
+    payload = json.loads(_decision(title="no id in json").model_dump_json())
+    del payload["id"]
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO decisions VALUES (?, ?, ?, ?)",
+        (pk, payload["status"], None, json.dumps(payload)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_a_legacy_row_with_no_id_in_its_json_takes_the_sql_primary_key(tmp_path, monkeypatch):
+    store_dir = tmp_path / "s"
+    store_dir.mkdir()
+    legacy = store_dir / "decisions.db"
+    _build_legacy_db(legacy, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True)
+    pk = "01KPRIMARYKEYOFTHEIDLESSROW"
+    _insert_decision_row_without_id(legacy, pk)
+    with monkeypatch.context() as m:
+        _fail_third_staged_move(m)
+        with pytest.raises(OSError, match="injected"):
+            Store(store_dir)
+    Store(store_dir).close()
+    names = sorted(p.name for p in (store_dir / "decisions").glob("*.json"))
+    assert names.count(f"{pk}.json") == 1
+    assert len(names) == 2  # the no-id row and the hand-built decision: no stray second file
+
+
+def test_a_legacy_row_with_an_unsafe_primary_key_and_no_id_fails_closed(tmp_path, monkeypatch):
+    db = tmp_path / "old.db"
+    _build_legacy_db(db, _0_2_0_SCHEMA_SQL, "0.2.0")
+    _insert_decision_row_without_id(db, "../../x")
+    calls: list = []
+    real = tempfile.mkdtemp
+
+    def recording(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store_module.tempfile, "mkdtemp", recording)
+    before = db.read_bytes()
+    with pytest.raises(ValueError, match="unsafe record id"):
+        Store(db)
+    assert calls == []
+    assert db.read_bytes() == before
+    assert {p.name for p in tmp_path.iterdir()} == {"old.db"}
+
+
+def test_a_legacy_row_with_an_unsafe_primary_key_and_a_safe_json_id_fails_closed(
+    tmp_path, monkeypatch
+):
+    db = tmp_path / "old.db"
+    _build_legacy_db(db, _0_2_0_SCHEMA_SQL, "0.2.0")
+    decision = _decision(title="safe json id, unsafe primary key")
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO decisions VALUES (?, ?, ?, ?)",
+        ("../../x", decision.status.value, None, decision.model_dump_json()),
+    )
+    conn.commit()
+    conn.close()
+    calls: list = []
+    real = tempfile.mkdtemp
+
+    def recording(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store_module.tempfile, "mkdtemp", recording)
+    before = db.read_bytes()
+    with pytest.raises(ValueError, match="unsafe record id"):
+        Store(db)
+    assert calls == []
+    assert db.read_bytes() == before
+    assert {p.name for p in tmp_path.iterdir()} == {"old.db"}
+
+
+def test_dir_migration_interrupted_remigrates(tmp_path, monkeypatch):
+    store_dir = tmp_path / "s"
+    store_dir.mkdir()
+    legacy = store_dir / "decisions.db"
+    entity, decision, binding, _init, domain = _build_legacy_db(
+        legacy, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True
+    )
+    with monkeypatch.context() as m:
+        _fail_third_staged_move(m)
+        with pytest.raises(OSError, match="injected"):
+            Store(store_dir)
+    assert legacy.is_file()  # the legacy file is renamed only after every move landed
+    assert _staging_dirs(tmp_path) == [] and _staging_dirs(store_dir) == []
+
+    s = Store(store_dir)
+    _assert_fully_migrated(s, entity, decision, binding, domain)
+    s.close()
+    assert (store_dir / "decisions.db.migrated-backup").is_file()
+    assert not legacy.exists()
+
+
+def test_bare_file_migration_interrupted_keeps_staging(tmp_path, monkeypatch):
+    db = tmp_path / "old.db"
+    _build_legacy_db(db, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True)
+    with monkeypatch.context() as m:
+        _fail_third_staged_move(m)
+        with pytest.raises(OSError, match="injected"):
+            Store(db)
+    (staging,) = _staging_dirs(tmp_path)
+    sentinel = tmp_path / "old.db.migration-incomplete"
+    assert sentinel.is_file()
+    then = sentinel.stat().st_mtime - 120  # the crash was a while ago, not a live migration
+    os.utime(sentinel, (then, then))
+    with pytest.raises(ValueError, match="migration-incomplete|interrupted") as exc:
+        Store(db)
+    assert str(staging) in str(exc.value)
+    assert "old.db.migrated-backup" in str(exc.value)
+
+
+def test_sentinel_write_failure_leaves_the_legacy_file(tmp_path, monkeypatch):
+    db = tmp_path / "old.db"
+    entity, decision, binding, _init, domain = _build_legacy_db(
+        db, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True
+    )
+    real = Path.open
+
+    def failing(self, *args, **kwargs):
+        if self.name.endswith(".migration-incomplete"):
+            raise OSError("injected: sentinel write")
+        return real(self, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "open", failing)
+        with pytest.raises(OSError, match="sentinel"):
+            Store(db)
+    assert db.is_file()
+    assert not (tmp_path / "old.db.migrated-backup").exists()
+    s = Store(db)
+    _assert_fully_migrated(s, entity, decision, binding, domain)
+    s.close()
+
+
+def test_rename_failure_after_sentinel_cleans_up_and_migrates_on_reopen(tmp_path, monkeypatch):
+    db = tmp_path / "old.db"
+    entity, decision, binding, _init, domain = _build_legacy_db(
+        db, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True
+    )
+    real = Path.rename
+
+    def failing(self, target):
+        if str(target).endswith(".migrated-backup"):
+            raise OSError("injected: rename")
+        return real(self, target)
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "rename", failing)
+        with pytest.raises(OSError, match="rename"):
+            Store(db)
+    assert not (tmp_path / "old.db.migration-incomplete").exists()
+    assert _staging_dirs(tmp_path) == []
+    assert db.is_file()
+    s = Store(db)
+    _assert_fully_migrated(s, entity, decision, binding, domain)
+    s.close()
+
+
+def test_store_dot_opens(tmp_path, monkeypatch):
+    store_dir = tmp_path / "s"
+    Store(store_dir).close()
+    monkeypatch.chdir(store_dir)
+    Store(".").close()
+
+
+def _write_sentinel(db, staging_path, age_seconds: float = 120.0) -> Path:
+    """Write a sentinel whose mtime is ``age_seconds`` back: by default an old one (a crashed
+    migration); ``0`` is a young one, which stands for a live migration (design D10)."""
+    sentinel = db.parent / "old.db.migration-incomplete"
+    sentinel.write_text(
+        json.dumps({"staging": str(staging_path), "backup": str(db) + ".migrated-backup"}),
+        encoding="utf-8",
+    )
+    if age_seconds:
+        then = sentinel.stat().st_mtime - age_seconds
+        os.utime(sentinel, (then, then))
+    return sentinel
+
+
+def test_crash_between_sentinel_and_rename_heals(tmp_path):
+    db = tmp_path / "old.db"
+    entity, decision, binding, _init, domain = _build_legacy_db(
+        db, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True
+    )
+    staging = tmp_path / ".sidegraph-migrating-x"
+    (staging / "decisions").mkdir(parents=True)
+    (staging / "decisions" / "half.json").write_text("{}", encoding="utf-8")
+    _write_sentinel(db, staging)
+    s = Store(db)
+    _assert_fully_migrated(s, entity, decision, binding, domain)
+    s.close()
+    assert not (tmp_path / "old.db.migration-incomplete").exists()
+    assert not staging.exists()
+
+
+def test_stale_sentinel_with_a_relative_dotdot_path_removes_its_staging(
+    tmp_path, capsys, monkeypatch
+):
+    """``Path("../old.db").absolute()`` keeps the ``..``; the staging directory the sentinel
+    names is normalised, so the parents must be compared normalised too."""
+    db = tmp_path / "old.db"
+    entity, decision, binding, _init, domain = _build_legacy_db(
+        db, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True
+    )
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    staging = tmp_path / ".sidegraph-migrating-x"
+    (staging / "decisions").mkdir(parents=True)
+    _write_sentinel(db, staging)
+    monkeypatch.chdir(sub)
+    capsys.readouterr()
+    s = Store("../old.db")
+    _assert_fully_migrated(s, entity, decision, binding, domain)
+    s.close()
+    assert not staging.exists()
+    assert "not a staging directory" not in capsys.readouterr().err
+
+
+def test_stale_sentinel_never_deletes_a_foreign_directory(tmp_path, capsys):
+    db = tmp_path / "old.db"
+    entity, decision, binding, _init, domain = _build_legacy_db(
+        db, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True
+    )
+    precious = tmp_path / "precious"
+    precious.mkdir()
+    (precious / "keep.txt").write_text("keep", encoding="utf-8")
+    _write_sentinel(db, precious)
+    capsys.readouterr()
+    s = Store(db)
+    _assert_fully_migrated(s, entity, decision, binding, domain)
+    s.close()
+    assert (precious / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert "precious" in capsys.readouterr().err
+
+
+def test_a_concurrent_opener_never_touches_the_foreign_sentinel(tmp_path, monkeypatch):
+    """Two openers of one legacy file share a sentinel path. The second one's exclusive
+    create fails: it aborts, and leaves the other's sentinel, the legacy file and everything
+    else alone (design D10). The stale check is patched out to stand for the window between
+    that check and the create, in which the other opener wrote its sentinel."""
+    db = tmp_path / "old.db"
+    _build_legacy_db(db, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True)
+    foreign = tmp_path / "old.db.migration-incomplete"
+    foreign_bytes = json.dumps(
+        {"staging": str(tmp_path / ".sidegraph-migrating-other"), "backup": "elsewhere"}
+    ).encode()
+    foreign.write_bytes(foreign_bytes)
+    monkeypatch.setattr(Store, "_check_migration_sentinel", staticmethod(lambda raw, s: None))
+    before = {p.name for p in tmp_path.iterdir()}
+
+    with pytest.raises(ValueError, match="another process is migrating"):
+        Store(db)
+
+    assert foreign.read_bytes() == foreign_bytes
+    assert db.is_file()
+    assert not (tmp_path / "old.db.migrated-backup").exists()
+    assert {p.name for p in tmp_path.iterdir()} == before
+    assert _staging_dirs(tmp_path) == []
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def test_a_young_sentinel_with_the_legacy_file_intact_is_a_live_migration(tmp_path):
+    """Opener A wrote its sentinel and paused before the rename. Opener B must not call that
+    stale and delete A's staging directory (design D10): it refuses and touches nothing."""
+    db = tmp_path / "old.db"
+    _build_legacy_db(db, _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True)
+    staging = tmp_path / ".sidegraph-migrating-live"
+    (staging / "decisions").mkdir(parents=True)
+    (staging / "decisions" / "half.json").write_text("{}", encoding="utf-8")
+    sentinel = _write_sentinel(db, staging, age_seconds=0)
+    before = _snapshot(tmp_path)
+
+    with pytest.raises(ValueError, match="migrating .*old.db.* now.*retry in a minute") as exc:
+        Store(db)
+    assert "do not delete the sentinel" in str(exc.value)
+
+    assert sentinel.is_file() and staging.is_dir() and db.is_file()
+    assert _snapshot(tmp_path) == before
+
+
+def test_a_young_sentinel_with_the_legacy_file_gone_asks_for_a_retry(tmp_path):
+    """The rename has happened and the sentinel is seconds old: A is still moving the staged
+    files in. That is a retry, not the manual-recovery message."""
+    db = tmp_path / "old.db"
+    staging = tmp_path / ".sidegraph-migrating-live"
+    (staging / "decisions").mkdir(parents=True)
+    _write_sentinel(db, staging, age_seconds=0)
+
+    with pytest.raises(ValueError, match="retry in a minute") as exc:
+        Store(db)
+
+    assert "interrupted" not in str(exc.value)
+    assert staging.is_dir()
+
+
+def test_an_old_sentinel_with_the_legacy_file_gone_still_gives_the_recovery_message(tmp_path):
+    db = tmp_path / "old.db"
+    staging = tmp_path / ".sidegraph-migrating-x"
+    (staging / "decisions").mkdir(parents=True)
+    _write_sentinel(db, staging, age_seconds=120)
+
+    with pytest.raises(ValueError, match="interrupted") as exc:
+        Store(db)
+    # a crash between the last move and the sentinel's removal leaves staging empty
+    assert "staging directory is empty, the migration had finished" in str(exc.value)
+
+
+def test_an_unreadable_sentinel_mtime_counts_as_old(tmp_path):
+    """No mtime, no evidence of a live migration: today's stale handling applies."""
+    age = store_module._sentinel_age_seconds(tmp_path / "missing.migration-incomplete")
+    assert age > store_module._LIVE_MIGRATION_SECONDS
+
+
+def test_legacy_migration_refuses_symlinked_subdir(tmp_path):
+    """The symlink check runs BEFORE the legacy dispatch: otherwise the migration moves the
+    records through the link and renames the legacy file, then the check raises."""
+    root = tmp_path / ".sidegraph"
+    root.mkdir()
+    legacy = root / "decisions.db"
+    _build_legacy_db(legacy, _0_2_0_SCHEMA_SQL, "0.2.0")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "decisions").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="is a symlink"):
+        Store(root)
+    assert legacy.is_file()
+    assert list(outside.iterdir()) == []

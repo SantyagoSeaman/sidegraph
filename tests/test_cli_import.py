@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1047,31 +1048,6 @@ _MENTIONLESS_ADR = (
 )
 
 
-def test_cli_import_docs_absolute_path_from_wrong_cwd_warns_unanchorable(
-    tmp_path, capsys, monkeypatch
-):
-    # BUG F repro: an absolute --docs path is relativized against os.getcwd() to match the
-    # graph's repo-relative source_file. Run from a DIFFERENT cwd, that relativization misses,
-    # the doc-node anchor fails, and (with no mention anchors) the doc is silently
-    # unanchorable. The CLI must WARN on stderr about the abs-path/cwd footgun.
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    graph = _write_graph(repo, "g.json", _DOC_NODE_ONLY_GRAPH)  # source_file "docs/a.md" rel repo
-    db = repo / "t.db"
-    doc = _write_md(repo, "docs/a.md", _MENTIONLESS_ADR)
-
-    monkeypatch.chdir(tmp_path)  # NOT the repo root — the cwd mismatch
-    rc = import_main(["--db", str(db), "--graph", str(graph), "--docs", str(doc), "--any-doc"])
-    assert rc == 0
-    captured = capsys.readouterr()
-    assert "imported 0 decision(s)" in captured.out
-    assert "1 unanchorable" in captured.out
-    # The actionable warning goes to stderr, naming the abs-path/repo-root fix.
-    assert "unanchorable" in captured.err
-    assert "repo root" in captured.err
-    assert list(Store(db).iter_decisions()) == []
-
-
 def test_cli_import_docs_absolute_path_from_repo_root_anchors_and_no_warning(
     tmp_path, capsys, monkeypatch
 ):
@@ -1708,3 +1684,219 @@ def test_cli_import_docs_revival_reports_imported_not_superseded(tmp_path, capsy
     assert import_main(argv) == 0
     out = capsys.readouterr().out
     assert "imported 1 decision(s), superseded 0" in out, out
+
+
+# -- repo-relative keying from a subdirectory of a git work tree --------------------------
+# (design/superpowers/specs/2026-09-29-import-paths-design.md D1/D2/D5)
+
+
+def _git_repo(tmp_path, monkeypatch, name="repo"):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    return repo
+
+
+def test_no_warning_in_a_git_repo_from_a_subdirectory(tmp_path, capsys, monkeypatch):
+    repo = _git_repo(tmp_path, monkeypatch)
+    graph = _write_graph(repo, "g.json", _DOC_NODE_ONLY_GRAPH)
+    doc = _write_md(repo, "docs/a.md", _MENTIONLESS_ADR)
+    db = repo / "t.db"
+
+    monkeypatch.chdir(repo / "docs")
+    argv = ["--db", str(db), "--graph", str(graph), "--docs", str(doc), "--any-doc"]
+    assert import_main(argv) == 0
+    captured = capsys.readouterr()
+    assert "imported 1 decision(s)" in captured.out
+    assert captured.err == ""
+    refs = [d.provenance.ref for d in Store(db).iter_decisions()]
+    assert refs == ["docs/a.md"]
+
+
+def test_cli_symlink_escape_is_refused_and_reported(tmp_path, capsys, monkeypatch):
+    repo = _git_repo(tmp_path, monkeypatch)
+    graph = _write_graph(repo, "g.json", _DOC_NODE_ONLY_GRAPH)
+    target = _write_md(tmp_path, "elsewhere/secret.md", _MENTIONLESS_ADR)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "a.md").symlink_to(target)
+    db = repo / "t.db"
+
+    monkeypatch.chdir(repo)
+    argv = ["--db", str(db), "--graph", str(graph), "--docs", "docs", "--any-doc"]
+    assert import_main(argv) == 0
+    out = capsys.readouterr().out
+    assert "1 doc(s) refused: a symlink pointing outside the repository" in out
+    assert list(Store(db).iter_decisions()) == []
+
+    # The dry run prints the same refusal line.
+    assert import_main([*argv, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "1 doc(s) refused: a symlink pointing outside the repository" in out
+    assert list(Store(db).iter_decisions()) == []
+
+
+def test_cli_in_repo_directory_symlink_imports_under_the_path_named(tmp_path, capsys, monkeypatch):
+    repo = _git_repo(tmp_path, monkeypatch)
+    graph_data = json.loads(json.dumps(_DOC_NODE_ONLY_GRAPH))
+    graph_data["nodes"][0]["source_file"] = "docs/adr/a.md"
+    graph = _write_graph(repo, "g.json", graph_data)
+    _write_md(repo, "design/adr/a.md", _MENTIONLESS_ADR)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "adr").symlink_to("../design/adr")
+    db = repo / "t.db"
+
+    monkeypatch.chdir(repo)
+    argv = ["--db", str(db), "--graph", str(graph), "--docs", "docs/adr", "--any-doc"]
+    assert import_main(argv) == 0
+    out = capsys.readouterr().out
+    assert "imported 1 decision(s)" in out
+    assert "refused" not in out
+    assert [d.provenance.ref for d in Store(db).iter_decisions()] == ["docs/adr/a.md"]
+
+
+def test_profile_discovery_refuses_a_hit_outside_the_repository(tmp_path, capsys, monkeypatch):
+    repo = _git_repo(tmp_path, monkeypatch)
+    graph = _write_graph(repo, "g.json", _DOC_NODE_ONLY_GRAPH)
+    _write_md(tmp_path, "outside/secret.md", _MENTIONLESS_ADR)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "decisions").symlink_to(tmp_path / "outside")
+    db = repo / "t.db"
+
+    monkeypatch.chdir(repo)
+    argv = ["--db", str(db), "--graph", str(graph), "--docs", "--any-doc"]
+    assert import_main(argv) == 0
+    out = capsys.readouterr().out
+    assert "1 doc(s) refused: a symlink pointing outside the repository" in out
+    assert "imported 0 decision(s)" in out
+    assert list(Store(db).iter_decisions()) == []
+
+
+_ADR_NODE_GRAPH = {
+    "nodes": [
+        {
+            "id": "file_adr",
+            "label": "0001.md",
+            "norm_label": "0001.md",
+            "file_type": "document",
+            "source_file": "docs/adr/0001.md",
+            "community": 1,
+        },
+    ],
+    "links": [],
+}
+
+
+def test_profile_discovery_from_a_subdirectory(tmp_path, capsys, monkeypatch):
+    repo = _git_repo(tmp_path, monkeypatch)
+    graph = _write_graph(repo, "g.json", _ADR_NODE_GRAPH)
+    _write_md(repo, "docs/adr/0001.md", _MENTIONLESS_ADR)
+
+    monkeypatch.chdir(repo / "docs")
+    argv = ["--docs", "--dry-run", "--db", str(repo / "t.db"), "--graph", str(graph)]
+    assert import_main(argv) == 0
+    out = capsys.readouterr().out
+    # Per-record line: the repository-relative ref. Per-file rollup: the on-disk path the
+    # operator would open, relative to the cwd.
+    assert "docs/adr/0001.md: [imported] Some doc with no mentions" in out
+    assert "\n  adr/0001.md: 1\n" in out
+
+
+_NON_GIT_WARNING = (
+    "warning: 1 doc(s) unanchorable — not inside a git work tree, so doc paths resolve "
+    "against the current directory; if this is not the project root, run sidegraph-import "
+    "from there."
+)
+
+
+def test_warning_outside_git_from_a_subdirectory(tmp_path, capsys, monkeypatch):
+    # No git work tree: the current directory stands in for the repo root, so from a
+    # subdirectory the graph's `docs/a.md` no longer matches and the CLI says why.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    graph = _write_graph(plain, "g.json", _DOC_NODE_ONLY_GRAPH)
+    doc = _write_md(plain, "docs/a.md", _MENTIONLESS_ADR)
+
+    monkeypatch.chdir(plain / "docs")
+    argv = ["--db", str(plain / "t.db"), "--graph", str(graph), "--docs", str(doc), "--any-doc"]
+    assert import_main(argv) == 0
+    captured = capsys.readouterr()
+    assert "imported 0 decision(s)" in captured.out
+    assert "1 unanchorable" in captured.out
+    assert _NON_GIT_WARNING in captured.err
+    assert list(Store(plain / "t.db").iter_decisions()) == []
+
+
+def test_no_warning_in_a_git_repo_when_genuinely_unanchorable(tmp_path, capsys, monkeypatch):
+    repo = _git_repo(tmp_path, monkeypatch)
+    graph = _write_graph(repo, "g.json", UNANCHORABLE_GRAPH)  # no node for the document
+    _write_md(repo, "docs/a.md", _MENTIONLESS_ADR)
+
+    monkeypatch.chdir(repo / "docs")
+    argv = ["--db", str(repo / "t.db"), "--graph", str(graph), "--docs", "a.md", "--any-doc"]
+    assert import_main(argv) == 0
+    captured = capsys.readouterr()
+    assert "1 unanchorable" in captured.out
+    assert captured.err == ""
+
+
+def test_cli_rerun_reports_repaired_anchors(tmp_path, capsys, monkeypatch):
+    import sidegraph.doc_import as di
+
+    monkeypatch.chdir(tmp_path)
+    graph = _write_graph(
+        tmp_path,
+        "g.json",
+        {
+            "nodes": _DOC_NODE_ONLY_GRAPH["nodes"],
+            "links": [],
+        },
+    )
+    _write_md(tmp_path, "docs/a.md", _MENTIONLESS_ADR)
+    db = tmp_path / "t.db"
+    argv = ["--db", str(db), "--graph", str(graph), "--docs", "docs/a.md", "--any-doc"]
+    real = di.resolve_and_bind
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected crash")
+
+    monkeypatch.setattr(di, "resolve_and_bind", boom)
+    with pytest.raises(RuntimeError, match="injected crash"):
+        import_main(argv)
+    monkeypatch.setattr(di, "resolve_and_bind", real)
+    capsys.readouterr()
+
+    assert import_main(argv) == 0
+    out = capsys.readouterr().out
+    assert "1 existing record(s) had their anchors repaired" in out, out
+
+
+def test_import_from_a_subdirectory_keys_the_repo_path(tmp_path, capsys, monkeypatch):
+    # The default graph now follows the store's project (repository root here), so a relative
+    # `--docs` from a subdirectory finds it with no `--graph`. The ref is the repository
+    # path, so a re-run from the root sees the same record.
+    # design/superpowers/specs/2026-09-29-cli-graph-and-store-paths-design.md D5.
+    repo = _git_repo(tmp_path, monkeypatch)
+    (repo / "graphify-out").mkdir()
+    (repo / "graphify-out" / "graph.json").write_text(json.dumps(_ADR_NODE_GRAPH))
+    _write_md(repo, "docs/adr/0001.md", _MENTIONLESS_ADR)
+    db = repo / ".sidegraph"
+    Store(db).close()
+    monkeypatch.delenv("SIDEGRAPH_GRAPH", raising=False)
+
+    monkeypatch.chdir(repo / "docs")
+    assert import_main(["--db", "../.sidegraph", "--docs", "adr/0001.md", "--any-doc"]) == 0
+    assert "imported 1 decision(s)" in capsys.readouterr().out
+    store = Store(db)
+    decisions = list(store.iter_decisions())
+    assert [d.provenance.ref for d in decisions] == ["docs/adr/0001.md"]
+    assert store.bindings_for_record(decisions[0].id), "the file-node anchor is missing"
+    store.close()
+
+    monkeypatch.chdir(repo)
+    assert import_main(["--db", ".sidegraph", "--docs", "docs/adr/0001.md", "--any-doc"]) == 0
+    out = capsys.readouterr().out
+    assert "imported 0 decision(s)" in out
+    assert "1 existing" in out

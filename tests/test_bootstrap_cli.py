@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import shlex
 import sys
 from datetime import UTC, datetime
@@ -826,6 +828,7 @@ def test_report_write_failure_after_confirmation_exits_actionable_incomplete(
     assert "report write failed" in captured.out
     assert "sidegraph-bootstrap --resume" in captured.out
     assert "ERROR" not in captured.err
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_recovery_fields_are_structured_and_terminal_safe(
@@ -1363,3 +1366,257 @@ def test_canonical_complete_integration_failure_renders_and_reports_exact_resume
     assert "PROOF        production retrieval returned" in out
     assert f"RESUME       {exact_resume}" in out
     assert f"- next command: `{exact_resume}`" in rendered_report
+
+
+def _store_summary_line(out: str) -> str:
+    lines = [line for line in out.splitlines() if line.startswith("store: ")]
+    assert len(lines) == 1, out
+    return lines[0]
+
+
+def test_bootstrap_summary_names_the_store_and_its_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_bootstrap_repo(tmp_path, host="claude-code")
+    real = tmp_path / "shared" / "real_store"
+    real.mkdir(parents=True)
+    (tmp_path / ".sidegraph").symlink_to(real, target_is_directory=True)
+    accepted_answers(monkeypatch)
+
+    assert main(["--root", str(tmp_path), "--host", "claude-code"]) == 0
+
+    line = _store_summary_line(capsys.readouterr().out)
+    assert line == f"store: {real} (via symlink {tmp_path / '.sidegraph'})"
+
+
+def test_bootstrap_summary_names_a_symlink_below_an_unresolved_root_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    real_root = tmp_path / "real_root"
+    write_bootstrap_repo(real_root, host="claude-code")
+    root_alias = tmp_path / "root_alias"
+    root_alias.symlink_to(real_root, target_is_directory=True)
+    (real_root / "elsewhere").mkdir()
+    (real_root / "state").symlink_to(real_root / "elsewhere", target_is_directory=True)
+    accepted_answers(monkeypatch)
+
+    rc = main(
+        [
+            "--root",
+            str(root_alias),
+            "--host",
+            "claude-code",
+            "--db",
+            str(root_alias / "state" / "s"),
+        ]
+    )
+
+    assert rc == 0
+    line = _store_summary_line(capsys.readouterr().out)
+    assert f"store: {real_root / 'elsewhere' / 's'} (via symlink " in line
+
+
+def test_bootstrap_summary_no_false_symlink_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "repo"
+    write_bootstrap_repo(root, host="claude-code")
+    (tmp_path / "shared").mkdir()
+    accepted_answers(monkeypatch)
+    assert main(["--root", str(root), "--host", "claude-code", "--db", "../shared/store"]) == 0
+    line = _store_summary_line(capsys.readouterr().out)
+    assert line == f"store: {tmp_path / 'shared' / 'store'}"
+
+    # A symlinked directory ABOVE the root and the store, outside the root, is not a note.
+    outer_real = tmp_path / "outer_real"
+    outer_real.mkdir()
+    (tmp_path / "outer_link").symlink_to(outer_real, target_is_directory=True)
+    accepted_answers(monkeypatch)
+    rc = main(
+        [
+            "--root",
+            str(root),
+            "--host",
+            "claude-code",
+            "--db",
+            str(tmp_path / "outer_link" / "store"),
+        ]
+    )
+    assert rc == 0
+    line = _store_summary_line(capsys.readouterr().out)
+    assert line == f"store: {outer_real / 'store'}"
+
+
+@pytest.mark.parametrize("entry", ["decisions", "index.db"])
+def test_bootstrap_refuses_a_symlinked_store_internal_before_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry: str,
+) -> None:
+    write_bootstrap_repo(tmp_path, host="claude-code")
+    store_dir = tmp_path / ".sidegraph"
+    store_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if entry == "index.db":
+        (store_dir / entry).symlink_to(outside / "index.db")
+    else:
+        (store_dir / entry).symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr("builtins.input", forbidden_review_input)
+
+    rc = main(["--root", str(tmp_path), "--host", "claude-code"])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "is a symlink" in captured.err
+    assert list(outside.iterdir()) == []
+
+
+def _guard_args(host: str = "claude-code", **overrides: object) -> argparse.Namespace:
+    values: dict[str, object] = {"report": None, "host": host, "codex_config": None}
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def test_report_write_breaks_a_hard_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_bootstrap_repo(tmp_path, host="claude-code")
+    accepted_answers(monkeypatch)
+    other = tmp_path / "other-name.txt"
+    other.write_text("keep me\n", encoding="utf-8")
+    report = tmp_path / "bootstrap-report.md"
+    os.link(other, report)
+
+    rc = main(["--root", str(tmp_path), "--host", "claude-code", "--report", str(report)])
+
+    capsys.readouterr()
+    assert rc == 0
+    assert other.read_text(encoding="utf-8") == "keep me\n"
+    assert "## Proof" in report.read_text(encoding="utf-8")
+    umask = os.umask(0)
+    os.umask(umask)
+    assert report.stat().st_mode & 0o777 == 0o666 & ~umask
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    ("relative", "label"),
+    [
+        ("graphify-out/graph.json", "graph input"),
+        (".mcp.json", "Claude Code MCP config"),
+        (".claude/settings.json", "Claude Code hooks config"),
+        ("docs/adr/001-retry.md", "scanned source docs/adr/001-retry.md"),
+    ],
+)
+def test_report_guard_refuses_a_hard_link_to_a_protected_file(
+    tmp_path: Path, relative: str, label: str
+) -> None:
+    from sidegraph.bootstrap.cli import _validate_report_destination
+
+    write_bootstrap_repo(tmp_path, host="claude-code")
+    report = tmp_path / "bootstrap-report.md"
+    os.link(tmp_path / relative, report)
+    graph = tmp_path / "graphify-out" / "graph.json"
+
+    with pytest.raises(ValueError, match="conflicts with protected") as raised:
+        _validate_report_destination(
+            _guard_args(report=str(report)),
+            tmp_path,
+            tmp_path / ".sidegraph",
+            graph,
+            ("docs/adr/001-retry.md",),
+        )
+    assert label in str(raised.value)
+
+
+@pytest.mark.parametrize("hooks", [".codex/hooks.json", ".codex/hooks/hooks.json"])
+def test_report_guard_protects_every_codex_hooks_path(tmp_path: Path, hooks: str) -> None:
+    from sidegraph.bootstrap.cli import _validate_report_destination
+
+    write_bootstrap_repo(tmp_path, host="codex")
+    write(tmp_path / ".codex" / "hooks.json", "{}\n")
+    graph = tmp_path / "graphify-out" / "graph.json"
+
+    with pytest.raises(ValueError, match="conflicts with protected"):
+        _validate_report_destination(
+            _guard_args("codex", report=str(tmp_path / hooks)),
+            tmp_path,
+            tmp_path / ".sidegraph",
+            graph,
+        )
+
+
+@pytest.mark.parametrize(
+    ("host", "target", "label"),
+    [
+        ("claude-code", ".codex/hooks.json", "Codex hooks config"),
+        ("codex", ".claude/settings.json", "Claude Code hooks config"),
+    ],
+)
+def test_report_cannot_overwrite_the_other_hosts_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    host: str,
+    target: str,
+    label: str,
+) -> None:
+    """A repo wired for both hosts: ``--host`` picks the verifier, not what is protected."""
+    write_bootstrap_repo(tmp_path, host="claude-code")
+    write_codex_config(tmp_path)
+    write(tmp_path / ".codex" / "hooks.json", '{"live": true}\n')
+    report = tmp_path / target
+    before = report.read_bytes()
+
+    assert_pre_review_report_collision(
+        tmp_path, report, monkeypatch, capsys, "--host", host, protected_label=label
+    )
+    assert report.read_bytes() == before
+
+
+@pytest.mark.parametrize("layout", ["canonical", "legacy", "none"])
+@pytest.mark.parametrize("host", ["claude-code", "codex"])
+def test_guard_covers_every_path_the_verifier_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str, layout: str
+) -> None:
+    from sidegraph.bootstrap.cli import _host_config_inputs
+    from sidegraph.bootstrap.integrations import verify_integration
+    from sidegraph.bootstrap.model import HostKind
+
+    if host == "claude-code" and layout != "canonical":
+        pytest.skip("Claude has a single layout")
+    write(
+        tmp_path / ".codex" / "config.toml", '[mcp_servers.sidegraph]\ncommand = "sidegraph-mcp"\n'
+    )
+    if layout == "canonical":
+        write(tmp_path / ".codex" / "hooks.json", "{}\n")
+    elif layout == "legacy":
+        write(tmp_path / ".codex" / "hooks" / "hooks.json", "{}\n")
+    write_claude_config(tmp_path)
+    root = Path(os.path.realpath(tmp_path))
+    touched: list[Path] = []
+
+    def spied(name: str) -> None:
+        real = getattr(Path, name)
+
+        def spy(self: Path, *args: object, **kwargs: object) -> object:
+            touched.append(Path(os.path.realpath(self)))  # not Path.resolve: it may probe
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, name, spy)
+
+    for probe in ("is_file", "exists", "read_text", "open", "stat", "is_dir"):
+        spied(probe)
+    verify_integration(tmp_path, HostKind(host))
+    monkeypatch.undo()
+
+    def in_a_host_config_place(path: Path) -> bool:
+        parts = path.relative_to(root).parts if path.is_relative_to(root) else ()
+        return parts == (".mcp.json",) or (len(parts) >= 2 and parts[0] in (".codex", ".claude"))
+
+    read = [path for path in touched if in_a_host_config_place(path)]
+    guarded = {path for _label, path in _host_config_inputs(_guard_args(host), tmp_path)}
+    assert read
+    assert set(read) <= guarded

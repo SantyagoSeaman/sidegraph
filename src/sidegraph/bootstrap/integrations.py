@@ -121,9 +121,27 @@ def _next_action(checks: tuple[tuple[Status, str, Path, bool], ...], root: Path)
     return None
 
 
+def host_config_paths(
+    root: Path, host: HostKind, *, codex_config: Path | None = None
+) -> tuple[tuple[str, Path], ...]:
+    """Every config path the verifier for ``host`` may read, labelled. The verifiers and
+    bootstrap's ``--report`` guard both take their paths from here, so a path the verifier
+    starts reading cannot fall out of the guard.
+    # see design/superpowers/specs/2026-09-29-store-symlinks-and-bootstrap-guards-design.md D6"""
+    if host == HostKind.CLAUDE_CODE:
+        return (
+            ("Claude Code MCP config", root / ".mcp.json"),
+            ("Claude Code hooks config", root / ".claude" / "settings.json"),
+        )
+    return (
+        ("Codex config", codex_config or root / ".codex" / "config.toml"),
+        ("Codex hooks config", root / ".codex" / "hooks.json"),
+        ("Codex legacy hooks config", root / ".codex" / "hooks" / "hooks.json"),
+    )
+
+
 def _verify_claude(root: Path) -> IntegrationResult:
-    mcp_path = root / ".mcp.json"
-    hooks_path = root / ".claude" / "settings.json"
+    (_, mcp_path), (_, hooks_path) = host_config_paths(root, HostKind.CLAUDE_CODE)
     mcp_config, mcp_invalid = _load_json(mcp_path)
     hooks_config, hooks_invalid = _load_json(hooks_path)
     mcp = _status(mcp_config, mcp_invalid, "sidegraph-mcp")
@@ -151,9 +169,9 @@ def _verify_claude(root: Path) -> IntegrationResult:
 
 
 def _verify_codex(root: Path, codex_config: Path | None) -> IntegrationResult:
-    mcp_path = codex_config or root / ".codex" / "config.toml"
-    hooks_path = root / ".codex" / "hooks.json"
-    legacy_hooks_path = root / ".codex" / "hooks" / "hooks.json"
+    (_, mcp_path), (_, hooks_path), (_, legacy_hooks_path) = host_config_paths(
+        root, HostKind.CODEX, codex_config=codex_config
+    )
     if not hooks_path.is_file() and legacy_hooks_path.is_file():
         hooks_path = legacy_hooks_path
     mcp_config, mcp_invalid = _load_toml(mcp_path)

@@ -6,9 +6,10 @@ targets."""
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from ulid import ULID
 
-from sidegraph.okf import build_bundle
+from sidegraph.okf import build_bundle, write_bundle
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -472,3 +473,30 @@ class TestProposedExcluded:
         draft = s.add_decision(_decision(status=DecisionStatus.PROPOSED))
         s.add_binding(AnchorBinding(record_id=draft.id, entity_id=e.entity_id, tier=2))
         assert not any(p.startswith("entities/") for p in build_bundle(s))
+
+
+@pytest.mark.parametrize("case", ["decision", "entity"])
+def test_okf_export_skips_an_unsafe_id(tmp_path: Path, capsys, case: str):
+    """A crafted id must never become a path (design/superpowers/specs/
+    2026-09-29-record-identity-design.md D6). The rows are forced into the index directly:
+    reload now refuses such a file, but the exporter defends itself as well."""
+    s = _store(tmp_path)
+    kept = s.add_decision(_decision())
+    if case == "decision":
+        s._index_write_decision(_decision(id="../../../../x"))
+    else:
+        s._index_write_entity(Entity(entity_id="../../ent", canonical_name="ent"))
+        s._index_write_binding(
+            AnchorBinding(record_id=kept.id, entity_id="../../ent", tier=2, weight=1.0)
+        )
+    bundle = build_bundle(s)
+    out = tmp_path / "proj" / "out"
+    write_bundle(bundle, out)
+    s.close()
+    written = [p for p in (tmp_path / "proj").rglob("*") if p.is_file()]
+    assert written and all(out in p.parents for p in written)
+    assert not (tmp_path / "proj" / "x.md").exists()
+    assert not any(k.startswith("entities/") and not k.endswith("index.md") for k in bundle)
+    pages = [k for k in bundle if k.startswith("decisions/") and not k.endswith("index.md")]
+    assert len(pages) == 1
+    assert "not a safe filename" in capsys.readouterr().err

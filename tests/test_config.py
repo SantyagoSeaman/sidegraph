@@ -6,8 +6,13 @@ confirmation the wiring itself is correct."""
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 import sidegraph.config as config
 from sidegraph.config import DEFAULT_STORE_DIR, resolve_store_path
+from sidegraph.store import Store
 
 
 def _reset(monkeypatch):
@@ -229,3 +234,43 @@ def test_deprecation_notice_not_emitted_when_sidegraph_db_unused(tmp_path, monke
     monkeypatch.chdir(tmp_path)
     resolve_store_path(warn_on_create=False)
     assert capsys.readouterr().err == ""
+
+
+# -- SIDEGRAPH_DB rescues to the parent only for a `.db` leaf ---------------------------------
+# design/superpowers/specs/2026-09-29-cli-graph-and-store-paths-design.md D6
+
+
+def test_sidegraph_db_missing_dir_is_used_as_given(tmp_path, monkeypatch):
+    _reset(monkeypatch)
+    monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
+
+    missing = tmp_path / "proj" / ".sidegraph"
+    monkeypatch.setenv("SIDEGRAPH_DB", str(missing))
+    assert resolve_store_path() == str(missing)
+
+    dangling = tmp_path / "linked" / ".sidegraph"
+    dangling.parent.mkdir()
+    dangling.symlink_to(tmp_path / "nowhere" / "store", target_is_directory=True)
+    monkeypatch.setenv("SIDEGRAPH_DB", str(dangling))
+    assert resolve_store_path() == str(dangling)
+
+    # the legacy rescue is case-insensitive on the suffix
+    monkeypatch.setenv("SIDEGRAPH_DB", str(tmp_path / "sub" / "store.DB"))
+    assert resolve_store_path() == str(tmp_path / "sub")
+
+
+def test_sidegraph_db_dangling_db_link_is_returned_as_given_not_its_parent(tmp_path, monkeypatch):
+    """A dangling ``*.db`` link is neither file nor directory; the suffix rescue must not
+    send ``Store`` to the project root."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    link = proj / "store.db"
+    link.symlink_to(tmp_path / "missing")
+    monkeypatch.setenv("SIDEGRAPH_DB", str(link))
+    _reset(monkeypatch)
+
+    assert resolve_store_path() == str(link)
+    with pytest.raises(FileExistsError):
+        Store(resolve_store_path()).close()
+    assert sorted(os.listdir(proj)) == ["store.db"]
+    assert not (tmp_path / "missing").exists()

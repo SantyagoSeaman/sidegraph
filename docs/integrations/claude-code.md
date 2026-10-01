@@ -133,7 +133,7 @@ transcript.
 
 ### `PreToolUse` — `sidegraph-pre-tool-use`
 
-Matcher `Read|Grep` (see the snippet in
+Matcher `Read|Grep|Edit|Write` (see the snippet in
 [`claude-code-setup.md`](../getting-started/claude-code-setup.md#2-add-the-hooks)). On a
 `Read`/`Grep` call that looks like it targets a file (any string `file_path`/`path`/`pattern`
 argument — deliberately permissive), when the store has >= 1 accepted domain or >= 1 valid
@@ -145,7 +145,8 @@ Fires at most once per session for each of its two forms, generic and path-speci
 guarded by its own session-scoped marker in the store's `meta` table, separate from the
 `Stop` hook's own capture ledger so the guards don't consume each other's one-shot), so a
 session can see up to two of these nudges. Set `SIDEGRAPH_GREP_NUDGE=off` to disable it
-entirely. Like the other two hooks, it never crashes
+entirely. The matcher also admits `Edit` and `Write`: those reach the process only to be
+recorded as touch events (no nudge). Like the other two hooks, it never crashes
 or blocks the tool call: any failure (or the store simply having nothing to offer yet) prints
 `{}`.
 
@@ -186,12 +187,15 @@ the recommended install path, and it works today, no PyPI publish required:
 | `SIDEGRAPH_RATIFY_NUDGE` | unset | Set to `off` to disable the `SessionStart` pending-ratification line entirely (no other value has any effect). |
 | `SIDEGRAPH_AUTO_ACCEPT` | unset | Set to `on` to land agent-proposed decisions/facts as `accepted` immediately, bypassing the ratification queue (no other value has any effect; domains are always exempt). See [`guides/capturing-decisions.md#4-auto-accept-opt-in`](../guides/capturing-decisions.md#4-auto-accept-opt-in). |
 
-`SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` are resolved relative to the **working directory of the
-process that reads them** — which is the crux of the cwd caveat below.
+`SIDEGRAPH_DIR` is resolved relative to the **working directory of the process that reads it**;
+a relative `SIDEGRAPH_GRAPH` is resolved against the project of the store `SIDEGRAPH_DIR` names
+(the store's parent directory) by the CLI and the MCP server, and against `CLAUDE_PROJECT_DIR`
+by the hooks. The `SIDEGRAPH_DIR` half is the crux of the cwd caveat below.
 
 ## The cwd caveat
 
-`SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` are plain relative-path lookups against `os.getcwd()`; there
+`SIDEGRAPH_DIR` is a plain relative-path lookup against `os.getcwd()`; with the default
+`.sidegraph` in the project, `SIDEGRAPH_GRAPH` therefore also lands in the project. There
 is no path resolution against the Claude Code project root in the current source. That's fine
 when Claude Code launches the MCP server/hooks with the project directory as cwd — the common
 case for the manual `.mcp.json`/`.claude/settings.json` setup above. It is **not guaranteed**

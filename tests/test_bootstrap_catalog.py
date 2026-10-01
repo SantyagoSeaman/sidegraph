@@ -154,3 +154,94 @@ def test_catalog_fingerprint_is_stable_for_the_same_sorted_snapshot():
     assert fingerprint_catalog(CanonicalCatalog(decisions=(first,))) != (
         fingerprint_catalog(CanonicalCatalog(decisions=(first, second)))
     )
+
+
+def test_catalog_applies_identity_rule(tmp_path, capsys):
+    """A file without its id, or whose id is not its filename, is not a record: minting a
+    fresh ULID for it made the fingerprint differ between two loads (design/superpowers/
+    specs/2026-09-29-record-identity-design.md D12)."""
+    store_dir = tmp_path / ".sidegraph"
+    write_model(store_dir / "decisions" / "good.json", decision("good", "Good"))
+
+    def without(model: Decision | Fact | Domain, field: str) -> dict:
+        data = json.loads(model.model_dump_json())
+        del data[field]
+        return data
+
+    fact = Fact(
+        id="fact-1",
+        statement="s",
+        source="src",
+        valid_from=NOW,
+        provenance=Provenance(source="manual"),
+    )
+    domain = Domain(
+        domain_id="dom-1", slug="d", title="D", summary="sum", provenance=Provenance(source="m")
+    )
+    for subdir, name, data in (
+        ("decisions", "noid", without(decision("x", "No id"), "id")),
+        ("facts", "noid", without(fact, "id")),
+        ("domains", "noid", without(domain, "domain_id")),
+        ("decisions", "other", json.loads(decision("different", "Mismatch").model_dump_json())),
+    ):
+        (store_dir / subdir).mkdir(parents=True, exist_ok=True)
+        (store_dir / subdir / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
+
+    first = load_canonical_catalog(store_dir)
+    second = load_canonical_catalog(store_dir)
+    assert fingerprint_catalog(first) == fingerprint_catalog(second)
+    assert [d.id for d in first.decisions] == ["good"]
+    assert first.facts == ()
+    assert first.domains == ()
+    assert capsys.readouterr().err.count("WARNING") >= 4
+
+
+def test_catalog_applies_identity_rule_to_archive_lines(tmp_path, capsys):
+    """An archive line without an id, or with an unsafe one, is skipped as the store skips
+    it: keying it by a freshly minted ULID made the fingerprint differ between loads (D12)."""
+    from sidegraph.store import Store
+
+    store_dir = tmp_path / ".sidegraph"
+    good = decision("good", "Good")
+    idless = json.loads(decision("x", "No id").model_dump_json())
+    del idless["id"]
+    lines = [
+        {"record_type": "decision", **good.model_dump(mode="json")},
+        {"record_type": "decision", **idless},
+        {"record_type": "decision", **{**good.model_dump(mode="json"), "id": "../x"}},
+    ]
+    seg = store_dir / "archive" / "2026-08-01.jsonl"
+    seg.parent.mkdir(parents=True)
+    seg.write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+
+    first = load_canonical_catalog(store_dir)
+    second = load_canonical_catalog(store_dir)
+    assert fingerprint_catalog(first) == fingerprint_catalog(second)
+    assert [d.id for d in first.decisions] == ["good"]
+    assert "archive" in capsys.readouterr().err
+    store = Store(store_dir)
+    try:
+        count = store._conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+    finally:
+        store.close()
+    assert count == len(first.decisions)
+
+
+def test_catalog_skips_a_non_object_archive_line(tmp_path, capsys):
+    """A line like ``[]`` is skipped with a warning, as the store skips it, rather than
+    failing a catalog load of a store that opens fine (design D8)."""
+    store_dir = tmp_path / ".sidegraph"
+    good = decision("good", "Good")
+    seg = store_dir / "archive" / "2026-08-01.jsonl"
+    seg.parent.mkdir(parents=True)
+    seg.write_text(
+        json.dumps({"record_type": "decision", **good.model_dump(mode="json")}) + "\n[]\n",
+        encoding="utf-8",
+    )
+
+    first = load_canonical_catalog(store_dir)
+    second = load_canonical_catalog(store_dir)
+
+    assert [d.id for d in first.decisions] == ["good"]
+    assert fingerprint_catalog(first) == fingerprint_catalog(second)
+    assert "not a JSON object" in capsys.readouterr().err

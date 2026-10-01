@@ -7,6 +7,245 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-01
+
+### Added
+
+- **`sidegraph-verify` reports `unsafe-record-id`.** A record file, `bindings/` file or
+  archive line whose id is not a single safe path segment is now a finding, and a
+  non-string id in a record or archive file no longer crashes the run with `unhashable type`.
+- **`sidegraph-verify` reports a symlinked store entry as `symlinked-store-entry`.** One
+  violation per store-owned directory or file that is a symlink, so a committed link fails the
+  CI gate; `sidegraph-doctor` inherits it.
+
+### Changed
+
+- **A `--graph` typed as a relative path resolves against the shell in `sidegraph-ratify`
+  and `sidegraph-stats`.** It used to resolve against the store's project. The default and
+  `$SIDEGRAPH_GRAPH` still follow the store. The same holds in every command that reads a
+  graph, so the copy-and-sync workflow works with `--graph graphify-out/graph.json` typed from
+  the repository.
+- **A store in a nested directory needs an absolute `SIDEGRAPH_GRAPH`.** With
+  `SIDEGRAPH_DIR=.config/sidegraph` and a relative `SIDEGRAPH_GRAPH`, the CLI now looks for the
+  graph under `.config/` (the store's project) instead of using the shell's copy. A command
+  that needs the graph fails with a hint; `init`, `ratify`, `doctor` and `stats`, for which it
+  is optional, continue and print the hint (`stats` reports its graph metrics as unavailable). Set an absolute `SIDEGRAPH_GRAPH` or pass `--graph`. The MCP server now
+  follows the same rule (next entry); the hooks are unaffected.
+- **The MCP server reads the graph that belongs to its store.** A relative `SIDEGRAPH_GRAPH`
+  (or the default `graphify-out/graph.json`) used to resolve against the server's working
+  directory, so a store reached by an absolute `SIDEGRAPH_DIR`, or a store in a nested directory,
+  could be synced against one project's graph by the CLI and another's by `sync_anchors` and the
+  retrieval tools, and the store's graph version flipped back and forth. It now resolves against
+  the store's project, the same rule the CLI uses, and an empty `SIDEGRAPH_GRAPH` counts as unset.
+  With the default layout (`.sidegraph` in the project, the server started there) nothing changes.
+  A nested store needs an absolute `SIDEGRAPH_GRAPH`; `sync_anchors` reports `graph not readable`
+  with the path and names the graph it found beside the working directory, when there is one.
+- **A document is imported again once, if its `provenance.ref` changes.** A document
+  imported before this release from a subdirectory or by an absolute path is imported
+  again under its repository path. The old record stays. A leftover that is still `proposed` can be dropped with
+  `sidegraph-ratify --drop <id>`. An `accepted` leftover has no one-step retirement: leave
+  it, or supersede it by hand with `supersede_decision`, which writes a new record.
+- **`sidegraph-import --path` (and domain `--paths`) match on directory boundaries.**
+  `--path payments` no longer imports `payments_v2/b.py`, and a partial-name prefix such as
+  `--path docs/adr/00` matches nothing; a prefix matches a file under that directory or
+  that exact file. `--path ""` still matches everything, and mixed with a real prefix it is
+  ignored. The domain `--paths` help already behaved this way and now says so.
+- **The Stop hook skips the transcript of a session that is already captured.** It now peeks
+  at the capture ledger read-only before parsing the transcript, so every Stop after the
+  capturing one no longer re-reads the whole file.
+
+### Fixed
+
+- **The derived initiative names the store's repository branch.** It used to come from the
+  branch of whatever directory the MCP server or CLI ran in. An inherited `GIT_DIR` or
+  `GIT_WORK_TREE` no longer redirects either the derived initiative or the captured commit.
+- **A timestamp in the future no longer counts as fresh.** The capture session-id fallback and
+  the session attribution of retrieval telemetry treated a marker stamped ahead of the clock
+  as current; they now ignore it. The SessionStart dedupe still treats a same-session stamp
+  less than 60 seconds ahead as a duplicate (a parallel hook can write one), but a stamp
+  further ahead no longer suppresses the map until the clock catches up.
+- **Every CLI command that takes a store and a `--graph` pairs the store with its own
+  project's graph by default.** `sidegraph-sync`, `sidegraph-import` (both modes),
+  `sidegraph-domains bootstrap`, `sidegraph-doctor` and `sidegraph-init` (whose found/missing
+  line used the shell's path) read the default graph relative to the
+  shell, so `--db A/.sidegraph` run from project B stamped A's store with B's graph version
+  and could rewrite A's anchors, import decisions, or bootstrap domains from B's graph. The
+  default and `$SIDEGRAPH_GRAPH` (an empty value counts as unset) now resolve against the
+  store's project, as `sidegraph-ratify` and `sidegraph-stats` already did; a store reached
+  through a symlinked `.sidegraph` keeps the link's project. When the store's project has no
+  graph but the same path exists beside the shell (a store copied elsewhere), one stderr hint
+  names `--graph <path>`; when both exist, a note says which was used. Error lines name the
+  resolved path.
+- **`SIDEGRAPH_DB` naming a missing path no longer scaffolds its parent.** A missing
+  `SIDEGRAPH_DB=/proj/.sidegraph`, or a dangling link, resolved to `/proj` and a store was
+  created in the project root. Only a path ending in `.db` is rescued to its parent now; any
+  other missing path is used as given, and a dangling link fails to open without creating
+  anything.
+- **`sidegraph-sync --check` documents domain-refresh failures.** The help and the module
+  docstring omitted the finding that already makes `--check` exit 2.
+- **A move left `moved_uncommitted` is now re-verified after you commit it, even when the
+  graph was not rebuilt.** Committing a rename does not change `graph.json`, so the version
+  gate skipped every later sync and the leaf kept its old path until `--force`. Sync now
+  remembers such entities with the git `HEAD` it saw, and the first sync after `HEAD` moves
+  re-verifies just them (a narrow pass that leaves domain membership alone). The comment that
+  promised the next sync would heal it was wrong, and is corrected.
+- **A decision with two leaves in one community no longer loses that community's binding when
+  one leaf leaves it.** Both leaves share one Tier-1 `community:*` row, and a renumber that
+  moved one leaf orphaned the row the other still held, so the decision stopped surfacing for
+  that community. Sync now settles a record's community rows after every leaf has been
+  rebound, and a new row carries the moved leaf's relation instead of `affects`. Damage from
+  earlier syncs is repaired when a later repoint touches the record, or when the index is
+  next rebuilt from the committed files.
+- **Secret redaction covers quoted values and quoted keys.** `password: "one two"`,
+  `` token: `abc def` `` and `password = 'a b c'` were cut at the first space, leaving the rest
+  of the secret in the store, and `{"password": "hunter2 two"}` was not matched at all. A
+  quoted value is now taken whole, with any text glued to its closing quote, and a quoted
+  key matches too. JSON keys such as `"token_count"` now redact like the unquoted
+  `token_count:` already did. An escaped quote (`"alpha\" beta"`) does not end a quoted
+  value, and a quoted key stops at the next JSON field, so `{"password":"x y","reason":"z"}`
+  keeps `reason`.
+- **A decision whose attached fact failed is left proposed under an auto-ratify policy,** and
+  an auto-accepted fact's write-guard message points to `add_anchors` instead of a drop that
+  the store refuses.
+- **An initiative name is redacted before it becomes an entity, on every write path.** A
+  secret in `initiative`, or in a branch name the propose path derives one from, used to land
+  in the canonical `initiative:<name>` entity file. A blank or all-secret initiative now binds
+  nothing, and a padded name is trimmed (`"  proj  "` keys as `initiative:proj`).
+- **`add_decision` binds its initiative with no graph or no anchors.** The Tier-0 binding was
+  made only inside the per-anchor loop, so a call without a reader or without an anchor
+  dropped it silently.
+- **`add_domain`, `supersede_domain` and `sidegraph-domains add` redact the title and
+  summary.** Only `propose_domains` and the bootstrap did. The MCP results now carry
+  `redactions`, and the CLI prints a count line when it redacted something.
+- **`propose_decisions` dedups a decision on its redacted title.** A title that held a secret
+  was compared raw against the stored, redacted one, so proposing it twice wrote it twice.
+- **One failing draft no longer aborts a propose batch.** A step after the write (anchors,
+  initiative, tags, attached facts, auto-ratify) now leaves the result `written` with a
+  `reason`; an error before the write makes that draft `rejected`; each attached fact and each
+  domain is isolated the same way, and a failed TOC rebuild after `propose_domains` is
+  reported as a `toc:` warning. `KeyboardInterrupt` still propagates.
+- **A record id can no longer become a path outside the store.** Every canonical writer built
+  `<dir>/<id>.json` from the id as given, so an id like `../../x` wrote outside the store.
+  The store now refuses to write an id that is not a single path segment, and the OKF export
+  skips such a decision, fact or entity with a warning.
+- **A canonical file whose JSON id does not match its filename is skipped on reload, with a
+  warning on every open.** A file with a crafted id was indexed under that id, so one later
+  ratify could write outside the store. Duplicate ids let the later file silently win, and a
+  file with no id got a fresh ULID on every rebuild. Such files are now left out of the index
+  and named in a warning until they are fixed or removed. An existing index reloads once to
+  apply the rule. An archive line with an unsafe or non-string id is skipped instead of
+  making `Store()` fail.
+- **An interrupted legacy migration no longer loses its staged work.** The legacy file is
+  renamed to its backup only after the staged directories have moved in, so an interruption
+  leaves it in place and the next open migrates again. A bare-file migration, which has to
+  rename first, keeps its staging directory and leaves a sentinel so the next open says what
+  to do. A sentinel younger than 60 seconds means a migration is running now: the open
+  refuses with "retry in a minute" and touches nothing, and deleting that sentinel early is
+  unsafe. A legacy row with an unsafe id fails the migration before anything is written, and
+  a row whose JSON omits its id takes its SQL primary key instead of a fresh one per retry.
+- **The bootstrap catalog applies the same identity rule.** A record file with no id was
+  given a fresh ULID on every load, so the catalog fingerprint changed between two loads of
+  one store. Such files are now skipped with a warning.
+- **The store refuses a symlinked directory or store file inside itself.** A symlinked
+  `decisions/` sent every record write, from the MCP server, the hooks and bootstrap alike, to
+  the link's target, and a symlinked `index.db` made SQLite write there. `Store()` now raises
+  before any migration or write, naming the entry, and `sidegraph-bootstrap` refuses before
+  the review prompts. A symlinked store root stays allowed. Bootstrap's action summary now
+  names the store path and any symlink between the repository root and it.
+- **`sidegraph-bootstrap --report` no longer overwrites a file it is hard-linked to, and
+  protects the Codex hooks file the verifier really reads.** The guard compared resolved
+  paths, so a hard link to a host config passed it and the report truncated the shared file.
+  It also protected only the legacy `.codex/hooks/hooks.json`, not `.codex/hooks.json`. The
+  report is now published by replace, and one list of host-config paths feeds both the
+  verifier and the guard. The guard covers every host's config file, whichever `--host` is
+  selected.
+- **`sidegraph-import --docs` keys a document inside the repository by its repository path,
+  whatever directory it runs from.** Run from a subdirectory or given an absolute path, a
+  document used to miss its file node in the graph, skip as unanchorable, and get a
+  different `provenance.ref` from the same document imported at the root. Profile discovery
+  also finds the profile's documents from any directory in the repository, and the
+  unanchorable warning now fires only outside a git work tree, where the current directory
+  stands in for the root. Build the graph from the repository root: a graph built from a
+  subdirectory leaves documents unanchorable.
+- **`--docs` refuses a markdown file that is a symlink to a target outside the repository.**
+  It used to read the target under `--any-doc`. The document is counted as `refused: a symlink
+  pointing outside the repository`, and so is a profile-discovery hit that resolves outside
+  the repository (for example through a symlinked directory). A symlinked directory inside
+  the repository that points inside it imports under the path you named, and one that points
+  outside the repository is refused. A symlink to a file inside the repository imports under
+  its link path.
+- **A re-import repairs a record that has no anchors.** A document whose record was written
+  but whose bindings never landed (a run that stopped in between, leaving no anchor other
+  than `tag:` bindings) used to be skipped as existing for good. It is now bound on the next import and reported as `had their anchors
+  repaired`.
+- **The `import_docs` docstring describes what it does:** the five compared fields, the
+  statuses it matches, the repair and the refusal.
+- **`sidegraph-init` no longer writes `.claude/settings.json` through a symlink, and no
+  longer prints a traceback when the write fails.** A symlinked `.claude/` or `settings.json`
+  (live or dangling) is left untouched and the `env` line to add by hand is printed. A merge
+  into an existing file is now published by replacing it atomically, so an interruption
+  cannot leave a truncated file, and any write failure (a read-only `.claude/`, for example)
+  is reported the same way instead of raising. An `env` block that is `null` or not an
+  object, and a settings file that changes while init runs, are skipped the same way, not
+  raised, and a link swapped in just before the write is refused. A write-protected file is
+  respected when init runs as root too.
+- **`sidegraph-doctor`, the drift refresh the session hooks run, and `sidegraph-stats` now
+  open the index correctly when the store's path contains `#`, `?`, or `%` followed by two
+  hex digits.** Their read-only SQLite URI was built from the unquoted path.
+  **Doctor reported its index checks as skipped**, blaming a missing index and suggesting
+  `sidegraph-sync`, which could not help. **The session drift refresh silently stopped
+  excluding orphaned bindings.** **Stats failed.** For `#` and `?`, an empty file was also
+  created at the store path cut short at that character, and an unrelated database there
+  could be read instead.
+- **The session-link gate checks every line that gets published.** Lines starting with `#` in
+  a PR description, and in commit messages made with `git commit -m`/`-F`, which git records,
+  are now checked. The PR title and the PR's recorded commit messages are checked too. The
+  check re-runs when a PR description is edited. The public repository runs the check too:
+  the release snapshot ships the checker, and the workflow fails when the checker is missing
+  instead of skipping.
+- **`sidegraph-export-okf` refuses a symlinked `--out`, and a failed export no longer
+  destroys the previous one.** A symlinked output directory used to be written through, or
+  cleared, wherever it pointed, and a write that failed midway left a partial bundle after
+  the old export was already deleted. The new bundle is now built beside `--out` and
+  swapped in only when complete, except for a mount point, a `--out` that is the current
+  directory, an unwritable or non-directory parent, or a previous export that cannot be
+  renamed aside, which are written in place as before (a write failure there can leave a
+  partial export). The in-place write goes to the validated, resolved directory.
+- **An unreadable store or graph directory no longer ends in a traceback.** On Python 3.13 a store or
+  graph whose directory could not be read (permission denied) made `sidegraph-sync`,
+  `sidegraph-import`, `sidegraph-domains bootstrap`, `sidegraph-init`, `sidegraph-stats` and
+  `sidegraph-ratify` (on a domain accept) exit with an uncaught `PermissionError`. An unreadable
+  store is now reported on the command's error line (exit 1; 2 for `sidegraph-stats`). An
+  unreadable graph is treated as a missing one: `sidegraph-sync`, `sidegraph-import` and
+  `sidegraph-domains bootstrap` stop with `graph not readable`, and the other commands carry on
+  without a graph.
+  A working directory that cannot be read skips the graph hint and the `sync_anchors` hint instead of
+  raising; other code that resolves a relative path against it may still raise.
+- **A retried Tier-1 reconcile that could not run is no longer reported as done.** A
+  remembered community reconcile whose record still has a live or degraded Tier-2 anchor
+  with no recorded community kept being treated as a success: the key was cleared, the sync
+  said `moved`, and the stale row stayed live. It is now kept, and retried silently on every
+  sync.
+- **Sync, verify and doctor ask git about the repository their own files are in.**
+  `sidegraph-sync` (the graph's directory), `sidegraph-verify --against` and
+  `sidegraph-doctor` (the store's, and its graph-root check's) no longer inherit an ambient `GIT_DIR` or
+  `GIT_WORK_TREE`, which could make sync read another repository's `HEAD` and adopt a rename
+  that was never committed. The lazy sync run by `SessionStart` and retrieval, and the
+  `SessionStart` drift cache, are fixed too. `sidegraph-init` and `sidegraph-import` resolve
+  the repository root from the current directory the same way. A work tree whose repository
+  is found only through `GIT_DIR` now needs a `.git` file containing `gitdir: <path>`, and
+  `core.bare=false` in that repository.
+- **The sync docs list every condition that prevents a skip.** A remembered Tier-1
+  reconcile that is repaired or fails again also makes a plain sync report instead of
+  skipping.
+- **Documentation and help text match what the code does.** The PreToolUse docs name the
+  real `Read|Grep|Edit|Write` matcher and the two nudge forms, each at most once per session.
+  The `add_decision`, `supersede_decision`, `add_fact`, `supersede_fact` and
+  `propose_decisions` tool descriptions list `anchors_orphaned`. `sidegraph-ratify --help`
+  says `--all` also accepts standalone facts, and `--help` for `sidegraph-verify`,
+  `-doctor` and `-blame` no longer promises a legacy `*.db` migration they never perform.
+  `SECURITY.md` states local retrieval telemetry and the output paths commands write to.
+
 ## [0.5.0] — 2026-09-23
 
 ### Changed

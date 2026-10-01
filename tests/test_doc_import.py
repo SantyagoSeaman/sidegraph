@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,7 @@ from sidegraph.doc_import import (
     parse_decision_doc,
 )
 from sidegraph.engine.reader import GraphifyReader
-from sidegraph.schema import DecisionKind, DecisionStatus
+from sidegraph.schema import AnchorBinding, DecisionKind, DecisionStatus, Entity
 from sidegraph.store import Store
 
 _SPECS_DIR = Path(__file__).resolve().parent.parent / "design" / "superpowers" / "specs"
@@ -1244,9 +1246,10 @@ FOUR_MENTIONS_PLUS_DOC_NODE_GRAPH = {
 
 
 def test_import_docs_caps_mention_anchors_at_three_plus_doc_node(tmp_path, monkeypatch):
-    # The doc's OWN file-node anchor is looked up by matching provenance.ref (the path
-    # passed to import_docs) against the graph's source_file — chdir + a relative path so
-    # that lines up with the fixture's "docs/a.md" without hard-coding tmp_path into it.
+    # The doc's OWN file-node anchor is looked up by matching its repository-relative path
+    # against the graph's source_file. tmp_path is no git work tree, so the cwd is the root:
+    # chdir + a relative path lines up with the fixture's "docs/a.md" without hard-coding
+    # tmp_path into it.
     monkeypatch.chdir(tmp_path)
     reader = _reader(tmp_path, FOUR_MENTIONS_PLUS_DOC_NODE_GRAPH)
     store = Store(tmp_path / "s.db")
@@ -1795,7 +1798,7 @@ def test_import_docs_ratify_after_multiple_propose_cycles(tmp_path):
     reader = _reader(tmp_path, IDENTIFIER_GRAPH)
     store = Store(tmp_path / "s.db")
     md_path = tmp_path / "docs" / "a.md"
-    ref = str(md_path)  # provenance.ref is keyed on whatever path string the caller passed
+    ref = str(md_path)  # outside the repository: keyed on the path the caller passed
     _write_md(
         tmp_path, "docs/a.md", _adr("Submit path", decision="Calls `submit_order` on success.")
     )
@@ -1843,7 +1846,7 @@ def test_import_docs_invariant_no_two_open_accepted_across_mixed_propose_runs(tm
     reader = _reader(tmp_path, IDENTIFIER_GRAPH)
     store = Store(tmp_path / "s.db")
     md_path = tmp_path / "docs" / "a.md"
-    ref = str(md_path)  # provenance.ref is keyed on whatever path string the caller passed
+    ref = str(md_path)  # outside the repository: keyed on the path the caller passed
     _write_md(
         tmp_path, "docs/a.md", _adr("Submit path", decision="Calls `submit_order` on success.")
     )
@@ -2451,3 +2454,423 @@ def test_parse_optional_heading_is_not_rejected():
     p = parse_decision_doc(doc, "docs/adr/0016.md")
     assert p is not None
     assert p.rejected is None
+
+
+# ---------------------------------------------------------------------------------------
+# Repo-relative keying and the symlink-escape refusal
+# (design/superpowers/specs/2026-09-29-import-paths-design.md D1/D2)
+# ---------------------------------------------------------------------------------------
+
+
+def _hermetic_git_repo(tmp_path, monkeypatch, name="repo"):
+    """A hermetic git work tree under ``tmp_path`` (no global/system git config), so a
+    test that runs from a subdirectory gets a real toplevel to key against."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    return repo
+
+
+def _file_node(source_file):
+    return {
+        "id": f"file_{source_file}",
+        "label": source_file.rsplit("/", 1)[-1],
+        "norm_label": source_file.rsplit("/", 1)[-1],
+        "file_type": "document",
+        "source_file": source_file,
+        "community": 1,
+    }
+
+
+def _graph_of(*nodes):
+    return {"nodes": list(nodes), "links": []}
+
+
+_SUBMIT_NODE = {
+    "id": "fn_submit",
+    "label": "submit_order",
+    "norm_label": "submit_order",
+    "file_type": "code",
+    "source_file": "exec.py",
+    "community": 1,
+}
+
+_MENTIONLESS = (
+    "# Some doc with no mentions\n\n"
+    "## Context\n\nReal context prose, with no backticked code mentions at all.\n\n"
+    "## Decision\n\nA real decision statement with nothing anchorable inside it.\n"
+)
+
+
+def test_file_anchor_found_from_a_subdirectory(tmp_path, monkeypatch):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    doc = _write_md(repo, "docs/adr/0001.md", _MENTIONLESS)
+    reader = _reader(repo, _graph_of(_file_node("docs/adr/0001.md")))
+    monkeypatch.chdir(repo / "docs")
+
+    rel = import_docs(Store(tmp_path / "rel.db"), reader, ["adr/0001.md"])
+    assert (rel.imported, rel.skipped_unanchorable) == (1, 0)
+
+    ab = import_docs(Store(tmp_path / "abs.db"), reader, [str(doc)])
+    assert (ab.imported, ab.skipped_unanchorable) == (1, 0)
+
+
+def test_dotdot_prefixed_directory_is_in_repo(tmp_path, monkeypatch):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    (repo / "docs").mkdir()
+    _write_md(repo, "..notes/0001.md", _MENTIONLESS)
+    reader = _reader(repo, _graph_of(_file_node("..notes/0001.md")))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo / "docs")
+
+    report = import_docs(store, reader, ["../..notes/0001.md"], any_doc=True)
+    assert report.imported == 1
+    assert [d.provenance.ref for d in store.iter_decisions()] == ["..notes/0001.md"]
+
+
+def test_ref_is_repo_relative_whatever_the_cwd(tmp_path, monkeypatch):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    _write_md(repo, "docs/adr/0001.md", _adr("Ordering", decision="Calls `submit_order`."))
+    reader = _reader(repo, _graph_of(_file_node("docs/adr/0001.md"), _SUBMIT_NODE))
+    store = Store(tmp_path / "s.db")
+
+    monkeypatch.chdir(repo / "docs")
+    first = import_docs(store, reader, ["adr/0001.md"])
+    assert first.imported == 1
+    monkeypatch.chdir(repo)
+    second = import_docs(store, reader, ["docs/adr/0001.md"])
+    assert (second.imported, second.skipped_existing) == (0, 1)
+    assert [d.provenance.ref for d in store.iter_decisions()] == ["docs/adr/0001.md"]
+
+
+def test_explicit_outside_document_keeps_caller_ref(tmp_path, monkeypatch):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    outside = _write_md(tmp_path, "elsewhere/x.md", _adr("Out", decision="Calls `submit_order`."))
+    # The file node is keyed `relpath(outside, cwd)`: the pre-existing lookup an outside
+    # document keeps (absolute -> cwd-relative), which the file binding below depends on.
+    reader = _reader(repo, _graph_of(_SUBMIT_NODE, _file_node(os.path.relpath(outside, repo))))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    report = import_docs(store, reader, [str(outside)], any_doc=True)
+    assert report.imported == 1
+    decision = next(store.iter_decisions())
+    assert decision.provenance.ref == str(outside)
+    leaf_names = {
+        store.get_entity(b.entity_id).canonical_name
+        for b in store.bindings_for_record(decision.id)
+        if b.tier == 2
+    }
+    assert "x.md" in leaf_names
+
+
+@pytest.mark.parametrize("any_doc", [False, True])
+def test_symlink_escape_is_refused_with_or_without_any_doc(tmp_path, monkeypatch, any_doc):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    target = _write_md(
+        tmp_path, "elsewhere/secret.md", _adr("Secret", decision="Uses `submit_order`.")
+    )
+    (repo / "docs" / "adr").mkdir(parents=True)
+    (repo / "docs" / "adr" / "link.md").symlink_to(target)
+    reader = _reader(repo, _graph_of(_file_node("docs/adr/link.md"), _SUBMIT_NODE))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    report = import_docs(store, reader, ["docs/adr"], any_doc=any_doc)
+    assert report.skipped_outside_repo == 1
+    assert report.imported == 0
+    assert list(store.iter_decisions()) == []
+
+
+def test_in_repo_symlink_imports_under_its_link_path(tmp_path, monkeypatch):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    _write_md(repo, "design/x.md", _MENTIONLESS)
+    (repo / "docs" / "adr").mkdir(parents=True)
+    (repo / "docs" / "adr" / "x.md").symlink_to("../../design/x.md")
+    reader = _reader(repo, _graph_of(_file_node("docs/adr/x.md")))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    report = import_docs(store, reader, ["docs/adr/x.md"])
+    assert (report.imported, report.skipped_outside_profile) == (1, 0)
+    assert [d.provenance.ref for d in store.iter_decisions()] == ["docs/adr/x.md"]
+
+
+def test_in_repo_directory_symlink_stays_lexical_for_the_default_import(tmp_path, monkeypatch):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    _write_md(repo, "design/adr/0001.md", _adr("Ordering", decision="Calls `submit_order`."))
+    (repo / "docs").mkdir()
+    (repo / "docs" / "adr").symlink_to("../design/adr")
+    reader = _reader(repo, _graph_of(_SUBMIT_NODE))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    report = import_docs(store, reader, ["docs/adr"])
+    assert (report.imported, report.skipped_outside_profile) == (1, 0)
+    assert report.skipped_outside_repo == 0
+    assert [d.provenance.ref for d in store.iter_decisions()] == ["docs/adr/0001.md"]
+
+
+def test_in_repo_directory_symlink_finds_the_file_node_under_the_lexical_path(
+    tmp_path, monkeypatch
+):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    _write_md(repo, "design/adr/0002.md", _MENTIONLESS)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "adr").symlink_to("../design/adr")
+    reader = _reader(repo, _graph_of(_file_node("docs/adr/0002.md")))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    report = import_docs(store, reader, ["docs/adr"], any_doc=True)
+    assert (report.imported, report.skipped_unanchorable) == (1, 0)
+    (decision,) = list(store.iter_decisions())
+    assert decision.provenance.ref == "docs/adr/0002.md"
+    leaf_names = {
+        store.get_entity(b.entity_id).canonical_name
+        for b in store.bindings_for_record(decision.id)
+        if b.tier == 2
+    }
+    assert "0002.md" in leaf_names
+
+
+def test_absolute_path_through_a_symlinked_prefix_keys_the_repository_path(tmp_path, monkeypatch):
+    real = tmp_path / "real"
+    real.mkdir()
+    repo = _hermetic_git_repo(real, monkeypatch)
+    _write_md(repo, "docs/adr/0001.md", _adr("Ordering", decision="Calls `submit_order`."))
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)
+    reader = _reader(repo, _graph_of(_SUBMIT_NODE))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    report = import_docs(store, reader, [str(alias / "repo" / "docs" / "adr" / "0001.md")])
+    assert (report.imported, report.skipped_outside_profile) == (1, 0)
+    assert [d.provenance.ref for d in store.iter_decisions()] == ["docs/adr/0001.md"]
+
+
+def test_a_dotdot_path_across_a_directory_symlink_keys_the_file_actually_read(
+    tmp_path, monkeypatch
+):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    _write_md(repo, "design/adr/0001.md", _MENTIONLESS)
+    _write_md(repo, "design/foo.md", _adr("Design foo", decision="Calls `submit_order`."))
+    _write_md(repo, "docs/foo.md", _adr("Docs foo", decision="Calls `submit_order`."))
+    (repo / "docs" / "adr").symlink_to("../design/adr")
+    reader = _reader(repo, _graph_of(_SUBMIT_NODE))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    report = import_docs(store, reader, ["docs/adr/../foo.md"], any_doc=True)
+    assert report.imported == 1
+    assert [(d.title, d.provenance.ref) for d in store.iter_decisions()] == [
+        ("Design foo", "design/foo.md")
+    ]
+
+
+def test_absolute_path_through_a_symlinked_prefix_and_a_directory_symlink_stays_lexical(
+    tmp_path, monkeypatch
+):
+    real = tmp_path / "real"
+    real.mkdir()
+    repo = _hermetic_git_repo(real, monkeypatch)
+    _write_md(repo, "design/adr/0001.md", _adr("Ordering", decision="Calls `submit_order`."))
+    (repo / "docs").mkdir()
+    (repo / "docs" / "adr").symlink_to("../design/adr")
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)
+    reader = _reader(repo, _graph_of(_SUBMIT_NODE))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    report = import_docs(store, reader, [str(alias / "repo" / "docs" / "adr" / "0001.md")])
+    assert (report.imported, report.skipped_outside_profile) == (1, 0)
+    assert [d.provenance.ref for d in store.iter_decisions()] == ["docs/adr/0001.md"]
+
+
+def test_an_explicit_path_through_a_directory_symlink_leaving_the_repo_is_refused(
+    tmp_path, monkeypatch
+):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    _write_md(tmp_path, "elsewhere/adr/0001.md", _adr("Secret", decision="Uses `submit_order`."))
+    (repo / "docs").mkdir()
+    (repo / "docs" / "adr").symlink_to(tmp_path / "elsewhere" / "adr")
+    reader = _reader(repo, _graph_of(_SUBMIT_NODE))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    report = import_docs(store, reader, ["docs/adr/0001.md"], any_doc=True)
+    assert (report.imported, report.skipped_outside_repo) == (0, 1)
+    assert list(store.iter_decisions()) == []
+
+
+def test_symlink_swapped_after_the_check_reads_the_validated_target(tmp_path, monkeypatch):
+    """The escape check validates the link's resolved target; the read must use that same
+    resolved path, so re-pointing the link between the two cannot import an outside file."""
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    _write_md(repo, "design/x.md", _adr("Inside", decision="Inside text."))
+    outside = _write_md(tmp_path, "elsewhere/secret.md", _adr("Secret", decision="Outside text."))
+    link = repo / "docs" / "adr" / "x.md"
+    link.parent.mkdir(parents=True)
+    link.symlink_to("../../design/x.md")
+    reader = _reader(repo, _graph_of(_file_node("docs/adr/x.md")))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    real_open = os.open
+    target = (repo / "design" / "x.md").resolve()
+    swapped = []
+
+    def swapping_open(path, *args, **kwargs):
+        if Path(path) == target and not swapped:
+            swapped.append(True)
+            link.unlink()
+            link.symlink_to(outside)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    report = import_docs(store, reader, ["docs/adr/x.md"])
+    assert swapped
+    assert report.imported == 1
+    (decision,) = list(store.iter_decisions())
+    assert "Inside text." in decision.choice
+    assert "Outside text." not in decision.choice
+
+
+def test_target_replaced_by_a_symlink_after_the_check_is_refused(tmp_path, monkeypatch):
+    """The resolved target itself can be swapped for a link to an outside file between the
+    check and the read; the read must not follow it, and the refusal is counted."""
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    _write_md(repo, "design/x.md", _adr("Inside", decision="Inside text."))
+    outside = _write_md(
+        tmp_path, "elsewhere/secret.md", _adr("Secret", decision="External choice.")
+    )
+    link = repo / "docs" / "adr" / "x.md"
+    link.parent.mkdir(parents=True)
+    link.symlink_to("../../design/x.md")
+    reader = _reader(repo, _graph_of(_file_node("docs/adr/x.md")))
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+
+    real_open = os.open
+    target = (repo / "design" / "x.md").resolve()
+    swapped = []
+
+    def swapping_open(path, *args, **kwargs):
+        if Path(path) == target and not swapped:
+            swapped.append(True)
+            target.unlink()
+            target.symlink_to(outside)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    report = import_docs(store, reader, ["docs/adr/x.md"])
+    assert swapped
+    assert report.imported == 0
+    assert report.skipped_outside_repo == 1
+    assert not list(store.iter_decisions())
+
+
+# ---------------------------------------------------------------------------------------
+# A re-import repairs a matched record that has no bindings
+# (design/superpowers/specs/2026-09-29-import-paths-design.md D3)
+# ---------------------------------------------------------------------------------------
+
+
+def _crash_first_import(tmp_path, monkeypatch, *, tags=None):
+    """Import one anchorable document while ``resolve_and_bind`` raises, so the record
+    lands with zero bindings (the crash between the write and the binding). Returns the
+    store, the reader, and the restored ``resolve_and_bind``."""
+    import sidegraph.doc_import as di
+
+    monkeypatch.chdir(tmp_path)
+    _write_md(tmp_path, "docs/a.md", _adr("Ordering", decision="Calls `submit_order`."))
+    reader = _reader(tmp_path, _graph_of(_file_node("docs/a.md"), _SUBMIT_NODE))
+    store = Store(tmp_path / "s.db")
+    real = di.resolve_and_bind
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected crash")
+
+    monkeypatch.setattr(di, "resolve_and_bind", boom)
+    with pytest.raises(RuntimeError, match="injected crash"):
+        import_docs(store, reader, ["docs/a.md"], any_doc=True, tags=tags)
+    monkeypatch.setattr(di, "resolve_and_bind", real)
+    (decision,) = list(store.iter_decisions())
+    assert store.bindings_for_record(decision.id) == []
+    return store, reader, decision
+
+
+def test_rerun_repairs_a_match_with_no_bindings(tmp_path, monkeypatch):
+    store, reader, decision = _crash_first_import(tmp_path, monkeypatch)
+
+    dry = import_docs(store, reader, ["docs/a.md"], any_doc=True, dry_run=True)
+    assert (dry.skipped_existing, dry.anchors_repaired) == (1, 0)
+    assert store.bindings_for_record(decision.id) == []
+
+    report = import_docs(store, reader, ["docs/a.md"], any_doc=True)
+    assert (report.skipped_existing, report.anchors_repaired) == (1, 1)
+    assert store.bindings_for_record(decision.id)
+    assert len(list(store.iter_decisions())) == 1
+
+    again = import_docs(store, reader, ["docs/a.md"], any_doc=True)
+    assert (again.skipped_existing, again.anchors_repaired) == (1, 0)
+
+
+def test_rerun_with_bindings_never_touches_the_graph(tmp_path, monkeypatch):
+    import sidegraph.doc_import as di
+
+    monkeypatch.chdir(tmp_path)
+    _write_md(tmp_path, "docs/a.md", _adr("Ordering", decision="Calls `submit_order`."))
+    reader = _reader(tmp_path, _graph_of(_file_node("docs/a.md"), _SUBMIT_NODE))
+    store = Store(tmp_path / "s.db")
+    assert import_docs(store, reader, ["docs/a.md"], any_doc=True).imported == 1
+
+    def spy(*args, **kwargs):
+        raise AssertionError("a matched record with bindings must not re-scan the graph")
+
+    monkeypatch.setattr(di, "_select_mention_anchors", spy)
+    report = import_docs(store, reader, ["docs/a.md"], any_doc=True)
+    assert (report.skipped_existing, report.anchors_repaired) == (1, 0)
+
+
+def _tag_entity_bound(store, decision_id):
+    return any(
+        (e := store.get_entity(b.entity_id)) is not None and e.canonical_name == "tag:t"
+        for b in store.bindings_for_record(decision_id)
+    )
+
+
+def test_tag_only_repair_is_not_counted(tmp_path, monkeypatch):
+    store, _reader_ok, decision = _crash_first_import(tmp_path, monkeypatch)
+    empty = _reader(tmp_path, _graph_of(), name="empty.json")  # the document resolves nothing
+
+    report = import_docs(store, empty, ["docs/a.md"], any_doc=True, tags=["t"])
+    assert (report.skipped_existing, report.anchors_repaired) == (1, 0)
+    assert _tag_entity_bound(store, decision.id)
+
+
+def test_tag_only_record_is_repaired_once_anchors_resolve(tmp_path, monkeypatch):
+    store, reader, decision = _crash_first_import(tmp_path, monkeypatch)
+    empty = _reader(tmp_path, _graph_of(), name="empty.json")
+    import_docs(store, empty, ["docs/a.md"], any_doc=True, tags=["t"])
+    assert _tag_entity_bound(store, decision.id)
+
+    report = import_docs(store, reader, ["docs/a.md"], any_doc=True)
+    assert (report.skipped_existing, report.anchors_repaired) == (1, 1)
+
+
+def test_dangling_binding_does_not_block_the_repair(tmp_path, monkeypatch):
+    store, reader, decision = _crash_first_import(tmp_path, monkeypatch)
+    entity = store.upsert_entity(Entity(canonical_name="ghost.py"))
+    store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=1))
+    real_get_entity = store.get_entity
+    monkeypatch.setattr(
+        store, "get_entity", lambda eid: None if eid == entity.entity_id else real_get_entity(eid)
+    )
+
+    report = import_docs(store, reader, ["docs/a.md"], any_doc=True)
+    assert (report.skipped_existing, report.anchors_repaired) == (1, 1)

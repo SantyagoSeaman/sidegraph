@@ -14,9 +14,12 @@ checkout, run them as
 
 ## Preflight (both modes)
 
-1. **Run from the repo root.** Doc paths resolve relative to the current directory and
-   must match `graph.json`'s root-relative `source_file` entries — an absolute `--docs`
-   path from the wrong cwd makes every anchor miss, silently.
+1. **Run from the repo root.** Documents are keyed by their repository path from any
+   directory inside a git work tree, but the default `--db` is resolved from the current
+   directory, so run from the root or pass it; the default `--graph` follows the store's
+   project.
+   Outside a git work tree the current directory stands in for the root, and a wrong one
+   makes every anchor miss.
 2. **Rebuild the graph right before importing:** `graphify update .`. A *missing* graph
    fails the whole run; a *stale* one (docs added since the last build) silently skips the
    new files as unanchorable.
@@ -51,9 +54,9 @@ report closely:
 - `would import N decision(s), supersede M (skipped: A existing, B unanchorable, C
   not-decision-shaped, D unparseable, E superseded-frontmatter, F outside-profile)` — plus
   per-file breakdown and per-anchor `anchor skipped: <name> (<reason>)` lines.
-- **Lots of `unanchorable` + you passed an absolute path?** That's the wrong-cwd trap from
+- **Lots of `unanchorable` outside a git work tree?** That's the wrong-cwd trap from
   preflight — the command itself warns when ≥ half of anchor-attempted docs miss. Re-run
-  from the repo root with a relative path.
+  from the project root.
 - **`N skipped as template(s)`** — template detection (filename stem `template`,
   `type: template` frontmatter, placeholder-dominated body) working as intended, never a
   bug: a blank ADR template's own `**Status:** APPROVED` line must not become a decision.
@@ -63,6 +66,14 @@ report closely:
   (Context/Decision/Status/... or Trigger/Design/...); narrative or table-structured docs
   don't qualify (by design, for now) — record their content via
   `sidegraph:record-decision` if it matters.
+- **`N doc(s) refused: a symlink pointing outside the repository`** — a markdown link (or a
+  discovered file reached through a symlinked directory) whose target lies outside the repo
+  is never read, with or without `--any-doc`. A symlinked directory inside the repo that
+  points inside it imports under the path you named. Nothing to fix in the run; check the
+  link.
+- **`N existing record(s) had their anchors repaired`** (real run only) — a record from an
+  earlier run that stopped before its anchors landed was bound now. Expected, not a
+  duplicate.
 - **`N file(s) skipped: not valid UTF-8, re-save as UTF-8 to import:`** (printed last, with
   the listed paths) — a file whose bytes aren't valid UTF-8 is skipped and named instead of
   aborting the run. Re-save the listed file(s) as UTF-8 and re-run to import them. No

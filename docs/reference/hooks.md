@@ -65,9 +65,11 @@ Behavior:
    > When you need to find or understand code in this project, call get_task_context(seeds)
    > before any grep or file search — decisions, gotchas and a domain map are indexed here.
 
-   Unlike the `PreToolUse` nudge below (`Read`/`Grep` only, once per session), this line is
-   unconditional and is meant to cover every search surface behaviorally — bash
-   `grep`/`rg`/`find` included, not just the two tools that hook can match on. Emits:
+   Unlike the `PreToolUse` nudge below (`Read`/`Grep` only, each of its two forms at most once
+   per session), this line is unconditional and is meant to cover every search surface
+   behaviorally — bash `grep`/`rg`/`find` included, not just the two tools the nudge fires
+   for (that hook's matcher also admits `Edit` and `Write`, but only to record touches).
+   Emits:
 
 ```json
 {
@@ -150,7 +152,10 @@ Behavior, in order:
    print `{}` (allow). Prevents an infinite block loop.
 3. No session identity in the payload (neither `transcript_path` nor `session_id`) → print
    `{}` (allow) — can't dedup the nudge without an id, so it never risks looping.
-4. **Substance gate:** count the transcript's *real* user prompts — JSONL lines with
+4. A read-only peek at `capture_sessions` in `index.db`: a session already captured →
+   print `{}` (allow) without reading the transcript. Any failure of the peek (no index, a
+   held lock, an unreadable table) falls through to the next step.
+5. **Substance gate:** count the transcript's *real* user prompts — JSONL lines with
    `type: "user"` whose `message.content` is a string, or a list containing at least one
    block that is NOT `type: "tool_result"`. Claude Code transcripts use `type: "user"` for
    both an actual typed prompt and a tool result being handed back to the agent, so content
@@ -161,8 +166,8 @@ Behavior, in order:
    every completed agent turn, and the once-per-session ledger let the very first one
    through, so the nudge used to fire at the end of turn one of practically every session,
    before there was anything worth distilling.
-5. `store.was_captured(session_id)` already true → print `{}` (allow).
-6. Otherwise: `store.mark_captured(session_id)` is written **before** the block response is
+6. `store.was_captured(session_id)` already true → print `{}` (allow).
+7. Otherwise: `store.mark_captured(session_id)` is written **before** the block response is
    emitted (so a crash between the two can't double-nudge), then:
 
 ```json
@@ -232,18 +237,21 @@ Behavior, in order — any `{}` below means the tool call proceeds through Claud
 permission flow, untouched:
 
 1. `$SIDEGRAPH_GREP_NUDGE == "off"` → print `{}`.
-2. `tool_name` is not `Read` or `Grep` → print `{}` (a matcher-level `Read|Grep` filter in
-   `hooks.json` also does this; this is belt-and-braces inside the hook itself).
+2. `tool_name` is not `Read` or `Grep` → print `{}` for the nudge. The `hooks.json` matcher is
+   `Read|Grep|Edit|Write`, so `Edit` and `Write` still reach the process and are recorded as
+   touch events (below); only the nudge is limited to `Read` and `Grep`.
 3. `tool_input` has no string `file_path`/`path`/`pattern` argument (and no other non-empty
    string argument at all) → print `{}`. Deliberately permissive otherwise — any string arg is
    treated as "looks like a file/pattern target," not just a particular path shape.
 4. No session identity in the payload → print `{}`.
-5. A per-session marker (`pretool_nudge:<session>` in `store.meta` — deliberately **not**
-   the `Stop` hook's `capture_sessions` ledger, so the two one-shot guards can't consume each
-   other) already set → print `{}`.
+5. The per-session marker for this call's form already set → print `{}`. A call whose path
+   has anchored titles consults `pretool_nudge_path:<session>`; any other call consults
+   `pretool_nudge:<session>` (both in `store.meta` — deliberately **not** the `Stop` hook's
+   `capture_sessions` ledger, so the one-shot guards can't consume each other). A marker
+   set for the other form does not suppress this one.
 6. The store has zero accepted domains **and** zero currently-valid (non-superseded,
    non-rejected, non-expired) decisions → print `{}` — nothing to redirect the agent toward.
-7. Otherwise: writes the per-session marker (before emitting, so a crash between the two can't
+7. Otherwise: writes the per-session marker for this form (before emitting, so a crash between the two can't
    double-nudge), then emits a non-blocking, `additionalContext`-only nudge:
 
 ```json
@@ -254,6 +262,8 @@ permission flow, untouched:
   }
 }
 ```
+
+With a single anchored title there is no semicolon: `memory has "<title>" anchored to <path>`.
 
 Two forms, each fired at most once per session **on its own ledger key**:
 
@@ -276,7 +286,7 @@ have anyway.
 
 The hook also records a **touch event** for every `Read`, `Grep`, `Edit` and `Write` that
 names a file inside the project root — separately from the nudge, which keeps its `Read`/
-`Grep` scope and its once-per-session limit. The path is normalized to repo-relative before
+`Grep` scope and its once-per-session limit per form. The path is normalized to repo-relative before
 it is stored; a pattern-only `Grep`, a directory, or a path outside the root records
 nothing. This is what lets the journal answer whether memory arrived before the agent
 worked somewhere. Disable with `SIDEGRAPH_TELEMETRY=off`.

@@ -36,6 +36,7 @@ from sidegraph.verify import (
     FILENAME_ID_MISMATCH,
     PARSE_ERROR,
     SUPERSEDED_WITHOUT_SUCCESSOR,
+    SYMLINKED_STORE_ENTRY,
     UNKNOWN_SCHEMA_VERSION,
     Violation,
     verify_snapshot,
@@ -495,3 +496,111 @@ def test_cli_exit_1_on_unreadable_store_dir(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "not readable" in out
+
+
+# -- unsafe-record-id (design/superpowers/specs/2026-09-29-record-identity-design.md D7) ---
+
+UNSAFE_CODE = "unsafe-record-id"  # == verify.UNSAFE_RECORD_ID
+
+
+def _unsafe_paths(store: Store) -> set[str]:
+    return {v.path for v in verify_snapshot(store.path) if v.code == UNSAFE_CODE}
+
+
+def test_verify_reports_unsafe_record_id_in_hot_file(store: Store):
+    d = store.add_decision(_decision())
+    stem = "01JCRAFTEDIDXXXXXXXXXXXXXX"
+    _write(_decision_path(store, stem), {**_read(_decision_path(store, d.id)), "id": "../../x"})
+    assert str(_decision_path(store, stem)) in _unsafe_paths(store)
+
+
+def test_verify_reports_unsafe_hot_stem(store: Store):
+    d = store.add_decision(_decision())
+    path = _decision_path(store, ".hidden")
+    _write(path, {**_read(_decision_path(store, d.id)), "id": ".hidden"})
+    assert str(path) in _unsafe_paths(store)
+
+
+def test_verify_reports_unsafe_bindings_stem(store: Store):
+    path = store.path / "bindings" / ".x.json"
+    _write(path, [])
+    assert str(path) in _unsafe_paths(store)
+
+
+def test_verify_reports_unsafe_archive_line(store: Store):
+    d = store.add_decision(_decision())
+    archive_dir = store.path / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(
+        {"record_type": "decision", **_read(_decision_path(store, d.id)), "id": "../x"}
+    )
+    seg = archive_dir / "2026-07-11-1-deadbeefcafe.jsonl"
+    seg.write_text(line + "\n", encoding="utf-8")
+    assert str(seg) in _unsafe_paths(store)
+
+
+def test_verify_tolerates_list_id(store: Store):
+    d = store.add_decision(_decision())
+    raw = _read(_decision_path(store, d.id))
+    hot = _decision_path(store, "01JLISTIDXXXXXXXXXXXXXXXXX")
+    _write(hot, {**raw, "id": ["a"]})
+    facts = store.path / "domains" / "01JLISTDOMXXXXXXXXXXXXXXXX.json"
+    _write(facts, {"domain_id": {"a": 1}})
+    archive_dir = store.path / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    seg = archive_dir / "2026-07-11-1-deadbeefcafe.jsonl"
+    seg.write_text(
+        json.dumps({"record_type": "decision", **raw, "id": ["a"]}) + "\n", encoding="utf-8"
+    )
+    found = _unsafe_paths(store)  # must not raise TypeError: unhashable type
+    assert {str(hot), str(facts), str(seg)} <= found
+
+
+@pytest.mark.parametrize("record_type", [["decision"], {"a": 1}, 7, None])
+def test_verify_tolerates_a_non_string_record_type(store: Store, record_type):
+    d = store.add_decision(_decision())
+    archive_dir = store.path / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    seg = archive_dir / "2026-07-11-1-deadbeefcafe.jsonl"
+    seg.write_text(
+        json.dumps({**_read(_decision_path(store, d.id)), "record_type": record_type}) + "\n",
+        encoding="utf-8",
+    )
+    found = verify_snapshot(store.path)  # must not raise TypeError: unhashable type
+    assert not [v for v in found if v.path == str(seg)]
+
+
+@pytest.mark.parametrize("shape", ["missing", "non-string"])
+def test_verify_reports_an_archive_line_with_a_missing_or_non_string_id(store: Store, shape):
+    d = store.add_decision(_decision())
+    raw = _read(_decision_path(store, d.id))
+    if shape == "missing":
+        del raw["id"]
+    else:
+        raw["id"] = 7
+    archive_dir = store.path / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    seg = archive_dir / "2026-07-11-1-deadbeefcafe.jsonl"
+    seg.write_text(json.dumps({"record_type": "decision", **raw}) + "\n", encoding="utf-8")
+    found = [v for v in verify_snapshot(store.path) if v.path == str(seg)]
+    assert [v.code for v in found] == [UNSAFE_CODE]
+
+
+def test_verify_reports_symlinked_store_entry(store: Store, tmp_path):
+    """Every symlinked store-owned entry is one violation (not just the first): a committed
+    link fails the CI gate at PR time, though ``Store()`` itself would refuse to open."""
+    store.add_decision(_decision())
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (store.path / "decisions").rename(outside / "decisions")
+    (store.path / "decisions").symlink_to(outside / "decisions", target_is_directory=True)
+    (store.path / "index.db").rename(outside / "index.db")
+    (store.path / "index.db").symlink_to(outside / "index.db")
+
+    violations = verify_snapshot(store.path)
+
+    linked = [v for v in violations if v.code == SYMLINKED_STORE_ENTRY]
+    assert sorted(v.path for v in linked) == [
+        str(store.path / "decisions"),
+        str(store.path / "index.db"),
+    ]

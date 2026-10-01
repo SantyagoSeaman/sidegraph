@@ -51,12 +51,24 @@ from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
-from .schema import SCHEMA_VERSION, AnchorBinding, Decision, Domain, Entity, Fact, Initiative
+from .gitenv import git_env
+from .schema import (
+    SCHEMA_VERSION,
+    AnchorBinding,
+    Decision,
+    Domain,
+    Entity,
+    Fact,
+    Initiative,
+    is_safe_record_id,
+)
 from .store import (
     _FORMAT_MARKER_NAME,
     _FORMAT_MARKER_PREFIX,
     _MIGRATABLE_SCHEMA_VERSIONS,
     _RELOADABLE_SCHEMA_VERSIONS,
+    _archive_line_problem,
+    symlinked_internals,
 )
 
 # Violation codes — pinned constants (design ruling 2). The CLI's --json output and every
@@ -71,6 +83,8 @@ DANGLING_FACT_SUPPORT = "dangling-fact-support"
 DUPLICATE_ULID = "duplicate-ulid"
 BAD_ARCHIVE_SEGMENT = "bad-archive-segment"
 FILENAME_ID_MISMATCH = "filename-id-mismatch"
+UNSAFE_RECORD_ID = "unsafe-record-id"
+SYMLINKED_STORE_ENTRY = "symlinked-store-entry"
 
 # Transition-layer codes (design ruling 2, "Transition layer" — see that section below).
 ILLEGAL_FIELD_CHANGE = "illegal-field-change"
@@ -149,6 +163,18 @@ def _check_filename_matches_id(path: Path, rid: str) -> Violation | None:
     return None
 
 
+def _check_safe_record_id(path: Path, rid: object) -> Violation | None:
+    """A record's id IS its filename (design/superpowers/specs/2026-09-29-record-identity-
+    design.md D7): either the id or the file's stem failing :func:`is_safe_record_id` is an
+    :data:`UNSAFE_RECORD_ID` finding, and the store's reload skips such a file. A non-string
+    id (list, dict) lands here too instead of crashing the callers' ``setdefault``."""
+    if not is_safe_record_id(rid):
+        return _violation(UNSAFE_RECORD_ID, path, f"record id {rid!r} is not a safe filename")
+    if not is_safe_record_id(path.stem):
+        return _violation(UNSAFE_RECORD_ID, path, f"filename {path.stem!r} is not a safe id")
+    return None
+
+
 # -- per-directory checks ------------------------------------------------------------------
 
 
@@ -186,6 +212,11 @@ def _check_temporal_dir(
             violations.append(_violation(PARSE_ERROR, path, "not a record object (missing 'id')"))
             continue
         rid = raw["id"]
+        unsafe = _check_safe_record_id(path, rid)
+        if unsafe is not None:
+            violations.append(unsafe)
+        if not isinstance(rid, str):
+            continue  # nothing can be keyed on it (an unhashable id would crash setdefault)
         all_paths_by_id.setdefault(rid, []).append(path)
         mismatch = _check_filename_matches_id(path, rid)
         if mismatch is not None:
@@ -225,6 +256,11 @@ def _check_plain_dir(
             )
             continue
         rid = raw[id_field]
+        unsafe = _check_safe_record_id(path, rid)
+        if unsafe is not None:
+            violations.append(unsafe)
+        if not isinstance(rid, str):
+            continue  # nothing can be keyed on it (an unhashable id would crash setdefault)
         all_paths_by_id.setdefault(rid, []).append(path)
         mismatch = _check_filename_matches_id(path, rid)
         if mismatch is not None:
@@ -258,6 +294,10 @@ def _check_bindings_dir(
             violations.append(_violation(PARSE_ERROR, path, "bindings file must be a JSON list"))
             continue
         record_id = path.stem
+        if not is_safe_record_id(record_id):
+            violations.append(
+                _violation(UNSAFE_RECORD_ID, path, f"filename {record_id!r} is not a safe id")
+            )
         items: list[dict] = []
         for i, item in enumerate(raw):
             payload = item if isinstance(item, dict) else {}
@@ -323,6 +363,18 @@ def _check_archive_dir(dir_path: Path) -> _ArchiveIndex:
                 continue
             record_type = obj.get("record_type")
             payload = {k: v for k, v in obj.items() if k != "record_type"}
+            # Same predicate the store and the catalog skip by: a recognised record_type
+            # whose id is missing, not a string or not a safe filename stem is not indexed.
+            problem = _archive_line_problem(record_type, payload)
+            if problem is not None:
+                violations.append(
+                    _violation(
+                        UNSAFE_RECORD_ID,
+                        path,
+                        f"line {lineno}: archive record cannot be indexed: {problem}",
+                    )
+                )
+                continue
             if record_type == "decision" and "id" in payload:
                 decisions.setdefault(payload["id"], payload)
                 decision_entries.setdefault(payload["id"], []).append((path, payload))
@@ -486,6 +538,16 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
 
     violations: list[Violation] = []
     violations += _check_format_marker(store_dir)
+    # ``Store()`` refuses these at open, so the CI gate must report them here: this layer
+    # never builds a ``Store`` and would otherwise read straight through the link.
+    violations += [
+        _violation(
+            SYMLINKED_STORE_ENTRY,
+            store_dir / name,
+            "store-owned entry is a symlink; the store refuses to use one",
+        )
+        for name in symlinked_internals(store_dir)
+    ]
 
     decisions_raw, decision_paths, decision_all_paths, v = _check_temporal_dir(
         store_dir / "decisions", Decision
@@ -895,10 +957,18 @@ def _run_git(
     """``timeout`` (drift→supersede D1) bounds the subprocess for hook-path callers; the
     default ``None`` is byte-for-byte today's behavior for every existing call site. A
     ``TimeoutExpired`` maps onto the same ``ValueError`` contract as ``OSError`` — every
-    caller already treats that as "git unavailable"."""
+    caller already treats that as "git unavailable".
+
+    Git runs with its repository-local variables (``GIT_DIR`` and friends) dropped, so it
+    answers about the repository containing ``cwd``, never an ambient one."""
     try:
         return subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=git_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ValueError(f"could not run git ({' '.join(args)}): {e}") from e

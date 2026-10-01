@@ -127,8 +127,10 @@ it never adds to it.
   `reason` first:** `file-not-in-graph` usually means a stale graph (run `graphify update .`
   and re-anchor — the name was probably fine), `name-not-in-file` means the name is wrong
   (`find_entity`/`query_structure` will say what is really there), `no-file-path` means pass
-  one, and `no-graph` is the expected graph-less case described above — not an authoring
-  mistake, and it heals on the next sync.
+  one. With no graph at all, an `add_fact`/`supersede_fact` entry carries **no** `reason`
+  key (`{entity_id, canonical_name, tier: 2}`; `reason: "no-graph"` appears only on
+  `propose_decisions` results). That is the expected graph-less case described above — not
+  an authoring mistake, and it heals on the next sync.
 - **Check `redactions`** — every text field (`statement`/`source`) is redacted first, the
   same secret patterns `add_decision` runs; a non-zero count means something got scrubbed
   before it ever reached the store.

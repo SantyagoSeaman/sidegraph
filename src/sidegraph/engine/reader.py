@@ -25,6 +25,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from ..gitenv import git_env
 from ..schema import Descriptor, canonicalize
 
 # Node file types that can carry anchors. Concepts (LLM-extracted thematic entities) and
@@ -381,6 +382,7 @@ class GraphifyReader:
             result = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 cwd=self.path.parent,
+                env=git_env(),
                 capture_output=True,
                 text=True,
                 timeout=5.0,

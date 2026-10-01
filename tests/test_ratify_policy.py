@@ -10,7 +10,7 @@ This module is also the SHARED SCAFFOLDING FILE for the whole plan (see
 puts every spec ledger row's tests here (T1-T7, T9-T19; T8 gets its own
 ``tests/test_doctor_auto_share.py``), Task 1 establishes it and Tasks 2-7 APPEND --
 never re-declaring a builder that already exists here. The names below this module's own
-Step 1/4 tests (``_no_ambient_initiative``, ``store``, ``GOLDEN_GRAPH``, ``FEATURE_GRAPH``/
+Step 1/4 tests (``store``, ``GOLDEN_GRAPH``, ``FEATURE_GRAPH``/
 ``_feature_graph``, ``_eligible_decision_draft``/``_eligible_fact_draft``/
 ``_eligible_domain_draft``) are that scaffolding -- unused by Task 1's own tests (T1's row
 needs none of them; see the test-inventory table), present so Tasks 2-7 do not each
@@ -81,20 +81,6 @@ from tests.test_store_ratification import _proposed
 # case this graph structurally cannot produce.
 GOLDEN_GRAPH = Path(__file__).parent / "fixtures" / "mini_graph.json"
 GOLDENS = Path(__file__).parent / "fixtures" / "auto_policy" / "parity_goldens.json"
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_initiative(monkeypatch):
-    """Tests must not depend on the ambient git branch (established repo pattern --
-    ``tests/test_capture_propose.py:15``, ``tests/test_capture_auto_accept.py:17``).
-
-    Without it, ``capture._derive_initiative()`` picks up whatever branch this checkout
-    happens to be on and silently adds a stray Tier-0 binding, which anchor/binding-count
-    assertions in Tasks 2-7's eligibility tests don't account for. Autouse: every test in
-    this shared scaffolding file gets it for free, the same way every test in
-    ``test_capture_propose.py`` already does.
-    """
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: None)
 
 
 @pytest.fixture
@@ -2035,17 +2021,15 @@ def test_cascade_blocks_when_any_fact_in_the_set_is_ineligible(store, tmp_path):
 
 def test_initiative_binding_never_masks_a_missing_live_anchor(store, tmp_path, monkeypatch):
     """I2: `_anchor_signal`'s `tier in (1, 2)` filter is what keeps a live Tier-0
-    INITIATIVE binding from masking a record that has no real anchor to stand on. Every
-    other test in this module runs under the autouse `_no_ambient_initiative` fixture
-    (needed for determinism — without it, tests would depend on whatever branch this
-    checkout happens to be on), which makes this filter's absence invisible to the full
-    suite: production runs on a feature branch, where `_derive_initiative()` mints a
-    live Tier-0 binding on EVERY capture. A per-test `monkeypatch.setattr` overrides the
-    autouse fixture back to a real branch name here, and proves an orphan-only AND an
-    ambiguous-only draft both still stay proposed despite the extra live Tier-0
-    binding — dropping the tier filter would count that binding as "live" and
-    self-certify both."""
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: "feature-x")
+    INITIATIVE binding from masking a record that has no real anchor to stand on. Tests
+    outside a feature-branch repository derive no initiative (the store sits in a temp
+    dir, where git finds no repository), which makes this filter's absence invisible to
+    the rest of the module: production runs on a feature branch, where
+    `_derive_initiative()` mints a live Tier-0 binding on EVERY capture. This test forces
+    a branch name, and proves an orphan-only AND an ambiguous-only draft both still stay
+    proposed despite the extra live Tier-0 binding — dropping the tier filter would count
+    that binding as "live" and self-certify both."""
+    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda *a, **k: "feature-x")
     reader = _feature_graph(tmp_path)
 
     orphan_only = _eligible_decision_draft(
@@ -2145,24 +2129,28 @@ def test_domain_with_only_path_prefixes_auto_ratifies(store, tmp_path):
     assert domain.communities  # resolved via path_prefixes alone, no seed_anchors needed
 
 
-def test_rejected_attached_fact_never_gets_cascade_stamp(store, tmp_path):
+def test_deduped_attached_fact_never_gets_cascade_stamp(store, tmp_path):
     """m4: the nested-stamping filter (`fr.fact_id in cascaded_ids`) must actually
     filter — stamping every `fact_results` entry unconditionally would put the
-    `auto:*` stamp on a REJECTED attached fact's result too (`fact_id=None`, never
-    written, never part of the cascade), a public result that lies about a record that
-    was never accepted."""
+    `auto:*` stamp on a DEDUPED attached fact's result too (it carries the existing
+    fact's id but was never written by this call and is not in the cascade set), a public
+    result that lies about a record this decision did not accept. A REJECTED attached fact
+    no longer reaches this filter: it blocks the decision's auto-ratification outright."""
     reader = _feature_graph(tmp_path)
+    # An existing standalone fact on the same anchor: the attached duplicate dedups against
+    # it, so its id is not in this decision's cascade set.
+    [prior] = capture.propose_facts([_eligible_fact_draft()], store, reader)
     draft = _eligible_decision_draft(
-        facts=[_eligible_fact_draft(), _eligible_fact_draft(statement="")]
+        facts=[_eligible_fact_draft(statement="another non-derivable fact"), _eligible_fact_draft()]
     )
     [result] = capture.propose([draft], store, reader, ratify_policy=RatifyPolicy.AUTO_LOW_RISK)
     assert result.ratified_by == "auto:auto-low-risk"
-    good, rejected = result.facts
+    good, deduped = result.facts
     assert good.status == "written"
     assert good.ratified_by == "auto:auto-low-risk"
-    assert rejected.status == "rejected"
-    assert rejected.fact_id is None
-    assert rejected.ratified_by is None
+    assert deduped.status == "deduped"
+    assert deduped.fact_id == prior.fact_id
+    assert deduped.ratified_by is None
 
 
 # ---------------------------------------------------------------------------------------
@@ -4549,13 +4537,16 @@ def _c1_hits_in_source(src: str, filename: str = "<synthetic>") -> list[tuple[in
       imported under an alias that does not itself start with a writer prefix; raw
       ``Path.write_text``/``store._conn.execute("UPDATE ...")`` writes.
 
-    **Dataflow (fix round 3, item 2a):** outside ``store.py``, exactly THREE ``.status``
+    **Dataflow (fix round 3, item 2a):** outside ``store.py``, exactly FOUR ``.status``
     assignments have a value ``_status_flip_value_caught`` does not flag as an enum
     mention or a record-status string -- ``anchoring.py:61`` (``AnchorResolution.__init__``,
-    ``self.status = status``), ``sync.py:72`` (``_set_leaf_status``, ``b.status =
-    status``), and ``sync.py:110`` (``_repoint_communities``, ``tb.status =
-    "orphaned"``) -- all three legitimate ``AnchorBinding``/``AnchorResolution``
-    transitions, none a ``Decision``/``Domain`` status flip; re-derived by an AST walk
+    ``self.status = status``), ``sync.py`` ``_set_leaf_status`` (``b.status = status``),
+    and two in ``sync.py`` ``_reconcile_tier1_communities`` (``tb.status = "live"`` to
+    restore a Tier-1 community row a leaf still holds, ``tb.status = "orphaned"`` for a
+    community every leaf vacated; these replaced the single ``tb.status = "orphaned"`` that
+    ``_repoint_communities`` used to make) -- all legitimate
+    ``AnchorBinding``/``AnchorResolution`` transitions, none a ``Decision``/``Domain``
+    status flip; re-derived by an AST walk
     this session (not copied from a prior round's docstring), landing on the same count
     fix round 2 first measured. Fix round 2 recorded a ``(file, function)`` site pin for
     this gap -- the C-3 idiom -- as an unbuilt follow-up rather than build it there,
@@ -4775,7 +4766,7 @@ _C1_DATAFLOW_SITES = Counter(
     {
         ("anchoring.py", "__init__"): 1,
         ("sync.py", "_set_leaf_status"): 1,
-        ("sync.py", "_repoint_communities"): 1,
+        ("sync.py", "_reconcile_tier1_communities"): 2,
     }
 )
 

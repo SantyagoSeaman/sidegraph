@@ -27,8 +27,10 @@ from .anchoring import orphan_reason, resolve_and_bind
 from .capture import (
     AnchorDraft,
     RatifyPolicy,
+    _bind_initiative,
     _bind_orphaned,
     _capture_commit,
+    _clean_initiative,
     _resolves_to_live_decision,
     _session_id_fallback,
     format_communities_sample,
@@ -42,7 +44,14 @@ from .capture import (
     redact,
 )
 from .capture import propose_domains as _propose_domain_drafts
-from .config import TELEMETRY_SESSION_KEY, resolve_store_path
+from .config import (
+    DEFAULT_GRAPH,
+    TELEMETRY_SESSION_KEY,
+    default_graph_path,
+    path_is_file,
+    path_state,
+    resolve_store_path,
+)
 from .domains import DEFAULT_CANDIDATE_LIMIT, collect_domain_candidates, community_group_path
 from .engine.reader import GraphifyReader
 from .retrieval import (
@@ -122,20 +131,48 @@ def _get_store() -> Store:
     return _store
 
 
-def _graph_path() -> str:
-    """The graph path ``_load_reader()`` resolves and reads from -- factored out so a
-    caller that gets back ``None`` (a bad/missing graph) can still explain WHERE it looked
-    (``sync_anchors``'s unreadable-graph error), since ``_load_reader()`` itself degrades
-    a bad path to a bare ``None`` with no path attached."""
-    return os.environ.get("SIDEGRAPH_GRAPH", "graphify-out/graph.json")
+def _graph_path(store: Store | None = None) -> str:
+    """The graph ``_load_reader()`` reads: ``$SIDEGRAPH_GRAPH`` (empty counts as unset) or
+    ``graphify-out/graph.json``, a relative value resolved against the store's project --
+    the same rule as the CLI, so both always read the graph belonging to the store they
+    write to. Factored out so ``sync_anchors`` can name where it looked."""
+    return str(default_graph_path((store or _get_store()).path))
 
 
-def _load_reader() -> GraphifyReader | None:
-    """Best-effort reader over $SIDEGRAPH_GRAPH (or graphify-out/graph.json). None if absent."""
+def _load_reader(store: Store | None = None) -> GraphifyReader | None:
+    """Best-effort reader over the store's own graph (see :func:`_graph_path`). None if absent."""
     try:
-        return GraphifyReader(_graph_path())
+        return GraphifyReader(_graph_path(store))
     except Exception:
         return None
+
+
+def _unreadable_graph_error(store: Store) -> str:
+    """``sync_anchors``'s error when no reader could be built: names the resolved path and,
+    when the same relative value exists beside the process cwd, says how to use it."""
+    value = os.environ.get("SIDEGRAPH_GRAPH") or DEFAULT_GRAPH
+    try:
+        graph = _graph_path(store)
+    except OSError:  # a relative store path resolves against the cwd, which is unreadable
+        return f"graph not readable ({value})"
+    msg = f"graph not readable ({graph})"
+    if os.path.isabs(value):
+        return msg
+    try:
+        here = Path(os.path.abspath(value))  # getcwd() raises when the cwd is unreadable
+    except OSError:
+        return msg
+    if (
+        str(here) != graph
+        and path_state(Path(graph))
+        == "missing"  # a corrupt or unreadable graph is not a missing one
+        and path_is_file(here)
+    ):
+        msg += (
+            f"; {here} exists beside the server's cwd -- "
+            "set SIDEGRAPH_GRAPH to an absolute path to use it"
+        )
+    return msg
 
 
 # The only legal AnchorBinding.relation values (Relation is a Literal, not an enum) — used
@@ -281,9 +318,13 @@ def _add_decision_impl(
     )
     store.add_decision(decision)
 
-    anchors_skipped, anchors_orphaned = _resolve_anchors(
-        decision.id, anchors, reader, store, initiative=initiative
-    )
+    anchors_skipped, anchors_orphaned = _resolve_anchors(decision.id, anchors, reader, store)
+    # Decision-level, so it binds whatever the reader and the anchors: cleaned like every
+    # other prose field, and before the bindings summary below so the result includes it.
+    clean_initiative, n5 = _clean_initiative(initiative)
+    redactions += n5
+    if clean_initiative:
+        _bind_initiative(store, decision.id, clean_initiative)
     for tag in _coerce_tags(tags):
         scrubbed, n = redact(tag)
         redactions += n
@@ -318,7 +359,6 @@ def _resolve_anchors(
     anchors: list[dict] | None,
     reader,
     store,
-    initiative: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Resolve+bind every anchor ref, returning ``(ambiguous, orphaned)`` as feedback.
 
@@ -359,7 +399,6 @@ def _resolve_anchors(
                 ref,
                 reader,
                 store,
-                initiative=initiative,
                 relation=raw.get("relation"),
             )
             if result.status == "ambiguous":
@@ -403,13 +442,15 @@ def add_decision(
     ``{"name": ..., "file_path": ..., "relation": ...}`` refs to the code entities the
     decision is about (``relation`` optional: creates|modifies|affects|deprecates|
     considered, defaults to "affects"); each is resolved against the current Graphify graph
-    and multi-anchored (leaf + domain/community [+ initiative]). Anchoring is best-effort:
-    with no graph present, the decision still writes. A malformed anchor list — an invalid
-    ``relation``, a non-string ``name``/``file_path``, or a non-empty list with no named
-    anchor — is rejected before anything is written, graph or not.
+    and multi-anchored (leaf + domain/community). Anchoring is best-effort: with no graph
+    present, the decision still writes. ``initiative``, when given, is bound as a Tier-0
+    ``initiative:<name>`` entity on every call, with or without a graph or anchors. A
+    malformed anchor list — an invalid ``relation``, a non-string ``name``/``file_path``, or
+    a non-empty list with no named anchor — is rejected before anything is written, graph or not.
 
-    Every text field (title/context/choice/rejected/consequences, and tag text before
-    slugification) is redacted first — same secret patterns as the propose/import
+    Every text field (title/context/choice/rejected/consequences, tag text before
+    slugification, and ``initiative``; a blank or all-secret initiative binds nothing) is
+    redacted first — same secret patterns as the propose/import
     pipelines; the scrubbed text is the only text that reaches the repo-committed store.
 
     ``tags`` are free-form labels — a bare comma-separated string is accepted too —
@@ -419,14 +460,23 @@ def add_decision(
     ``layer`` optionally marks the decision "business" or "technical" — a filter axis for
     mixed corpora.
 
-    Returns ``{"id", "status", "bindings", "entities", "anchors_skipped", "redactions"}``
-    (``redactions`` = secret replacements made across all text fields) — ``entities`` is
-    ``[{"entity_id", "canonical_name", "tier"}, ...]``, one per binding created, so a caller
-    can chain straight into ``find_entity``/``get_entity_history`` without touching the store.
+    Returns ``{"id", "status", "bindings", "entities", "anchors_skipped", "anchors_orphaned",
+    "redactions"}`` (``redactions`` = secret replacements made across all text fields) —
+    ``entities`` is ``[{"entity_id", "canonical_name", "tier"}, ...]``, one per binding created,
+    so a caller can chain straight into ``find_entity``/``get_entity_history`` without touching
+    the store.
     ``anchors_skipped`` is ``[{"name", "reason": "ambiguous", "candidates"}, ...]`` — the
     anchors whose name matched more than one graph node (candidates capped at 5), so no
     precise Tier-2 leaf was created for them; empty when every anchor resolved cleanly or no
-    graph is present.
+    graph is present. ``anchors_orphaned`` is
+    ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
+    to nothing (always ``[]`` when no graph is present).
+    The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
+    PreToolUse nudge skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
+    stale graph (run ``graphify update .``, then re-anchor), ``name-not-in-file`` means the
+    name is wrong (``find_entity`` says what is there), ``no-file-path`` means pass
+    ``file_path``. Repair with ``add_anchors`` — no duplicate record, no content-free
+    supersession.
     """
     return _add_decision_impl(
         _get_store(),
@@ -594,12 +644,20 @@ def supersede_decision(
     ``propose_decisions`` stamps).
 
     Returns ``{"id", "supersedes", "bindings", "entities", "anchors_skipped",
-    "redactions"}`` — ``anchors_skipped`` is ``[{"name", "reason": "ambiguous",
+    "anchors_orphaned", "redactions"}`` — ``anchors_skipped`` is ``[{"name", "reason": "ambiguous",
     "candidates"}, ...]``, the same per-anchor feedback ``add_decision`` returns
     (candidates capped at 5): populated
     only on the explicit-``anchors`` path (an anchor whose name matched more than one graph
     node got no precise Tier-2 leaf), always ``[]`` when ``anchors`` is omitted since
-    inheritance never resolves against the graph.
+    inheritance never resolves against the graph. ``anchors_orphaned`` is
+    ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
+    to nothing (always ``[]`` when no graph is present).
+    The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
+    PreToolUse nudge skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
+    stale graph (run ``graphify update .``, then re-anchor), ``name-not-in-file`` means the
+    name is wrong (``find_entity`` says what is there), ``no-file-path`` means pass
+    ``file_path``. Repair with ``add_anchors`` — no duplicate record, no content-free
+    supersession.
     """
     return _supersede_decision_impl(
         _get_store(),
@@ -755,11 +813,24 @@ def add_fact(
     Every text field (statement/source) is redacted first, same secret patterns as
     ``add_decision``'s.
 
-    Returns ``{"id", "statement", "status", "redactions", "entities", "anchors_skipped"}``
-    — ``entities`` is ``[{"entity_id", "canonical_name", "tier"}, ...]``, one per binding
-    created; ``anchors_skipped`` is ``[{"name", "reason": "ambiguous", "candidates"}, ...]``
+    Returns ``{"id", "statement", "status", "redactions", "entities", "anchors_skipped",
+    "anchors_orphaned"}`` — ``entities`` is ``[{"entity_id", "canonical_name", "tier"}, ...]``,
+    one per binding created; ``anchors_skipped`` is
+    ``[{"name", "reason": "ambiguous", "candidates"}, ...]``
     (candidates capped at 5) — populated only when a graph is present and an anchor's name
     matched more than one node, since there is nothing to be ambiguous against otherwise.
+    ``anchors_orphaned`` is
+    ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
+    to nothing against a graph. With no graph present every anchor lands here instead, as
+    ``{"entity_id", "canonical_name", "tier": 2}`` with no ``reason`` key; it heals on the
+    next sync once a graph exists.
+    The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
+    PreToolUse nudge skip it. When ``reason`` is present, read it first:
+    ``file-not-in-graph`` usually means a stale graph (run ``graphify update .``, then
+    re-anchor), ``name-not-in-file`` means the name is wrong (``find_entity`` says what is
+    there), ``no-file-path`` means pass
+    ``file_path``. Repair with ``add_anchors`` — no duplicate record, no content-free
+    supersession.
     """
     return _add_fact_impl(
         _get_store(),
@@ -909,8 +980,9 @@ def supersede_fact(
     ``add_fact``'s.
 
     Returns ``{"id", "statement", "status", "redactions", "entities", "anchors_skipped",
-    "supersedes"}`` — same shape as ``add_fact``'s plus ``supersedes`` (the predecessor's
-    id).
+    "anchors_orphaned", "supersedes"}`` — same shape as ``add_fact``'s plus ``supersedes`` (the
+    predecessor's id); ``anchors_orphaned`` entries follow ``add_fact``'s rule (no ``reason``
+    key when no graph is present) and the same ``add_anchors`` repair.
     """
     return _supersede_fact_impl(
         _get_store(),
@@ -1327,7 +1399,8 @@ def _session_key(store: Store) -> str | None:
         return None
     if written.tzinfo is None:
         return None
-    if datetime.now(UTC) - written > _SESSION_KEY_TTL:
+    # A stamp ahead of the clock (negative age) is not a live session either.
+    if not timedelta(0) <= datetime.now(UTC) - written <= _SESSION_KEY_TTL:
         return None
     return session_id
 
@@ -1646,14 +1719,18 @@ def propose_decisions(
     "layer"? ("business"|"technical"), "facts"? ([DraftFact], attached — see below)}.
     Each anchor's ``relation`` (optional): creates|modifies|affects|deprecates|considered,
     defaults to "affects" — same five literals ``add_decision`` enumerates.
-    The pipeline redacts secrets (including tag text), validates, dedups, writes as
+    The pipeline redacts secrets (including tag and initiative text), validates, dedups, writes as
     status=proposed (ratified later by a human — or at write time by an opt-in
     SIDEGRAPH_RATIFY_POLICY when the draft is eligible), and anchors best-effort —
     tags/layer/per-anchor relation carry through unchanged to ratification.
 
     Each result carries ``"anchors_skipped": [{"name", "reason": "ambiguous", "candidates"}]``
     — anchors whose name matched more than one graph node, so no precise Tier-2 leaf was
-    created for them (capped at 5); empty when every anchor resolved cleanly.
+    created for them (capped at 5); empty when every anchor resolved cleanly. Each decision
+    result also carries ``"anchors_orphaned": [{"entity_id", "canonical_name", "tier": 2,
+    "reason"}, ...]`` — anchors that resolved to nothing (the leaf is written but dead on
+    arrival for retrieval; ``reason`` is ``"no-graph"`` when no graph is present). Repair
+    with ``add_anchors`` once the record is written — never by superseding it.
 
     Each result also carries ``neighbors`` — up to 3 live records anchored to the same code
     (deduplicated; on a ``deduped`` result, the existing record itself). If your new record
@@ -1679,6 +1756,12 @@ def propose_decisions(
     auto-ratification policy accepted the record at write time, else null — including
     nested attached facts accepted through the cascade) and ``auto_ratify_error`` (null
     unless an attempt failed); ``status`` keeps its write-action meaning.
+
+    A ``written`` result may carry a ``reason``: the record is on disk, but a step after
+    the write (anchors, initiative, tags, attached facts, auto-ratify) failed and the later
+    steps did not run. The text names the step and the remedy. A ``rejected`` result whose
+    reason starts with "internal error" may have left the record on disk; do not re-propose
+    it in the same session.
 
     Auto-accept: when the ``SIDEGRAPH_AUTO_ACCEPT`` environment variable is set to ``"on"``
     (off by default), every decision draft, its attached facts, and every standalone fact
@@ -1941,6 +2024,10 @@ def _add_domain_impl(
             raise ValueError(f"parent_slug {parent_slug!r} does not resolve to any domain")
         parent_id = parent.domain_id
 
+    # Title and summary are prose in a repo-committed store: same gate as propose_domains.
+    # The slug is an identifier and stays as given (redacting it would break lookup).
+    title, n1 = redact(title)
+    summary, n2 = redact(summary)
     graph_version = reader.graph_version() if reader is not None else None
     domain = Domain(
         slug=slug,
@@ -1954,7 +2041,7 @@ def _add_domain_impl(
         provenance=Provenance(source="manual", author=author, graph_version=graph_version),
     )
     store.add_domain(domain)
-    return {"domain_id": domain.domain_id, "status": domain.status.value}
+    return {"domain_id": domain.domain_id, "status": domain.status.value, "redactions": n1 + n2}
 
 
 @mcp.tool
@@ -1982,7 +2069,11 @@ def add_domain(
     optional immediate seed for a direct-write caller that already knows current
     (volatile) community ids and wants them visible before the next resolve pass.
 
-    Returns ``{"domain_id", "status"}``.
+    ``title`` and ``summary`` are redacted first, like every other prose field; the slug is
+    an identifier and is not.
+
+    Returns ``{"domain_id", "status", "redactions"}`` (``redactions`` = secret replacements
+    made across title and summary).
     """
     return _add_domain_impl(
         _get_store(),
@@ -2044,6 +2135,8 @@ def _supersede_domain_impl(
             raise ValueError(f"parent_slug {parent_slug!r} does not resolve to any domain")
         parent_id = parent.domain_id
 
+    new_title, n1 = redact(new_title)
+    new_summary, n2 = redact(new_summary)
     graph_version = reader.graph_version() if reader is not None else None
     new_domain = Domain(
         slug=new_slug,
@@ -2061,6 +2154,7 @@ def _supersede_domain_impl(
         "domain_id": result.domain_id,
         "status": result.status.value,
         "supersedes": old.domain_id,
+        "redactions": n1 + n2,
     }
 
 
@@ -2098,9 +2192,12 @@ def supersede_domain(
     collides with some OTHER still-live (proposed/accepted) domain (the predecessor itself
     is excluded from that check, so reusing the same slug is fine).
 
-    Returns ``{"domain_id": str, "status": str, "supersedes": str}`` — ``status`` is
-    always ``"proposed"``, ``domain_id`` is the successor's, ``supersedes`` is the
-    predecessor's resolved ``domain_id``.
+    ``new_title`` and ``new_summary`` are redacted first, like every other prose field.
+
+    Returns ``{"domain_id": str, "status": str, "supersedes": str, "redactions": int}`` —
+    ``status`` is always ``"proposed"``, ``domain_id`` is the successor's, ``supersedes`` is
+    the predecessor's resolved ``domain_id``, ``redactions`` counts the secret replacements
+    made in the new title and summary.
     """
     return _supersede_domain_impl(
         _get_store(),
@@ -2494,7 +2591,7 @@ def _sync_anchors_impl(store: Store, reader: GraphifyReader | None, force: bool 
     2026-07-11-ci-integrity-design.md ruling 1) -- instead of building it inline.
     """
     if reader is None:
-        return {"synced": False, "error": f"graph not readable ({_graph_path()})"}
+        return {"synced": False, "error": _unreadable_graph_error(store)}
 
     report = sync(store, reader, force=force)
     return report_as_dict(report)
@@ -2541,13 +2638,23 @@ def sync_anchors(force: bool = False) -> dict:
     "stale_decisions": [...], "empty_domains": [...], "overbroad_domains": [...],
     "slug_conflicts": [...], "domains_refreshed": int, "domain_failures": [{"slug",
     "title", "error"}, ...]}``. ``synced`` is ``False`` when the pass was skipped outright
-    (``graph_version`` unchanged, no ``force``, and no cold-reload flag pending) -- when
-    skipped, every OTHER field is an EMPTY default (``outcomes: []``, ``counts: ""``,
+    (``graph_version`` unchanged, no ``force``, no cold-reload flag pending, no
+    remembered ``moved_uncommitted`` entity to re-verify after ``HEAD`` moved, and no
+    remembered Tier-1 community reconcile whose retry repaired the record or failed again;
+    a retry that abstains reports nothing) -- when skipped, every OTHER field is an EMPTY default
+    (``outcomes: []``, ``counts: ""``,
     ``repointed: 0``, ``stale_decisions: []``, ``empty_domains: []``, ``overbroad_domains: []``,
     ``slug_conflicts: []``, ``domains_refreshed: 0``, ``domain_failures: []``) from a
     fresh, un-run ``SyncReport(skipped=True)`` -- NOT the prior (possibly stale) report --
     so a caller must never read a skipped pass as "everything's clean"; pass
-    ``force=True`` (or wait for a real graph rebuild) to get an actual report. ``outcomes``
+    ``force=True`` (or wait for a real graph rebuild) to get an actual report. A third,
+    NARROW kind: when a prior pass left entities ``moved_uncommitted`` and git HEAD has since
+    moved with the graph unchanged, only those entities are re-verified -- ``synced`` is
+    ``True``, ``from_version == to_version``, ``outcomes`` covers just them, and the domain
+    fields stay empty because domain membership was not recomputed. A remembered Tier-1
+    community reconcile that is retried and repairs the record (a ``moved`` outcome,
+    ``community rows of record <id>``) or fails again (an ``error`` outcome, kept and
+    retried on the next sync) also returns ``synced: true`` with that outcome. ``outcomes``
     carries only entities worth a human's attention -- moved/moved_uncommitted/ambiguous/
     orphaned/error -- never the "unchanged"/"rebound" majority, same filter
     ``sidegraph-sync``'s own printer
@@ -2559,7 +2666,10 @@ def sync_anchors(force: bool = False) -> dict:
     informational ``empty_domains``/``overbroad_domains``.
 
     With no Graphify graph present, returns ``{"synced": False, "error": "graph not
-    readable (<resolved path>)"}`` instead of crashing -- explanatory, not silent, since
+    readable (<resolved path>)"}`` (the path is the store-anchored one; when the same
+    relative value exists beside the server's cwd the message adds ``; <cwd path> exists
+    beside the server's cwd -- set SIDEGRAPH_GRAPH to an absolute path to use it``)
+    instead of crashing -- explanatory, not silent, since
     this IS the diagnostic tool (contrast every other tool's best-effort, no-graph-present
     degrade, which never surfaces an error at all).
     """

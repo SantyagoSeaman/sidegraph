@@ -32,8 +32,10 @@ stamp (e.g. right after `graphify update .`, or after hand-editing a domain's
 [`docs/reference/mcp-tools.md`](../../../../docs/reference/mcp-tools.md#sync_anchors) for
 the full shape). `synced: false` with no `force` means the pass was skipped outright
 (`graph_version` unchanged) — every other field is then an *empty* default, not a stale
-prior report; re-call with `force=True` to get real data. `outcomes` only ever lists
-entities worth a human's attention — never the `unchanged`/`rebound` majority:
+prior report; re-call with `force=True` to get real data. (Without `force`, a move left
+`moved_uncommitted` is also re-verified once `HEAD` moves, as a narrow pass over just those
+entities; the `force=True` call above already re-runs everything, so it makes that moot.)
+`outcomes` only ever lists entities worth a human's attention — never the `unchanged`/`rebound` majority:
 
 - **`moved`** — informational, nothing to do: a unique same-name match in a same-suffix
   file, the anchor followed the code.

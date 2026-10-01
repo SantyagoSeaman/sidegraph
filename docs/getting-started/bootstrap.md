@@ -140,7 +140,11 @@ policy is separate.
 `--report bootstrap-report.md` writes aggregate counts, separate edit/action rates, candidate
 precision, per-action and CLI-to-proof elapsed seconds, anchor coverage, proof state, review
 debt, and the canonical paths changed. It excludes source content and candidate text and is
-never uploaded automatically. These local metrics are operator/session observations, not a
+never uploaded automatically. The report never overwrites any host's config file, the graph, a scanned
+source or a store file, hard links included. The reviewed action summary starts with the
+resolved `store:` path, and names a symlink when the path or a directory above it in the
+repository is one. A symlinked directory or store file *inside* the store stops the run
+before review. These local metrics are operator/session observations, not a
 first-user cohort or task-benefit result. Inspect the report before sharing.
 
 ## Reproduce the dogfood path

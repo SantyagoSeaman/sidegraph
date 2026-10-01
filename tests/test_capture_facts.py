@@ -1,25 +1,11 @@
 """Facts through the deterministic propose pipeline.
 see design/superpowers/specs/2026-07-10-facts-layer-design.md"""
 
-import pytest
-
 from sidegraph.capture import propose, propose_facts
 from sidegraph.schema import DecisionStatus
 from sidegraph.store import Store
 
 SECRET = "api_key=hunter2secret"
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_initiative(monkeypatch):
-    """Tests must not depend on the ambient git branch (mirrors
-    test_capture_propose.py's identical fixture): without this, `_derive_initiative()`
-    picks up whatever branch the repo happens to be checked out on and silently adds a
-    Tier-0 binding to the DECISION only (facts never inherit `initiative`, only
-    `anchors`) — which breaks the binding-equality assertions below in an
-    environment-dependent way (passes on `main`, fails on any feature branch).
-    """
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: None)
 
 
 def _draft(**kw):

@@ -5,8 +5,10 @@ description: Use when someone asks how much Sidegraph memory is actually being u
 
 # Stats
 
-Run `sidegraph-stats` and show its output **verbatim** in a fenced block. Everything in the
-report is read from the local, gitignored index; nothing is sent anywhere. If the command is
+Run `sidegraph-stats` and show its output **verbatim** in a fenced block. Usage figures
+come from the local, gitignored index and graph figures from the optional read-only
+`graph.json`; the command also checks the canonical store files for index staleness.
+Nothing is sent anywhere. If the command is
 not on `PATH`, run it the way the other CLI skills do:
 `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stats`.
 
@@ -31,6 +33,5 @@ Follow-ups worth offering, only if the numbers invite them:
 ## See also
 
 - [`docs/reference/cli.md`](../../../../docs/reference/cli.md#sidegraph-stats) — the flags
-  (`--window`, `--json`, `--db`, `--graph`) and exit codes.
-- [`docs/guides/verifying-your-setup.md`](../../../../docs/guides/verifying-your-setup.md#case-9--usage-statistics)
-  — what each block of the report answers.
+  (`--window`, `--json`, `--db`, `--graph`), exit codes, and what each block of the report
+  answers.

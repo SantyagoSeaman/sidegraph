@@ -10,12 +10,13 @@ import traceback
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from secrets import token_hex
 from time import monotonic
 from typing import NoReturn
 
 from sidegraph.bootstrap.apply import apply_review, render_markdown_report
 from sidegraph.bootstrap.catalog import load_canonical_catalog
-from sidegraph.bootstrap.integrations import verify_integration
+from sidegraph.bootstrap.integrations import host_config_paths, verify_integration
 from sidegraph.bootstrap.model import (
     BootstrapCandidate,
     BootstrapPlan,
@@ -37,7 +38,7 @@ from sidegraph.config import resolve_store_path
 from sidegraph.domains import collect_domain_candidates
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.profiles import FlowProfile, detect_profile, get_profile
-from sidegraph.store import Store
+from sidegraph.store import Store, refuse_symlinked_internals
 
 
 class BootstrapArgumentParser(argparse.ArgumentParser):
@@ -96,19 +97,40 @@ def _resolve_optional_path(value: str | None, root: Path) -> Path | None:
     return path.resolve() if path.is_absolute() else (root / path).resolve()
 
 
-def _selected_host_config_inputs(
-    args: argparse.Namespace, root: Path
-) -> tuple[tuple[str, Path], ...]:
-    if args.host == HostKind.CLAUDE_CODE.value:
-        return (
-            ("Claude Code MCP config", (root / ".mcp.json").resolve()),
-            ("Claude Code hooks config", (root / ".claude" / "settings.json").resolve()),
-        )
+def _host_config_inputs(args: argparse.Namespace, root: Path) -> tuple[tuple[str, Path], ...]:
+    """Every host's config file, not only ``--host``'s: the flag picks the verifier, and a
+    repo wired for both hosts must not lose the other one's live config to ``--report``.
+    De-duplicated by resolved path, first label wins.
+    # see design/superpowers/specs/2026-09-29-store-symlinks-and-bootstrap-guards-design.md D6"""
     codex_config = _resolve_optional_path(args.codex_config, root)
-    return (
-        ("Codex config", codex_config or (root / ".codex" / "config.toml").resolve()),
-        ("Codex hooks config", (root / ".codex" / "hooks" / "hooks.json").resolve()),
-    )
+    by_path: dict[Path, str] = {}
+    for host in HostKind:
+        for label, path in host_config_paths(root, host, codex_config=codex_config):
+            by_path.setdefault(path.resolve(), label)
+    return tuple((label, path) for path, label in by_path.items())
+
+
+def _store_summary_line(args: argparse.Namespace, root: Path, store_dir: Path) -> str:
+    """``store: <resolved>``, plus ``(via symlink <p>)`` when the store path as spelled, or a
+    directory between the root and it, is a symlink. Walks from the root as given and from
+    the resolved root, so a ``--db`` spelled through an unresolved root prefix is caught.
+    Comparing ``absolute()`` with ``resolve()`` would also fire for ``--db ../shared`` and the
+    system ``/tmp`` and ``/var`` links.
+    # see design/superpowers/specs/2026-09-29-store-symlinks-and-bootstrap-guards-design.md D4"""
+    line = f"store: {store_dir}"
+    for base in dict.fromkeys((Path(os.path.normpath(Path(args.root).absolute())), root)):
+        spelled = resolve_store_path(args.db, root=str(base), warn_on_create=False)
+        raw = Path(os.path.normpath(spelled))
+        try:
+            parts = raw.relative_to(base).parts
+        except ValueError:
+            steps = [raw]  # outside the root: only the store path itself is checked
+        else:
+            steps = [base.joinpath(*parts[: n + 1]) for n in range(len(parts))]
+        for step in steps:
+            if step.is_symlink():
+                return f"{line} (via symlink {step})"
+    return line
 
 
 def _validate_report_destination(
@@ -123,14 +145,20 @@ def _validate_report_destination(
         return None
     protected_files = (
         ("graph input", graph_path.resolve()),
-        *_selected_host_config_inputs(args, root),
+        *_host_config_inputs(args, root),
         *(
             (f"scanned source {source_path}", (root / source_path).resolve())
             for source_path in source_paths
         ),
     )
     for label, protected_path in protected_files:
-        if report_path == protected_path:
+        # samefile catches a hard link: a different name for the same inode, which the
+        # resolved-path comparison cannot see.
+        if report_path == protected_path or (
+            report_path.exists()
+            and protected_path.exists()
+            and os.path.samefile(report_path, protected_path)
+        ):
             raise ValueError(
                 f"--report destination conflicts with protected {label}: {protected_path}"
             )
@@ -283,8 +311,9 @@ def render_changed_plan_diff(previous: BootstrapPlan, refreshed: BootstrapPlan) 
     render_preview(refreshed)
 
 
-def _render_action_summary(review: ReviewResult) -> None:
+def _render_action_summary(review: ReviewResult, *, store_line: str) -> None:
     print("\nReviewed redacted action summary")
+    print(store_line)
     for item in review.items:
         candidate = item.candidate
         print(f"- {item.action.value}: {candidate.title} [{candidate.key}]")
@@ -299,8 +328,8 @@ def _render_action_summary(review: ReviewResult) -> None:
             )
 
 
-def confirm_review(review: ReviewResult) -> bool:
-    _render_action_summary(review)
+def confirm_review(review: ReviewResult, *, store_line: str) -> bool:
+    _render_action_summary(review, store_line=store_line)
     return input("Type literal 'confirm' to write reviewed actions: ").strip() == "confirm"
 
 
@@ -388,16 +417,22 @@ def write_report_only_when_requested(
     if path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        render_markdown_report(
-            report,
-            integration=integration,
-            proof=proof,
-            task_proof=task_proof,
-            elapsed_seconds=elapsed_seconds,
-        ),
-        encoding="utf-8",
+    text = render_markdown_report(
+        report,
+        integration=integration,
+        proof=proof,
+        task_proof=task_proof,
+        elapsed_seconds=elapsed_seconds,
     )
+    # Publish by replace, not by truncating the destination in place: the replace swaps the
+    # name, so another hard link to the old file keeps its bytes.
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{token_hex(4)}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def integration_ready_for_selected_host(result: IntegrationResult) -> bool:
@@ -565,6 +600,10 @@ def _main(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     store_dir = Path(resolve_store_path(args.db, root=str(root), warn_on_create=False)).resolve()
     graph_path = _resolve_graph_path(args.graph, root).resolve()
+    # Refuse a symlinked store internal up front: otherwise it would surface only after both
+    # prompts, as `STORE incomplete` with no reason.
+    if store_dir.is_dir():
+        refuse_symlinked_internals(store_dir)
     _validate_report_destination(args, root, store_dir, graph_path)
     detection = detect_profile(root, args.profile)
     profile = require_selected_profile(detection)
@@ -682,7 +721,7 @@ def _main(args: argparse.Namespace) -> int:
             return 0
 
     try:
-        confirmed = confirm_review(review)
+        confirmed = confirm_review(review, store_line=_store_summary_line(args, root, store_dir))
     except EOFError:
         render_input_ended_without_writes("final confirmation", resume_command)
         return 2

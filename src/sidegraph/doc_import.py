@@ -11,6 +11,7 @@ guessed, plus the document's own file-level node when present. See
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
@@ -285,6 +286,8 @@ class _DocDisposition:
     pending_proposal: Decision | None
     supersedable: tuple[Decision, ...]
     inherit_bindings_from: str | None
+    # The content-matched open record behind a ``skipped-existing`` action (D3), else None.
+    match: Decision | None = None
 
 
 class DocImportReport(BaseModel):
@@ -344,6 +347,13 @@ class DocImportReport(BaseModel):
     # file's children along with it). The children stand alone either way; this counts the
     # suppressed parent, once per file where either rule fired.
     skipped_degenerate_parent: int = 0
+    # A document inside the repository whose symlink target lies OUTSIDE it — refused with
+    # or without `--any-doc` (see `_repo_relative`, design/superpowers/specs/
+    # 2026-09-29-import-paths-design.md D2). Never read past the link, never stored.
+    skipped_outside_repo: int = 0
+    # A content-matched record with no non-tag binding whose anchors this run re-applied
+    # (D3): the repair of an earlier crash between the write and the binding.
+    anchors_repaired: int = 0
     # Auto-ratification policy (design D2/D6) -- additive/defaulted, same contract as
     # importer.ImportReport's own pair: incremented/appended by the post-write auto block
     # in _import_one_record, always empty/zero under `manual` or when a written record
@@ -1459,6 +1469,18 @@ def _is_live_tree_path(rel_path: str, profile: FlowProfile) -> bool:
     return _matches_ingest_globs(rel_path, profile.ingest_globs)
 
 
+def _glob_repo_root_info() -> tuple[Path, bool]:
+    """``(repo root, from_git)``: the root :func:`_glob_repo_root` returns, and whether it
+    came from ``git rev-parse --show-toplevel`` (``True``) or from the bare current
+    directory, the fallback taken when git is missing or the cwd is not in a work tree
+    (``False``). The CLI's unanchorable-documents warning fires on the fallback only.
+    # see design/superpowers/specs/2026-09-29-import-paths-design.md D5"""
+    try:
+        return _find_repo_root(Path.cwd()), True
+    except (ValueError, OSError):
+        return Path.cwd().resolve(), False
+
+
 def _glob_repo_root() -> Path:
     """The repo root the D7.1 import-glob gate normalizes against — resolved from the
     process's current directory the same way D5 resolves ``sidegraph-doctor``'s
@@ -1469,10 +1491,48 @@ def _glob_repo_root() -> Path:
     means. Git missing, no repo, or any other failure all fall back to the bare (but
     still ``.resolve()``-d) cwd itself, so a caller already running from the repo root —
     the common case — behaves exactly as before this fix (BLOCKING-1, code review)."""
-    try:
-        return _find_repo_root(Path.cwd())
-    except (ValueError, OSError):
-        return Path.cwd().resolve()
+    return _glob_repo_root_info()[0]
+
+
+def _repo_relative(path: str | Path, repo_root: Path) -> str:
+    """``path`` relative to ``repo_root``, keyed the way Graphify keys ``source_file``.
+
+    The key is LEXICAL first: the absolute path without resolving any symlink, so a
+    symlinked directory inside the repository (``docs/adr -> ../design/adr``) keeps the
+    path the caller named. It is accepted only when it names the very file the caller
+    gave (``docs/adr/../foo.md`` normalizes to ``docs/foo.md``, which may be another file).
+    When the lexical path escapes the repository, or names another file, the key is taken
+    from the nearest lexical ancestor that resolves to the repository root (a symlinked
+    prefix or macOS ``/private/tmp`` for git's real toplevel), keeping the links below it.
+    With no such ancestor it is computed from the resolved parent directories, with the
+    file's own name kept, so a symlinked document stays under its LINK path. Whether the
+    document really lies inside the repository is decided by the caller from the fully
+    resolved file, not from this key. Independent of the process's current directory.
+    # see design/superpowers/specs/2026-09-29-import-paths-design.md D1"""
+    absolute = os.path.abspath(path)
+    target = Path(path).resolve()
+    resolved_root = repo_root.resolve()
+
+    def names_the_file(rel: str) -> bool:
+        return _in_repo(rel) and (resolved_root / rel).resolve() == target
+
+    lexical = os.path.relpath(absolute, repo_root)
+    if names_the_file(lexical):
+        return lexical
+    for ancestor in Path(absolute).parents:
+        if ancestor.resolve() == resolved_root:
+            rel = os.path.relpath(absolute, ancestor)
+            if names_the_file(rel):
+                return rel
+            break
+    p = Path(path)
+    return os.path.relpath(p.parent.resolve() / p.name, repo_root)
+
+
+def _in_repo(rel: str) -> bool:
+    """True iff a ``relpath`` result names a location inside the repository. Exact tests,
+    not ``startswith("..")``, which would also match a directory named ``..foo``."""
+    return not (rel == ".." or rel.startswith("../") or os.path.isabs(rel))
 
 
 def import_docs(
@@ -1506,17 +1566,36 @@ def import_docs(
     Pipeline per file: ``parse_decision_doc`` -> historical-frontmatter skip -> idempotency
     lookup (``provenance.source == "doc-import"``, ``provenance.ref == <rel_path>``, title-
     agnostic — see ``Store.find_decisions_by_ref``) -> mention-anchor resolution (only when
-    about to write; a doc that's ``skipped_existing`` never touches the graph) -> write.
+    about to write, or to repair a match that has no anchors, below) -> write.
+
+    **Keying and the escape refusal (design/superpowers/specs/2026-09-29-import-paths-
+    design.md D1/D2).** A
+    document inside the repository is keyed by its repository path (lexical, so a symlinked
+    directory or document stays under the path named — how Graphify keys ``source_file``;
+    only the symlinked prefix of a path typed through one is resolved) whatever the
+    current directory: that path drives the file-node
+    anchor lookup, ``provenance.ref``, the profile gate and the in-flight-note trigger. A
+    document given explicitly from outside the repository keeps the caller's path. An
+    in-repo document whose symlink target lies outside the repository is refused before the
+    profile gate, with or without ``any_doc``, and counted ``skipped_outside_repo``.
 
     **Idempotency & evolution (design §3, append-only, no schema change; pending-proposal
     dedup fix).** The idempotency check compares the fresh parse against EVERY currently
-    open (``accepted`` OR ``proposed``) decision at the same ``provenance.ref`` — not just
-    one of them (see ``Store.find_decisions_by_ref``'s docstring for the regression this
+    stored decision at the same ``provenance.ref`` whose status is in
+    ``_DOC_WRITE_STATUSES`` (``accepted``, ``proposed`` OR ``rejected``) — not just one of
+    them (see ``Store.find_decisions_by_ref``'s docstring for the regression this
     fixes: comparing against only a single, scan-order-picked record let a re-run miss an
     already-pending proposal with matching content and duplicate it every run). A doc whose
-    ``(title, choice, rejected)`` are byte-identical to ANY open record at that ref is
-    ``skipped_existing`` — no anchor resolution even attempted for it, and nothing is
-    written or touched, regardless of which of the (at most two) open records matched.
+    ``(title, context, choice, rejected, consequences)`` are byte-identical to ANY such
+    record at that ref is ``skipped_existing`` and nothing new is written, regardless of
+    which of them matched. (``superseded`` records are never compared.)
+
+    **Anchor repair (same spec, D3).** A matched record that has no non-tag binding is the
+    remains of a crash between the write and the binding (doc import never writes a record
+    with zero anchors). Such a match is not returned early: its mention anchors are
+    re-selected and applied idempotently, and ``DocImportReport.anchors_repaired`` counts
+    it (a dry run writes and counts nothing). A match that already has a non-tag binding
+    never touches the graph. A partial crash (some anchors landed) is not repaired.
 
     A doc at the same ``ref`` whose parsed content differs from ALL open records (the doc
     was edited again) gets a fresh :class:`~sidegraph.schema.Decision`. Its ``supersedes``
@@ -1585,16 +1664,22 @@ def import_docs(
     outside every glob is skipped and counted ``skipped_outside_profile`` — never parsed,
     never anchor-resolved. ``any_doc=True`` restores the pre-D7.1 no-filter behavior (the
     CLI's ``--any-doc`` flag). Profile-only discovery (no explicit ``--docs PATH``) is
-    unaffected either way: those files already came FROM ``profile.ingest_globs``, so the
-    check is a structural no-op there.
+    unaffected by the glob gate either way: those files already came FROM
+    ``profile.ingest_globs``. Discovery itself refuses a hit that resolves outside the
+    repository (the CLI counts it in ``skipped_outside_repo``) before this function sees it.
 
     Normalization is against the REPO ROOT (:func:`_glob_repo_root`), never the process's
     current directory (BLOCKING-1, code review): ``ingest_globs`` are repo-relative
     patterns, so a caller running from a subdirectory, or passing an absolute path (or one
     reached through a symlinked prefix) from anywhere but the repo root, must still
-    resolve to the same repo-relative form a glob like ``docs/adr/*.md`` means. Both the
-    file and the repo root are ``.resolve()``-d before the comparison (the macOS
-    ``/tmp`` -> ``/private/tmp`` symlink case).
+    resolve to the same repo-relative form a glob like ``docs/adr/*.md`` means. For an
+    in-repo document the key is lexical first (accepted only when it names the file actually
+    read); a path that escapes the repository lexically, such as one typed through a
+    symlinked prefix (the macOS ``/tmp`` -> ``/private/tmp`` case), is keyed from its
+    nearest lexical ancestor that resolves to the repository root, so a symlinked directory
+    or document below it keeps its link path, and only without such an ancestor from its
+    resolved parent directories. The fully resolved target is used only for the
+    outside-repository refusal.
 
     **E1/E2/E3 (openspec profile design, design/superpowers/specs/2026-08-06-openspec-
     profile-design.md).** E1: ``active_profile.title_pattern`` is threaded into the parse
@@ -1639,17 +1724,53 @@ def import_docs(
     repo_root = _glob_repo_root()
 
     for rel_path in process:
-        # D7.1: enforcement runs FIRST, before the file is even read — an out-of-profile
-        # doc costs nothing beyond the glob check itself. Both sides are `.resolve()`-d
-        # (follows symlinks, absolute-izes a relative path against the CURRENT cwd) before
-        # computing the repo-root-relative form a glob like `docs/adr/*.md` actually means
-        # — see `_glob_repo_root`'s docstring for why cwd alone isn't enough.
-        glob_check_path = os.path.relpath(Path(rel_path).resolve(), repo_root)
+        # D1/D2 (design/superpowers/specs/2026-09-29-import-paths-design.md): a document
+        # INSIDE the repository is keyed by its repository path (`keyed_path`) whatever the
+        # cwd — Graphify's `source_file` form — and one whose symlink target lies OUTSIDE
+        # the repository is refused, with or without `--any-doc`, BEFORE the profile gate.
+        # A document given explicitly from outside the repository keeps the caller's path.
+        repo_rel = _repo_relative(rel_path, repo_root)
+        read_path = Path(rel_path)
+        if _in_repo(repo_rel):
+            # The read below uses this validated resolved path, not the link, and opens it
+            # without following a final-component link, so a link swapped in after the
+            # check is refused. Left open: a DIRECTORY component of the path replaced by a
+            # link after the check, which needs write access to the repository; per-component
+            # `openat` pinning is out of scope.
+            read_path = Path(rel_path).resolve()
+            if not _in_repo(os.path.relpath(read_path, repo_root)):
+                report.skipped_outside_repo += 1
+                continue
+            keyed_path = lookup_path = glob_check_path = repo_rel
+        else:
+            keyed_path = lookup_path = rel_path
+            # An outside document keeps its pre-existing lookup (absolute -> cwd-relative):
+            # tests and callers that build a graph from `relpath(doc, cwd)` depend on it.
+            if os.path.isabs(lookup_path):
+                lookup_path = os.path.relpath(lookup_path, os.getcwd())
+            glob_check_path = os.path.relpath(Path(rel_path).resolve(), repo_root)
+        # D7.1: enforcement runs FIRST after that, before the file is even read — an
+        # out-of-profile doc costs nothing beyond the glob check itself. `glob_check_path`
+        # is the repo-root-relative form a glob like `docs/adr/*.md` actually means — see
+        # `_glob_repo_root`'s docstring for why cwd alone isn't enough.
         if not any_doc and not _matches_ingest_globs(glob_check_path, active_profile.ingest_globs):
             report.skipped_outside_profile += 1
             continue
 
-        source_bytes = Path(rel_path).read_bytes()
+        if _in_repo(repo_rel):
+            try:
+                fd = os.open(read_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            except OSError as exc:
+                if exc.errno != errno.ELOOP:
+                    raise
+                # The validated target became a link after the check: same refusal as an
+                # escape.
+                report.skipped_outside_repo += 1
+                continue
+            with os.fdopen(fd, "rb") as handle:
+                source_bytes = handle.read()
+        else:
+            source_bytes = read_path.read_bytes()
         source_hash = hashlib.sha256(source_bytes).hexdigest()
         # D1/D2 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): decode
         # as utf-8-sig (plain UTF-8 plus a stripped BOM, never guessed) inside a narrow
@@ -1668,9 +1789,9 @@ def import_docs(
         # `DocWriteRequest.rel_path` below), so an unedited doc re-imported after an
         # archive-style move dedupes by ref instead of duplicating. The on-disk `rel_path`
         # stays in play for exactly two things: file I/O (already done, above) and the
-        # anchor lookup (`anchor_lookup_path`, below) — plus the dry-run/`by_file()`
+        # anchor lookup (`lookup_path`, below) — plus the dry-run/`by_file()`
         # listings, which deliberately show what the operator would open (review N5).
-        normalized_rel_path = active_profile.normalized_rel_path(rel_path)
+        normalized_rel_path = active_profile.normalized_rel_path(keyed_path)
         docs, reason = _parse_decision_docs_with_reason(
             raw_text,
             normalized_rel_path,
@@ -1732,17 +1853,12 @@ def import_docs(
         # redacted title+choice text instead — a per-AD record should bind to the symbols
         # its own block names, not to the whole document's top-3.
         clean_whole, _ = redact(raw_text)
-        # Doc-node anchor lookup needs a REPO-RELATIVE path to match the graph's
-        # `source_file` — a caller (the CLI's `--docs` in particular) may pass an absolute
-        # path straight through; normalize it against the cwd here, just for this lookup
-        # (provenance.ref/idempotency stay keyed on whatever path the caller actually
-        # passed, unchanged — the CLI's absolute-path warning depends on this rationale).
-        # Deliberately the ON-DISK path (E2): anchor lookups match the graph's actual
-        # `source_file`, which never moves just because a flow archives a change folder.
-        anchor_lookup_path = rel_path
-        if os.path.isabs(anchor_lookup_path):
-            anchor_lookup_path = os.path.relpath(anchor_lookup_path, os.getcwd())
-        file_anchor = _file_node_descriptor(anchor_lookup_path, reader)
+        # Doc-node anchor lookup matches the graph's `source_file`, which is repo-relative:
+        # for an in-repo document `lookup_path` is exactly that, from any cwd (D1).
+        # Deliberately the ON-DISK path (E2), never the flow-normalized one: anchor lookups
+        # match the graph's actual `source_file`, which never moves just because a flow
+        # archives a change folder.
+        file_anchor = _file_node_descriptor(lookup_path, reader)
 
         for parsed in docs:
             _import_one_record(
@@ -1764,6 +1880,21 @@ def import_docs(
             )
 
     return report
+
+
+def _has_non_tag_binding(store: Store, decision: Decision | None) -> bool:
+    """True iff ``decision`` has at least one binding to an existing entity that is not a
+    ``tag:`` abstract entity (a binding to a missing entity is not a landed anchor). The one
+    predicate behind both the early return and the ``anchors_repaired`` counter (D3): a tag
+    rides on every import via ``--tag``, so it says nothing about whether the document's own
+    anchors landed."""
+    if decision is None:
+        return False
+    for binding in store.bindings_for_record(decision.id):
+        entity = store.get_entity(binding.entity_id)
+        if entity is not None and not entity.canonical_name.startswith("tag:"):
+            return True
+    return False
 
 
 def _import_one_record(
@@ -1812,9 +1943,17 @@ def _import_one_record(
         tags=tuple(tag_slugs),
     )
     preflight_disposition = _classify_doc_candidate(store, preflight)
+    # D3: a content match returns early only when it already carries a non-tag binding.
+    # Doc import never writes a record with zero anchors (an unanchorable document is
+    # skipped), so a match with none is a crash between the write and the binding: fall
+    # through to re-select anchors and let `apply_doc_candidate`'s `skipped-existing`
+    # branch apply them idempotently.
+    repair_match = None
     if preflight_disposition.action == "skipped-existing":
-        report.skipped_existing += 1
-        return
+        if _has_non_tag_binding(store, preflight_disposition.match):
+            report.skipped_existing += 1
+            return
+        repair_match = preflight_disposition.match
 
     mention_source = clean_whole if parsed.fragment is None else f"{parsed.title}\n{parsed.choice}"
     anchors, anchors_skipped = _select_mention_anchors(mention_source, reader)
@@ -1865,6 +2004,8 @@ def _import_one_record(
 
     if result.action == "skipped-existing":
         report.skipped_existing += 1
+        if not dry_run and _has_non_tag_binding(store, repair_match):
+            report.anchors_repaired += 1
         return
     if result.action == "skipped-unanchorable":
         report.skipped_unanchorable += 1
@@ -1954,6 +2095,7 @@ def _classify_doc_state(
             pending_proposal=pending_proposal,
             supersedable=supersedable,
             inherit_bindings_from=None,
+            match=match,
         )
 
     inherit_bindings_from = None

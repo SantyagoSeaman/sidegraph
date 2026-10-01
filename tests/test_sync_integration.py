@@ -1,7 +1,5 @@
 import subprocess
 
-import pytest
-
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import Seed, get_task_context
 from sidegraph.server import _propose_decisions_impl, _ratify_decisions_impl
@@ -104,11 +102,6 @@ def _write_graph(tmp_path, name, data):
     p = tmp_path / name
     p.write_text(json.dumps(data))
     return p
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_initiative(monkeypatch):
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: None)
 
 
 def test_rebuild_heals_moved_and_flags_renamed(tmp_path):

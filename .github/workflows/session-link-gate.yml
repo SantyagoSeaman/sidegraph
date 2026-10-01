@@ -1,0 +1,76 @@
+# The PR half of the owner ruling "never publish an external session link", shared with the
+# `no-session-links` commit-msg hook (.pre-commit-config.yaml) through
+# tools/check_no_session_links.py, so the rule cannot drift between them. A commit-msg hook
+# cannot see a pull request's title or description, and a commit made without the hook never
+# passes through it, so this checks all three places text gets published:
+#   - the PR title and description, verbatim (lines starting with `#` are markdown headings
+#     there, not comments), and the title again because the default merge commit carries it;
+#   - the PR's recorded commit messages, exactly as they sit in history.
+# Its own workflow file, not a job in ci.yml, so `edited` can re-run it without re-running
+# the whole CI on every description edit. Every event for an open PR runs both steps: an
+# `edited` run that skipped the commit check would go green on the same head SHA and replace
+# a red run in the checks view. Edits to a closed or merged PR skip the commit check, so old
+# history is not re-checked. No `concurrency` block: with one, a later run could cancel an
+# in-flight `synchronize` run and leave the commits unchecked. The job takes seconds.
+# Fails closed: the checker ships in the public snapshot too, and a run without it fails
+# instead of skipping, so deleting or moving it cannot turn the gate green.
+# Actions are pinned to commit SHAs (the tag comment records the version).
+name: session-link-gate
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-description-link-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # zizmor artipacked: this job never pushes; do not persist git credentials past checkout.
+      # fetch-depth 0: the commit step needs the whole base..head range.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check PR title and description for forbidden session links
+        # Title and body are untrusted (attacker-controlled on a fork PR), so they go through
+        # env vars rather than `${{ }}` in the script text, which would be a script-injection
+        # hole. `github.event.pull_request.body` is `null` for an empty description; GitHub
+        # renders that as an empty env var. Reported line numbers run two higher than in the
+        # body: the title and a blank line come first.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ ! -f tools/check_no_session_links.py ]; then
+            echo "::error::tools/check_no_session_links.py is missing; the session-link gate cannot run"
+            exit 1
+          fi
+          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr-text.txt"
+          python3 tools/check_no_session_links.py --published "$RUNNER_TEMP/pr-text.txt"
+
+      - name: Check the PR's commit messages for forbidden session links
+        # Runs on every event for an open PR, description edits included: a green run with
+        # this step skipped would replace a red one on the same head SHA. A closed or merged
+        # PR (its commits predate this gate) is not re-checked. A SHA matches no pattern, so
+        # each reported line points into the commit named above it; on failure the step lists
+        # the `commit` start lines (SHAs and line numbers only, never the offending text).
+        if: github.event.pull_request.state == 'open'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ ! -f tools/check_no_session_links.py ]; then
+            echo "::error::tools/check_no_session_links.py is missing; the session-link gate cannot run"
+            exit 1
+          fi
+          git log --format='commit %H%n%B' "$BASE_SHA..$HEAD_SHA" > "$RUNNER_TEMP/pr-commits.txt"
+          python3 tools/check_no_session_links.py --published "$RUNNER_TEMP/pr-commits.txt" || {
+            echo "commit start lines in the checked log:"
+            grep -n '^commit ' "$RUNNER_TEMP/pr-commits.txt"
+            exit 1
+          }

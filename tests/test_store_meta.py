@@ -133,6 +133,18 @@ def test_set_meta_rejects_schema_version_overwrite(tmp_path):
     assert s.get_meta("schema_version") == original
 
 
+def test_delete_meta_removes_a_key_and_refuses_schema_version(tmp_path):
+    s = Store(tmp_path / "t.db")
+    s.set_meta("k", "v")
+    s.delete_meta("k")
+    assert s.get_meta("k") is None
+    s.delete_meta("k")  # absent: a no-op
+    original = s.get_meta("schema_version")
+    with pytest.raises(ValueError):
+        s.delete_meta("schema_version")
+    assert s.get_meta("schema_version") == original
+
+
 def test_iter_concrete_entities_filters(tmp_path):
     s = Store(tmp_path / "t.db")
     tracked = s.upsert_entity(

@@ -29,6 +29,24 @@ Every directory except `archive/` and `index.db` is created empty the first time
 opens a fresh path — a brand-new `.sidegraph/` has all six subdirectories present even before
 the first decision is written.
 
+A record's id **is** its filename, so an id must be a single path segment: it starts with a
+letter or digit, continues with letters, digits, `.`, `_` or `-`, and is at most 128
+characters long. Every ULID qualifies. The store refuses to write a record whose id does not
+(`ValueError: unsafe record id`), and a file on disk whose JSON id is missing, unsafe, or
+different from its filename is not a record at all: see
+[Freshness](#freshness-absorbing-a-git-pull) for how a reload treats it.
+
+**Symlinks inside the store are refused.** A `Store` will not open a directory any of whose
+subdirectories (`decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`, `initiatives/`,
+`archive/`) or store files (`format`, `stamping_live_since`, `.gitignore`, `index.db`, and
+SQLite's `index.db-journal`, `-wal` and `-shm`) is a symlink, live or dangling: a linked
+`decisions/` would send every record write to the link's target, and a linked `index.db` would
+make SQLite write there. The error names the entry (`… inside the store is a symlink`);
+replace it with a real directory or file. `sidegraph-verify` reports each such entry as
+`symlinked-store-entry`. A symlinked store **root** (`.sidegraph -> ../shared/store`) is fine:
+a deliberately shared store is a real use. Record files inside a real subdirectory are still
+read as they are.
+
 **One file per record**, not one JSONL event log, is the whole point of the wave: different
 records land in different files, so two branches that ratify different decisions merge with
 zero conflict, a PR diff shows "added `decisions/01J....json` — one small file" instead of
@@ -46,7 +64,7 @@ an ordinary, human-readable git conflict in one small JSON file — not a corrup
 | `Entity` — `entity_id`/`canonical_name`/`kind`/`descriptor`, for every entity EXCEPT a `community:*` abstract entity (index-only — see below) | `Domain.communities` |
 | `AnchorBinding` set per decision or fact — `entity_id`/`tier`/`relation`/`weight`, no `status`, EXCLUDING any binding whose entity is a `community:*` abstract entity | `toc_cache` (the `SessionStart` table-of-contents render) |
 | `Initiative` — full row | the per-session capture ledger (`capture_sessions`, dedup markers) |
-| `archive/*.jsonl` segments (once compaction has run) | `last_synced_graph_version`, `schema_version`, the canonical-digest freshness stamp |
+| `archive/*.jsonl` segments (once compaction has run) | `last_synced_graph_version`, `pending_uncommitted_moves` (the entities a sync left as `moved_uncommitted`, with the git `HEAD` it saw, so the next sync after `HEAD` moves re-verifies them), `pending_tier1_reconcile` (the `(record, vacated community)` pairs whose Tier-1 reconcile failed, as JSON; every sync retries them first; a pair is cleared once its reconcile completes, and kept, silently, while a live or degraded Tier-2 anchor of the record has no recorded community), `schema_version`, the canonical-digest freshness stamp, `skipped_canonical_files` (the files the last reload left out; see [Digest integrity](#digest-integrity)) |
 | — | retrieval telemetry (`retrieval_shows`, `retrieval_seeds` — records that reached a render, areas that were asked about; see [Retrieval telemetry](#retrieval-telemetry) below) |
 | — | `community:*` abstract `Entity` rows, and any Tier-1 `AnchorBinding` pointing at one — see [Community bindings are derived](#community-bindings-are-derived-not-committed) below |
 | — | `canonical_stat` (`subdir`, `stem`, `size`, `mtime_ns` per canonical file this index actually loaded — see [Digest integrity](#digest-integrity) below) |
@@ -201,6 +219,27 @@ This is what "a pull is absorbed automatically" means in practice: nothing has t
 teammate's new decision files landed — the next store open sees the digest disagree and
 reloads. No command is needed beyond what already runs on every session start / tool call.
 
+**A file whose identity does not hold is skipped, not indexed.** During a reload, a record
+file is indexed only if it is a JSON object whose id field (`id`, `entity_id` or
+`domain_id`) is present, is a safe id (see [Layout](#layout-file-per-record-json-plus-a-derived-local-index)),
+and equals the filename stem; a `bindings/` file needs only a safe stem. Anything else is left
+out of the index, so a crafted or copied id can neither become a path nor shadow the record
+that owns it, and an id-less file no longer mints a new ULID on every rebuild. The files
+skipped by the last reload are listed in the index's `skipped_canonical_files` meta key (path,
+reason, size and mtime), and `Store.__init__` prints a warning naming them **on every open**
+while the list is non-empty, pointing at `sidegraph-verify`, which reports each one: a file that is not a JSON object or has
+no id as `parse-error`, an id that differs from the filename as `filename-id-mismatch`, and an
+unsafe id as `unsafe-record-id`. A listed file that has since vanished or changed makes the next open
+reload once, which rewrites the list, so fixing or deleting the file clears the warning.
+An archive segment line with a missing, unsafe or non-string id, or that is not a JSON object, is
+skipped with a warning too (a line of an unrecognized `record_type` is skipped silently); the rest of
+the segment loads. `sidegraph-verify` reports a missing, unsafe or non-string archive id as
+`unsafe-record-id`.
+
+The digest also folds in a fixed identity-rule constant, so an index certified by code that
+predates this rule mismatches once, reloads through it and is re-certified: a poisoned index
+cannot keep serving a crafted id on the fast path.
+
 A reload marks the store `volatile_stale`, and the next `sidegraph-sync` — ordinary or
 lazy, no `--force` needed — rebuilds every derived field from the graph and clears the
 mark. Until that pass runs, domain membership is empty, entity engine-mappings are unset,
@@ -213,7 +252,9 @@ The freshness digest above only protects "does the index match the CANONICAL FIL
 disk" — it says nothing about whether the index actually loaded a file it can currently
 see. `canonical_stat(subdir, stem, size, mtime_ns)` (index-only, gitignored) closes that
 gap: a row exists for a file only once THIS index has actually read (or written) it in its
-current state.
+current state. A file the reload skipped for its identity (see [Freshness](#freshness-absorbing-a-git-pull))
+gets its row too, because the reload did examine it in its current state; without the row,
+every later write would refuse to certify the digest.
 
 Without it, a subtle defect is possible: writer A publishes a canonical file (`os.replace`
 — durable and visible to every process immediately) and dies before its own index write.
@@ -360,8 +401,27 @@ layout:
    (so a crash mid-export never corrupts either the legacy file or a real store directory).
 3. The legacy file is renamed to `<name>.migrated-backup` (e.g.
    `decisions.db.migrated-backup`) — **never deleted**, matching the store's own append-only
-   ethos even for its own retired format. This rename is the point of no return; the staged
-   export then lands at the canonical path.
+   ethos even for its own retired format. In the directory case (`<store>/decisions.db`) the
+   staged subdirectories move into the store first and the rename comes last, so an
+   interruption leaves the legacy file in place and the next open migrates again, which is
+   safe to repeat. In the bare-file case (`Store("old.db")`) the rename has to come first,
+   because the store path is the legacy file itself. Just before it, a sentinel
+   `<name>.migration-incomplete` is written beside the legacy file, naming the staging
+   directory and the backup, and deleted after the last move. If the migration dies after the
+   rename, the staging directory is kept, and the next open refuses with a message naming it
+   and the backup, so the staged files can be moved into place by hand and the sentinel
+   deleted (an empty staging directory means the migration had finished: delete it and the
+   sentinel). A sentinel younger than 60 seconds means a migration is running now: the open
+   refuses with "retry in a minute" and touches nothing, whatever state the legacy file is
+   in. Deleting that sentinel early is unsafe: the next open would take whatever directory is
+   there and never read the staged records back. Only an older sentinel gets the stale
+   cleanup or the manual-recovery message. A sentinel left by an interruption before the
+   rename is stale once it is older than that: the next open removes it, and the staging
+   directory it names only when that is a directory next to the legacy file with a
+   `.sidegraph-migrating-` name.
+   Every legacy row's id (and every binding's `record_id`) must also be a safe id, or the
+   migration fails closed before anything is staged. A row whose JSON omits its id takes its
+   SQL primary key as the id, and that key must be safe too.
 4. `index.db` is rebuilt from the freshly written canonical files, `SCHEMA_VERSION` is stamped
    at the running code's current version, and one line prints to stderr naming the source,
    destination, and backup path.

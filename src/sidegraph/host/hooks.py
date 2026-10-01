@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 # Defined in config.py, not here: server.py (core) needs this constant too (Task 4), and
@@ -105,8 +106,10 @@ def _session_identity(payload: dict) -> tuple[str | None, str | None]:
 
 
 def _session_start_duplicate(store, session_id: str, now: datetime) -> bool:
-    """True iff ``session_start()`` already ran for ``session_id`` within the last
-    :data:`_SESSION_START_DEDUPE_SECONDS` (design D7.2). Same session id AND a fresh
+    """True iff ``session_start()`` already ran for ``session_id`` within
+    :data:`_SESSION_START_DEDUPE_SECONDS` of ``now`` (design D7.2), in either direction: a
+    stamp up to that far AHEAD also counts, because a sibling hook that took a later ``now``
+    may have written first. Same session id AND a fresh
     timestamp -> duplicate, ledger left untouched (so a third rapid call still compares
     against the ORIGINAL write, not a duplicate's own arrival time); anything else
     (no prior key, a different session, or an expired window) -> not a duplicate, and the
@@ -132,9 +135,12 @@ def _session_start_duplicate(store, session_id: str, now: datetime) -> bool:
             if prev_id == session_id:
                 try:
                     prev_dt = datetime.fromisoformat(prev_stamp)
+                    # abs(): `now` is taken before the read, so a sibling hook that committed
+                    # a later stamp first leaves a genuine duplicate a few ms "in the
+                    # future"; a stamp a whole window or more ahead is not a duplicate.
                     if (
                         prev_dt.tzinfo is not None
-                        and (now - prev_dt).total_seconds() < _SESSION_START_DEDUPE_SECONDS
+                        and abs((now - prev_dt).total_seconds()) < _SESSION_START_DEDUPE_SECONDS
                     ):
                         return True
                 except ValueError:
@@ -446,6 +452,7 @@ def stop() -> None:
             return
 
         from ..config import resolve_store_path
+        from ..gitio import open_index_ro
         from ..store import Store
 
         payload = _read_payload()
@@ -456,6 +463,27 @@ def stop() -> None:
         if not session_id:
             print(json.dumps({}))
             return
+
+        # Read-only peek at the capture ledger BEFORE the transcript parse: every Stop after
+        # the capturing one would otherwise re-read the whole transcript just to learn the
+        # session is done. Any failure (no index, a lock, an empty index.db) falls through
+        # to the authoritative `was_captured` check below; the peek never writes.
+        peek = open_index_ro(
+            Path(
+                resolve_store_path(root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False)
+            )
+        )
+        if peek is not None:
+            try:
+                if peek.execute(
+                    "SELECT 1 FROM capture_sessions WHERE session_id = ?", (session_id,)
+                ).fetchone():
+                    print(json.dumps({}))
+                    return
+            except sqlite3.Error:
+                pass
+            finally:
+                peek.close()
 
         transcript_path = payload.get("transcript_path")
         # Must be a non-empty str, not just truthy: a malformed/adversarial payload with an

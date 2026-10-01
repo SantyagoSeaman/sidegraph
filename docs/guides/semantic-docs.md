@@ -170,8 +170,8 @@ uv run sidegraph-import --dry-run                 # see the volume first
 uv run sidegraph-import --path src/execution/ --limit 50
 ```
 
-`--path PREFIX` is repeatable (only rationales whose `file_path` starts with one of the given
-prefixes); `--limit N` caps how many are processed after filtering.
+`--path PREFIX` is repeatable (only rationales whose `file_path` is under one of the given
+directory prefixes, or is that exact file); `--limit N` caps how many are processed after filtering.
 
 **Doc corpora need the semantic pass first**, since `rationale` nodes from prose only show up
 after `graphify extract .`. Volume there tends to be far smaller — the reference ADR corpus

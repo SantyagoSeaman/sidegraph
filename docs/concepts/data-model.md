@@ -261,8 +261,9 @@ newer/future version, or an unrecognized string) is a hard rejection: use a fres
 ## `Initiative` — the Tier-0 grouping container
 
 The high-level capture APIs use an initiative as a flat Tier-0 abstract entity named
-`initiative:<label>`. Passing a draft's `initiative` field creates that entity and binding;
-omitting it creates neither. Capture may derive the label from a branch before it reaches
+`initiative:<label>`. Passing a draft's `initiative` field creates that entity and binding,
+after the name is redacted and trimmed; a blank or all-secret name binds nothing. Omitting
+it creates neither. Capture may derive the label from a branch before it reaches
 this step, but the storage layer does not do so implicitly.
 
 The `Initiative` model below is a separate low-level persisted record supported by

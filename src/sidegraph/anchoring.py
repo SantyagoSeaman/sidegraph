@@ -4,7 +4,7 @@ Given a decision and an anchor reference (name + file), resolve it through a Gra
 and create AnchorBindings across tiers with graceful degradation (see
 docs/concepts/anchoring.md):
 
-- resolved   -> Tier-2 leaf (live) + Tier-1 domain/community (live) [+ Tier-0 initiative]
+- resolved   -> Tier-2 leaf (live) + Tier-1 domain/community (live)
 - ambiguous  -> Tier-1 domain/community only (degraded, unless a domain covers it — see
                 below); no leaf
 - unresolved -> Tier-2 leaf (orphaned); no community
@@ -67,13 +67,11 @@ def resolve_and_bind(
     ref: Descriptor,
     reader: GraphifyReader,
     store: Store,
-    initiative: str | None = None,
     relation: Relation | None = None,
 ) -> AnchorResolution:
     """``relation`` (optional) overrides the default "affects" on the leaf + Tier-1 bindings
-    created for THIS anchor (see docs/concepts/anchoring.md#multi-anchor-at-capture); it
-    never applies to the Tier-0 initiative binding, which is decision-level rather than
-    per-anchor.
+    created for THIS anchor (see docs/concepts/anchoring.md#multi-anchor-at-capture). The
+    Tier-0 initiative binding is decision-level, not per-anchor: the write path makes it.
 
     Returns an :class:`AnchorResolution` — a ``list[AnchorBinding]`` in every respect a
     caller cares about, plus ``.status``/``.candidates`` for callers that want to report
@@ -178,21 +176,6 @@ def resolve_and_bind(
                     )
                 )
             )
-
-    # Tier-0 initiative — created only when the decision names one. Never takes the
-    # per-anchor relation override (see docstring).
-    if initiative:
-        init = store.get_or_create_abstract_entity(f"initiative:{initiative}")
-        bindings.append(
-            store.add_binding(
-                AnchorBinding(
-                    record_id=record_id,
-                    entity_id=init.entity_id,
-                    tier=0,
-                    status="live",
-                )
-            )
-        )
 
     return AnchorResolution(bindings, result.status, result.candidates)
 

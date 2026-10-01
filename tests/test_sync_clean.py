@@ -11,8 +11,6 @@ from __future__ import annotations
 import json
 import subprocess
 
-import pytest
-
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import TOC_CACHE_KEY
 from sidegraph.schema import Domain, DomainStatus, Provenance
@@ -108,11 +106,6 @@ GRAPH_COMMUNITY_B = {
     ],
     "links": [],
 }
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_initiative(monkeypatch):
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: None)
 
 
 def _snapshot_canonical_dir(store: Store) -> dict[str, tuple[bytes, int, int]]:

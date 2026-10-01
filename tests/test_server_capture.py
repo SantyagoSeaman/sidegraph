@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import TOC_CACHE_KEY
 from sidegraph.schema import Descriptor, Domain, DomainStatus, Provenance
@@ -49,6 +51,28 @@ def test_list_proposed_docstrings_mention_domains_section():
 
     assert "Domains" in _list_proposed_impl.__doc__
     assert "Domains" in list_proposed.__doc__
+
+
+def test_write_tool_docstrings_name_anchors_orphaned():
+    """The published descriptions are what an agent reads: every tool whose result carries
+    ``anchors_orphaned`` must say so, or the one field to act on goes unread."""
+    from sidegraph.server import (
+        add_decision,
+        add_fact,
+        propose_decisions,
+        supersede_decision,
+        supersede_fact,
+    )
+
+    for tool in (add_decision, supersede_decision, add_fact, supersede_fact, propose_decisions):
+        doc = tool.fn.__doc__ if hasattr(tool, "fn") else tool.__doc__
+        assert doc and "anchors_orphaned" in doc, tool
+        # An orphaned anchor is repaired with add_anchors; superseding the record would close
+        # an accepted record and write a duplicate.
+        assert "add_anchors" in doc, tool
+        assert "or supersede the record" not in doc, tool
+        orphan_text = doc[doc.index("anchors_orphaned") :]
+        assert "supersede the record" not in orphan_text, tool
 
 
 def test_ratify_impl_reports_errors_per_id(tmp_path):
@@ -813,3 +837,94 @@ def test_propose_decisions_docstring_enumerates_relation_literals():
     doc = propose_decisions.__doc__ or ""
     for literal in ("creates", "modifies", "affects", "deprecates", "considered"):
         assert literal in doc, f"{literal!r} missing from propose_decisions' docstring"
+
+
+SECRET_INITIATIVE = "AKIAQWERTYUIOPASDFGH"
+_TRADER = [{"name": "Trader", "file_path": "trader/exec.py"}]
+
+
+def _initiative_names(store):
+    rows = store._conn.execute(
+        "SELECT canonical_name FROM entities WHERE canonical_name LIKE 'initiative:%'"
+    ).fetchall()
+    return [r["canonical_name"] for r in rows]
+
+
+@pytest.mark.parametrize("with_reader", [False, True])
+@pytest.mark.parametrize("with_anchors", [False, True])
+def test_add_decision_binds_initiative_without_reader_or_anchors(
+    tmp_path, with_reader, with_anchors
+):
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE) if with_reader else None
+    out = _add_decision_impl(
+        store,
+        reader,
+        "title",
+        "adr",
+        "ctx",
+        "choice",
+        anchors=_TRADER if with_anchors else None,
+        initiative="metadata-platform",
+    )
+    tier0 = [b for b in store.bindings_for_record(out["id"]) if b.tier == 0]
+    assert len(tier0) == 1
+    assert tier0[0].status == "live"
+    assert store.get_entity(tier0[0].entity_id).canonical_name == "initiative:metadata-platform"
+    assert any(
+        e["canonical_name"] == "initiative:metadata-platform" and e["tier"] == 0
+        for e in out["entities"]
+    )
+
+
+def test_add_decision_initiative_keeps_default_relation(tmp_path):
+    store = Store(tmp_path / "t.db")
+    out = _add_decision_impl(
+        store,
+        GraphifyReader(FIXTURE),
+        "title",
+        "adr",
+        "ctx",
+        "choice",
+        anchors=[dict(_TRADER[0], relation="deprecates")],
+        initiative="proj",
+    )
+    by_tier = {b.tier: b for b in store.bindings_for_record(out["id"])}
+    assert by_tier[2].relation == "deprecates"
+    assert by_tier[0].relation == "affects"  # the per-anchor override never reaches it
+
+
+@pytest.mark.parametrize("initiative", [SECRET_INITIATIVE, "   "])
+def test_add_decision_all_secret_or_blank_initiative_binds_nothing(tmp_path, initiative):
+    store = Store(tmp_path / "t.db")
+    out = _add_decision_impl(
+        store,
+        GraphifyReader(FIXTURE),
+        "title",
+        "adr",
+        "ctx",
+        "choice",
+        anchors=_TRADER,
+        initiative=initiative,
+    )
+    assert _initiative_names(store) == []
+    assert not [b for b in store.bindings_for_record(out["id"]) if b.tier == 0]
+
+
+def test_add_decision_redacts_initiative(tmp_path):
+    store = Store(tmp_path / "t.db")
+    out = _add_decision_impl(
+        store,
+        GraphifyReader(FIXTURE),
+        "title",
+        "adr",
+        "ctx",
+        "choice",
+        anchors=_TRADER,
+        initiative=f"proj-{SECRET_INITIATIVE}",
+    )
+    assert out["redactions"] >= 1
+    assert not any(SECRET_INITIATIVE in n for n in _initiative_names(store))
+    for f in tmp_path.rglob("*.json"):
+        assert SECRET_INITIATIVE not in f.read_text()
+    assert any(e["canonical_name"] == "initiative:proj-[REDACTED]" for e in out["entities"])

@@ -472,6 +472,11 @@ def _case_compact(store: Store) -> tuple[str, object]:
     return "INSERT INTO meta", lambda: store.compact()
 
 
+def _case_delete_meta(store: Store) -> tuple[str, object]:
+    store.set_meta("case-custom-key", "v1")
+    return "DELETE FROM meta", lambda: store.delete_meta("case-custom-key")
+
+
 def _case_supersede_domain(store: Store) -> tuple[str, object]:
     old = store.add_domain(_domain("case-supersede-old"))
     new = _domain("case-supersede-new", supersedes=old.domain_id)
@@ -503,6 +508,7 @@ _ROLLBACK_CASES = {
     "upsert_initiative": _case_upsert_initiative,
     "compact": _case_compact,
     "set_meta": _case_set_meta,
+    "delete_meta": _case_delete_meta,
     "supersede_domain": _case_supersede_domain,
 }
 

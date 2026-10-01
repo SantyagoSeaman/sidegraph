@@ -611,3 +611,19 @@ def test_the_shared_db_help_still_promises_migration_where_it_is_true(capsys):
     from sidegraph.cli import export_okf_main
 
     assert "one-time migration" in _help_of(export_okf_main, capsys)
+
+
+def test_the_inspection_commands_do_not_promise_a_legacy_migration(capsys):
+    """verify, doctor and blame never open a `Store`, so their `--db` help must not borrow the
+    sentence the store-opening commands carry."""
+    from sidegraph.cli import blame_main, doctor_main, verify_main
+
+    for main in (verify_main, doctor_main, blame_main):
+        text = _help_of(main, capsys)
+        assert "cannot migrate" in text and "one-time migration" not in text, main
+
+
+def test_the_ratify_help_says_all_includes_standalone_facts(capsys):
+    from sidegraph.cli import ratify_main
+
+    assert "standalone facts" in _help_of(ratify_main, capsys)

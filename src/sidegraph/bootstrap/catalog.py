@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
 from sidegraph.bootstrap.model import FrozenModel
 from sidegraph.schema import Decision, DecisionStatus, Domain, Fact
+from sidegraph.store import _archive_line_problem, _record_identity_problem
 
 
 class CanonicalCatalog(FrozenModel):
@@ -32,10 +34,25 @@ class CanonicalCatalog(FrozenModel):
         )
 
 
-def _load_model[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
+def _load_identified[ModelT: BaseModel](
+    path: Path, model: type[ModelT], id_field: str
+) -> ModelT | None:
+    """Read one canonical file as ``model``. A file that is not a record by the store's identity
+    rule (``store._record_identity_problem``: id present, safe, equal to the filename stem)
+    is skipped with a warning. Keying it by its JSON id would mint a fresh ULID for a missing
+    id on every load, so the fingerprint would differ between two loads of one store (design/
+    superpowers/specs/2026-09-29-record-identity-design.md D12)."""
     try:
-        return model.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValidationError) as exc:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError(f"invalid canonical file {path}: {exc}") from exc
+    problem = _record_identity_problem(data, id_field, path.stem)
+    if problem is not None:
+        print(f"sidegraph: WARNING skipping {path}: {problem}.", file=sys.stderr)
+        return None
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
         raise ValueError(f"invalid canonical file {path}: {exc}") from exc
 
 
@@ -57,8 +74,21 @@ def load_canonical_catalog(store_dir: Path) -> CanonicalCatalog:
             try:
                 raw = json.loads(line)
                 if not isinstance(raw, dict):
-                    raise TypeError("archive record must be a JSON object")
+                    print(
+                        f"sidegraph: WARNING skipping a line of archive segment {segment.name}: "
+                        "not a JSON object.",
+                        file=sys.stderr,
+                    )
+                    continue
                 payload = {key: value for key, value in raw.items() if key != "record_type"}
+                problem = _archive_line_problem(raw.get("record_type"), payload)
+                if problem is not None:
+                    print(
+                        f"sidegraph: WARNING skipping a line of archive segment {segment.name}: "
+                        f"{problem}.",
+                        file=sys.stderr,
+                    )
+                    continue
                 if raw.get("record_type") == "decision":
                     decision = Decision.model_validate(payload)
                     decisions.setdefault(decision.id, decision)
@@ -69,12 +99,17 @@ def load_canonical_catalog(store_dir: Path) -> CanonicalCatalog:
                 raise ValueError(f"invalid canonical archive {segment}:{lineno}: {exc}") from exc
 
     for path in sorted((store_dir / "decisions").glob("*.json")):
-        decision = _load_model(path, Decision)
-        decisions[decision.id] = decision
-    facts = tuple(_load_model(path, Fact) for path in sorted((store_dir / "facts").glob("*.json")))
+        hot_decision = _load_identified(path, Decision, "id")
+        if hot_decision is not None:
+            decisions[hot_decision.id] = hot_decision
+    loaded_facts = (
+        _load_identified(path, Fact, "id") for path in sorted((store_dir / "facts").glob("*.json"))
+    )
+    facts = tuple(fact for fact in loaded_facts if fact is not None)
     for path in sorted((store_dir / "domains").glob("*.json")):
-        domain = _load_model(path, Domain)
-        domains[domain.domain_id] = domain
+        hot_domain = _load_identified(path, Domain, "domain_id")
+        if hot_domain is not None:
+            domains[hot_domain.domain_id] = hot_domain
 
     return CanonicalCatalog(
         decisions=tuple(decisions[key] for key in sorted(decisions)),

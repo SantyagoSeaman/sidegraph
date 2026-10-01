@@ -282,10 +282,12 @@ def test_marker_never_acquired_regardless_of_which_subdir_holds_the_record(tmp_p
 
     ``_store_has_any_records`` itself only checks file EXISTENCE under each subdir (see its
     docstring), never content — but ``Store.__init__`` still cold-reloads and
-    pydantic-validates every canonical file on a fresh index regardless, so each
-    placeholder below is the minimal SCHEMA-VALID shape for its kind (a plain ``[]`` for
-    ``bindings``, which is a list of entries, not a record file itself), written directly
-    to disk before ``Store`` ever opens this directory.
+    reads every canonical file on a fresh index regardless. Each placeholder below is the
+    minimal SCHEMA-VALID shape for its kind (a plain ``[]`` for ``bindings``, which is a
+    list of entries, not a record file itself), written directly to disk before ``Store``
+    ever opens this directory. It carries no id, so the reload SKIPS it with a warning (the
+    record-identity rule: a record's id is its filename); the file still exists, which is
+    all this test needs.
     """
     minimal_content = {
         "decisions": {

@@ -31,20 +31,24 @@ the same way any other entity does.
 
 ## Multi-anchor at capture
 
-`resolve_and_bind(record_id, ref, reader, store, initiative=None, relation=None)` resolves one
-`Descriptor` against the current graph and can create up to three bindings for it in one call:
+`resolve_and_bind(record_id, ref, reader, store, relation=None)` resolves one
+`Descriptor` against the current graph and can create up to two bindings for it in one call:
 
 - **Tier-2 (leaf)** — the concrete entity itself, when the resolve either succeeded or failed
   outright (not when ambiguous).
 - **Tier-1 (group)** — the entity's Leiden community, whenever one is known — see
   [domain-aware Tier-1](#domain-aware-tier-1) below for what actually gets bound once a domain
   has claimed that community.
-- **Tier-0 (initiative)** — only when the decision names an owning initiative; always `live`.
 
 `relation` (optional; `creates` \| `modifies` \| `affects` \| `deprecates` \| `considered`,
 default `"affects"`) overrides the default on the Tier-2 and Tier-1 bindings created for *this*
-anchor — it never applies to the Tier-0 initiative binding, which is decision-level rather than
-per-anchor. See [data model](data-model.md#anchorbinding--tiered-link).
+anchor. See [data model](data-model.md#anchorbinding--tiered-link).
+
+The **Tier-0 initiative** binding is not made per anchor. When the decision names an owning
+initiative (or the propose path derives one from the current branch of the project's
+repository: the directory that holds the store, or its symlink), the write path binds it once,
+`live`, whatever the reader and the anchors: the name is redacted first, and a blank or
+all-secret name binds nothing.
 
 A decision typically ends up multi-anchored: a leaf plus its community (or domain), optionally
 plus an initiative — so a single rebuild that only shifts the leaf still leaves the group anchor
@@ -88,11 +92,14 @@ silently re-pointed, never written to git, whenever Leiden renumbers.
 Sidegraph never guesses. `reader.resolve()` returns exactly one of three statuses, and each
 drives different bindings:
 
-| Resolve status | Tier-2 leaf | Tier-1 community | Tier-0 initiative |
-|---|---|---|---|
-| **resolved** (unique match) | created, `live` | created if the node has a community, `live` | created if named, `live` |
-| **ambiguous** (multiple matches) | **none created** | created only if *all* candidates share one community, `degraded` | created if named, `live` |
-| **unresolved** (no match) | created, `orphaned` | none (no community to fall back to) | created if named, `live` |
+| Resolve status | Tier-2 leaf | Tier-1 community |
+|---|---|---|
+| **resolved** (unique match) | created, `live` | created if the node has a community, `live` |
+| **ambiguous** (multiple matches) | **none created** | created only if *all* candidates share one community, `degraded` |
+| **unresolved** (no match) | created, `orphaned` | none (no community to fall back to) |
+
+The Tier-0 initiative binding does not depend on the resolve status: it is decision-level, made
+once by the write path, `live`, whenever an initiative is named.
 
 An ambiguous match with candidates spanning different communities gets **no binding at all**
 beyond a possible initiative — Sidegraph would rather anchor nothing than anchor to a guess.
@@ -121,7 +128,8 @@ name-only match, then orphaned. No special-casing for concepts versus code symbo
 
 The sync job (triggered lazily on read — see [retrieval](retrieval.md#lazy-sync-on-read))
 re-resolves every concrete entity through a deterministic ladder (`rebind_entity` in
-`sync.py`), gated on a graph-version check so it's a cheap no-op when nothing changed:
+`sync.py`), gated on a graph-version check so the full pass is skipped when nothing changed (entities
+remembered under `pending_uncommitted_moves` are still re-verified once `HEAD` has moved):
 
 1. **Exact** — `resolve(name, file_path)` still resolves uniquely -> **rebound** (or
    **unchanged** if the node id didn't move); leaf bindings heal to `live`; the entity's

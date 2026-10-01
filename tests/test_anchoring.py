@@ -124,17 +124,6 @@ def test_ambiguous_real_reader_degrades_to_community(tmp_path):
     assert s.get_entity(tiers[1].entity_id).canonical_name == "community:7"
 
 
-def test_initiative_creates_tier0(tmp_path):
-    s = Store(tmp_path / "t.db")
-    d = _decision(s)
-    reader = FakeReader(ResolveResult(status="resolved", node_id="n1", community="18"))
-    bindings = resolve_and_bind(
-        d.id, Descriptor(name="X", file_path="x.py"), reader, s, initiative="Metadata Platform"
-    )
-    tiers = {b.tier for b in bindings}
-    assert tiers == {2, 1, 0}
-
-
 # -- domain-aware Tier-1 binding (mind-model layer, M2) ----------------------------------
 
 
@@ -208,7 +197,7 @@ def test_no_matching_domain_still_falls_back_to_community(tmp_path):
     assert s.get_entity(tier1.entity_id).canonical_name == "community:18"
 
 
-def test_relation_override_applies_to_leaf_and_tier1_not_initiative(tmp_path):
+def test_relation_override_applies_to_leaf_and_tier1(tmp_path):
     s = Store(tmp_path / "t.db")
     d = _decision(s)
     reader = FakeReader(ResolveResult(status="resolved", node_id="n1", community="18"))
@@ -217,13 +206,12 @@ def test_relation_override_applies_to_leaf_and_tier1_not_initiative(tmp_path):
         Descriptor(name="X", file_path="x.py"),
         reader,
         s,
-        initiative="proj",
         relation="deprecates",
     )
     by_tier = {b.tier: b for b in bindings}
+    assert set(by_tier) == {2, 1}
     assert by_tier[2].relation == "deprecates"
     assert by_tier[1].relation == "deprecates"
-    assert by_tier[0].relation == "affects"  # initiative unaffected by per-anchor override
 
 
 def test_relation_override_applies_to_domain_binding_too(tmp_path):

@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.server import _propose_decisions_impl, _ratify_decisions_impl
 from sidegraph.store import Store
@@ -39,11 +37,6 @@ def _write_graph(tmp_path, name, data):
     p = tmp_path / name
     p.write_text(json.dumps(data))
     return p
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_initiative(monkeypatch):
-    monkeypatch.setattr("sidegraph.capture._derive_initiative", lambda: None)
 
 
 def _canonical_snapshot(store_path) -> dict[str, tuple[bytes, int, int]]:

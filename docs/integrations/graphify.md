@@ -61,8 +61,11 @@ Anchoring and `sidegraph-import` both treat its output identically to the AST pa
 see [`guides/semantic-docs.md`](../guides/semantic-docs.md) for the full two-pass workflow,
 cost/cache expectations, and the bootstrap-import walkthrough.
 
-Point Sidegraph at it with `SIDEGRAPH_GRAPH` (default `graphify-out/graph.json`, resolved
-relative to the process's working directory).
+Point Sidegraph at it with `SIDEGRAPH_GRAPH` (default `graphify-out/graph.json`). The CLI
+commands resolve a relative default against the store's project, and a `--graph` you type
+against the shell's directory. The MCP server resolves it the same way, against the
+project of the store it serves, and the hooks anchor a relative `SIDEGRAPH_GRAPH` to
+`$CLAUDE_PROJECT_DIR` when the host sets it (the process's working directory otherwise). See [Graph path resolution](../reference/cli.md).
 
 ## Non-git and doc-only corpora
 
@@ -116,11 +119,11 @@ It is **not a destructive conflict.** The two live in different files (Graphify'
 merges rather than overwrites; both hooks only add `additionalContext` and neither ever
 denies a tool call, so there is no blocking or deadlock; and `graphify claude uninstall`
 filters strictly on Graphify's own matchers (`Bash`, `Read|Glob`, `Glob|Grep`), so it never
-removes Sidegraph's `Read|Grep` hook. Safe to run — but redundant.
+removes Sidegraph's `Read|Grep|Edit|Write` hook. Safe to run — but redundant.
 
 Redundant because the **Sidegraph plugin already fronts the graph for Claude Code**: its
 `SessionStart` hook injects the graph-derived top-tier map, its `PreToolUse` nudge already
-redirects blind `Read`/`Grep` toward retrieval (non-blocking, **once per session**), and its
+redirects blind `Read`/`Grep` toward retrieval (non-blocking, each of its two forms at most **once per session**), and its
 MCP server exposes the query surface. Graphify's `Read|Glob` hook, by contrast, fires on
 **every** qualifying read and pushes toward the *code* graph (`graphify query`) rather than
 the *decision* memory — so on a plain read you get two nudges pulling different directions,
@@ -162,8 +165,9 @@ always finishes first:
 sidegraph-sync
 ```
 
-This is a convenience, not a dependency: `sidegraph-sync` re-resolves anchors and is a cheap
-no-op when the graph version hasn't changed. Because the same `graph_version` check also runs
+This is a convenience, not a dependency: `sidegraph-sync` re-resolves anchors and skips the
+full pass when the graph version hasn't changed (entities remembered under
+`pending_uncommitted_moves` are still re-verified once `HEAD` has moved). Because the same `graph_version` check also runs
 lazily on every read path (`get_task_context`, `SessionStart`), a missed or skipped hook
 invocation is self-healing — the next read catches the stale mapping and re-syncs before
 serving context.
@@ -198,8 +202,9 @@ serving context.
   file content changed since that pre-commit build), which leaves `built_at_commit` stamped to
   the *previous* commit. Sidegraph's own sync gate is unaffected — the content hash folded into
   `graph_version` (see [`reference/configuration.md`](../reference/configuration.md#graph-version-semantics))
-  still matches either way, so sync correctly no-ops too — but any decision captured in that
-  window has `provenance.graph_version` recorded with the stale commit id, not the new HEAD. If
+  still matches either way, so the full pass is correctly skipped too (a move it left as `moved_uncommitted`
+  is remembered and re-verified once `HEAD` moves, without a rebuild) — but any decision
+  captured in that window has `provenance.graph_version` recorded with the stale commit id, not the new HEAD. If
   exact provenance commits matter for that window, touch a tracked file (or otherwise force a
   real rebuild) after committing so `built_at_commit` catches up before capturing more
   decisions.
