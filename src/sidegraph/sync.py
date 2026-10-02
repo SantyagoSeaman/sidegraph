@@ -6,7 +6,9 @@ old path confirmed gone from disk AND that same move confirmed by COMMITTED git 
 see ``_committed_evidence_confirms_move``; unconfirmed evidence reports
 ``moved_uncommitted`` and leaves the binding untouched rather than guessing, remembering
 the entity so a later sync re-verifies it once git HEAD moves, even when the graph did not
-change — the dirty-tree guard, ``SIDEGRAPH_TRUST_DIRTY_TREE=on`` escapes it) -> ambiguous
+change — the dirty-tree guard, ``SIDEGRAPH_TRUST_DIRTY_TREE=on`` escapes it; the hit must also
+be the same name, case kept, and git must show the new path arriving with the old one's
+removal — see ``_move_adds_the_new_path``; a refusal falls through to orphaned) -> ambiguous
 -> orphaned —
 healing or degrading tier-2 leaf bindings (never deleting) and refreshing the
 durable->engine mapping. Gated on
@@ -27,6 +29,12 @@ writing it (Gate-5 blocker — see
 TOC cache. ``refresh_domain_communities_now`` resolves a single domain immediately
 (ratify-time, bypassing the ``graph_version`` gate) so a newly-accepted domain's membership
 shows up without waiting for the next graph rebuild.
+
+Index-only mode (``canonical_writes=False``, see ``sync``): a linked worktree reads the main
+checkout's graph and syncs it into its own cold index. The pass refreshes every derived thing as
+usual and abstains from the one thing that can touch a tracked file, the moved rung's adoption
+(``_rebind_ladder``), in the full pass and in the narrow re-verification pass.
+see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)
 
 Git-native store wave (see docs/reference/store-format.md): the report also surfaces
 ``Store.domain_slug_conflicts()`` — cross-branch domain-slug races — as
@@ -55,6 +63,7 @@ from .schema import (
     DomainStatus,
     Entity,
     matches_path_prefix,
+    strip_decoration,
 )
 from .store import VOLATILE_STALE_KEY, Store
 from .verify import _run_git
@@ -336,6 +345,75 @@ def _committed_evidence_confirms_move(repo_root: Path, old_path: str, new_path: 
     return old_gone and new_present
 
 
+def _tree_has(repo_root: Path, rev: str, path: str) -> bool | None:
+    """Whether ``path`` is in ``rev``'s tree: ``True`` / ``False``, or ``None`` when git could
+    not answer (a missing binary, a timeout, a non-zero exit). ``git ls-tree`` exits 0 with
+    empty output for an absent path, so "absent" and "failed" never look alike here."""
+    try:
+        result = _run_git(["ls-tree", rev, "--", path], cwd=repo_root, timeout=5.0)
+    except ValueError:
+        return None
+    if result.returncode != 0:
+        return None
+    return bool(result.stdout.strip())
+
+
+def _move_adds_the_new_path(repo_root: Path, old_path: str, new_path: str) -> bool:
+    """True only when git shows ``new_path`` was ADDED by the change that removed
+    ``old_path`` -- the half of a move ``_committed_evidence_confirms_move`` cannot see: it
+    only proves ``new_path`` is in HEAD now, which a file that was there all along satisfies
+    just as well (a deleted type whose name matches an old member elsewhere).
+
+    Fails CLOSED. Any git answer that is not a clear yes refuses: a non-zero exit, a git that
+    cannot run, an empty answer where one is required, a shallow boundary. A refusal leaves
+    the leaf orphaned, which is visible and repairable; a wrong adoption rewrites a shared
+    descriptor silently.
+
+    - Old path still in HEAD (only reachable with ``SIDEGRAPH_TRUST_DIRTY_TREE=on``, an
+      uncommitted move): ``new_path`` must be absent from HEAD, i.e. new in the working tree.
+    - Otherwise: find the mainline commit that deleted ``old_path`` (``--first-parent -m``,
+      so a merge counts as one change: a branch that adds in one commit and deletes in the
+      next, merged ``--no-ff``, is judged as a whole). Its first parent must exist (it does
+      not at a shallow boundary) and lack ``new_path``, and the commit itself must hold it.
+
+    # see design/superpowers/specs/2026-10-01-moved-rung-false-adoption-design.md (D2)
+    """
+    old_in_head = _tree_has(repo_root, "HEAD", old_path)
+    if old_in_head is None:
+        return False
+    if old_in_head:
+        return _tree_has(repo_root, "HEAD", new_path) is False
+    try:
+        log = _run_git(
+            [
+                "log",
+                "--first-parent",
+                "-m",
+                "--no-show-signature",
+                "-1",
+                "--format=%H",
+                "--diff-filter=D",
+                "--",
+                # a pathspec reads [ * ? as a glob; ls-tree does not, and takes no magic
+                f":(literal){old_path}",
+            ],
+            cwd=repo_root,
+            timeout=5.0,
+        )
+        change = log.stdout.strip()
+        if log.returncode != 0 or not change or len(change.split()) != 1:
+            return False
+        parent = f"{change}^1"
+        if _run_git(["rev-parse", "--verify", "-q", parent], cwd=repo_root, timeout=5.0).returncode:
+            return False
+    except ValueError:
+        return False
+    return (
+        _tree_has(repo_root, parent, new_path) is False
+        and _tree_has(repo_root, change, new_path) is True
+    )
+
+
 def _trust_dirty_tree() -> bool:
     """``SIDEGRAPH_TRUST_DIRTY_TREE=on`` — off-by-default escape hatch, point-of-use env
     read (same convention as ``SIDEGRAPH_AUTO_ACCEPT``/the host-hook ``*_NUDGE`` flags):
@@ -354,9 +432,13 @@ def rebind_entity(
     reader: GraphifyReader,
     repo_root: Path | None = None,
     vacated: dict[str, set[str]] | None = None,
+    canonical_writes: bool = True,
 ) -> RebindOutcome:
     """One entity through the deterministic rebind ladder, then (with no ``vacated``
     collector) reconcile the Tier-1 community rows of the records it touched.
+
+    ``canonical_writes=False`` keeps the pass index-only: the moved rung abstains (see
+    ``_rebind_ladder``), so no tracked ``entities/<id>.json`` is ever rewritten.
 
     ``sync()`` passes one collector across the whole ladder and reconciles once after it,
     because the sibling leaves' final state decides whether a vacated community is still
@@ -364,7 +446,7 @@ def rebind_entity(
     reconciled immediately. See ``_rebind_ladder`` for the ladder itself.
     """
     collector: dict[str, set[str]] = {} if vacated is None else vacated
-    outcome = _rebind_ladder(entity, store, reader, repo_root, collector)
+    outcome = _rebind_ladder(entity, store, reader, repo_root, collector, canonical_writes)
     if vacated is None:
         for record_id, gone in collector.items():
             _reconcile_tier1_communities(record_id, gone, store)
@@ -377,8 +459,15 @@ def _rebind_ladder(
     reader: GraphifyReader,
     repo_root: Path | None,
     vacated: dict[str, set[str]],
+    canonical_writes: bool = True,
 ) -> RebindOutcome:
     """One entity through the deterministic rebind ladder.
+
+    ``canonical_writes=False`` (a borrowed graph, see ``sync``) makes the moved rung abstain
+    entirely: its adoption is the only step that rewrites a tracked file, and the evidence it
+    reads (the old path gone from disk, the move in HEAD's tree) is the graph's checkout's, not
+    the branch the store belongs to. An exact miss then falls through to the same orphan rung as
+    any move the rung cannot verify. The ambiguity branch beside it is index-only and stays.
 
     ``repo_root`` backs the "moved" rung's file-still-on-disk guard (see the comment at
     that rung) -- ``sync()`` resolves it once per pass via ``_resolve_repo_root`` and
@@ -445,17 +534,26 @@ def _rebind_ladder(
     #    doc_import.py's ambiguous-anchor handling, the community-derivation cap above).
     if desc.file_path is not None:
         loose = reader.resolve(Descriptor(name=desc.name))
-        if loose.status == "resolved":
+        if loose.status == "resolved" and canonical_writes:
             # same resolve() invariant as the exact-match branch above.
             assert loose.node_id is not None
             node = reader.get_node(loose.node_id)
             new_file = node.file_path if node is not None else None
+            # The lookup is case-insensitive and decoration-blind, so a unique hit can be a
+            # different symbol altogether (a deleted type ``Priority`` against an old member
+            # ``.priority``). A move keeps the name: same spelling once the decoration both
+            # sides carry is stripped, case kept. Checked BEFORE everything below, so a loose
+            # match never reaches ``moved_uncommitted`` (which is remembered and re-run) and a
+            # refusal falls through to the orphan rung.
+            same_name = node is not None and strip_decoration(node.name) == strip_decoration(
+                desc.name
+            )
             same_suffix = (
                 new_file is not None
                 and PurePosixPath(new_file).suffix == PurePosixPath(desc.file_path).suffix
             )
             old_confirmed_gone = repo_root is not None and not (repo_root / desc.file_path).exists()
-            if same_suffix and old_confirmed_gone:
+            if same_name and same_suffix and old_confirmed_gone:
                 # repo_root is not None here (old_confirmed_gone's own short-circuit proves
                 # it), and new_file is not None (same_suffix's own check proves it) -- both
                 # narrowed for the committed-evidence check below.
@@ -473,33 +571,46 @@ def _rebind_ladder(
                 if _trust_dirty_tree() or _committed_evidence_confirms_move(
                     repo_root, desc.file_path, new_file
                 ):
-                    entity.descriptor = Descriptor(name=desc.name, file_path=new_file)
-                    repointed = _adopt(
-                        entity, loose.node_id, version, store, loose.community, vacated
-                    )
+                    # Committed evidence says the new path is in HEAD, not that it came WITH
+                    # the move: a file that was there all along says the same. Adopt only when
+                    # git shows the change that removed the old path also added the new one;
+                    # any git failure refuses, and the refusal falls through to the orphan
+                    # rung.
+                    if _move_adds_the_new_path(repo_root, desc.file_path, new_file):
+                        entity.descriptor = Descriptor(name=desc.name, file_path=new_file)
+                        repointed = _adopt(
+                            entity, loose.node_id, version, store, loose.community, vacated
+                        )
+                        return RebindOutcome(
+                            **base,
+                            status="moved",
+                            node_id=loose.node_id,
+                            detail=f"{desc.file_path} -> {new_file}",
+                            repointed=repointed,
+                        )
+                elif _tree_has(repo_root, "HEAD", new_file) is False:
+                    # Evidence looks like a move on disk but isn't (yet) committed -- never
+                    # guess. Leave the binding exactly as it was (no adopt, no repoint, no
+                    # status change) and surface it the same way orphaned/ambiguous outcomes
+                    # are surfaced: informational, routed to a human, never a silent rewrite.
+                    # Only while the move can still come true: a new path that is ALREADY in
+                    # HEAD was there before the old one went, no later commit makes that a
+                    # move (``_move_adds_the_new_path``), and git failing to say fails closed.
+                    # Both fall through to the orphan rung instead of being remembered.
                     return RebindOutcome(
                         **base,
-                        status="moved",
-                        node_id=loose.node_id,
-                        detail=f"{desc.file_path} -> {new_file}",
-                        repointed=repointed,
+                        status="moved_uncommitted",
+                        detail=(
+                            f"{desc.file_path} -> {new_file} (uncommitted -- commit the move "
+                            "so sync can verify it, or set SIDEGRAPH_TRUST_DIRTY_TREE=on to "
+                            "trust the working tree)"
+                        ),
                     )
-                # Evidence looks like a move on disk but isn't (yet) committed -- never
-                # guess. Leave the binding exactly as it was (no adopt, no repoint, no
-                # status change) and surface it the same way orphaned/ambiguous outcomes
-                # are surfaced: informational, routed to a human, never a silent rewrite.
-                return RebindOutcome(
-                    **base,
-                    status="moved_uncommitted",
-                    detail=(
-                        f"{desc.file_path} -> {new_file} (uncommitted -- commit the move so "
-                        "sync can verify it, or set SIDEGRAPH_TRUST_DIRTY_TREE=on to trust "
-                        "the working tree)"
-                    ),
-                )
-            # fall through to orphan: a cross-suffix hit (collision, not a move), the old
-            # path is still on disk (out-of-scope file that never moved), or repo_root is
-            # unknown and the old path's fate can't be verified either way (fail closed)
+            # fall through to orphan: a different symbol with the same loose name, a
+            # cross-suffix hit (collision, not a move), the old path is still on disk
+            # (out-of-scope file that never moved), repo_root is unknown and the old path's
+            # fate can't be verified either way (fail closed), the new path is already in
+            # HEAD, or git cannot show the new path arrived with the old one's removal
         if loose.status == "ambiguous":
             _set_leaf_status(entity.entity_id, store, "degraded")
             repointed = _repoint_off_path(entity, loose.community, store, vacated)
@@ -1050,7 +1161,7 @@ def _reverify_pending_moves(
     _record_pending_moves(store, head, outcomes, frozenset(watched))
     _reconcile_vacated(vacated, store, outcomes)
     if next(store.iter_domains(status=DomainStatus.ACCEPTED), None) is not None:
-        store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store, reader)))
+        _rebuild_toc_cache(store, reader)
     return SyncReport(
         from_version=version,
         to_version=version,
@@ -1060,9 +1171,52 @@ def _reverify_pending_moves(
     )
 
 
-def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncReport:
+# Key inside the cached TOC dict: the store's canonical digest when it was built (see
+# ``Store.canonical_digest``). A cache that carries none, because a path with no graph reader
+# wrote it, is never trusted as current.
+TOC_DIGEST_FIELD = "store_digest"
+
+
+def _rebuild_toc_cache(store: Store, reader: GraphifyReader) -> None:
+    """Build the TOC with ``reader`` and cache it, stamped with the canonical digest.
+
+    The digest is read BEFORE the build: a canonical write that lands during it then leaves
+    the stamp behind the store, and the next pass rebuilds, never the other way round.
+    """
+    digest = store.canonical_digest()
+    toc = build_toc(store, reader)
+    if digest is not None:
+        toc[TOC_DIGEST_FIELD] = digest
+    store.set_meta(TOC_CACHE_KEY, json.dumps(toc))
+
+
+def _toc_cache_is_current(store: Store) -> bool:
+    """True when the cached TOC was built, with a reader, over the store as it is now."""
+    digest = store.canonical_digest()
+    if digest is None:
+        return False
+    try:
+        cache = json.loads(store.get_meta(TOC_CACHE_KEY) or "null")
+    except ValueError:
+        return False
+    return isinstance(cache, dict) and cache.get(TOC_DIGEST_FIELD) == digest
+
+
+def sync(
+    store: Store, reader: GraphifyReader, force: bool = False, *, canonical_writes: bool = True
+) -> SyncReport:
     """Full rebind pass, gated on graph_version AND the volatile-reload flag. Stamps
     last_synced, and clears the reload flag, only on completion.
+
+    ``canonical_writes=False`` is the index-only mode for a graph that is not this store's own
+    (a linked worktree reading the main checkout's): every derived refresh runs, and the moved
+    rung abstains in the full pass while the narrow re-verification pass is skipped, because an
+    adoption rewrites a tracked ``entities/<id>.json`` from evidence about another checkout's
+    tree. The pending-moves key is left as it was. Its version stamp is its own value
+    (``index-only:<graph version>``), compared and written in place of the plain one: a graph
+    the store later reads as its own, byte for byte the same (a copy, a symlinked
+    ``graphify-out``, a deterministic rebuild at the same commit), must not look "already
+    synced" to a pass that owns the moved rung.
 
     Entities that error during rebind are not retried until the next graph-version change
     (or force=True) — the stamp records a completed visit, not universal success. The
@@ -1078,12 +1232,21 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
     membership was not recomputed). The gate below skips the rebind ladder itself when the
     version already matches, the store's volatile state isn't cold (`VOLATILE_STALE_KEY`),
     and `force` wasn't passed — but the gate does NOT skip the TOC cache refresh: a skipped
-    pass still rewrites `toc_cache` when at least one accepted domain exists, since that
-    cache can go stale from content-only changes the graph never sees (see the gate's own
-    comment below).
+    pass still rewrites `toc_cache` when at least one accepted domain exists and the store
+    changed since the cache was built, since that cache can go stale from content-only changes
+    the graph never sees (see the gate's own comment below).
     """
     to_version = reader.graph_version()
-    from_version = store.get_meta(LAST_SYNCED_KEY)
+    # What the gate stamps and compares is the graph version PLUS the resolver revision
+    # (reader.sync_stamp), so the first pass after an upgrade that taught resolve() something
+    # new reruns once and heals what the older rules left orphaned. The report is a different
+    # thing: it shows the plain graph version on both sides, so the revision is stripped from
+    # the stored stamp before it becomes ``from_version``.
+    stamp = reader.sync_stamp()
+    if not canonical_writes:
+        stamp = f"index-only:{stamp}"
+    last_stamp = store.get_meta(LAST_SYNCED_KEY)
+    from_version = reader.without_revision(last_stamp)
     # An earlier pass's failed Tier-1 reconcile is retried first, whatever the gate says.
     retried = _retry_pending_tier1(store)
     # A canonical reload (pull, merge, branch switch, hand edit — even a bare touch, since
@@ -1093,11 +1256,11 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
     # sidegraph-sync / lazy sync rebuilds volatile state") — set on every reload since, and
     # read here for the first time.
     volatile_stale = store.get_meta(VOLATILE_STALE_KEY) == "1"
-    if to_version == from_version and not volatile_stale and not force:
+    if stamp == last_stamp and not volatile_stale and not force:
         # A committed move does not change graph.json, so a pass that left entities
         # `moved_uncommitted` would otherwise never revisit them. Re-check them once HEAD has
         # resolvably moved (design D2); an unresolvable HEAD keeps the key and skips.
-        pending = _load_pending_moves(store)
+        pending = _load_pending_moves(store) if canonical_writes else None
         if pending is not None:
             recorded_head, pending_ids = pending
             head = _current_head(reader.path.parent)
@@ -1111,11 +1274,17 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
         # graph_version, so the version gate above must not ALSO gate the cache refresh: doing
         # so left the cache stale until an unrelated domain accept/drop happened to rebuild it
         # (cli.py/server.py's own explicit ratify-time refresh), which real sessions hit (fix-
-        # wave B, B6). `build_toc` is store-only (no reader dependency for its fields today) and
-        # cheap, so it's safe to recompute on every sync call; gated on "at least one accepted
-        # domain exists" purely to avoid a pointless write when there is nothing to refresh.
-        if next(store.iter_domains(status=DomainStatus.ACCEPTED), None) is not None:
-            store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store, reader)))
+        # wave B, B6). But every `get_task_context` call lands here, and a TOC build counts
+        # every domain's decisions (0.1-0.2 s on a real store), so the rebuild is gated on the
+        # store having changed since the cache was built: the cache carries the canonical
+        # digest it was built over, and an unchanged digest keeps it. Gated also on "at least
+        # one accepted domain exists" to avoid a pointless write when there is nothing to
+        # refresh.
+        # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D2b)
+        if next(
+            store.iter_domains(status=DomainStatus.ACCEPTED), None
+        ) is not None and not _toc_cache_is_current(store):
+            _rebuild_toc_cache(store, reader)
         if retried:
             # The retry repaired a record or failed again: report it (a narrow-style report),
             # not a silent skip.
@@ -1130,16 +1299,20 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
 
     # Read BEFORE the ladder: a commit landing after it must differ from what is recorded,
     # or the gate would skip that move indefinitely (design D2).
-    head_before = _current_head(reader.path.parent)
+    head_before = _current_head(reader.path.parent) if canonical_writes else None
     outcomes: list[RebindOutcome] = list(retried)
     vacated: dict[str, set[str]] = {}
     # Resolved once for the whole pass (one subprocess call, not one per entity) and
     # threaded through every rebind_entity call — see _resolve_repo_root / the moved
     # rung's own comment for what this guards against and how it degrades when unknown.
-    repo_root = _resolve_repo_root(reader)
+    repo_root = _resolve_repo_root(reader) if canonical_writes else None
     for entity in store.iter_concrete_entities():
         try:
-            outcomes.append(rebind_entity(entity, store, reader, repo_root, vacated))
+            outcomes.append(
+                rebind_entity(
+                    entity, store, reader, repo_root, vacated, canonical_writes=canonical_writes
+                )
+            )
         except Exception as e:  # one bad entity must not abort the pass
             outcomes.append(
                 RebindOutcome(
@@ -1153,7 +1326,8 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
     # Reconciled after the whole ladder, not per entity: a sibling leaf may still be
     # unvisited (or orphaned later in the pass) when an earlier leaf leaves a community.
     # The pending key is recorded before the reconcile (see _reverify_pending_moves).
-    _record_pending_moves(store, head_before, outcomes)
+    if canonical_writes:
+        _record_pending_moves(store, head_before, outcomes)
     _reconcile_vacated(vacated, store, outcomes)
 
     domains_refreshed, empty_domains, overbroad_domains, domain_failures = _refresh_domains(
@@ -1162,7 +1336,7 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
 
     stale = _stale_decisions(store)
 
-    store.set_meta(LAST_SYNCED_KEY, to_version)
+    store.set_meta(LAST_SYNCED_KEY, stamp)
     # Cleared HERE, beside the version stamp and BEFORE build_toc: volatile state has been
     # rebuilt by this point (the ladder, _refresh_domains and the stale scan all ran), and
     # the TOC is a render of that state, not part of it. Clearing after build_toc instead
@@ -1173,7 +1347,7 @@ def sync(store: Store, reader: GraphifyReader, force: bool = False) -> SyncRepor
     # last_synced stamp, so it reflects this pass's own updates; written on every completed
     # (non-skipped) pass, fresh or forced — a skipped pass returns above and never reaches
     # here, leaving the cache untouched.
-    store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store, reader)))
+    _rebuild_toc_cache(store, reader)
     return SyncReport(
         from_version=from_version,
         to_version=to_version,
@@ -1302,14 +1476,17 @@ def report_has_findings(d: dict) -> bool:
     return bool(d["stale_decisions"] or d["slug_conflicts"] or d["domain_failures"])
 
 
-def maybe_sync(store: Store, reader: GraphifyReader | None) -> SyncReport | None:
+def maybe_sync(
+    store: Store, reader: GraphifyReader | None, *, canonical_writes: bool = True
+) -> SyncReport | None:
     """Lazy read-path trigger: no reader -> None; else sync (self-skips on version match).
+    ``canonical_writes=False`` is ``sync``'s index-only mode, for a borrowed graph.
 
     Callers wrap this best-effort — a sync failure must never break retrieval or startup.
     """
     if reader is None:
         return None
-    return sync(store, reader)
+    return sync(store, reader, canonical_writes=canonical_writes)
 
 
 def refresh_code_drift_cache(

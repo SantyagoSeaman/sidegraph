@@ -29,6 +29,7 @@ from collections.abc import Sequence
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 from pydantic import BaseModel, ValidationError
@@ -140,6 +141,15 @@ class GraphStats(BaseModel):
     files: int = 0
     communities: int = 0
     graph_version: str | None = None
+    # How the graph's build commit stands against HEAD (`GraphifyReader.freshness`).
+    # All four are None when there is no readable graph. `stale_files` and `commits_behind`
+    # are None when the comparison could not be made; `commits_behind` is also None for a
+    # build commit outside HEAD's history.
+    # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D7)
+    freshness: Literal["fresh", "stale", "unknown"] | None = None
+    built_at: str | None = None
+    commits_behind: int | None = None
+    stale_files: int | None = None
 
 
 class AnchorStats(BaseModel):
@@ -490,7 +500,7 @@ def _graph_stats(graph_path: Path | None) -> GraphStats:
     Implements design/superpowers/specs/2026-09-18-usage-stats-design.md, §4 (graph half).
 
     Deliberately limited to the reader's public surface: nodes, distinct source files,
-    communities, version. No edge count — that would mean reaching past the surface for a
+    communities, version, freshness. No edge count — that would mean reaching past the surface for a
     number the report does not use. How many areas are NAMED is a store fact (accepted
     Domain records), never ``community_labels``, which is the engine's own sidecar.
     A missing graph is ``GraphStats()``; one that is there but cannot be parsed is
@@ -504,12 +514,17 @@ def _graph_stats(graph_path: Path | None) -> GraphStats:
     try:
         reader = GraphifyReader(graph_path)
         nodes = reader.list_nodes()
+        fresh = reader.freshness()
         return GraphStats(
             available=True,
             nodes=len(nodes),
             files=len({n.file_path for n in nodes if n.file_path}),
             communities=len(reader.communities()),
             graph_version=reader.graph_version(),
+            freshness=fresh.state,
+            built_at=fresh.built_at,
+            commits_behind=fresh.commits_behind,
+            stale_files=None if fresh.state == "unknown" else fresh.changed,
         )
     except Exception:
         # Any failure here — truncated JSON, valid JSON of the wrong shape, a permission error

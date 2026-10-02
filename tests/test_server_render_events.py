@@ -192,7 +192,7 @@ def test_the_tools_forward_intent_to_their_impls(tmp_path, monkeypatch):
     store, reader = _store_with_seed_mistake(tmp_path)
     monkeypatch.setattr(server, "_session_key", lambda _s: "sess-1")
     monkeypatch.setattr(server, "_get_store", lambda: store)
-    monkeypatch.setattr(server, "_synced_reader", lambda: reader)
+    monkeypatch.setattr(server, "_synced_reader", lambda: (reader, None))
     server.get_task_context(files=["trader/exec.py"], intent="check-plan")
     server.query_decisions(files=["trader/exec.py"], intent="explain-why")
     assert [e["intent"] for e in store.render_events()] == ["check-plan", "explain-why"]

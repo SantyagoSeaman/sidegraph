@@ -96,7 +96,7 @@ Create `.codex/hooks.json` in the repo:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -106,7 +106,7 @@ Create `.codex/hooks.json` in the repo:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-stop"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -121,6 +121,14 @@ directory to the repo root regardless of where Codex actually launches it from, 
 working on a non-git corpus too (Sidegraph doesn't require the corpus to be a git repo — see
 [`integrations/graphify.md`](../integrations/graphify.md#non-git-and-doc-only-corpora)), where a
 bare `git rev-parse --show-toplevel` would fail and leave `cd` with no argument.
+
+The trailing `|| printf …` is a guard, and it should stay. On `Stop`, Codex feeds a hook's stderr
+back to the model when the hook exits 2, and `uv` exits 2 on some of its own errors (a project it
+cannot find, a cache it cannot write), so a command that never reaches Python could keep
+continuing your session. With the guard the hook exits 0 and answers `{}`. On `SessionStart` it
+answers a `systemMessage` telling you to run the hook command in a terminal to see the error
+(see [`reference/hooks.md`](../reference/hooks.md#if-you-see-this-message)). The same guard ends
+every hook command in the plugin; see [`integrations/codex.md`](../integrations/codex.md#hooks-ga).
 
 No `PreToolUse` entry is included above. Codex can invoke that event for local function tools,
 but it has no stable `Read`/`Grep` tool pair to which Sidegraph's Claude-specific redirect can

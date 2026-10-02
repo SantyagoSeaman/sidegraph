@@ -49,9 +49,11 @@ north star this razor guards.
   Never anchor to a bare module-level constant (the engine indexes functions/classes/
   files, not constants — anchor the file and name the constant in the statement), and
   keep `name` bare (`store.py`, `_touch_digest`) — `file_path`, not the name, carries
-  the path. Cross-repo facts anchor to their nearest in-repo consumer (a foreign file
-  never resolves here); ephemeral artifacts (task briefs, run reports) are not anchor
-  targets — anchor what outlives the wave. Doc-corpus example:
+  the path. `Type.member` (`Store._touch_digest`) resolves to the member only with its
+  `file_path`; the bare name with its file stays preferred. Cross-repo facts anchor to
+  their nearest in-repo consumer (a foreign file never resolves here); ephemeral
+  artifacts (task briefs, run reports) are not anchor targets — anchor what outlives the
+  wave. Doc-corpus example:
   `[{"name": "Option C — Existing-contour execution with neutral result push (chosen)",
   "file_path": "ADR-001-dq-execution-and-triggering.md"},
   {"name": "ADR-001-dq-execution-and-triggering.md",

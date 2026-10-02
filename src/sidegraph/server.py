@@ -12,11 +12,12 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import posixpath
 import threading
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, cast, get_args
 
 from fastmcp import FastMCP
@@ -47,13 +48,17 @@ from .capture import propose_domains as _propose_domain_drafts
 from .config import (
     DEFAULT_GRAPH,
     TELEMETRY_SESSION_KEY,
+    borrowed_graph_candidate,
     default_graph_path,
+    main_checkout_root,
     path_is_file,
     path_state,
-    resolve_store_path,
+    repository_root,
+    resolve_store_location,
 )
 from .domains import DEFAULT_CANDIDATE_LIMIT, collect_domain_candidates, community_group_path
-from .engine.reader import GraphifyReader
+from .engine.reader import GraphifyReader, open_borrowed_reader
+from .freshness import staleness_phrase
 from .retrieval import (
     TOC_CACHE_KEY,
     RetrievalBudget,
@@ -103,9 +108,11 @@ mcp = FastMCP("sidegraph", version=_server_version())
 # materialize a stray store (e.g. "sidegraph.db" in whatever the current working directory
 # happened to be) just from `import sidegraph.server`, which is exactly the kind of
 # import-time side effect a library module must not have. Path resolution is shared with
-# the CLI and the Claude Code hooks via config.resolve_store_path (SIDEGRAPH_DIR primary,
+# the CLI and the Claude Code hooks via config.resolve_store_location (SIDEGRAPH_DIR primary,
 # SIDEGRAPH_DB honored for back-compat, default ".sidegraph") -- see
-# docs/reference/configuration.md.
+# docs/reference/configuration.md. The server is a host surface: launched in a subdirectory,
+# a relative store that is absent there is looked up in the ancestors, inside the repository
+# (design/superpowers/specs/2026-10-01-subdirectory-launch-design.md D3).
 _store: Store | None = None
 
 # Guards `_get_store()`'s memoization (review Important-2b): fastmcp 3 dispatches sync
@@ -127,7 +134,7 @@ def _get_store() -> Store:
     if _store is None:
         with _store_lock:
             if _store is None:
-                _store = Store(resolve_store_path())
+                _store = Store(resolve_store_location(search_ancestors=True).path)
     return _store
 
 
@@ -1180,6 +1187,156 @@ def _seeds_from_args(files: list[str] | None, entities: list[dict] | None) -> li
     return seeds
 
 
+# `_not_in_graph_block`: at most this many seed paths are named per sentence.
+_NOT_IN_GRAPH_LISTED = 10
+
+
+def _listed(paths: list[str]) -> str:
+    """``a, b`` up to :data:`_NOT_IN_GRAPH_LISTED` paths, then ``…, and N more``."""
+    shown = ", ".join(paths[:_NOT_IN_GRAPH_LISTED])
+    extra = len(paths) - _NOT_IN_GRAPH_LISTED
+    return f"{shown}, and {extra} more" if extra > 0 else shown
+
+
+def _is_repo_relative(p: str) -> bool:
+    """Whether ``p`` is written the way the graph writes ``source_file``: relative, already
+    normalized, and inside the repository. ``PurePosixPath("/abs/x")`` and
+    ``posixpath.normpath("./x") != "./x"`` are what ``root / p`` would silently accept, and
+    ``normpath`` leaves a leading ``..`` alone, so ``../x`` needs its own check."""
+    pure = PurePosixPath(p)
+    return not pure.is_absolute() and ".." not in pure.parts and posixpath.normpath(p) == p
+
+
+def _not_in_graph_block(
+    reader,
+    files: list[str] | None,
+    entities: list[dict] | None,
+    borrowed_from: Path | None = None,
+    worktree_root: Path | None = None,
+) -> str:
+    """The "## Not in the code graph" block: what happened to each seed path the graph does
+    not hold, or ``""`` when the graph holds every one (then neither ``freshness()`` nor
+    ``repo_root()`` is called: no git cost on the common path).
+
+    The cause differs by seed. A repo-relative path that exists as a file but is not in the
+    graph gets the graph-state advice (rebuild a stale graph; a current one may simply not
+    cover that file); a directory, a path that does not exist, any path when graph.json is
+    outside a git repository, and a path that is not written as a normalized repo-relative
+    one (absolute, ``./x``, ``a/../b``, a trailing slash: ``root / p`` would accept them, but
+    the graph never holds them) gets "check the path". ``freshness()`` runs only when some
+    seed is an existing file.
+
+    ``borrowed_from`` is the main checkout whose graph a linked worktree reads, and
+    ``worktree_root`` that worktree: "exists" is then checked in the worktree, and a file there
+    that the main checkout lacks gets the borrowed sentence instead of a verdict on the graph
+    (the graph was never built from it, so its freshness says nothing).
+    # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D5)
+    # see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D3)
+    """
+    paths = [*(files or []), *(e.get("file_path") for e in (entities or []))]
+    seeds = list(dict.fromkeys(p for p in paths if isinstance(p, str) and p))
+    held = reader.source_files()
+    missing = [p for p in seeds if p not in held]
+    if not missing:
+        return ""
+    borrowed = borrowed_from is not None and worktree_root is not None
+    candidates = [p for p in missing if _is_repo_relative(p)]
+    root = worktree_root if borrowed else (reader.repo_root() if candidates else None)
+    present = [p for p in candidates if root is not None and (root / p).is_file()]
+    only_here = (
+        [p for p in present if borrowed_from is not None and not (borrowed_from / p).is_file()]
+        if borrowed
+        else []
+    )
+    existing = [p for p in present if p not in set(only_here)]
+    other = [p for p in missing if p not in set(present)]
+    noun = "seed path" if len(seeds) == 1 else "seed paths"
+    into = f" in {borrowed_from}" if borrowed else ""
+    lines = ["## Not in the code graph"]
+    if existing:
+        n = len(existing)
+        verb = "exists but is" if n == 1 else "exist but are"
+        sentence = f"{n} of {len(seeds)} {noun} {verb} not in the code graph: {_listed(existing)}. "
+        state = reader.freshness(root=None if borrowed else root)
+        if state.state == "stale":
+            sentence += (
+                f"The graph is stale ({staleness_phrase(state)}): rebuild it"
+                f"{into or ' from the repository root'} with `graphify update .`, then call again."
+            )
+        elif state.state == "fresh":
+            sentence += (
+                "No committed change since the build explains it: the file may be newer than "
+                f"the build and not committed yet (rebuild{' it' + into if borrowed else ''} "
+                "with `graphify update .`), sit under an excluded path, or be a file type "
+                "Graphify skips."
+            )
+        else:
+            sentence += (
+                f"Could not tell whether the graph is current ({state.reason}): rebuild it"
+                f"{into} with `graphify update .` if these files are new."
+            )
+        lines.append(sentence)
+    if only_here:
+        n = len(only_here)
+        verb = "exists but is" if n == 1 else "exist but are"
+        lines.append(
+            f"{n} of {len(seeds)} {noun} {verb} not in the code graph: {_listed(only_here)}. "
+            f"{_BORROWED_SENTENCE}"
+        )
+    if other:
+        n = len(other)
+        verb = (
+            "is not a repo-relative path to a file"
+            if n == 1
+            else "are not repo-relative paths to files"
+        )
+        lines.append(
+            f"{n} of {len(seeds)} {noun} {verb} in this repository: {_listed(other)}. "
+            "Check the path: it must be repo-relative, from the repository root, written "
+            "without `./`, `..` or a trailing slash, and name a file, not a directory."
+        )
+    return "\n".join(lines)
+
+
+# What a linked worktree is told about a file that exists only on its branch: the main
+# checkout's graph was built without it.
+_BORROWED_SENTENCE = (
+    "This worktree reads the main checkout's graph, which does not hold files that exist "
+    "only on this branch."
+)
+
+
+def _no_graph_block(store) -> str:
+    """The "## No code graph" block: no reader could be opened, and the call named a seed.
+
+    Names the graph looked at: the store's own (:func:`_graph_path`), or, for a linked
+    worktree with none of its own, the main checkout's (:func:`borrowed_graph_candidate`)
+    with the advice to build it there. A path that is there but could not be read (permissions,
+    a corrupt file) is "not readable", never "missing".
+    # see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D4)
+    """
+    candidate = borrowed_graph_candidate(store.path)
+    main = main_checkout_root(store.path) if candidate is not None else None
+    graph = candidate if candidate is not None and main is not None else None
+    path = graph if graph is not None else Path(_graph_path(store))
+    if path_state(path) == "missing":
+        lead = f"No code graph at {path}"
+        build = (
+            f"Build it in the main checkout {main} with `graphify update .`."
+            if graph is not None
+            else "Build it from the repository root with `graphify update .`."
+        )
+    else:
+        lead = f"The code graph at {path} is not readable"
+        build = (
+            f"Make it readable, or rebuild it in the main checkout {main} with `graphify update .`."
+            if graph is not None
+            else "Make it readable, or rebuild it from the repository root with "
+            "`graphify update .`."
+        )
+    return f"## No code graph\n{lead}: memory anchored to code cannot be looked up. {build}"
+
+
 def _get_task_context_impl(
     store,
     reader,
@@ -1188,8 +1345,18 @@ def _get_task_context_impl(
     structure_budget: int,
     memory_budget: int,
     intent: str | None = None,
+    borrowed_from: Path | None = None,
 ) -> str:
-    """Testable core: build seeds, run retrieval, return the rendered slice."""
+    """Testable core: build seeds, run retrieval, return the rendered slice.
+
+    A seed the graph does not hold gets a trailing "Not in the code graph" block saying why
+    (stale graph, a file the engine skips, a bad path), instead of a bare "No context found."
+    With no reader and a seed, a trailing "No code graph" block says the graph is missing.
+    ``TaskContext.render()`` itself is untouched. ``borrowed_from`` is the main checkout whose
+    graph ``reader`` was opened on, for a linked worktree with none of its own
+    (:func:`_synced_reader`); it changes only the wording of the first block.
+    see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D3, D4)
+    """
     seeds = _seeds_from_args(files, entities)
     ctx = _retrieve(seeds, store, reader, RetrievalBudget(structure_budget, memory_budget))
     _record(
@@ -1199,17 +1366,46 @@ def _get_task_context_impl(
         ctx=ctx,
         intent=_caller_intent(intent),
     )
-    return ctx.render()
+    text = ctx.render()
+    # Own try/except: advice about the graph must never cost the answer it follows.
+    block = ""
+    try:
+        if reader is not None:
+            worktree = repository_root(store.path) if borrowed_from is not None else None
+            block = _not_in_graph_block(reader, files, entities, borrowed_from, worktree)
+        elif seeds:
+            block = _no_graph_block(store)
+    except Exception:
+        block = ""
+    if block:
+        text = f"{text}\n\n{block}"
+    return text
 
 
-def _synced_reader() -> GraphifyReader | None:
+def _synced_reader() -> tuple[GraphifyReader | None, Path | None]:
     """Best-effort reader with a lazy sync attempt — shared by every retrieval-facing tool
     (get_task_context/query_structure/query_decisions/drill_down). Sync failure degrades
-    to un-synced retrieval, never an error."""
+    to un-synced retrieval, never an error.
+
+    Returns ``(reader, borrowed_from)``. A linked worktree has the tracked store and no graph:
+    when the store's own graph is missing, the reader is opened on the main checkout's and
+    ``borrowed_from`` is that checkout's root. The borrowed graph is synced index-only
+    (``canonical_writes=False``): the worktree's index starts cold, and without the derived
+    state (domain communities, Tier-1 community bindings, ``last_seen_*``) retrieval loses its
+    domain members and its Related bucket. That sync never rewrites a tracked file, and its moved
+    rung abstains. Otherwise ``borrowed_from`` is ``None``.
+    see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)"""
     reader = _load_reader()
+    if reader is None:
+        borrowed = open_borrowed_reader(_get_store().path)
+        if borrowed is None:
+            return None, None
+        with contextlib.suppress(Exception):
+            maybe_sync(_get_store(), borrowed[0], canonical_writes=False)
+        return borrowed
     with contextlib.suppress(Exception):
         maybe_sync(_get_store(), reader)
-    return reader
+    return reader, None
 
 
 def _get_task_context_with_sync(
@@ -1220,9 +1416,16 @@ def _get_task_context_with_sync(
     intent: str | None = None,
 ) -> str:
     """Tool-shell core: lazy sync (best-effort), then retrieval."""
-    reader = _synced_reader()
+    reader, borrowed_from = _synced_reader()
     return _get_task_context_impl(
-        _get_store(), reader, files, entities, structure_budget, memory_budget, intent
+        _get_store(),
+        reader,
+        files,
+        entities,
+        structure_budget,
+        memory_budget,
+        intent,
+        borrowed_from=borrowed_from,
     )
 
 
@@ -1306,7 +1509,8 @@ def query_structure(
     Same ``files``/``entities`` shape as ``get_task_context``. Never crashes: with no
     Graphify graph present, returns an explanatory note instead of a map.
     """
-    return _query_structure_impl(_get_store(), _synced_reader(), files, entities, budget_chars)
+    reader, _ = _synced_reader()
+    return _query_structure_impl(_get_store(), reader, files, entities, budget_chars)
 
 
 @mcp.tool
@@ -1329,9 +1533,8 @@ def query_decisions(
     ``intent``: optional label for what asked (e.g. a skill name). Recorded for local
     statistics only; never affects what is returned.
     """
-    return _query_decisions_impl(
-        _get_store(), _synced_reader(), files, entities, budget_chars, intent
-    )
+    reader, _ = _synced_reader()
+    return _query_decisions_impl(_get_store(), reader, files, entities, budget_chars, intent)
 
 
 def _auto_accept() -> bool:
@@ -2572,7 +2775,8 @@ def drill_down(domain_slug: str) -> dict:
     ``supersede_decision`` any that no longer hold. (Deliberate contract addition,
     drift→supersede wave N3.)
     """
-    return _drill_down_impl(_get_store(), _synced_reader(), domain_slug)
+    reader, _ = _synced_reader()
+    return _drill_down_impl(_get_store(), reader, domain_slug)
 
 
 def _sync_anchors_impl(store: Store, reader: GraphifyReader | None, force: bool = False) -> dict:

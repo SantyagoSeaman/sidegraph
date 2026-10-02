@@ -19,7 +19,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from .engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader, NodeRef
 from .schema import (
@@ -238,6 +238,23 @@ class SeedResolution:
     seed_node_ids: list[str]
     seed_entities: list[Entity]
     seed_communities: list[str]
+    # node id -> the entities the store last saw there, built once per call by ``resolve_seeds``
+    # and reused by ``_gather_structure``; ``None`` when the resolution came from elsewhere.
+    entities_by_node: dict[str, list[Entity]] | None = None
+
+
+def _entities_by_node(store: Store) -> dict[str, list[Entity]]:
+    """``node id -> entities`` by the engine mapping the write path and sync keep
+    (``last_seen_node_id``), each list ordered by entity id. Several entities can sit on one
+    node (``Type.m`` and ``Type::m`` are two entities and one node), and every one counts.
+    One pass over the concrete entities, not one scan per node."""
+    by_node: dict[str, list[Entity]] = {}
+    for e in store.iter_concrete_entities():
+        if e.last_seen_node_id is not None:
+            by_node.setdefault(e.last_seen_node_id, []).append(e)
+    for entities in by_node.values():
+        entities.sort(key=lambda e: e.entity_id)
+    return by_node
 
 
 def resolve_seeds(seeds: list[Seed], reader: GraphifyReader | None, store: Store) -> SeedResolution:
@@ -265,13 +282,30 @@ def resolve_seeds(seeds: list[Seed], reader: GraphifyReader | None, store: Store
 
     entities: list[Entity] = []
     seen_ents: set[str] = set()
-    for n in nodes:
-        e = store.resolve_descriptor(n.name, n.file_path)
+
+    def add(e: Entity | None) -> None:
         if e is not None and e.entity_id not in seen_ents:
             seen_ents.add(e.entity_id)
             entities.append(e)
 
-    return SeedResolution(node_ids, entities, sorted(communities))
+    # A seed that names a stored descriptor IS that entity, whatever the graph calls the node:
+    # a stored `Type.member` has no node of that label (Graphify says `.member()`), and an
+    # orphaned one may have no node at all.
+    for s in seeds:
+        if s.name:
+            add(store.resolve_descriptor(s.name, s.file_path))
+    # A resolved node reaches its entities through the engine mapping the write path and sync
+    # keep (`last_seen_node_id`), looked up in one map built once per call. The node's own
+    # label still gets its descriptor lookup beside it: an entity that was never mapped (no
+    # `last_seen_node_id` yet) or whose carrier adopted a path-less name is found only that way.
+    by_node = _entities_by_node(store) if nodes else None
+    if by_node is not None:
+        for n in nodes:
+            for e in by_node.get(n.node_id, []):
+                add(e)
+            add(store.resolve_descriptor(n.name, n.file_path))
+
+    return SeedResolution(node_ids, entities, sorted(communities), by_node)
 
 
 _MISTAKE_KINDS = {DecisionKind.GOTCHA, DecisionKind.CONSTRAINT, DecisionKind.LESSON}
@@ -1083,6 +1117,7 @@ def _gather_structure(
         return structure, peripheral
 
     node_cap = max(1, budget.structure_chars // 120)
+    by_node = res.entities_by_node if res.entities_by_node is not None else _entities_by_node(store)
     sub = reader.subgraph(res.seed_node_ids, node_cap)
     # The BFS walk itself is capped at `node_cap` nodes; when it fills that cap, the
     # subgraph was truncated regardless of whether every rendered line happened to fit
@@ -1113,10 +1148,12 @@ def _gather_structure(
             used += len(line)
             structure.append(line)
         if n.node_id not in seed_set:
-            e = store.resolve_descriptor(n.name, n.file_path)
-            if e is not None and e.entity_id not in seen_peri:
-                seen_peri.add(e.entity_id)
-                peripheral.append(e)
+            # The engine mapping first (a stored `Type.member` is not the node's `.member()`
+            # label), then the label, as before.
+            for e in [*by_node.get(n.node_id, []), store.resolve_descriptor(n.name, n.file_path)]:
+                if e is not None and e.entity_id not in seen_peri:
+                    seen_peri.add(e.entity_id)
+                    peripheral.append(e)
 
     if overflow_nodes or walk_saturated:
         candidate_ids = _structure_fallback_candidate_communities(
@@ -1279,30 +1316,19 @@ def top_tier_map(store: Store, reader: GraphifyReader | None, top_communities: i
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _domain_mistake_count(domain: Domain, store: Store) -> int:
-    """Valid mistake-kind decisions bound (Tier-1) to ``domain``'s paired abstract entity
-    (``domain:<slug>``, minted at acceptance). ``resolve_and_bind`` only ever creates
-    Tier-1 bindings to a domain entity, so ``valid_decisions_for_entity`` — which already
-    excludes orphaned bindings and superseded/rejected/expired decisions — needs no
-    further tier filter here."""
-    entity = store.find_abstract_entity(f"domain:{domain.slug}")
-    if entity is None:
-        return 0
-    return sum(
-        1
-        for d in store.valid_decisions_for_entity(entity.entity_id)
-        if d.status == DecisionStatus.ACCEPTED and d.kind in _MISTAKE_KINDS
-    )
-
-
 def build_toc(store: Store, reader: GraphifyReader | None = None) -> dict:
     """Precompute the SessionStart table of contents (§5/§6): accepted domains (title,
     summary, parent, mistake + subdomain counts), initiatives, and global mistakes.
-    Written to ``store`` meta under :data:`TOC_CACHE_KEY` at the end of ``sync.sync``;
-    ``reader`` is accepted for parity with ``top_tier_map`` and future drill-down use but
-    unused today — every field here comes from the store alone. Defaults to ``None`` so
-    callers with no reader on hand (e.g. the ratify surfaces, which refresh the cache
-    immediately on a domain accept/drop) can call ``build_toc(store)``.
+    Written to ``store`` meta under :data:`TOC_CACHE_KEY` at the end of ``sync.sync``.
+
+    A domain's mistake count is the accepted mistake-kind decisions in
+    :func:`_domain_decisions`, the union ``drill_down`` serves, so the two surfaces report
+    one number. ``reader`` is what that union's document branch needs; every other field here
+    comes from the store alone. Defaults to ``None`` so callers with no reader on hand (e.g.
+    the ratify surfaces, which refresh the cache immediately on a domain accept/drop) can call
+    ``build_toc(store)``: their counts leave out whole-document anchors until the next sync
+    pass, which has one, rebuilds the cache.
+    # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D2)
 
     Returns a plain JSON-able dict (not a dataclass) since its only destination is
     ``json.dumps`` for the meta table and ``render_toc``'s dict-shaped read-back.
@@ -1319,6 +1345,7 @@ def build_toc(store: Store, reader: GraphifyReader | None = None) -> dict:
         if d.parent_id:
             subdomain_counts[d.parent_id] = subdomain_counts.get(d.parent_id, 0) + 1
 
+    pool = _entity_pool(store, reader)
     domains = []
     for d in accepted:
         parent_slug = None
@@ -1331,26 +1358,51 @@ def build_toc(store: Store, reader: GraphifyReader | None = None) -> dict:
                 "title": d.title,
                 "summary": d.summary,
                 "parent_slug": parent_slug,
-                "mistakes": _domain_mistake_count(d, store),
+                "mistakes": sum(
+                    1
+                    for x in _domain_decisions(d, store, reader, pool)
+                    if x.status == DecisionStatus.ACCEPTED and x.kind in _MISTAKE_KINDS
+                ),
                 "subdomains": subdomain_counts.get(d.domain_id, 0),
             }
         )
 
     initiatives = [{"name": i.name, "description": i.description} for i in store.iter_initiatives()]
 
-    accepted_mistakes, proposed_mistakes = partition_by_trust(
-        _by_recency([x for x in store.decisions_by_scope(Scope.GLOBAL) if x.kind in _MISTAKE_KINDS])
-    )
-    global_mistakes = [_fmt_decision(d) for d in accepted_mistakes[:10]]
+    global_mistakes, unratified = _global_mistake_lines(store)
 
     result = {
         "domains": domains,
         "initiatives": initiatives,
         "global_mistakes": global_mistakes,
     }
-    if proposed_mistakes:
-        result["unratified"] = [_fmt_decision(d) for d in proposed_mistakes[:10]]
+    if unratified:
+        result["unratified"] = unratified
     return result
+
+
+def _global_mistake_lines(store: Store) -> tuple[list[str], list[str]]:
+    """The rendered global mistake/constraint lines (accepted, then proposed), most recent
+    first and capped at ten each: the two store-only sections of :func:`build_toc`."""
+    accepted_mistakes, proposed_mistakes = partition_by_trust(
+        _by_recency([x for x in store.decisions_by_scope(Scope.GLOBAL) if x.kind in _MISTAKE_KINDS])
+    )
+    return (
+        [_fmt_decision(d) for d in accepted_mistakes[:10]],
+        [_fmt_decision(d) for d in proposed_mistakes[:10]],
+    )
+
+
+def unratified_mistakes(store: Store) -> list[str]:
+    """The ``unratified`` section of :func:`build_toc` and nothing else.
+
+    ``host.hooks.session_start`` renders the domain map from the cache but needs this list
+    live, because a proposal can land after the cache was built. It used to get it by running
+    the whole :func:`build_toc`, which counts every domain's decisions; this reads only the
+    global scope.
+    # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D2b)
+    """
+    return _global_mistake_lines(store)[1]
 
 
 def render_toc(cache: dict) -> str:
@@ -1470,45 +1522,52 @@ def _domain_member_nodes(
     return ranked[:cap]
 
 
+def _node_in_domain(n: NodeRef, communities: set[str], path_prefixes: list[str]) -> bool:
+    """Whether ``n`` belongs to a domain with these ``communities`` and ``path_prefixes`` —
+    the one definition of "currently covers", shared by :func:`_domain_member_candidates` and
+    the document branch of :func:`_domain_decisions`, so the two cannot drift apart."""
+    if n.community is not None and n.community in communities:
+        return True
+    # n.file_path is None only for pathless engine artifacts (see _domain_member_nodes.on_path).
+    return n.file_path is not None and any(
+        matches_path_prefix(n.file_path, p) for p in path_prefixes
+    )
+
+
 def _domain_member_candidates(domain: Domain, reader: GraphifyReader) -> dict[str, NodeRef]:
     """Every anchorable node currently belonging to ``domain`` — current ``communities`` UNION
     any node under one of ``domain.path_prefixes`` — UNCAPPED and node-id keyed. The shared
-    "what does this domain currently cover" query behind both :func:`_domain_member_nodes` (a
-    capped, ranked sample for the human-facing ``members`` field) and
-    :func:`_domain_covered_file_paths` (the full file-coverage set the document branch of
-    :func:`_domain_decisions` needs): capping this to the 20-node display sample would
-    silently under-cover a domain whose true member count exceeds it, which is exactly the
-    kind of miss the document branch exists to close.
+    "what does this domain currently cover" query behind :func:`_domain_member_nodes` (a
+    capped, ranked sample for the human-facing ``members`` field): capping this to the 20-node
+    display sample would silently under-cover a domain whose true member count exceeds it,
+    which is exactly the kind of miss the document branch of :func:`_domain_decisions` exists
+    to close, and that branch asks the same membership question through
+    :func:`_domain_covers_file`.
     """
     communities = set(domain.communities)
-
-    def on_path(n: NodeRef) -> bool:
-        # Guard directly (see _domain_member_nodes.on_path) rather than lean on the
-        # `not n.file_path` filter below across the closure boundary.
-        return n.file_path is not None and any(
-            matches_path_prefix(n.file_path, p) for p in domain.path_prefixes
-        )
-
     candidates: dict[str, NodeRef] = {}
     for n in reader.list_nodes():
         if n.node_id in candidates or n.file_type not in ANCHORABLE_FILE_TYPES or not n.file_path:
             continue
-        in_community = n.community is not None and n.community in communities
-        if in_community or on_path(n):
+        if _node_in_domain(n, communities, domain.path_prefixes):
             candidates[n.node_id] = n
     return candidates
 
 
-def _domain_covered_file_paths(domain: Domain, reader: GraphifyReader) -> set[str]:
-    """The file_paths of every node ``domain`` currently covers (see
-    :func:`_domain_member_candidates`) — the document branch of :func:`_domain_decisions`'s
-    gate: a decision about a whole DOCUMENT (see :func:`_is_document_file_node`) surfaces
-    under a domain when that document's own file_path is in this set, i.e. the domain covers
-    at least one node (typically a heading) drawn from that same file. Uncapped, unlike the
-    ``members`` field's human-facing sample — missing a file here would silently under-cover a
-    domain with more members than the display cap.
+def _domain_covers_file(domain: Domain, reader: GraphifyReader, file_path: str) -> bool:
+    """Whether ``domain`` currently covers at least one node (typically a heading) drawn from
+    ``file_path`` — the document branch of :func:`_domain_decisions`'s gate: a decision about
+    a whole DOCUMENT (see :func:`_is_document_file_node`) surfaces under a domain when that
+    document's own file is covered. Uncapped, unlike the ``members`` field's human-facing
+    sample — missing a file here would silently under-cover a domain with more members than
+    the display cap. Asks the reader for that one file's nodes (its memoized per-file index)
+    instead of walking every node of the graph once per domain.
     """
-    return {n.file_path for n in _domain_member_candidates(domain, reader).values() if n.file_path}
+    communities = set(domain.communities)
+    return bool(file_path) and any(
+        _node_in_domain(n, communities, domain.path_prefixes)
+        for n in reader.nodes_in_file(file_path)
+    )
 
 
 def _is_document_file_node(entity: Entity, reader: GraphifyReader) -> bool:
@@ -1535,8 +1594,34 @@ def _is_document_file_node(entity: Entity, reader: GraphifyReader) -> bool:
     return node.name == node.file_path.rsplit("/", 1)[-1]
 
 
+class _EntityPool(NamedTuple):
+    """The concrete entities, read once, for the per-domain joins of :func:`_domain_decisions`
+    (see there for why a caller with many domains passes one).
+
+    ``documents`` is the subset whose current graph node is a whole-FILE document (the only
+    entities the document branch can ever match, see :func:`_is_document_file_node`), so a
+    corpus with none skips that branch's scan of the whole graph for every domain.
+    """
+
+    concrete: list[Entity]
+    documents: list[Entity]
+
+
+def _entity_pool(store: Store, reader: GraphifyReader | None) -> _EntityPool:
+    concrete = list(store.iter_concrete_entities())
+    documents = (
+        []
+        if reader is None
+        else [e for e in concrete if e.descriptor is not None and _is_document_file_node(e, reader)]
+    )
+    return _EntityPool(concrete, documents)
+
+
 def _domain_decisions(
-    domain: Domain, store: Store, reader: GraphifyReader | None = None
+    domain: Domain,
+    store: Store,
+    reader: GraphifyReader | None = None,
+    pool: _EntityPool | None = None,
 ) -> list[Decision]:
     """The currently-valid decisions belonging to ``domain`` — the UNION of three sources,
     deduplicated by decision id (finding I; document branch added for the doc-corpus gap):
@@ -1549,7 +1634,7 @@ def _domain_decisions(
         domain's own decisions never surface under it, AND
     (c) decisions anchored to a whole-DOCUMENT entity (see :func:`_is_document_file_node`)
         whose file_path is covered by one of ``domain``'s member nodes (see
-        :func:`_domain_covered_file_paths`) — closes a gap (a)+(b) miss on doc corpora:
+        :func:`_domain_covers_file`) — closes a gap (a)+(b) miss on doc corpora:
         ``doc_import`` anchors an ADR/spec decision to the document's OWN file-level node, but
         Graphify clusters ALL doc file-level nodes into a single hub community, so that
         entity's ``last_seen_community`` is essentially never among ``domain.communities``
@@ -1583,6 +1668,10 @@ def _domain_decisions(
     bindings excluded) are identical across the union.
     """
     by_id: dict[str, Decision] = {}
+    # ``pool`` is the one hoistable part of the join: ``build_toc`` asks this for every
+    # accepted domain, and re-reading and re-parsing every entity row once per domain (twice,
+    # for the two branches) was most of its cost. A single-domain caller omits it.
+    pool = pool if pool is not None else _entity_pool(store, reader)
 
     entity = store.find_abstract_entity(f"domain:{domain.slug}")
     if entity is not None:
@@ -1591,19 +1680,16 @@ def _domain_decisions(
 
     communities = set(domain.communities)
     if communities:
-        for e in store.iter_concrete_entities():
+        for e in pool.concrete:
             if e.last_seen_community in communities:
                 for d in store.valid_decisions_for_entity(e.entity_id):
                     by_id.setdefault(d.id, d)
 
     if reader is not None:
-        covered_paths = _domain_covered_file_paths(domain, reader)
-        if covered_paths:
-            for e in store.iter_concrete_entities():
-                if e.descriptor is None or e.descriptor.file_path not in covered_paths:
-                    continue
-                if not _is_document_file_node(e, reader):
-                    continue
+        for e in pool.documents:
+            if e.descriptor is None or e.descriptor.file_path is None:
+                continue
+            if _domain_covers_file(domain, reader, e.descriptor.file_path):
                 for d in store.valid_decisions_for_entity(e.entity_id):
                     by_id.setdefault(d.id, d)
 

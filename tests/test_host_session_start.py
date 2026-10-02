@@ -35,9 +35,12 @@ def test_session_start_never_raises(tmp_path, monkeypatch, capsys):
     assert out == {}  # degraded, never raised
 
 
-def test_session_start_relative_env_paths_anchor_to_claude_project_dir(
+def test_session_start_relative_store_anchors_to_claude_project_dir_and_graph_follows_it(
     tmp_path, monkeypatch, capsys
 ):
+    """The store is anchored to ``CLAUDE_PROJECT_DIR``; a relative graph is resolved against
+    the STORE's own project (its parent), like the CLI and the MCP server, not against
+    ``CLAUDE_PROJECT_DIR``."""
     import shutil
 
     project_dir = tmp_path / "project"
@@ -45,12 +48,12 @@ def test_session_start_relative_env_paths_anchor_to_claude_project_dir(
     shutil.copy(FIXTURE, project_dir / "sub" / "graph.json")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.setenv("SIDEGRAPH_DIR", "sub/s.db")
-    monkeypatch.setenv("SIDEGRAPH_GRAPH", "sub/graph.json")
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", "graph.json")
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     hooks.session_start()
     out = json.loads(capsys.readouterr().out)
     ctx = out["hookSpecificOutput"]["additionalContext"]
-    assert "## Communities" in ctx  # reader resolved via CLAUDE_PROJECT_DIR
+    assert "## Communities" in ctx  # the graph beside the store, `project/sub/graph.json`
     assert (project_dir / "sub" / "s.db").exists()  # store opened under project dir
 
 
@@ -177,6 +180,83 @@ def test_session_start_augments_stale_domain_cache_with_live_unratified_memory(
     assert ctx.index("Payments") < ctx.index("## Unratified proposals")
 
 
+def test_session_start_instruction_names_the_real_call_and_the_deferred_tool(
+    tmp_path, monkeypatch, capsys
+):
+    """The line used to teach ``get_task_context(seeds)``, a parameter the tool does not have
+    (its schema takes ``files`` and ``entities`` and forbids extra properties), so an agent
+    following it made a call that failed validation. It now names the real parameter, points
+    at the check-plan skill, and tells the agent to load a tool that is listed only by name."""
+    monkeypatch.setenv("SIDEGRAPH_DB", str(tmp_path / "s.db"))
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    hooks.session_start()
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "get_task_context(files=" in ctx
+    assert "(seeds)" not in ctx
+    assert "check-plan skill" in ctx
+    assert "listed only by name" in ctx
+
+
+def test_session_start_does_not_build_the_whole_toc_to_read_the_unratified_list(
+    tmp_path, monkeypatch, capsys
+):
+    """``build_toc`` walks every domain; SessionStart only needs its ``unratified`` section,
+    which is a few global-mistake lines. Reading it through the full build made every session
+    start pay for the per-domain counts twice (the sync pass and this one)."""
+    import sidegraph.retrieval as retrieval
+    from sidegraph.retrieval import TOC_CACHE_KEY
+    from sidegraph.schema import Domain, Provenance
+    from sidegraph.store import Store
+
+    db = tmp_path / "s.db"
+    store = Store(db)
+    d = store.add_domain(
+        Domain(
+            slug="payments",
+            title="Payments",
+            summary="Handles settlement.",
+            provenance=Provenance(source="manual"),
+        )
+    )
+    store.ratify_domains(accept=[d.domain_id])
+    store.set_meta(
+        TOC_CACHE_KEY,
+        json.dumps(
+            {
+                "domains": [
+                    {
+                        "slug": "payments",
+                        "title": "Payments",
+                        "summary": "Handles settlement.",
+                        "parent_slug": None,
+                        "mistakes": 0,
+                        "subdomains": 0,
+                    }
+                ],
+                "initiatives": [],
+                "global_mistakes": [],
+            }
+        ),
+    )
+    calls: list[int] = []
+    real_build_toc = retrieval.build_toc
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real_build_toc(*args, **kwargs)
+
+    monkeypatch.setattr(retrieval, "build_toc", spy)
+    monkeypatch.setenv("SIDEGRAPH_DB", str(db))
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))  # reader=None
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    hooks.session_start()
+
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "## Domains" in ctx  # the cached map still rendered
+    assert calls == []
+
+
 def test_session_start_standing_instruction_precedes_domain_toc(tmp_path, monkeypatch, capsys):
     """F2: the standing "use get_task_context before searching" instruction must be at the
     very top of the injected context, ahead of the real domain TOC render path."""
@@ -285,7 +365,7 @@ def test_session_start_malformed_toc_shape_degrades_to_legacy_map_not_empty(
     ``top_tier_map``, not all the way out to the outer handler's ``{}`` (which would lose
     the store-only content too, not just the domain TOC).
 
-    Stamps ``last_synced_graph_version`` to the fixture's own version first so the lazy
+    Stamps ``last_synced_graph_version`` to the fixture's own sync stamp first so the lazy
     sync inside ``session_start`` is a no-op and does not itself overwrite the malformed
     cache with a freshly (validly) rebuilt one before the read-back below."""
     from sidegraph.engine.reader import GraphifyReader
@@ -295,7 +375,7 @@ def test_session_start_malformed_toc_shape_degrades_to_legacy_map_not_empty(
 
     db = tmp_path / "s.db"
     store = Store(db)
-    store.set_meta(LAST_SYNCED_KEY, GraphifyReader(FIXTURE).graph_version())
+    store.set_meta(LAST_SYNCED_KEY, GraphifyReader(FIXTURE).sync_stamp())
     store.set_meta(
         TOC_CACHE_KEY,
         json.dumps({"domains": "not-a-list-of-dicts", "initiatives": [], "global_mistakes": []}),
@@ -473,7 +553,8 @@ def test_session_start_duplicate_helper_never_raises_on_store_failure(monkeypatc
     """Direct unit test of `_session_start_duplicate`'s own resilience (best-effort, per
     its docstring): a `get_meta` failure returns False (never a duplicate) rather than
     propagating -- this is what actually protects `session_start()`'s call site, which has
-    no wrapping try/except of its own around this call."""
+    no wrapping try/except of its own around this call. The read fails first here, so the
+    write path is covered by the next test."""
 
     class _BrokenStore:
         def get_meta(self, key):
@@ -483,6 +564,21 @@ def test_session_start_duplicate_helper_never_raises_on_store_failure(monkeypatc
             raise RuntimeError("boom")
 
     assert hooks._session_start_duplicate(_BrokenStore(), "s1", datetime.now(UTC)) is False
+
+
+def test_session_start_duplicate_helper_never_raises_when_the_atomic_write_fails():
+    """The lock-free read succeeds (an empty ledger), so the decision reaches
+    ``update_meta_if`` -- the path every first start takes. A failure there (a lock timeout
+    after the busy wait) is "not a duplicate", never an exception out of the hook."""
+
+    class _LockedStore:
+        def get_meta(self, key):
+            return None
+
+        def update_meta_if(self, key, decide):
+            raise RuntimeError("database is locked")
+
+    assert hooks._session_start_duplicate(_LockedStore(), "s1", datetime.now(UTC)) is False
 
 
 def test_session_start_duplicate_ignores_a_stamp_far_in_the_future(tmp_path):
@@ -523,3 +619,72 @@ def test_session_start_duplicate_tolerates_a_stamp_one_second_ahead(tmp_path):
 
     assert hooks._session_start_duplicate(store, "dup-skew", now) is True
     store.close()
+
+
+# --- a stale graph says so ------------------------------------------------------------------
+# see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D4, T9-T10)
+
+
+def _session_context(fx, tmp_path, monkeypatch, capsys) -> str:
+    """Run SessionStart over a repository from ``tests.test_graph_freshness`` and return the
+    additionalContext it printed."""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(fx.repo))
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "store"))
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(fx.graph))
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    hooks.session_start()
+    out = json.loads(capsys.readouterr().out)
+    return out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_session_start_says_the_graph_is_stale(tmp_path, monkeypatch, capsys):
+    """T9. Red against unfixed code: no line about the graph at all."""
+    from tests.test_graph_freshness import stale_repo
+
+    fx = stale_repo(tmp_path)
+
+    ctx = _session_context(fx, tmp_path, monkeypatch, capsys)
+
+    assert "the code graph is stale" in ctx
+    assert f"built at {fx.first[:7]}, 1 commit behind HEAD, 1 file changed since" in ctx
+    assert "graphify update ." in ctx
+
+
+def test_session_start_is_silent_about_a_fresh_graph(tmp_path, monkeypatch, capsys):
+    """T10. Red against nothing: a guard against a line on every session (mutation M4)."""
+    from tests.test_graph_freshness import make_repo
+
+    fx = make_repo(tmp_path)
+
+    ctx = _session_context(fx, tmp_path, monkeypatch, capsys)
+
+    assert "the code graph is stale" not in ctx
+    assert "graphify update" not in ctx
+
+
+def test_session_start_is_silent_when_the_comparison_is_unknown(tmp_path, monkeypatch, capsys):
+    from tests.test_graph_freshness import stale_repo, write_graph
+
+    fx = stale_repo(tmp_path)
+    write_graph(fx.graph, "abc123", ["pkg/m.py"])  # not a full commit id
+
+    ctx = _session_context(fx, tmp_path, monkeypatch, capsys)
+
+    assert "the code graph is stale" not in ctx
+
+
+def test_session_start_survives_a_failing_freshness_check(tmp_path, monkeypatch, capsys):
+    """The stale line has its own try/except: a failure there must never cost the map."""
+    from tests.test_graph_freshness import stale_repo
+
+    fx = stale_repo(tmp_path)
+
+    def boom(self, *a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("sidegraph.engine.reader.GraphifyReader.freshness", boom)
+
+    ctx = _session_context(fx, tmp_path, monkeypatch, capsys)
+
+    assert "get_task_context" in ctx
+    assert "the code graph is stale" not in ctx

@@ -61,17 +61,29 @@ One anchor orphaning does not take the decision down with it — the other keeps
 [`guides/surviving-refactors.md`](surviving-refactors.md) for what happens to each anchor
 independently when the graph is rebuilt.
 
-Two name shapes look valid and never resolve — write the pair instead:
+Two name shapes need care, and a third resolves only with its file:
 
 - **A bare module-level constant** (`MEMORY_GUARD_LINE`, `_SECRET_PATTERNS`): the engine's
   AST pass indexes functions, classes and files, **not constants** — such an anchor is born
   orphaned. Anchor the containing file (or enclosing function) and name the constant in the
   record's prose.
-- **A path-qualified or class-qualified name** (`src/sidegraph/store.py`,
-  `Store._touch_digest`): the graph labels files by basename and methods bare. Write
-  `{"name": "store.py", "file_path": "src/sidegraph/store.py"}` and
-  `{"name": "_touch_digest", "file_path": "src/sidegraph/store.py"}` — the `file_path`
-  field, not the name, carries the path.
+- **A path-qualified name** (`src/sidegraph/store.py`): the graph labels files by basename,
+  so this never resolves (it reads as the member `py`). Write
+  `{"name": "store.py", "file_path": "src/sidegraph/store.py"}` — the `file_path` field, not
+  the name, carries the path.
+- **A type-qualified member** (`Store._touch_digest`, `AudioPlayback.playClip`): the graph
+  labels a method bare and links it to its type, and **with its `file_path` the qualified
+  name resolves to the member's own node** (`.`, `::` and `#` all work; a nested type is
+  matched by its last segment). The bare name with its file stays preferred
+  (`{"name": "_touch_digest", "file_path": "src/sidegraph/store.py"}`), because it keeps
+  resolving if the type is renamed. Two limits: **without a `file_path` a qualified name
+  never resolves** (the member name alone would match across the whole repository, and
+  Sidegraph does not guess), and when the file holds several members of that name that
+  nothing ties to the named type (static functions carry no type link), it stays orphaned
+  rather than pick one. It stays orphaned too when the file holds a node whose name differs
+  from the member only by case (a struct `Message` beside a method `.message()`), because the
+  store treats the two spellings as one anchor. A property or constant the engine has no node
+  for is not a member in this sense.
 
 Two more targets fail *later*, even when the name resolves today:
 
@@ -84,7 +96,7 @@ Two more targets fail *later*, even when the name resolves today:
   lesson outlives the wave, anchor it to what outlives the wave: the code or doc the
   lesson is *about*.
 
-Either name-shape mistake is visible at write time: the result's `anchors_orphaned` names
+A name that does not resolve is visible at write time: the result's `anchors_orphaned` names
 it — fix it before leaving the record, don't ship a memory nothing will ever surface. The
 two late-failing targets are not (they resolve fine today) — they are a judgment call this
 guide is the checklist for.

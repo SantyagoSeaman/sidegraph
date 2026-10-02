@@ -90,7 +90,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start"
+            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -100,7 +100,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stop"
+            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -111,7 +111,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use"
+            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       }
@@ -121,7 +121,13 @@ Add to `.claude/settings.json` (merge into an existing file):
 ```
 
 From a source checkout, replace each `uvx --from git+... <entrypoint>` above with `uv run
---project /ABSOLUTE/PATH/TO/sidegraph <entrypoint>` (see the note in step 1).
+--project /ABSOLUTE/PATH/TO/sidegraph <entrypoint>` (see the note in step 1). Keep the trailing
+`|| printf …` on each command: Claude Code treats a hook that exits 2 with text on stderr as a
+block on `Stop` (it continues the conversation) and on `PreToolUse` (it blocks the tool call), and
+`uvx` exits 2 on some of its own errors, so without the guard a command that cannot start would
+block you instead of just doing nothing. The guard makes it exit 0 and answer `{}`, or, on
+`SessionStart`, a `systemMessage` telling you to run the hook command in a terminal to see the
+error (see [`reference/hooks.md`](../reference/hooks.md#if-you-see-this-message)).
 
 The env vars are inlined into the command because Claude Code hook entries have no separate
 `env`/`cwd` fields.
@@ -138,8 +144,9 @@ The env vars are inlined into the command because Claude Code hook entries have 
   nudge text and the substance gate's mechanics.
 - `PreToolUse` redirects a blind `Read`/`Grep` on a source file toward
   `get_task_context`/`drill_down` with a one-line, non-blocking nudge: a generic form and a
-  path-specific form, each firing at most once per session on its own one-shot key, so a
-  session can see up to two, only when the store actually has decision memory to offer. Set
+  path-specific form, each firing at most once per agent on its own one-shot key, so the
+  session's own agent can see up to two, and so can each subagent it starts, only when the
+  store actually has decision memory to offer. Set
   `SIDEGRAPH_GREP_NUDGE=off` (alongside the other env vars in the command) to disable it.
 
 > **Don't also run `graphify claude install`.** It writes its own `PreToolUse` hooks into

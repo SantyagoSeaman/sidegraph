@@ -114,6 +114,22 @@ def _stale(**over):
     )
 
 
+def _stale_graph(**over) -> GraphStats:
+    """A built graph that HEAD has moved past. 238 communities, 300 files, as on the
+    corpus copy the field report measured."""
+    fields = dict(
+        available=True,
+        nodes=6164,
+        files=300,
+        communities=238,
+        freshness="stale",
+        built_at="314f1ac" + "0" * 33,
+        commits_behind=314,
+        stale_files=258,
+    )
+    return GraphStats(**{**fields, **over})
+
+
 def _narrowed_window():
     """`--window 7` over a journal whose only rows are older than that."""
     return _report(
@@ -250,6 +266,13 @@ def _states() -> dict[str, StatsReport]:
         "no-graph": _report(graph=GraphStats(available=False)),
         "empty-graph": _report(graph=GraphStats(available=True)),
         "unreadable-graph": _report(graph=GraphStats(unreadable=True)),
+        # The stale-graph continuation line, in the three shapes it can take. The
+        # 80-column and causal-word sweeps read all of them.
+        "stale-graph": _report(graph=_stale_graph()),
+        "stale-graph-wrapped": _report(graph=_stale_graph(commits_behind=12345, stale_files=6789)),
+        "stale-graph-outside-history": _report(
+            graph=_stale_graph(commits_behind=None, stale_files=1)
+        ),
         "no-render-journal": _report(activation=_act(render_journal=False)),
         "drill-down-only": _report(activation=_act(budget_journal=False)),
         "all-zero": zeros,
@@ -412,6 +435,66 @@ def test_an_unreadable_graph_does_not_send_the_reader_to_sidegraph_init():
     assert "could not be read" in line and "graphify update" in line
     assert "sidegraph-init" not in text.split("GRAPH", 1)[1].split("ANCHORS", 1)[0]
     assert "not built" not in line and "0 nodes" not in text
+
+
+# --- a stale graph (D7) ---------------------------------------------------------------------
+# see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D7, T16)
+
+
+def test_t16_a_stale_graph_adds_a_continuation_line_under_the_counts():
+    text = render_text(_report(graph=_stale_graph(commits_behind=1, stale_files=1)))
+
+    assert _block(text, "GRAPH") == [
+        "GRAPH       6,164 nodes · 300 files · 238 communities",
+        "            stale: 1 commit behind HEAD, 1 file changed → graphify update .",
+    ]
+    assert all(len(ln) <= 80 for ln in _lines(text))
+
+
+def test_a_stale_line_too_wide_for_the_body_hangs_the_command_under_it():
+    """The spec's own 314-commit example is 81 columns with the 12-column label, so the
+    command moves to a hanging line, the way every other over-wide figure does."""
+    text = render_text(_report(graph=_stale_graph()))
+
+    assert _block(text, "GRAPH") == [
+        "GRAPH       6,164 nodes · 300 files · 238 communities",
+        "            stale: 314 commits behind HEAD, 258 files changed",
+        "              → graphify update .",
+    ]
+    assert all(len(ln) <= 80 for ln in _lines(text))
+
+
+def test_a_build_commit_outside_head_s_history_says_so():
+    """The spec's example line is 83 columns with the label, so the command hangs here too."""
+    one = render_text(_report(graph=_stale_graph(commits_behind=None, stale_files=1)))
+    two = render_text(_report(graph=_stale_graph(commits_behind=None, stale_files=2)))
+
+    assert _block(one, "GRAPH")[1:] == [
+        "            stale: built outside HEAD's history, 1 file differs",
+        "              → graphify update .",
+    ]
+    assert _block(two, "GRAPH")[1:] == [
+        "            stale: built outside HEAD's history, 2 files differ",
+        "              → graphify update .",
+    ]
+    assert all(len(ln) <= 80 for text in (one, two) for ln in _lines(text))
+
+
+def test_a_fresh_or_unknown_graph_adds_nothing_to_the_counts_line():
+    for freshness, behind, files in (("fresh", 3, 0), ("unknown", None, None), (None, None, None)):
+        text = render_text(
+            _report(
+                graph=_stale_graph(freshness=freshness, commits_behind=behind, stale_files=files)
+            )
+        )
+        assert _block(text, "GRAPH") == ["GRAPH       6,164 nodes · 300 files · 238 communities"]
+        assert "stale" not in text.split("GRAPH", 1)[1].split("ANCHORS", 1)[0]
+
+
+def test_the_golden_screens_carry_no_stale_line():
+    """The existing reports have no freshness, so no screen the golden table pins changes."""
+    for name, rep in _golden_reports().items():
+        assert "stale:" not in render_text(rep), name
 
 
 def test_a_missing_render_journal_prints_no_number_it_never_recorded():
@@ -1154,6 +1237,20 @@ def test_json_without_a_readable_graph_carries_no_graph_size(graph):
 def test_json_keeps_a_built_graph_that_holds_no_nodes_as_a_measured_zero():
     g = _data(_report(graph=GraphStats(available=True)))["graph"]
     assert (g["nodes"], g["files"], g["communities"]) == (0, 0, 0)
+
+
+def test_json_carries_the_graph_freshness_fields_additively():
+    g = _data(_report(graph=_stale_graph()))["graph"]
+    assert g["freshness"] == "stale"
+    assert g["built_at"] == "314f1ac" + "0" * 33
+    assert (g["commits_behind"], g["stale_files"]) == (314, 258)
+    assert (g["nodes"], g["files"], g["communities"]) == (6164, 300, 238)
+
+
+@pytest.mark.parametrize("graph", [GraphStats(available=False), GraphStats(unreadable=True)])
+def test_json_without_a_readable_graph_carries_no_freshness(graph):
+    g = _data(_report(graph=graph))["graph"]
+    assert (g["freshness"], g["built_at"], g["commits_behind"], g["stale_files"]) == (None,) * 4
 
 
 def test_json_drops_retention_where_the_header_does():

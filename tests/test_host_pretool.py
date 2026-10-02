@@ -3,7 +3,7 @@
 See ``docs/reference/hooks.md#sidegraph-pre-tool-use``: on Read/Grep of something that
 looks like a source file, when the store has decision memory to offer, emit a non-blocking
 ``additionalContext`` nudge toward ``get_task_context``/``drill_down`` — never a hard
-block — at most once per session.
+block — at most once per agent (the session's own agent and each subagent).
 """
 
 import io
@@ -178,11 +178,11 @@ def test_pretool_nudge_missing_session_id_allows_silently(tmp_path, monkeypatch,
 # -- path-specific nudge (whitepaper Phase-1 finding) ----------------------------------------
 #
 # Measured 2026-07-31 across 168 arm-A sessions: this nudge FIRES (its `pretool_nudge:`
-# ledger keys are in the store — the transcript never shows it, because Claude Code does
-# not echo PreToolUse additionalContext) and the agent reads the file anyway. 40-45% of
-# sessions on code corpora paid for memory and never called retrieval, and those sessions
-# scored BELOW the no-memory control. The nudge announced that memory exists without
-# saying what memory holds about the path being opened.
+# ledger keys are in the store; the transcript of that Claude Code version never showed it,
+# 2.1.259+ records it as `hook_additional_context` attachments) and the agent reads the file
+# anyway. 40-45% of sessions on code corpora paid for memory and never called retrieval, and
+# those sessions scored BELOW the no-memory control. The nudge announced that memory exists
+# without saying what memory holds about the path being opened.
 
 
 def _seed_anchored_decision(

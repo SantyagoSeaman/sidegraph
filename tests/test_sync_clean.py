@@ -342,24 +342,25 @@ def test_a_moved_entity_DOES_rewrite_its_canonical_file(tmp_path):
     derived. A 'moved' adoption rewrites entity.descriptor and that diff is CORRECT --
     someone reading only the test above would otherwise 'fix' it."""
     # The moved rung fails closed without a resolvable repo_root AND committed evidence
-    # (dirty-tree guard, sync.py's _committed_evidence_confirms_move) -- git-init tmp_path
-    # so it can confirm a.py is genuinely gone once the graph moves it, same as the live
-    # checkout the fix targets.
+    # (dirty-tree guard, sync.py's _committed_evidence_confirms_move) that the new path
+    # arrived with the old one's removal (sync._move_adds_the_new_path) -- git-init tmp_path
+    # and commit a.py, so the later commit of `git mv a.py moved/c.py` is real history, same
+    # as the live checkout the fix targets.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "a.py").write_text("def foo(): pass\n")
+    subprocess.run(["git", "add", "a.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "a.py"], cwd=tmp_path, check=True)
     store, reader = _store_and_reader_for_clean(tmp_path)
     sync(store, reader, force=True)
     before = _snapshot_canonical_dir(store)
 
     # Same symbol, same community, different file — the "moved" rung of rebind_entity.
-    # Commit the new file's real presence at HEAD so the dirty-tree guard's committed-
-    # evidence check confirms the move (a.py was never committed, so its absence is
-    # already confirmed).
-    moved_file = tmp_path / "moved" / "c.py"
-    moved_file.parent.mkdir(parents=True, exist_ok=True)
-    moved_file.write_text("def foo(): pass\n")
-    subprocess.run(["git", "add", "moved/c.py"], cwd=tmp_path, check=True)
+    # Commit the move itself, so the dirty-tree guard's committed-evidence check confirms
+    # it and git shows moved/c.py arriving in the very commit that removes a.py.
+    (tmp_path / "moved").mkdir()
+    subprocess.run(["git", "mv", "a.py", "moved/c.py"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "move to moved/c.py"], cwd=tmp_path, check=True)
 
     moved = dict(GRAPH_A)

@@ -11,7 +11,7 @@ corpus, not with ours. Re-measure before quoting these numbers elsewhere.
 | Trigger | What runs | Cost here | Notes |
 |---|---|---|---|
 | Every agent session start | `sidegraph-session-start` hook: opens the store, best-effort sync, renders the memory map | **~350 ms** | Degrades to a shorter map without a graph; a failure never blocks the session |
-| Every `Read`/`Grep`/`Edit`/`Write` tool call | `sidegraph-pre-tool-use` hook: path lookup + at most one nudge per session per kind | **~110 ms** | May write local touch/one-shot telemetry to `index.db`; failure is swallowed by design |
+| Every `Read`/`Grep`/`Edit`/`Write` tool call | `sidegraph-pre-tool-use` hook: path lookup + at most one nudge per agent per kind | **~110 ms** | May write local touch/one-shot telemetry to `index.db`; failure is swallowed by design |
 | Every agent session end | `sidegraph-stop` hook: capture nudge | ~110 ms | Same failure posture |
 | First store open after a `git pull` (or any change to canonical files) | SQLite index rebuild from the canonical JSON | **~160 ms** (1,106 files) | Automatic, no command to run; the index is gitignored and derived |
 | Store open with a fresh index | open + full decision scan | **~13 ms** | |

@@ -48,7 +48,7 @@ Project-scoped, at `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -58,7 +58,7 @@ Project-scoped, at `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-stop"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -82,6 +82,34 @@ initiatives, global mistakes); `sidegraph-stop` emits the same guarded once-per-
 block-to-distill nudge. Both degrade silently on any failure — a missing store or graph never
 blocks the session.
 
+Each command ends with a guard, `|| printf '{}\n'` on `Stop` and, on `SessionStart`,
+`|| printf '%s\n' '{"systemMessage":"…"}'`. It covers the part the Python entry points cannot:
+a command that never reaches Python. On `Stop`, Codex treats a hook that exits 2 with text on
+stderr as a block and feeds that text back to the model, and `uv` exits 2 on some of its own
+errors (a project it cannot find, a cache it cannot write), as does `dash` when the `cd` fails.
+Without the guard such a failure keeps continuing the session. With it the hook exits 0 and
+answers `{}`, which Codex reads as "nothing to say". On `SessionStart` a failed command is only
+a failed hook, so the guard there is for the user: it answers a `systemMessage`, "Sidegraph: the
+SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a
+terminal to see the error". The price of the guard is that a failure no longer shows up as a
+failed hook, which is why `SessionStart` says so itself. Keep the guard if you adapt the recipe.
+How to run the command in a terminal is in
+[`reference/hooks.md`](../reference/hooks.md#if-you-see-this-message).
+
+`sidegraph-stop` reads Codex's own transcript, the rollout file, to decide whether the session
+is substantial enough to nudge. Only a person's interactive thread can arm it, and only once
+it holds at least two real prompts of its own: the project instructions and environment
+blocks Codex writes into a rollout, a Stop hook's own block reason fed back, and an answer to
+the agent's question do not count. A subagent, Codex's automatic reviewer and a headless
+`codex exec` run never arm it, and `codex exec` is the one that matters in automation: a Stop
+block makes a headless run continue and replaces the output you asked for with `-o`. A run
+started through the Codex TypeScript SDK is headless too: the gate recognises it by the
+rollout's `source` of `exec`, because the SDK sets an originator of its own. Observed
+on codex-cli 0.159.3, Codex fires `SubagentStop`, not `Stop`, for a subagent, and the plugin
+registers no `SubagentStop` hook, so a subagent's thread is not nudged either way. The exact
+rule is in
+[`reference/hooks.md`](../reference/hooks.md#sidegraph-stop).
+
 Codex only loads project-local `.codex/` hooks (like the ones above) when the project layer
 is marked trusted — if these hooks silently don't fire, check the trust prompt/settings before
 assuming the JSON above is wrong.
@@ -92,6 +120,19 @@ Claude Code's. The `sidegraph-pre-tool-use` Read/Grep redirect nudge (see
 [`claude-code.md`](claude-code.md#pretooluse--sidegraph-pre-tool-use)) has nothing to attach
 to on Codex today. Re-check the current [Codex hooks documentation](https://learn.chatgpt.com/codex/hooks)
 before adding one; hosted tools are outside the hook surface.
+
+### Headless runs
+
+A `codex exec` run never arms the capture nudge, as above, so a Stop block cannot replace the
+`-o` output. If the plugin's hooks are trusted in the `CODEX_HOME` the run uses, they still run
+there, and a broken install (`uv` cannot start, the project directory is gone) answers `{}` and
+the run goes on. To run a review panel or any other automation without Sidegraph's hooks at all,
+give it a `CODEX_HOME` that holds only `auth.json`: with no plugin installed there is no
+Sidegraph hook, and a project's own `.codex/hooks.json` does not run there either, because that
+home has not trusted the project. Do not add `--dangerously-bypass-hook-trust` to that run.
+`SIDEGRAPH_CAPTURE_NUDGE=off` is narrower: it silences only the `Stop` nudge, and `SessionStart`
+still injects the memory map. Name the model with `-m`, since the clean home carries no
+`config.toml`.
 
 ## AGENTS.md pattern
 
@@ -126,7 +167,11 @@ Sidegraph also ships a Codex plugin, the same one-line install as the Claude Cod
    trust them. Approve to complete it. Skip or decline and the MCP tools still work, but
    retrieval at session start and the capture reminder at session end stay silent (see why
    below). A hook definition change in a later release needs a fresh approval. Review or
-   re-approve anytime with `/hooks`.
+   re-approve anytime with `/hooks`. The release that added the start guard described under
+   [Hooks](#hooks-ga) is such a change: Codex's trust hash covers the command, so after updating
+   the plugin the two hooks stay inactive until you approve them again, once, in `/hooks` or at
+   the next interactive session's trust prompt. If you wired the hooks by hand instead, append the
+   guard to the commands in your own `.codex/hooks.json`, as the recipe above shows.
 
 This is the same repo-committed manifest set the Claude Code plugin uses, in Codex's own
 shape: `.agents/plugins/marketplace.json` at the repo root, and
@@ -175,9 +220,11 @@ install sidegraph@sidegraph`, the MCP server works immediately but `SessionStart
 stay silent until that one-time approval. What was verified without
 a live, trusted Codex session: the hook entry points themselves honor the Codex JSON contract.
 Fed Codex-shaped payloads on stdin, `sidegraph-session-start` wrote the session telemetry row
-and returned `hookSpecificOutput.additionalContext`; `sidegraph-stop` wrote a
-`capture_sessions` row and returned its reminder when the transcript passed the substance
-gate, and correctly wrote nothing when it did not. Also unverified against the
+and returned `hookSpecificOutput.additionalContext`; `sidegraph-stop`, given a real rollout
+of an earlier interactive session as the transcript, wrote a `capture_sessions` row and
+returned its reminder, and wrote nothing for a rollout with fewer than two real prompts, for
+a subagent's or the automatic reviewer's thread, and for a headless `codex exec` run. Also
+unverified against the
 published docs: the top-level `mcpServers`/`hooks` fields in `.codex-plugin/plugin.json` are
 not documented on `developers.openai.com/plugins/build/plugins` as of this writing, which
 instead sketches an `extensions.com.openai` nesting. The live install above is the evidence

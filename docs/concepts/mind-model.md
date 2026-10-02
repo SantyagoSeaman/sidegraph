@@ -39,19 +39,19 @@ that suffices:
    summary, a mistake count, and a subdomain count (see
    [retrieval](retrieval.md#sessionstart-toc)). This is what an agent reads before touching
    anything — "what areas does this project have, and what should I already know about each."
-   The mistake count is narrower than "mistakes in this area": it counts only decisions
-   Tier-1-bound to the domain's own `domain:<slug>` entity (captured, or re-anchored, after
-   the domain was ratified) — a gotcha anchored to a leaf entity that happens to live in the
-   domain still surfaces in that entity's task context, just not in this count.
+   The mistake count is what `drill_down` would serve for the domain: the accepted `gotcha`,
+   `lesson` and `constraint` decisions in the union described under `drill_down` below, so a
+   gotcha anchored to a leaf entity that lives in the domain is counted too. Proposed and
+   superseded records are not.
 2. **`drill_down(domain_slug)`** — walk one domain: its full summary, its accepted subdomains,
    a capped sample of the code/doc entities that currently belong to it, and the decisions
-   about it (mistakes first). Unlike the TOC's narrower mistake count, `drill_down`'s
-   `decisions` list is the **union** of decisions tagged directly to the `domain:<slug>` entity,
+   about it (mistakes first). Its `decisions` list is the **union** of decisions tagged
+   directly to the `domain:<slug>` entity,
    decisions anchored to any code/doc entity that lives in one of the domain's communities
    (a community-membership join, deduplicated), and decisions anchored to a whole *document*
    entity whose file_path is one of the domain's covered files — so a gotcha anchored to a leaf
    entity in the domain, or an imported ADR that anchored to a doc rather than the domain
-   abstraction, *does* surface here even though it isn't counted in the TOC. The document branch
+   abstraction, *does* surface here, and is counted in the TOC. The document branch
    matters specifically on doc corpora: `sidegraph-import --docs` anchors an ADR to the
    document's own file-level node, but Graphify clusters every doc file-level node into one hub
    community, so that node's community is essentially never among the domain's `communities`

@@ -34,6 +34,7 @@ from urllib.parse import quote
 from ulid import ULID
 
 from .engine.reader import GraphifyReader
+from .freshness import staleness_phrase
 from .schema import DecisionStatus, canonicalize
 from .store import _STAMPING_MARKER_NAME, _TERMINAL_DECISION_STATUSES
 from .verify import _check_archive_dir, _iter_json_files, _load_raw_json, _run_git
@@ -51,6 +52,7 @@ CODE_DRIFT = "code-drift"
 STALE_INSTRUCTIONS = "stale-instructions"
 UNRATIFIED_ACCEPT = "unratified-accept"
 GRAPH_ROOT_MISMATCH = "graph-root-mismatch"
+GRAPH_STALE = "graph-stale"
 
 # Name reported in ``CurationReport.skipped`` when index.db is absent or unusable — the
 # binding-status check has no canonical source to fall back on (statuses are index-only).
@@ -956,6 +958,37 @@ def _check_graph_root_mismatch(
     ]
 
 
+def _check_graph_stale(reader: GraphifyReader | None) -> list[Finding]:
+    """graph-stale: the graph was built at a commit HEAD has moved past, and a file
+    the graph should reflect changed since, so memory cannot see or anchor to code added
+    after the build. ``GraphifyReader.freshness`` (the engine seam) does the comparison;
+    this turns a ``stale`` verdict into one advisory Finding. ``fresh`` and ``unknown`` report
+    nothing, like ``reader is None`` (no graph configured, or unreadable).
+
+    Its git calls all run inside ``freshness()``, and only when a reader is passed:
+    ``curate(store_dir)`` without one makes none, so the git-call count pinned by
+    ``test_curate_git_call_count_unchanged_by_refactor`` is untouched.
+    # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D6)
+    """
+    if reader is None:
+        return []
+    freshness = reader.freshness()
+    if freshness.state != "stale":
+        return []
+    examples = ", ".join(freshness.sample)
+    if freshness.changed > len(freshness.sample):
+        examples += ", …"
+    return [
+        Finding(
+            GRAPH_STALE,
+            str(reader.path),
+            f"the code graph is stale: {staleness_phrase(freshness)} (e.g. {examples}); "
+            "memory cannot see or anchor to code added after the build — rebuild from the "
+            "repository root with `graphify update .`, then run `sidegraph-sync`",
+        )
+    ]
+
+
 def _read_stamping_marker(store_dir: Path) -> datetime | None:
     """The store's creation marker (``store.py``'s ``_STAMPING_MARKER_NAME``, written
     once — and only once — by ``Store._ensure_stamping_marker`` the moment a store is
@@ -1479,4 +1512,7 @@ def curate(
     # of every anchor in the store silently looking orphaned. Best-effort like every
     # check above -- reader=None (no graph configured, or unreadable) simply skips it.
     findings += _check_graph_root_mismatch(reader, repo_root)
+    # Additive: the graph never caught up with HEAD. Appended after the check above
+    # so existing finding order is unchanged.
+    findings += _check_graph_stale(reader)
     return CurationReport(findings=findings, skipped=skipped)

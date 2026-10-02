@@ -152,13 +152,16 @@ def test_moved_updates_descriptor_and_heals(tmp_path):
     """The moved rung requires repo_root, the old path's confirmed absence there, AND that
     absence/presence confirmed by COMMITTED git history (dirty-tree guard fixed
     2026-09-18 -- see test_moved_rung_fails_closed_on_uncommitted_delete for the negative
-    case this rung now also has to reject): c.py never existed, d.py is committed, so
-    HEAD itself proves the move genuinely happened, the same signal the live fix is built
-    on."""
+    case this rung now also has to reject), and the new path must have arrived with the
+    old one's removal (see tests/test_sync_moved_adoption.py): c.py is committed, then
+    renamed to d.py in a second commit, so HEAD's history itself proves the move genuinely
+    happened, the same signal the live fix is built on."""
     _init_repo(tmp_path)
-    (tmp_path / "d.py").write_text("def mover_fn(): pass\n")
+    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
     _git(["add", "-A"], tmp_path)
-    _git(["commit", "-q", "-m", "d.py lives here now"], tmp_path)
+    _git(["commit", "-q", "-m", "c.py"], tmp_path)
+    _git(["mv", "c.py", "d.py"], tmp_path)
+    _git(["commit", "-q", "-m", "c.py -> d.py"], tmp_path)
     reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
     s = Store(tmp_path / "t.db")
     e = _entity(s, "mover_fn", "c.py", "m1")  # old file -> exact miss, name-only hit
@@ -219,13 +222,15 @@ def test_loose_rung_rejects_cross_type_collision(tmp_path):
 
 def test_loose_rung_adopts_doc_to_doc_move(tmp_path):
     """A doc heading that moved file (same suffix) still rebinds via the loose rung, once
-    repo_root confirms ADR-001.md (a bare string here, never a real file) is genuinely
-    gone from disk AND ADR-002.md's committed HEAD confirms the move -- see
-    test_moved_updates_descriptor_and_heals for why both are required."""
+    repo_root confirms ADR-001.md is genuinely gone from disk AND committed history
+    shows ADR-002.md arriving as ADR-001.md goes -- see test_moved_updates_descriptor_and_heals
+    for why both are required."""
     _init_repo(tmp_path)
-    (tmp_path / "ADR-002.md").write_text("# context\n")
+    (tmp_path / "ADR-001.md").write_text("# context\n")
     _git(["add", "-A"], tmp_path)
-    _git(["commit", "-q", "-m", "ADR-002.md lives here now"], tmp_path)
+    _git(["commit", "-q", "-m", "ADR-001.md"], tmp_path)
+    _git(["mv", "ADR-001.md", "ADR-002.md"], tmp_path)
+    _git(["commit", "-q", "-m", "ADR-001.md -> ADR-002.md"], tmp_path)
     reader = GraphifyReader(_write_graph(tmp_path, "doc.json", GRAPH_DOC))
     s = Store(tmp_path / "t.db")
     e = _entity(s, "context", "ADR-001.md", "old-doc-id")
@@ -876,7 +881,7 @@ def test_a_failed_reconcile_in_a_full_pass_is_retried_by_the_next_plain_sync(tmp
 
     assert s.get_meta(_PENDING_KEY) is None  # the adopt completed
     assert [o.status for o in r.outcomes if o.status == "error"] == ["error"]
-    assert s.get_meta("last_synced_graph_version") == reader.graph_version()
+    assert s.get_meta("last_synced_graph_version") == reader.sync_stamp()
     assert json.loads(s.get_meta(_TIER1_META)) == {d.id: ["2"]}
     assert _status_of(s, d, c2) == "live"  # the stale row survived the failed pass
 
@@ -1029,7 +1034,9 @@ def test_moved_rung_fails_closed_when_old_path_still_committed_at_head(tmp_path)
     genuinely committed, but the old path (c.py) is ALSO still committed at HEAD -- only
     removed from disk by an uncommitted delete. A move needs BOTH halves confirmed;
     a same-suffix hit whose OLD file git still tracks is not a confirmed move, no matter
-    how convincingly the new file is committed."""
+    how convincingly the new file is committed. Because d.py was already at HEAD before
+    c.py went, no later commit can make this a move (see tests/test_sync_moved_adoption.py),
+    so it is reported as orphaned, not remembered as a move waiting for a commit."""
     _init_repo(tmp_path)
     (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
     (tmp_path / "d.py").write_text("def mover_fn(): pass\n")
@@ -1044,11 +1051,11 @@ def test_moved_rung_fails_closed_when_old_path_still_committed_at_head(tmp_path)
 
     out = rebind_entity(e, s, reader, repo_root=tmp_path)
 
-    assert out.status == "moved_uncommitted"  # NOT "moved" -- c.py is still at HEAD
+    assert out.status == "orphaned"  # NOT "moved" -- c.py is still at HEAD, d.py always was
     kept = s.get_entity(e.entity_id)
     assert kept.descriptor.file_path == "c.py"
     assert kept.last_seen_node_id == "m1"
-    assert s.bindings_for_record(d.id)[0].status == "live"
+    assert s.bindings_for_record(d.id)[0].status == "orphaned"
 
 
 def test_moved_rung_fails_closed_when_new_path_never_committed(tmp_path):
@@ -1147,9 +1154,11 @@ def test_sync_resolves_repo_root_from_the_graph_not_the_store(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_repo(repo)
-    (repo / "d.py").write_text("def mover_fn(): pass\n")
+    (repo / "c.py").write_text("def mover_fn(): pass\n")
     _git(["add", "-A"], repo)
-    _git(["commit", "-q", "-m", "d.py lives here now"], repo)
+    _git(["commit", "-q", "-m", "c.py"], repo)
+    _git(["mv", "c.py", "d.py"], repo)
+    _git(["commit", "-q", "-m", "c.py -> d.py"], repo)
     reader = GraphifyReader(_write_graph(repo, "b.json", GRAPH_B))  # c.py absent in repo
 
     store_dir = tmp_path / "elsewhere" / "not-a-git-repo"

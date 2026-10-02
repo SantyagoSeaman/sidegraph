@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import ast
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -453,6 +453,21 @@ def _case_prune_telemetry_events(store: Store) -> tuple[str, object]:
     return "DELETE FROM render_events", lambda: store.prune_telemetry_events(older_than_days=0)
 
 
+def _case_claim_meta(store: Store) -> tuple[str, object]:
+    return "INSERT INTO meta", lambda: store.claim_meta("case-claim-key", "v1")
+
+
+def _case_update_meta_if(store: Store) -> tuple[str, object]:
+    return "INSERT INTO meta", lambda: store.update_meta_if("case-cond-key", lambda cur: "v1")
+
+
+def _case_prune_meta_prefixes(store: Store) -> tuple[str, object]:
+    store.set_meta("case-prune:legacy", "1")
+    return "DELETE FROM meta", lambda: store.prune_meta_prefixes(
+        ("case-prune:",), older_than=timedelta(days=30)
+    )
+
+
 def _case_upsert_initiative(store: Store) -> tuple[str, object]:
     return "INSERT INTO initiatives", lambda: store.upsert_initiative(
         Initiative(name="case-initiative")
@@ -508,6 +523,9 @@ _ROLLBACK_CASES = {
     "upsert_initiative": _case_upsert_initiative,
     "compact": _case_compact,
     "set_meta": _case_set_meta,
+    "claim_meta": _case_claim_meta,
+    "update_meta_if": _case_update_meta_if,
+    "prune_meta_prefixes": _case_prune_meta_prefixes,
     "delete_meta": _case_delete_meta,
     "supersede_domain": _case_supersede_domain,
 }

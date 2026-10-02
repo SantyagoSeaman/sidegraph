@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sidegraph.stats.model import ActivationStats, StatsReport
+from sidegraph.stats.model import ActivationStats, GraphStats, StatsReport
 
 _LABEL_WIDTH = 12
 _SCREEN_WIDTH = 80
@@ -263,10 +263,30 @@ def _graph(report: StatsReport) -> list[str]:
         # Built and readable but empty: three zeroes would read as a measurement. The usual
         # cause is an engine run from the wrong directory (doctor's graph-root advisory).
         return ["built, but holds no nodes → graphify update . (from the repo root)"]
-    return [
+    counts = (
         f"{_count(g.nodes, 'node')} · {_count(g.files, 'file')} "
         f"· {_count(g.communities, 'community', 'communities')}"
-    ]
+    )
+    return [counts, *_stale(g)]
+
+
+def _stale(g: GraphStats) -> list[str]:
+    """A continuation line under the counts when the graph's build commit has fallen behind
+    HEAD (spec D7); nothing for a fresh graph or one that could not be compared. Over the
+    body width, the command hangs on its own line, like every other over-wide figure here.
+    See design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D7).
+    """
+    if g.freshness != "stale":
+        return []
+    files = g.stale_files or 0
+    if g.commits_behind is not None:
+        behind = f"{_count(g.commits_behind, 'commit')} behind HEAD"
+        head = f"stale: {behind}, {_count(files, 'file')} changed"
+    else:
+        verb = "differs" if files == 1 else "differ"
+        head = f"stale: built outside HEAD's history, {_count(files, 'file')} {verb}"
+    tail = "→ graphify update ."
+    return [f"{head} {tail}"] if len(f"{head} {tail}") <= _BODY_WIDTH else [head, _HANG + tail]
 
 
 def _anchors(report: StatsReport) -> list[str]:

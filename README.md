@@ -139,7 +139,7 @@ projects the full store, history included, into an OKF v0.1 bundle any OKF consu
  next session ◀── SessionStart TOC            anchored to entities in the
  of named domains ◀── get_task_context ◀────── engine's graph (read-only);
  mistakes first        drill_down             re-anchored after refactors
- blind Read/Grep ──▶ nudged back to get_task_context (each form once per session)
+ blind Read/Grep ──▶ nudged back to get_task_context (each form once per agent)
 ```
 
 Two layers age differently: the **structure** layer (the code graph — entities,

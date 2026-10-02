@@ -1,7 +1,7 @@
 """Touch events from the PreToolUse hook (spec D3/D4/D9).
 
 The nudge and the recording share one handler and nothing else: the nudge keeps its
-Read/Grep scope and its once-per-session ledger, recording runs before every one of the
+Read/Grep scope and its once-per-agent ledger, recording runs before every one of the
 nudge's gates.
 """
 

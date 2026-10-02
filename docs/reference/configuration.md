@@ -19,7 +19,7 @@ a per-call parameter, not an environment/config setting.
 | `SIDEGRAPH_UNRATIFIED` | unset (`"on"`) | `retrieval.py` (`proposal_surfaces`, read at point of use — the single proposal-surfacing policy every render surface funnels through). Set to `off` for **regulated mode**: `proposed` records never surface as content — not in `get_task_context`, drill-down, the SessionStart TOC's unratified block, or the PreToolUse nudge titles — regardless of age. The SessionStart pending-ratification **counter stays** (it is queue metadata, not record content). No other value has any effect. For a committed, CI-checkable setting, pin it in the repository's `.claude/settings.json` `env` block. See [`hooks.md`](hooks.md#sidegraph-session-start). |
 | `SIDEGRAPH_PROPOSAL_WINDOW_DAYS` | unset (`30`) | `retrieval.py` (`proposal_surfaces`, read at point of use). The proposal **surfacing window**: a `proposed` record older than N days (by `valid_from`) stops surfacing as content while remaining in the store, in `sidegraph-ratify`, in the queue counter, and fully ratifiable later — expiry is derived at read time, nothing is written. `0` disables the window (pre-2026-08-04 behavior). A malformed value falls back to the default 30 — fail-safe, never fail-open. Matches `sidegraph-doctor --stale-days`'s default. |
 | `SIDEGRAPH_TELEMETRY` | unset (`"on"`) | `server.py` (every retrieval-facing tool impl, read at point of use via `_telemetry_enabled()`) and `host/hooks.py` (`pre_tool_use`'s `_record_touch_event`, and `session_start`'s prune call, via the shared `config.telemetry_enabled()`). Set to `off` to stop recording retrieval telemetry (`index.db`'s `retrieval_shows`/`retrieval_seeds` — see [store-format.md#retrieval-telemetry](store-format.md#retrieval-telemetry)) entirely — no other value has any effect, and the retrieval itself is unaffected either way. Feeds `sidegraph-doctor`'s `never-surfaced` check; see [`reference/cli.md`](cli.md#sidegraph-doctor). A showing made while it is off is in no counter, so `sidegraph-stats` counts that record under `no recorded showing`; see [`reference/cli.md`](cli.md#sidegraph-stats). Also silences touch-event recording in the PreToolUse hook. The flag removes the recording, not the hook invocation itself. Retention is **not** affected: the 30-day prune of `retrieval_events` runs at `SessionStart` regardless of this flag, so opting out strictly reduces what is retained — it stops new rows arriving while existing ones keep ageing out. (Until 2026-08-04 the same check gated both, which meant opting out froze retention; a practitioner review caught that inversion.) |
-| `SIDEGRAPH_TRUST_DIRTY_TREE` | unset | `sync.py` (`_trust_dirty_tree()`, read at point of use inside `rebind_entity`'s "moved" rung). Set to `on` to make the moved rung trust WORKING-TREE evidence alone again (unique same-suffix name-only hit + old path gone from disk) instead of also requiring that same move to be confirmed by committed `HEAD` history — the dirty-tree guard's off-by-default escape hatch, for someone who has verified their own tree and doesn't want to wait for a commit before syncing. No other value has any effect. See [`guides/surviving-refactors.md`](../guides/surviving-refactors.md#why-moved-checks-the-disk). |
+| `SIDEGRAPH_TRUST_DIRTY_TREE` | unset | `sync.py` (`_trust_dirty_tree()`, read at point of use inside `rebind_entity`'s "moved" rung). Set to `on` to make the moved rung trust WORKING-TREE evidence alone again (unique same-suffix name-only hit + old path gone from disk) instead of also requiring that same move to be confirmed by committed `HEAD` history — the dirty-tree guard's off-by-default escape hatch, for someone who has verified their own tree and doesn't want to wait for a commit before syncing. It overrides only that committed-evidence check: the name must still be the same symbol, and the new path must still be new — with the flag on and the old path still in `HEAD` (an uncommitted move), the new path must be absent from `HEAD`, so a move onto a file that already exists is refused. No other value has any effect. See [`guides/surviving-refactors.md`](../guides/surviving-refactors.md#why-moved-checks-the-disk). |
 
 Bootstrap adds no environment variable. Its repository, profile, host, explicit source,
 candidate, task, report, and recovery choices are command flags; see
@@ -39,7 +39,8 @@ neither: a three-value knob matched exactly (after trimming), failing safe to `m
 ## Store path resolution
 
 `SIDEGRAPH_DIR` and `SIDEGRAPH_DB` both feed one shared resolver
-(`config.resolve_store_path`, [`src/sidegraph/config.py`](../../src/sidegraph/config.py)) —
+(`config.resolve_store_location`, whose `.path` is `config.resolve_store_path`;
+[`src/sidegraph/config.py`](../../src/sidegraph/config.py)) —
 `server.py`, `host/hooks.py`'s three hooks, and every `cli.py` subcommand (`sidegraph-ratify`,
 `sidegraph-sync`, `sidegraph-import`, `sidegraph-domains`, `sidegraph-compact`, and
 `sidegraph-init`) all call it, so they agree on precedence exactly:
@@ -54,6 +55,19 @@ An explicit `--db` flag wins outright — nothing below it is even consulted. Ab
 directory is preferred over creating a new one, and a brand-new `.sidegraph` is the final
 fallback (with a one-line stderr warning that a new, empty store is being created — unless the
 caller is `sidegraph-init`, which announces the same fact on stdout instead).
+
+The hooks and the MCP server add one step, and only for a **relative** `$SIDEGRAPH_DIR` or the
+default `.sidegraph`: when that path does not exist where it is anchored, they look for it in
+the parent directories, nearest first, up to the repository root (the nearest directory holding
+a `.git` entry, a directory or a file), and use the first one found. A `.git` entry at your home
+directory, or above it, is not a repository root for this purpose: a dotfiles repository at `~`
+would otherwise make every project beneath it share `~/.sidegraph`. This is what makes a
+session started in a subdirectory of the repository use the repository's store instead of
+creating an empty second one there. A store that exists at the anchor still wins (a
+per-package store keeps working), the lookup never leaves the repository, and it does not run
+for `--db`, an absolute `SIDEGRAPH_DIR`, `$SIDEGRAPH_DB`, a value with a `..` part, or an
+anchor that is a symlink (even a dangling one). A symlink in a parent directory counts as the
+store, as given, live or not. The CLI does not search at all: from a subdirectory, pass `--db`.
 
 ### `SIDEGRAPH_DB` (deprecated)
 
@@ -85,9 +99,10 @@ also the moment a one-line deprecation notice prints to stderr, at most once per
 
 Both defaults, and any value read from the env vars, are relative paths resolved against the
 process's **current working directory at the moment it starts** — plain `pathlib.Path`
-behavior, nothing Sidegraph-specific. There is no repo-root detection or upward search (the
-Claude Code hooks are the one exception: they anchor a relative result to
-`$CLAUDE_PROJECT_DIR` when it's set — see `resolve_store_path`'s `root` parameter).
+behavior, nothing Sidegraph-specific. The CLI does no repo-root detection or upward search. The
+Claude Code hooks and the MCP server are the exception: the hooks anchor a relative result to
+`$CLAUDE_PROJECT_DIR` when it's set (see `resolve_store_location`'s `root` parameter), and both
+look a missing relative store up inside the repository, as described above.
 
 This matters because the MCP server and the three hooks are typically launched as subprocesses
 by Claude Code, and different launch mechanisms handle cwd differently:
@@ -121,8 +136,9 @@ and prints the hint: set an absolute
 serves: the default and `SIDEGRAPH_GRAPH` resolve against that store's project, never the
 server's cwd (there is no typed `--graph`). For a nested store its `sync_anchors` tool reports
 `graph not readable (<path>)` and names the graph beside the cwd; the lazy sync behind the
-retrieval tools degrades silently. The hooks still anchor a relative `SIDEGRAPH_GRAPH` to
-`$CLAUDE_PROJECT_DIR` when the host sets it. A store or graph path that cannot be read
+retrieval tools degrades silently. The hooks resolve the graph the same way: a relative
+default or `SIDEGRAPH_GRAPH` is looked up in the store's project, not under
+`$CLAUDE_PROJECT_DIR`. A store or graph path that cannot be read
 (permission denied) counts as missing and never raises a traceback. `-sync`, `-import` and
 `-domains bootstrap`, which need the graph, stop with `graph not readable (<path>)`; `-init`,
 `-ratify`, `-doctor` and `-stats` carry on without it and exit 0. The cwd hint is given only
@@ -194,8 +210,10 @@ render the real, domain-named table of contents (`render_toc`) instead of the le
 nameless-community fallback (`top_tier_map`) — see
 [retrieval: SessionStart TOC](../concepts/retrieval.md#sessionstart-toc). It's written by every
 completed `sidegraph-sync` pass; by a *skipped* (graph-unchanged) `sidegraph-sync` pass too,
-whenever at least one accepted domain exists (a content-only change never moves
-`graph_version`, so the cache would otherwise only heal on the next real graph rebuild); and
+whenever at least one accepted domain exists and the store changed since the cache was built
+(a content-only change never moves `graph_version`, so the cache would otherwise only heal on
+the next real graph rebuild; the cache records the store's canonical digest for that
+comparison); and
 immediately by `ratify`/`sidegraph-ratify` whenever that call actually accepted or dropped >= 1
 domain. There is no environment variable for it — like the retrieval budgets, it's not
 something you configure, only something written and read.

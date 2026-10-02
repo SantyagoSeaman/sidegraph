@@ -80,12 +80,15 @@ anchors resurface as noise in someone else's task context later.
   {"name": "ADR-001.md", "file_path": "adr/ADR-001.md"}]`. In the first store maintenance
   pass (2026-08-09), this one rule would have kept 7 of 10 fully-invisible records
   reachable.
-- **Two name shapes look valid and never resolve.** A bare module-level constant
-  (`MEMORY_GUARD_LINE`) — the engine indexes functions/classes/files, not constants;
-  anchor the containing file or function and name the constant in prose. A path- or
-  class-qualified name (`src/sidegraph/store.py`, `Store._touch_digest`) — the graph
-  labels files by basename and methods bare; the `file_path` field carries the path,
-  the `name` stays bare (`store.py`, `_touch_digest`).
+- **Two name shapes need care.** A bare module-level constant
+  (`MEMORY_GUARD_LINE`) never resolves — the engine indexes functions/classes/files, not
+  constants; anchor the containing file or function and name the constant in prose. A
+  path-qualified name (`src/sidegraph/store.py`) never resolves either — the graph labels
+  files by basename; the `file_path` field carries the path, the `name` stays `store.py`.
+  A type-qualified member (`Store._touch_digest`) resolves to the member **with its
+  `file_path`**, but the bare name with its file stays preferred (`_touch_digest`): it keeps
+  resolving if the type is renamed. Without a `file_path` the qualified form never resolves,
+  and with several same-named members that nothing ties to the named type it stays orphaned.
 - **Two targets resolve today and die later.** A file in another repository — this
   store's graph will never contain it; anchor the nearest in-repo consumer and name the
   foreign path in prose. An ephemeral process artifact (task brief, run report) — if the

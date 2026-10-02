@@ -623,3 +623,26 @@ def test_a_reload_clears_stat_rows_for_files_it_did_not_load(tmp_path):
         )
     finally:
         reopened.close()
+
+
+# == the public accessor a derived cache keys on =============================================
+
+
+def test_canonical_digest_accessor_follows_the_stamp_and_is_none_once_cleared(tmp_path):
+    """``Store.canonical_digest`` is what a derived value (the TOC cache) records to ask
+    later whether the store changed: it advances with a canonical write and equals what a
+    fresh walk of the files computes, and it reads ``None`` after a refused stamp cleared the
+    row, so such a cache treats "cannot tell" as changed."""
+    store = Store(tmp_path / "s")
+    before = store.canonical_digest()
+
+    store.add_fact(_fact("a write that moves the digest"))
+
+    after = store.canonical_digest()
+    assert after is not None and after != before
+    assert after == store._compute_canonical_digest()[0]
+
+    with store._mutation():
+        store._conn.execute("DELETE FROM meta WHERE key = 'canonical_digest'")
+    assert store.canonical_digest() is None
+    store.close()

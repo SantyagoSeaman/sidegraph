@@ -16,17 +16,22 @@ this module is the ONLY place allowed to know that file's name/shape (see
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
+import re
 import subprocess
 import time
 from collections import deque
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel
 
+from ..config import borrowed_graph_path, main_checkout_root
+from ..freshness import GraphFreshness
 from ..gitenv import git_env
-from ..schema import Descriptor, canonicalize
+from ..schema import Descriptor, canonicalize, strip_decoration
 
 # Node file types that can carry anchors. Concepts (LLM-extracted thematic entities) and
 # rationale nodes (recorded reasoning, code AST or LLM prose) anchor exactly like code
@@ -50,6 +55,37 @@ _SUBDIR_MISMATCH_MIN_SAMPLE = 8
 # a coincidental repo-root-relative collision (a vendored copy, a symlink) for one sampled
 # path, and demanding unanimous absence would let that one collision defeat the whole check.
 _SUBDIR_MISMATCH_THRESHOLD = 0.9
+
+# freshness(): the only build-commit values worth handing to git. A full SHA-1 or SHA-256 id;
+# anything shorter or ref-like (`abc123`, `v1`, `-x`) could resolve to a different commit, or be
+# read by git as an option, so it reads as "unknown" instead.
+_FULL_COMMIT_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+# Sibling of graph.json that Graphify rewrites on every `update`, including one that finds the
+# topology unchanged and leaves graph.json itself untouched. Only freshness() reads it, for
+# its mtime; like the labels sidecar, this module is the one place that knows its name.
+_MANIFEST_FILENAME = "manifest.json"
+
+# freshness(): how many of the changed paths a stale verdict names (GraphFreshness.sample).
+_FRESHNESS_SAMPLE = 5
+
+# Bumped whenever ``resolve()`` starts answering differently for the SAME graph, so a store
+# stamped by an older resolver reruns its sync once and heals what the old rules left orphaned.
+# Folded into :meth:`GraphifyReader.sync_stamp`, never into ``graph_version()`` (which is
+# provenance). 2: ``Type.member`` falls back to the member's own node.
+# see design/superpowers/specs/2026-10-01-member-anchor-names-design.md (D2)
+RESOLVER_REVISION = 2
+
+# A stamp's resolver-revision suffix (:meth:`GraphifyReader.sync_stamp`). The content hash is hex,
+# so an ``r`` after the last colon can only be the revision.
+_REVISION_SUFFIX_RE = re.compile(r":r\d+$")
+
+# The two edge relations by which Graphify links a type to what it owns: ``method`` (type ->
+# method) and ``case_of`` (enum -> case). Source is the owner, target the member.
+_OWNER_RELATIONS = frozenset({"method", "case_of"})
+
+# ``Type.member``, ``Type::member`` and ``Type#member`` are the three spellings of "member of".
+_MEMBER_SEPARATOR_RE = re.compile(r"::|[.#]")
 
 
 class NodeRef(BaseModel):
@@ -80,12 +116,45 @@ class ResolveResult(BaseModel):
     community: str | None = None
 
 
+class _Unknown(Exception):
+    """Internal to ``GraphifyReader.freshness``: a step could not decide; carries the reason."""
+
+
 class RationaleNode(BaseModel):
     node_id: str
     text: str  # the node's label — engine truncates ~80 chars, that's fine
     file_path: str | None = None
     community: str | None = None
     targets: list[NodeRef] = []  # what this rationale explains
+
+
+def _strip_generics(name: str) -> str:
+    """Drop every balanced ``<...>`` group (``Stack<Element>`` -> ``Stack``). An unclosed
+    ``<`` swallows the rest, which leaves the name without a member and so unresolved."""
+    out: list[str] = []
+    depth = 0
+    for ch in name:
+        if ch == "<":
+            depth += 1
+        elif ch == ">" and depth:
+            depth -= 1
+        elif not depth:
+            out.append(ch)
+    return "".join(out)
+
+
+def _split_member(name: str) -> tuple[str, str] | None:
+    """``(owner, member)`` of a qualified name, or ``None`` for a bare or degenerate one.
+
+    Generic parameters and the trailing call decoration go first, then the name is split at its
+    last separator; the owner is narrowed to its own last segment (``Outer.Inner.m`` -> owner
+    ``Inner``, member ``m``). Both sides must be non-empty.
+    """
+    parts = _MEMBER_SEPARATOR_RE.split(strip_decoration(_strip_generics(name)))
+    if len(parts) < 2:
+        return None
+    owner, member = parts[-2].strip(), parts[-1].strip()
+    return (owner, member) if owner and member else None
 
 
 def _to_node(raw: dict) -> NodeRef:
@@ -123,6 +192,8 @@ class GraphifyReader:
         self._adjacency: dict[str, list[tuple[str, str]]] | None = None
         self._resolve_idx: dict[str, list[NodeRef]] | None = None
         self._file_idx: dict[str, list[NodeRef]] | None = None
+        self._owner_idx: dict[str, list[str]] | None = None
+        self._source_files: frozenset[str] | None = None
 
     def _load(self, retries: int = 3) -> dict:
         last: Exception | None = None
@@ -152,6 +223,43 @@ class GraphifyReader:
         if commit:
             return f"{commit}:{self._content_hash}"
         return f"content:{self._content_hash}"
+
+    def sync_stamp(self) -> str:
+        """What ``sync`` stamps and compares: :meth:`graph_version` plus the resolver revision.
+
+        ``graph_version()`` stays the provenance value records carry; this one also changes
+        when ``resolve()`` learns to answer differently about the same graph, so the first
+        sync after such an upgrade reruns once and heals what the older rules left orphaned.
+        The stamp lives in the gitignored index, so the store format is unchanged.
+        # see design/superpowers/specs/2026-10-01-member-anchor-names-design.md (D2)
+        """
+        return f"{self.graph_version()}:r{RESOLVER_REVISION}"
+
+    @staticmethod
+    def without_revision(stamp: str | None) -> str | None:
+        """``stamp`` without its resolver-revision suffix: the plain graph version, which is
+        what a sync report shows on both sides. ``None`` and a stamp written before the
+        revision existed come back unchanged."""
+        return None if stamp is None else _REVISION_SUFFIX_RE.sub("", stamp)
+
+    def built_at_commit(self) -> str | None:
+        """The raw ``built_at_commit`` field: the HEAD Graphify ran at. ``None`` when it is
+        absent or not a non-empty string. Engine-seam accessor: nothing outside ``engine/``
+        reads the field.
+        # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D1)
+        """
+        commit = self._raw.get("built_at_commit")
+        return commit if isinstance(commit, str) and commit else None
+
+    def source_files(self) -> frozenset[str]:
+        """Every node's ``source_file``, of every file type (not only anchorable ones: an
+        image or a config file the graph holds is still a file the graph holds), built once
+        (memoized). Backs :meth:`freshness` and the "not in the code graph" answer.
+        # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D1)
+        """
+        if self._source_files is None:
+            self._source_files = frozenset(n.file_path for n in self._nodes if n.file_path)
+        return self._source_files
 
     def list_nodes(self) -> list[NodeRef]:
         return list(self._nodes)
@@ -194,13 +302,79 @@ class GraphifyReader:
             m = matches[0]
             return ResolveResult(status="resolved", node_id=m.node_id, community=m.community)
         if not matches:
-            return ResolveResult(status="unresolved")
+            return self._resolve_member(desc)
         comms = {m.community for m in matches if m.community is not None}
         shared = comms.pop() if len(comms) == 1 else None
         return ResolveResult(
             status="ambiguous",
             candidates=[m.node_id for m in matches],
             community=shared,
+        )
+
+    def _owner_index(self) -> dict[str, list[str]]:
+        """``member node_id -> owner node_ids`` over the ``method`` / ``case_of`` edges, read in
+        the engine's direction (source owns target), built once (memoized). Backs
+        :meth:`_resolve_member`; deliberately directed, because a type that has methods must
+        not read as owned by them."""
+        if self._owner_idx is None:
+            idx: dict[str, list[str]] = {}
+            for link in self._links:
+                if self._relation(link) in _OWNER_RELATIONS:
+                    idx.setdefault(str(link.get("target")), []).append(str(link.get("source")))
+            self._owner_idx = idx
+        return self._owner_idx
+
+    def _resolve_member(self, desc: Descriptor) -> ResolveResult:
+        """Fallback for a name with no exact match: ``Type.member`` -> the member's own node.
+
+        Graphify labels a member ``.playClip()`` and links it to its type; agents write
+        ``AudioPlayback.playClip``. It is for code identifiers only: the owner's last segment
+        and the member must both be identifiers, and a candidate must be a ``code`` node, so
+        prose with a dot in it, a numbered heading (``8. Testing``) or a file name
+        (``verify-release.sh``) never splits into a "member" of something. Needs a file
+        (without one the member name alone matches across the whole repository, which is a
+        guess). Candidates are the nodes in that file whose label, decoration stripped and
+        case KEPT, is the member. A node whose label differs from the member only by case (a
+        struct ``Message`` beside a method ``.message()``) makes the whole answer
+        ``unresolved``: the store dedups an anchor by its lowercased name, so the two spellings
+        share one entity and binding either node would put the other's record on it. A
+        candidate an owner edge ties to a type other than the named one (compared with case
+        kept) is rejected, even when it is alone; of several, only those tied to the named owner
+        stay. Whatever does not narrow to exactly one is ``unresolved``, never ``ambiguous``:
+        that keeps the write path's orphaned, healable leaf.
+        # see design/superpowers/specs/2026-10-01-member-anchor-names-design.md (D1)
+        """
+        unresolved = ResolveResult(status="unresolved")
+        if not desc.file_path:
+            return unresolved
+        split = _split_member(desc.name)
+        if split is None:
+            return unresolved
+        owner, member = split
+        if not (owner.isidentifier() and member.isidentifier()):
+            return unresolved
+        in_file = self._file_index().get(desc.file_path, [])
+        for n in in_file:
+            label = strip_decoration(n.name)
+            if label != member and label.lower() == member.lower():
+                return unresolved
+        owners = self._owner_index()
+        kept: list[NodeRef] = []
+        tied: list[NodeRef] = []  # kept, and tied by an owner edge to `owner` in this file
+        for n in in_file:
+            if n.file_type != "code" or strip_decoration(n.name) != member:
+                continue
+            owner_nodes = [o for oid in owners.get(n.node_id, []) if (o := self._by_id.get(oid))]
+            if any(strip_decoration(o.name) != owner for o in owner_nodes):
+                continue
+            kept.append(n)
+            if any(o.file_path == desc.file_path for o in owner_nodes):
+                tied.append(n)
+        chosen = kept if len(kept) == 1 else tied
+        if len(chosen) != 1:
+            return unresolved
+        return ResolveResult(
+            status="resolved", node_id=chosen[0].node_id, community=chosen[0].community
         )
 
     def _relation(self, link: dict) -> str:
@@ -364,11 +538,12 @@ class GraphifyReader:
         except (OSError, subprocess.SubprocessError):
             return []
 
-    def repo_root(self) -> Path | None:
+    def repo_root(self, timeout: float = 5.0) -> Path | None:
         """Best-effort git worktree root containing THIS reader's graph.json —
         ``git rev-parse --show-toplevel`` run from ``self.path.parent``, never raising.
         ``None`` when graph.json sits outside any git working tree, or git itself is
-        unavailable.
+        unavailable (or slower than ``timeout`` seconds, which :meth:`freshness` passes
+        as the time left on its one deadline).
 
         Deliberately keyed off graph.json's OWN location, not any other artifact (e.g. a
         decision store, which is routinely copied elsewhere for safe inspection and would
@@ -385,13 +560,147 @@ class GraphifyReader:
                 env=git_env(),
                 capture_output=True,
                 text=True,
-                timeout=5.0,
+                timeout=timeout,
             )
         except (OSError, subprocess.SubprocessError):
             return None
         if result.returncode != 0:
             return None
         return Path(result.stdout.strip()).resolve()
+
+    def freshness(self, deadline: float = 3.0, root: Path | None = None) -> GraphFreshness:
+        """Is the graph current? ``built_at_commit`` set against HEAD, never raising.
+
+        ``stale`` means a file the graph should reflect changed since the build and the
+        graph does not reflect it; ``commits_behind`` is reported and never decides that (a
+        commit touching only file types the graph does not hold must not nag). ``unknown``
+        (with a ``reason``) when the build commit is absent or not a full id, graph.json is
+        outside a git repository, git cannot run or outruns ``deadline`` (one shared budget
+        for every git call here), or the repository lacks the build commit. ``root`` is the
+        repository root when the caller already holds it (from :meth:`repo_root`), which
+        saves that one git call.
+
+        Every git call runs from graph.json's own directory, so the paths ``git diff`` prints
+        (``--no-relative``: repository-root relative whatever the graph's depth) are directly
+        comparable with node ``source_file`` values. Graphify stamps the HEAD it ran at and
+        indexes the working tree, so a changed file the graph holds whose working-tree copy
+        is no newer than the build is already reflected and does not count. The build time
+        is the later of graph.json's mtime and the sibling ``manifest.json``'s: a rebuild
+        that finds the topology unchanged leaves graph.json (and its stamp) untouched but
+        still rewrites the manifest.
+        # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D2)
+        """
+        try:
+            return self._freshness(deadline, root)
+        except _Unknown as e:
+            return GraphFreshness(state="unknown", reason=str(e))
+        except Exception:
+            return GraphFreshness(state="unknown", reason="the comparison with HEAD failed")
+
+    def _freshness(self, deadline: float, root: Path | None) -> GraphFreshness:
+        """The body of :meth:`freshness`; raises :class:`_Unknown` where it cannot decide."""
+        end = time.monotonic() + deadline
+
+        def git(*args: str) -> subprocess.CompletedProcess[bytes]:
+            left = end - time.monotonic()
+            if left <= 0:
+                raise _Unknown("git timed out")
+            try:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=self.path.parent,
+                    env=git_env(),
+                    capture_output=True,
+                    timeout=left,
+                )
+            except subprocess.TimeoutExpired:
+                raise _Unknown("git timed out") from None
+            except OSError:
+                raise _Unknown("git could not be run") from None
+
+        built = self.built_at_commit()
+        if built is None:
+            raise _Unknown("graph.json records no build commit")
+        if not _FULL_COMMIT_RE.fullmatch(built):
+            raise _Unknown("graph.json's build commit is not a full commit id")
+
+        if root is None:
+            left = end - time.monotonic()
+            root = self.repo_root(timeout=left) if left > 0 else None
+        if root is None:
+            if end <= time.monotonic():
+                raise _Unknown("git timed out")
+            raise _Unknown("graph.json is not inside a git repository")
+
+        head_run = git("rev-parse", "HEAD")
+        head = head_run.stdout.decode().strip()
+        if head_run.returncode != 0 or not head:
+            raise _Unknown("the repository has no commits")
+        if built == head:
+            return GraphFreshness(
+                state="fresh", built_at=built, head=head, in_history=True, commits_behind=0
+            )
+        if git("cat-file", "-e", f"{built}^{{commit}}").returncode != 0:
+            raise _Unknown(f"built at {built[:7]}, a commit this repository does not have")
+
+        ancestor = git("merge-base", "--is-ancestor", built, "HEAD").returncode
+        commits_behind: int | None = None
+        if ancestor == 0:
+            count = git("rev-list", "--count", f"{built}..HEAD")
+            if count.returncode != 0:
+                raise _Unknown("git could not count the commits since the build")
+            commits_behind = int(count.stdout.decode().strip())
+        elif ancestor != 1:
+            raise _Unknown("git could not relate the build commit to HEAD")
+
+        diff = git(
+            "diff", "--name-only", "--no-relative", "--no-renames", "-z", built, "HEAD", "--"
+        )
+        if diff.returncode != 0:
+            raise _Unknown("git diff failed")
+        changed = [os.fsdecode(p) for p in diff.stdout.split(b"\0") if p]
+
+        held = self.source_files()
+        # No extension is not an extension: an extensionless file in the graph (a Makefile)
+        # must not make every extensionless change look indexable.
+        extensions = {PurePosixPath(p).suffix for p in held} - {""}
+        build_time = self.path.stat().st_mtime_ns
+        # No manifest beside graph.json (OSError): graph.json's own mtime is the build time.
+        with contextlib.suppress(OSError):
+            build_time = max(build_time, (self.path.parent / _MANIFEST_FILENAME).stat().st_mtime_ns)
+
+        def counts(p: str) -> bool:
+            in_graph = p in held
+            # Graphify skips dot-directories, so a new file there is not one it should hold.
+            indexable = in_graph or (
+                PurePosixPath(p).suffix in extensions
+                and not any(seg.startswith(".") for seg in p.split("/")[:-1])
+            )
+            if not indexable:
+                return False
+            target = root / p
+            try:
+                if not target.is_file():
+                    return in_graph  # deleted, or now a directory: the graph still holds it
+                if not in_graph:
+                    return True  # a new file
+                return target.stat().st_mtime_ns > build_time  # edited after the build
+            except OSError:
+                return True
+
+        counting = [p for p in changed if counts(p)]
+        ordered = sorted(p for p in counting if p in held) + sorted(
+            p for p in counting if p not in held
+        )
+        return GraphFreshness(
+            state="stale" if counting else "fresh",
+            built_at=built,
+            head=head,
+            in_history=ancestor == 0,
+            commits_behind=commits_behind,
+            changed=len(counting),
+            sample=ordered[:_FRESHNESS_SAMPLE],
+        )
 
     def detect_subdir_mismatch(
         self, repo_root: Path | None = None, sample_size: int = 25
@@ -457,4 +766,21 @@ class GraphifyReader:
         for sub in subdirs:
             if all((root / sub / p).exists() for p in missing):
                 return {"sampled": len(sampled), "missing": len(missing), "likely_run_from": sub}
+        return None
+
+
+def open_borrowed_reader(store_path: str | Path) -> tuple[GraphifyReader, Path] | None:
+    """A reader over the main checkout's graph for a linked worktree whose store has no graph of
+    its own, with the main checkout root; ``None`` when nothing is borrowable or the graph cannot
+    be read. Never raises. The read tools and SessionStart call it after the store's own graph
+    failed to open, and sync the result index-only (``canonical_writes=False``): the worktree's
+    index is derived from the borrowed graph and no tracked file is rewritten. No write path
+    borrows.
+    see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)"""
+    try:
+        graph, main = borrowed_graph_path(store_path), main_checkout_root(store_path)
+        if graph is None or main is None:
+            return None
+        return GraphifyReader(graph), main
+    except Exception:
         return None

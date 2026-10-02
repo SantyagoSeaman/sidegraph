@@ -3,15 +3,20 @@ docs/concepts/mind-model.md)."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
-from sidegraph.retrieval import build_toc, render_toc
+from sidegraph.engine.reader import GraphifyReader
+from sidegraph.retrieval import build_toc, drill_down, render_toc, unratified_mistakes
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
     DecisionKind,
     DecisionStatus,
+    Descriptor,
     Domain,
+    DomainStatus,
+    Entity,
     Initiative,
     Provenance,
     Scope,
@@ -45,6 +50,24 @@ def _decision(store: Store, kind: DecisionKind, **overrides) -> Decision:
     return store.add_decision(Decision(**base))
 
 
+def _bind_entity(store: Store, record_id: str, entity_id: str, tier: int = 2) -> None:
+    store.add_binding(
+        AnchorBinding(record_id=record_id, entity_id=entity_id, tier=tier, status="live")
+    )
+
+
+def _entity_in_community(store: Store, name: str, file_path: str, community: str) -> Entity:
+    """A concrete entity observed (as of the last sync) in ``community`` -- the membership
+    signal a domain's decisions are joined on (``Entity.last_seen_community``)."""
+    return store.upsert_entity(
+        Entity(
+            canonical_name=name,
+            descriptor=Descriptor(name=name, file_path=file_path),
+            last_seen_community=community,
+        )
+    )
+
+
 def _bind_domain(store: Store, record_id: str, slug: str, status: str = "live") -> None:
     entity = store.find_abstract_entity(f"domain:{slug}")
     store.add_binding(
@@ -67,8 +90,8 @@ def test_build_toc_empty_store(tmp_path):
 
 
 def test_build_toc_reader_is_optional(tmp_path):
-    """``reader`` is unused (every TOC field comes from the store alone) -- callers that
-    have no reader on hand (e.g. the ratify surfaces) must be able to omit it."""
+    """``reader`` is optional (it only adds the document branch of the mistake count) --
+    callers that have no reader on hand (e.g. the ratify surfaces) must be able to omit it."""
     store = Store(tmp_path / "t.db")
     assert build_toc(store) == build_toc(store, None)
 
@@ -107,6 +130,160 @@ def test_build_toc_excludes_superseded_and_orphaned_bindings_from_mistake_count(
 
     toc = build_toc(store, None)
     assert toc["domains"][0]["mistakes"] == 0
+
+
+def test_build_toc_counts_a_mistake_anchored_inside_the_domains_community(tmp_path):
+    """The count is what ``drill_down`` would serve, not only what is tagged to the domain.
+    Most captured mistakes anchor to a code entity, not to ``domain:<slug>``, so a count of
+    the tagged ones alone read "0 mistake(s)" over a domain that holds several."""
+    store = Store(tmp_path / "t.db")
+    domain = _domain(store, "trading", communities=["1"])
+    assert domain.status.value == "accepted"  # a proposed domain would give 0 on both sides
+    ent = _entity_in_community(store, "Trader", "trader/exec.py", "1")
+    mistake = _decision(
+        store, DecisionKind.GOTCHA, title="fills arrive twice", status=DecisionStatus.ACCEPTED
+    )
+    _bind_entity(store, mistake.id, ent.entity_id)
+
+    toc = build_toc(store, None)
+    assert [(d["slug"], d["mistakes"]) for d in toc["domains"]] == [("trading", 1)]
+
+
+def _write_graph(tmp_path, nodes) -> GraphifyReader:
+    graph_path = tmp_path / "g.json"
+    graph_path.write_text(json.dumps({"built_at_commit": "abc", "nodes": nodes, "links": []}))
+    return GraphifyReader(graph_path)
+
+
+def _accepted_mistakes_served_by_drill_down(
+    store: Store, reader: GraphifyReader | None, slug: str
+) -> int:
+    served = drill_down(slug, store, reader)
+    assert served["found"] is True
+    decisions = [store.get_decision(i) for i in served["decision_ids"]]
+    return sum(
+        1
+        for d in decisions
+        if d is not None
+        and d.status == DecisionStatus.ACCEPTED
+        and d.kind in (DecisionKind.GOTCHA, DecisionKind.CONSTRAINT, DecisionKind.LESSON)
+    )
+
+
+def test_build_toc_count_equals_the_accepted_mistakes_drill_down_serves(tmp_path):
+    """One number, two surfaces: for every accepted domain, the TOC count equals the accepted
+    mistakes in ``drill_down``'s result, all three branches of the union included (tagged to
+    the domain, anchored inside its communities, anchored to a document it covers), and with
+    the same reader on both sides -- the document branch needs one."""
+    reader = _write_graph(
+        tmp_path,
+        [
+            {
+                "id": "adr_file",
+                "label": "ADR-005.md",
+                "norm_label": "adr-005.md",
+                "file_type": "document",
+                "source_file": "docs/ADR-005.md",
+                "community": "9",
+            },
+            {
+                "id": "adr_heading",
+                "label": "ADR-005: Some Decision",
+                "norm_label": "adr-005: some decision",
+                "file_type": "document",
+                "source_file": "docs/ADR-005.md",
+                "community": "5",
+            },
+        ],
+    )
+    store = Store(tmp_path / "t.db")
+    trading = _domain(store, "trading", communities=["1"])
+    docs = _domain(store, "adr-domain", communities=["5"])
+    quiet = _domain(store, "quiet", communities=["7"])
+    assert {d.slug for d in (trading, docs, quiet)} == {
+        d.slug for d in store.iter_domains(status=DomainStatus.ACCEPTED)
+    }
+
+    accepted = DecisionStatus.ACCEPTED
+    tagged = _decision(store, DecisionKind.LESSON, title="tagged lesson", status=accepted)
+    _bind_domain(store, tagged.id, "trading")
+    ent = _entity_in_community(store, "Trader", "trader/exec.py", "1")
+    anchored = _decision(store, DecisionKind.GOTCHA, title="anchored gotcha", status=accepted)
+    _bind_entity(store, anchored.id, ent.entity_id)
+    _bind_entity(store, tagged.id, ent.entity_id)  # reachable twice, counted once
+    adr = _decision(store, DecisionKind.CONSTRAINT, title="adr constraint", status=accepted)
+    doc_entity = store.upsert_entity(
+        Entity(
+            canonical_name="ADR-005.md",
+            descriptor=Descriptor(name="ADR-005.md", file_path="docs/ADR-005.md"),
+            last_seen_node_id="adr_file",
+            last_seen_community="9",
+        )
+    )
+    _bind_entity(store, adr.id, doc_entity.entity_id)
+    not_a_mistake = _decision(store, DecisionKind.ADR, title="plain adr", status=accepted)
+    _bind_entity(store, not_a_mistake.id, ent.entity_id)
+
+    toc = build_toc(store, reader)
+    counts = {d["slug"]: d["mistakes"] for d in toc["domains"]}
+    served = {
+        slug: _accepted_mistakes_served_by_drill_down(store, reader, slug)
+        for slug in ("trading", "adr-domain", "quiet")
+    }
+    assert counts == served
+    assert counts == {"trading": 2, "adr-domain": 1, "quiet": 0}  # both sides are not just 0
+
+
+def test_build_toc_count_skips_proposed_and_superseded_mistakes(tmp_path):
+    """Only a ratified, still-valid mistake is counted. A proposal is not yet team memory,
+    and a superseded one was abandoned: counting either would promise a gotcha that
+    ``drill_down`` ranks as unratified or no longer shows."""
+    store = Store(tmp_path / "t.db")
+    _domain(store, "trading", communities=["1"])
+    ent = _entity_in_community(store, "Trader", "trader/exec.py", "1")
+
+    counted = _decision(
+        store, DecisionKind.GOTCHA, title="ratified gotcha", status=DecisionStatus.ACCEPTED
+    )
+    proposed = _decision(store, DecisionKind.GOTCHA, title="still a proposal")
+    old = _decision(store, DecisionKind.LESSON, title="old lesson", status=DecisionStatus.ACCEPTED)
+    _decision(
+        store,
+        DecisionKind.LESSON,
+        title="its successor",
+        status=DecisionStatus.ACCEPTED,
+        supersedes=old.id,
+    )
+    for d in (counted, proposed, old):
+        _bind_entity(store, d.id, ent.entity_id)
+
+    assert proposed.status == DecisionStatus.PROPOSED
+    assert store.get_decision(old.id).status == DecisionStatus.SUPERSEDED
+    toc = build_toc(store, None)
+    assert toc["domains"][0]["mistakes"] == 1
+
+
+def test_unratified_mistakes_holds_only_the_proposed_global_mistakes_build_toc_lists(tmp_path):
+    """SessionStart reads this list live instead of building the whole TOC for it, so it has
+    to be exactly that TOC section: proposed global records of a MISTAKE kind (gotcha, lesson,
+    constraint), not every proposal in the global scope."""
+    store = Store(tmp_path / "t.db")
+    _decision(store, DecisionKind.GOTCHA, title="proposed gotcha", scope=Scope.GLOBAL)
+    _decision(store, DecisionKind.ADR, title="proposed adr", scope=Scope.GLOBAL)
+    _decision(
+        store,
+        DecisionKind.CONSTRAINT,
+        title="accepted constraint",
+        scope=Scope.GLOBAL,
+        status=DecisionStatus.ACCEPTED,
+    )
+
+    lines = unratified_mistakes(store)
+
+    assert len(lines) == 1
+    assert "proposed gotcha" in lines[0]
+    assert not any("proposed adr" in line or "accepted constraint" in line for line in lines)
+    assert lines == build_toc(store).get("unratified", [])
 
 
 def test_build_toc_parent_slug_and_subdomain_counts(tmp_path):

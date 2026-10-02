@@ -68,11 +68,13 @@ Either way, `session_start` prepends the same standing instruction ahead of whic
 renderer's text follows — added once at the hook-assembly level, not inside either renderer
 (see [`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start)):
 
-> When you need to find or understand code in this project, call get_task_context(seeds)
-> before any grep or file search — decisions, gotchas and a domain map are indexed here.
+> When you need to find or understand code in this project, call get_task_context(files=[…])
+> with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
+> are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
+> available. If the tool is listed only by name, load it first.
 
 Unlike the `PreToolUse` nudge below (which only ever fires on `Read`/`Grep`, and fires each
-of its two forms, generic and path-specific, at most once per session), this instruction is
+of its two forms, generic and path-specific, at most once per agent), this instruction is
 unconditional and covers every search surface — bash
 `grep`/`rg`/`find`, MCP structure-query tools, everything — by telling the agent up front,
 not by gating a specific tool call.
@@ -141,10 +143,13 @@ decision, it emits a **non-blocking**, `additionalContext`-only `hookSpecificOut
 toward `get_task_context`/`drill_down` — no `permissionDecision` field is set, so the tool call
 is never denied, escalated, or auto-approved; it only gets annotated with the nudge text, and
 then runs through Claude Code's normal permission flow exactly as it would have otherwise.
-Fires at most once per session for each of its two forms, generic and path-specific (each
-guarded by its own session-scoped marker in the store's `meta` table, separate from the
-`Stop` hook's own capture ledger so the guards don't consume each other's one-shot), so a
-session can see up to two of these nudges. Set `SIDEGRAPH_GREP_NUDGE=off` to disable it
+Fires at most once per agent for each of its two forms, generic and path-specific (each
+guarded by its own marker in the store's `meta` table, separate from the `Stop` hook's own
+capture ledger so the guards don't consume each other's one-shot), so one agent can see up
+to two of these nudges. The session's own agent and every subagent it starts count
+separately, because Claude Code gives a subagent's hook payload its parent's session id and
+its own `agent_id`: without that, the main agent's nudge would have used up the one a
+subagent needed. Set `SIDEGRAPH_GREP_NUDGE=off` to disable it
 entirely. The matcher also admits `Edit` and `Write`: those reach the process only to be
 recorded as touch events (no nudge). Like the other two hooks, it never crashes
 or blocks the tool call: any failure (or the store simply having nothing to offer yet) prints
@@ -174,7 +179,9 @@ the recommended install path, and it works today, no PyPI publish required:
 > to the canonical filenames during the public release. Those variants run `uvx --from
 > git+https://github.com/SantyagoSeaman/sidegraph.git@main …`, so the plugin deliberately
 > follows the public repository rather than the PyPI package. The unsuffixed files in this
-> development repository run the local checkout with `uv run --no-active` instead.
+> development repository run the checkout the plugin was loaded from, with
+> `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.." --package
+> sidegraph --frozen --no-active`, in whatever project the session is in.
 
 ## Environment variables
 
@@ -187,19 +194,27 @@ the recommended install path, and it works today, no PyPI publish required:
 | `SIDEGRAPH_RATIFY_NUDGE` | unset | Set to `off` to disable the `SessionStart` pending-ratification line entirely (no other value has any effect). |
 | `SIDEGRAPH_AUTO_ACCEPT` | unset | Set to `on` to land agent-proposed decisions/facts as `accepted` immediately, bypassing the ratification queue (no other value has any effect; domains are always exempt). See [`guides/capturing-decisions.md#4-auto-accept-opt-in`](../guides/capturing-decisions.md#4-auto-accept-opt-in). |
 
-`SIDEGRAPH_DIR` is resolved relative to the **working directory of the process that reads it**;
-a relative `SIDEGRAPH_GRAPH` is resolved against the project of the store `SIDEGRAPH_DIR` names
-(the store's parent directory) by the CLI and the MCP server, and against `CLAUDE_PROJECT_DIR`
-by the hooks. The `SIDEGRAPH_DIR` half is the crux of the cwd caveat below.
+A relative `SIDEGRAPH_DIR` is anchored to the **launch directory**: `CLAUDE_PROJECT_DIR` for the
+hooks, the working directory of the process for the MCP server and the CLI. On the host surfaces
+(the hooks and the MCP server), a relative store that does not exist there is then looked up in the
+parent directories, up to the repository's `.git` boundary (see
+[Launching in a subdirectory](#launching-in-a-subdirectory)); the CLI never does. A relative
+`SIDEGRAPH_GRAPH` is resolved against the project of the store `SIDEGRAPH_DIR` names (the store's
+parent directory) by the CLI, the MCP server and the hooks. The `SIDEGRAPH_DIR` half is the crux of
+the cwd caveat below.
 
 ## The cwd caveat
 
-`SIDEGRAPH_DIR` is a plain relative-path lookup against `os.getcwd()`; with the default
-`.sidegraph` in the project, `SIDEGRAPH_GRAPH` therefore also lands in the project. There
-is no path resolution against the Claude Code project root in the current source. That's fine
-when Claude Code launches the MCP server/hooks with the project directory as cwd — the common
-case for the manual `.mcp.json`/`.claude/settings.json` setup above. It is **not guaranteed**
-for a plugin-distributed MCP server or hook, where cwd can differ from the project root.
+A relative `SIDEGRAPH_DIR` is anchored to the launch directory: `CLAUDE_PROJECT_DIR` for the hooks
+(the directory Claude Code was started in, not necessarily the repository root), `os.getcwd()` for
+the MCP server and the CLI. With the default `.sidegraph` in the project, `SIDEGRAPH_GRAPH`
+therefore also lands in the project. Where the relative store does not exist at that anchor, the
+hooks and the MCP server look for it in the parent directories, up to the repository's `.git`
+boundary (see [Launching in a subdirectory](#launching-in-a-subdirectory)); the CLI never does.
+Anchoring to the launch directory is fine when Claude Code launches the MCP server/hooks with the
+project directory as cwd — the common case for the manual `.mcp.json`/`.claude/settings.json` setup
+above. It is **not guaranteed** for a plugin-distributed MCP server or hook, where cwd can differ
+from the project root.
 
 Two mitigations, both config-level (no source change needed to use them):
 
@@ -224,10 +239,39 @@ Two mitigations, both config-level (no source change needed to use them):
   `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from
   git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start`. This is
   the content of `plugin/sidegraph/hooks/hooks.public.json`; the release renames it to
-  `hooks.json`. The development variant uses `uv run --no-active` with the same prefix.
+  `hooks.json`. The development variant uses the same prefix and runs the checkout the plugin
+  was loaded from: `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.."
+  --package sidegraph --frozen --no-active`. Every hook command also ends with a guard (`|| printf '{}\n'`, and for
+  `SessionStart` a `systemMessage` telling you to run the hook command in a terminal) that
+  turns a command that cannot start into exit 0: Claude Code reads exit 2 with text on stderr
+  as a block on `Stop` and `PreToolUse`, and `uv` exits 2 on some of its own errors.
 
-Belt and braces: the hook entry points themselves also anchor relative
-`SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` values to `CLAUDE_PROJECT_DIR` when Claude Code exports it,
-so even a hook invoked without the `cd` prefix resolves paths correctly. The MCP server
-deliberately does not do this env-anchoring itself (the portable core stays host-agnostic) —
-it leans on the plugin's `sh -c` wrapper above to fix its cwd instead.
+Belt and braces: the hook entry points themselves also anchor a relative `SIDEGRAPH_DIR` to
+`CLAUDE_PROJECT_DIR` when Claude Code exports it, so even a hook invoked without the `cd` prefix
+resolves the store correctly; the graph then follows the store. The MCP server deliberately does
+not do this env-anchoring itself (the portable core stays host-agnostic) — it leans on the
+plugin's `sh -c` wrapper above to fix its cwd instead.
+
+### Launching in a subdirectory
+
+`CLAUDE_PROJECT_DIR` is the directory Claude Code was launched in, not the repository root: a
+launch in `repo/pkg` gives `repo/pkg`. The hooks and the MCP server therefore anchor the relative
+`.sidegraph` to `repo/pkg`. Where it does not exist there, they look for it in the parent
+directories, up to the repository root (the nearest directory with a `.git` entry), and use the
+first one found, so a launch in `repo/pkg` uses `repo/.sidegraph` and does not create an empty
+second store. A store that exists in the launch directory still wins, which keeps a per-package
+store working. Touches are recorded relative to the directory the store was found in (`pkg/a.py`),
+the same as every anchor.
+
+This applies wherever a subdirectory launch reads the plugin. A launch in `repo/pkg` does not read
+`repo/.claude/settings.json` (measured with Claude Code 2.1.287), so a plugin enabled only there is
+not active for it: enable it at user scope, or in the subdirectory's own `.claude/settings.json`.
+
+A session that an older Sidegraph started in a subdirectory may have left a `.sidegraph` there. An
+empty one is named by `SessionStart` together with the repository's store; remove it to use the
+repository's. One that holds any record (a single proposed decision from an old capture is enough)
+is not reported and keeps hiding the repository's store: review it with
+`sidegraph-ratify --db <subdirectory>/.sidegraph`, record what matters again in the repository's
+store, then remove the subdirectory's directory. A `.git` entry at your home directory is not a
+repository root for the lookup, and the CLI does not search at all: from a subdirectory, pass
+`--db`.

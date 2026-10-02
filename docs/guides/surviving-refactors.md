@@ -57,8 +57,8 @@ deterministic ladder, one rung at a time, and the first rung that fires wins:
 |---|---|---|
 | `unchanged` | Exact `name`+`file_path` match, same node id as last sync | Leaf binding stays `live`; still checks for community re-pointing (below). |
 | `rebound` | Exact `name`+`file_path` match, but the node id changed | Leaf binding stays/returns to `live`, mapping refreshed to the new node id. |
-| `moved` | No exact match, but a *unique* name-only match exists **in a file of the same suffix**, **the entity's old `file_path` is confirmed gone from disk**, AND that same move is **independently confirmed by committed git history** (old path absent, new path tracked — both at `HEAD`) | The entity's `descriptor.file_path` is updated to follow it; leaf binding heals to `live`. A same-name hit in a file of a *different* suffix (e.g. a vanished code symbol colliding with an unrelated doc heading) is treated as a collision, not a move, and falls through to orphaned instead — as does any hit whose old path is still on disk (below). |
-| `moved_uncommitted` | Same disk-level evidence as `moved` (unique same-suffix hit, old path gone from disk), but git's committed history at `HEAD` does not yet confirm it — an uncommitted delete, rename, or stash on this one working tree | Nothing is touched — the binding, descriptor, and node mapping are all left exactly as they were. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`, see below). Sidegraph remembers the entity, and the first sync after `HEAD` moves re-verifies it even if the graph was not rebuilt. If the old path is back on disk (the rename was reverted or stashed) the leaf is left untouched, and the entity stays watched until a later `HEAD` change or a rebuild settles it. A new file that takes the old path before the move is committed and synced hides the move: it surfaces as `orphaned` after the next graph rebuild. |
+| `moved` | No exact match, but a *unique* name-only match exists **with the same name** (decoration stripped, case kept) **in a file of the same suffix**, **the entity's old `file_path` is confirmed gone from disk**, that same move is **independently confirmed by committed git history** (old path absent, new path tracked — both at `HEAD`), AND git shows the new path **arriving with the old path's removal** | The entity's `descriptor.file_path` is updated to follow it; leaf binding heals to `live`. A same-name hit in a file of a *different* suffix (e.g. a vanished code symbol colliding with an unrelated doc heading) is treated as a collision, not a move, and falls through to orphaned instead — as does any hit whose old path is still on disk, a hit that is only a case-insensitive match (a deleted type `Priority` against an old member `.priority`), and a new path that was already there before the old one went (below). |
+| `moved_uncommitted` | Same disk-level evidence as `moved` (unique same-suffix hit of the same name, old path gone from disk), but git's committed history at `HEAD` does not yet confirm it — an uncommitted delete, rename, or stash on this one working tree — and the new path is not already in `HEAD` (one that is was there before the old path went, so no commit can make it a move: that is `orphaned`) | Nothing is touched — the binding, descriptor, and node mapping are all left exactly as they were. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`, see below). Sidegraph remembers the entity, and the first sync after `HEAD` moves re-verifies it even if the graph was not rebuilt. If the old path is back on disk (the rename was reverted or stashed) the leaf is left untouched, and the entity stays watched until a later `HEAD` change or a rebuild settles it. A new file that takes the old path before the move is committed and synced hides the move: it surfaces as `orphaned` after the next graph rebuild. |
 | `ambiguous` | More than one node now matches | Leaf binding flips to `degraded` (not deleted). If every candidate shares one community, that community is still used for re-pointing. |
 | `orphaned` | No match at all, exact or loose | Leaf binding flips to `orphaned`. If the entity's file still exists and its nodes agree on a single community, that community is used for re-pointing (see below) — Sidegraph is not guessing which node the entity *became*, only where its code still lives. |
 
@@ -100,6 +100,41 @@ was reverted or stashed instead, the old path is back on disk and the leaf is le
 For the rare case of someone who has verified their own working tree and wants the old,
 disk-only behavior back, `SIDEGRAPH_TRUST_DIRTY_TREE=on` is a documented, off-by-default
 escape hatch scoped to exactly this one check.
+
+Committed history that shows the old path gone and the new path present is still not a move:
+a file that was there all along says the same. A type deleted along with its file, whose name
+matches (ignoring case) an old member in some unrelated file, looks exactly like that. So the
+rung asks two more questions before it adopts. First, is the hit the same symbol? The name
+must be equal once the decoration both sides carry (`()`, a leading `.`) is stripped, with
+**case kept**: `Priority` is not `.priority`. Second, did the new path arrive with the old
+one's removal? Sidegraph finds the commit on the main line of history (`git log
+--first-parent -m`, so a branch merged with `--no-ff` counts as one change) that deleted the
+old path, and requires its first parent to lack the new path and the commit itself to hold
+it. Any other answer refuses: a git call that fails, a history with no deletion in it (the
+old path was never committed, say a gitignored directory), a shallow clone whose boundary
+hides the answer, or a new path added long after the deletion. Moves out of a path git never
+held are therefore reported `orphaned`, and `heal-anchors` re-anchors them. With
+`SIDEGRAPH_TRUST_DIRTY_TREE=on`, where the old path is still in `HEAD`, the new path must be
+absent from `HEAD` instead: new in the working tree. A refused move falls through to
+`orphaned`. `moved_uncommitted` is kept for a move that can still come true: the old path
+is gone from the working tree and the new path is not in `HEAD` yet.
+
+Git's history alone does not show some real moves as one change, so these are refused too.
+Each ends `orphaned`, and `heal-anchors` re-anchors it:
+
+- **The add and the delete in two commits on the first-parent line.** The new file lands in
+  one commit and the old one goes in the next, whether both are on the main branch, or a branch
+  is merged fast-forward or rebase-merged (a `--no-ff` merge is judged as one change and is
+  adopted).
+- **A second move before any sync ran.** The file went `A` to `B` to `C` while the descriptor
+  still names `A`: the commit that deleted `A` did not add `C`.
+- **An old path that was re-added and then deleted again.** The latest deletion is the one
+  that is judged, and it need not be the move.
+
+If an earlier release adopted a false move, it rewrote an entity's `descriptor.file_path`.
+List those rewrites with
+`git log -p --diff-filter=M -- .sidegraph/entities/ | grep -E '^(commit |[-+]\s+"file_path")'`
+and check each one against the rule above.
 
 ## Community re-pointing
 
@@ -195,9 +230,10 @@ needing another sync pass.
 ## The never-guess promise
 
 Nothing in the rebind ladder silently re-anchors a decision to a *different* entity that
-merely looks plausible. `moved` only fires on a **unique** name-only hit within the same file
-type **whose old path is confirmed gone from disk AND confirmed by committed git history**
-(see [why `moved` checks the disk](#why-moved-checks-the-disk)); anything with more than one
+merely looks plausible. `moved` only fires on a **unique** name-only hit **that is the same
+name, case kept,** within the same file type **whose old path is confirmed gone from disk AND
+confirmed by committed git history, with the new path arriving in the change that removed
+the old one** (see [why `moved` checks the disk](#why-moved-checks-the-disk)); anything with more than one
 candidate is `ambiguous`, not resolved; anything unverifiable stays `orphaned`; and disk-level
 evidence git's `HEAD` doesn't yet back up reports `moved_uncommitted` rather than adopting on
 a dirty tree. An `ambiguous` or

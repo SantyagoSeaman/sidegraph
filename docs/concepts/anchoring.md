@@ -15,6 +15,22 @@ enclosing-module info, so `name` + `file_path` is all identity has to work with.
 (lowercase, strip a leading `.`, drop call-decoration like `()`), so `.foo()` in a decision's
 anchor matches the graph node named `foo`.
 
+**`Type.member` names.** Graphify labels a method `.foo()` and links it to its type with a
+`method` edge (an enum case with `case_of`), so a name written `Type.foo` has no exact match.
+When none is found and the descriptor has a `file_path`, `resolve()` falls back to the member.
+It is for code identifiers only: the owner (its last segment, so `Outer.Inner.foo` reads as
+`Inner`) and the member must both be identifiers, and the candidate must be a `code` node, so
+prose with a dot in it, a numbered heading or `verify-release.sh` never reads as a member.
+The name is split at its last `.`, `::` or `#`, the node in that file whose label is the member
+is found (case kept), a candidate the graph ties to a different type is rejected, and, of
+several, those tied to the named type are kept. Anything that does not narrow to exactly one
+node is `unresolved`, the orphaned, healable leaf a bare miss has always been, never
+`ambiguous`. So is a name with a case-only twin in the file (a struct `Message` beside a
+method `.message()`): the store dedups an anchor by its lowercased name, so the two spellings
+are one entity, and binding either node would put the other's record on it. Without a file the
+fallback never runs, and a path-qualified name (`src/pkg/mod.py`, which reads as the member
+`py`) still never resolves.
+
 ## Lazy `Entity` creation
 
 An `Entity` is created the first time a decision references it — via
@@ -121,8 +137,8 @@ node and a file node are both just nodes.
 The same pattern applies to `concept` nodes from the semantic pass: a concept has no stable id
 either, so **anchor concept + file together**, not the concept alone. Re-extracting an edited
 file can rename or drop the concepts inside it — the same churn a code refactor causes to
-symbol names — and the rebind ladder below handles it identically: exact match, then unique
-name-only match, then orphaned. No special-casing for concepts versus code symbols.
+symbol names — and the rebind ladder below handles it identically: exact match, then a unique
+same-name match in a file that arrived with the old one's removal, then orphaned. No special-casing for concepts versus code symbols.
 
 ## What happens on rename or move
 
@@ -137,10 +153,13 @@ remembered under `pending_uncommitted_moves` are still re-verified once `HEAD` h
    re-pointing](../guides/surviving-refactors.md#community-re-pointing)).
 2. **Ambiguous** — leaf bindings flip to `degraded`; the node mapping is left untouched
    (never guess); community is re-pointed if a shared one is still resolvable.
-3. **Moved** — exact fails but a name-only retry resolves uniquely, *and* the new file has
-   the same suffix as the old `descriptor.file_path` (e.g. `.py` -> `.py`, `.md` -> `.md`),
-   *and* the old `file_path` is confirmed gone from the checkout ->
-   `descriptor.file_path` is updated to follow the file, leaf bindings heal to `live`.
+3. **Moved** — exact fails but a name-only retry resolves uniquely, *and* the hit is the
+   same name (decoration such as `()` or a leading `.` stripped from both sides, **case
+   kept**), *and* the new file has the same suffix as the old `descriptor.file_path` (e.g.
+   `.py` -> `.py`, `.md` -> `.md`), *and* the old `file_path` is confirmed gone from the
+   checkout, *and* git's history shows the new file arriving in the same change that
+   removed the old one -> `descriptor.file_path` is updated to follow the file, leaf
+   bindings heal to `live`.
    **Suffix guard:** a unique name-only hit whose file suffix *differs* from the old one
    (e.g. a vanished code symbol whose name happens to collide with a doc heading) is a
    **collision, not a move** — it is never adopted, and falls through to orphaned instead.
@@ -148,6 +167,15 @@ remembered under `pending_uncommitted_moves` are still re-verified once `HEAD` h
    still there — a symbol renamed *inside* a surviving file is not a move, however unique
    the name-only hit elsewhere looks, and "can't verify" counts as "still there" (see [why
    `moved` checks the disk](../guides/surviving-refactors.md#why-moved-checks-the-disk)).
+   **Name guard:** the name-only lookup ignores case, so a deleted type `Priority` can find
+   an old member `.priority` in an unrelated file. That is a different symbol, not a move,
+   and is never adopted. **Arrival guard:** a new path that already existed before the old
+   one was removed is a collision, not a move. So is an old path git cannot account for
+   (never committed, or beyond the history a shallow clone holds): any git answer that is
+   not a clear yes refuses. A refused move falls through to orphaned, which
+   `sidegraph:heal-anchors` repairs.
+   This rung resolves by name only, so a `Type.member` anchor cannot follow its file being
+   moved; the bare member name can.
 4. **Orphaned** — nothing resolves; leaf bindings flip to `orphaned`. Sync still tries to
    derive the entity's current community from its surviving file's nodes (useful when a
    symbol renamed but its file didn't move); that derivation only happens when the file's

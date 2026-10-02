@@ -801,9 +801,42 @@ def test_removed_stale_claims_do_not_return() -> None:
         "once sidegraph publishes to pypi",
         "up to five markdown sections",
         "rm -rf graphify-out",
+        # The SessionStart instruction once taught this call; the tool has no `seeds`
+        # parameter (it takes `files` and `entities`), so an agent following it failed
+        # validation.
+        "get_task_context(seeds)",
     )
     for phrase in banned:
         assert phrase not in normalized
+
+
+def _flatten_quote(text: str) -> str:
+    """``text`` as one line with the markdown a quote of it can carry (blockquote markers,
+    code spans, italics, quotation marks) and its line wrapping removed."""
+    return re.sub(r"\s+", " ", re.sub(r"[>`*\"]", " ", text)).strip()
+
+
+def test_every_doc_quote_of_the_session_start_instruction_equals_the_constant() -> None:
+    """The standing instruction is quoted in four pages. Each quote must be the constant
+    itself, word for word: a paraphrase that drifts is how the docs came to teach a call
+    (`get_task_context(seeds)`) the tool does not accept."""
+    from sidegraph.host.hooks import STANDING_SEARCH_INSTRUCTION
+
+    constant = _flatten_quote(STANDING_SEARCH_INSTRUCTION)
+    opener = _flatten_quote(STANDING_SEARCH_INSTRUCTION.split(",", 1)[0])
+    quoting = {
+        path.relative_to(_ROOT).as_posix(): _flatten_quote(path.read_text(encoding="utf-8"))
+        for path in [*sorted((_ROOT / "docs").rglob("*.md")), _ROOT / "README.md"]
+    }
+    quoting = {name: text for name, text in quoting.items() if opener in text}
+    assert set(quoting) >= {
+        "docs/concepts/retrieval.md",
+        "docs/guides/retrieval-in-sessions.md",
+        "docs/integrations/claude-code.md",
+        "docs/reference/hooks.md",
+    }, f"parsed the quote from {sorted(quoting)}"
+    for name, text in quoting.items():
+        assert constant in text, f"{name} quotes the SessionStart instruction inexactly"
 
 
 def _task_context_render_headings() -> list[str]:

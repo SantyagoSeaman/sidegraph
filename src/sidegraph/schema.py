@@ -65,12 +65,23 @@ def _new_id() -> str:
     return str(ULID())
 
 
+def strip_decoration(name: str) -> str:
+    """Strip an entity name's decoration but keep its case: surrounding whitespace, a
+    leading ``.`` and any call decoration. Graphify renders functions ``f()`` and methods
+    ``.m()``; decisions reference bare symbols. :func:`canonicalize` is this plus
+    ``lower()``; callers that must tell ``Confidence`` (a type) from ``.confidence()`` (a
+    method) use this one directly (see
+    design/superpowers/specs/2026-10-01-member-anchor-names-design.md, D1).
+    """
+    return name.strip().lstrip(".").split("(", 1)[0].strip()
+
+
 def canonicalize(name: str) -> str:
     """Normalize an entity name for matching: lowercase, strip a leading ``.`` and any
     call decoration. Graphify renders functions ``f()`` and methods ``.m()``; decisions
     reference bare symbols. Canonicalizing both sides makes name matching robust.
     """
-    return name.strip().lstrip(".").split("(", 1)[0].strip().lower()
+    return strip_decoration(name).lower()
 
 
 _SLUGIFY_STRIP_RE = re.compile(r"[^a-z0-9-]")

@@ -128,8 +128,9 @@ usual advice to multi-anchor, plus the filename-not-title choice above.
 
 Edited (not deleted) doc files behave like an ordinary code refactor for concept churn:
 re-extracting a changed file can rename or drop the concepts inside it, and the rebind ladder
-handles that the same way it handles a renamed function — exact match, then unique name-only
-match, then orphaned, never a guess.
+handles that the same way it handles a renamed function — exact match, then a unique name-only
+match of the same name in a file that arrived with the old one's removal, then orphaned, never
+a guess.
 
 ## Bootstrap import (`sidegraph-import`)
 

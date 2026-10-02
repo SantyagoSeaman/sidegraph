@@ -1083,7 +1083,7 @@ sidegraph-doctor [--db PATH] [--against GIT_REF] [--check] [--stale-days N] [--j
 | `--check` | off | advisory findings also exit `2` (default: report only; a *skipped* check never fails, even with `--check`) |
 | `--stale-days N` | `30` | flag a proposed decision/domain whose id timestamp is strictly older than `N` days; must be `>= 0` |
 | `--json` | off | print `{"clean", "violations", "findings", "skipped"}` as one JSON object to stdout (nothing else) |
-| `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | read-only input used only for the `graph-root-mismatch` advisory check below; missing or unreadable simply skips that one check |
+| `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | read-only input used only for the `graph-root-mismatch` and `graph-stale` advisory checks below; missing or unreadable simply skips both |
 
 One-stop store health: composes `sidegraph-verify`'s strict snapshot (+ optional
 `--against` transition layer) with an advisory curation lint, rather than reimplementing
@@ -1116,6 +1116,7 @@ plain-text line):
 | `unratified-accept` | an **accepted** record whose provenance says `agent` and which carries no ratifier stamp — the signature `SIDEGRAPH_AUTO_ACCEPT=on` leaves in a shared store (one environment's setting bypassing the ratification gate for everyone). Scoped to records created at/after the EARLIER of the store's earliest ratifier stamp and its creation marker (`.sidegraph/stamping_live_since`, written once when a store is genuinely new — never backfilled onto an existing one), so a store predating both reports nothing rather than everything; a store that has never ratified anything but was created by a marker-writing version is still in scope from its own creation, closing the blind window an unratified store would otherwise sit in forever. A stamped record — including one stamped `auto:<policy>` by an auto-ratification policy — and a human-sourced one are never flagged. A **supersession successor** (`supersedes` set — `supersede_decision`/`supersede_fact`) is never flagged either: reversal has no ratification queue to bypass and lands accepted immediately by design, so it reproduces the signature with no relation to the env var this check hunts. Narrowed exception: a `supersedes`-bearing record IS still flagged if it carries a `layer`, a `provenance.ref`, or a tier-0 `tag:`/`initiative:` binding absent from its predecessor — neither `supersede_decision` nor `supersede_fact` can produce any of the three, so one present proves the `propose_decisions`/auto-accept path wrote it. (The fact half is defensive only: `supersede_fact` always stamps `source="human"`, so a fact successor never reaches this agent-sourced check, and no draft shape carries `supersedes` on a fact.) Only a MINIMAL superseding draft (none of the three) is indistinguishable from a legitimate successor by the record's own fields, and stays excluded — a known, accepted, narrower trade-off than treating every supersession alike. Advisory: the signature is not proof — verify before concluding |
 | `duplicate-entity` | two or more committed entity files share one logical identity (legal — see below — but ambiguous); reported once per group, at the winner's (lowest-`entity_id`) file, naming every id in the group and its binding count |
 | `graph-root-mismatch` | `graphify update` was likely run from a subdirectory instead of the repository root, so every recorded `source_file` is relative to that subdirectory instead — every anchor in the graph will look orphaned until it's rebuilt from the root. Detected from `--graph`: a sample of anchorable `source_file` values that mostly don't exist relative to the repo root, but DO all exist under one specific subdirectory (named in the finding). Silent on a legitimately partial graph (a doc-only corpus, an `--exclude`d build) and on too small a sample to judge safely; needs `--graph` to resolve (missing/unreadable simply skips it) |
+| `graph-stale` | the graph was built at a commit HEAD has moved past (graph.json's `built_at_commit`), and a file the graph should reflect changed since: one it holds was edited after the graph was last built (the later of `graph.json`'s and its sibling `manifest.json`'s modification times) or deleted, or a new file of a type it holds now exists (not under a dot-directory, which Graphify skips). Memory cannot see or anchor to code added after the build. The detail gives the build commit, how many commits behind HEAD (or "a commit outside HEAD's history" after a checkout of an older commit), how many files changed, and up to five example paths; the fix is `graphify update .` from the repository root, then `sidegraph-sync`. Silent when the build commit is HEAD, when only file types the graph does not hold changed (a `.yml` against a `.py`-only graph), and when a graph built from a dirty tree was committed afterwards, or a `graphify update .` found nothing to change and rewrote only `manifest.json` (the file is no newer than the build); also silent when the comparison cannot be made (no `built_at_commit`, one that is not a full commit id, a graph outside a git repository, a build commit the repository lacks, git unavailable or slower than 3 seconds). **`--check` exits `2` on it**, so a CI job that runs doctor should rebuild the graph first; one that does is unaffected. Needs `--graph` to resolve |
 
 `degraded-binding`/`orphaned-binding` come from `index.db`, opened strictly read-only — it
 is the only source for binding status (canonical `bindings/*.json` files carry identity,
@@ -1267,7 +1268,8 @@ there anyway", so no line of the report claims an effect.
   long the journal is kept (older rows are pruned at each `SessionStart`), so a larger value
   reports what is still held and no more. Must be a positive whole number; anything else
   exits `2` before any path is touched.
-- `--graph PATH` — the Graphify `graph.json`, read only to size the graph, default
+- `--graph PATH` — the Graphify `graph.json`, read only to size the graph and to compare the
+  commit it was built at with `HEAD` (a few bounded, read-only git calls), default
   `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`. The default resolves against the
   STORE's project root (so a store elsewhere is not measured against whatever graph sits
   beside your shell); a path you type resolves against the shell's directory. A graph that is missing or unreadable is
@@ -1282,7 +1284,12 @@ there anyway", so no line of the report claims an effect.
   `activation.degraded` and `dropped_for_budget` also when the window holds only
   `drill_down` lookups, which apply no budget; `retained_days` for a window that holds nothing of an older journal; and
   `graph.nodes`, `files` and `communities` when there is no readable graph. A zero that was
-  measured stays a zero: an empty journal, a built graph with no nodes.
+  measured stays a zero: an empty journal, a built graph with no nodes. The graph's state against
+  `HEAD` is four more fields under `graph`: `freshness` (`"fresh"`, `"stale"` or `"unknown"`),
+  `built_at` (the full build commit), `commits_behind` and `stale_files`; all are `null` when
+  there is no readable graph. When the comparison could not be made (`freshness` is
+  `"unknown"`), the other three are `null` too. `commits_behind` is also `null` for a build
+  commit outside `HEAD`'s history. They are Provisional like the rest of this report: they may gain fields.
 
 Example, from this repository's own store (the numbers are that store's, on the day it was
 run):
@@ -1340,7 +1347,13 @@ What each block answers, with activation first, as the question the other blocks
   In `--json` the same figure is `memory.no_recorded_showing`.
 - **GRAPH** and **ANCHORS** — the size of the code graph, and how many anchors are live,
   degraded or orphaned. Degraded or orphaned anchors end with a pointer to
-  [`sidegraph-doctor`](#sidegraph-doctor).
+  [`sidegraph-doctor`](#sidegraph-doctor). A graph built at a commit `HEAD` has moved past,
+  with a file it should hold changed or added since, gets a continuation line under the
+  counts, for example `stale: 314 commits behind HEAD, 258 files changed → graphify update .`
+  (the command moves to its own line when the first part is wide; a build commit outside
+  `HEAD`'s history reads `stale: built outside HEAD's history, 1 file differs`). A fresh graph,
+  and one that could not be compared, add nothing. The same comparison backs the `graph-stale`
+  finding in [`sidegraph-doctor`](#sidegraph-doctor).
 
 Lines the report will not invent:
 

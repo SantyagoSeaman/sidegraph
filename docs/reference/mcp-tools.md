@@ -389,6 +389,48 @@ The label `drill_down` is reserved for the server's own `drill_down` records and
 recorded when passed here.
 
 **Returns:** a Markdown string, or the literal `"No context found."` if nothing resolves.
+When a seed path (from `files`, or an entity's `file_path`) is not a file the code graph holds,
+the string ends with a `## Not in the code graph` block that says what happened to each such
+path instead of leaving a bare empty answer:
+
+- a path that exists in the repository but is missing from a **stale** graph (built at a commit
+  `HEAD` has moved past): the block gives the build commit and the gap, and says to rebuild with
+  `graphify update .` from the repository root, then call again;
+- the same from a graph that shows no committed change since the build: no commit explains the
+  gap, so the file may be newer than the build and not committed yet (rebuild with
+  `graphify update .`), sit under an excluded path, or be a file type Graphify skips;
+- the same when the comparison could not be made: the reason, and the rebuild command if the
+  files are new;
+- a directory, a path that does not exist, and a path that is not written repo-relative and
+  normalized (absolute, `./x`, `a/../b`, a trailing slash): check the path. The graph never holds
+  such a spelling, so no rebuild would help, and no graph comparison is made for it.
+
+Nothing is added when the graph holds every seed, and then no git call is made. The block belongs
+to `get_task_context` only; `query_structure` and `query_decisions` are unchanged.
+
+In a **linked worktree** that has no graph of its own, every read tool opens the main checkout's
+graph (see [the Graphify integration](../integrations/graphify.md#linked-worktrees-read-the-main-checkouts-graph))
+and syncs it index-only (no tracked file is rewritten). The `## Not in the code graph` block is then worded for it:
+
+- a seed that exists only in the worktree gets "This worktree reads the main checkout's graph,
+  which does not hold files that exist only on this branch." with no freshness check, because the
+  graph was never built from that file;
+- a seed that also exists in the main checkout gets the stale or current verdict above, with the
+  advice to rebuild in the main checkout (`rebuild it in <main> with graphify update .`).
+
+When no graph could be opened and the call named at least one seed, the string ends with:
+
+```
+## No code graph
+No code graph at <path>: memory anchored to code cannot be looked up. Build it from the
+repository root with `graphify update .`.
+```
+
+`<path>` is the graph the server looked at: the store's own, or, in a linked worktree whose main
+checkout has none either, the main checkout's, with "Build it in the main checkout `<main>` with
+`graphify update .`." A graph that is there and cannot be read (permissions, a corrupt file) reads
+"The code graph at `<path>` is not readable" instead of "No code graph at". A call with no seeds, or
+with a reader, is unchanged.
 
 ## `query_structure` / `query_decisions`
 

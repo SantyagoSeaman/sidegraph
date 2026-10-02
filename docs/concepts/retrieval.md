@@ -16,12 +16,14 @@ whether the store has any accepted domains yet:
   first domain is ratified — no sync required, see [below](#when-the-toc-goes-live)): one line
   per accepted domain (title, one-line summary truncated to 100 characters, mistake count,
   subdomain count when non-zero), then initiatives, then global mistakes. This is what "the
-  mind model comes alive" means in practice. The per-domain mistake count
-  (`_domain_mistake_count`) is narrower than "all mistakes in this area": it counts only
-  decisions Tier-1-bound to the domain's own `domain:<slug>` entity, i.e. captured (or
-  re-anchored) after the domain existed — a `gotcha`/`lesson`/`constraint` anchored only to a
-  leaf entity within the domain still surfaces in that entity's `get_task_context` output, it
-  just doesn't add to this count.
+  mind model comes alive" means in practice. The per-domain mistake count is what
+  [`drill_down`](#drill_downdomain_slug--the-axis-1-operation) would serve for that domain:
+  the accepted `gotcha`/`lesson`/`constraint` decisions in the union of those tagged to the
+  domain's own `domain:<slug>` entity, those anchored to a code or doc entity that lives in one
+  of its communities, and, when a graph reader is on hand, those anchored to a whole document
+  it covers. Proposed and superseded records are not counted. A TOC built without a reader
+  (the ratify and capture paths) leaves out the document branch until the next sync pass that
+  has one.
 - **`top_tier_map(store, reader)`** — the legacy, nameless fallback: top communities by member
   count (labeled only by god-node name), initiatives, global mistakes. Runs on demand (no
   cache) whenever the store has zero accepted domains — a fresh repo, or one that hasn't
@@ -33,34 +35,41 @@ prepends it once, at the hook-assembly level, ahead of whichever renderer's text
 `render_toc`/`top_tier_map` stay pure content formatters (see
 [`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start)). The instruction now
 covers every search surface, not just `Read`/`Grep`: *"When you need to find or understand
-code in this project, call `get_task_context(seeds)` before any grep or file search —
-decisions, gotchas and a domain map are indexed here."* Both degrade gracefully — an empty
+code in this project, call `get_task_context(files=[…])` with repo-relative paths before any
+grep or file search — decisions, gotchas and a domain map are indexed here. Before a
+non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
+listed only by name, load it first."* Both degrade gracefully — an empty
 store still gets the instruction plus just the header. The `SessionStart` hook itself never
 blocks startup: any failure, or a cache it can't parse, falls back to `top_tier_map` rather
 than crashing; any failure in *that* prints `{}` and exits 0.
 
 ### When the TOC goes live
 
-`build_toc(store, reader=None)` precomputes the cache from store content alone (domains,
-initiatives, global mistakes — no graph needed) and is written to `store` meta under the
+`build_toc(store, reader=None)` precomputes the cache from the store (domains, initiatives,
+global mistakes; a graph reader is optional and only adds the document branch of the mistake
+count) and is written to `store` meta under the
 `toc_cache` key (see [configuration](../reference/configuration.md#domain-sync-and-the-toc-cache))
 at two points:
 
 1. **Every completed `sidegraph-sync` pass** (fresh or forced) — after the domain-community
    refresh, so the cache reflects that pass's own updates. **Also on a skipped
-   (already-up-to-date) pass**, whenever at least one accepted domain exists: a content-only
-   change such as `add_decision` bound to an existing domain entity never moves
-   `graph_version`, so without this a lazy `sidegraph-sync` right after it would report
-   "up to date" and leave the cache stale until an unrelated domain accept/drop happened to
-   rebuild it.
+   (already-up-to-date) pass**, whenever at least one accepted domain exists and the store
+   changed since the cache was built: a content-only change such as `add_decision` bound to an
+   existing domain entity never moves `graph_version`, so without this a lazy
+   `sidegraph-sync` right after it would report "up to date" and leave the cache stale until
+   an unrelated domain accept/drop happened to rebuild it. Every retrieval call runs this
+   pass, and a build counts every domain's decisions, so the cache records the store's
+   canonical digest and an unchanged digest keeps it. A cache written without a graph reader
+   carries no digest and is rebuilt once.
 2. **Every `ratify` call (MCP tool or `sidegraph-ratify` CLI) that actually accepted or dropped
    at least one domain** — immediately, without waiting for the next sync. This is what makes
    `bootstrap → ratify` visibly turn the TOC on in the very same session, even when no graph
    sync is needed.
 
 A decisions-only ratify (no domain ids in the batch) does not rebuild the cache immediately.
-It can change a rendered mistake count; the next completed or skipped sync refreshes that
-count. Domain acceptance is the special case refreshed in the ratify operation itself.
+It can change a rendered mistake count; the next completed sync pass, or skipped one that
+finds the store changed, refreshes that count, and so does the count after `add_decision`.
+Domain acceptance is the special case refreshed in the ratify operation itself.
 
 ## `drill_down(domain_slug)` — the Axis-1 operation
 
@@ -77,8 +86,8 @@ an empty list with an explanatory `"note"` key — everything store-derived (`do
 
 ## `get_task_context`: seeded, budgeted, mistakes-first
 
-`get_task_context(seeds, store, reader, budget)` is the core UX: given what the agent is
-about to touch, return a compact slice of structure *and* memory, memory ranked so the things
+`get_task_context(seeds, store, reader, budget)` is the core UX (the MCP tool of that name
+takes the seeds as `files` and `entities`): given what the agent is about to touch, return a compact slice of structure *and* memory, memory ranked so the things
 most likely to save it from a repeat mistake come first.
 
 ### Seeds
@@ -88,6 +97,11 @@ A `Seed` is either:
 - a **name (+ optional file_path)** — an entity ref, resolved the same way capture resolves
   anchors (see [anchoring](anchoring.md#descriptors-name--file)); an ambiguous ref keeps
   *all* candidates rather than guessing or dropping the seed.
+
+A seed reaches the store's entities two ways, and both count: a named seed that matches a
+stored anchor name is that entity directly (whatever the graph calls the node, so a stored
+`Type.member` is found), and every node a seed resolves to is mapped to the entity the store
+last saw it as (`last_seen_node_id`), with the node's own label still looked up beside that.
 
 Seeds are explicit — there is no semantic/embedding query matching; the caller (typically an
 MCP tool call with `files=[...]` and/or `entities=[{"name", "file_path"}, ...]`) names exactly
@@ -295,13 +309,22 @@ a decision doesn't vanish just because its most precise anchor did.
 Before rendering, every retrieval-facing MCP tool — `get_task_context`, `query_structure`,
 `query_decisions`, and `drill_down` — plus the `SessionStart` hook calls `maybe_sync(store,
 reader)` — best-effort, wrapped so a sync failure degrades to un-synced retrieval rather than
-erroring. `maybe_sync` is itself cheap in the common case: it compares the graph's current
-version against the store's `last_synced_graph_version` meta stamp and skips the full pass if they match (an entity remembered under
+erroring. A linked worktree that reads the main checkout's graph because it has none of its own
+syncs it too, index-only: the derived state fills its cold index, and no tracked file is rewritten
+(the moved rung abstains; see
+[the Graphify integration](../integrations/graphify.md#linked-worktrees-read-the-main-checkouts-graph)).
+`maybe_sync` is itself cheap in the common case: it compares the graph's current
+version (plus the reader's resolver revision, so an upgrade that changes how names resolve reruns the pass once) against the store's `last_synced_graph_version` meta stamp and skips the full pass if they match (an entity remembered under
 `pending_uncommitted_moves` is still re-verified once `HEAD` has moved).
 This is the self-healing mechanism described in
-[anchoring](anchoring.md#what-happens-on-rename-or-move): a missed post-commit hook is simply
-caught by the next read, and it's what keeps each accepted domain's `communities` field current
-too (see [mind model](mind-model.md#how-domains-relate-to-engine-communities)).
+[anchoring](anchoring.md#what-happens-on-rename-or-move): a graph that was rebuilt after a
+missed post-commit sync is caught by the next read, and it's what keeps each accepted domain's
+`communities` field current too (see
+[mind model](mind-model.md#how-domains-relate-to-engine-communities)). It cannot catch a graph
+that was never rebuilt, because the version it compares is the file's own: that case is
+reported separately, by comparing the graph's build commit with `HEAD` (see
+[the Graphify integration](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks)), and
+only a rebuild fixes it.
 
 ### Rendering
 
@@ -310,7 +333,17 @@ accepted inline `evidence:` lines nested under the decision they support), **Kno
 (accepted standalone facts — see above), **Structural map** (the budgeted subgraph around the
 seeds, rendered as pointers — `- name (file_type) [file_path:line]`, never inlined code),
 **Related**, then **Unratified proposals**.
-Missing sections are omitted; an empty result renders `"No context found."`.
+Missing sections are omitted; an empty result renders `"No context found."`. After the
+rendered text, `get_task_context` appends a `## Not in the code graph` block when a seed path is
+not a file the graph holds, saying why: a file that exists but is missing from a stale graph
+(rebuild it), from a graph with no committed change since its build (the file may be newer than
+the build and uncommitted, or sit on a path or have a type the engine skips), or a path that is
+not a normalized repo-relative path to a file (check it). In a linked worktree that borrows the
+main checkout's graph, a file that exists only on the branch gets one sentence saying the graph
+does not hold it, and the rebuild advice for any other file names the main checkout. With no graph
+at all and at least one seed, a `## No code graph` block names the path looked at and says to build
+it (or, when the graph is there and cannot be read, that it is not readable). `render()` itself
+does not produce either block.
 
 ## See also
 

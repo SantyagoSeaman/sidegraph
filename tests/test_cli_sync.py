@@ -217,15 +217,18 @@ def test_cli_sync_reports_repointed_community_bindings(tmp_path, capsys):
 
 def test_cli_sync_surfaces_moved_with_old_and_new_file(tmp_path, capsys):
     # The moved rung fails closed without a resolvable repo_root AND committed evidence
-    # (dirty-tree guard, sync.py's _committed_evidence_confirms_move) -- git-init tmp_path
-    # and commit d.py so HEAD itself confirms c.py -> d.py genuinely happened, same as the
+    # (dirty-tree guard, sync.py's _committed_evidence_confirms_move) that the new path
+    # arrived with the old one's removal (_move_adds_the_new_path) -- git-init tmp_path,
+    # commit c.py, then commit the `git mv` so HEAD itself shows c.py -> d.py, same as the
     # live checkout the fix targets.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-    (tmp_path / "d.py").write_text("def mover_fn(): pass\n")
+    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "d.py lives here now"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "c.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "mv", "c.py", "d.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "c.py -> d.py"], cwd=tmp_path, check=True)
     graph = _write_graph(tmp_path, "b.json", GRAPH_B)
     db = tmp_path / "t.db"
     s = Store(db)

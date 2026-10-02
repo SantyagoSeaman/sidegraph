@@ -64,8 +64,51 @@ cost/cache expectations, and the bootstrap-import walkthrough.
 Point Sidegraph at it with `SIDEGRAPH_GRAPH` (default `graphify-out/graph.json`). The CLI
 commands resolve a relative default against the store's project, and a `--graph` you type
 against the shell's directory. The MCP server resolves it the same way, against the
-project of the store it serves, and the hooks anchor a relative `SIDEGRAPH_GRAPH` to
-`$CLAUDE_PROJECT_DIR` when the host sets it (the process's working directory otherwise). See [Graph path resolution](../reference/cli.md).
+project of the store it serves, and so do the hooks: a relative `SIDEGRAPH_GRAPH` is looked up in the
+store's project, not under `$CLAUDE_PROJECT_DIR`. See [Graph path resolution](../reference/cli.md).
+
+## Linked worktrees read the main checkout's graph
+
+`graphify-out/` is gitignored, so a `git worktree add` checkout has the tracked store and no
+graph. Without one nothing resolves: `get_task_context` finds no entity for any seed. When the
+store's own graph is missing and its repository is a linked worktree of a main checkout, the
+read tools (`get_task_context`, `query_structure`, `query_decisions`, `drill_down`) and the
+`SessionStart` hook open the **main checkout's** graph instead. The path is the store's own
+project-relative one, applied in the main checkout: a store at `.config/sidegraph` borrows
+`<main>/.config/graphify-out/graph.json`.
+
+The borrowed graph is **synced index-only**. A worktree's `index.db` is gitignored and starts
+cold, and what makes retrieval work there is derived from the graph: each domain's `communities`,
+the Tier-1 community bindings, the entities' `last_seen_*` mapping. Left cold, `drill_down` showed
+a fraction of the decisions the main checkout shows and `get_task_context` lost its `## Related`
+section. So the lazy sync runs against the borrowed graph, and it never rewrites a tracked file:
+the one step of a sync that can, the moved rung (it follows a renamed file by rewriting
+`entities/<id>.json`), abstains, because its evidence, the old path gone and the move in HEAD's
+history, would come from the main checkout and not from the branch. A worktree keeps its tracked store
+byte-identical to what git checked out. `SessionStart` builds the domain map in memory from the
+store every time, instead of trusting a cached one, and says whose graph it reads:
+
+> Sidegraph: this worktree has no code graph of its own, so memory reads the main checkout's
+> (`<main>/graphify-out/graph.json`); code that exists only on this branch is not in it.
+
+A file that exists only on the branch is not in that graph, and `get_task_context` says so
+instead of calling the graph stale. A file the branch changed that the main checkout also has is
+described as it is in the main checkout: its symbols and the edges between them are the main
+checkout's, not the branch's, and nothing warns about it. A stale main-checkout graph is named as
+such, with the checkout to rebuild it in (`graphify update .` there). A worktree is not rebuilt: a cold build in one took 43 seconds and about 18 MB on a large
+repository, and the main checkout is where the graph is kept fresh.
+
+What is never borrowed: `sync_anchors`, `list_domain_candidates`, every tool that writes a record,
+and every CLI default (`sidegraph-sync`, `sidegraph-doctor`, `sidegraph-stats`). A worktree that has
+a graph of its own reads and syncs it as before, and so does an absolute `SIDEGRAPH_GRAPH`.
+
+The main checkout is found from the filesystem alone (the worktree's `.git` file, the `gitdir` it
+names, that directory's `commondir`), with no git call. It is found only when the common directory
+is a `.git` directory of a repository that is not bare (`core.bare`): a bare repository (also
+`git clone --bare R x/.git`), the `.bare` layout, a repository whose git directory is separate and
+not itself named `.git`, a submodule and a plain `git clone` (a review copy) have no main checkout to
+borrow from. There, with no graph, `get_task_context` answers with a `## No code graph` block that
+names the path it looked at and says to build it.
 
 ## Non-git and doc-only corpora
 
@@ -123,7 +166,7 @@ removes Sidegraph's `Read|Grep|Edit|Write` hook. Safe to run — but redundant.
 
 Redundant because the **Sidegraph plugin already fronts the graph for Claude Code**: its
 `SessionStart` hook injects the graph-derived top-tier map, its `PreToolUse` nudge already
-redirects blind `Read`/`Grep` toward retrieval (non-blocking, each of its two forms at most **once per session**), and its
+redirects blind `Read`/`Grep` toward retrieval (non-blocking, each of its two forms at most **once per agent**), and its
 MCP server exposes the query surface. Graphify's `Read|Glob` hook, by contrast, fires on
 **every** qualifying read and pushes toward the *code* graph (`graphify query`) rather than
 the *decision* memory — so on a plain read you get two nudges pulling different directions,
@@ -168,9 +211,25 @@ sidegraph-sync
 This is a convenience, not a dependency: `sidegraph-sync` re-resolves anchors and skips the
 full pass when the graph version hasn't changed (entities remembered under
 `pending_uncommitted_moves` are still re-verified once `HEAD` has moved). Because the same `graph_version` check also runs
-lazily on every read path (`get_task_context`, `SessionStart`), a missed or skipped hook
-invocation is self-healing — the next read catches the stale mapping and re-syncs before
-serving context.
+lazily on every read path (`get_task_context`, `SessionStart`), a graph that was rebuilt while
+the hook missed its sync is caught by the next read, which re-syncs before serving context.
+
+A graph that was **never rebuilt** is a different case, and the lazy check cannot see it: it
+compares `graph.json` with the store's last sync, so a graph that stopped at an old commit
+looks up to date for as long as it is left alone. Sidegraph compares the commit the graph was
+built at (`built_at_commit`) with `HEAD` and says so on four surfaces: a `SessionStart` line,
+an explanation after a `get_task_context` call that names a file the graph does not hold, a
+`graph-stale` finding in `sidegraph-doctor`, and a `stale:` line in `sidegraph-stats`. The graph
+counts as stale only when a file it should hold changed or appeared since the build, so a commit
+that touches nothing the graph indexes does not trigger it. Only a rebuild fixes it:
+`graphify update .` from the repository root, then `sidegraph-sync`.
+
+Two details of the engine matter here. A `graphify update .` that finds the code topology
+unchanged leaves `graph.json` untouched, and so its recorded build commit, but still rewrites the
+`manifest.json` beside it; Sidegraph takes the later of the two file times as the build time, so
+such a run clears the warning for files edited before it, even though the graph keeps reporting
+the older commit. And `graphify cluster-only .` restamps `built_at_commit` without re-indexing
+any file, so it can hide staleness: use `graphify update .`.
 
 ## Troubleshooting
 

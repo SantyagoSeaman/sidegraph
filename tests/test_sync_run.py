@@ -100,7 +100,7 @@ def test_sync_gates_on_version_and_stamps(tmp_path):
     _entity(s, "f_stable", "a.py", "s1")
     first = sync(s, reader)
     assert first.skipped is False
-    assert s.get_meta(LAST_SYNCED_KEY) == reader.graph_version()
+    assert s.get_meta(LAST_SYNCED_KEY) == reader.sync_stamp()
     assert s.get_meta(LAST_SYNCED_KEY).startswith("vB:")
     second = sync(s, reader)  # same version -> cheap no-op
     assert second.skipped is True and second.outcomes == []
@@ -111,15 +111,18 @@ def test_sync_gates_on_version_and_stamps(tmp_path):
 
 def test_sync_reports_all_ladder_outcomes(tmp_path):
     # The moved rung fails closed without a resolvable repo_root AND committed evidence
-    # (dirty-tree guard, sync.py's _committed_evidence_confirms_move) -- git-init tmp_path
-    # and commit d.py so it can confirm c.py -> d.py at HEAD, same as the live checkout
-    # the fix targets.
+    # (dirty-tree guard, sync.py's _committed_evidence_confirms_move) that the new path
+    # arrived with the old one's removal (sync._move_adds_the_new_path) -- git-init tmp_path,
+    # commit c.py and then the `git mv` to d.py, so HEAD's history shows c.py -> d.py, same
+    # as the live checkout the fix targets.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-    (tmp_path / "d.py").write_text("def mover_fn(): pass\n")
-    subprocess.run(["git", "add", "d.py"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "d.py lives here now"], cwd=tmp_path, check=True)
+    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
+    subprocess.run(["git", "add", "c.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "c.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "mv", "c.py", "d.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "c.py -> d.py"], cwd=tmp_path, check=True)
     reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
     s = Store(tmp_path / "t.db")
     _entity(s, "f_stable", "a.py", "s1")  # unchanged
@@ -160,7 +163,7 @@ def test_sync_continues_past_bad_entity(tmp_path):
     report = sync(s, reader)
     assert report.counts().get("error") == 1
     assert report.counts().get("unchanged") == 1  # the good entity still processed
-    assert s.get_meta(LAST_SYNCED_KEY) == reader.graph_version()  # completed pass stamps
+    assert s.get_meta(LAST_SYNCED_KEY) == reader.sync_stamp()  # completed pass stamps
 
 
 def test_maybe_sync_none_without_reader(tmp_path):

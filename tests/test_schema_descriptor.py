@@ -97,3 +97,37 @@ def test_decision_rejects_naive_datetime():
             valid_from=datetime.now(),  # naive -> must be rejected now
             provenance=Provenance(source="manual"),
         )
+
+
+def test_strip_decoration_keeps_case_and_strips_the_rest():
+    """``strip_decoration`` is ``canonicalize`` without ``lower()``: whitespace, one leading
+    ``.`` run and the call decoration go, the case stays. design/superpowers/specs/
+    2026-10-01-member-anchor-names-design.md (D1), shared with the member resolver."""
+    from sidegraph.schema import strip_decoration
+
+    assert strip_decoration("BitfinexAdapter") == "BitfinexAdapter"
+    assert strip_decoration(".playClip()") == "playClip"
+    assert strip_decoration("  place_order( self ) ") == "place_order"
+    assert strip_decoration(".__init__()") == "__init__"
+    assert strip_decoration("Confidence") != strip_decoration(".confidence()")
+
+
+def test_strip_decoration_is_what_canonicalize_lowercases():
+    """Pins the refactor: ``canonicalize`` stays byte-identical to the old one-liner."""
+    from sidegraph.schema import strip_decoration
+
+    for name in [
+        "BitfinexAdapter",
+        "_t()",
+        ".__init__()",
+        "  place_order( self ) ",
+        "..Weird()",
+        "",
+        "   ",
+        "Type.member",
+        ".playClip()",
+        "A(b)(c)",
+    ]:
+        legacy = name.strip().lstrip(".").split("(", 1)[0].strip().lower()
+        assert canonicalize(name) == legacy
+        assert canonicalize(name) == strip_decoration(name).lower()

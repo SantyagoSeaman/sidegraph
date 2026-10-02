@@ -64,7 +64,7 @@ an ordinary, human-readable git conflict in one small JSON file — not a corrup
 | `Entity` — `entity_id`/`canonical_name`/`kind`/`descriptor`, for every entity EXCEPT a `community:*` abstract entity (index-only — see below) | `Domain.communities` |
 | `AnchorBinding` set per decision or fact — `entity_id`/`tier`/`relation`/`weight`, no `status`, EXCLUDING any binding whose entity is a `community:*` abstract entity | `toc_cache` (the `SessionStart` table-of-contents render) |
 | `Initiative` — full row | the per-session capture ledger (`capture_sessions`, dedup markers) |
-| `archive/*.jsonl` segments (once compaction has run) | `last_synced_graph_version`, `pending_uncommitted_moves` (the entities a sync left as `moved_uncommitted`, with the git `HEAD` it saw, so the next sync after `HEAD` moves re-verifies them), `pending_tier1_reconcile` (the `(record, vacated community)` pairs whose Tier-1 reconcile failed, as JSON; every sync retries them first; a pair is cleared once its reconcile completes, and kept, silently, while a live or degraded Tier-2 anchor of the record has no recorded community), `schema_version`, the canonical-digest freshness stamp, `skipped_canonical_files` (the files the last reload left out; see [Digest integrity](#digest-integrity)) |
+| `archive/*.jsonl` segments (once compaction has run) | `last_synced_graph_version` (the graph version plus the resolver revision, `<graph version>:r<N>`; raising the revision reruns the first sync after an upgrade), `pending_uncommitted_moves` (the entities a sync left as `moved_uncommitted`, with the git `HEAD` it saw, so the next sync after `HEAD` moves re-verifies them), `pending_tier1_reconcile` (the `(record, vacated community)` pairs whose Tier-1 reconcile failed, as JSON; every sync retries them first; a pair is cleared once its reconcile completes, and kept, silently, while a live or degraded Tier-2 anchor of the record has no recorded community), `schema_version`, the canonical-digest freshness stamp, `skipped_canonical_files` (the files the last reload left out; see [Digest integrity](#digest-integrity)) |
 | — | retrieval telemetry (`retrieval_shows`, `retrieval_seeds` — records that reached a render, areas that were asked about; see [Retrieval telemetry](#retrieval-telemetry) below) |
 | — | `community:*` abstract `Entity` rows, and any Tier-1 `AnchorBinding` pointing at one — see [Community bindings are derived](#community-bindings-are-derived-not-committed) below |
 | — | `canonical_stat` (`subdir`, `stem`, `size`, `mtime_ns` per canonical file this index actually loaded — see [Digest integrity](#digest-integrity) below) |
@@ -319,6 +319,15 @@ afterwards. Three kinds: `seed` (a path a retrieval was asked about), `show_anch
 anchored by a record that reached a render — `detail` holds the record id), and `touch` (a
 file the agent opened, edited or grepped — `detail` holds the tool name). `key` is always a
 repo-relative file path, which is the join axis.
+
+`agent` is a nullable text column, set only on a `touch` made by a Claude Code subagent: the
+host's own id for that subagent, opaque to the store. The row's `session_id` is still the
+parent session's, so counting sessions is unchanged, and `NULL` means the session's own agent
+(and every row written before the column existed). A fresh index has the column from its
+`CREATE TABLE`; an index built before it gains it with `ALTER TABLE retrieval_events ADD COLUMN
+agent TEXT` on its next open. An open that cannot run the `ALTER` (it lost a lock race, say)
+carries on without the column, and touches fail to record until a later open adds it; the hook
+swallows that error.
 
 Like `retrieval_shows`/`retrieval_seeds` and `capture_sessions`, it lives only in the
 gitignored `index.db` and survives `_reload_index_from_canonical`, so a `git pull` does not

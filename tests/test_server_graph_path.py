@@ -41,7 +41,7 @@ def _write_graph(project: Path, commit: str, nodes: int) -> Path:
 
 
 def _version(g: Path) -> str:
-    return GraphifyReader(str(g)).graph_version()
+    return GraphifyReader(str(g)).sync_stamp()
 
 
 @pytest.fixture
@@ -96,9 +96,10 @@ def test_lazy_read_path_sync_keeps_the_version_the_cli_stamped(mcp_in_b, monkeyp
     monkeypatch.setenv("SIDEGRAPH_GRAPH", "graphify-out/graph.json")
     assert cli.sync_main([]) == 0
 
-    reader = server._synced_reader()
+    reader, borrowed_from = server._synced_reader()
 
     assert reader is not None and Path(reader.path).resolve() == ga.resolve()
+    assert borrowed_from is None
     assert _stamp(a / ".sidegraph") == _version(ga)
 
 

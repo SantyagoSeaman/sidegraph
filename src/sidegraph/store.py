@@ -111,6 +111,12 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     data TEXT NOT NULL,
     PRIMARY KEY (record_id, entity_id)
 )""",
+    # The key above leads with record_id, so a lookup by entity_id alone (every
+    # `bindings_for_entity`, and `build_toc` makes one per entity in a domain's communities)
+    # scanned the whole table: 0.115 s of a 0.149 s TOC build on a real 15-domain store.
+    # Derived, like the table: it comes back with it on a rebuild and on any open.
+    # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D2b)
+    "CREATE INDEX IF NOT EXISTS idx_anchor_bindings_entity ON anchor_bindings (entity_id)",
     """CREATE TABLE IF NOT EXISTS initiatives (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -143,7 +149,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     at         TEXT NOT NULL,
     kind       TEXT NOT NULL,
     key        TEXT NOT NULL,
-    detail     TEXT
+    detail     TEXT,
+    agent      TEXT
 )""",
     """CREATE INDEX IF NOT EXISTS idx_retrieval_events_session
     ON retrieval_events (session_id)""",
@@ -792,11 +799,30 @@ class Store:
         try:
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA_SQL)
+            self._migrate_retrieval_events_agent()
             self._refresh_freshness()
             self._warn_skipped_files()
         except BaseException:
             self._conn.close()
             raise
+
+    def _migrate_retrieval_events_agent(self) -> None:
+        """Add ``retrieval_events.agent`` to an index that predates it. Never fails the open.
+
+        A fresh index gets the column from ``CREATE TABLE``; this reaches the ones built
+        before it. The check is a read, so an up-to-date index pays no write lock. Two hook
+        processes can both see the column missing and both ALTER: the loser's "duplicate
+        column name" means the column is there, which is success. Any other failure (a locked
+        or read-only index) is swallowed too: the column is a convenience for per-agent touch
+        counts, and the next open retries.
+        see design/superpowers/specs/2026-10-01-per-agent-hook-state-design.md (D3)
+        """
+        try:
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(retrieval_events)")}
+            if "agent" not in columns:
+                self._conn.execute("ALTER TABLE retrieval_events ADD COLUMN agent TEXT")
+        except sqlite3.OperationalError:
+            pass
 
     # -- canonical layout / migration ----------------------------------------
 
@@ -3266,24 +3292,35 @@ class Store:
     # What the counters cannot express is *when* and *in which session*, which is the whole
     # question this journal exists to answer.
 
-    def _append_event(self, session_id: str, kind: str, key: str, detail: str | None) -> None:
+    def _append_event(
+        self,
+        session_id: str,
+        kind: str,
+        key: str,
+        detail: str | None,
+        agent: str | None = None,
+    ) -> None:
         with self._mutation():
             self._conn.execute(
-                "INSERT INTO retrieval_events (session_id, at, kind, key, detail) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (session_id, datetime.now(UTC).isoformat(), kind, key, detail),
+                "INSERT INTO retrieval_events (session_id, at, kind, key, detail, agent) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, datetime.now(UTC).isoformat(), kind, key, detail, agent),
             )
 
-    def record_touch(self, session_id: str, path: str, tool: str) -> None:
+    def record_touch(self, session_id: str, path: str, tool: str, agent: str | None = None) -> None:
         """Record that a file was touched during a session.
 
-        All three values are **opaque** to the core: ``session_id`` is whatever the host
-        calls a session and ``tool`` whatever it calls the tool. The core never interprets
-        either — this keeps the host seam one-directional (see CLAUDE.md; ``capture_sessions``
-        is the precedent). ``path`` must already be repo-relative; normalizing it is the
-        host's job, because only the host knows the root it was given (D3).
+        All four values are **opaque** to the core: ``session_id`` is whatever the host
+        calls a session, ``tool`` whatever it calls the tool and ``agent`` whatever it calls
+        an agent inside that session (``None`` for the session's own agent). The core never
+        interprets any of them — this keeps the host seam one-directional (see CLAUDE.md;
+        ``capture_sessions`` is the precedent). ``path`` must already be repo-relative;
+        normalizing it is the host's job, because only the host knows the root it was given
+        (D3). The agent never changes which session the row belongs to, so session counts
+        stay what they were.
+        see design/superpowers/specs/2026-10-01-per-agent-hook-state-design.md (D3)
         """
-        self._append_event(session_id, "touch", path, tool)
+        self._append_event(session_id, "touch", path, tool, agent)
 
     def record_retrieval_events(
         self,
@@ -3824,6 +3861,18 @@ class Store:
             row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
 
+    def canonical_digest(self) -> str | None:
+        """The digest this index is certified against: the stamp of the canonical files as
+        this process last wrote or loaded them (see ``_touch_digest``), or ``None`` when it
+        was cleared (a write that could not be certified) and the next open will reload.
+
+        It moves on every canonical write and on every reload, and on nothing else, so a
+        derived value that depends only on canonical records can record it and later ask
+        whether the store changed, without walking the files. ``None`` means "cannot tell".
+        # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D2b)
+        """
+        return self.get_meta(_CANONICAL_DIGEST_KEY)
+
     def set_meta(self, key: str, value: str) -> None:
         if key == "schema_version":
             raise ValueError(
@@ -3835,6 +3884,80 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+
+    def claim_meta(self, key: str, value: str) -> bool:
+        """Set ``key`` only if it is absent; True iff this call set it.
+
+        One statement, so two processes claiming the same key at once cannot both win: a
+        ``get_meta`` followed by a ``set_meta`` leaves a window between them in which both
+        read "absent". A hook that nudges once per agent claims its key here and nudges only
+        on True. Refuses ``schema_version``, as ``set_meta`` does.
+        see design/superpowers/specs/2026-10-01-per-agent-hook-state-design.md (D2)
+        """
+        if key == "schema_version":
+            raise ValueError(
+                "schema_version is stamped at store creation and must not be overwritten"
+            )
+        with self._mutation():
+            cursor = self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+                (key, value),
+            )
+            return cursor.rowcount == 1
+
+    def update_meta_if(self, key: str, decide: Callable[[str | None], str | None]) -> bool:
+        """Read ``key``, let ``decide`` choose the new value, and write it, all under one
+        ``BEGIN IMMEDIATE``; True iff a value was written.
+
+        ``decide`` gets the current value (``None`` when the row is absent) and returns the
+        string to store, or ``None`` to leave the row untouched. A ``get_meta`` followed by a
+        ``set_meta`` is two transactions, so two processes can both read the old value and
+        both decide to write; here the second one waits for the first's commit and decides
+        against what it wrote. An exception from ``decide`` rolls back and propagates. The
+        store never names the key or parses the value: the host passes both. Refuses
+        ``schema_version``, as ``set_meta`` does.
+        see design/superpowers/specs/2026-10-02-session-start-dedupe-atomic-design.md (D1)
+        """
+        if key == "schema_version":
+            raise ValueError(
+                "schema_version is stamped at store creation and must not be overwritten"
+            )
+        with self._mutation(immediate=True):
+            row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            new = decide(row["value"] if row else None)
+            if new is None:
+                return False
+            self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, new),
+            )
+            return True
+
+    def prune_meta_prefixes(self, prefixes: Iterable[str], older_than: timedelta) -> int:
+        """Delete one-shot meta rows under ``prefixes`` that have expired; return how many.
+
+        A row has expired when its value is an ISO timestamp older than ``older_than``, or
+        the legacy ``"1"`` that one-shot keys carried before they held a timestamp. Any other
+        value is kept. Keys are matched with ``substr`` and never ``LIKE``: ``_`` is a
+        ``LIKE`` wildcard and the host's prefixes contain it. An empty prefix would match
+        every key and is refused; ``schema_version`` is never deleted.
+        see design/superpowers/specs/2026-10-01-per-agent-hook-state-design.md (D4)
+        """
+        wanted = tuple(prefixes)
+        if any(not prefix for prefix in wanted):
+            raise ValueError("an empty prefix matches every meta key; name what to prune")
+        cutoff = (datetime.now(UTC) - older_than).isoformat()
+        deleted = 0
+        with self._mutation():
+            for prefix in wanted:
+                deleted += self._conn.execute(
+                    "DELETE FROM meta WHERE substr(key, 1, ?) = ? AND key != 'schema_version' "
+                    "AND (value = '1' OR (value GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-"
+                    "[0-9][0-9]T*' AND value < ?))",
+                    (len(prefix), prefix, cutoff),
+                ).rowcount
+        return deleted
 
     def delete_meta(self, key: str) -> None:
         """Remove a derived meta key (a no-op when absent). Refuses ``schema_version``, as

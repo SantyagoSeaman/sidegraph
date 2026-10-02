@@ -51,7 +51,7 @@ def _write_graph(project: Path, commit: str, nodes: int) -> Path:
 
 
 def _version(graph: Path) -> str:
-    return GraphifyReader(str(graph)).graph_version()
+    return GraphifyReader(str(graph)).sync_stamp()
 
 
 @pytest.fixture(autouse=True)

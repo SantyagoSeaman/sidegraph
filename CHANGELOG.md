@@ -7,6 +7,201 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-02
+
+### Changed
+
+- **The hooks and the MCP server look a missing relative store up inside the repository.** The
+  precedence between `--db`, `SIDEGRAPH_DIR`, `SIDEGRAPH_DB` and the default is unchanged, and a
+  store that exists where its relative path is anchored still wins. What is new: when a relative
+  `SIDEGRAPH_DIR` (or the default `.sidegraph`) does not exist there, the three hooks and the MCP
+  server visit the parent directories, nearest first, up to and including the repository root (the
+  nearest directory holding a `.git` entry, a directory or a file), and use the first store found.
+  The lookup never leaves the repository (a `.git` entry at your home directory or above it is not
+  a repository root, so a dotfiles repository does not turn `~/.sidegraph` into every project's
+  store) and does not run for `--db`, an absolute `SIDEGRAPH_DIR`, `SIDEGRAPH_DB`, a value with a
+  `..` part, or an anchor that is a symlink. The CLI, `sidegraph-init`
+  and `sidegraph-bootstrap` are unchanged: from a subdirectory they still need `--db`. To keep the
+  old outcome on a host surface, pass an absolute `SIDEGRAPH_DIR`.
+
+### Fixed
+
+- **A SessionStart hook registered twice on one host no longer injects the map twice.** Two
+  copies firing for one session at once both read the old duplicate-check ledger and both emitted;
+  the check now decides and stamps inside one write transaction, and a duplicate still answers
+  without waiting for a lock. The ledger keeps one row, so a repeat is still let through when
+  another session starts in between, or when two sessions with doubled hooks start together.
+- **Sync's moved rung adopts only a real move.** When an anchor's file is gone, sync looks the
+  name up across the whole graph and follows a unique hit to its new file. That lookup ignores
+  case and decoration, and the check behind it (the old path is out of `HEAD`, the new one is in
+  it) did not ask whether the new path was there before. A type deleted together with its file
+  could therefore be re-anchored onto an unrelated file that held an old member of the same name:
+  a deleted `Priority` followed `.priority` into another file, silently rewriting the entity's
+  committed `descriptor.file_path`. Two rules now close it. The hit must be the same name once
+  the call decoration (`()`, a leading `.`) is stripped from both sides, with case kept. And git
+  must show the new path arriving in the change that removed the old one: the mainline commit that
+  deleted the old path (a branch merged with `--no-ff` counts as one change) must have a first
+  parent without the new path and must hold it itself. With `SIDEGRAPH_TRUST_DIRTY_TREE=on` and the
+  old path still in `HEAD`, the new path must be absent from `HEAD`. Every git failure refuses, as
+  does a history with no deletion in it, so a move out of a path git never held (a gitignored
+  directory) and a move that a shallow clone cannot prove now end `orphaned`, which
+  `sidegraph:heal-anchors` repairs, instead of being adopted. An uncommitted delete onto a path
+  that is already in `HEAD` is `orphaned` too, not remembered as a move waiting for a commit: no
+  commit can make it one. The search matches the old path literally (a path such as
+  `app/[id]/view.tsx` is not a glob) and ignores `log.showSignature`.
+
+  Some real moves are refused as well, because git's history alone does not show them as one
+  change. Each ends `orphaned` and `sidegraph:heal-anchors` re-anchors it:
+  - the new file added in one commit and the old one deleted in another on the first-parent line,
+    including a branch merged fast-forward or rebase-merged;
+  - a second move before any sync ran (`A` to `B` to `C` while the descriptor still names `A`);
+  - an old path that was re-added and then deleted again.
+
+  To check what an earlier release adopted, list the descriptor rewrites:
+  `git log -p --diff-filter=M -- .sidegraph/entities/ | grep -E '^(commit |[-+]\s+"file_path")'`.
+  A rewrite is a real move only if the new path was added by the commit that deleted the old one
+  (`git log --first-parent -m -1 --diff-filter=D -- <old path>` finds that commit; the new path
+  must be missing from its first parent and present in it). Re-anchor a wrong one by superseding
+  the record with fresh anchors.
+
+- **The `SessionStart` instruction names a call the tool accepts, and a domain's mistake count
+  counts what the domain holds.** The standing line told the agent to call
+  `get_task_context(seeds)`, but the tool takes `files` and `entities` and rejects anything else,
+  so an agent that followed it made a call that failed validation. It now says
+  `get_task_context(files=[…])` with repo-relative paths, points at the check-plan skill before a
+  non-trivial change when it is available, and says to load the tool first if the host lists it
+  only by name. Separately, the per-domain count in the `SessionStart` map read "0 mistake(s)"
+  over a domain whose gotchas were anchored to its own code, because it counted only decisions
+  tagged to the domain itself. It now counts the accepted `gotcha`, `lesson` and `constraint`
+  decisions that `drill_down` serves for the domain, so the two show one number. The map's cache
+  records the store's digest, so a retrieval call on an unchanged store no longer rebuilds it, and
+  `SessionStart` reads the unratified list without building the whole map. The bindings table gains
+  an index by entity (an existing store gets it on its next open), which takes a rebuild of the map
+  from about 0.1 s to under 0.03 s on a real store, so the cost of a session start is what it was
+  before the count changed, also right after a store change and in a linked worktree. A worktree
+  builds its map with the main checkout's graph reader, so it counts the same decisions the main
+  checkout does. A map written by a path that has no graph reader (ratify, capture) leaves out
+  decisions anchored to a whole document until the next sync.
+
+- **A Claude Code subagent gets its own read nudges, and its touches are told apart.** A
+  subagent's hook payload carries its parent's session id plus an `agent_id` of its own, and
+  the `PreToolUse` nudge keys were per session: once the main agent had been nudged, every
+  subagent it started read anchored files blind. Each agent, the session's own and every
+  subagent, now gets one generic and one path-specific nudge. The
+  keys are claimed in a single statement, so a subagent's parallel opening reads cannot both
+  nudge, and `SessionStart` expires keys older than 30 days. The `retrieval_events` journal
+  gains a nullable `agent` column, added to an existing index on its next open, that records
+  which subagent made a touch; the row stays under the parent's session, so `sidegraph-stats`
+  counts the same sessions as before. Only `agent_id` counts, never `agent_type`: a main
+  session started with `claude --agent <name>` is still the session's own agent.
+
+- **An anchor written `Type.member` now resolves to the member.** Graphify labels a method
+  `.playClip()` and links it to its type, an agent writes `AudioPlayback.playClip`, and the two
+  never met: the anchor was born orphaned, and a seed naming it never reached the record, which
+  surfaced only through its community, as an unratified proposal. With a `file_path`, a name
+  with no exact match now falls back to a member of the named type in that file. It is for code
+  identifiers only (prose, a numbered heading or a hyphenated file name never reads as a
+  member). The name is split at the last `.`, `::` or `#` and the member is compared with its
+  case kept. A candidate that an edge ties to a different type is refused, and the answer stays
+  orphaned, never guessed, when several remain or when the file holds a case-only twin of the
+  member (a struct `Message` beside a method `.message()`, which the store treats as one
+  anchor). Without a file, and for a path-qualified name (`src/pkg/mod.py`), nothing changes.
+  On the read path a seed that names a stored anchor, and every node a seed resolves to, now
+  map to their store entities by the engine mapping, in the neighbour walk as well, so such a
+  record ranks as a mistake or decision again. The first `sidegraph-sync` after the upgrade
+  reruns once on its own (the sync stamp now carries a resolver revision, which a report does
+  not show) and heals the orphans this left behind. The skills and guides no longer say
+  `Type.member` names never resolve; the bare name with its file stays the preferred form.
+
+- **A hook command that cannot start no longer blocks or loops the host.** On `Stop`, both hosts
+  feed a hook's stderr back when the hook exits 2: Codex continues the turn, and Claude Code
+  continues the conversation, and Claude Code also blocks the tool call on `PreToolUse`. `uv`
+  exits 2 on some of its own errors (a project it cannot find, a cache it cannot write) and `dash`
+  exits 2 when the `cd` fails, so a hook command that never reached Python could do exactly that,
+  over and over in a headless `codex exec` run. Every shipped hook command, in both plugins and in
+  the manual recipes in the docs, now ends with a guard: `Stop` and `PreToolUse` answer `{}`, and
+  `SessionStart` answers a one-line `systemMessage` that says the hook could not start and to run
+  the hook command in a terminal to see the error. A command that starts Python behaves as
+  before. **Codex users: approve the two hooks again once after updating.** Codex records trust
+  per hook definition and the definition includes its command, so the changed commands do not run
+  until you approve them in `/hooks` or at the next interactive session's trust prompt. **If you
+  wired the hooks by hand**, append the guard to your own commands in `.claude/settings.json` or
+  `.codex/hooks.json`; the recipes in the docs show it. The Codex page also now says how to run a
+  headless review without Sidegraph's hooks.
+- **The capture nudge now arms on Codex.** The Stop hook's substance gate understood only Claude
+  Code transcripts, so on a Codex rollout it counted zero prompts and never nudged: every Codex
+  session ended without the capture reminder. The gate now reads a rollout too. A person's prompt
+  is a user message that is not text Codex wrote itself (the project instructions and environment
+  blocks, plugin and skill blocks, an aborted-turn note, a Stop hook's own block reason fed back);
+  nor does an answer to the agent's question, which arrives mid-turn, count as one. Each prompt
+  counts once although Codex mirrors it as an event. A thread arms after two real prompts, never
+  on tool calls. Subagent threads, Codex's automatic reviewer and headless `codex exec` runs, including
+  ones started through the Codex TypeScript SDK, never arm, so a review panel's `-o` output is
+  never replaced by a continuation. The nudge text, the once-per-session ledger and the hook
+  definitions are unchanged, so Codex's trust in the installed hooks stays valid. Claude Code
+  sessions are counted exactly as before.
+- **A session started in a subdirectory no longer opens a second, empty store.** Claude Code sets
+  `CLAUDE_PROJECT_DIR` to the directory it was launched in, so a launch in `repo/pkg` with the
+  plugin active created `repo/pkg/.sidegraph` beside the repository's own store, and the session
+  saw no memory. The hooks and the MCP server now use `repo/.sidegraph`, record touches relative
+  to it (`pkg/a.py`, so they join the anchors) and keep the nested-store case (`.config/sidegraph`)
+  repo-relative. The hooks also read the graph the store's project holds, as the CLI and the MCP
+  server do, so a store in a nested directory finds its own `graphify-out/graph.json`; a relative
+  `SIDEGRAPH_GRAPH` is no longer looked up under `$CLAUDE_PROJECT_DIR`. A store the old behaviour
+  already created is not touched: when the store a session uses is empty and the repository's
+  store above it holds records, `SessionStart` adds one line naming both. Remove the empty
+  `<subdirectory>/.sidegraph` to use the repository's. A stray store that holds any record (one
+  proposed decision from an old capture is enough) is not reported and keeps hiding the
+  repository's: review it with `sidegraph-ratify --db <subdirectory>/.sidegraph`, record what
+  matters again in the repository's store, then remove the stray directory.
+
+- **A code graph that never caught up with `HEAD` now says so.** Nothing compared the commit
+  `graph.json` was built at (`built_at_commit`) with `HEAD`, so a graph stuck at an old commit
+  looked up to date for good, and every `get_task_context` call seeded with a file added since
+  returned a bare `No context found.` The comparison now runs in the engine reader and counts a
+  graph as stale only when a file it should hold changed or appeared since the build (a commit
+  touching only file types the graph does not hold does not, and a graph built from a dirty tree
+  and committed afterwards does not). It surfaces in four places:
+  - `SessionStart` adds one line when the graph is stale, with the rebuild command
+    (`graphify update .` from the repository root);
+  - `get_task_context` appends a `## Not in the code graph` block after its answer when a seed is
+    not a file the graph holds, saying whether the graph is stale, shows no committed change since
+    its build (the file may be newer than the build, or one the engine skips) or could not be
+    compared, or whether the path is a directory, missing or not a normalized repo-relative path
+    (an absolute path, `./x`). Seeds the graph holds leave the answer byte-identical and cost no git call;
+  - `sidegraph-doctor` reports a new advisory finding, `graph-stale`. **`sidegraph-doctor --check`
+    now exits `2` on a stale graph**; a CI job that rebuilds the graph before running doctor is
+    unaffected;
+  - `sidegraph-stats` adds a `stale:` continuation line under the GRAPH counts, and its `--json`
+    gains `graph.freshness`, `built_at`, `commits_behind` and `stale_files`.
+
+  The docs no longer call a missed refresh "self-healing": the lazy check re-syncs a graph that
+  was rebuilt, and only a rebuild fixes one that never was.
+
+- **A linked worktree reads the main checkout's code graph, and a missing graph is said.**
+  `graphify-out/` is gitignored, so a `git worktree add` checkout had the tracked store and no
+  graph, and `get_task_context` resolved nothing there. When the store's own graph is missing and
+  its repository is a linked worktree of a main checkout, the read tools (`get_task_context`,
+  `query_structure`, `query_decisions`, `drill_down`) and `SessionStart` now open the main
+  checkout's graph, found from the worktree's `.git` file alone (no git call). That graph is synced
+  index-only: a worktree's index starts cold, and without the derived state (domain communities,
+  community bindings, engine mappings) `drill_down` lost most of a domain's decisions and
+  `get_task_context` its `## Related` section. The sync never rewrites a tracked file (its moved
+  rung, the one step that can, abstains), so the worktree's store stays as git checked it out.
+  `SessionStart` builds the domain map in memory from the store, adds a line saying whose graph it
+  reads, and names the main checkout in its stale-graph line. `get_task_context` tells a file that
+  exists only on the branch apart from one the main checkout's graph is stale for. A file the
+  branch changed that the main checkout also has is described as it is in the main checkout (its
+  symbols and the edges between them), and nothing warns about it.
+  `sync_anchors`, `list_domain_candidates`, every write tool and every CLI default keep reading the
+  store's own graph. A bare repository (also one cloned into `x/.git`), a git directory that is
+  separate and not itself named `.git`, a submodule and a plain `git clone` have no main checkout
+  to borrow from.
+- **`get_task_context` says when there is no code graph at all.** With no reader and at least one
+  seed, the answer ends with a `## No code graph` block naming the path that was looked at and
+  how to build it, instead of an answer that looked like a search with no hits. A graph that is
+  there and cannot be read is reported as not readable, not as missing.
+
 ## [0.6.0] — 2026-10-01
 
 ### Added

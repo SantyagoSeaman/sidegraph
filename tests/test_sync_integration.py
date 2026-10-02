@@ -106,16 +106,19 @@ def _write_graph(tmp_path, name, data):
 
 def test_rebuild_heals_moved_and_flags_renamed(tmp_path):
     # The moved rung now fails closed without a resolvable repo_root AND committed
-    # evidence (dirty-tree guard, sync.py's _committed_evidence_confirms_move) -- a real
-    # git worktree, plus a commit of d.py (the rebuild's own new home for mover_fn),
-    # lets it confirm c.py -> d.py genuinely happened at HEAD, same as the live checkout
-    # the fix targets.
+    # evidence (dirty-tree guard, sync.py's _committed_evidence_confirms_move) that the new
+    # path arrived with the old one's removal (sync._move_adds_the_new_path) -- a real git
+    # worktree, c.py committed and then renamed to d.py (the rebuild's own new home for
+    # mover_fn) in a second commit, lets it confirm c.py -> d.py genuinely happened in
+    # HEAD's history, same as the live checkout the fix targets.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-    (tmp_path / "d.py").write_text("def mover_fn(): pass\n")
-    subprocess.run(["git", "add", "d.py"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "d.py lives here now"], cwd=tmp_path, check=True)
+    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
+    subprocess.run(["git", "add", "c.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "c.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "mv", "c.py", "d.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "c.py -> d.py"], cwd=tmp_path, check=True)
     reader_a = GraphifyReader(_write_graph(tmp_path, "a.json", GRAPH_A))
     store = Store(tmp_path / "e.db")
 

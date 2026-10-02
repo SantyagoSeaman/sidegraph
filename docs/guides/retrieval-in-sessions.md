@@ -30,11 +30,13 @@ Whichever renderer ran, the `sidegraph-session-start` hook prepends the same **s
 search instruction**, once, ahead of the rest of the text (not inside either renderer — see
 [`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start)):
 
-> When you need to find or understand code in this project, call get_task_context(seeds)
-> before any grep or file search — decisions, gotchas and a domain map are indexed here.
+> When you need to find or understand code in this project, call get_task_context(files=[…])
+> with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
+> are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
+> available. If the tool is listed only by name, load it first.
 
 Unlike the `PreToolUse` nudge (`Read`/`Grep` only, each of its two forms at most once per
-session — see below), this line is unconditional and covers every search surface behaviorally, not just those two tools — bash
+agent — see below), this line is unconditional and covers every search surface behaviorally, not just those two tools — bash
 `grep`/`rg`/`find` and MCP structure-query tools included.
 
 Both renderers also inject:
@@ -95,7 +97,15 @@ entirely if empty:
 | `## Related` | Accepted decisions reached indirectly, plus one-line superseded history for seed entities. |
 | `## Unratified proposals` | Proposed decisions and facts, always after accepted memory and omitted by the proposal policy when required. |
 
-If nothing resolves at all, the tool returns the literal string `No context found.`
+If nothing resolves at all, the tool returns the literal string `No context found.` If a file
+you passed is not in the code graph, a trailing `## Not in the code graph` block says why: the
+graph is stale and needs `graphify update .`, the file is newer than the build or one the engine
+skips, or the path is not a normalized repo-relative path to a file (an absolute path, `./x` and a
+directory are not; see [`get_task_context`](../reference/mcp-tools.md#get_task_context)). With no
+code graph at all, a trailing `## No code graph` block names the path that was looked at and says
+to build it: the graph is missing, so memory anchored to code could not be looked up. In a
+linked worktree the graph is the main checkout's, and a file that exists only on the branch is
+reported as not in it.
 
 Each decision line looks like:
 

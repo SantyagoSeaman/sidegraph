@@ -111,3 +111,50 @@ def test_a_graph_of_the_wrong_shape_is_unreadable_not_a_crash(tmp_path):
     odd.write_text("[1, 2, 3]")
     g = build_report(tmp_path / "s", odd, window_days=30, now=NOW).graph
     assert (g.available, g.unreadable) == (False, True)
+
+
+def test_a_stale_graph_carries_its_freshness_into_the_report(tmp_path):
+    """Spec D7: `_graph_stats` fills the four fields from `reader.freshness()`."""
+    from tests.test_graph_freshness import stale_repo
+
+    fx = stale_repo(tmp_path)
+    Store(tmp_path / "s").close()
+
+    g = build_report(tmp_path / "s", fx.graph, window_days=30, now=NOW).graph
+
+    assert g.available is True
+    assert g.freshness == "stale"
+    assert g.built_at == fx.first
+    assert g.commits_behind == 1
+    assert g.stale_files == 1
+
+
+def test_a_graph_built_at_head_is_fresh_with_no_stale_files(tmp_path):
+    from tests.test_graph_freshness import make_repo
+
+    fx = make_repo(tmp_path)
+    Store(tmp_path / "s").close()
+
+    g = build_report(tmp_path / "s", fx.graph, window_days=30, now=NOW).graph
+
+    assert (g.freshness, g.commits_behind, g.stale_files) == ("fresh", 0, 0)
+
+
+def test_a_graph_that_cannot_be_compared_is_unknown_with_no_figures(tmp_path):
+    Store(tmp_path / "s").close()
+
+    g = build_report(tmp_path / "s", _graph(tmp_path), window_days=30, now=NOW).graph
+
+    assert g.available is True
+    assert g.freshness == "unknown"
+    assert (g.built_at, g.commits_behind, g.stale_files) == (None, None, None)
+
+
+def test_no_readable_graph_has_no_freshness_fields(tmp_path):
+    Store(tmp_path / "s").close()
+    bad = tmp_path / "graph.json"
+    bad.write_text("{ not json")
+
+    for path in (None, tmp_path / "nope.json", bad):
+        g = build_report(tmp_path / "s", path, window_days=30, now=NOW).graph
+        assert (g.freshness, g.built_at, g.commits_behind, g.stale_files) == (None,) * 4

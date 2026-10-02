@@ -12,8 +12,9 @@ Run them in the repository whose `.sidegraph/` you configured.
 3. Ask the agent to call `get_task_context` for one existing file.
 
 **Success:** the tool is available and returns either task context or `No context found.` A
-missing record is fine; “unknown tool”, a different repository's records, or a silent
-SessionStart hook is not. For Codex, confirm hook trust before debugging the JSON.
+missing record is fine; a trailing `## No code graph` block means the code graph is missing or not
+readable (build it with `graphify update .`, or fix its permissions), not that the wiring failed. “Unknown tool”, a different repository's
+records, or a silent SessionStart hook is not fine. For Codex, confirm hook trust before debugging the JSON.
 
 If this fails, compare the resolved paths with
 [Configuration](../reference/configuration.md#store-path-resolution) and the relevant host
