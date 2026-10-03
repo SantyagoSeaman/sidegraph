@@ -19,7 +19,7 @@ from .schema import (
 )
 from .store import Store
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "SCHEMA_VERSION",

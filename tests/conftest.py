@@ -85,3 +85,22 @@ def _no_inherited_git_repository(monkeypatch: pytest.MonkeyPatch) -> None:
     write into a foreign repository or index."""
     for var in GIT_LOCAL_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _git_config_is_hermetic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Keep the developer's own git configuration out of every test.
+
+    A ``sidegraph.graphRefresh=false`` or a ``core.hooksPath`` in the real global config changes
+    what ``sidegraph-init`` installs and what the integrity checks report, so a test that passes
+    on a clean machine failed on one that had either. ``GIT_CONFIG_GLOBAL`` names an empty file
+    (git then reads neither ``~/.gitconfig`` nor the XDG file), and ``GIT_CONFIG_NOSYSTEM`` drops
+    the system file. A test that wants a global value points ``GIT_CONFIG_GLOBAL`` at its own file
+    with ``monkeypatch``, as the git-hook tests do.
+    """
+    empty = tmp_path_factory.getbasetemp() / "empty.gitconfig"
+    empty.touch()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")

@@ -46,11 +46,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
+from .config import _store_project_root
 from .gitenv import git_env
 from .schema import (
     SCHEMA_VERSION,
@@ -975,14 +977,47 @@ def _run_git(
 
 
 def _find_repo_root(store_dir: Path) -> Path:
-    """The git repository containing ``store_dir`` — may be an ancestor of it, not
-    ``store_dir`` itself. Raises ``ValueError`` (the CLI's operational-error exit path, 1 —
+    """The git repository that PHYSICALLY contains ``store_dir`` — may be an ancestor of it,
+    not ``store_dir`` itself. Raises ``ValueError`` (the CLI's operational-error exit path, 1 —
     never a violation, design ruling 2: "Not-a-git-repo ... -> operational error") when
-    ``store_dir`` isn't inside any git working tree."""
+    ``store_dir`` isn't inside any git working tree.
+
+    Physical on purpose: ``git`` resolves a symlinked store through the link, and the store's
+    own files are committed in the repository they sit in, so ``verify_against`` (and
+    ``doctor --against``) diff that repository's history. The repository of the project that
+    HOLDS a symlinked store is :func:`find_store_project_repo`'s answer, not this one's.
+    # see design/superpowers/specs/2026-10-02-store-git-root-symlink-design.md (D5)"""
     result = _run_git(["rev-parse", "--show-toplevel"], cwd=store_dir)
     if result.returncode != 0:
         raise ValueError(f"{store_dir} is not inside a git repository: {result.stderr.strip()}")
     return Path(result.stdout.strip()).resolve()
+
+
+def find_store_project_repo(store_dir: Path, *, timeout: float | None = None) -> Path | None:
+    """The git repository of the project a store belongs to, or ``None``. Never raises.
+
+    The project is the store path's logical parent (``config._store_project_root``, lexical,
+    never ``resolve()``d), so a symlinked ``.sidegraph`` belongs to the project that holds the
+    link, not to the repository the link points into: the anchored code lives in the project.
+    Only when that parent is inside no repository does it retry from ``store_dir`` itself, which
+    keeps a store directory that is its own repository working. ``--show-toplevel`` succeeds in
+    a repository with no commits, so an empty project is still chosen over a link target's
+    repository. Git runs through ``_run_git`` (``git_env()``, repository-local variables
+    dropped). ``timeout`` is ONE budget in seconds for both attempts; a failure to run git, or
+    a spent budget, gives ``None`` without a retry.
+    # see design/superpowers/specs/2026-10-02-store-git-root-symlink-design.md (D1)"""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    for cwd in (_store_project_root(store_dir), Path(store_dir)):
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return None
+        try:
+            result = _run_git(["rev-parse", "--show-toplevel"], cwd=cwd, timeout=remaining)
+            if result.returncode == 0:
+                return Path(result.stdout.strip()).resolve()
+        except (ValueError, OSError):
+            return None
+    return None
 
 
 def _git_diff_name_status(repo_root: Path, ref: str, store_dir: Path) -> list[tuple[str, str]]:

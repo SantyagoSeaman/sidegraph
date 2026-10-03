@@ -33,6 +33,28 @@ might Graphify's `graph.json` — that one really is regenerated on every build;
 store is the opposite, deliberately durable, and is the one piece of Sidegraph's state that
 must survive a laptop being wiped.
 
+## Writes that never reach the team
+
+A record follows the branch and the checkout it was written on, because the store is committed
+with the repository. Two things strand one without anyone noticing:
+
+- **It was never committed.** An agent wrote a decision or a supersession into the checkout, a
+  later session took it for a foreign change and kept it out of every pull request, and it sat
+  there for days. Other checkouts and teammates never saw it, and a `git clean` or a re-clone
+  would lose it.
+- **It sits on a branch nobody merges.** A proposal made on a feature branch is invisible to
+  `main`'s session start, which counts the proposals it can see, until the branch merges.
+
+Sidegraph says so instead of changing where records go. A write tool's result carries a
+`commit_hint` when the store is inside a git repository ([MCP tools](../reference/mcp-tools.md#commit-hint)).
+At session start, two checks look: `store-uncommitted` reports store files that stayed
+uncommitted for a day, and `branch-only-records` reports records that exist only on unmerged
+local branches, with a notice when such a branch is more than a week old
+([troubleshooting](troubleshooting.md#store-uncommitted)). The fix is the ordinary one: commit
+`.sidegraph/` in the same pull request as the work that produced the records, and merge the
+branch that holds the rest. A pre-commit hook that runs `sidegraph-doctor --check` is safe, since
+files that are fully staged do not count.
+
 ## Ratification as part of PR review
 
 Because each decision is its own small file, a raw `git diff` on a branch that ratified

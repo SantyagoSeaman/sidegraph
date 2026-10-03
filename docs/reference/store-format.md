@@ -47,6 +47,17 @@ replace it with a real directory or file. `sidegraph-verify` reports each such e
 a deliberately shared store is a real use. Record files inside a real subdirectory are still
 read as they are.
 
+**A symlinked store belongs to the project that holds the link.** The code a record is anchored
+to lives in that project, so the repository Sidegraph asks about the store is the project's, not
+the one the link points into: the `provenance.commit` stamped at capture is the project's `HEAD`
+(`null` while the project has no commits), the code-drift check diffs that commit in the
+project's repository, and the graph-refresh hook check reads the project's hooks. When the
+project is in no repository, the capture commit and the code-drift check ask the store directory
+itself instead, so a store that is its own top-level repository keeps using it; the refresh-hook
+check does not fall back, just as `sidegraph-init` installs nothing outside a repository.
+`--against` (`sidegraph-verify` and `sidegraph-doctor`) is the one exception: it diffs the
+history of the repository that physically holds the store's files.
+
 **One file per record**, not one JSONL event log, is the whole point of the wave: different
 records land in different files, so two branches that ratify different decisions merge with
 zero conflict, a PR diff shows "added `decisions/01J....json` — one small file" instead of

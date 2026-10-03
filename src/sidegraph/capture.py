@@ -43,6 +43,7 @@ from .schema import (
 )
 from .store import _TERMINAL_DECISION_STATUSES, Store
 from .sync import activate_accepted_domain
+from .verify import _run_git, find_store_project_repo
 
 # v1 secret patterns. Redaction runs FIRST: its output is the only text that proceeds to
 # validation/storage — mandatory for a repo-committed store.
@@ -680,32 +681,30 @@ def _bind_initiative(store: Store, record_id: str, initiative: str) -> None:
 def _capture_commit(store: Store) -> str | None:
     """``git rev-parse HEAD`` -- best-effort capture-time HEAD stamp (design D1).
 
-    Runs with ``cwd=store.path`` — the STORE's own directory, never the ambient process
-    cwd (CORRECTION-2, code review) — so the commit always names the repo the store
-    actually lives in, regardless of where the calling process happens to be running
-    from. This matters concretely for D5's doctor ``code-drift`` check: it diffs a
-    stamped commit against ``HEAD`` in the repo it resolves from the STORE's directory
-    (``verify._find_repo_root``), so a commit stamped against the wrong repo would
-    silently degrade every batch to the git-unavailable note. ``None`` on any failure (no
-    repo containing the store, git missing, non-zero exit), never raising. Also used by
-    ``server._supersede_decision_impl`` (D6) so both write paths that ever construct a
-    fresh ``Provenance`` stamp ``commit`` identically. Repository-local variables such as
-    ``GIT_DIR`` are dropped from the environment for the same reason as in
-    ``_derive_initiative``; the symlinked-root behaviour is unchanged on purpose.
-    # see design/superpowers/specs/2026-09-30-initiative-from-store-repo-design.md §6"""
+    The repository is the one of the project the store belongs to
+    (``verify.find_store_project_repo``), never the ambient process cwd's (CORRECTION-2, code
+    review): a symlinked ``.sidegraph`` stamps the HEAD of the project that holds the link,
+    where the anchored code lives, not the link target's. HEAD is then read in that repository
+    with no retry, so a project with no commits stamps ``None`` rather than a link target's
+    HEAD. This matters for D5's doctor ``code-drift`` check, which diffs the stamped commit in
+    the same repository (``find_store_project_repo`` again): a commit stamped against another
+    repository would degrade every batch to the git-unavailable note. ``None`` on any failure
+    (no repository for the store, git missing, non-zero exit), never raising. Also used by
+    ``server._supersede_decision_impl`` (D6) so both write paths that ever construct a fresh
+    ``Provenance`` stamp ``commit`` identically. Both git runs go through ``verify._run_git``,
+    which drops repository-local variables such as ``GIT_DIR`` from the environment, for the
+    same reason as in ``_derive_initiative``.
+    # see design/superpowers/specs/2026-10-02-store-git-root-symlink-design.md (D2)"""
     try:
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=store.path,
-            env=git_env(),
-            capture_output=True,
-            text=True,
-        )
+        root = find_store_project_repo(store.path)
+        if root is None:
+            return None
+        out = _run_git(["rev-parse", "HEAD"], cwd=root)
         commit = out.stdout.strip()
         if out.returncode != 0 or not commit:
             return None
         return commit
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, ValueError):
         return None
 
 

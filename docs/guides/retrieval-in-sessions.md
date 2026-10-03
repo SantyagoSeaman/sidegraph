@@ -80,8 +80,16 @@ seeds that resolve to the right part of the graph:
 - An **entity seed** (`entities=[{"name": "Trader", "file_path": "trader/exec.py"}]`) resolves
   through the same name+file matching `add_decision`'s anchors use.
 
+A seed does not have to be spelled the way the graph spells it. `./trader/exec.py`,
+`trader/exec.py:42`, `exec.py` and an absolute path inside the repository all read as the same
+file, a directory (`trader/`) reads as up to eight of its files, and `Trader.place` finds the
+method with no file at all. Each such rewrite is a guess, and the reply says so in a
+`## How your seeds were read` block. When a name could mean several files or symbols, the tool
+lists them and reads none: pass the repo-relative path.
+
 Vague, non-task questions ("what does this project do") don't give the tool anything to seed
-on — be concrete about the file or symbol so the retrieval has something to resolve.
+on — be concrete about the file or symbol so the retrieval has something to resolve. A call with
+no seeds at all says so, and names the domains you can drill into.
 
 ## Reading the output blocks
 
@@ -97,11 +105,14 @@ entirely if empty:
 | `## Related` | Accepted decisions reached indirectly, plus one-line superseded history for seed entities. |
 | `## Unratified proposals` | Proposed decisions and facts, always after accepted memory and omitted by the proposal policy when required. |
 
-If nothing resolves at all, the tool returns the literal string `No context found.` If a file
-you passed is not in the code graph, a trailing `## Not in the code graph` block says why: the
-graph is stale and needs `graphify update .`, the file is newer than the build or one the engine
-skips, or the path is not a normalized repo-relative path to a file (an absolute path, `./x` and a
-directory are not; see [`get_task_context`](../reference/mcp-tools.md#get_task_context)). With no
+If nothing resolves at all, the tool returns the literal string `No context found.`, followed
+by a block that says why. A seed that was read some other way than written gets a
+`## How your seeds were read` line (guessed, normalised, a directory, ambiguous, or a name that
+matches no symbol). If a file you passed is not in the code graph, a trailing
+`## Not in the code graph` block says why: the graph is stale and needs `graphify update .`, the
+file is newer than the build or one the engine skips, or the path names no file in the
+repository (see [`get_task_context`](../reference/mcp-tools.md#get_task_context)). A call with no
+seeds gets a `## Why this is empty` block. With no
 code graph at all, a trailing `## No code graph` block names the path that was looked at and says
 to build it: the graph is missing, so memory anchored to code could not be looked up. In a
 linked worktree the graph is the main checkout's, and a file that exists only on the branch is

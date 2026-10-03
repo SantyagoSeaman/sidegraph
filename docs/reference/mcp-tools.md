@@ -37,6 +37,27 @@ use — see [`configuration.md`](configuration.md#store-path-resolution)) and a 
 | [`verify_store`](#verify_store) | Integrity lint of the store's canonical files | CI or ad hoc — checking the store hasn't been hand-corrupted |
 | [`add_anchors`](#add_anchors) | Append bindings to an EXISTING decision or fact | The `heal-anchors` triage flow — "code moved, decision still valid" |
 
+## Commit hint
+
+A store is committed with the repository, so a record follows the branch and the checkout it was
+written on. When the store sits inside a git repository, the write tools add a `commit_hint` key
+to a successful result:
+
+- `add_decision`, `supersede_decision`, `add_fact`, `supersede_fact`, `add_anchors`,
+  `add_domain` and `supersede_domain` return one dict, which gains the key.
+- `propose_decisions` and `propose_domains` return a list, and only the elements that wrote a
+  record gain it: `status` `"written"` for the first, `"proposed"` for the second. A `deduped`,
+  `rejected` or `skipped` element has none, and neither does `add_anchors`' `{"error": ...}`.
+
+The value is one sentence, naming the store's path relative to the repository root:
+`Commit .sidegraph/ in the same change as the work that produced this record, so it reaches
+other checkouts and teammates.` Outside a git repository the key is absent, and so it is for a
+store that is a symlink to a directory outside the repository, because git commits the link and
+not the records behind it. `ratify` and
+`ratify_decisions` carry none, because their results are keyed by record id, and `sync_anchors`
+writes a committed file only when a rung moves. The key is additive, like every field the tools'
+results may still gain ([stability](stability.md)).
+
 ## `add_decision`
 
 ```python
@@ -104,7 +125,7 @@ caller can chain straight into [`find_entity`](#find_entity) or
 [`get_entity_history`](#get_entity_history) without touching the store. `anchors_skipped` is
 `[{"name": str, "reason": "ambiguous", "candidates": list[str]}, ...]` — the anchors whose name
 matched more than one graph node (`candidates` capped at 5), so no precise Tier-2 leaf was
-created for them; empty when every anchor resolved cleanly or no graph reader is present.
+created for them; empty when every anchor resolved cleanly or no graph reader is present. Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 **`anchors_orphaned` is the one to act on.** It carries an entity summary plus a `reason`
 (`{"entity_id", "canonical_name", "tier": 2, "reason": str}`) for every anchor that resolved
@@ -177,7 +198,7 @@ successor is written or the predecessor closed.
 `anchors_skipped`/`anchors_orphaned`/`redactions` shapes as `add_decision`'s, reflecting whichever path
 (explicit or inherited) produced the replacement's bindings (`anchors_skipped` is always
 `[]` on the inherited path — inheritance never resolves against the graph). Text fields are
-redacted exactly like `add_decision`'s.
+redacted exactly like `add_decision`'s. Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `add_fact`
 
@@ -223,7 +244,7 @@ otherwise.
 `anchors_orphaned` is `[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]` when a graph
 is present and the name resolved to nothing; with no graph every anchor lands there as
 `{"entity_id", "canonical_name", "tier": 2}` with no `reason` key, and heals on the next sync.
-Repair either with [`add_anchors`](#add_anchors).
+Repair either with [`add_anchors`](#add_anchors). Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `supersede_fact`
 
@@ -259,7 +280,7 @@ the predecessor closed.
 **Returns:** `{"id": str, "statement": str, "status": str, "redactions": int, "entities":
 list[dict], "anchors_skipped": list[dict], "anchors_orphaned": list[dict], "supersedes": str}` — same shape as `add_fact`'s
 plus `supersedes` (the predecessor's id), with the same `anchors_orphaned` shapes;
-`anchors_skipped` is always `[]` on the inherited path.
+`anchors_skipped` is always `[]` on the inherited path. Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `retrieve_decisions`
 
@@ -401,9 +422,15 @@ path instead of leaving a bare empty answer:
   `graphify update .`), sit under an excluded path, or be a file type Graphify skips;
 - the same when the comparison could not be made: the reason, and the rebuild command if the
   files are new;
-- a directory, a path that does not exist, and a path that is not written repo-relative and
-  normalized (absolute, `./x`, `a/../b`, a trailing slash): check the path. The graph never holds
-  such a spelling, so no rebuild would help, and no graph comparison is made for it.
+- a path that does not exist, one that names nothing the graph holds, and one that points outside
+  the repository (`../x`, `.`, an absolute path elsewhere): check the path. No rebuild would
+  help, and no graph comparison is made for it.
+
+The paths named are the ones [the seed ladder](#seeds-are-read-tolerantly) could not read, in
+their normalised spelling: `./pkg/n.py`, `pkg//n.py` and an absolute path under the repository
+root all name `pkg/n.py`, so a file that exists but is not in the graph gets the graph-state
+advice above whichever way it was written. The `N` of "N of M seed paths" stays the number of
+distinct paths as you wrote them.
 
 Nothing is added when the graph holds every seed, and then no git call is made. The block belongs
 to `get_task_context` only; `query_structure` and `query_decisions` are unchanged.
@@ -429,8 +456,117 @@ repository root with `graphify update .`.
 `<path>` is the graph the server looked at: the store's own, or, in a linked worktree whose main
 checkout has none either, the main checkout's, with "Build it in the main checkout `<main>` with
 `graphify update .`." A graph that is there and cannot be read (permissions, a corrupt file) reads
-"The code graph at `<path>` is not readable" instead of "No code graph at". A call with no seeds, or
-with a reader, is unchanged.
+"The code graph at `<path>` is not readable" instead of "No code graph at". A call that has a reader
+is unchanged by this block.
+
+### Seeds are read tolerantly
+
+A seed the graph does not hold as written is read through a short ladder before it is given up
+on. Each rewrite is a guess, and a `## How your seeds were read` block after the rendered text
+(before the not-in-graph block) says so, one line per seed. Seeds that resolve as written are
+never touched: a call whose seeds all resolve gets no block and costs nothing extra.
+
+For a file path (`files`, or an entity's `file_path`):
+
+1. **Normalised.** Surrounding whitespace, a trailing `:12` or `:12:3`, a leading `./`, doubled
+   slashes, `a/../b` and an absolute path under the repository root all read as the repo-relative
+   path: `` `./pkg/n.py` → read as `pkg/n.py` (normalised) ``. A file that is itself named like a
+   location (`notes:12`) is tried as written before the location is stripped.
+2. **A file on disk is never swapped for another.** A path that is a file in the repository, with
+   exactly that letter case, but not in the graph is not guessed to be a different file with the
+   same name. It goes to the not-in-graph block.
+   Letter case is compared exactly, even on a case-insensitive filesystem; a path that differs
+   from a graph file only by case reads as that file, marked `guessed: different letter case`
+   (two such files are ambiguous).
+3. **Directory.** A path with files under it in the graph reads as a directory: up to 8 files,
+   shallowest first. A directory of more than 24 files is listed, not read, with its five largest
+   subdirectories and their file counts (with some of its top-level files when the subdirectories
+   leave room), so you can pass a file or a smaller directory. A trailing slash means "a directory" and skips step 4.
+4. **The shortest tail that matches.** Each tail of the path, longest first, is matched against
+   the graph's files, and the first tail that matches anything decides. One file: it is read,
+   marked `guessed: the only file with that path ending` (or `with that name`, when only the file
+   name matched). Several files: the seed is reported as ambiguous with up to five candidates and
+   nothing is read. A path outside the repository (`../x`, `.`) is never matched.
+
+For an entity `{"name", "file_path"}`: an entity that resolves as written is untouched. A
+`file_path` the graph lacks goes through steps 1, 2 and 4, and the seed is rewritten only when the
+entity is in the file that comes out. Failing that, the name alone is tried across the
+repository, and a `Type.member` (also `Type::member`, `Type#member`) is found through the
+graph's owner edge: one match is read, several are reported as ambiguous. A name with no file
+that matches several symbols is **reported as ambiguous and not read**; it used to be expanded
+to all of them, and the list counts distinct files, not nodes. A name that matches nothing gets
+its own line: `` `Frobnicate` → matches no symbol in the code graph ``, and a name missing from
+a file the graph holds says `` matches no symbol in `pkg/m.py` ``. An entity whose `file_path` is
+in the graph, or is a file on disk that the graph lacks, is never moved to another file (the
+latter gets the not-in-graph advice). A rewritten or ambiguous entity seed keeps the original as an
+exact seed, so a record stored under the original file keeps the tier it always had.
+
+A guessed seed ranks below the ones you got right. When at least one seed resolved as written
+to a node of the graph, the records of the guessed ones appear in `## Related` and
+`## Known facts`, after every record of the seeds you got right (their related records, their
+superseded history, global decisions and facts) have had their budget, and the structural map is
+the one those seeds alone would give; when none did, the guessed seeds act as the seeds. The
+block lists at most ten seeds, then `… and N more seeds`. Telemetry records a rewritten path
+under the path that was read, and a directory under its normalised key, not its files.
+
+### An empty answer says why
+
+Besides the not-in-graph block, a call that gave **no** `files` and no `entities`, and whose
+answer is exactly `No context found.`, ends with:
+
+```
+## Why this is empty
+No files or entities were given, so nothing could be matched. Pass files=[…] with the
+repo-relative paths you are working on, or drill_down(<slug>) for a named area: Auth (auth),
+Payments (payments).
+```
+
+It names at most 12 accepted domains by title and slug (then `, and N more`), and stops at
+"working on." when the store has none. A seed with neither a name nor a path (`files=[""]`,
+`entities=[{}]`, blanks) counts as no seed. With no code graph the block also says to build it first
+(`graphify update .`). Every other empty answer already says why: a path the
+graph lacks gets the not-in-graph block, a name that matches nothing gets its own line above, and
+a missing graph gets the `## No code graph` block above. An empty answer for a file seed that has
+anchored files near it adds [the nearest anchored records](#the-nearest-anchored-records) to this
+block.
+
+### The nearest anchored records
+
+A file seed that no read could place, and one that resolved with no current record anchored to
+it, is not a dead end: the files around it often carry the memory you wanted. For each such file
+seed the reply says where the nearest memory is, in one sentence. A seed qualifies when it is
+a file path read as given or as one other file, and it either names a file the graph lacks (a
+path inside the repository) or names one with no current record of its own. A directory, an
+ambiguous seed, an entity seed and a path outside the repository get none.
+
+```
+## Nearest anchored
+No current record is anchored to `core/a.py`. Nearest anchored: `net/c.py` (linked in the code graph, 2 records), `core/b.py` (same directory, 3 records).
+```
+
+- **Anchored** means a live or degraded binding (the two through which a record is shown) from a
+  current record (accepted, or proposed and inside the proposal window, and not past its
+  `valid_to`) to an entity in a file the graph holds. An orphaned binding, a rejected or
+  superseded record (a superseded one shows only as a "tried, reverted" line) and a record on a
+  file the graph lacks do not count.
+- **Candidates**, in this order: the anchored files that hold a node next to a node of the seed in
+  the graph, the two with the most records; then the anchored files under the nearest ancestor
+  directory that has any (at any depth), the two with the most records. Ties go by path. An ancestor
+  that holds more than a quarter of all anchored files, and more than four of them, is the
+  repository's hub and is skipped, and the repository root is never used. The two lists are merged without repeats and cut to three
+  files. A directory label is `same directory` or ``under `dir` ``.
+- **One sentence per seed**, at most three, then `… and N more seeds with no anchored record`. A
+  seed with nothing anchored near it gets no sentence. When the answer is empty the sentences go
+  under `## Why this is empty`; otherwise under `## Nearest anchored`, after the other blocks.
+
+When the main answer has **no decision memory** (no mistake, decision, fact, related or
+unratified line; a structural map does not count), the records of the files the sentences name
+follow under `## Nearest anchored records (not anchored to your files)`, rendered like the main
+answer with their headings one level lower and the supersede line once at the very end. The
+block carries the memory guard line itself when the main answer has none (an empty answer). A
+main answer that already has memory gets the sentence alone, so no record shows twice. Those
+records count as shown in the local statistics (their render counters are added to the call's),
+and the neighbour files are never recorded as seeds.
 
 ## `query_structure` / `query_decisions`
 
@@ -651,7 +787,7 @@ the remedy is to drop it with `ratify(drop=[...])` and propose the complete draf
 an accepted one (`SIDEGRAPH_AUTO_ACCEPT=on`), anchors can be added with `add_anchors`, while
 initiative and tags cannot be added afterwards. A `rejected` result whose `reason` starts with
 `internal error` may have left the record on disk unindexed until the store is reopened: do not
-re-propose it in the same session, and check `list_proposed` in the next one.
+re-propose it in the same session, and check `list_proposed` in the next one. Inside a git repository, each element that wrote a record also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 **Auto-accept:** when the `SIDEGRAPH_AUTO_ACCEPT` environment variable is `"on"` (read at
 point of use in this tool shell; any other value, including unset, is off), every decision
@@ -738,7 +874,7 @@ the `warnings` of every auto-ratified result.
 None, "redactions": int, "warnings": list[str], "ratified_by": str | None,
 "auto_ratify_error": str | None}`. `status` keeps its write-action value even when
 auto-ratified: an eligible domain still reports `"proposed"` here, never `"written"` —
-`ratified_by` is what tells the two cases apart.
+`ratified_by` is what tells the two cases apart. Inside a git repository, each element that wrote a record also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `add_domain`
 
@@ -773,7 +909,7 @@ ids and wants them visible before the next resolve pass.
 field; the slug is an identifier and is not.
 
 **Returns:** `{"domain_id": str, "status": str, "redactions": int}` (`status` is always
-`"proposed"`; `redactions` counts the secret replacements made in the title and summary).
+`"proposed"`; `redactions` counts the secret replacements made in the title and summary). Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `supersede_domain`
 
@@ -817,7 +953,7 @@ pass to reconsider.
 
 **Returns:** `{"domain_id": str, "status": str, "supersedes": str, "redactions": int}` — `status` is always
 `"proposed"`, `domain_id` is the successor's, `supersedes` is the predecessor's resolved
-`domain_id`.
+`domain_id`. Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `list_proposed`
 
@@ -1114,4 +1250,4 @@ list[dict]}` — `bound`/`orphaned` entries are `{"entity_id": str, "canonical_n
 bound with no graph present or that resolved to nothing (never dropped either way).
 `ambiguous` is `{"name": str, "reason": "ambiguous", "candidates": list[str]}` (capped at 5)
 for anchor names that matched more than one graph node — no leaf created, the same
-per-anchor feedback `add_decision`'s `anchors_skipped` gives.
+per-anchor feedback `add_decision`'s `anchors_skipped` gives. On success, inside a git repository, the result also carries a `commit_hint` ([Commit hint](#commit-hint)); the error dict has none.

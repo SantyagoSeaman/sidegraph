@@ -93,6 +93,7 @@ sidegraph-bootstrap --resume --profile generic-adr --host claude-code
 
 ```
 sidegraph-init [--db PATH] [--graph PATH] [--no-settings | --ratify-policy VALUE]
+                [--hooks | --no-hooks | --remove-hooks]
 ```
 
 | Flag | Default | Meaning |
@@ -101,6 +102,9 @@ sidegraph-init [--db PATH] [--graph PATH] [--no-settings | --ratify-policy VALUE
 | `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | `graph.json` path to check for (read-only; never created) |
 | `--no-settings` | off | skip the `.claude/settings.json` step described below entirely: no prompt, no write, just the line a person would need to set it up by hand |
 | `--ratify-policy` | unset | `manual`, `auto-low-risk`, or `auto-all`: write this value into `.claude/settings.json` with no prompt (still never overwrites an existing value there); for a scripted, non-interactive setup that wants an explicit answer instead of the interactive question below. Mutually exclusive with `--no-settings` |
+| `--hooks` | off | install or refresh the graph refresh git hook (step 3) with no question: for a scripted setup, or after the person agreed in chat. Clears an earlier decline. Mutually exclusive with `--no-hooks` and `--remove-hooks` |
+| `--no-hooks` | off | install no hook and record the choice (`git config --local sidegraph.graphRefresh false`), so the session-start reminder stops. Mutually exclusive with `--hooks` and `--remove-hooks` |
+| `--remove-hooks` | off | remove Sidegraph's block from `post-commit`, `post-merge` and `post-checkout` (each foreign hook ends byte-identical to its state before install, and a file Sidegraph created is deleted), delete the helper and its lock files, clear the recorded choice, print what changed, and **exit without running the rest of init** (`0`, or `1` when a file cannot be removed or a hook was left holding its block): it creates no `.sidegraph/` and asks no settings question. Mutually exclusive with `--hooks` and `--no-hooks` |
 
 Bootstraps a target repo for Sidegraph. Run it once, in the repo you want memory over (not
 the Sidegraph checkout):
@@ -118,7 +122,49 @@ the Sidegraph checkout):
    <path> — run \`graphify update .\`, then \`sidegraph-sync\`, to anchor decisions to code
    (optional; Sidegraph works without it).` if not. The graph is optional at init time —
    `sidegraph-init` typically runs before the first `graphify update .`.
-3. Prints the setup instructions: the plugin install path first (`/plugin marketplace add
+3. Settles the **graph refresh git hook**, in the store's own repository (not necessarily the
+   shell's directory), printing `graph refresh hook: skipped (not a git repository)` outside
+   one. The hook keeps `graphify-out/graph.json` current: it rebuilds the graph in the
+   background after each commit, merge and branch switch, **in the main checkout only**
+   (linked worktrees read its graph). See
+   [Keeping the graph fresh: git hooks](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
+   - **Where the hook cannot rebuild the store's graph:** the helper rebuilds
+     `<main checkout>/graphify-out/graph.json` and nothing else. When the store reads another
+     graph (a typed `--graph`, a store in a subdirectory, a linked worktree with a graph of its
+     own) or the repository has no main checkout (a bare repository with worktrees), init
+     installs nothing and prints `graph refresh hook: skipped (the hook rebuilds <graph>; this
+     store reads <graph>)`. A linked worktree with no graph of its own reads the main checkout's
+     and is not skipped. `--no-hooks` still records the choice there.
+   - **Installed already** (the helper and all three blocks are there): the blocks are
+     rewritten to the current version and `graph refresh hook: installed (post-commit,
+     post-merge, post-checkout)` is printed. Nothing is asked. When every hook calls the helper
+     but some by hand (a hook that was refused, a `core.hooksPath` directory), only the helper
+     is refreshed: `graph refresh hook: already wired (...)`. A hook calls the helper only when
+     it is executable and the helper's name is on a line that does not start with `#`; a hook
+     that fails either test is not wired.
+   - **Declined earlier** (`sidegraph.graphRefresh` reads `false`, in the repository's or the
+     global git config): `graph refresh hook: declined earlier (git config
+     sidegraph.graphRefresh false); install it with \`sidegraph-init --hooks\`` (`declined in
+     your global git config` for a global value). Nothing is asked or written.
+   - **`core.hooksPath` set**, at any level: the helper is installed in the repository's own
+     `hooks/` directory, no hook file is written (a hooks manager owns that directory), and the
+     one line to add by hand to each of the three hooks is printed.
+   - **In an interactive terminal,** one question, `Install it? [Y/n]`: an empty answer, `y`
+     or `yes` installs, `n` or `no` records the decline, and two unrecognised answers (or an
+     EOF) take the default, yes.
+   - **Outside a terminal** (CI, a script, an agent-driven session): nothing is written, and
+     it prints `non-interactive: no git hook installed. To keep the code graph fresh, run
+     \`sidegraph-init --hooks\` (or \`--no-hooks\` to stop the reminder).` A session start
+     then reminds the person once a day (the `refresh-hook-missing` check in the
+     [troubleshooting guide](../guides/troubleshooting.md)).
+
+   The block is inserted right after the hook's shebang line and never replaces anything. A
+   hook that is a symlink, is not executable, has CRLF line endings, or is not a shell script
+   (a Python or Node hook) is left untouched and the line to add by hand is printed; damaged
+   markers (a lone marker, reversed markers, two pairs) are reported and left alone. When
+   Graphify's own hook is also installed, init says that it rebuilds in linked worktrees too
+   and how to remove it (`graphify hook uninstall`); it never touches it.
+4. Prints the setup instructions: the plugin install path first (`/plugin marketplace add
    SantyagoSeaman/sidegraph` + `/plugin install sidegraph@sidegraph` — installs the MCP server
    and all three hooks automatically), then the no-plugin alternative (a single
    `claude mcp add sidegraph -s project … -- uvx --from git+…` command that writes a
@@ -126,7 +172,7 @@ the Sidegraph checkout):
    [`claude-code-setup.md`](../getting-started/claude-code-setup.md) /
    [`codex-setup.md`](../getting-started/codex-setup.md) for hook-by-hook manual wiring.
    Printed on every run, not just the first, so it's easy to re-fetch.
-4. Settles `.claude/settings.json`'s `env.SIDEGRAPH_RATIFY_POLICY`
+5. Settles `.claude/settings.json`'s `env.SIDEGRAPH_RATIFY_POLICY`
    (see [`configuration.md`](configuration.md#environment-variables)), never by writing it
    silently. The library's own default is `manual` either way; this step only decides what a
    *fresh* project's committed settings say:
@@ -168,17 +214,25 @@ the Sidegraph checkout):
    equivalent as a plain `export SIDEGRAPH_RATIFY_POLICY=<value>` line. A settings-file
    problem never fails the store creation in step 1.
 
-**Exit code:** `0` on success, including when the graph is missing (expected and non-fatal)
-and when re-run on an already-initialized repo (idempotent). Non-zero (`1`) only if the store
-itself can't be created/opened (e.g. its parent directory isn't writable, or an existing store
-has an incompatible format/`schema_version`) — printed as `store not writable (<path>):
-<error>`.
+**Exit code:** `0` on success, including when the graph is missing (expected and non-fatal),
+when re-run on an already-initialized repo (idempotent), and when the hook step is skipped.
+Non-zero (`1`) if the store itself can't be created/opened (e.g. its parent directory isn't
+writable, or an existing store has an incompatible format/`schema_version`) — printed as `store
+not writable (<path>): <error>` — and, for the hook flags, if `--hooks` cannot write the helper
+or a hook file (`graph refresh hook: could not write (<error>)`; the rest of init has run), or
+`--remove-hooks` cannot remove them (`graph refresh hook: could not remove (<error>)`), or
+leaves a hook untouched because it is a symlink or its block markers are damaged
+(`graph refresh hook: removal was partial; Sidegraph's block may remain in <hooks>, left
+untouched: edit them by hand`; the other hooks and the helper are still removed). The
+hook question's own write failure prints the same message and leaves the exit code `0`.
 
 **Examples:**
 
 ```bash
 uv run sidegraph-init
 uv run sidegraph-init --db .sidegraph --graph graphify-out/graph.json
+uv run sidegraph-init --hooks          # keep the graph fresh, no question
+uv run sidegraph-init --remove-hooks   # take the hook out again
 ```
 
 ## `sidegraph-ratify`
@@ -1083,7 +1137,7 @@ sidegraph-doctor [--db PATH] [--against GIT_REF] [--check] [--stale-days N] [--j
 | `--check` | off | advisory findings also exit `2` (default: report only; a *skipped* check never fails, even with `--check`) |
 | `--stale-days N` | `30` | flag a proposed decision/domain whose id timestamp is strictly older than `N` days; must be `>= 0` |
 | `--json` | off | print `{"clean", "violations", "findings", "skipped"}` as one JSON object to stdout (nothing else) |
-| `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | read-only input used only for the `graph-root-mismatch` and `graph-stale` advisory checks below; missing or unreadable simply skips both |
+| `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | read-only input used for the `graph-root-mismatch` and `graph-stale` checks below; missing or unreadable skips both and says so (see *Skipped checks* below) |
 
 One-stop store health: composes `sidegraph-verify`'s strict snapshot (+ optional
 `--against` transition layer) with an advisory curation lint, rather than reimplementing
@@ -1117,6 +1171,8 @@ plain-text line):
 | `duplicate-entity` | two or more committed entity files share one logical identity (legal — see below — but ambiguous); reported once per group, at the winner's (lowest-`entity_id`) file, naming every id in the group and its binding count |
 | `graph-root-mismatch` | `graphify update` was likely run from a subdirectory instead of the repository root, so every recorded `source_file` is relative to that subdirectory instead — every anchor in the graph will look orphaned until it's rebuilt from the root. Detected from `--graph`: a sample of anchorable `source_file` values that mostly don't exist relative to the repo root, but DO all exist under one specific subdirectory (named in the finding). Silent on a legitimately partial graph (a doc-only corpus, an `--exclude`d build) and on too small a sample to judge safely; needs `--graph` to resolve (missing/unreadable simply skips it) |
 | `graph-stale` | the graph was built at a commit HEAD has moved past (graph.json's `built_at_commit`), and a file the graph should reflect changed since: one it holds was edited after the graph was last built (the later of `graph.json`'s and its sibling `manifest.json`'s modification times) or deleted, or a new file of a type it holds now exists (not under a dot-directory, which Graphify skips). Memory cannot see or anchor to code added after the build. The detail gives the build commit, how many commits behind HEAD (or "a commit outside HEAD's history" after a checkout of an older commit), how many files changed, and up to five example paths; the fix is `graphify update .` from the repository root, then `sidegraph-sync`. Silent when the build commit is HEAD, when only file types the graph does not hold changed (a `.yml` against a `.py`-only graph), and when a graph built from a dirty tree was committed afterwards, or a `graphify update .` found nothing to change and rewrote only `manifest.json` (the file is no newer than the build); also silent when the comparison cannot be made (no `built_at_commit`, one that is not a full commit id, a graph outside a git repository, a build commit the repository lacks, git unavailable or slower than 3 seconds). **`--check` exits `2` on it**, so a CI job that runs doctor should rebuild the graph first; one that does is unaffected. Needs `--graph` to resolve |
+| `orphaned-record` | an open (`proposed`/`accepted`) decision or fact whose every Tier-2 (leaf) anchor is `orphaned`, so retrieval reaches it only through its file or domain; one finding per record, at its canonical file, naming how many leaf anchors it has. Statuses come from `index.db` and read "as of last sync", so the check is skipped while the index has been reloaded and not yet synced (see *Skipped checks* below; run `sidegraph-sync`). It is the record-level view of `orphaned-binding` (any record it flags has orphaned bindings, which that code already reports), so it adds no new reason for `--check` to exit `2`. The fix is to rebuild a stale graph, then `sidegraph-sync`; otherwise re-anchor the record with `add_anchors` or the `heal-anchors` skill, or supersede it if the code is gone. Needs a usable `index.db` |
+| `store-uncommitted` | store files nobody committed for at least 24 hours: records, bindings, entities, an archive segment or the root files (`format`, `.gitignore`, `stamping_live_since`) that `git status` shows as new, modified or deleted. One finding, at the store path, naming how many files there are, how old the oldest is and what kinds they are (a new `archive/` segment beside deleted records reads as "a compaction"). A new record or entity file is aged by its ULID name, which a `git stash` cannot rewrite; a modified file, or anything under `bindings/`, by its modification time; a deleted file by its subdirectory's, a lower bound. Entries fully staged in the index are not counted, so a `--check` run in a pre-commit hook does not block the commit that fixes the problem. **`--check` exits `2` on it.** The fix is to commit the store in a pull request. Silent, and not run, outside a git repository, with no `git`, or when git is slower than 2 seconds |
 
 `degraded-binding`/`orphaned-binding` come from `index.db`, opened strictly read-only — it
 is the only source for binding status (canonical `bindings/*.json` files carry identity,
@@ -1155,6 +1211,19 @@ consumes it yet; its *shows* count normally, so surfacing only through a domain 
 still protects a decision from a false flag.
 
 `clean` is `true` only when both `violations` and `findings` are empty.
+
+**Skipped checks.** A check that cannot look says so and is never a finding: it affects neither
+the exit code nor `clean`, even under `--check`. Without a usable `index.db` the index checks
+(`binding-status`, `never-surfaced`, `orphaned-records`) are listed in `skipped` and printed as
+"... check skipped (no usable index.db — run sidegraph-sync)". `orphaned-records` is skipped the
+same way, under the same text, while the index has been reloaded and not yet synced (a new store,
+or a `git pull` that changed a record): every binding reads live until `sidegraph-sync`
+recomputes the statuses, so the check has nothing to say. Without a readable graph the
+graph checks (`graph-root-mismatch`, `graph-stale`) are listed as `"graph"` in `skipped`, and the
+plain-text report prints one line just before its summary:
+``graph checks skipped (no code graph at <path> — build it from the repository root with `graphify update .`)``.
+`--json` prints nothing extra. A missing graph is deliberately not a finding: `--check` escalates
+every finding, so a CI job that runs doctor without building a graph would start exiting `2`.
 
 **Exit code:** `0` healthy — advisory findings alone stay `0` without `--check`. `1`
 operational error — same paths as `sidegraph-verify` (unreadable store; or, when `--against`
@@ -1290,6 +1359,9 @@ there anyway", so no line of the report claims an effect.
   there is no readable graph. When the comparison could not be made (`freshness` is
   `"unknown"`), the other three are `null` too. `commits_behind` is also `null` for a build
   commit outside `HEAD`'s history. They are Provisional like the rest of this report: they may gain fields.
+  `health` is a list of `{"check", "severity", "summary", "fix"}` objects, one per problem the
+  integrity checks found that is `broken` or `degraded` (see **HEALTH** below), in the order the
+  checks run; an empty list means none. It is never `null`.
 
 Example, from this repository's own store (the numbers are that store's, on the day it was
 run):
@@ -1297,6 +1369,7 @@ run):
 ```
 Sidegraph · sidegraph                              window: 30 days (12 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 24 of 71 sessions
             every one of those got records back
             47 sessions touched files without asking
@@ -1315,8 +1388,18 @@ GRAPH       9,390 nodes · 541 files · 534 communities
 ANCHORS     2,418 live · 3 degraded · 61 orphaned → sidegraph-doctor
 ```
 
-What each block answers, with activation first, as the question the other blocks build on:
+What each block answers. HEALTH is first because it says whether the rest can be trusted;
+activation follows, as the question the other blocks build on:
 
+- **HEALTH** — does Sidegraph need attention? The same integrity checks that SessionStart runs
+  (see [troubleshooting](../guides/troubleshooting.md)), run against this command's own read-only
+  snapshot of the index. `ok` when none of them found a `broken` or `degraded` problem. One
+  problem reads `<summary> → <fix>`, for example `code graph stale → graphify update .`. Several
+  read `<n> problems: <the first summary> → <its fix>; all: sidegraph-doctor`, and a line wider
+  than the screen hangs the arrow and the command on their own line, like the stale-graph line
+  under GRAPH. Advisory problems stay where they already show (MEMORY, ANCHORS, GRAPH). A check
+  that cannot run (no readable graph, an index behind the store files) adds nothing: `ok` here
+  means "nothing found", and `sidegraph-doctor` says what it skipped.
 - **ACTIVATION** — did memory get asked for at all? A session counts as having *asked* when the
   journal holds a memory lookup for it (`get_task_context`, `query_decisions` or `drill_down`);
   sessions that touched files and never asked are counted separately, and so is a session that

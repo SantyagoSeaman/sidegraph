@@ -271,11 +271,12 @@ def _resolve_repo_root(reader: GraphifyReader) -> Path | None:
     """Best-effort git worktree root containing ``reader``'s ``graph.json``, used ONLY by
     the "moved" rung below (see ``rebind_entity``) to check whether an entity's OLD
     ``file_path`` is still sitting on disk before trusting a name-only hit as a move. Same
-    ``git rev-parse --show-toplevel`` call ``verify._find_repo_root``/
-    ``doctor.scan_code_drift`` already use to answer this same class of question ("is this
-    repo-relative path real"), but never raises: a graph outside any git working tree, or
-    git being unavailable, degrades to ``None`` (mirrors ``doctor.py``'s own
-    ``repo_root_failed`` tolerance) -- see the fail-closed consequence of that below.
+    ``git rev-parse --show-toplevel`` call ``verify._find_repo_root`` and
+    ``verify.find_store_project_repo`` (``doctor.scan_code_drift``'s root) use to answer this
+    same class of question ("is this repo-relative path real"), but never raises: a graph
+    outside any git working tree, or git being unavailable, degrades to ``None`` (mirrors
+    ``doctor.py``'s own ``repo_root_failed`` tolerance) -- see the fail-closed consequence of
+    that below.
 
     Deliberately keyed off the READER's location, not the store's: entity ``file_path``
     descriptors are relative to the checkout the graph was built from, and the store (a

@@ -95,8 +95,17 @@ most likely to save it from a repeat mistake come first.
 A `Seed` is either:
 - a **file path** — resolves to every anchorable node in that file, or
 - a **name (+ optional file_path)** — an entity ref, resolved the same way capture resolves
-  anchors (see [anchoring](anchoring.md#descriptors-name--file)); an ambiguous ref keeps
-  *all* candidates rather than guessing or dropping the seed.
+  anchors (see [anchoring](anchoring.md#descriptors-name--file)). An ambiguous ref with a file
+  keeps *all* its candidates in that file. For the MCP tool `get_task_context`, an ambiguous ref
+  with *no* file is reported and not read: expanding it would be a silent guess.
+  `query_structure` and `query_decisions` still expand every candidate.
+
+The MCP tool reads a seed that the graph does not hold as written before giving up on it: a
+path with a stray `./`, a wrong prefix or a bare file name, a directory, and a `Type.member`
+with no file. Every rewrite is a guess and is named as one in the reply, the seeds that resolved
+as written come first, and a guess that could mean several things is listed and never read (see
+[`get_task_context`](../reference/mcp-tools.md#seeds-are-read-tolerantly)). The rule is still
+exact matching, never similarity.
 
 A seed reaches the store's entities two ways, and both count: a named seed that matches a
 stored anchor name is that entity directly (whatever the graph calls the node, so a stored
@@ -317,8 +326,9 @@ syncs it too, index-only: the derived state fills its cold index, and no tracked
 version (plus the reader's resolver revision, so an upgrade that changes how names resolve reruns the pass once) against the store's `last_synced_graph_version` meta stamp and skips the full pass if they match (an entity remembered under
 `pending_uncommitted_moves` is still re-verified once `HEAD` has moved).
 This is the self-healing mechanism described in
-[anchoring](anchoring.md#what-happens-on-rename-or-move): a graph that was rebuilt after a
-missed post-commit sync is caught by the next read, and it's what keeps each accepted domain's
+[anchoring](anchoring.md#what-happens-on-rename-or-move): a graph that was rebuilt, by the
+[graph refresh hook](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks) or by hand,
+with no sync after it, is caught by the next read, and it's what keeps each accepted domain's
 `communities` field current too (see
 [mind model](mind-model.md#how-domains-relate-to-engine-communities)). It cannot catch a graph
 that was never rebuilt, because the version it compares is the file's own: that case is

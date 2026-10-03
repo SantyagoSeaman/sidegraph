@@ -377,6 +377,54 @@ class GraphifyReader:
             status="resolved", node_id=chosen[0].node_id, community=chosen[0].community
         )
 
+    def resolve_member_name(self, name: str) -> ResolveResult:
+        """``Type.member`` with no file: the member's own node(s), found through the owner edge.
+
+        For a seed that names a member and nothing else (:meth:`_resolve_member` needs a file).
+        Member forms only (``Type.member``, ``Type::member``, ``Type#member``, generics and call
+        decoration stripped): a plain name already resolves through ``resolve(Descriptor(name,
+        None))``. A candidate is a ``code`` node whose label, decoration stripped and case KEPT,
+        is the member, and which an owner edge ties to a node labelled (case kept) the named
+        type; the owner and the member must both be identifiers. A candidate whose own file
+        holds a node that differs from the member only by case is dropped: the store dedups an
+        anchor by its lowercased name, so binding either spelling would put the other's record
+        on it. The rule is per candidate file, so a twin elsewhere changes nothing.
+        One survivor is ``resolved``, several are ``ambiguous``, none is ``unresolved``.
+        ``resolve()`` and anchoring are unchanged, so ``RESOLVER_REVISION`` does not move.
+        # see design/superpowers/specs/2026-10-02-tolerant-seeds-design.md (D2)
+        """
+        unresolved = ResolveResult(status="unresolved")
+        split = _split_member(name)
+        if split is None:
+            return unresolved
+        owner, member = split
+        if not (owner.isidentifier() and member.isidentifier()):
+            return unresolved
+        same_name = self._resolve_index().get(member.lower(), [])
+        twin_files = {n.file_path for n in same_name if strip_decoration(n.name) != member}
+        owners = self._owner_index()
+        found: list[NodeRef] = []
+        for n in same_name:
+            if n.file_type != "code" or strip_decoration(n.name) != member:
+                continue
+            if not n.file_path or n.file_path in twin_files:
+                continue
+            owner_nodes = [o for oid in owners.get(n.node_id, []) if (o := self._by_id.get(oid))]
+            if any(strip_decoration(o.name) == owner for o in owner_nodes):
+                found.append(n)
+        if not found:
+            return unresolved
+        if len(found) == 1:
+            return ResolveResult(
+                status="resolved", node_id=found[0].node_id, community=found[0].community
+            )
+        comms = {n.community for n in found if n.community is not None}
+        return ResolveResult(
+            status="ambiguous",
+            candidates=[n.node_id for n in found],
+            community=comms.pop() if len(comms) == 1 else None,
+        )
+
     def _relation(self, link: dict) -> str:
         return str(link.get("relation") or link.get("type") or "")
 

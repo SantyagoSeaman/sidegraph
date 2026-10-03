@@ -113,6 +113,25 @@ def _header(report: StatsReport) -> str:
     return left + " " * (_SCREEN_WIDTH - len(left) - len(right)) + right
 
 
+def _health(report: StatsReport) -> list[str]:
+    """The HEALTH block: ``ok`` when the integrity registry found nothing broken or degraded,
+    else the problem and its fix (one problem), or how many and the first (several, with
+    ``sidegraph-doctor`` for the rest). Over the body width, the arrow and the command hang on
+    their own line, like every other over-wide figure here.
+    See design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D7).
+    """
+    items = report.health
+    if not items:
+        return ["ok"]
+    first = items[0]
+    if len(items) == 1:
+        head, tail = first.summary, f"→ {first.fix}"
+    else:
+        head = f"{len(items)} problems: {first.summary}"
+        tail = f"→ {first.fix}; all: sidegraph-doctor"
+    return [f"{head} {tail}"] if len(f"{head} {tail}") <= _BODY_WIDTH else [head, _HANG + tail]
+
+
 def _activation(report: StatsReport) -> list[str]:
     a = report.activation
     if not report.telemetry_enabled:
@@ -308,6 +327,7 @@ def render_text(report: StatsReport) -> str:
     no clock, no store — everything printed is a field of `report` (D9).
     """
     lines = [_header(report), ""]
+    lines += _block("HEALTH", _health(report))
     lines += _block("ACTIVATION", _activation(report))
     lines += _block("REACH", _reach(report))
     lines.append("")

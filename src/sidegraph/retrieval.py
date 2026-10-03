@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple, TypeVar
@@ -654,8 +654,15 @@ def rank_decisions(
     seed_communities: list[str],
     store: Store,
     budget: RetrievalBudget,
+    *,
+    trailing_entities: Sequence[Entity] = (),
 ) -> TaskContext:
     """Gather valid decisions and rank them mistakes-first under budget.memory_chars.
+
+    ``trailing_entities`` (the entities of guessed seeds, see ``get_task_context``) rank after
+    everything the seeds' and peripheral entities' own records could fill, the unratified ones
+    included: their accepted decisions render in ``related`` and their accepted facts in
+    ``facts``, and their proposals queue after every other proposal.
 
     Renders ``ctx.mistakes``/``ctx.decisions`` at the generous ``detailed`` tier and
     ``ctx.related`` at the tight tier (fix-wave C, C1 — see :func:`_fmt_decision`'s
@@ -969,6 +976,50 @@ def rank_decisions(
             elif record.id not in rendered_fact_ids:
                 place_fact(ctx.unratified, record, _fmt_fact(record))
 
+    # Trailing entities (the guessed seeds): last of all, after every record an exact-only call
+    # would have placed, the exact seeds' own unratified ones included, so a guess never spends
+    # budget they would have used. Their accepted records go to the related tier and the
+    # Known-facts bucket; their proposals queue after everything else unratified.
+    trailing_proposed: list[Decision] = []
+    trailing_proposed_facts: dict[str, Fact] = {}
+    for e in trailing_entities:
+        accepted, proposed = partition_by_trust(store.valid_decisions_for_entity(e.entity_id))
+        for d in _by_recency(accepted):
+            if add(ctx.related, d):
+                # `add` queued its proposed facts for the related proposals, which were
+                # rendered above: queue them again for the trailing ones.
+                for fact in _live_facts(store.facts_for_decision(d.id)):
+                    if fact.status == DecisionStatus.PROPOSED:
+                        trailing_proposed_facts.setdefault(fact.id, fact)
+        trailing_proposed.extend(proposed)
+    for e in trailing_entities:
+        entity_facts = _live_facts(store.valid_facts_for_entity(e.entity_id))
+        accepted_facts, unratified_facts = partition_by_trust(
+            sorted(entity_facts, key=lambda f: f.id)
+        )
+        for fact in accepted_facts:
+            if fact.id in rendered_fact_ids:
+                continue
+            place_fact(ctx.facts, fact, _fmt_fact(fact))
+        for fact in unratified_facts:
+            trailing_proposed_facts.setdefault(fact.id, fact)
+    trailing_proposed = _by_recency(trailing_proposed)
+    for decision in trailing_proposed:
+        for fact in sorted(_live_facts(store.facts_for_decision(decision.id)), key=lambda f: f.id):
+            if fact.status == DecisionStatus.PROPOSED:
+                trailing_proposed_facts.setdefault(fact.id, fact)
+            elif fact.id not in rendered_fact_ids:
+                place_fact(ctx.facts, fact, _fmt_fact(fact))
+    trailing_records: list[Decision | Fact] = [
+        *trailing_proposed,
+        *trailing_proposed_facts.values(),
+    ]
+    for record in sorted(trailing_records, key=lambda item: item.valid_from, reverse=True):
+        if isinstance(record, Decision):
+            add(ctx.unratified, record, evidence=False, detailed=False)
+        elif record.id not in rendered_fact_ids:
+            place_fact(ctx.unratified, record, _fmt_fact(record))
+
     # fact_order already tracks exactly the facts that made it into the render, in the
     # order each was placed (inline evidence at every bucket plus the standalone
     # Known-facts bucket above) — fold it into shown_ids once here rather than duplicating
@@ -1170,12 +1221,47 @@ def get_task_context(
     store: Store,
     reader: GraphifyReader | None,
     budget: RetrievalBudget | None = None,
+    *,
+    guessed: Sequence[Seed] = (),
 ) -> TaskContext:
-    """Phase-2 merge: budgeted structural subgraph + mistakes-first decision memory."""
+    """Phase-2 merge: budgeted structural subgraph + mistakes-first decision memory.
+
+    ``guessed`` are the seeds the seed ladder rewrote (``seed_ladder.tolerate``). When the exact
+    ``seeds`` resolved to a graph node, they are read exactly as without ``guessed``: the same
+    structural map, the same peripheral entities, in the same order. The guessed seeds' entities
+    then rank as ``trailing_entities`` of :func:`rank_decisions`: their records render in the
+    related tier and the Known-facts bucket after every record the exact seeds and their
+    neighbours would have shown, the superseded one-liners and global decisions included. A guess
+    never pushes out a record of a seed the agent got right, and adds nothing to the map. When no
+    exact seed resolved to a node (an exact seed that matches only a stored descriptor does not
+    count), the guessed seeds act as the seeds.
+    # see design/superpowers/specs/2026-10-02-tolerant-seeds-design.md (D3)
+    """
     budget = budget or RetrievalBudget()
     res = resolve_seeds(seeds, reader, store)
+    demoted: list[Entity] = []
+    if guessed:
+        if res.seed_node_ids:
+            exact_ids = {e.entity_id for e in res.seed_entities}
+            demoted = [
+                e
+                for e in resolve_seeds(list(guessed), reader, store).seed_entities
+                if e.entity_id not in exact_ids
+            ]
+        else:
+            res = resolve_seeds([*seeds, *guessed], reader, store)
     structure, peripheral = _gather_structure(res, store, reader, budget)
-    ctx = rank_decisions(res.seed_entities, peripheral, res.seed_communities, store, budget)
+    if demoted:
+        held = {e.entity_id for e in peripheral}
+        demoted = [e for e in demoted if e.entity_id not in held]
+    ctx = rank_decisions(
+        res.seed_entities,
+        peripheral,
+        res.seed_communities,
+        store,
+        budget,
+        trailing_entities=demoted,
+    )
     ctx.structure = structure
     return ctx
 

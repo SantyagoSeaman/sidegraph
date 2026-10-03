@@ -176,9 +176,9 @@ and Graphify's is the noisier, unbounded one.
 install`** — you already have the graph-orientation and read-nudge behaviour, done more
 conservatively. If you specifically want Graphify's own `graphify query` reflex on top, keep
 its hooks but set `SIDEGRAPH_GREP_NUDGE=off` (see [`claude-code.md`](claude-code.md)) so the
-two don't double-nudge on reads. This is separate from `graphify hook install` (the
-[post-commit git hook](#keeping-the-graph-fresh-git-hooks) that rebuilds `graph.json`) — that
-one is orthogonal and fine to keep.
+two don't double-nudge on reads. This is separate from the git hook that rebuilds `graph.json`: Sidegraph installs its own
+([below](#keeping-the-graph-fresh-git-hooks)), which differs from Graphify's `graphify hook
+install` in rebuilding in the main checkout only.
 
 `graphify update .` prints "Re-extracting code files" / "Code graph updated" even on a
 pure-markdown corpus with no code files at all — expected engine chatter, not a sign the
@@ -190,29 +190,74 @@ by design, it is the only place Graphify specifics may live in Sidegraph.
 
 ## Keeping the graph fresh: git hooks
 
-Install Graphify's own hook once, in the target repo:
+Let `sidegraph-init` install the refresh hook, once, in the target repo. It asks, in a terminal,
+and `--hooks` installs without asking (`--no-hooks` declines, and records that so the
+reminder stops):
 
 ```bash
-graphify hook install    # post-commit (and post-checkout) → rebuilds graph.json
+sidegraph-init --hooks
 ```
 
-This installs a **code-only AST rebuild** (no LLM) into `.git/hooks/post-commit` as a marked
-block. Prose/ADR extraction is a model pass and is not re-run automatically — re-run
-`graphify update .` (or the `/graphify` skill's `--update` form) whenever the docs change.
+It writes a small helper, `sidegraph-graph-refresh`, into the repository's `hooks/` directory
+(inside the common git directory, so every worktree shares it), and a marked three-line block
+into `post-commit`, `post-merge` and `post-checkout` that calls it. The helper runs
+`graphify update .`, a **code-only AST rebuild** (no LLM). Prose/ADR extraction is a model pass
+and is not re-run automatically: re-run `graphify update .` (or the `/graphify` skill's
+`--update` form) whenever the docs change.
 
-Chain Sidegraph's sync **after** Graphify's block, in the same hook, so the graph rebuild
-always finishes first:
+- **Which events.** After a commit, after a merge (a fast-forward `git pull` fires
+  `post-merge`, which Graphify's own hook does not cover) and after a branch switch. A file
+  checkout (`git checkout -- file`) and a `git switch -c` that stays on the same commit do not
+  rebuild.
+- **One graph.** The helper rebuilds `graphify-out/graph.json` at the main checkout's root, and
+  init installs it only where that is the graph the store reads. A store in a subdirectory, a
+  typed `--graph`, a linked worktree with a graph of its own and a bare repository with worktrees
+  (no main checkout) get `graph refresh hook: skipped`, naming the graph the hook would rebuild.
+- **The main checkout only.** A linked worktree reads the main checkout's graph (see
+  [above](#linked-worktrees-read-the-main-checkouts-graph)), so a commit in one does nothing.
+  Rebuilding there as well costs about 18 MB and 43 s for a cold build on one field corpus with
+  25 worktrees, and agents commit in worktrees constantly.
+- **In the background, one at a time.** Git never waits for the rebuild. A lock directory keeps
+  one rebuild running; a hook that fires while it runs makes it go once more when it finishes, so
+  the graph never settles on a tree older than the last request. A lock left by a job that died
+  is detected and cleared: by its pid, or, when the job died before writing one (a full disk, a
+  quota), by its age, ten minutes. `sidegraph-init --hooks` clears such a lock at once. One risk
+  remains: after a reboot a pid can belong to a live, unrelated process, and the hook then waits
+  until that process exits.
+- **Where the output goes.** The last rebuild's output is `sidegraph-graph-refresh.log` in the
+  common git directory (`.git/` in a normal clone).
+- **No `sidegraph-sync` in the hook.** The next memory call notices the new graph version and
+  re-anchors before it answers, the same lazy check described below. Chaining `sidegraph-sync`
+  into a hook would race the background rebuild.
+- **It never replaces a hook.** The block goes right after the hook's shebang line, so a
+  foreign hook that ends in `exit` or `exec` cannot skip it, and every other byte of the file
+  stays as it was. A second `--hooks` leaves the files byte-identical. A hook that is a
+  symlink, is not executable, has CRLF line endings or is not a shell script (a Python or Node
+  hook) is left untouched, and init prints the one line to add by hand. Damaged markers (a lone
+  marker, reversed markers, two pairs) are reported and left alone.
+- **`core.hooksPath`.** When it is set, a hooks manager such as Husky, lefthook or pre-commit
+  owns that directory and regenerates it, so init writes nothing there. It installs the helper
+  and prints the line to add to each of the three hooks in that directory; a call added by hand
+  counts as installed, provided the hook is executable and the call is not in a comment.
+- **Removal.** `sidegraph-init --remove-hooks` removes exactly the block's bytes (a file that
+  Sidegraph created is deleted, a foreign hook ends as it was before), deletes the helper and its
+  lock files, and clears the recorded choice.
+- **The reminder.** Without the hook, a session start tells the model and, once a day, you
+  (the `refresh-hook-missing` check in the [troubleshooting guide](../guides/troubleshooting.md#refresh-hook-missing)).
+  It stays quiet in a repository with no graph, and after `--no-hooks`.
 
-```bash
-# .git/hooks/post-commit, appended after Graphify's marked block:
-sidegraph-sync
-```
+**Graphify's own hook** (`graphify hook install`) is not needed and is not what Sidegraph
+installs. It rebuilds in every linked worktree that commits, writes no `post-merge` hook, and
+appends its block after any existing content. If both are installed, the main checkout rebuilds
+twice on every commit (Graphify's lock serialises them), and linked worktrees rebuild too. Init
+reports it when it finds one, and never touches it; `graphify hook uninstall` removes it and
+leaves Sidegraph's block as it was.
 
-This is a convenience, not a dependency: `sidegraph-sync` re-resolves anchors and skips the
-full pass when the graph version hasn't changed (entities remembered under
-`pending_uncommitted_moves` are still re-verified once `HEAD` has moved). Because the same `graph_version` check also runs
-lazily on every read path (`get_task_context`, `SessionStart`), a graph that was rebuilt while
-the hook missed its sync is caught by the next read, which re-syncs before serving context.
+The lazy check keeps the store honest whichever way the graph was rebuilt: `graph_version` is
+compared on every read path (`get_task_context`, `SessionStart`), so a graph that was rebuilt in
+the background, or by hand, is caught by the next read, which re-syncs before serving context
+(entities remembered under `pending_uncommitted_moves` are still re-verified once `HEAD` has
+moved).
 
 A graph that was **never rebuilt** is a different case, and the lazy check cannot see it: it
 compares `graph.json` with the store's last sync, so a graph that stopped at an old commit

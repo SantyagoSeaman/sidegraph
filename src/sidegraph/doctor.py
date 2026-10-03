@@ -33,11 +33,17 @@ from urllib.parse import quote
 
 from ulid import ULID
 
+from . import integrity
 from .engine.reader import GraphifyReader
-from .freshness import staleness_phrase
 from .schema import DecisionStatus, canonicalize
 from .store import _STAMPING_MARKER_NAME, _TERMINAL_DECISION_STATUSES
-from .verify import _check_archive_dir, _iter_json_files, _load_raw_json, _run_git
+from .verify import (
+    _check_archive_dir,
+    _iter_json_files,
+    _load_raw_json,
+    _run_git,
+    find_store_project_repo,
+)
 
 # Finding codes — pinned constants (design: "Advisory checks — pinned finding codes").
 # ``--json`` output and every test assert against these exact strings.
@@ -53,6 +59,20 @@ STALE_INSTRUCTIONS = "stale-instructions"
 UNRATIFIED_ACCEPT = "unratified-accept"
 GRAPH_ROOT_MISMATCH = "graph-root-mismatch"
 GRAPH_STALE = "graph-stale"
+ORPHANED_RECORD = "orphaned-record"
+STORE_UNCOMMITTED = "store-uncommitted"
+
+# The registry's check id -> the finding code doctor prints. They differ where one check yields
+# findings of one record each: check ``orphaned-records`` is one problem, code ``orphaned-record``
+# is one line per record. A dict read as ``_FINDING_CODE.get(...)`` is the shape the docs-claims
+# test resolves; a subscript would hide ``graph-stale`` from it.
+# see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
+# see design/superpowers/specs/2026-10-02-stranded-store-writes-design.md (D1)
+_FINDING_CODE = {
+    "graph-stale": GRAPH_STALE,
+    "orphaned-records": ORPHANED_RECORD,
+    "store-uncommitted": STORE_UNCOMMITTED,
+}
 
 # Name reported in ``CurationReport.skipped`` when index.db is absent or unusable — the
 # binding-status check has no canonical source to fall back on (statuses are index-only).
@@ -661,8 +681,11 @@ def _scan_code_drift(
     scan makes — root resolution, the batch diffs, and (``resolve_head=True``, the
     :func:`scan_code_drift` wrapper only — never the ``curate()`` path, N6) the final
     ``rev-parse HEAD`` — draws from the ONE budget (code review round 1, I-1/M-1: the
-    root used to be resolved through ``verify._find_repo_root`` with no timeout at all,
-    then re-resolved a second time in the wrapper)."""
+    root used to be resolved with no timeout at all, then re-resolved a second time in the
+    wrapper). The root, when the caller passes none, is the repository of the store's
+    PROJECT (``verify.find_store_project_repo``), so a symlinked store is measured where
+    its anchored code lives.
+    # see design/superpowers/specs/2026-10-02-store-git-root-symlink-design.md (D3)"""
     file_by_entity = _file_by_entity(entities)
     status_by_key = _binding_status_by_key(store_dir)
 
@@ -703,17 +726,10 @@ def _scan_code_drift(
         return deadline - (time.monotonic() - started)
 
     if repo_root is None:
-        # Inline rather than `verify._find_repo_root` so the call draws on the scan
-        # budget — the helper has no timeout seam, and this used to be the one unbounded
-        # git call on the hook paths (review I-1). Same command, same cwd, same
-        # `.resolve()`; a non-zero exit or any failure is the same repo_root_failed scan
-        # the helper's raise produced.
-        try:
-            result = _run_git(["rev-parse", "--show-toplevel"], cwd=store_dir, timeout=_remaining())
-            if result.returncode != 0:
-                return CodeDriftScan([], unstamped, True, True, None)
-            repo_root = Path(result.stdout.strip()).resolve()
-        except (ValueError, OSError, subprocess.TimeoutExpired):
+        # The project's repository, drawing on the scan budget: a symlinked store belongs to
+        # the project that holds the link, the repository capture stamped its commit from.
+        repo_root = find_store_project_repo(store_dir, timeout=_remaining())
+        if repo_root is None:
             return CodeDriftScan([], unstamped, True, True, None)
 
     batches: list[DriftBatch] = []
@@ -958,35 +974,56 @@ def _check_graph_root_mismatch(
     ]
 
 
-def _check_graph_stale(reader: GraphifyReader | None) -> list[Finding]:
-    """graph-stale: the graph was built at a commit HEAD has moved past, and a file
-    the graph should reflect changed since, so memory cannot see or anchor to code added
-    after the build. ``GraphifyReader.freshness`` (the engine seam) does the comparison;
-    this turns a ``stale`` verdict into one advisory Finding. ``fresh`` and ``unknown`` report
-    nothing, like ``reader is None`` (no graph configured, or unreadable).
+def _registry_findings(
+    store_dir: Path, now: datetime, reader: GraphifyReader | None, index: sqlite3.Connection | None
+) -> list[Finding]:
+    """The integrity registry's findings for doctor: ``graph-stale`` (the graph was built at a
+    commit HEAD has moved past, so memory cannot see or anchor to code added after the build),
+    ``orphaned-record`` (one per open record whose every code anchor is orphaned) and
+    ``store-uncommitted`` (store files nobody committed for a day).
 
-    Its git calls all run inside ``freshness()``, and only when a reader is passed:
-    ``curate(store_dir)`` without one makes none, so the git-call count pinned by
-    ``test_curate_git_call_count_unchanged_by_refactor`` is untouched.
+    The registry is a pure read here, as everything in this module is: ``reader`` is the
+    engine seam, which does the git comparison inside ``freshness()`` and only when one is
+    passed (``curate(store_dir)`` without one makes none there, so the ``_run_git`` count pinned
+    by ``test_curate_git_call_count_unchanged_by_refactor`` is untouched), and ``index`` is the
+    caller's ``mode=ro`` connection. Without either, the checks that need it are not run.
+    ``store-uncommitted`` needs neither: it always runs two read-only git calls (``rev-parse``
+    and ``status``) through ``integrity._git``, which that count does not see and
+    ``test_curate_runs_two_read_only_git_calls_through_the_registry`` pins.
     # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D6)
+    # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
     """
-    if reader is None:
-        return []
-    freshness = reader.freshness()
-    if freshness.state != "stale":
-        return []
-    examples = ", ".join(freshness.sample)
-    if freshness.changed > len(freshness.sample):
-        examples += ", …"
-    return [
-        Finding(
-            GRAPH_STALE,
-            str(reader.path),
-            f"the code graph is stale: {staleness_phrase(freshness)} (e.g. {examples}); "
-            "memory cannot see or anchor to code added after the build — rebuild from the "
-            "repository root with `graphify update .`, then run `sidegraph-sync`",
-        )
-    ]
+    result = integrity.run(
+        integrity.Inputs(store_dir=store_dir, now=now, index=index, reader=reader), "doctor"
+    )
+    findings: list[Finding] = []
+    for problem in result.problems:
+        code = _FINDING_CODE.get(problem.check)
+        if code is None:
+            continue
+        findings += [Finding(code, path, detail) for path, detail in problem.findings]
+    return findings
+
+
+def open_curation_index(store_dir: str | Path) -> sqlite3.Connection | None:
+    """A ``mode=ro`` connection on ``index.db`` for the registry's index checks, opened the way
+    ``_check_binding_statuses`` opens its own; ``None`` when there is no usable index (absent,
+    corrupt, or from before ``anchor_bindings``), which skips those checks. The caller closes it.
+    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
+    """
+    index_path = Path(store_dir) / "index.db"
+    if not index_path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        conn.execute("SELECT 1 FROM anchor_bindings LIMIT 1")
+    except sqlite3.Error:
+        conn.close()
+        return None
+    return conn
 
 
 def _read_stamping_marker(store_dir: Path) -> datetime | None:
@@ -1433,6 +1470,7 @@ def curate(
     now: datetime | None = None,
     repo_root: Path | None = None,
     reader: GraphifyReader | None = None,
+    index: sqlite3.Connection | None = None,
 ) -> CurationReport:
     """Run every advisory curation check over the store at ``store_dir``.
 
@@ -1442,9 +1480,10 @@ def curate(
 
     ``repo_root`` (design D5, additive): the git repository ``code-drift`` diffs against
     (and, additively, that ``graph-root-mismatch`` checks graph paths against — see
-    below). ``None`` (the default -- ``sidegraph-doctor`` passes nothing) resolves it the
-    same way ``verify._find_repo_root`` does, from ``store_dir`` itself (the store may be
-    nested inside the repo). Passing it explicitly is mainly a test seam -- it skips that
+    below). ``None`` (the default -- ``sidegraph-doctor`` passes nothing) resolves it with
+    ``verify.find_store_project_repo``: the repository of the store's PROJECT (its logical
+    parent, so a symlinked ``.sidegraph`` belongs to the project that holds the link), else
+    ``store_dir`` itself. Passing it explicitly is mainly a test seam -- it skips that
     resolution and any git-availability failure it could raise.
 
     ``reader`` (additive, defect fixed 2026-09-18): an optional :class:`GraphifyReader`
@@ -1452,9 +1491,16 @@ def curate(
     (a person running `graphify update` from a subdirectory instead of the repo root).
     ``None`` (no graph configured, or unreadable -- ``sidegraph-doctor`` never fails to
     load a graph the way it never fails to load a git ref) simply skips that one check,
-    same "advisory, best-effort" contract as every other curation check here.
+    same "advisory, best-effort" contract as every other curation check here. The same reader
+    also feeds the registry's ``graph-stale`` finding.
+
+    ``index`` (additive): a ``mode=ro`` connection on ``index.db`` for the registry's index
+    checks (``orphaned-record``); the caller opens and closes it (``open_curation_index``).
+    ``None`` (the default) runs none of them, so direct ``curate(store_dir)`` callers see the
+    findings they always did. Which skips to report is the CLI's call, not this function's.
     # see design/superpowers/specs/2026-07-23-sidegraph-doctor-design.md
     # see design/superpowers/specs/2026-07-30-staleness-machinery-design.md (D5)
+    # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
     """
     root = Path(store_dir)
     now = now or datetime.now(UTC)
@@ -1512,7 +1558,8 @@ def curate(
     # of every anchor in the store silently looking orphaned. Best-effort like every
     # check above -- reader=None (no graph configured, or unreadable) simply skips it.
     findings += _check_graph_root_mismatch(reader, repo_root)
-    # Additive: the graph never caught up with HEAD. Appended after the check above
-    # so existing finding order is unchanged.
-    findings += _check_graph_stale(reader)
+    # The registry's findings, appended after the check above so the existing finding order is
+    # unchanged: the graph never caught up with HEAD (``graph-stale``, where this module's own
+    # check used to be), and records whose every code anchor is orphaned (``orphaned-record``).
+    findings += _registry_findings(root, now, reader, index)
     return CurationReport(findings=findings, skipped=skipped)

@@ -26,9 +26,9 @@ described a mode that had not existed for weeks, because no test looked there.
 | Surface | What is fixed | What guards it |
 |---|---|---|
 | **The store on disk** — `.sidegraph/` layout, one JSON file per record, the `format` marker, `schema_version` | The current version is **0.6.0**. `0.2.0`/`0.3.0` stores migrate automatically on first open (original kept as `*.migrated-backup`, never deleted). `0.4.0`/`0.5.0` reload in place. A future bump does one of those two — it never orphans a store. | `sidegraph-verify` lints every canonical file against the write-path invariants; `--against <ref>` classifies every changed file against the store's own transition rules |
-| **CLI commands, flags, exit codes** | 18 entry points, 77 flags. A flag is not removed without a deprecation window; documented exit codes keep their meaning | every parser option must appear in its `cli.md` section (`tests/test_docs_claims.py`) |
+| **CLI commands, flags, exit codes** | 18 entry points, 80 flags. A flag is not removed without a deprecation window; documented exit codes keep their meaning | every parser option must appear in its `cli.md` section (`tests/test_docs_claims.py`) |
 | **Environment variables** | The 13 in [`configuration.md`](configuration.md), and the store-path precedence between them. `SIDEGRAPH_DB` stays honoured as the documented deprecated form. `SIDEGRAPH_RATIFY_POLICY`'s name and its `manual` default are committed; its auto values and their gates are Provisional (below). | bidirectional test: the documented set must equal what `src/` actually reads |
-| **Hook process contract** | Read one JSON payload on stdin, write one JSON object on stdout, never block the host, never crash it — any internal failure prints `{}` and exits normally | the hook tests, and a live host run per release |
+| **Hook process contract** | Read one JSON payload on stdin, write one JSON object on stdout, never block the host, never crash it — any internal failure exits normally, printing `{}`, or for SessionStart a store that cannot be opened prints a `systemMessage` naming the cause | the hook tests, and a live host run per release |
 
 The *payload schema* inside the hook contract is **Claude Code's**, not ours. If the host
 changes it, we follow the host; that is the point of keeping the host seam thin.
@@ -40,13 +40,14 @@ changes it, we follow the host; that is the point of keeping the host seam thin.
 | **The MCP tool set and return shapes** (24 tools) | Fields and tools may still be added or deprecated; `ratify_decisions` is already a deprecated alias. Pin a version if a client depends on an exact shape. |
 | **Flow profiles** — the six names and their ingest globs | `spec-kit`'s glob reads `specs/*/plan.md`, while that flow writes its rejected alternatives to `research.md`, which nothing reads. Fixing that changes a glob. |
 | **`doctor` finding codes** | Advisory lint; the set grows as checks are added. Guarded against the docs, not frozen. |
+| **Integrity check ids and severities** — `store-unreadable`, `graph-stale`, `orphaned-records` and the rest of the [troubleshooting](../guides/troubleshooting.md) table, as they appear in `sidegraph-stats --json`'s `health[].check` and in the `integrity_notice:` meta rows | Beside the doctor codes, for the same reason: the set grows as checks are added (host-wiring checks are planned), and a severity or a threshold (such as the age that makes orphaned records degraded) may move once it is measured. |
 | **Auto-ratification policy** — `SIDEGRAPH_RATIFY_POLICY`'s `auto-low-risk`/`auto-all` values and eligibility gates, the `, auto-ratified N` CLI summary segment, and `sidegraph-doctor`'s `auto share`/`auto supersede rate` lines | Eligibility and reporting may tighten. `manual` remains the committed default. |
 
 ### Not a contract
 
 | Surface | Why |
 |---|---|
-| **The text retrieval renders** — `[unratified]` / `[drifted]` markers, line format, budget splits, the `SessionStart` map layout | It is unversioned prose written for a model to read. Assert on structured records or tool return values, not formatting. |
+| **The text retrieval renders** — `[unratified]` / `[drifted]` markers, line format, budget splits, the `SessionStart` map layout, and the wording of its status lines and notices | It is unversioned prose written for a model to read. Assert on structured records or tool return values, not formatting. |
 | **Archive segment format** — `archive/<date>-<seq>-<hash>.jsonl` | Implemented but still provisional; consumers should load records through Sidegraph rather than parse filenames. |
 | **`index.db`** — every table and column | Derived, gitignored, rebuilt from the canonical files whenever stale. It is a cache. Read the JSON. |
 

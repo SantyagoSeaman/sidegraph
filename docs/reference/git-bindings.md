@@ -47,9 +47,11 @@ repos:
 ```
 
 then `pre-commit install --hook-type prepare-commit-msg` (the framework does not install
-`prepare-commit-msg`-stage hooks with a bare `pre-commit install`). `sidegraph-init` prints
-this hint; it never touches `.git/hooks` itself — installing a git hook is something a
-repo opts into explicitly, not something `sidegraph-init` does on your behalf.
+`prepare-commit-msg`-stage hooks with a bare `pre-commit install`). `sidegraph-init` does not
+install this hook: it stays opt-in, by hand. `sidegraph-init` does write git hooks for one
+other purpose, the graph refresh block in `post-commit`, `post-merge` and `post-checkout`, and
+only after its question or `--hooks` (see
+[keeping the graph fresh](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks)).
 
 ### Candidates
 

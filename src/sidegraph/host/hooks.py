@@ -27,7 +27,7 @@ import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 # Defined in config.py, not here: server.py (core) needs this constant too (Task 4), and
 # core importing from host/ would invert this project's seam rule (host may depend on the
@@ -39,6 +39,9 @@ from ..config import (
     StoreLocation,
     ancestor_store,
 )
+
+if TYPE_CHECKING:
+    from ..integrity import Check, Problem, RunResult
 
 CAPTURE_NUDGE = (
     "Sidegraph: if this session produced a durable decision, lesson, or gotcha — or a "
@@ -190,6 +193,190 @@ def _stray_store_line(location: StoreLocation) -> str | None:
         f"this repository's memory. An older Sidegraph may have created {location.path} for a "
         f"session started in a subdirectory: remove {location.path} to use {above.path}."
     )
+
+
+def host_checks(location: StoreLocation) -> tuple[Check, ...]:
+    """The integrity checks that need the host: ``stray-store``, a closure over this launch's
+    ``StoreLocation`` because the portable registry's ``Inputs`` stays host-free. The hook
+    passes ``CHECKS[:5] + host_checks(location) + CHECKS[5:]`` to keep the line order.
+    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D1, D4 check 5)
+    """
+    from ..integrity import Check, Inputs, Problem
+
+    def detect_stray_store(inputs: Inputs) -> Problem | None:
+        line = _stray_store_line(location)
+        if line is None:
+            return None
+        return Problem(
+            check="stray-store",
+            severity="degraded",
+            summary="empty store beside the launch directory",
+            fix=f"remove {location.path}",
+            line=line,
+            notice=line,
+        )
+
+    return (Check("stray-store", frozenset({"session"}), detect_stray_store),)
+
+
+# A notice reaches the human at most once a day per check, and again at once when the severity
+# rises. One meta key per check id (a bounded set, never per session) holds
+# ``<severity>|<iso-timestamp>``.
+# see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D5)
+_NOTICE_KEY_PREFIX = "integrity_notice:"
+_NOTICE_REPEAT = timedelta(hours=24)
+
+
+def _is_transient_lock(error: BaseException) -> bool:
+    """``Store()`` failed because another process holds the index's lock: ``SQLITE_BUSY`` or
+    ``SQLITE_LOCKED``. ``sqlite_errorcode`` carries the extended result code (BUSY_SNAPSHOT is
+    517), whose low byte is the primary one. A lock is not a broken store, so the hook keeps
+    printing ``{}`` for it; a read-only or unreadable index is not transient.
+    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D3)
+    """
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
+def _report_unreadable_store(location: StoreLocation, error: BaseException, now: datetime) -> None:
+    """Print what a store that cannot open says: the registry runs ``store-unreadable`` alone
+    (the other checks read the store or the graph this path does not have), and the human gets
+    the notice as ``systemMessage`` while the model is told memory tools will fail. No noise
+    control and no dedupe here: both live in the store that did not open, and a broken store is
+    worth reporting at every start.
+    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D3)
+    """
+    from .. import integrity
+
+    inputs = integrity.Inputs(store_dir=Path(location.path), now=now, open_error=error)
+    result = integrity.run(inputs, "session", (integrity.STORE_UNREADABLE,))
+    if not result.problems:
+        print(json.dumps({}))
+        return
+    problem = result.problems[0]
+    print(
+        json.dumps(
+            {
+                "systemMessage": problem.notice,
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": problem.line,
+                },
+            }
+        )
+    )
+
+
+def _notice_is_due(stamp: str | None, severity: str, now: datetime) -> bool:
+    """A notice is due when its key is absent or unparseable, a day or more has passed since the
+    recorded one (either direction: a stamp from the future does not silence a notice for as long
+    as it is ahead), or the severity is higher than the recorded one.
+    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D5)
+    """
+    if stamp is None:
+        return True
+    from ..integrity import SEVERITY_RANK
+
+    recorded, _, iso = stamp.partition("|")
+    before_rank = SEVERITY_RANK.get(recorded)
+    try:
+        before = datetime.fromisoformat(iso)
+        if before_rank is None or before.tzinfo is None:
+            return True
+        return abs(now - before) >= _NOTICE_REPEAT or SEVERITY_RANK[severity] > before_rank
+    except (ValueError, TypeError):
+        return True
+
+
+def _claim_notice(store, problem: Problem, now: datetime) -> bool:
+    """True iff this process may send ``problem``'s notice to the human, and the claim is made.
+
+    The decision and the write are one ``Store.update_meta_if`` (an immediate transaction): the
+    hook registered twice fires both copies for one session start, with different session ids,
+    and only the process that writes the stamp emits. When the claim itself fails the notice is
+    sent anyway: a duplicate is better than silence. A failure that is a lock another process
+    holds is raised instead, so the caller can stop writing: every further write would wait out
+    the busy timeout too (``_due_notices``).
+    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D5)
+    """
+
+    def decide(current: str | None) -> str | None:
+        if not _notice_is_due(current, problem.severity, now):
+            return None
+        return f"{problem.severity}|{now.isoformat()}"
+
+    try:
+        return store.update_meta_if(_NOTICE_KEY_PREFIX + problem.check, decide)
+    except Exception as e:
+        if _is_transient_lock(e):
+            raise
+        return True
+
+
+def _recorded_notice_keys(index) -> frozenset[str]:
+    """The ``integrity_notice:`` meta keys that exist, read from the hook's read-only index
+    connection (before it closes), so that clearing a key is a write only when there is one to
+    clear. Empty when the index cannot be read: under a lock, the time to write nothing."""
+    if index is None:
+        return frozenset()
+    try:
+        rows = index.execute(
+            "SELECT key FROM meta WHERE substr(key, 1, ?) = ?",
+            (len(_NOTICE_KEY_PREFIX), _NOTICE_KEY_PREFIX),
+        ).fetchall()
+    except sqlite3.Error:
+        return frozenset()
+    return frozenset(row[0] for row in rows)
+
+
+def _due_notices(
+    store, result: RunResult, now: datetime, recorded: frozenset[str] | None = None
+) -> list[str]:
+    """The notices to send to the human now, highest severity first (registry order within one
+    severity), and the housekeeping that goes with them: a check that ran and found nothing
+    deletes its key, so a problem that comes back after a fix is reported at once. A check that
+    did not run (``_NotRun``, an exception, a switch) leaves its key alone.
+
+    Writes are rationed, because each one waits out the busy timeout when another process holds
+    the write lock (5 s by default, per write). A key is deleted only when it exists:
+    ``recorded`` is the set of existing keys the caller already read (``None`` reads each clean
+    id's key from the store, which takes no write lock), so a healthy start writes nothing. And
+    the first failure that is a lock stops all further claims and deletes: the remaining due
+    notices are sent unclaimed, a duplicate being better than silence.
+    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D5)
+    """
+    from ..integrity import SEVERITY_RANK
+
+    with_notice = [p for p in result.problems if p.notice]
+    with_notice.sort(key=lambda p: -SEVERITY_RANK[p.severity])  # stable: registry order kept
+    writable = True
+    notices: list[str] = []
+    for problem in with_notice:
+        claimed = True
+        if writable:
+            try:
+                claimed = _claim_notice(store, problem, now)
+            except Exception:  # a lock another process holds: write nothing more
+                writable = False
+        if claimed and problem.notice:
+            notices.append(problem.notice)
+    for check_id in sorted(result.clean):
+        if not writable:
+            break
+        key = _NOTICE_KEY_PREFIX + check_id
+        try:
+            if recorded is None:
+                if store.get_meta(key) is None:
+                    continue
+            elif key not in recorded:
+                continue
+            store.delete_meta(key)
+        except Exception as e:
+            if _is_transient_lock(e):
+                break
+    return notices
 
 
 def _session_start_duplicate(store, session_id: str, now: datetime) -> bool:
@@ -499,7 +686,14 @@ def session_start() -> None:
     store that does not exist under $CLAUDE_PROJECT_DIR is looked up in the ancestors, inside
     the repository, so a session started in a subdirectory uses the repository's store; the
     graph is the one that store's project holds (``config.default_graph_path``). Must never
-    crash the session — any failure prints ``{}`` and exits 0.
+    crash the session — any failure prints ``{}`` and exits 0, except a store that cannot be
+    opened (not a lock another process holds): that prints a ``systemMessage`` naming the cause
+    and the fix.
+
+    The status lines (pending ratification, drift, borrowed or stale graph, stray store, missing
+    graph, orphaned records, skipped files) come from the integrity registry, which also yields
+    the notices sent to the human as ``systemMessage``, at most once a day per check — see
+    ``sidegraph.integrity`` and design/superpowers/specs/2026-10-02-integrity-self-check-design.md.
 
     Double-injection dedupe (design D7.2): a session id repeated within
     :data:`_SESSION_START_DEDUPE_SECONDS` exits silently, since a user's own hook
@@ -522,7 +716,16 @@ def session_start() -> None:
         location = resolve_store_location(
             root=os.environ.get("CLAUDE_PROJECT_DIR"), search_ancestors=True
         )
-        store = Store(location.path)
+        # A store that cannot open used to print `{}` and switch memory off with no word to
+        # anyone. Only a lock another process holds keeps that: it passes by itself.
+        # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D3)
+        try:
+            store = Store(location.path)
+        except Exception as e:
+            if _is_transient_lock(e):
+                raise
+            _report_unreadable_store(location, e, datetime.now(UTC))
+            return
         # Not payload["session_id"] directly: that field is the umbrella workspace session
         # on Codex, not this session — see _session_identity.
         session_id, session_group = _session_identity(payload)
@@ -574,8 +777,10 @@ def session_start() -> None:
         # derives it without rewriting any tracked file (its moved rung abstains).
         # see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)
         borrowed_from: Path | None = None
+        graph_path: Path | None = None
         try:
-            reader = GraphifyReader(default_graph_path(store.path))
+            graph_path = default_graph_path(store.path)
+            reader = GraphifyReader(graph_path)
         except Exception:
             reader = None
             borrowed = open_borrowed_reader(store.path)
@@ -631,115 +836,68 @@ def session_start() -> None:
         # renderers.
         text = f"{STANDING_SEARCH_INSTRUCTION}\n\n{text}"
 
-        # Pending-ratification queue visibility (A): one line, own try/except -- a count
-        # failure must never cost the map. SIDEGRAPH_RATIFY_NUDGE=off suppresses it (same
-        # convention as SIDEGRAPH_CAPTURE_NUDGE/SIDEGRAPH_GREP_NUDGE; read at point of use,
-        # never cached). See design/superpowers/specs/
-        # 2026-07-10-ratification-ux-and-mcp-gaps-design.md.
-        if os.environ.get("SIDEGRAPH_RATIFY_NUDGE") != "off":
-            try:
-                nd, nf, ndom = store.pending_ratification_counts()
-                total = nd + nf + ndom
-                if total:
-                    # Oldest-age suffix (2026-08-04 proposal-lifecycle design D3): queue
-                    # AGE, not just size, is what makes neglect visible — proposals older
-                    # than the surfacing window still count here even though they no
-                    # longer render as content (the counter is metadata; regulated mode
-                    # and the window never silence it). Domains carry no valid_from and
-                    # are excluded from the age scan, never guessed.
-                    oldest = ""
-                    stamps = [d.valid_from for d in store.iter_proposed()]
-                    stamps += [f.valid_from for f in store.iter_proposed_facts()]
-                    if stamps:
-                        age_days = max(0, (datetime.now(UTC) - min(stamps)).days)
-                        oldest = f"; oldest {age_days} days"
-                    text += (
-                        f"\n\nSidegraph: {total} record(s) awaiting ratification "
-                        f"({nd} decisions, {nf} facts, {ndom} domains{oldest}) — review "
-                        "with the ratify MCP tool or sidegraph-ratify."
-                    )
-            except Exception:
-                pass  # the pending line must never cost the map
-
-        # Drift line (drift→supersede D4): the refresh runs UNCONDITIONALLY — it is what
-        # keeps the retrieval markers' cache fresh; SIDEGRAPH_DRIFT_NUDGE=off gates the
-        # PROSE only (spec I5, option b — gating the refresh froze markers at their last
-        # pre-off state with no self-heal path). Own try/except: a drift failure must
-        # never cost the map.
+        # Drift refresh (drift→supersede D4): it runs UNCONDITIONALLY — it is what keeps the
+        # retrieval markers' cache fresh; SIDEGRAPH_DRIFT_NUDGE=off gates the PROSE only (spec I5,
+        # option b — gating the refresh froze markers at their last pre-off state with no
+        # self-heal path). Its return value is the drift check's input: `None` when the refresh
+        # could not run, which the check treats as "not run", never as the old cache's count.
+        # Own try/except: a drift failure must never cost the map.
+        drift_count: int | None = None
         try:
             from .. import sync as _sync_drift
 
-            n = _sync_drift.refresh_code_drift_cache(store)
-            if n and os.environ.get("SIDEGRAPH_DRIFT_NUDGE") != "off":
-                text += (
-                    f"\n\nSidegraph: {n} record(s) are anchored to code that changed "
-                    "after their capture — task-relevant ones carry a [drifted] tag in "
-                    "retrieval; full list: sidegraph-doctor; supersede any that no "
-                    "longer hold."
-                )
+            drift_count = _sync_drift.refresh_code_drift_cache(store)
         except Exception:
             pass  # the drift line must never cost the map
 
-        # Borrowed-graph line (spec D2): whose graph the map and the structure come from.
-        # Own try/except: it must never cost the map.
-        # see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)
+        # The status lines and the notices for the human: one registry decides what is wrong
+        # (pending ratification, drift, borrowed graph, stale graph, stray store, missing
+        # graph, orphaned records, skipped files). Its model lines are appended in registry
+        # order, as the inline blocks they replace were; its notices go out as `systemMessage`.
+        # Own try/except: the map is this hook's only real deliverable.
+        # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D1, D5)
+        notices: list[str] = []
         try:
-            if reader is not None and borrowed_from is not None:
-                text += (
-                    "\n\nSidegraph: this worktree has no code graph of its own, so memory "
-                    f"reads the main checkout's ({reader.path}); code that exists only on this "
-                    "branch is not in it."
+            from .. import integrity
+            from ..gitio import open_index_ro
+
+            now = datetime.now(UTC)
+            index = open_index_ro(Path(store.path))
+            try:
+                recorded = _recorded_notice_keys(index)
+                result = integrity.run(
+                    integrity.Inputs(
+                        store_dir=Path(store.path),
+                        now=now,
+                        store=store,
+                        index=index,
+                        reader=reader,
+                        graph_path=graph_path,
+                        borrowed_from=borrowed_from,
+                        drift_count=drift_count,
+                    ),
+                    "session",
+                    integrity.CHECKS[:5] + host_checks(location) + integrity.CHECKS[5:],
                 )
+            finally:
+                if index is not None:
+                    index.close()
+            for problem in result.problems:
+                if problem.line:
+                    text += f"\n\n{problem.line}"
+            notices = _due_notices(store, result, now, recorded)
         except Exception:
-            pass  # the borrowed line must never cost the map
+            pass  # the status lines must never cost the map
 
-        # Stale-graph line (spec D4): only when the graph's build commit leaves a file the
-        # graph should hold unreflected. `fresh` and `unknown` print nothing, and there is no
-        # switch for it. Own try/except: a git failure must never cost the map. A borrowed
-        # graph is the main checkout's: the line names that checkout, which is where it is
-        # rebuilt (a cold build in every worktree costs 43 s and 18 MB).
-        # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D4)
-        try:
-            if reader is not None:
-                from ..freshness import staleness_phrase
-
-                freshness = reader.freshness()
-                if freshness.state == "stale" and borrowed_from is not None:
-                    text += (
-                        f"\n\nSidegraph: the main checkout's code graph ({borrowed_from}) is "
-                        f"stale ({staleness_phrase(freshness)}): rebuild it there with "
-                        "`graphify update .`"
-                    )
-                elif freshness.state == "stale":
-                    text += (
-                        f"\n\nSidegraph: the code graph is stale ({staleness_phrase(freshness)}), "
-                        "so memory cannot see or anchor to code added after the build. "
-                        "Rebuild it from the repository root: `graphify update .`"
-                    )
-        except Exception:
-            pass  # the stale line must never cost the map
-
-        # Stray-store line (spec D4): an older Sidegraph created an empty store beside the
-        # launch directory, and the repository's own store is above it. Reported, never
-        # removed. Own try/except: a filesystem failure must never cost the map.
-        # see design/superpowers/specs/2026-10-01-subdirectory-launch-design.md (D4)
-        try:
-            stray = _stray_store_line(location)
-            if stray:
-                text += f"\n\n{stray}"
-        except Exception:
-            pass  # the stray-store line must never cost the map
-
-        print(
-            json.dumps(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": "SessionStart",
-                        "additionalContext": text,
-                    }
-                }
-            )
-        )
+        output: dict = {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": text,
+            }
+        }
+        if notices:
+            output = {"systemMessage": "\n".join(notices), **output}
+        print(json.dumps(output))
     except Exception:
         print(json.dumps({}))
 

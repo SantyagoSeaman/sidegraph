@@ -12,6 +12,7 @@ from sidegraph.stats.model import (
     ActivationStats,
     AnchorStats,
     GraphStats,
+    HealthItem,
     MemoryStats,
     ReachStats,
     StatsReport,
@@ -165,6 +166,10 @@ def _block(text: str, label: str) -> list[str]:
     return out
 
 
+def _problem(check: str, summary: str, fix: str) -> HealthItem:
+    return HealthItem(check=check, severity="degraded", summary=summary, fix=fix)
+
+
 def _states() -> dict[str, StatsReport]:
     zeros = _report(
         activation=ActivationStats(
@@ -285,6 +290,25 @@ def _states() -> dict[str, StatsReport]:
         "wrapped-and-rounded": wrapped,
         "quiet-and-off": quiet_and_off,
         "nothing-asked": nothing_asked,
+        # The HEALTH block in its three shapes. The 80-column and causal-word sweeps read them.
+        "health-one": _report(
+            health=[_problem("graph-stale", "code graph stale", "graphify update .")]
+        ),
+        "health-several": _report(
+            health=[
+                _problem("graph-stale", "code graph stale", "graphify update ."),
+                _problem("store-files-skipped", "2 store file(s) skipped", "sidegraph-verify"),
+            ]
+        ),
+        "health-wide": _report(
+            health=[
+                _problem(
+                    "orphaned-records",
+                    "1,234 record(s) with every anchor orphaned in this store",
+                    "sidegraph-doctor --check",
+                )
+            ]
+        ),
     }
 
 
@@ -321,6 +345,9 @@ def test_blocks_come_in_the_specified_order_with_one_blank_line_before_memory():
 
 
 def test_labels_are_twelve_wide_and_continuations_align_under_them():
+    # HEALTH leads the screen but is not in LABELS, which also fixes the order the blocks after
+    # it must come in (test above): the whitelist for this test is LABELS plus HEALTH.
+    labels = ("HEALTH", *LABELS)
     lines = _lines(render_text(_report()))[2:]
     for ln in lines:
         if not ln.strip():
@@ -328,8 +355,8 @@ def test_labels_are_twelve_wide_and_continuations_align_under_them():
         if ln.startswith(" "):
             assert ln.startswith(" " * 12) and not ln.startswith(" " * 13), ln
         else:
-            assert ln.split()[0] in LABELS, ln
-            assert ln[:12].rstrip() in LABELS and ln[11] == " " and ln[12] != " ", ln
+            assert ln.split()[0] in labels, ln
+            assert ln[:12].rstrip() in labels and ln[11] == " " and ln[12] != " ", ln
 
 
 def test_the_screen_fits_eighty_columns_and_ends_with_one_newline():
@@ -810,6 +837,7 @@ GOLDEN = {
     "mature": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 24 of 60 sessions
             3 of those got nothing back
             36 sessions touched files without asking
@@ -830,6 +858,7 @@ ANCHORS     191 live · 0 degraded · 8 orphaned → sidegraph-doctor
     "immature": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  too little to summarize yet — 2 sessions over 13 days
 REACH       259 files touched, 36 with memory anchored to them
             asked about most, all time: store.py ×12 · capture.py ×9 · cli.py ×6
@@ -845,6 +874,7 @@ ANCHORS     191 live · 0 degraded · 8 orphaned → sidegraph-doctor
     "empty-journal": """\
 Sidegraph · demo                                    window: 30 days (0 retained)
 
+HEALTH      ok
 ACTIVATION  no sessions recorded yet
 REACH       no files touched in this window
 
@@ -857,6 +887,7 @@ ANCHORS     none yet
     "telemetry-off": """\
 Sidegraph · demo                                                 window: 30 days
 
+HEALTH      ok
 ACTIVATION  recording is off (SIDEGRAPH_TELEMETRY=off)
 REACH       silent domains: CLI — no record is bound to it
 
@@ -869,6 +900,7 @@ ANCHORS     191 live · 0 degraded · 8 orphaned → sidegraph-doctor
     "no-graph": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 24 of 60 sessions
             3 of those got nothing back
             36 sessions touched files without asking
@@ -889,6 +921,7 @@ ANCHORS     191 live · 0 degraded · 8 orphaned → sidegraph-doctor
     "empty-graph": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 24 of 60 sessions
             3 of those got nothing back
             36 sessions touched files without asking
@@ -909,6 +942,7 @@ ANCHORS     191 live · 0 degraded · 8 orphaned → sidegraph-doctor
     "unreadable-graph": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 24 of 60 sessions
             3 of those got nothing back
             36 sessions touched files without asking
@@ -929,6 +963,7 @@ ANCHORS     191 live · 0 degraded · 8 orphaned → sidegraph-doctor
     "no-render-journal": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 24 of 60 sessions
             3 of those got nothing back
             36 sessions touched files without asking
@@ -948,6 +983,7 @@ ANCHORS     191 live · 0 degraded · 8 orphaned → sidegraph-doctor
     "large-numbers": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 10,234 of 12,345 sessions
             234 of those got nothing back
             2,111 sessions touched files without asking
@@ -969,6 +1005,7 @@ ANCHORS     191,000 live · 7,900 degraded · 8,000 orphaned → sidegraph-docto
     "all-asks-empty": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 24 of 60 sessions
             24 of those got nothing back
             36 sessions touched files without asking
@@ -989,6 +1026,7 @@ ANCHORS     191 live · 0 degraded · 8 orphaned → sidegraph-doctor
     "wrapped-and-rounded": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 24 of 60 sessions
             3 of those got nothing back
             36 sessions touched files without asking
@@ -1011,6 +1049,7 @@ ANCHORS     191 live · 0 degraded · 8 orphaned → sidegraph-doctor
     "quiet-and-off": """\
 Sidegraph · demo                                                 window: 30 days
 
+HEALTH      ok
 ACTIVATION  recording is off (SIDEGRAPH_TELEMETRY=off)
 REACH       nothing to report yet
 
@@ -1023,6 +1062,7 @@ ANCHORS     none yet
     "nothing-asked": """\
 Sidegraph · demo                                   window: 30 days (13 retained)
 
+HEALTH      ok
 ACTIVATION  memory was asked in 0 of 60 sessions
             60 sessions touched files without asking
             0 showings

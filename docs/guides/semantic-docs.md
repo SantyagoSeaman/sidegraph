@@ -31,7 +31,8 @@ graphify update .
 graphify extract . --backend claude
 ```
 
-`graphify update .` stays your per-commit default (wire it into the post-commit hook per
+`graphify update .` stays your per-commit default, and it is what the graph refresh hook runs
+after each commit in the main checkout (`sidegraph-init --hooks`; see
 [`integrations/graphify.md`](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks)).
 `graphify extract` is a separate, explicit step — run it after documentation changes
 meaningfully, not on every commit.

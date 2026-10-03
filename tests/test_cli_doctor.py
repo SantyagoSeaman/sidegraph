@@ -124,7 +124,8 @@ def test_json_output_shape_and_purity(tmp_path, capsys):
     assert doc["violations"] == []
     assert doc["findings"][0]["code"] == "dangling-record"
     assert set(doc["findings"][0]) == {"code", "path", "detail"}
-    assert doc["skipped"] == []  # Store-seeded stores carry an index.db
+    # An index that no sync has computed the statuses of, and no graph in this test's directory.
+    assert doc["skipped"] == ["orphaned-records", "graph"]
 
 
 def test_json_clean_true_on_healthy_store(tmp_path, capsys):
@@ -138,7 +139,7 @@ def test_skipped_check_does_not_fail_even_with_check(tmp_path, capsys):
     (db / "index.db").unlink()  # fresh-clone shape: canonical files only
     assert doctor_main(["--db", str(db), "--check", "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc["skipped"] == ["binding-status", "never-surfaced"]
+    assert doc["skipped"] == ["binding-status", "never-surfaced", "orphaned-records", "graph"]
     assert doc["clean"] is True
 
 

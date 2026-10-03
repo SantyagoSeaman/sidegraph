@@ -25,6 +25,7 @@ If the repository already has ADRs or specs, use the
 ## Operate and maintain it
 
 - [Survive refactors and heal anchors](guides/surviving-refactors.md).
+- [Read what Sidegraph tells you when it needs attention](guides/troubleshooting.md).
 - [Run CI and scheduled maintenance](guides/ci-cd-maintenance.md).
 - [Import decision-shaped documents](guides/semantic-docs.md).
 - [See runtime cost and operational boundaries](reference/operations.md).

@@ -55,12 +55,17 @@ on an empty store is expected, not broken. For the full seven-case proof (durabi
 mistakes-first, refactor survival, ...), point the human at
 [verifying your setup](../../../../docs/guides/verifying-your-setup.md).
 
-## 5. Keep the graph fresh (recommend, don't run unasked)
+## 5. Keep the graph fresh (ask the human first)
 
-Recommend `graphify hook install` — a post-commit hook that rebuilds the **code** graph on
-every commit (doc/prose extraction still needs a manual `graphify update .` after doc
-changes) — and chaining `sidegraph-sync` after Graphify's block in the same hook. Both
-touch `.git/hooks/`, so confirm before installing. Details:
+A graph nobody rebuilds goes stale, and memory then cannot see or anchor to new code. Ask the
+human whether to install the refresh hook: a marked block in `post-commit`, `post-merge` and
+`post-checkout` that rebuilds the **code** graph in the background, in the main checkout only
+(linked worktrees read its graph). It never replaces an existing hook, and
+`sidegraph-init --remove-hooks` takes it out. On a yes run `sidegraph-init --hooks`; on a no run
+`sidegraph-init --no-hooks`, which records the answer so that Sidegraph stops asking. Do not run
+either unasked, and do not run `graphify hook install` instead: Graphify's own hook also rebuilds
+in every linked worktree. (Doc/prose extraction still needs a manual `graphify update .` after
+doc changes.) Details:
 [keeping the graph fresh](../../../../docs/integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
 
 **Do NOT run `graphify claude install`.** The plugin already fronts the graph for Claude

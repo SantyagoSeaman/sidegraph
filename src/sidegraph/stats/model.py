@@ -29,11 +29,13 @@ from collections.abc import Sequence
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote
 
 from pydantic import BaseModel, ValidationError
 
+from sidegraph import integrity
+from sidegraph.freshness import GraphFreshness
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -43,6 +45,9 @@ from sidegraph.schema import (
     Entity,
     Fact,
 )
+
+if TYPE_CHECKING:
+    from sidegraph.engine.reader import GraphifyReader
 
 # Below either floor, no ratio is computed anywhere in the report: a fresh install rendering
 # "0 of 0 sessions (0%)" reads as a broken product (D7). The floor is the one uncalibrated
@@ -158,6 +163,19 @@ class AnchorStats(BaseModel):
     orphaned: int = 0
 
 
+class HealthItem(BaseModel):
+    """One problem the integrity registry found, for the HEALTH line: the check that found it,
+    its severity (``broken`` or ``degraded``; advisory ones stay in the MEMORY and ANCHORS
+    blocks), a short noun phrase and the exact command or action that fixes it.
+    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D7)
+    """
+
+    check: str
+    severity: str
+    summary: str
+    fix: str
+
+
 class StatsReport(BaseModel):
     repo: str
     window_days: int
@@ -172,6 +190,9 @@ class StatsReport(BaseModel):
     memory: MemoryStats | None
     graph: GraphStats
     anchors: AnchorStats | None
+    # The registry's broken and degraded problems, in registry order; empty is "ok". Additive:
+    # the stats JSON is Provisional and may gain fields.
+    health: list[HealthItem] = []
 
 
 class UnreadableRecordError(ValueError):
@@ -295,6 +316,12 @@ def build_report(
     # is relative, and `Path('.sidegraph').parent.name` is "".
     store_dir = Path(store_dir).resolve()
 
+    # The graph is opened and its freshness computed once, before the snapshot below: the git
+    # comparison can take seconds, and a read transaction held across it would keep a writer's
+    # commit waiting. The registry reuses both (it runs while the snapshot is open, and reads
+    # nothing from git itself).
+    graph, reader, freshness = _read_graph(graph_path)
+
     # `isolation_level=None` because Python's sqlite3 opens no transaction for a SELECT: each
     # query would be its own read, and a writer landing between two of them (this runs
     # mid-session, which is when one is writing) makes a report that matches neither the state
@@ -399,6 +426,25 @@ def build_report(
         # Called while the connection is still open, on rows already fetched: a reopen here
         # would be a second read path, and a `Store` a write path (D8).
         anchors = None if index_stale else _anchor_stats(bindings)
+        # The registry reads the same snapshot, and gets none while the index is behind the
+        # files (its index checks would describe a store that is gone). Only what is broken or
+        # degraded is a HEALTH item: an advisory problem is already visible in its own block.
+        problems = integrity.run(
+            integrity.Inputs(
+                store_dir=store_dir,
+                now=now,
+                index=None if index_stale else conn,
+                reader=reader,
+                graph_path=graph_path,
+                known_freshness=freshness,
+            ),
+            "stats",
+        ).problems
+        health = [
+            HealthItem(check=p.check, severity=p.severity, summary=p.summary, fix=p.fix)
+            for p in problems
+            if p.severity in ("broken", "degraded")
+        ]
 
     retained_days = max((now - datetime.fromisoformat(first_at)).days, 0) if first_at else 0
     # A session "asked" when the journals hold a seed, a show OR a render row for it: a seed
@@ -489,15 +535,22 @@ def build_report(
             if index_stale
             else _memory_stats(decisions, facts, domains, shows_by_record, cutoff_dt)
         ),
-        graph=_graph_stats(graph_path),
+        graph=graph,
         anchors=anchors,
+        health=health,
     )
 
 
-def _graph_stats(graph_path: Path | None) -> GraphStats:
-    """Graph metrics, through GraphifyReader and nothing else (CLAUDE.md, engine seam).
+def _read_graph(
+    graph_path: Path | None,
+) -> tuple[GraphStats, GraphifyReader | None, GraphFreshness | None]:
+    """Graph metrics, through GraphifyReader and nothing else (CLAUDE.md, engine seam), with the
+    reader and the freshness they came from, so the integrity registry reuses both and git runs
+    once. Both are ``None`` when there is no readable graph.
 
-    Implements design/superpowers/specs/2026-09-18-usage-stats-design.md, §4 (graph half).
+    Implements design/superpowers/specs/2026-09-18-usage-stats-design.md, §4 (graph half), and
+    design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D7) for the shared
+    reader and freshness.
 
     Deliberately limited to the reader's public surface: nodes, distinct source files,
     communities, version, freshness. No edge count — that would mean reaching past the surface for a
@@ -508,14 +561,14 @@ def _graph_stats(graph_path: Path | None) -> GraphStats:
     raise.
     """
     if graph_path is None or not Path(graph_path).exists():
-        return GraphStats()
+        return GraphStats(), None, None
     from sidegraph.engine.reader import GraphifyReader
 
     try:
         reader = GraphifyReader(graph_path)
         nodes = reader.list_nodes()
         fresh = reader.freshness()
-        return GraphStats(
+        stats = GraphStats(
             available=True,
             nodes=len(nodes),
             files=len({n.file_path for n in nodes if n.file_path}),
@@ -526,10 +579,11 @@ def _graph_stats(graph_path: Path | None) -> GraphStats:
             commits_behind=fresh.commits_behind,
             stale_files=None if fresh.state == "unknown" else fresh.changed,
         )
+        return stats, reader, fresh
     except Exception:
         # Any failure here — truncated JSON, valid JSON of the wrong shape, a permission error
         # — is the same state for the reader of the report: a file exists and gave nothing.
-        return GraphStats(unreadable=True)
+        return GraphStats(unreadable=True), None, None
 
 
 def _memory_stats(

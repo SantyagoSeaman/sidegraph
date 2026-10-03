@@ -7,6 +7,132 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-03
+
+### Added
+
+- **`get_task_context` says where the memory is when your file has none.** A file seed the graph
+  lacks, or one that resolved with no current record anchored to it, now gets a `## Nearest anchored`
+  sentence naming up to three files that do carry records: the graph neighbours first (the two
+  with the most records), then the files under the nearest directory that has any, skipping a
+  directory that holds more than a quarter of all anchored files (and more than four) and never
+  the repository root.
+  When the answer has no decision memory at all, the records of those files follow under `##
+  Nearest anchored records (not anchored to your files)`, labelled as not about your files, with
+  the same supersede line the main answer carries. An empty answer carries the sentence under `##
+  Why this is empty`. At most three seeds get a sentence. The records count as shown in
+  `sidegraph-stats`, and the neighbour files are never recorded as seeds. See
+  [the tool reference](docs/reference/mcp-tools.md#the-nearest-anchored-records).
+
+- **Records that never reach the team are now visible.** A record follows the branch and
+  checkout it was written on, and on one field corpus two supersessions sat uncommitted for five
+  days and 32 proposals lived only on branches that `main`'s session start never saw. Two new
+  checks run at session start. `store-uncommitted` (degraded, with a notice, also in
+  `sidegraph-doctor` and `sidegraph-stats`) reports store files nobody committed for a day, aged
+  by the ULID in a new file's name (a `git stash` cannot rewrite it) and by the modification time
+  otherwise; fully staged files do not count, so `sidegraph-doctor --check` in a pre-commit hook
+  never blocks the fixing commit. `branch-only-records` (advisory) scans every unmerged local branch,
+  oldest first, for open records the default branch lacks (each counted once, for the newest
+  branch that holds it), and sends a notice when such a branch is more than a week old: the fix is
+  to merge it. The write tools (`add_decision`,
+  `supersede_decision`, `add_fact`, `supersede_fact`, `add_anchors`, `add_domain`,
+  `supersede_domain`, and the written elements of `propose_decisions` and `propose_domains`) add a
+  `commit_hint` to their result when the store is inside a git repository, except a store that is a
+  symlink to a directory outside it: git commits the link, not the records behind it. Where records
+  are written does not change. See the
+  [troubleshooting guide](docs/guides/troubleshooting.md#store-uncommitted) and the
+  [MCP tools reference](docs/reference/mcp-tools.md#commit-hint).
+
+- **Sidegraph tells you when it needs attention, not only the model.** One list of integrity
+  checks now runs at every session start and in `sidegraph-doctor` and `sidegraph-stats`. The model
+  still gets a status line per problem, with the five existing lines unchanged and in the same
+  order. Problems that need a person also reach you as a `systemMessage`, which Claude Code shows as
+  a warning: at most once a day for each check, again at once when a problem gets worse, and not
+  again once the check finds nothing. New checks: a store that cannot be opened (a merge conflict
+  left in `.sidegraph/`, a damaged index, a store written by another version) now says so and
+  names the fix instead of switching memory off silently; a missing or unreadable code graph;
+  open records whose every code anchor is orphaned (degraded, with a notice, when three or more were
+  written in the last 14 days; advisory otherwise); and store files the last reload could not
+  index. A proposal that has waited 30 days earns a notice too. `sidegraph-doctor` gains an
+  `orphaned-record` finding and, with no graph, a skipped-checks line (`"graph"` in `--json`'s
+  `skipped`) instead of a finding, so `--check` does not start failing CI jobs that run without
+  one. `sidegraph-stats` opens with a `HEALTH` line (`health` in `--json`). The checks, their
+  severities and fixes are in the new [troubleshooting guide](docs/guides/troubleshooting.md), and
+  the output is in the [hooks reference](docs/reference/hooks.md#notices-for-the-human).
+
+- **`sidegraph-init` asks whether to keep the code graph fresh, and installs the hook that does
+  it.** A graph nobody rebuilds goes stale, and on one field corpus it fell 314 commits behind
+  because the setup hint was printed and skipped. In a terminal, init now asks once (default yes);
+  `--hooks` installs without asking, `--no-hooks` declines and records it
+  (`git config sidegraph.graphRefresh false`), and `--remove-hooks` takes everything out and exits
+  without creating a store (it exits 1, and says the removal was partial, when a hook is a symlink
+  or has damaged markers and so keeps its block). The hook is a marked block in `post-commit`, `post-merge` and
+  `post-checkout`, inserted right after the shebang line so that a foreign hook that ends in `exit`
+  cannot skip it, plus a helper that rebuilds the graph in the background, in the main checkout
+  only (a linked worktree reads its graph), one rebuild at a time. It never replaces a hook: one that
+  is a symlink, not executable, CRLF or not a shell script is left alone and the line to add by hand
+  is printed. With `core.hooksPath` set it writes no hook file and prints the lines instead. Without
+  a terminal nothing is written, and a new advisory check, `refresh-hook-missing`, tells the model
+  to ask you, and tells you once a day, until the hook is installed or declined. A call you add by hand
+  counts only when its hook is executable and the call is not in a comment. The three flags are
+  a Committed surface ([stability](docs/reference/stability.md)); see
+  [keeping the graph fresh](docs/integrations/graphify.md#keeping-the-graph-fresh-git-hooks) and the
+  [troubleshooting guide](docs/guides/troubleshooting.md#refresh-hook-missing).
+
+### Changed
+
+- **`get_task_context` reads a wrong seed the way you meant it, and an empty answer says why.**
+  A seed the graph does not hold as written used to come back as "No context found." Now `./x.py`,
+  `x.py:12`, an absolute path inside the repository, a missing or invented directory prefix, a bare
+  file name, a directory, and a `Type.member` with no file are read through a short ladder, and a
+  `## How your seeds were read` block says what each one became and that a rewrite is a guess. A
+  file that exists on disk but not in the graph is never swapped for a namesake. A directory reads
+  as up to eight files, or is listed when it holds more than 24. A path that differs from a graph
+  file only by letter case reads as that file, even on a case-insensitive filesystem. A path or
+  name that could mean several is reported and read as none. Guessed seeds rank in the related
+  tier below the seeds you got right. The not-in-graph block now names the normalised path, so
+  `./pkg/n.py` gets the stale-or-new advice instead of "check the path". A name with no file that
+  matches several symbols is no longer expanded to all of them: it is reported as ambiguous. A call
+  with no seeds at all names the accepted domains you can drill into. Telemetry records a rewritten
+  path under the path that was read and a directory under its normalised key, and keeps a seed
+  whose name starts with `..` that it used to drop. See
+  [the tool reference](docs/reference/mcp-tools.md#seeds-are-read-tolerantly).
+
+### Fixed
+
+- **A symlinked store's capture commit, code drift and refresh-hook check come from the project
+  that holds the link.** A store can be a symlink (`.sidegraph -> ../shared/store`). Its records
+  are anchored to code in the project that holds the link, but git resolved the link and answered
+  for the repository it points into: `provenance.commit` named that repository's `HEAD`, or was
+  empty when the target sits in no repository, so the code-drift check passed silently or never
+  ran, and the refresh-hook check read the wrong hooks. Capture now stamps the project's `HEAD`
+  (empty while the project has no commits), the code-drift check diffs it in the project's
+  repository, and the refresh-hook check reads the project's hooks and recorded choice, the ones
+  `sidegraph-init` writes. A store that is not a symlink behaves as before, and
+  `--against` (`sidegraph-verify`, `sidegraph-doctor`) still diffs the history of the repository
+  that holds the store's files. Three behaviour changes come with it. A store directory that is itself a repository or
+  submodule inside another repository now stamps the enclosing project's `HEAD` and measures drift
+  there, and its refresh-hook check now runs against the enclosing project; a top-level store
+  repository with no enclosing one is unchanged. A record stamped before the fix with the link
+  target's (or the nested repository's) `HEAD` now gets `sidegraph-doctor`'s existing
+  `code-drift: git unavailable — check skipped` note for that commit, where it used to pass
+  silently. And the records of a symlinked store now match in git-bindings rule (a) and in
+  `sidegraph-blame`, which read `provenance.commit`. See [the store
+  format](docs/reference/store-format.md).
+
+### Security
+
+- **The lockfile moves `PyJWT` from 2.13.0 to 2.15.1 and `virtualenv` from 21.7.0 to
+  21.14.4.** The PyJWT 2.14.0 and 2.15.0 fixes cover one critical advisory (an asymmetric
+  PEM key with mutated whitespace skips the HMAC key-confusion guard), five high ones (key
+  material accepted as HMAC secrets, JWKS redirects, a BOM bypass) and several moderate
+  ones. The virtualenv fixes cover seed wheels that were not integrity-checked and
+  activation scripts that run commands embedded in a path or a prompt. PyJWT reaches Sidegraph only
+  through the MCP SDK's `crypto` extra, and Sidegraph never decodes a token; virtualenv is
+  a development dependency through pre-commit. The published package pins neither, so this
+  changes development and CI environments and installs made from `uv.lock`; a fresh install
+  already resolves fixed versions.
+
 ## [0.7.0] — 2026-10-02
 
 ### Changed

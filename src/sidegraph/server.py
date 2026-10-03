@@ -14,6 +14,7 @@ import json
 import os
 import posixpath
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
@@ -23,6 +24,7 @@ from typing import Literal, cast, get_args
 from fastmcp import FastMCP
 from pydantic import ValidationError
 
+from . import nearest_anchored, seed_ladder
 from .anchoring import entity_summaries as _entity_summaries
 from .anchoring import orphan_reason, resolve_and_bind
 from .capture import (
@@ -60,6 +62,8 @@ from .domains import DEFAULT_CANDIDATE_LIMIT, collect_domain_candidates, communi
 from .engine.reader import GraphifyReader, open_borrowed_reader
 from .freshness import staleness_phrase
 from .retrieval import (
+    _STANDING_SUPERSEDE_HINT,
+    MEMORY_GUARD_LINE,
     TOC_CACHE_KEY,
     RetrievalBudget,
     Seed,
@@ -136,6 +140,48 @@ def _get_store() -> Store:
             if _store is None:
                 _store = Store(resolve_store_location(search_ancestors=True).path)
     return _store
+
+
+def _commit_hint(store: Store) -> str | None:
+    """The sentence a write tool adds to its result: the store sits inside a git repository, so
+    a record in it is stranded on this checkout until the change that produced it is committed.
+    ``None`` outside a repository, and ``None`` for a symlinked store whose target lies outside
+    it: git commits the link, not the records behind it, so the advice would be false. The prefix
+    is the store's path relative to the repository root, lexical like ``repository_root``: no
+    subprocess, and a symlinked store keeps the name its project knows it by.
+    # see design/superpowers/specs/2026-10-02-stranded-store-writes-design.md (D3)"""
+    try:
+        root = repository_root(store.path)
+        if root is None:
+            return None
+        if not Path(store.path).resolve().is_relative_to(root.resolve()):
+            return None
+        prefix = Path(os.path.abspath(store.path)).relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return None
+    return (
+        f"Commit {prefix}/ in the same change as the work that produced this record, so it "
+        "reaches other checkouts and teammates."
+    )
+
+
+def _with_commit_hint(store: Store, result: dict) -> dict:
+    """``result`` with a ``commit_hint`` key when the store is inside a repository."""
+    hint = _commit_hint(store)
+    if hint is not None:
+        result["commit_hint"] = hint
+    return result
+
+
+def _hint_elements(store: Store, results: list[dict], status: str) -> list[dict]:
+    """``results`` with a ``commit_hint`` on each element whose ``status`` is ``status`` (the one
+    that wrote a record), when the store is inside a repository."""
+    hint = _commit_hint(store)
+    if hint is not None:
+        for element in results:
+            if element.get("status") == status:
+                element["commit_hint"] = hint
+    return results
 
 
 def _graph_path(store: Store | None = None) -> str:
@@ -350,15 +396,18 @@ def _add_decision_impl(
             )
         )
     bindings = store.bindings_for_record(decision.id)
-    return {
-        "id": decision.id,
-        "status": decision.status.value,
-        "bindings": len(bindings),
-        "entities": _entity_summaries(store, bindings),
-        "anchors_skipped": anchors_skipped,
-        "anchors_orphaned": anchors_orphaned,
-        "redactions": redactions,
-    }
+    return _with_commit_hint(
+        store,
+        {
+            "id": decision.id,
+            "status": decision.status.value,
+            "bindings": len(bindings),
+            "entities": _entity_summaries(store, bindings),
+            "anchors_skipped": anchors_skipped,
+            "anchors_orphaned": anchors_orphaned,
+            "redactions": redactions,
+        },
+    )
 
 
 def _resolve_anchors(
@@ -602,15 +651,18 @@ def _supersede_decision_impl(
             )
 
     bindings = store.bindings_for_record(replacement.id)
-    return {
-        "id": replacement.id,
-        "supersedes": old_decision_id,
-        "bindings": len(bindings),
-        "entities": _entity_summaries(store, bindings),
-        "anchors_skipped": anchors_skipped,
-        "anchors_orphaned": anchors_orphaned,
-        "redactions": redactions,
-    }
+    return _with_commit_hint(
+        store,
+        {
+            "id": replacement.id,
+            "supersedes": old_decision_id,
+            "bindings": len(bindings),
+            "entities": _entity_summaries(store, bindings),
+            "anchors_skipped": anchors_skipped,
+            "anchors_orphaned": anchors_orphaned,
+            "redactions": redactions,
+        },
+    )
 
 
 @mcp.tool
@@ -782,15 +834,18 @@ def _add_fact_impl(
 
     anchors_skipped, anchors_orphaned = _bind_fact_anchors(fact.id, anchors, reader, store)
     bindings = store.bindings_for_record(fact.id)
-    return {
-        "id": fact.id,
-        "statement": fact.statement,
-        "status": fact.status.value,
-        "redactions": redactions,
-        "entities": _entity_summaries(store, bindings),
-        "anchors_skipped": anchors_skipped,
-        "anchors_orphaned": anchors_orphaned,
-    }
+    return _with_commit_hint(
+        store,
+        {
+            "id": fact.id,
+            "statement": fact.statement,
+            "status": fact.status.value,
+            "redactions": redactions,
+            "entities": _entity_summaries(store, bindings),
+            "anchors_skipped": anchors_skipped,
+            "anchors_orphaned": anchors_orphaned,
+        },
+    )
 
 
 @mcp.tool
@@ -945,16 +1000,19 @@ def _supersede_fact_impl(
             )
 
     bindings = store.bindings_for_record(replacement.id)
-    return {
-        "id": replacement.id,
-        "statement": replacement.statement,
-        "status": replacement.status.value,
-        "redactions": redactions,
-        "entities": _entity_summaries(store, bindings),
-        "anchors_skipped": anchors_skipped,
-        "anchors_orphaned": anchors_orphaned,
-        "supersedes": old_fact_id,
-    }
+    return _with_commit_hint(
+        store,
+        {
+            "id": replacement.id,
+            "statement": replacement.statement,
+            "status": replacement.status.value,
+            "redactions": redactions,
+            "entities": _entity_summaries(store, bindings),
+            "anchors_skipped": anchors_skipped,
+            "anchors_orphaned": anchors_orphaned,
+            "supersedes": old_fact_id,
+        },
+    )
 
 
 @mcp.tool
@@ -1213,6 +1271,9 @@ def _not_in_graph_block(
     entities: list[dict] | None,
     borrowed_from: Path | None = None,
     worktree_root: Path | None = None,
+    *,
+    ladder: seed_ladder.Ladder | None = None,
+    root_of: Callable[[], Path | None] | None = None,
 ) -> str:
     """The "## Not in the code graph" block: what happened to each seed path the graph does
     not hold, or ``""`` when the graph holds every one (then neither ``freshness()`` nor
@@ -1230,21 +1291,36 @@ def _not_in_graph_block(
     ``worktree_root`` that worktree: "exists" is then checked in the worktree, and a file there
     that the main checkout lacks gets the borrowed sentence instead of a verdict on the graph
     (the graph was never built from it, so its freshness says nothing).
+
+    ``ladder`` is the seed ladder's verdict (:func:`seed_ladder.tolerate`): the paths named are
+    then its ``unresolved`` ones, in their normalised spelling, so ``./pkg/n.py`` gets the advice
+    for ``pkg/n.py``; a seed the ladder read, or reported in its own block, is not named. The
+    ``N`` of "N of M" stays the number of distinct paths as given. ``root_of`` is the one lookup
+    of the repository root the call shares with the ladder.
     # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D5)
     # see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D3)
+    # see design/superpowers/specs/2026-10-02-tolerant-seeds-design.md (D5)
     """
     paths = [*(files or []), *(e.get("file_path") for e in (entities or []))]
-    seeds = list(dict.fromkeys(p for p in paths if isinstance(p, str) and p))
-    held = reader.source_files()
-    missing = [p for p in seeds if p not in held]
+    seeds = list(dict.fromkeys(p for p in paths if isinstance(p, str) and p.strip()))
+    if ladder is not None:
+        missing = list(ladder.unresolved)
+    else:
+        held = reader.source_files()
+        missing = [p for p in seeds if p not in held]
     if not missing:
         return ""
     borrowed = borrowed_from is not None and worktree_root is not None
     candidates = [p for p in missing if _is_repo_relative(p)]
-    root = worktree_root if borrowed else (reader.repo_root() if candidates else None)
-    present = [p for p in candidates if root is not None and (root / p).is_file()]
+    lookup = root_of if root_of is not None else reader.repo_root
+    root = worktree_root if borrowed else (lookup() if candidates else None)
+    present = [p for p in candidates if root is not None and seed_ladder.is_file_exact(root, p)]
     only_here = (
-        [p for p in present if borrowed_from is not None and not (borrowed_from / p).is_file()]
+        [
+            p
+            for p in present
+            if borrowed_from is not None and not seed_ladder.is_file_exact(borrowed_from, p)
+        ]
         if borrowed
         else []
     )
@@ -1337,6 +1413,51 @@ def _no_graph_block(store) -> str:
     return f"## No code graph\n{lead}: memory anchored to code cannot be looked up. {build}"
 
 
+# `TaskContext.render()` when nothing was found. The "Why this is empty" block is for exactly
+# this text; `test_retrieval_seeds.py` pins the literal on the render side.
+_NO_CONTEXT = "No context found."
+
+# "Why this is empty": at most this many accepted domains are named.
+_EMPTY_DOMAINS_LISTED = 12
+_EMPTY_HEADING = "## Why this is empty"
+
+
+def _once(fn: Callable[[], Path | None]) -> Callable[[], Path | None]:
+    """``fn`` called at most once, on first use; later calls return its first answer."""
+    box: list[Path | None] = []
+
+    def call() -> Path | None:
+        if not box:
+            box.append(fn())
+        return box[0]
+
+    return call
+
+
+def _empty_block(store, *, graph_missing: bool = False) -> str:
+    """The "## Why this is empty" block: a call that gave no files and no entities, and so had
+    nothing to match. Names the accepted domains (name and slug) as places to start. With no
+    code graph to match against it also says to build one first.
+    # see design/superpowers/specs/2026-10-02-tolerant-seeds-design.md (D6)
+    """
+    domains = sorted(
+        store.iter_domains(DomainStatus.ACCEPTED), key=lambda d: (d.title.lower(), d.slug)
+    )
+    text = "No files or entities were given, so nothing could be matched."
+    if graph_missing:
+        text += (
+            " There is no code graph to match against either: build it from the repository "
+            "root with `graphify update .` first."
+        )
+    text += " Pass files=[…] with the repo-relative paths you are working on"
+    if domains:
+        named = ", ".join(f"{d.title} ({d.slug})" for d in domains[:_EMPTY_DOMAINS_LISTED])
+        extra = len(domains) - _EMPTY_DOMAINS_LISTED
+        named += f", and {extra} more" if extra > 0 else ""
+        text += f", or drill_down(<slug>) for a named area: {named}"
+    return f"{_EMPTY_HEADING}\n{text}."
+
+
 def _get_task_context_impl(
     store,
     reader,
@@ -1349,37 +1470,111 @@ def _get_task_context_impl(
 ) -> str:
     """Testable core: build seeds, run retrieval, return the rendered slice.
 
-    A seed the graph does not hold gets a trailing "Not in the code graph" block saying why
-    (stale graph, a file the engine skips, a bad path), instead of a bare "No context found."
-    With no reader and a seed, a trailing "No code graph" block says the graph is missing.
+    A seed the graph does not hold is first read through the seed ladder
+    (:func:`seed_ladder.tolerate`): a path with a stray ``./``, a wrong prefix or a bare name, a
+    directory, a ``Type.member`` with no file. Each rewrite is a guess and is said so in a
+    "How your seeds were read" block after the rendered text; an ambiguous seed is reported and
+    never read. What the ladder cannot read gets a trailing "Not in the code graph" block saying
+    why (stale graph, a file the engine skips, a bad path), instead of a bare "No context
+    found."; with no reader and a seed, a trailing "No code graph" block says the graph is
+    missing; with no seed at all, a "Why this is empty" block names where to start.
     ``TaskContext.render()`` itself is untouched. ``borrowed_from`` is the main checkout whose
     graph ``reader`` was opened on, for a linked worktree with none of its own
-    (:func:`_synced_reader`); it changes only the wording of the first block.
+    (:func:`_synced_reader`); it changes only the wording of the not-in-graph block and the
+    root the ladder reads paths against.
     see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D3, D4)
+    see design/superpowers/specs/2026-10-02-tolerant-seeds-design.md (D1, D4-D7)
     """
-    seeds = _seeds_from_args(files, entities)
-    ctx = _retrieve(seeds, store, reader, RetrievalBudget(structure_budget, memory_budget))
+    # A seed with neither a name nor a path (`files=[""]`, `entities=[{}]`, blanks) names
+    # nothing: the call is one with no seeds.
+    seeds = [
+        s
+        for s in _seeds_from_args(files, entities)
+        if (s.name or "").strip() or (s.file_path or "").strip()
+    ]
+    worktree_of = _once(lambda: repository_root(store.path) if borrowed_from is not None else None)
+
+    def root_of() -> Path | None:
+        # Where "does this file exist?" is asked: the worktree for a borrowed graph, else the
+        # git root of the graph. One lookup per call, shared by the ladder and the block.
+        return worktree_of() or reader.repo_root()
+
+    root_once = _once(root_of)
+    ladder: seed_ladder.Ladder | None = None
+    exact: list[Seed] = seeds
+    guessed: list[Seed] = []
+    if reader is not None and seeds:
+        # Own try/except: a ladder that fails must leave the seeds exactly as they were.
+        try:
+            if seed_ladder.needs_tolerance(seeds, reader):
+                ladder = seed_ladder.tolerate(seeds, reader, root_once)
+                exact, guessed = ladder.exact, ladder.guessed
+        except Exception:
+            ladder, exact, guessed = None, seeds, []
+    budget = RetrievalBudget(structure_budget, memory_budget)
+    ctx = _retrieve(exact, store, reader, budget, guessed=guessed)
+    text = ctx.render()
+    # The nearest anchored files (spec D10-D12): a sentence per file seed that has no record of
+    # its own, and, when the main answer has no memory at all, the records of those files. Each
+    # step has its own try/except: advice must never cost the answer, nor each other.
+    near = nearest_anchored.Plan()
+    with contextlib.suppress(Exception):
+        if reader is not None and seeds:
+            near = nearest_anchored.plan(seeds, ladder, store, reader, shown_ids=ctx.shown_ids)
+    near_ctx: TaskContext | None = None
+    recorded = ctx
+    with contextlib.suppress(Exception):
+        if near.files and not nearest_anchored.has_memory(ctx):
+            second = _retrieve([Seed(file_path=f) for f in near.files], store, reader, budget)
+            merged = nearest_anchored.combine(ctx, second)
+            near_ctx, recorded = second, merged
     _record(
         store,
-        ctx.shown_ids,
-        [s.file_path for s in seeds if s.file_path],
-        ctx=ctx,
+        recorded.shown_ids,
+        ladder.seed_paths if ladder is not None else [s.file_path for s in seeds if s.file_path],
+        ctx=recorded,
         intent=_caller_intent(intent),
     )
-    text = ctx.render()
-    # Own try/except: advice about the graph must never cost the answer it follows.
-    block = ""
-    try:
+    # Each block has its own try/except: advice about the seeds must never cost the answer it
+    # follows, nor each other.
+    blocks: list[str] = []
+    with contextlib.suppress(Exception):
+        if ladder is not None:
+            blocks.append(seed_ladder.read_block(ladder.notes))
+    with contextlib.suppress(Exception):
         if reader is not None:
-            worktree = repository_root(store.path) if borrowed_from is not None else None
-            block = _not_in_graph_block(reader, files, entities, borrowed_from, worktree)
+            worktree = worktree_of()
+            blocks.append(
+                _not_in_graph_block(
+                    reader,
+                    files,
+                    entities,
+                    borrowed_from,
+                    worktree,
+                    ladder=ladder,
+                    root_of=root_once,
+                )
+            )
         elif seeds:
-            block = _no_graph_block(store)
-    except Exception:
-        block = ""
-    if block:
-        text = f"{text}\n\n{block}"
-    return text
+            blocks.append(_no_graph_block(store))
+    with contextlib.suppress(Exception):
+        if not seeds and text == _NO_CONTEXT:
+            blocks.append(_empty_block(store, graph_missing=reader is None))
+    with contextlib.suppress(Exception):
+        if near.sentences:
+            heading = _EMPTY_HEADING if text == _NO_CONTEXT else nearest_anchored.NEAREST_HEADING
+            blocks.append("\n".join([heading, *near.lines()]))
+    ids_shown = False
+    with contextlib.suppress(Exception):
+        if near_ctx is not None:
+            records, ids_shown = nearest_anchored.records_block(
+                near_ctx, guarded=MEMORY_GUARD_LINE in text
+            )
+            blocks.append(records)
+    out = "\n\n".join([text, *(b for b in blocks if b)])
+    # The records carried ids, so the reply ends with the line that says what to do about one
+    # that is wrong: once, at the very end, as the render puts it.
+    return f"{out}\n\n{_STANDING_SUPERSEDE_HINT}" if ids_shown else out
 
 
 def _synced_reader() -> tuple[GraphifyReader | None, Path | None]:
@@ -1653,7 +1848,7 @@ def _normalized_seeds(store: Store, seeds: list[str]) -> list[str]:
             rel = os.path.relpath(target, root)
         except (OSError, ValueError):
             continue
-        if rel == os.curdir or rel.startswith(os.pardir):
+        if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
             continue
         out.append(rel)
     return out
@@ -1816,7 +2011,7 @@ def _propose_decisions_impl(
                 ratify_policy=ratify_policy,
             )
         )
-    return results
+    return _hint_elements(store, results, "written")
 
 
 def _format_domain_proposal_line(d: Domain) -> str:
@@ -2244,7 +2439,9 @@ def _add_domain_impl(
         provenance=Provenance(source="manual", author=author, graph_version=graph_version),
     )
     store.add_domain(domain)
-    return {"domain_id": domain.domain_id, "status": domain.status.value, "redactions": n1 + n2}
+    return _with_commit_hint(
+        store, {"domain_id": domain.domain_id, "status": domain.status.value, "redactions": n1 + n2}
+    )
 
 
 @mcp.tool
@@ -2353,12 +2550,15 @@ def _supersede_domain_impl(
         provenance=Provenance(source="manual", author=author, graph_version=graph_version),
     )
     result = store.supersede_domain(old.domain_id, new_domain)
-    return {
-        "domain_id": result.domain_id,
-        "status": result.status.value,
-        "supersedes": old.domain_id,
-        "redactions": n1 + n2,
-    }
+    return _with_commit_hint(
+        store,
+        {
+            "domain_id": result.domain_id,
+            "status": result.status.value,
+            "supersedes": old.domain_id,
+            "redactions": n1 + n2,
+        },
+    )
 
 
 @mcp.tool
@@ -2434,7 +2634,7 @@ def _propose_domains_impl(
     results = _propose_domain_drafts(
         drafts, store, reader, session_id=session_id, author=author, ratify_policy=ratify_policy
     )
-    return [r.model_dump(mode="json") for r in results]
+    return _hint_elements(store, [r.model_dump(mode="json") for r in results], "proposed")
 
 
 @mcp.tool
@@ -3006,7 +3206,10 @@ def _add_anchors_impl(
             if summary is not None:
                 orphaned.append(summary)
 
-    return {"record_id": record_id, "bound": bound, "orphaned": orphaned, "ambiguous": ambiguous}
+    return _with_commit_hint(
+        store,
+        {"record_id": record_id, "bound": bound, "orphaned": orphaned, "ambiguous": ambiguous},
+    )
 
 
 @mcp.tool

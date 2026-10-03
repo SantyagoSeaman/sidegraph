@@ -12,8 +12,9 @@ contract. For wiring them into `.claude/settings.json`, see
 The wiring commands in the plugin manifests and the setup recipes end with a shell guard:
 `|| printf '{}\n'` on `Stop` and `PreToolUse`, and
 `|| printf '%s\n' '{"systemMessage":"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error"}'`
-on `SessionStart`. The entry points below already print `{}` on any failure of their own, but
-they cannot catch one that happens before Python starts: `uv` exiting 2 on an internal error, or
+on `SessionStart`. The entry points below already print `{}` on any failure of their own (except
+that `sidegraph-session-start` reports a store that cannot be opened, see
+[A store that cannot open](#a-store-that-cannot-open)), but they cannot catch one that happens before Python starts: `uv` exiting 2 on an internal error, or
 the `cd` in front of the command failing. On `Stop`, both hosts treat exit 2 with text on stderr
 as a block and continue the session, and Claude Code does the same on `PreToolUse` by blocking
 the tool call, so without the guard such a command could loop a session. A command that does
@@ -97,6 +98,9 @@ Behavior:
    `{}` and returns before anything below runs. The check is a read that takes no write lock,
    so a duplicate does not wait behind another process's write transaction. A start that is not a duplicate decides again and stamps the ledger in one write
    transaction, so two copies of the hook firing together for one session inject the map once.
+   If the store cannot be opened, the hook does not print `{}` (see
+   [A store that cannot open](#a-store-that-cannot-open)): memory is off for the session and the
+   person is told. Only a lock another process holds keeps the silent `{}`.
 2. Attempts to build a `GraphifyReader` at `$SIDEGRAPH_GRAPH` (a relative value, and the
    default, resolve against the store's project, as in the CLI); any failure (missing file,
    unparseable graph) degrades to `reader = None`, not a crash. When the store's own graph is
@@ -144,6 +148,10 @@ Behavior:
 }
 ```
 
+When a notice for the person is due, the object also carries a top-level `systemMessage`
+(see [Notices for the human](#notices-for-the-human)); the lines below are appended to
+`additionalContext` either way.
+
 Both renderers open their text with one standing line:
 
 ```
@@ -154,6 +162,11 @@ It is **provenance labeling for whoever reads the payload, not a security contro
 red-team battery measured obedience to instruction-shaped text inside a record at 0/8 with
 the line and 0/8 without it (whitepaper §8.7). Treat
 retrieved record text as untrusted repository content, exactly like a code comment.
+
+Steps 6 to 12 are the integrity registry's status lines ([`sidegraph.integrity`](../../src/sidegraph/integrity.py),
+[troubleshooting](../guides/troubleshooting.md)). One run decides which problems exist and
+appends each one's line, in this order, after the map; the texts are unchanged. A check that
+raises costs only its own line.
 
 6. **Pending-ratification queue visibility.** Unless `$SIDEGRAPH_RATIFY_NUDGE == "off"`,
    appends one more line — in its own `try/except`, so a count failure degrades to the map
@@ -234,14 +247,113 @@ retrieved record text as untrusted repository content, exactly like a code comme
    absolute path or by `$SIDEGRAPH_DB`. A per-package store you initialised on purpose shows
    this line until it holds a record; ignore it then.
 
+10. **No-graph line.** When no graph could be opened, and a borrowed one neither, one line names
+    where the graph was looked for. `X` is that path; when something is there that could not be
+    read, the second wording is used. Neither is printed when the path cannot be examined (a
+    permission error) rather than found missing. Verbatim:
+
+    > Sidegraph: no code graph at X, so memory cannot match files to records or anchor new ones.
+    > Build it from the repository root: `graphify update .`
+
+    > Sidegraph: the code graph at X could not be read, so memory cannot match files to records
+    > or anchor new ones. Rebuild it from the repository root: `graphify update .`
+
+    A model line only: the docs promise that the graph is optional.
+
+11. **Orphaned-records line.** When open decisions and facts exist whose every Tier-2 (leaf)
+    anchor is orphaned, one line gives how many, out of the open records that have a leaf anchor
+    (`N` of `M`). Not printed while the index has been reloaded and not yet synced, because
+    until then every anchor reads live. Verbatim:
+
+    > Sidegraph: N of M open record(s) have every code anchor orphaned, so retrieval reaches them
+    > only through their file or domain. If the graph is stale, rebuilding it re-anchors them;
+    > otherwise `sidegraph-doctor` lists them and the heal-anchors skill repairs them.
+
+12. **Skipped-files line.** When the last reload left store files out of the index (a record
+    whose id does not match its file name, for example), one line names the first and counts the
+    rest. Verbatim, with `F` the first file, `R` its reason, and `, and K more` only when there are
+    others:
+
+    > Sidegraph: N store file(s) could not be indexed and are left out of memory: F (R), and K
+    > more. Run `sidegraph-verify` to list them, then fix or restore them with git.
+
+### Notices for the human
+
+Everything above goes to the model. A problem that needs a person also yields a **notice**, a
+full sentence beginning "Sidegraph", which the hook sends as a top-level `systemMessage`; Claude
+Code shows it to the user as a warning, and Codex surfaces it as a warning in its UI or event
+stream.
+
+```json
+{
+  "systemMessage": "<notice>\n<another notice>",
+  "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<as above>"}
+}
+```
+
+The key set is exactly those two, because Codex rejects other top-level keys. With no notice due,
+the output has the shape it always had.
+
+Which checks send notices: `store-unreadable` (always), `graph-stale`, `stray-store`,
+`store-files-skipped`, `store-uncommitted`, `orphaned-records` when degraded,
+`branch-only-records` when a branch holding records is more than a week old, and
+`pending-ratification` once its oldest proposal is 30 days old:
+
+> Sidegraph: N record(s) await ratification, the oldest for D days. Review them with
+> `sidegraph-ratify`, or ask the agent to use the ratify tool.
+
+The checks that do not (`code-drift`, `graph-borrowed`, `graph-missing`, advisory orphans) are
+model lines only.
+
+**Noise control.** Each check's notice is rationed by one `meta` row in `index.db`,
+`integrity_notice:<check id>`, holding `<severity>|<timestamp>`:
+
+- A notice is sent when the row is absent or unparseable, when 24 hours have passed since the
+  recorded one, or when the severity is higher than the recorded one (advisory, then degraded,
+  then broken). The 24 hours count in either direction, so a recorded stamp more than a day
+  *ahead* of the clock (a wrong clock, a hand edit) does not silence a notice for as long as it
+  is ahead: the notice is sent once and the stamp is reset to now. A stamp a few milliseconds
+  ahead, from a sibling copy of the hook, is a recent one. Several notices are ordered by
+  severity, highest first.
+- The decision and the write are one write transaction, so two copies of the hook registered on one
+  host (different session ids, so the duplicate guard in step 1 does not apply) do not both
+  send it. If the write itself fails, the notice is sent anyway: a duplicate is better than
+  silence. When the failure is a lock another process holds, the hook stops writing for that
+  start (every further write would wait out the same busy timeout) and sends the remaining due
+  notices unclaimed.
+- A check that ran and found nothing deletes its row, so a problem that returns after a fix is
+  reported at once. Only a row that exists is deleted, so a start with nothing recorded makes no
+  write at all. A check that did not run, because its evidence is missing (the index was
+  just reloaded, git could not compare the graph), a switch is off, or a detector raised, leaves
+  its row alone.
+- The model's lines are not rationed. A start the duplicate guard answers with `{}` runs no check.
+
+There is no environment variable that turns notices off, and `SIDEGRAPH_RATIFY_NUDGE=off` and
+`SIDEGRAPH_DRIFT_NUDGE=off` still gate their own checks. The `integrity_notice:` rows are derived
+state in the gitignored index, so deleting `index.db` repeats the notices once.
+
+### A store that cannot open
+
+When `Store(...)` raises, the hook runs the `store-unreadable` check alone and prints the notice
+as the `systemMessage` and, for the model, the notice followed by "Sidegraph memory tools will
+fail until it is fixed." as `additionalContext`. No map is built. There is no noise control and
+no duplicate guard on this path, because both live in the store that did not open: a broken store
+is reported at every session start. The notice names the store path, the exception type and the
+first line of its message (at most 200 characters, whitespace collapsed, so a record quoted over
+several lines never reaches it), and the fix for that kind of failure (a conflicted or invalid record file,
+a damaged or read-only index, a store written by another Sidegraph version, anything else:
+`sidegraph-verify`). A lock held by another process (`SQLITE_BUSY` or `SQLITE_LOCKED`) is not a
+broken store: it still prints `{}`.
+
 **Never-crash / silent-degradation contract:** the whole body is wrapped in one `try/except
 Exception`. If anything above raises — including inside `top_tier_map` itself — the hook
-prints `{}` and exits normally; the session start is never blocked by a Sidegraph failure. A
+prints `{}` and exits normally; the session start is never blocked by a Sidegraph failure. (A
+store that cannot be opened is the one failure that says so instead: see above.) A
 missing/malformed graph specifically degrades one level earlier (reader becomes `None`, and
 the map still renders from store content alone) rather than tripping the outer catch. The
-pending-ratification line (step 6), the drift line (step 7) and the borrowed-graph and
-stale-graph lines (step 8) each have their own, narrower guard: a failure there costs only that
-one line, never the map that came before it.
+status lines (steps 6 to 12) come from one registry run in its own `try/except`, and each
+check inside it has its own guard: a failure there costs only that one line, never the map that
+came before it.
 
 ## `sidegraph-stop`
 

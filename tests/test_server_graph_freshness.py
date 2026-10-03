@@ -95,11 +95,15 @@ def test_t12_seeds_the_graph_holds_leave_the_output_and_the_cost_unchanged(tmp_p
     assert calls == []
 
 
-def test_a_call_with_no_seeds_is_unchanged(tmp_path):
+def test_a_call_with_no_seeds_says_why_it_is_empty(tmp_path):
+    """The render itself is unchanged; a call with no seeds now says why it is empty (spec D6)."""
     fx = stale_repo(tmp_path)
     reader = GraphifyReader(fx.graph)
 
-    assert _call(tmp_path, reader) == _bare_render(tmp_path, reader)
+    out = _call(tmp_path, reader)
+
+    assert out.startswith(_bare_render(tmp_path, reader) + "\n\n## Why this is empty\n")
+    assert HEADING not in out
 
 
 def test_t13_an_existing_file_missing_from_a_fresh_graph_says_the_graph_is_current(tmp_path):
@@ -125,13 +129,15 @@ def test_t24_each_seed_gets_the_advice_for_what_happened_to_it(tmp_path):
 
     out = _call(tmp_path, reader, files=["pkg/", "Nope.py", "pkg/n.py"])
 
+    # `pkg/` is a directory the graph holds files under: the ladder reads it as one (spec D9).
+    assert "- `pkg/` → a directory: read as the 1 file under it" in out
     existing, other = _block(out)
     assert existing.startswith("1 of 3 seed paths exists but is not in the code graph: pkg/n.py.")
     assert "Nope.py" not in existing and "pkg/," not in existing
     assert other.startswith(
-        "2 of 3 seed paths are not repo-relative paths to files in this repository: pkg/, Nope.py."
+        "1 of 3 seed paths is not a repo-relative path to a file in this repository: Nope.py."
     )
-    assert "pkg/n.py" not in other
+    assert "pkg/n.py" not in other and "pkg/" not in other
     assert "repo-relative" in other and "not a directory" in other
     assert "stale" not in other
 
@@ -140,25 +146,31 @@ def test_t26_a_seed_that_is_not_a_normalized_repo_relative_path_is_a_path_proble
     tmp_path, monkeypatch
 ):
     """`root / p` accepts an absolute path and `./x`, so they used to read as "exists but not
-    in the graph" and send the caller to rebuild a graph that was never the cause."""
+    in the graph" and send the caller to rebuild a graph that was never the cause. The seed
+    ladder now normalises each spelling to `pkg/n.py`, which is a file on disk the graph lacks:
+    one sentence for the one file, the graph-state advice (spec D5, D9). The denominator stays
+    the four paths as given."""
     fx = stale_repo(tmp_path)
     (fx.repo / "pkg" / "n.py").write_text("def b():\n    pass\n")
     reader = GraphifyReader(fx.graph)
     calls: list[str] = []
-    monkeypatch.setattr(reader, "freshness", lambda *a, **k: calls.append("freshness"))
+    real = reader.freshness
+
+    def counting(*a, **k):
+        calls.append("freshness")
+        return real(*a, **k)
+
+    monkeypatch.setattr(reader, "freshness", counting)
     absolute = str(fx.repo / "pkg" / "n.py")
     seeds = [absolute, "./pkg/n.py", "pkg/../pkg/n.py", "pkg//n.py"]
 
     out = _call(tmp_path, reader, files=seeds)
 
     (line,) = _block(out)
-    assert line.startswith(
-        "4 of 4 seed paths are not repo-relative paths to files in this repository: "
-        + ", ".join(seeds)
-        + "."
-    )
-    assert "Check the path" in line and "stale" not in line
-    assert calls == []
+    assert line.startswith("1 of 4 seed paths exists but is not in the code graph: pkg/n.py.")
+    assert "The graph is stale" in line
+    assert "Check the path" not in out
+    assert calls == ["freshness"]
 
 
 @pytest.mark.parametrize("seed", ["../x.py", "a/../../x.py"])
@@ -222,10 +234,10 @@ def test_t26b_the_same_file_written_repo_relative_gets_the_graph_state_advice(tm
 
     out = _call(tmp_path, reader, files=[str(fx.repo / "pkg" / "n.py"), "pkg/n.py"])
 
-    existing, other = _block(out)
-    assert existing.startswith("1 of 2 seed paths exists but is not in the code graph: pkg/n.py.")
-    assert other.startswith("1 of 2 seed paths is not a repo-relative path to a file")
-    assert str(fx.repo) in other
+    # An absolute in-root path normalises to the same file (spec D5, D9): one sentence for it.
+    (line,) = _block(out)
+    assert line.startswith("1 of 2 seed paths exists but is not in the code graph: pkg/n.py.")
+    assert str(fx.repo) not in out
 
 
 def test_t31_the_repository_root_is_looked_up_once_per_call(tmp_path, monkeypatch):
@@ -257,9 +269,11 @@ def test_t24_a_directory_or_missing_path_alone_does_not_ask_for_the_graph_state(
 
     out = _call(tmp_path, reader, files=["pkg/", "Nope.py"])
 
+    # `pkg/` holds a file the graph has, so the ladder reads it as a directory (spec D9).
+    assert "- `pkg/` → a directory: read as the 1 file under it" in out
     (line,) = _block(out)
     assert line.startswith(
-        "2 of 2 seed paths are not repo-relative paths to files in this repository: pkg/, Nope.py."
+        "1 of 2 seed paths is not a repo-relative path to a file in this repository: Nope.py."
     )
     assert calls == []
 

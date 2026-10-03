@@ -158,7 +158,10 @@ or blocks the tool call: any failure (or the store simply having nothing to offe
 ### Silent degradation
 
 All three hooks are written to **never crash the session** and never block a tool call. Any
-exception inside `session_start` prints `{}` (Claude Code proceeds with no injected context);
+exception inside `session_start` prints `{}` (Claude Code proceeds with no injected context),
+except that a store which cannot be opened prints a `systemMessage` naming the cause and the fix
+(and a model line saying memory tools will fail) instead, and a lock another process holds still
+prints `{}`;
 any exception inside `stop` prints `{}` (Claude Code proceeds to stop normally); any exception
 inside `pre_tool_use` — or the nudge conditions simply not holding — also prints `{}` (the
 tool call proceeds through the normal permission flow). A missing store, missing graph, or

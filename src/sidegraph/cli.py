@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import webbrowser
@@ -51,7 +52,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import gitio
+from . import githooks, gitio
 from .capture import (
     RatifyPolicy,
     format_domain_proposal,
@@ -63,6 +64,8 @@ from .capture import (
 from .config import (
     DEFAULT_GRAPH,
     DEFAULT_STORE_DIR,
+    _store_project_root,
+    borrowed_graph_candidate,
     default_graph_path,
     graph_path_for_store,
     path_exists,
@@ -76,7 +79,7 @@ from .doc_import import (
     _glob_repo_root_info,
     import_docs,
 )
-from .doctor import curate
+from .doctor import curate, open_curation_index
 from .domains import DEFAULT_CANDIDATE_LIMIT, bootstrap_domains, collect_domain_candidates
 from .engine.reader import GraphifyReader
 from .host.claude_settings import (
@@ -89,6 +92,7 @@ from .host.claude_settings import (
     repo_root_for_settings,
 )
 from .importer import import_rationales
+from .integrity import binding_statuses_computed
 from .okf import build_bundle, write_bundle
 from .profiles import PROFILES, get_profile
 from .retrieval import TOC_CACHE_KEY, build_toc, proposal_surfaces
@@ -228,6 +232,249 @@ def _ask_ratify_policy_interactively(rel_settings: str) -> str:
     return RATIFY_POLICY_DEFAULT
 
 
+_GRAPH_REFRESH_QUESTION = (
+    "Keep the code graph fresh? A git hook rebuilds graphify-out/graph.json in the\n"
+    "background after each commit, merge and branch switch, in the main checkout only\n"
+    "(linked worktrees read its graph). It adds a marked block to post-commit, post-merge\n"
+    "and post-checkout and never replaces an existing hook; `sidegraph-init --remove-hooks`\n"
+    "takes it out."
+)
+_GRAPH_REFRESH_NON_INTERACTIVE = (
+    "non-interactive: no git hook installed. To keep the code graph fresh, run "
+    "`sidegraph-init --hooks` (or `--no-hooks` to stop the reminder)."
+)
+_GRAPHIFY_HOOK_NOTE = (
+    "Graphify's own hook is also installed: it rebuilds in linked worktrees too, and in the "
+    "main checkout both hooks rebuild on every commit (Graphify's lock serialises them). "
+    "Remove it with `graphify hook uninstall` if you use worktrees."
+)
+
+
+def _ask_install_graph_refresh_hook() -> bool:
+    """Ask once, interactively, whether to install the graph refresh git hook: the question
+    follows ``_ask_ratify_policy_interactively``. An empty answer, ``y`` or ``yes`` is a yes,
+    ``n`` or ``no`` a no, and two unrecognised answers (or an EOF) take the default, yes: a hook
+    prompt must never be able to hang or fail init.
+    see design/superpowers/specs/2026-10-02-graph-refresh-hook-design.md (D1)"""
+    print(_GRAPH_REFRESH_QUESTION)
+    for prompt in ("Install it? [Y/n] ", "Please answer y or n. Install it? [Y/n] "):
+        try:
+            raw = input(prompt)
+        except EOFError:
+            break
+        normalized = raw.strip().lower()
+        if normalized in ("", "y", "yes"):
+            return True
+        if normalized in ("n", "no"):
+            return False
+    return True
+
+
+def _report_graph_refresh_install(info: githooks.RepoInfo, report: githooks.InstallReport) -> None:
+    """Print what ``githooks.install`` did: the hooks that now hold the block, the manual line
+    for each hook that was refused, the damaged-markers line, and Graphify's own hook (D6)."""
+    if report.hooks_path_set:
+        print(
+            f"graph refresh hook: core.hooksPath is set ({info.hooks_dir}), so no hook file was "
+            f"written there; a hooks manager owns that directory. The helper is installed at "
+            f"{info.helper}. Add one line to each hook in {info.hooks_dir}:"
+        )
+        for hook in githooks.HOOKS:
+            print(githooks.manual_line(hook))
+    else:
+        done = [r.hook for r in report.hooks if r.action not in ("refused", "damaged")]
+        if len(done) == len(githooks.HOOKS):
+            print(f"graph refresh hook: installed ({', '.join(done)})")
+        elif done:
+            print(f"graph refresh hook: installed ({', '.join(done)}); see below for the others")
+        else:
+            print("graph refresh hook: the helper is installed, but no hook file was changed")
+        for result in report.hooks:
+            if result.action == "refused":
+                print(
+                    f"{result.hook}: left untouched, {result.reason}. Add this line to it by hand:"
+                )
+                print(githooks.manual_line(result.hook))
+            elif result.action == "damaged":
+                print(f"{result.hook}: {result.reason}")
+    if report.graphify_hook:
+        print(_GRAPHIFY_HOOK_NOTE)
+
+
+def _install_graph_refresh_hook(info: githooks.RepoInfo) -> None:
+    """Install or refresh the helper and the blocks, and say what happened. ``OSError`` is the
+    caller's."""
+    graphify = shutil.which("graphify")
+    report = githooks.install(info, graphify=os.path.abspath(graphify) if graphify else None)
+    _report_graph_refresh_install(info, report)
+
+
+def _declined_message(choice: githooks.Choice) -> str:
+    """The line for a recorded decline: where it was read from, and the way back."""
+    where = (
+        "earlier (git config sidegraph.graphRefresh false)"
+        if choice.scope in ("local", "worktree", "command")
+        else f"in your {choice.scope} git config"
+    )
+    return f"graph refresh hook: declined {where}; install it with `sidegraph-init --hooks`"
+
+
+def _hook_graph_problem(
+    info: githooks.RepoInfo, db: str, graph_path: Path, *, graph_typed: bool
+) -> str | None:
+    """Why the hook could never rebuild this store's graph, or ``None`` when it can: the helper
+    rebuilds ``<main checkout>/graphify-out/graph.json`` and nothing else. A linked worktree with
+    no graph of its own reads that one (borrowing), which is fine; a typed ``--graph``, a store in
+    a subdirectory, a worktree with its own graph and a repository with no main checkout are not.
+    see design/superpowers/specs/2026-10-02-graph-refresh-hook-design.md (D5, D7)"""
+    target = githooks.rebuild_target(info, db)
+    if target is None:
+        return (
+            "no main checkout: the hook rebuilds the graph only in a main checkout, and this "
+            "repository has only linked worktrees"
+        )
+    candidates = [graph_path]
+    if not graph_typed:
+        borrowed = borrowed_graph_candidate(db)
+        if borrowed is not None:
+            candidates.append(borrowed)
+    try:
+        if any(path.resolve() == target.resolve() for path in candidates):
+            return None
+    except (OSError, RuntimeError):
+        pass
+    return f"the hook rebuilds {target}; this store reads {graph_path}"
+
+
+def _graph_refresh_hook(
+    project: Path,
+    *,
+    db: str,
+    graph_path: Path,
+    graph_typed: bool,
+    install: bool,
+    decline: bool,
+) -> bool:
+    """The graph refresh hook step of ``init_main``: the flags, or the question. The repository
+    is the store's project, not the shell's cwd. ``False`` only when an install the person asked
+    for (``--hooks``, or a yes) could not be written.
+    see design/superpowers/specs/2026-10-02-graph-refresh-hook-design.md (D1)"""
+    info = githooks.repo_info(project)
+    if info is None:
+        print("graph refresh hook: skipped (not a git repository)")
+        return True
+    if decline:
+        if not githooks.record_choice(project, declined=True):
+            print("graph refresh hook: could not record the choice in the git config")
+            return True
+        status = githooks.status(info)
+        if status.installed or status.wired:
+            print(
+                "graph refresh hook: recorded git config sidegraph.graphRefresh=false, which "
+                "stops the session-start reminder. The hook stays installed and keeps "
+                "rebuilding the graph; remove it with `sidegraph-init --remove-hooks`."
+            )
+        else:
+            print(
+                "graph refresh hook: not installed; recorded git config "
+                "sidegraph.graphRefresh=false in this repository. Install it with "
+                "`sidegraph-init --hooks`."
+            )
+        return True
+    problem = _hook_graph_problem(info, db, graph_path, graph_typed=graph_typed)
+    if problem is not None:
+        print(f"graph refresh hook: skipped ({problem})")
+        return True
+    try:
+        if install:
+            _install_graph_refresh_hook(info)
+            githooks.record_choice(project, declined=False)
+            choice = githooks.read_choice(project)
+            if choice is not None and choice.declined:
+                print(
+                    f"note: sidegraph.graphRefresh is still false in your {choice.scope} git "
+                    "config, so the session-start reminder stays off; unset it there to bring "
+                    "the reminder back."
+                )
+            return True
+        status = githooks.status(info)
+        if status.installed:
+            _install_graph_refresh_hook(info)
+            return True
+        if status.wired:  # every hook calls the helper, some by hand: nothing to ask or write
+            graphify = shutil.which("graphify")
+            githooks.install_helper(info, graphify=os.path.abspath(graphify) if graphify else None)
+            print(
+                f"graph refresh hook: already wired ({', '.join(githooks.HOOKS)} call the "
+                "helper); the helper was refreshed"
+            )
+            return True
+        choice = githooks.read_choice(project)
+        if choice is not None and choice.declined:
+            print(_declined_message(choice))
+            return True
+        if info.hooks_path_set:
+            _install_graph_refresh_hook(info)
+            return True
+        if sys.stdin.isatty():
+            if _ask_install_graph_refresh_hook():
+                _install_graph_refresh_hook(info)
+                githooks.record_choice(project, declined=False)
+            else:
+                githooks.record_choice(project, declined=True)
+                print(
+                    "graph refresh hook: declined; recorded git config "
+                    "sidegraph.graphRefresh=false in this repository. Install it later with "
+                    "`sidegraph-init --hooks`."
+                )
+            return True
+    except OSError as e:
+        print(f"graph refresh hook: could not write ({e})")
+        return False
+    print(_GRAPH_REFRESH_NON_INTERACTIVE)
+    return True
+
+
+def _remove_graph_refresh_hook(project: Path) -> int:
+    """``--remove-hooks``: take Sidegraph's blocks and helper out, clear the recorded choice, say
+    what changed, and return the exit code: ``1`` when it cannot write, or when a hook (a symlink,
+    damaged markers) was left untouched and may still hold the block. It runs before the store is
+    touched: removal must not create ``.sidegraph/`` or ask the settings question.
+    see design/superpowers/specs/2026-10-02-graph-refresh-hook-design.md (D3)"""
+    info = githooks.repo_info(project)
+    if info is None:
+        print("graph refresh hook: skipped (not a git repository)")
+        return 0
+    had_choice = githooks.read_choice(project) is not None
+    try:
+        report = githooks.remove(info)
+    except OSError as e:
+        print(f"graph refresh hook: could not remove ({e})")
+        return 1
+    changed = [r.hook for r in report.hooks if r.action in ("removed", "deleted")]
+    if changed:
+        print(f"graph refresh hook: removed ({', '.join(changed)})")
+    left = [r for r in report.hooks if r.action in ("refused", "damaged")]
+    for result in left:
+        print(f"{result.hook}: {result.reason}")
+    if report.helper_removed:
+        print(f"removed the helper {info.helper} and its lock files")
+    if had_choice:
+        print("cleared git config sidegraph.graphRefresh")
+    if not changed and not report.helper_removed and not left:
+        print("graph refresh hook: nothing to remove")
+    if left:  # a hook was left untouched, so its block may remain: a script must not read success
+        names = ", ".join(
+            f"{r.hook} ({'damaged markers' if r.action == 'damaged' else 'symlink'})" for r in left
+        )
+        print(
+            "graph refresh hook: removal was partial; Sidegraph's block may remain in "
+            f"{names}, left untouched: edit them by hand"
+        )
+        return 1
+    return 0
+
+
 def init_main(argv: list[str] | None = None) -> int:
     """Bootstrap a target repo: create the store, check for the graph, print wiring.
 
@@ -271,6 +518,32 @@ def init_main(argv: list[str] | None = None) -> int:
             "scripted, non-interactive setup that still wants an explicit answer"
         ),
     )
+    hook_flags = parser.add_mutually_exclusive_group()
+    hook_flags.add_argument(
+        "--hooks",
+        action="store_true",
+        help=(
+            "install or refresh the graph refresh git hook (post-commit, post-merge and "
+            "post-checkout, main checkout only) with no question -- for a scripted setup, or "
+            "after the person agreed in chat"
+        ),
+    )
+    hook_flags.add_argument(
+        "--no-hooks",
+        action="store_true",
+        help=(
+            "install no git hook and record that choice (git config sidegraph.graphRefresh "
+            "false), so that the session-start reminder stops"
+        ),
+    )
+    hook_flags.add_argument(
+        "--remove-hooks",
+        action="store_true",
+        help=(
+            "remove Sidegraph's blocks from the three hooks and its helper, clear the recorded "
+            "choice, print what changed and exit without running the rest of init"
+        ),
+    )
     args = parser.parse_args(argv)
     # Resolved AFTER parse_args, and only when --db was actually omitted (review Minor 4):
     # resolve_store_path() can print SIDEGRAPH_DB's one-line deprecation notice as a side
@@ -278,6 +551,12 @@ def init_main(argv: list[str] | None = None) -> int:
     # on a run that passes --db explicitly and was never going to consult the env at all.
     if args.db is None:
         args.db = resolve_store_path(warn_on_create=False)
+
+    # The hook goes into the store's own repository, which is not always the shell's.
+    project_dir = _store_project_root(args.db)
+    if args.remove_hooks:
+        # Before the store: removal creates nothing and asks nothing.
+        return _remove_graph_refresh_hook(project_dir)
 
     db_path = Path(args.db)
     already_initialized = _looks_already_initialized(db_path)
@@ -303,6 +582,15 @@ def init_main(argv: list[str] | None = None) -> int:
             "to anchor decisions to code (optional; Sidegraph works without it)."
         )
     _graph_hint(args.graph, graph_path)
+
+    hooks_ok = _graph_refresh_hook(
+        project_dir,
+        db=args.db,
+        graph_path=graph_path,
+        graph_typed=args.graph is not None and bool(args.graph.strip()),
+        install=args.hooks,
+        decline=args.no_hooks,
+    )
 
     rel_settings = SETTINGS_RELATIVE_PATH.as_posix()
     if args.no_settings:
@@ -370,7 +658,7 @@ def init_main(argv: list[str] | None = None) -> int:
     print()
     print("Hook-by-hook manual setup and Codex CLI wiring: see")
     print("docs/getting-started/claude-code-setup.md and docs/getting-started/codex-setup.md.")
-    return 0
+    return 0 if hooks_ok or not args.hooks else 1
 
 
 def _route_ratify(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
@@ -1786,8 +2074,8 @@ def doctor_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--graph",
         default=None,
-        help="graph.json path, used only for the graph-root-mismatch advisory check "
-        "(read-only; missing or unreadable simply skips that one check)",
+        help="graph.json path, used for the graph-root-mismatch and graph-stale checks "
+        "(read-only; missing or unreadable skips them and says so)",
     )
     args = parser.parse_args(argv)
     if args.stale_days < 0:
@@ -1808,16 +2096,31 @@ def doctor_main(argv: list[str] | None = None) -> int:
             print(f"doctor --against {args.against!r} failed: {e}")
             return 1
 
+    graph: Path | None = None
     try:
         graph = _resolve_cli_graph(args.graph, args.db)
         _graph_hint(args.graph, graph)
         reader: GraphifyReader | None = GraphifyReader(str(graph))
     except Exception:
         # Same "missing graph is fine" convention every other command with a --graph
-        # default uses — the graph-root-mismatch check just doesn't run.
+        # default uses — the graph-root-mismatch and graph-stale checks that read it just
+        # don't run, and the report says so (a skip, never a finding: --check
+        # would otherwise exit 2 in every CI job that runs doctor without a graph).
         reader = None
 
-    report = curate(args.db, stale_days=args.stale_days, reader=reader)
+    # The registry's index checks read a read-only connection that doctor hands over and closes;
+    # without a usable index.db they are skipped, with the text the other index checks use.
+    # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
+    # A reloaded index reads every binding live until a sync recomputes the statuses: the orphan
+    # check has nothing to say then, and the sync is what the skipped text already tells to run.
+    index = open_curation_index(args.db)
+    try:
+        report = curate(args.db, stale_days=args.stale_days, reader=reader, index=index)
+        statuses_known = index is not None and binding_statuses_computed(index)
+    finally:
+        if index is not None:
+            index.close()
+    skipped = report.skipped + ([] if statuses_known else ["orphaned-records"])
 
     if args.json:
         # Pure JSON on stdout — nothing else — mirrors sidegraph-verify --json.
@@ -1832,7 +2135,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
                         {"code": f.code, "path": f.path, "detail": f.detail}
                         for f in report.findings
                     ],
-                    "skipped": report.skipped,
+                    "skipped": skipped + (["graph"] if reader is None else []),
                 },
                 indent=2,
             )
@@ -1842,7 +2145,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
             print(f"{v.code}  {v.path}  {v.detail}")
         for f in report.findings:
             print(f"{f.code}  {f.path}  {f.detail}")
-        for name in report.skipped:
+        for name in skipped:
             print(f"{name} check skipped (no usable index.db — run sidegraph-sync)")
         # Ratification latency (2026-08-04 lifecycle D4 follow-up, practitioner
         # resolution 1.2): median/max ratified_at − valid_from over records that carry
@@ -1887,6 +2190,13 @@ def doctor_main(argv: list[str] | None = None) -> int:
                 print(line)
         except Exception:
             pass  # a stat failure must never cost the health report
+        if reader is None:
+            # Not the text above, which blames the index, and not a finding: see the comment
+            # where the reader is opened. Last before the summary line.
+            print(
+                f"graph checks skipped (no code graph at {graph or 'the default path'} — build "
+                "it from the repository root with `graphify update .`)"
+            )
         if violations or report.findings:
             print(f"{len(violations)} violation(s), {len(report.findings)} finding(s)")
         else:
