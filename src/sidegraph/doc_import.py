@@ -15,7 +15,7 @@ import errno
 import hashlib
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -288,6 +288,11 @@ class _DocDisposition:
     inherit_bindings_from: str | None
     # The content-matched open record behind a ``skipped-existing`` action (D3), else None.
     match: Decision | None = None
+    # The id a ``written``/``superseded`` write stamps as its ``supersedes``, else None: the
+    # accepted ancestor, or else the content match whose status flips (rejected <-> open).
+    # ``_apply_doc_state`` writes it and the dry run's auto-ratify verdict reads it
+    # (``is not None``), so the two cannot disagree on whether a ``written`` record supersedes.
+    supersedes_id: str | None = None
 
 
 class DocImportReport(BaseModel):
@@ -360,9 +365,15 @@ class DocImportReport(BaseModel):
     # was ineligible.
     auto_ratified: int = 0
     auto_ratify_failures: list[str] = Field(default_factory=list)  # ["<decision id>: <reason>"]
-    # [{"file_path", "ref", "title", "action": "imported"|"superseded", "anchors_skipped"},
-    # ...] — one item per RECORD (a split-capable dialect can emit several per file);
-    # `ref` is the effective ref (`path` or `path#fragment`), `file_path` the real path.
+    # What a real run would auto-ratify, filled ONLY by a dry run (the 2026-10-04 spec, D2):
+    # `auto_ratified` keeps meaning "transitions that actually happened", so it stays 0 in a
+    # dry run. An eligibility count, not a success guarantee -- a real `_auto_ratify` can
+    # still fail (a race, a cascade-guard refusal), which a dry run cannot foresee.
+    would_auto_ratify: int = 0
+    # [{"file_path", "ref", "title", "action": "imported"|"superseded", "anchors_skipped",
+    # "auto_ratify_eligible"}, ...] — one item per RECORD (a split-capable dialect can emit
+    # several per file); `ref` is the effective ref (`path` or `path#fragment`), `file_path`
+    # the real path.
     dry_run: list[dict] = Field(default_factory=list)
 
     def by_file(self) -> dict[str, int]:
@@ -1226,26 +1237,58 @@ _DRAFT_STATUS_MARKERS = ("draft", "propos", "pending", "under review")
 # CLOSED — invisible to retrieval, so nobody ever notices the record that quietly stopped
 # being memory. Measured false positives on the bare substring: "Accepted (rejected
 # alternative: gRPC)", "not rejected", "rejection criteria defined" all landed rejected.
-_REJECTED_WORD_RE = re.compile(r"(?<!\w)(?<!not )(?<!un-)(?<!un)reject(?:ed)?(?!\w)")
+# A negation is not always the word right before: "should not be rejected", "not  rejected"
+# (two spaces), "never rejected" and "isn't rejected" all landed rejected under a lookbehind
+# for "not " alone. `_negated` reads the few words before a match instead.
+_REJECTED_WORD_RE = re.compile(r"(?<!\w)(?<!un-)(?<!un)reject(?:ed)?(?!\w)")
 _PARENTHETICAL_RE = re.compile(r"\([^)]*\)")
+# The negation reaches this many words back, never across a clause break: `, ; . :`, a pipe, a
+# slash, an em or en dash, and a spaced hyphen or dash arrow (" - ", " -> "). Both errors are
+# real: a missed negation lands the record CLOSED, and a negation that reaches over a break
+# ("not accepted — rejected") lands a refused doc ACCEPTED, as current truth, unless
+# `--propose` or a draft marker sends it to the ratification queue. Not breaks, so still
+# negated: a conjunction ("not adopted and rejected") and an `=` arrow.
+_NEGATION_WINDOW = 3
+_CLAUSE_BREAK_RE = re.compile(r"[,;.:|/\u2014\u2013]|\s-+>?\s")
+_WORD_RE = re.compile(r"\w+(?:['\u2019]\w+)*")
+
+
+def _is_negation_word(word: str) -> bool:
+    return word in ("not", "never") or word.endswith(("n't", "n\u2019t"))
+
+
+def _negated(before: str) -> bool:
+    """Whether ``before`` (the text preceding a ``reject`` match) carries a negation: ``not``,
+    ``never`` or a word ending ``n't`` among its last :data:`_NEGATION_WINDOW` words, counting
+    only the clause the match is in (since the last :data:`_CLAUSE_BREAK_RE` break)."""
+    clause = _CLAUSE_BREAK_RE.split(before)[-1]
+    return any(_is_negation_word(w) for w in _WORD_RE.findall(clause)[-_NEGATION_WINDOW:])
 
 
 def _is_rejected_status(status: str | None) -> bool:
     """True when a frontmatter/bold ``status`` value reads as TURNED DOWN.
 
     Word-boundary match on ``reject``/``rejected``, after parenthesised asides are
-    stripped and with ``not``/``un`` negations excluded. So:
+    stripped. A match is excluded when it carries a ``un`` prefix, or a negation (``not``,
+    ``never``, a word ending ``n't``) within the three words before it in the same clause
+    (no clause break in between: ``, ; . :``, a pipe, a slash, an em or en dash, a spaced
+    hyphen or ``->``); any one un-negated match is enough. So:
 
     - ``rejected``, ``Rejected in favour of ADR-9999``, ``proposed, then rejected`` → True
+    - ``was rejected, not accepted``, ``not reviewed, rejected``, ``Not accepted — rejected``
+      → True (the negation is after the word, or in another clause)
     - ``Accepted (rejected alternative: gRPC)`` → False (the aside is about an option)
-    - ``not rejected``, ``un-rejected`` → False
+    - ``not rejected``, ``should not be rejected``, ``never rejected``, ``isn't rejected``,
+      ``un-rejected`` → False
     - ``rejection criteria defined`` → False (``rejection`` is a different word)
 
     Checked BEFORE :func:`_is_draft_like_status`: a value carrying both readings is
-    terminal, and the terminal one wins."""
+    terminal, and the terminal one wins.
+    see design/superpowers/specs/2026-10-04-rejected-status-negation-design.md"""
     if not status:
         return False
-    return bool(_REJECTED_WORD_RE.search(_PARENTHETICAL_RE.sub(" ", status.lower())))
+    text = _PARENTHETICAL_RE.sub(" ", status.lower())
+    return any(not _negated(text[: m.start()]) for m in _REJECTED_WORD_RE.finditer(text))
 
 
 def _is_draft_like_status(status: str | None) -> bool:
@@ -1651,8 +1694,8 @@ def import_docs(
     ``dry_run=True`` runs the full pipeline (parse -> frontmatter -> idempotency -> anchor
     resolution) so counts reflect what WOULD happen, but writes nothing;
     ``DocImportReport.dry_run`` carries ``{"file_path", "ref", "title", "action":
-    "imported"|"superseded", "anchors_skipped"}`` per RECORD (a split-capable dialect can
-    emit several per file). ``tags`` (free text, slugified, empty slugs
+    "imported"|"superseded", "anchors_skipped", "auto_ratify_eligible"}`` per RECORD (a
+    split-capable dialect can emit several per file). ``tags`` (free text, slugified, empty slugs
     dropped) bind durable ``tag:<slug>`` entities on every written decision, same mechanism
     as ``capture.py``'s tags.
 
@@ -1703,7 +1746,25 @@ def import_docs(
     per-record adapter) is deliberately the ONLY hook site — the shared
     ``apply_doc_candidate``/``_apply_doc_state`` write path stays untouched, since
     Bootstrap's ``bootstrap/apply.py`` calls it directly and must never auto-ratify.
+
+    A dry run fires no transition, so ``auto_ratified`` stays 0; it runs the same
+    ``auto_ratify_eligible`` verdict on the signal the write would produce (the disposition's
+    ``supersedes_id``, and the request's anchors plus any bindings the write would inherit)
+    and reports it in ``DocImportReport.would_auto_ratify`` and, per item,
+    ``"auto_ratify_eligible"``. A ref repeated within the run (one file named twice, a
+    directory plus a file inside it, a live and an archived copy one profile maps to one ref)
+    is classified against the records the earlier copies would have left at it, not the store
+    as it was: a record written there joins the set, a pending proposal the write drops and a
+    predecessor it closes leave it. So an identical repeat is ``skipped_existing``, a differing
+    one ``superseded``, and a repeat after a ``rejected`` first copy a fresh write, as in the
+    real run. Two rare shapes are not modelled, so the split can differ from the real run's
+    there (the eligibility count did not, where probed): a ref met three times with the first
+    content returning (A, B, A) under an auto policy, because the status an auto-ratify would
+    give the first record is not modelled; and a repeat with no anchor of its own, which a
+    real run would let inherit bindings from a record the same run wrote and a dry run counts
+    ``skipped_unanchorable``.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2/D3
+    # see design/superpowers/specs/2026-10-04-import-dry-run-previews-auto-ratification-design.md
     """
     # None = "auto per document" (B4); an explicit kind (including "adr") always wins.
     decision_kind_override = DecisionKind(kind) if kind is not None else None
@@ -1716,6 +1777,13 @@ def import_docs(
     process = files[:limit] if limit is not None else files
 
     report = DocImportReport()
+    # A dry run's view of the refs it has already counted a write for: per ref, the records a
+    # real run would hold there by now. A real run writes the first record at a ref and the
+    # next copy sees it in the store; a dry run writes nothing, so a ref repeated within the
+    # run (one file named twice, a directory plus a file inside it, or a live and an archived
+    # copy one profile normalizes to the same ref) is classified against this instead of the
+    # store. Always empty in a real run. See `_records_after_write`.
+    would_be: dict[str, list[Decision]] = {}
     # Resolved ONCE per run, not per file (BLOCKING-1) — repo-root-relative, never
     # cwd-relative. Always computed now (I2, R1 improvement wave §2): the live-tree
     # trigger predicate below needs a repo-root-relative on-disk path REGARDLESS of
@@ -1877,6 +1945,7 @@ def import_docs(
                 propose=propose,
                 dry_run=dry_run,
                 ratify_policy=ratify_policy,
+                would_be=would_be,
             )
 
     return report
@@ -1914,6 +1983,7 @@ def _import_one_record(
     propose: bool,
     dry_run: bool,
     ratify_policy: RatifyPolicy,
+    would_be: dict[str, list[Decision]],
 ) -> None:
     """Compatibility adapter from importer options/reporting to the shared write seam.
 
@@ -1942,7 +2012,7 @@ def _import_one_record(
         graph_version=graph_version,
         tags=tuple(tag_slugs),
     )
-    preflight_disposition = _classify_doc_candidate(store, preflight)
+    preflight_disposition = _classify_doc_candidate(store, preflight, would_be)
     # D3: a content match returns early only when it already carries a non-tag binding.
     # Doc import never writes a record with zero anchors (an unanchorable document is
     # skipped), so a match with none is a crash between the write and the binding: fall
@@ -1961,9 +2031,40 @@ def _import_one_record(
         update={"anchors": tuple(anchors), "anchors_skipped": tuple(anchors_skipped)}
     )
 
+    would_auto_ratify = False
     if dry_run:
-        disposition = _classify_doc_candidate(store, request)
+        existing = _doc_existing(store, request, would_be)
+        disposition = _classify_doc_state(store, request, existing)
         result = DocWriteResult(action=disposition.action)
+        # The verdict the post-write block below reaches, from the inputs the write uses (the
+        # 2026-10-04 spec, D1): the same gate, the same kind, `supersedes` from the same
+        # disposition `_apply_doc_state` stamps, and the live Tier-1/2 bindings the write
+        # would leave. Every selected anchor is confirmed `resolved`, so each binds live.
+        would_auto_ratify = (
+            ratify_policy != RatifyPolicy.MANUAL
+            and lands_proposed
+            and not status_derived
+            and disposition.action == "written"
+            and auto_ratify_eligible(
+                AutoEligibility(
+                    kind=_doc_kind(request).value,
+                    live_tier12=_dry_run_live_tier12(store, request, disposition),
+                    ambiguous_or_orphan_only=False,
+                    pipeline_clean=True,
+                    has_provenance=True,
+                    domain_anchored=False,
+                    has_supersedes=disposition.supersedes_id is not None,
+                ),
+                ratify_policy,
+            )
+        )
+        if disposition.action in ("written", "superseded"):
+            would_be[request.ref] = _records_after_write(
+                existing,
+                request,
+                disposition,
+                _build_doc_decision(request, disposition, _doc_kind(request)),
+            )
     else:
         result = apply_doc_candidate(store, reader, request)
 
@@ -2019,6 +2120,8 @@ def _import_one_record(
     if status_rejected:
         report.status_derived_rejected += 1
     if dry_run:
+        if would_auto_ratify:
+            report.would_auto_ratify += 1
         report.dry_run.append(
             {
                 "file_path": file_path,
@@ -2026,8 +2129,28 @@ def _import_one_record(
                 "title": parsed.title,
                 "action": "superseded" if result.action == "superseded" else "imported",
                 "anchors_skipped": anchors_skipped,
+                "auto_ratify_eligible": would_auto_ratify,
             }
         )
+
+
+def _dry_run_live_tier12(
+    store: Store, request: DocWriteRequest, disposition: _DocDisposition
+) -> int:
+    """The live Tier-1/2 binding count a ``written`` doc record would end up with, before
+    anything is written: its own selected anchors and file anchor (each confirmed ``resolved``,
+    so each binds as a live leaf; tags bind at Tier 0 and never count), plus the live Tier-1/2
+    bindings of the record it would inherit from (``_apply_doc_bindings`` copies them over
+    verbatim). At least the real ``_anchor_signal`` in the cases that matter: the gate only
+    needs ``>= 1``.
+    # see design/superpowers/specs/2026-10-04-import-dry-run-previews-auto-ratification-design.md D1
+    """
+    inherited = (
+        _anchor_signal(store, disposition.inherit_bindings_from)[0]
+        if disposition.inherit_bindings_from is not None
+        else 0
+    )
+    return len(request.anchors) + int(request.file_anchor is not None) + inherited
 
 
 _DOC_WRITE_STATUSES = (
@@ -2120,12 +2243,29 @@ def _classify_doc_state(
         pending_proposal=pending_proposal,
         supersedable=supersedable,
         inherit_bindings_from=inherit_bindings_from,
+        supersedes_id=(
+            accepted_ancestor.id
+            if accepted_ancestor is not None
+            else (match.id if needs_status_change and match is not None else None)
+        ),
     )
 
 
-def _classify_doc_candidate(store: Store, request: DocWriteRequest) -> _DocDisposition:
-    existing = store.find_decisions_by_ref("doc-import", request.ref, statuses=_DOC_WRITE_STATUSES)
-    return _classify_doc_state(store, request, existing)
+def _doc_existing(
+    store: Store, request: DocWriteRequest, would_be: Mapping[str, Sequence[Decision]] | None = None
+) -> Sequence[Decision]:
+    """The records at ``request``'s ref that a write classifies against: the store's, or, in a
+    dry run that has already counted a write at this ref, the records ``would_be`` says a real
+    run would hold there by now."""
+    if would_be is not None and request.ref in would_be:
+        return would_be[request.ref]
+    return store.find_decisions_by_ref("doc-import", request.ref, statuses=_DOC_WRITE_STATUSES)
+
+
+def _classify_doc_candidate(
+    store: Store, request: DocWriteRequest, would_be: Mapping[str, Sequence[Decision]] | None = None
+) -> _DocDisposition:
+    return _classify_doc_state(store, request, _doc_existing(store, request, would_be))
 
 
 def _apply_doc_bindings(
@@ -2161,6 +2301,70 @@ def _apply_doc_bindings(
         )
 
 
+def _build_doc_decision(
+    request: DocWriteRequest, disposition: _DocDisposition, decision_kind: DecisionKind
+) -> Decision:
+    """The :class:`Decision` a ``written``/``superseded`` document write appends. Shared by the
+    write and the dry run's would-be records (``_records_after_write``), so a dry run follows
+    exactly the record a real run creates."""
+    return Decision(
+        title=request.parsed.title,
+        kind=decision_kind,
+        status=request.status,
+        context=request.parsed.context,
+        choice=request.parsed.choice,
+        rejected=request.parsed.rejected,
+        consequences=request.parsed.consequences,
+        valid_from=datetime.now(UTC),
+        valid_to=datetime.now(UTC) if request.status == DecisionStatus.REJECTED else None,
+        supersedes=disposition.supersedes_id,
+        provenance=Provenance(
+            source="doc-import",
+            author="sidegraph-import",
+            ref=request.ref,
+            graph_version=request.graph_version,
+        ),
+    )
+
+
+def _closes_predecessor(request: DocWriteRequest, disposition: _DocDisposition) -> bool:
+    """Whether the write closes the record it supersedes: not when a ``proposed`` successor
+    follows an accepted ancestor (an unreviewed proposal never closes an accepted decision)."""
+    return not (
+        request.status == DecisionStatus.PROPOSED and disposition.accepted_ancestor is not None
+    )
+
+
+def _records_after_write(
+    existing: Sequence[Decision],
+    request: DocWriteRequest,
+    disposition: _DocDisposition,
+    decision: Decision,
+) -> list[Decision]:
+    """The records at one ref once ``decision`` is written, as a later copy of the same ref
+    would find them in the store: the new record joins, a pending proposal the write drops
+    leaves (a rejected record would be kept by a real run; it is dropped here, and no other
+    outcome of the drop is modelled), and a still-open predecessor the write supersedes leaves
+    (it is no longer open). Nothing is mutated: no record's status is changed outside the
+    store, so the status the auto-ratify block would give the new record is not modelled
+    either. Mirrors ``_apply_doc_state``; the dry run's memory of what its own run would have
+    written.
+    # see design/superpowers/specs/2026-10-04-import-dry-run-previews-auto-ratification-design.md
+    """
+    gone: set[str] = set()
+    if disposition.pending_proposal is not None:
+        gone.add(disposition.pending_proposal.id)
+    if decision.supersedes is not None and _closes_predecessor(request, disposition):
+        gone.update(
+            record.id
+            for record in existing
+            if record.id == decision.supersedes
+            and record.id not in gone
+            and record.status in (DecisionStatus.ACCEPTED, DecisionStatus.PROPOSED)
+        )
+    return [record for record in existing if record.id not in gone] + [decision]
+
+
 def _apply_doc_state(
     *,
     store: Store,
@@ -2194,36 +2398,8 @@ def _apply_doc_state(
     if disposition.pending_proposal is not None:
         store.drop(disposition.pending_proposal.id)
 
-    match = _preferred_content_match(request, existing)
-    needs_status_change = match is not None and (request.status == DecisionStatus.REJECTED) != (
-        match.status == DecisionStatus.REJECTED
-    )
-    decision = Decision(
-        title=request.parsed.title,
-        kind=decision_kind,
-        status=request.status,
-        context=request.parsed.context,
-        choice=request.parsed.choice,
-        rejected=request.parsed.rejected,
-        consequences=request.parsed.consequences,
-        valid_from=datetime.now(UTC),
-        valid_to=datetime.now(UTC) if request.status == DecisionStatus.REJECTED else None,
-        supersedes=(
-            disposition.accepted_ancestor.id
-            if disposition.accepted_ancestor is not None
-            else (match.id if needs_status_change and match is not None else None)
-        ),
-        provenance=Provenance(
-            source="doc-import",
-            author="sidegraph-import",
-            ref=request.ref,
-            graph_version=request.graph_version,
-        ),
-    )
-    close_predecessor = not (
-        request.status == DecisionStatus.PROPOSED and disposition.accepted_ancestor is not None
-    )
-    store.add_decision(decision, close_predecessor=close_predecessor)
+    decision = _build_doc_decision(request, disposition, decision_kind)
+    store.add_decision(decision, close_predecessor=_closes_predecessor(request, disposition))
     _apply_doc_bindings(
         store=store,
         reader=reader,
@@ -2238,6 +2414,12 @@ def _apply_doc_state(
     )
 
 
+def _doc_kind(request: DocWriteRequest) -> DecisionKind:
+    """The kind a write of ``request`` carries: the parsed (or overridden) suggestion, else
+    ``adr``. Shared by the write and the dry run's auto-ratify verdict so they agree."""
+    return request.parsed.suggested_kind or DecisionKind.ADR
+
+
 def apply_doc_candidate(
     store: Store, reader: GraphifyReader, request: DocWriteRequest
 ) -> DocWriteResult:
@@ -2247,12 +2429,10 @@ def apply_doc_candidate(
         DecisionStatus.REJECTED,
     ):
         raise ValueError("document import can write only accepted, proposed, or rejected")
-    decision_kind = request.parsed.suggested_kind or DecisionKind.ADR
-    existing = store.find_decisions_by_ref("doc-import", request.ref, statuses=_DOC_WRITE_STATUSES)
     return _apply_doc_state(
         store=store,
         reader=reader,
         request=request,
-        existing=existing,
-        decision_kind=decision_kind,
+        existing=_doc_existing(store, request),
+        decision_kind=_doc_kind(request),
     )

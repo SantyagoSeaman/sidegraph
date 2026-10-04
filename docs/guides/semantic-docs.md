@@ -151,8 +151,8 @@ pass extends the same idea to prose — ADR/SAD reasoning becomes `rationale` no
 the decision store empty on a codebase or doc corpus that already has months of recorded
 reasoning in it.
 
-**Always dry-run first** — it costs nothing and shows you the volume before anything is
-written:
+**Always dry-run first** — it costs nothing and shows you the volume before any record is
+written (it still creates a fresh store's own files if none existed, but no decision):
 
 ```bash
 uv run sidegraph-import --dry-run

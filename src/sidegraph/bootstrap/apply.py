@@ -489,12 +489,16 @@ def apply_review(
         for item in review.items:
             if item.action == ReviewAction.SKIP:
                 continue
-            request = build_doc_request(item, plan.graph_version, profile)
-            if request.ref != item.candidate.ref:
-                raise AssertionError(
-                    f"reviewed candidate ref changed during conversion: {item.candidate.ref}"
-                )
+            # Conversion, its ref check and the write share one `try`: a fault in any of them
+            # after an earlier item was written must reach `_finalize`, which reports the
+            # durable items and the RESUME command, not leave through the outer `finally`.
+            # see design/superpowers/specs/2026-10-04-bootstrap-apply-conversion-fault-design.md
             try:
+                request = build_doc_request(item, plan.graph_version, profile)
+                if request.ref != item.candidate.ref:
+                    raise AssertionError(
+                        f"reviewed candidate ref changed during conversion: {item.candidate.ref}"
+                    )
                 apply_doc_candidate(store, reader, request)
             except BaseException as exc:
                 error = _error_text(exc)

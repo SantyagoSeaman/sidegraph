@@ -255,6 +255,50 @@ def test_failure_after_canonical_write_is_partial_recoverable(tmp_path, monkeypa
     assert report.next_command == "sidegraph-bootstrap --resume"
 
 
+@pytest.mark.parametrize("faulting", [1, 2])
+@pytest.mark.parametrize("fault", ["ref-changed", "request-build-raises"])
+def test_conversion_fault_is_reported_like_a_write_fault(tmp_path, monkeypatch, fault, faulting):
+    """A fault converting reviewed item `faulting` takes the path a write error takes:
+    `failed_ref` set, the loop stops, `next_command` is the RESUME line the CLI prints, and
+    nothing lands for the faulting item. With item 2 faulting the first stays durable
+    (`partial-recoverable`); with item 1 faulting nothing is (`incomplete`, previously an
+    exception out of `apply_review`). Red against unfixed code in all four cases: the exception
+    left `apply_review` through the outer `try`, past `_finalize`. The on-disk assertion is what
+    turns a ref check moved AFTER the write red: the record would land under the unreviewed
+    ref. The two faults are not duplicates: hoisting only `build_doc_request` out of the `try`
+    leaves the `ref-changed` cases green.
+    see design/superpowers/specs/2026-10-04-bootstrap-apply-conversion-fault-design.md"""
+    plan, review, reader = accepted_plan(tmp_path, count=2)
+    original = build_doc_request
+    calls = {"n": 0}
+
+    def faults_on_the_chosen_item(item, graph_version, profile):
+        calls["n"] += 1
+        request = original(item, graph_version, profile)
+        if calls["n"] < faulting:
+            return request
+        if fault == "ref-changed":
+            return request.model_copy(update={"rel_path": "docs/adr/changed.md"})
+        raise ValueError("cannot convert the item")
+
+    monkeypatch.setattr("sidegraph.bootstrap.apply.build_doc_request", faults_on_the_chosen_item)
+    store_dir = tmp_path / ".sidegraph"
+    report = apply_review(plan, review, store_dir=store_dir, reader=reader)
+
+    written = faulting - 1
+    keys = tuple(item.candidate.key for item in review.items)
+    assert report.status == (RunStatus.PARTIAL_RECOVERABLE if written else RunStatus.INCOMPLETE)
+    assert report.failed_ref == f"docs/adr/{faulting:03d}.md"
+    assert report.next_command == "sidegraph-bootstrap --resume"
+    assert report.durable_candidate_keys == keys[:written]
+    assert report.pending_candidate_keys == keys[written:]
+    assert report.error
+    on_disk = load_canonical_catalog(store_dir).decisions
+    assert [d.provenance.ref for d in on_disk] == [
+        f"docs/adr/{number:03d}.md" for number in range(1, faulting)
+    ]
+
+
 def test_reopen_and_rerun_converges_without_duplicates(tmp_path, monkeypatch):
     """Minting a duplicate on resume instead of matching canonical content is a bug."""
     plan, review, reader = accepted_plan(tmp_path, count=2)

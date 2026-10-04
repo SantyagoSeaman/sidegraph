@@ -1273,11 +1273,22 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
             # `ref` is the effective ref (`path` or `path#fragment` for a split child) —
             # the per-record identity; `file_path` stays the real path for by_file()'s
             # per-document rollup (oneshot+granularity spec, review F14/F4).
-            print(f"{item['ref']}: [{item['action']}] {item['title']}")
+            # ` [auto]` (after the title, before the indented skip lines): a real run would
+            # auto-ratify this record (2026-10-04 spec, D4); never printed under `manual`.
+            marker = " [auto]" if item["auto_ratify_eligible"] else ""
+            print(f"{item['ref']}: [{item['action']}] {item['title']}{marker}")
             for skip in item["anchors_skipped"]:
                 print(f"    anchor skipped: {skip['name']} ({skip['reason']})")
+        # The dry run never carries the real run's `auto-ratified K` (nothing happened); under a
+        # non-`manual` policy it says how many records WOULD be auto-ratified instead.
+        would_segment = (
+            f", would auto-ratify {report.would_auto_ratify}"
+            if ratify_policy != RatifyPolicy.MANUAL
+            else ""
+        )
         print(
-            f"\nwould import {report.imported} decision(s), supersede {report.superseded} "
+            f"\nwould import {report.imported} decision(s), supersede {report.superseded}"
+            f"{would_segment} "
             f"(skipped: {report.skipped_existing} existing, "
             f"{report.skipped_unanchorable} unanchorable, "
             f"{report.skipped_not_decision} not-decision-shaped, "
@@ -1318,9 +1329,9 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
                 print(f"  {fp}")
         return 0
 
-    # Design D6: the count is added to the non-dry-run summary line only, only when the
-    # resolved policy is not `manual` — the dry-run line above (`report.dry_run`'s own
-    # printer) is left untouched.
+    # Design D6: the `auto-ratified K` count is added to the real run's summary line only, only
+    # when the resolved policy is not `manual`; the dry-run line above carries its own
+    # `would auto-ratify M` instead (2026-10-04 spec, D4).
     auto_segment = (
         f", auto-ratified {report.auto_ratified}" if ratify_policy != RatifyPolicy.MANUAL else ""
     )
@@ -1528,9 +1539,15 @@ def import_main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         for item in report.dry_run:
-            print(f"{item['file_path'] or item['node_id']}: {item['title']}")
+            marker = " [auto]" if item["auto_ratify_eligible"] else ""
+            print(f"{item['file_path'] or item['node_id']}: {item['title']}{marker}")
+        would_segment = (
+            f", would auto-ratify {report.would_auto_ratify}"
+            if ratify_policy != RatifyPolicy.MANUAL
+            else ""
+        )
         print(
-            f"\nwould import {report.imported} decision(s) "
+            f"\nwould import {report.imported} decision(s){would_segment} "
             f"(skipped: {report.skipped_existing} existing, "
             f"{report.skipped_unanchorable} unanchorable, {report.filtered} filtered)"
         )
@@ -2050,9 +2067,13 @@ def doctor_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="sidegraph-doctor",
         description="Store health: sidegraph-verify's strict snapshot (+ optional "
-        "--against transition layer) plus advisory curation lint (dangling records, "
-        "decayed bindings, stale proposals, unreferenced entities, expired-but-open "
-        "validity). Advisory findings never fail the run unless --check.",
+        "--against transition layer) plus advisory curation lint. The lint covers the "
+        "records and their anchors (dangling records, degraded or orphaned bindings and "
+        "records, unreferenced or duplicate entities, stale proposals, expired-but-open "
+        "validity), how current they are (code drift, never-surfaced decisions, stale "
+        "agent instructions, unratified accepts) and the integrity checks (stale graph, "
+        "graph built from a subdirectory, uncommitted store files, plugin off in "
+        "subdirectories). Advisory findings never fail the run unless --check.",
     )
     parser.add_argument("--db", default=None, help=_INSPECT_DB_HELP)
     parser.add_argument(

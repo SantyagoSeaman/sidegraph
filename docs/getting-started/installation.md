@@ -38,11 +38,18 @@ name, so `--from sidegraph` is required (a bare `uvx sidegraph-mcp` will not res
 
 ### Option B — host plugin (recommended for Claude Code and Codex)
 
-Inside an interactive host session, in the repo you want memory over:
+In the repo you want memory over. In Claude Code, inside an interactive session:
 
 ```
 /plugin marketplace add SantyagoSeaman/sidegraph
 /plugin install sidegraph@sidegraph
+```
+
+In Codex, from a terminal:
+
+```bash
+codex plugin marketplace add SantyagoSeaman/sidegraph
+codex plugin add sidegraph@sidegraph
 ```
 
 The Claude Code host installs the MCP server and all four hooks (`SessionStart`, `Stop`,
@@ -127,7 +134,7 @@ setup, scripted/CI use, and the two deliberately human-run jobs (`sidegraph-impo
 | `sidegraph-pre-tool-use` | `PreToolUse` hook — hands the agent the records anchored to a file when it reads or edits it (`Read`, `Grep`, `Edit`, `Write`, and `sed`/`grep`/`rg`/`cat` in Bash). |
 | `sidegraph-subagent-start` | `SubagentStart` hook — tells a starting subagent that decision memory exists and how to ask it. |
 | `sidegraph-bootstrap` | Guided CLI — scan one of six supported ADR/spec profiles, preview and review candidates, write only after confirmation, verify anchors/host integration, and prove production retrieval. |
-| `sidegraph-init` | CLI — bootstrap `.sidegraph/` in a repo: create the store, check for the graph, print the plugin install path (and the no-plugin `claude mcp add` alternative). |
+| `sidegraph-init` | CLI — bootstrap `.sidegraph/` in a repo: create the store, check for the graph, ask (in a terminal) whether to install the git hook that keeps the graph fresh (`--hooks`, `--no-hooks`, `--remove-hooks`), print the plugin install path (and the no-plugin `claude mcp add` alternative). |
 | `sidegraph-ratify` | CLI — review/accept/drop proposed decisions, facts, and domains. |
 | `sidegraph-sync` | CLI — re-anchor the store after a Graphify rebuild. |
 | `sidegraph-import` | CLI — bootstrap decisions from Graphify rationale nodes (code docstrings, or ADR/SAD prose after a semantic pass), or from existing ADR/spec markdown directly (`--docs`). |

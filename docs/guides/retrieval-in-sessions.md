@@ -35,22 +35,42 @@ search instruction**, once, ahead of the rest of the text (not inside either ren
 > are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
 > available. If the tool is listed only by name, load it first.
 
-Unlike the `PreToolUse` records block (the files a `Read`, `Edit`, `Write`, `Grep` or
-`sed`/`grep`/`rg`/`cat` line names, each at most once per agent — see below), this line is
-unconditional and covers every search surface behaviorally, not just calls that name a file with
-records — bash `find` and MCP structure-query tools included.
+Unlike the records the `PreToolUse` hook delivers at the point of reading (see
+[Memory without asking](#memory-without-asking) below), this line is unconditional and covers
+every search surface behaviorally, not just calls that name a file with records — bash `find`
+and MCP structure-query tools included.
+
+The next line names the package the hooks run: `Sidegraph X.Y.Z`. A session that launched an old
+install says so in its own context.
 
 Both renderers also inject:
 
 - **Initiatives** — every `Initiative` recorded in the store (name + description).
 - **Global mistakes & constraints** — up to the 10 most recent `gotcha`/`lesson`/`constraint`
-  decisions scoped `global`, newest first. This is the only place decisions appear at
-  session start; everything task-scoped is deferred to `get_task_context`.
+  decisions scoped `global`, newest first.
+- **Unratified proposals** — proposed records inside the surfacing window, after everything
+  accepted (see [below](#why-an-unratified-draft-still-shows-up-and-what-the-tag-means)). The
+  domain map lists proposed global mistakes only. The nameless map lists proposed decisions and
+  facts, up to 10 of each.
 
-Finally, unless `$SIDEGRAPH_RATIFY_NUDGE == "off"`, the hook appends one more line — own
-`try/except`, so a count failure never costs the map above it — whenever the pending-
-ratification queue is non-empty (nothing is appended at zero). Verbatim, with the counts
-substituted:
+The nameless map (no domain ratified yet) has two more sections: **Recorded decisions**, up to
+the 10 most recent accepted decisions that no section above already shows, and **Known facts**,
+up to 10 accepted facts. So the global mistakes are not the only decisions a session sees at
+start. Everything task-scoped is deferred to `get_task_context`.
+
+After the map come the status lines, one for each problem the integrity checks find, in a fixed
+order: records awaiting ratification, code drift, a borrowed or stale code graph, a stray empty
+store, a plugin and package version mismatch, the plugin off in subdirectories, a missing code
+graph, orphaned records, store files left out of the index, no refresh hook, uncommitted store
+files, and records that exist only on unmerged branches. Each line is there only while its
+problem is. A problem that needs a person also sends a notice to the user, at most once a day.
+The texts and the notice rules are in the
+[hooks reference](../reference/hooks.md#sidegraph-session-start), and
+[troubleshooting](troubleshooting.md) says what to do about each.
+
+The line you will meet most is the ratification one. Unless `$SIDEGRAPH_RATIFY_NUDGE == "off"`, the
+hook adds it whenever the pending-ratification queue is non-empty (nothing is appended at zero).
+Verbatim, with the counts substituted:
 
 > Sidegraph: N record(s) awaiting ratification (X decisions, Y facts, Z domains; oldest D days) — review
 > with the ratify MCP tool or sidegraph-ratify.
@@ -62,9 +82,36 @@ decision's cascade is covered by it and never double-counted), and proposed doma
 the `sidegraph:ratify-decisions` skill (which this line is meant to trigger) for the
 in-session walkthrough.
 
-With an empty store and no graph, this degrades to just the standing instruction plus the
-header — that's expected, not a bug (see the never-crash contract in
-[`reference/hooks.md`](../reference/hooks.md)).
+With an empty store and no graph, this degrades to the standing instruction, the version line,
+the header and a line saying there is no code graph — that's expected, not a bug (see the
+never-crash contract in [`reference/hooks.md`](../reference/hooks.md)).
+
+## Memory without asking
+
+The map above is thin on purpose, and an agent does not always call `get_task_context` before it
+reads. Three more channels put records in front of an agent, or tell it that records exist, with
+no query. All three read the store's index directly, so each costs a few tens of milliseconds.
+
+- **At the point of reading.** The `PreToolUse` hook runs before a `Read`, `Edit`, `Write` or
+  `Grep` call, and before a Bash line that runs `sed`, `grep`, `rg` or `cat`. When the call names
+  a file that decisions are anchored to, the agent gets that file's top decisions, mistakes first,
+  in the same call: two decisions, or three when the first two are mistakes, for at most three
+  files per call. Each file is delivered once per agent, and an agent gets ten files in all. A call that
+  names no file with records gets nothing. `SIDEGRAPH_GREP_NUDGE=off` stops it.
+- **In a subagent's brief.** On an `Agent` call (`Task` on older hosts), the hook reads the files
+  the brief names, and the files named in a plan or notes document the brief names, and appends
+  the decisions anchored to them to the brief: two per file, at most six lines. The subagent finds
+  the block at the end of its first message. The parent does not see it, and its transcript keeps
+  the prompt it wrote. `SIDEGRAPH_AGENT_BRIEF=off` stops it.
+- **At the start of a subagent.** A subagent starts without the session's context. The
+  `SubagentStart` hook gives it the standing instruction and one sentence saying how many
+  decisions are anchored to code, in how many files, and how many are recorded mistakes. It
+  carries no records: the subagent asks `get_task_context` for the files it works on.
+  `SIDEGRAPH_SUBAGENT_BRIEF=off` stops it.
+
+The first two channels deliver decisions only (facts reach the agent through `get_task_context`)
+and exist on Claude Code only. `SubagentStart` runs on Claude Code and on
+Codex. The wiring is in the [hooks reference](../reference/hooks.md#sidegraph-pre-tool-use).
 
 ## Asking task-scoped questions so `get_task_context` fires with the right seeds
 
@@ -112,8 +159,12 @@ by a block that says why. A seed that was read some other way than written gets 
 matches no symbol). If a file you passed is not in the code graph, a trailing
 `## Not in the code graph` block says why: the graph is stale and needs `graphify update .`, the
 file is newer than the build or one the engine skips, or the path names no file in the
-repository (see [`get_task_context`](../reference/mcp-tools.md#get_task_context)). A call with no
-seeds gets a `## Why this is empty` block. With no
+repository (see [`get_task_context`](../reference/mcp-tools.md#get_task_context)). A file seed
+that has no current record of its own, but has anchored files near it, gets a `## Nearest anchored`
+sentence naming them, and when the answer holds no decision memory at all the records of those
+files follow under `## Nearest anchored records (not anchored to your files)` (see
+[the nearest anchored records](../reference/mcp-tools.md#the-nearest-anchored-records)). A call
+with no seeds gets a `## Why this is empty` block. With no
 code graph at all, a trailing `## No code graph` block names the path that was looked at and says
 to build it: the graph is missing, so memory anchored to code could not be looked up. In a
 linked worktree the graph is the main checkout's, and a file that exists only on the branch is

@@ -8,7 +8,7 @@
         "source": "local",
         "path": "./plugin/sidegraph"
       },
-      "description": "Durable decision/lessons memory over your code graph — captured in-session, human-ratified, retrieved mistakes-first, surviving refactors."
+      "description": "Durable decision/lessons memory over your code graph — captured in-session, ratified before it is trusted, retrieved mistakes-first, surviving refactors."
     }
   ]
 }

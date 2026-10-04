@@ -244,13 +244,16 @@ class SeedResolution:
     entities_by_node: dict[str, list[Entity]] | None = None
 
 
-def _entities_by_node(store: Store) -> dict[str, list[Entity]]:
+def _entities_by_node(
+    store: Store, entities: Iterable[Entity] | None = None
+) -> dict[str, list[Entity]]:
     """``node id -> entities`` by the engine mapping the write path and sync keep
     (``last_seen_node_id``), each list ordered by entity id. Several entities can sit on one
     node (``Type.m`` and ``Type::m`` are two entities and one node), and every one counts.
-    One pass over the concrete entities, not one scan per node."""
+    One pass over the concrete entities, not one scan per node; a caller that already holds
+    them passes ``entities`` and the store is not read again."""
     by_node: dict[str, list[Entity]] = {}
-    for e in store.iter_concrete_entities():
+    for e in store.iter_concrete_entities() if entities is None else entities:
         if e.last_seen_node_id is not None:
             by_node.setdefault(e.last_seen_node_id, []).append(e)
     for entities in by_node.values():
@@ -258,8 +261,16 @@ def _entities_by_node(store: Store) -> dict[str, list[Entity]]:
     return by_node
 
 
-def resolve_seeds(seeds: list[Seed], reader: GraphifyReader | None, store: Store) -> SeedResolution:
-    """Resolve seeds to node ids, their store entities, and their community ids."""
+def resolve_seeds(
+    seeds: list[Seed],
+    reader: GraphifyReader | None,
+    store: Store,
+    entities_by_node: dict[str, list[Entity]] | None = None,
+) -> SeedResolution:
+    """Resolve seeds to node ids, their store entities, and their community ids.
+
+    ``entities_by_node`` is the map ``_entities_by_node`` builds; a caller that resolves many
+    seeds one call at a time builds it once and passes it, instead of one pass per call."""
     nodes: list[NodeRef] = []
     if reader is not None:
         for s in seeds:
@@ -299,7 +310,9 @@ def resolve_seeds(seeds: list[Seed], reader: GraphifyReader | None, store: Store
     # keep (`last_seen_node_id`), looked up in one map built once per call. The node's own
     # label still gets its descriptor lookup beside it: an entity that was never mapped (no
     # `last_seen_node_id` yet) or whose carrier adopted a path-less name is found only that way.
-    by_node = _entities_by_node(store) if nodes else None
+    by_node = None
+    if nodes:
+        by_node = _entities_by_node(store) if entities_by_node is None else entities_by_node
     if by_node is not None:
         for n in nodes:
             for e in by_node.get(n.node_id, []):

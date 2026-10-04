@@ -7,6 +7,110 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-04
+
+### Added
+
+- **Every MCP tool now carries annotations, so a host's auto-reviewer stops rejecting memory
+  reads.** In the field, Codex's auto-reviewer rejected 20 `get_task_context` calls, and each
+  one lost memory for that step: an unannotated tool takes the MCP defaults (destructive,
+  open-world), and the review's verdict then depends on the prompt. The seven tools that never
+  change a tracked file are read-only; the other 17 are non-destructive, closed-world local
+  writes. No tool sends anything off the machine and none deletes a record. A test runs the
+  read-only tools on a store where a lazy sync would adopt a moved symbol, and fails if one of
+  them changes a tracked file, so the annotation cannot drift from what the tool does. See the
+  [reference](docs/reference/mcp-tools.md#annotations) and the
+  [Codex page](docs/integrations/codex.md#the-auto-reviewer-and-memory-reads).
+- **The seed tools accept the argument names agents try, and every tool names its parameters in
+  an error.** `get_task_context`, `query_structure` and `query_decisions` accept `paths` (as
+  `files`) and `seeds`; each seed goes to `files` when it looks like a path and to `entities`
+  otherwise. `task` is refused with a line saying there is no free-text query. Any other
+  unknown argument, on any tool, is an error that names it and lists the tool's real parameters;
+  FastMCP's own error named the argument but not the parameters.
+
+### Changed
+
+- **`retrieve_decisions` no longer returns the whole store.** One call returned a full dump of
+  every visible decision: about 143,000 tokens on a store of 260 records, more than a host would
+  show, and in a field report most agents passed `include_superseded: true` and then either
+  printed the dump or filtered it by hand. The call now has two answers.
+  - With no narrowing filter it returns an **overview**: the total, counts by status and kind
+    (superseded and rejected records included, so the counts say that history exists), and the
+    newest records as compact rows (`id`, `kind`, `status`, `title`, `valid_from`).
+  - With a narrowing filter it returns **full records**, gotchas and lessons first and newest
+    first, cut at `limit` (default 25, at most 100) or `budget_chars` (default 24,000, at most
+    60,000), whichever comes first. A `hint` says what cut the list, or why it is empty.
+  - The filters are new arguments, and they combine with AND: `status` and `kind` (a string or a
+    list), `files`, `query` (every word must occur in the record's text) and `ids` (exact record
+    ids, superseded ones too). `include_superseded` keeps its meaning: it widens the overview's
+    `newest` and a filtered call that has no `status`.
+  - `files` are read the way `get_task_context` reads them: a basename, a suffix, a directory or
+    a letter-case slip works. `unresolved_files` lists, for each path nothing could read (at most
+    ten, with `unresolved_omitted` counting the rest), why (`ambiguous`, `directory-too-large`,
+    `not-in-graph` or `no-graph`) and the candidates to pass instead.
+  - **The return type changed from a list to a JSON object, sent once as a single text block
+    with no structured copy**, so `budget_chars` is the real cost on every host. A client that
+    read the list now reads `decisions` of a filtered answer. The proposal policy is unchanged
+    and applies to every shape.
+  - The `check-plan`, `explain-why`, `triage-drift` and `heal-anchors` skills now call it with a
+    filter, and a test fails if a skill calls it without one. See the
+    [reference](docs/reference/mcp-tools.md#retrieve_decisions).
+
+### Fixed
+
+- **A fault converting a reviewed item in `sidegraph-bootstrap` now prints the RESUME line.** The
+  conversion of each reviewed item, and the check that its ref still matches the candidate,
+  ran outside the per-item error handling. A fault there, after an earlier item had been
+  written, left `apply_review` without a report: an `AssertionError` ended the run as a
+  traceback, a `ValueError` was reported as a failure before anything was written, and neither
+  printed `RESUME`, though canonical files were already on disk. The fault now takes the path a
+  write error takes: the run stops, reports `partial-recoverable` with the durable candidates and
+  the failing ref, and prints the resume command. A fault on the first item, before anything is
+  written, now exits 2 with `STORE incomplete`, the failing ref and the resume command, where a
+  `ValueError` used to exit 1 with an `ERROR` line; the terminal shows the failing ref and not the
+  reason.
+- **`sidegraph-import --dry-run` now says what auto-ratification would do.** Both import paths
+  decided auto-ratification only after a real write, so under a non-`manual`
+  `SIDEGRAPH_RATIFY_POLICY` a dry run could not show which records a real run would land
+  accepted without a human: on one fixture it reported 0 where the real run auto-ratified 2. The
+  dry run now runs the same eligibility gate on the record the write would produce and reports
+  the result in a new `would_auto_ratify` field on `ImportReport` and `DocImportReport`, and as
+  `auto_ratify_eligible` on each dry-run item. `auto_ratified` keeps its meaning, transitions
+  that actually happened, so it stays 0 in a dry run.
+  - **Behaviour change:** under a non-`manual` policy the summary line gains `would
+    auto-ratify M` before `(skipped:` and an eligible item line ends with ` [auto]`. Under
+    `manual` both are unchanged. A dry run still never carries the real run's `auto-ratified K`.
+  - The count is eligibility, not a guarantee: a real run's transition can still fail, for
+    example on a race or a refused cascade.
+  - A key repeated within one run no longer counts twice in the dry run. Two rationales with the
+    same title in one file count once. A document ref met more than once (one file named twice, a
+    directory plus a file inside it, or a live and an archived copy that a profile maps to one
+    ref) is classified against the records the earlier copies would have left there, as the real
+    run sees them: an identical repeat is skipped, a differing one supersedes, and a copy after a
+    `rejected` first copy is a fresh write. Two rare shapes can still differ in the
+    `superseded`/`skipped` split, not in the eligibility count where checked: a ref met three
+    times with the first content returning, under an auto policy, and a repeat with no anchor of
+    its own.
+- **`find_entity` no longer calls a dangling record a decision.** Each binding was labelled
+  `fact` if a fact lookup found it and `decision` otherwise, so a binding whose record exists in
+  neither table (a record file removed by hand, or lost in a merge) came back as a decision that
+  `get_decision` could not fetch, and each binding cost a query of its own. The types of all of an
+  entity's bindings now come from one read of the index, and a binding with no record reports
+  `record_type: "unknown"`. The value is additive: a client that handles `decision` and `fact`
+  is unaffected. `get_entity_history` uses the same read and still skips such a binding. See the
+  [reference](docs/reference/mcp-tools.md#find_entity).
+- **A document status like `should not be rejected` no longer lands `rejected`.** The check for
+  a turned-down status saw a negation only as `not` and one space directly before the word, so
+  `should not be rejected`, `not  rejected` (two spaces), `never rejected` and `isn't rejected`
+  all read as rejections, and a false `rejected` lands closed and invisible to retrieval. A
+  negation is now `not`, `never` or a word ending `n't` within the three words before the word in
+  the same clause. A clause ends at `,` `;` `.` `:`, a pipe, a slash, an em or en dash, or a spaced
+  hyphen or `->`, so `not reviewed, rejected`, `Not accepted — rejected` and `Won't do / rejected`
+  still read as rejections, as does `not rejected, rejected`. A conjunction does not end a
+  clause: `Not adopted and rejected` reads as negated, and lands accepted unless `--propose` or
+  a draft marker sends it to the ratification queue. See the
+  [reference](docs/reference/cli.md#sidegraph-import).
+
 ## [0.9.0] — 2026-10-04
 
 ### Added

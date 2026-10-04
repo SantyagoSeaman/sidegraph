@@ -10,12 +10,14 @@ see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2-D4
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
+import fastmcp
 import pytest
 
 from sidegraph import server
@@ -29,6 +31,7 @@ from sidegraph.schema import (
     Descriptor,
     Domain,
     Entity,
+    Fact,
     Provenance,
     Scope,
 )
@@ -303,6 +306,101 @@ def test_a_worktree_that_later_gets_an_identical_graph_of_its_own_syncs_it_norma
     assert server._get_store().get_meta(LAST_SYNCED_KEY) == reader.sync_stamp()
     assert _entity_files(worktree) != before  # the default sync adopted the move
     assert "pkg/m.py" in "".join(_entity_files(worktree).values())
+
+
+# -- a read-only annotation is a promise about tracked files (tool-annotations D2) ----------
+
+
+def _tracked_bytes(checkout: Path) -> dict[str, bytes | None]:
+    """Every tracked file's bytes (``None`` for one deleted from the working tree)."""
+    return {
+        name: (checkout / name).read_bytes() if (checkout / name).exists() else None
+        for name in git(checkout, "ls-files").splitlines()
+    }
+
+
+def test_t2_no_read_only_tool_changes_a_tracked_file(moved_main, monkeypatch):
+    """The honesty guard for ``server._READ_ONLY``: on the fixture where a lazy sync adopts a
+    moved symbol into ``entities/<id>.json``, every tool annotated ``readOnlyHint`` leaves each
+    tracked file as it was. The store holds a fact, a proposed decision and an accepted domain,
+    and each tool must return that data: a tool that never reaches its loops cannot show a sync
+    hidden inside one (a lazy sync in ``_list_domains_impl``'s per-domain loop stayed green on a
+    store with no domain). The control at the end runs a retrieval tool, which does rewrite the
+    file, so the fixture holds the very write the guard is for.
+    see design/superpowers/specs/2026-10-04-tool-annotations-and-argument-names-design.md
+    (D2, T2, A2)
+    """
+    main = moved_main
+    store = serve(monkeypatch, main)  # opens and initialises the store before the snapshot
+    now = datetime.now(UTC)
+    manual = Provenance(source="manual")
+    store.add_fact(
+        Fact(
+            statement="The cache in old.py was measured at 40 ms per lookup.",
+            source="benchmark run",
+            valid_from=now,
+            provenance=manual,
+        )
+    )
+    store.add_decision(
+        Decision(
+            title="m.py should batch its retries",
+            kind=DecisionKind.LESSON,
+            status=DecisionStatus.PROPOSED,
+            context="c",
+            choice="ch",
+            valid_from=now,
+            provenance=manual,
+        )
+    )
+    domain = store.add_domain(
+        Domain(
+            slug="docs",
+            title="Documentation",
+            summary="Everything under docs.",
+            path_prefixes=["docs/"],
+            provenance=manual,
+        )
+    )
+    store.ratify_domains(accept=[domain.domain_id])
+    commit(main, "a fact, a proposal and a domain", {})
+    (entity,) = list(store.iter_concrete_entities())
+    assert porcelain(main) == ""
+    # Typical arguments, and what the answer must hold, for every tool that is read-only and for
+    # the retrieval tool the control runs: a tool annotated read-only later needs a row here.
+    typical: dict[str, tuple[dict, str]] = {
+        "list_facts": ({}, "The cache in old.py was measured"),
+        "find_entity": ({"name": "fn_0()", "file_path": "pkg/old.py"}, entity.entity_id),
+        "get_entity_history": ({"entity_id": entity.entity_id}, "old.py kept a cache"),
+        "list_proposed": ({}, "m.py should batch its retries"),
+        "list_domains": ({}, "Everything under docs."),
+        "list_domain_candidates": ({"min_members": 1}, "pkg"),
+        "verify_store": ({}, '"clean":true'),
+        "get_task_context": ({"files": ["pkg/m.py"]}, "old.py kept a cache"),
+    }
+
+    async def run() -> None:
+        async with fastmcp.Client(server.mcp) as client:
+            read_only = sorted(
+                t.name
+                for t in await client.list_tools()
+                if t.annotations and t.annotations.readOnlyHint
+            )
+            assert read_only, "no tool is annotated read-only: the guard would check nothing"
+            assert set(read_only) <= set(typical), sorted(set(read_only) - set(typical))
+            for name in read_only:
+                arguments, expected = typical[name]
+                before = _tracked_bytes(main)
+                result = await client.call_tool(name, arguments, raise_on_error=False)
+                answer = "".join(getattr(block, "text", "") for block in result.content)
+                assert not result.is_error, (name, answer)
+                assert expected in answer, (name, answer)
+                assert _tracked_bytes(main) == before, name
+                assert porcelain(main) == "", name
+            await client.call_tool("get_task_context", typical["get_task_context"][0])
+            assert ".sidegraph/entities/" in porcelain(main)  # the fixture bites
+
+    asyncio.run(run())
 
 
 # -- what a borrowed graph cannot hold (D3) ----------------------------------------------

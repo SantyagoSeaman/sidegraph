@@ -386,6 +386,7 @@ def test_import_dry_run_writes_nothing(tmp_path):
             "file_path": "exec.py",
             "title": "Retries are idempotent to survive at-least-once delivery",
             "node_id": "rat1",
+            "auto_ratify_eligible": False,
         }
     ]
     assert list(store.iter_decisions()) == []

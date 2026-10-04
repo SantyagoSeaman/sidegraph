@@ -21,9 +21,11 @@ lesson, finding it costs one tool call; not finding it costs re-living it.
 Three shapes of why-question, three entry points:
 
 - **A file or a few files** ("why is this module structured like this") →
-  `query_decisions(files=["src/..."])` — the decisions/mistakes/facts half of
-  `get_task_context`, no structural map. Use `get_task_context(files=[...])` instead when
-  you also need to orient in the area.
+  `get_task_context(files=["src/..."])` — decisions, mistakes and facts, plus a structural
+  map to orient in the area. It reads a loosely spelled path (`./src/x.py`, a basename, a
+  directory) and, when a file has no record of its own, says where the nearest memory is.
+  `query_decisions(files=[...])` returns the same memory without the map, but it matches the
+  path exactly as written and answers `No context found.` for one it cannot place.
 - **A named symbol, class, or doc heading** ("why does `X` do Y") →
   `find_entity(name, file_path=...)` first. A single match returns `entity_id`; then
   `get_entity_history(entity_id)` — every decision **and** fact ever bound to that
@@ -51,9 +53,9 @@ why-question has two layers, and the reader deserves both, clearly separated:
    the alternatives that were *shipped and then reversed*. Both belong in the answer.
 
 When history for an entity comes back empty but the question smells area-level, widen
-once: `retrieve_decisions(include_superseded=True)` lists the whole store (mistakes
-ranked first, superseded/rejected included) — scan titles for the topic before declaring
-the store silent.
+once: `retrieve_decisions(query="<one or two topic words>", include_superseded=True)`
+lists the records on that topic (mistakes ranked first, superseded/rejected included, cut
+at a budget) — read its `hint`, and scan the titles, before declaring the store silent.
 
 ## Answer shape
 

@@ -103,9 +103,11 @@ guide is the checklist for.
 
 ## 2. The automated path: Stop hook → distill → propose → ratify
 
-At the end of a session, the `Stop` hook fires a one-time nudge (see
+At the end of a session, the `Stop` hook fires a nudge (see
 [`reference/hooks.md`](../reference/hooks.md)) asking the agent to review the session for
-anything durable. The agent — not a separate LLM call, the same in-session agent — distills
+anything durable. The first nudge comes once the session looks substantial. A session that
+keeps working is nudged again, but only after at least 30 minutes and 10 new commits since the
+last nudge ([re-arm](../reference/hooks.md#re-arm-after-more-work)). The agent — not a separate LLM call, the same in-session agent — distills
 what happened into one or more **What / Why / Where / Learned** drafts and calls
 `propose_decisions(drafts=[...])`.
 
@@ -134,9 +136,9 @@ The write pipeline (`src/sidegraph/capture.py`) is deterministic — no LLM key 
 4. **Anchor** best-effort via the same multi-anchor resolution as `add_decision` (orphaned
    leaf if no graph is present).
 
-Proposed decisions are **not silently invisible**: they do surface in `get_task_context` and
-`retrieve_decisions`, but every rendered line is tagged `[unratified]` so you always know a
-draft hasn't been reviewed yet (see
+Proposed decisions are **not silently invisible**: they do surface in `get_task_context`,
+where every rendered line is tagged `[unratified]`, and in `retrieve_decisions`, where every
+record carries its `status`, so you always know a draft hasn't been reviewed yet (see
 [`guides/retrieval-in-sessions.md`](retrieval-in-sessions.md)). Ratification is what removes
 that tag, not what makes the record appear.
 
@@ -148,8 +150,8 @@ Ratify without leaving the session. `SessionStart` tells you when something is w
 is two MCP tools: `list_proposed()` (human-readable render of everything pending) and
 `ratify(accept=[...], drop=[...])` — the unified tool that ratifies decisions *and* domains
 through one gate (see [mind model](../concepts/mind-model.md#domain-lifecycle)).
-`ratify_decisions(accept=[...], drop=[...])` still works but is a **deprecated alias**, kept
-for one release for existing callers only — prefer `ratify` in new code.
+`ratify_decisions(accept=[...], drop=[...])` still works but is a **deprecated alias** (since
+0.1.0, still kept) for existing callers only — prefer `ratify` in new code.
 
 - **Accept** flips `proposed → accepted`. The record now reads untagged everywhere.
 - **Drop** is append-only, like everything else in the store: it sets `valid_to` and flips

@@ -304,7 +304,8 @@ line.
 
 ## The launch-commit file
 
-The plugin's `Stop` and `PreToolUse` hooks (and Codex's `Stop`) launch from a commit, not from
+The plugin's `Stop`, `PreToolUse` and `SubagentStart` hooks (and Codex's `Stop` and
+`SubagentStart`) launch from a commit, not from
 `@main`, which tracks a mutable branch (see
 [Mutable development references](../getting-started/installation.md#mutable-development-references)):
 `uv` re-resolves a branch reference on every call and serves a commit from its cache.
@@ -320,7 +321,7 @@ The plugin's `Stop` and `PreToolUse` hooks (and Codex's `Stop`) launch from a co
   of 40 lowercase hex characters (one trailing newline is accepted), so a damaged one is
   ignored.
 - **A slow hook call.** A value you edited by hand that looks like a commit but is not one makes
-  every `Stop` and `PreToolUse` call wait about six seconds for `uv` to fail before the hook
+  every `Stop`, `PreToolUse` and `SubagentStart` call wait about six seconds for `uv` to fail before the hook
   answers `{}`. Delete the file, or start a session so `SessionStart` overwrites it.
 - **After `uv cache clean`.** The cached commit is gone: the next call fetches it again, online.
   Offline it fails into the guard and answers `{}`, which is also what an offline `@main` call

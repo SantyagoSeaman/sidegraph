@@ -95,8 +95,11 @@ gives each subagent Codex starts a short brief, because a subagent gets no `Sess
 context: the `get_task_context(files=[…])` call to make, and one sentence on how many records
 memory holds and in how many files (see the
 [hooks reference](../reference/hooks.md#sidegraph-subagent-start); `SIDEGRAPH_SUBAGENT_BRIEF=off`
-disables it). All three degrade silently on any failure — a missing store or graph never
-blocks the session.
+disables it). `sidegraph-stop` and `sidegraph-subagent-start` degrade silently on any failure.
+`sidegraph-session-start` does too, with one exception: a store that cannot be opened. It then
+sends a notice (a `systemMessage` that names the cause and the fix) and tells the model that
+memory tools will fail, because a broken store should not go unseen. A missing store is created
+by `SessionStart`, and a missing graph only shortens the map; neither blocks the session.
 
 Each command ends with a guard, `|| printf '{}\n'` on `Stop` and `SubagentStart` and, on `SessionStart`,
 `|| printf '%s\n' '{"systemMessage":"…"}'`. It covers the part the Python entry points cannot:
@@ -150,6 +153,24 @@ home has not trusted the project. Do not add `--dangerously-bypass-hook-trust` t
 still injects the memory map. Name the model with `-m`, since the clean home carries no
 `config.toml`.
 
+## The auto-reviewer and memory reads
+
+Under `approval_policy = "on-request"` with `approvals_reviewer = "auto_review"`, Codex's
+auto-reviewer reviews an MCP tool call before it runs, unless the tool is annotated read-only,
+or non-destructive and closed-world. Sidegraph's tools carry those annotations (see
+[Annotations](../reference/mcp-tools.md#annotations)), so a memory read passes without a review.
+Before 0.10.0 the tools carried none, and a session whose prompt forbade network calls could see
+its memory reads denied as unacceptable risk, with the agent carrying on without memory for that
+step. If a session on an older install shows that denial, upgrade the package.
+
+A stricter per-server setting changes this. With `default_tools_approval_mode = "writes"` on
+the Sidegraph server, only the tools marked read-only skip the review. The retrieval tools
+(`get_task_context`, `query_decisions`, `query_structure`, `drill_down`, `retrieve_decisions`)
+are not marked read-only, because their lazy sync can update a tracked entity file when a symbol
+moved, so they still go to the reviewer. In our test run it judged a `get_task_context` call a
+local read and approved it. We did not run the other four, and under that setting the verdict is
+a judgment call, not a skip.
+
 ## AGENTS.md pattern
 
 Codex reads `AGENTS.md` as project instructions, the same role `CLAUDE.md` plays for Claude
@@ -171,11 +192,13 @@ in context while injected `additionalContext` is session-scoped.
 
 ## Plugin install path
 
-Sidegraph also ships a Codex plugin, the same one-line install as the Claude Code plugin:
+Sidegraph also ships a Codex plugin, from the same repository as the Claude Code plugin. Install
+it from a terminal with Codex's own commands (they are not slash commands typed in a session, and
+the Claude Code `/plugin` syntax does not apply):
 
-```
-/plugin marketplace add SantyagoSeaman/sidegraph
-/plugin install sidegraph@sidegraph
+```bash
+codex plugin marketplace add SantyagoSeaman/sidegraph
+codex plugin add sidegraph@sidegraph
 ```
 
 1. Trust the hooks: start an interactive `codex` session in the repo. Codex detects the new
@@ -223,7 +246,8 @@ anything else, instead of assuming an ambient project directory. That wrapper, n
 plugin-provided variable, is what keeps `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` pointed at the right
 repo.
 
-What was verified live (codex-cli 0.154.0, a throwaway `CODEX_HOME`): `codex plugin
+What was verified live on codex-cli 0.154.0, a throwaway `CODEX_HOME`, when the plugin's hooks
+were `SessionStart` and `Stop`: `codex plugin
 marketplace add SantyagoSeaman/sidegraph` fetches the published repository by the
 `owner/repo` shorthand, parses `.agents/plugins/marketplace.json` and resolves the plugin at
 `./plugin/sidegraph`. `codex plugin add sidegraph@sidegraph` installs it, copying
@@ -232,24 +256,26 @@ marketplace add SantyagoSeaman/sidegraph` fetches the published repository by th
 `sidegraph` server registered with the exact command from `codex/mcp.json`, and a
 non-interactive `codex exec` session with that server registered called the Sidegraph tools
 (`retrieve_decisions`, `list_proposed`, `query_decisions`, `find_entity`) and got real
-records back. `SessionStart` and `Stop` did not fire in that session, and that is expected,
-not a bug. Codex gates hooks with two independent checks. Project trust (`trust_level` in
+records back. The hooks did not fire in that session, and that is expected, not a bug. Codex
+gates hooks with two independent checks. Project trust (`trust_level` in
 `config.toml`) is one. Hook trust is separate and hash-based: Codex records trust against a
 hook definition's current hash and refuses to run a hook it has not seen approved at that
 hash. Installing or enabling a plugin does not grant hook trust. Per the [Codex hooks
 docs](https://learn.chatgpt.com/codex/hooks), Codex skips plugin-bundled hooks until the user
 reviews and trusts the current hook definition. Observed on a real machine running codex-cli
 0.154.0, not documented as a guarantee: after `codex plugin add sidegraph@sidegraph`, the
-first interactive `codex` session detects the three new hook definitions and prompts in the
-terminal to trust them, and answering yes completes the approval. No `/hooks` visit is needed
-for that normal path. A non-interactive `codex exec` session never shows the prompt at all,
+first interactive `codex` session detected the new hook definitions and prompted in the
+terminal to trust them, and answering yes completed the approval. No `/hooks` visit was needed
+for that normal path. The plugin now registers three hooks, `SessionStart`, `Stop` and
+`SubagentStart`, and trust is per definition, so a hook added by a later release is a new
+definition to approve; that was not re-observed on a later Codex. A non-interactive `codex exec` session never shows the prompt at all,
 which is exactly why automation needs the bypass below. `/hooks` is the surface for reviewing
 what is trusted and for re-approving after a hook definition changes, since trust is recorded
 per-hash. There is no config-file way to pre-approve it. The only bypass is `codex exec
 --dangerously-bypass-hook-trust`, which the docs themselves flag as dangerous and intended for
-automation that already vets its hook sources, not as the normal path. So after `/plugin
-install sidegraph@sidegraph`, the MCP server works immediately but `SessionStart` and `Stop`
-stay silent until that one-time approval. What was verified without
+automation that already vets its hook sources, not as the normal path. So after `codex plugin
+add sidegraph@sidegraph`, the MCP server works immediately but `SessionStart`, `Stop` and
+`SubagentStart` stay silent until that approval. What was verified without
 a live, trusted Codex session: the hook entry points themselves honor the Codex JSON contract.
 Fed Codex-shaped payloads on stdin, `sidegraph-session-start` wrote the session telemetry row
 and returned `hookSpecificOutput.additionalContext`; `sidegraph-stop`, given a real rollout

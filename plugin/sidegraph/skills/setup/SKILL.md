@@ -43,16 +43,21 @@ uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-in
 Creates `.sidegraph/` — the repo-committed, file-per-record sidecar, plus its own
 `.gitignore` keeping the derived `index.db` out of git — and reports the graph check.
 Expected: `created store: .sidegraph` (or `already initialized: .sidegraph exists.` —
-fine) and `found graph: graphify-out/graph.json`. `missing graph:` means step 2 didn't
-run here. Commit `.sidegraph/` with the repo — the store travels with the code.
+fine) and `found graph:` followed by the absolute path of `graphify-out/graph.json`.
+`missing graph:` means step 2 didn't run here. Run from a session it is non-interactive, so it
+does not ask whether to install the git hook that keeps the graph fresh; it prints how to
+(`sidegraph-init --hooks`, or `--no-hooks` to stop the reminder). Ask the human, and do not
+install it unasked (see [the Graphify
+integration](../../../../docs/integrations/graphify.md#keeping-the-graph-fresh-git-hooks)).
+Commit `.sidegraph/` with the repo — the store travels with the code.
 
 ## 4. Verify the wiring
 
 Call `list_domains()` — the cheapest read-only MCP tool. Any well-formed answer (an empty
 `[]` on a fresh store is the expected one) proves the server is alive against this repo's
 store. The `SessionStart` memory map appears at the start of the **next** session — a stub
-on an empty store is expected, not broken. For the full seven-case proof (durability,
-mistakes-first, refactor survival, ...), point the human at
+on an empty store is expected, not broken. For the full four-case proof (host wiring, durable
+capture and retrieval, ratification, sync), point the human at
 [verifying your setup](../../../../docs/guides/verifying-your-setup.md).
 
 Then run `sidegraph-doctor --json` (a pure read; with no command on `PATH`, run it the way step 3
@@ -97,8 +102,18 @@ In order of payoff:
 
 ## Reset / cleanup
 
-Everything Sidegraph owns in the repo is `.sidegraph/`; everything Graphify owns is
-`graphify-out/`. Delete both to start over — source files are never touched.
+The store is `.sidegraph/`; everything Graphify owns is `graphify-out/`. Delete both to
+start over. Source files are never touched. Sidegraph can also leave a few things outside
+those two directories:
+
+- the graph refresh hook, if installed (`sidegraph-init --hooks`, or a yes to its question):
+  a helper and three hook blocks under `.git/hooks/`. Run `sidegraph-init --remove-hooks`
+  first, because deleting the directories leaves them behind.
+- the git config key `sidegraph.graphRefresh`, recorded by `sidegraph-init --no-hooks`.
+  `--remove-hooks` clears it.
+- `SIDEGRAPH_RATIFY_POLICY` in `.claude/settings.json`, if `sidegraph-init` wrote it.
+- `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`, written by the SessionStart hook
+  and shared by every project on the machine.
 
 ## See also
 

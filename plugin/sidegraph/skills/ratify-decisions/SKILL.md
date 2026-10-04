@@ -135,8 +135,12 @@ record that was never valid in the first place.
   Sidegraph checkout, run it as `uvx --from
   git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-ratify`. Point the
   human there when they'd rather review outside the session.
-- Proposed records are never invisible while they wait — they surface in retrieval tagged
-  `[unratified]`. Ratification removes the tag; it doesn't make the record appear.
+- A proposed record is not hidden while it waits: by default it surfaces in retrieval tagged
+  `[unratified]`, and ratification removes the tag without making the record appear. Two
+  settings change that. A proposal older than the surfacing window (30 days,
+  `SIDEGRAPH_PROPOSAL_WINDOW_DAYS`) stops surfacing, and `SIDEGRAPH_UNRATIFIED=off` stops all of
+  them. `list_proposed` and `sidegraph-ratify` still list every pending record, so review the
+  queue with those, never with `retrieve_decisions`.
 
 ## See also
 

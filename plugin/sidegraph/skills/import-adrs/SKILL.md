@@ -48,12 +48,20 @@ sidegraph-import --docs docs/adr --dry-run     # docs mode
 sidegraph-import --dry-run                      # rationale mode
 ```
 
-Costs nothing, writes nothing, and shows exactly what a real run would do. Read the
-report closely:
+Costs nothing, writes no records, and shows exactly what a real run would do. It does open
+the store, so when none existed yet a fresh one's own files appear (`format`, `.gitignore`,
+`stamping_live_since`, `index.db`), with no record in it. Read the report closely:
 
 - `would import N decision(s), supersede M (skipped: A existing, B unanchorable, C
   not-decision-shaped, D unparseable, E superseded-frontmatter, F outside-profile)` — plus
   per-file breakdown and per-anchor `anchor skipped: <name> (<reason>)` lines.
+- **Under a non-`manual` `SIDEGRAPH_RATIFY_POLICY`**, the summary gains `, would auto-ratify M`
+  (`would import N decision(s), supersede M, would auto-ratify K (skipped: …)`), and each record
+  a real run would ratify at write time is marked `[auto]` after its title. A dry run never
+  ratifies anything itself.
+- **`N would land rejected (source status: rejected)`** — a doc whose own status reads as
+  turned down lands `rejected` regardless of `--propose`, so it is kept as "tried before,
+  abandoned because…" and never enters the ratification queue.
 - **Lots of `unanchorable` outside a git work tree?** That's the wrong-cwd trap from
   preflight — the command itself warns when ≥ half of anchor-attempted docs miss. Re-run
   from the project root.

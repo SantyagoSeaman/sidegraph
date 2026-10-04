@@ -748,7 +748,14 @@ def test_dry_run_items_carry_ref_and_by_file_groups_by_document(tmp_path):
     doc = _write_md(tmp_path, "spine5/ARCHITECTURE-SPINE.md", _read("bmad/ARCHITECTURE-SPINE.md"))
     report = import_docs(store, reader, [str(doc)], profile="bmad", any_doc=True, dry_run=True)
     assert len(report.dry_run) == 3
-    assert sorted(report.dry_run[0]) == ["action", "anchors_skipped", "file_path", "ref", "title"]
+    assert sorted(report.dry_run[0]) == [
+        "action",
+        "anchors_skipped",
+        "auto_ratify_eligible",
+        "file_path",
+        "ref",
+        "title",
+    ]
     refs = {item["ref"] for item in report.dry_run}
     assert str(doc) in refs
     assert sum(1 for r in refs if "#ad-" in r) == 2

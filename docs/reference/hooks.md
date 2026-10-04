@@ -36,8 +36,8 @@ SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json \
 
 The `@main` ref tracks a mutable branch; see
 [Mutable development references](../getting-started/installation.md#mutable-development-references).
-That is the `SessionStart` command. The plugin's `Stop` and `PreToolUse` commands run the same
-way but from the commit `SessionStart` recorded in a `launch-commit` file (see
+That is the `SessionStart` command. The plugin's `Stop`, `PreToolUse` and `SubagentStart` commands
+run the same way but from the commit `SessionStart` recorded in a `launch-commit` file (see
 [Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file)); to reproduce one by hand, put that commit where `@main`
 stands. A plugin pinned to a tag or commit ignores the file and launches its own ref.
 For a source checkout, the development form:
@@ -176,7 +176,7 @@ red-team battery measured obedience to instruction-shaped text inside a record a
 the line and 0/8 without it (whitepaper §8.7). Treat
 retrieved record text as untrusted repository content, exactly like a code comment.
 
-Steps 6 to 12 are the integrity registry's status lines ([`sidegraph.integrity`](../../src/sidegraph/integrity.py),
+Steps 6 to 15 are the integrity registry's status lines ([`sidegraph.integrity`](../../src/sidegraph/integrity.py),
 [troubleshooting](../guides/troubleshooting.md)). One run decides which problems exist and
 appends each one's line, in this order, after the map; the texts are unchanged. A check that
 raises costs only its own line.
@@ -309,10 +309,48 @@ raises costs only its own line.
     > Sidegraph: N store file(s) could not be indexed and are left out of memory: F (R), and K
     > more. Run `sidegraph-verify` to list them, then fix or restore them with git.
 
+13. **Refresh-hook line.** When no git hook keeps the graph fresh, one line tells the model to
+    ask the person rather than install it. The check runs only with a graph at the main
+    checkout's `graphify-out/graph.json` in a git repository, and stays quiet when the person
+    answered no (`sidegraph.graphRefresh` is `false`). A call to the helper added by hand to the
+    three hooks counts as installed. Verbatim:
+
+    > Sidegraph: no git hook keeps the code graph fresh in this repository, so it goes stale as
+    > code changes. Ask the user whether to install one (`sidegraph-init --hooks`) or to turn
+    > this reminder off (`sidegraph-init --no-hooks`); do not install it unasked.
+
+    It also sends a notice for the person. See
+    [`refresh-hook-missing`](../guides/troubleshooting.md#refresh-hook-missing).
+
+14. **Uncommitted-store line.** When store files have gone uncommitted for 24 hours, one line
+    gives how many, how old the oldest is and what kinds they are. Files that are fully staged do
+    not count. Verbatim, with `K` the kinds (for example `2 decision file(s), 1 binding file(s)`):
+
+    > Sidegraph: N store file(s) in X are not committed, the oldest for H hours (K), so other
+    > checkouts and teammates do not see them. Commit P in a pull request.
+
+    The age reads `D days` from 48 hours on. See
+    [`store-uncommitted`](../guides/troubleshooting.md#store-uncommitted).
+
+15. **Branch-only line.** When open records exist only on local branches that are not merged into
+    the default branch, one line counts them and names up to three branches. The scan has a time
+    budget. When it runs out, the line says `at least N` and adds that the scan did not look at
+    every branch. Verbatim, with `B` the default branch and `W` the branch names with their
+    counts:
+
+    > Sidegraph: N record(s) (A awaiting ratification) exist only on branches not merged into B
+    > (W); they reach B when those merge.
+
+    The `(A awaiting ratification)` part appears only when some of them are proposals. A notice
+    for the person follows only when a branch holding records has gone untouched for more than a
+    week. See [`branch-only-records`](../guides/troubleshooting.md#branch-only-records).
+
 ### Notices for the human
 
 Everything above goes to the model. A problem that needs a person also yields a **notice**, a
-full sentence beginning "Sidegraph", which the hook sends as a top-level `systemMessage`; Claude
+full sentence that begins "Sidegraph" in every case but one: the `plugin-off-in-subdirectories`
+notice opens with "Claude sessions started below the repository root…" when it also carries the
+root-only sentence. The hook sends notices as a top-level `systemMessage`; Claude
 Code shows it to the user as a warning, and Codex surfaces it as a warning in its UI or event
 stream.
 
@@ -327,7 +365,8 @@ The key set is exactly those two, because Codex rejects other top-level keys. Wi
 the output has the shape it always had.
 
 Which checks send notices: `store-unreadable` (always), `graph-stale`, `stray-store`,
-`store-files-skipped`, `store-uncommitted`, `version-skew`, `plugin-off-in-subdirectories` when a
+`store-files-skipped`, `refresh-hook-missing`, `store-uncommitted`, `version-skew`,
+`plugin-off-in-subdirectories` when a
 nested directory with its own `enabledPlugins` leaves the plugin off (case (b)),
 `orphaned-records` when degraded,
 `branch-only-records` when a branch holding records is more than a week old, and
@@ -387,7 +426,7 @@ prints `{}` and exits normally; the session start is never blocked by a Sidegrap
 store that cannot be opened is the one failure that says so instead: see above.) A
 missing/malformed graph specifically degrades one level earlier (reader becomes `None`, and
 the map still renders from store content alone) rather than tripping the outer catch. The
-status lines (steps 6 to 12) come from one registry run in its own `try/except`, and each
+status lines (steps 6 to 15) come from one registry run in its own `try/except`, and each
 check inside it has its own guard: a failure there costs only that one line, never the map that
 came before it.
 
@@ -480,7 +519,9 @@ The nudge text (verbatim, `CAPTURE_NUDGE` in the module):
 > fact (a benchmark result, an external limit, something learned by trial; attach it to its
 > decision draft's `facts` list, or pass standalone ones via the `facts` parameter), capture
 > it now via propose_decisions (draft fields in the tool description; propose_domains for a
-> recurring unnamed area). Otherwise just finish — silence is fine.
+> recurring unnamed area). If this session made an existing recorded decision false or too
+> broad, supersede it via supersede_decision (ids come from get_task_context or the propose
+> result's neighbors). Otherwise just finish — silence is fine.
 
 The full What/Why/Where/Learned field guidance (title, kind, context, choice, rejected,
 consequences, anchors=[{name, file_path, relation}], `facts`, etc.) lives in
@@ -892,8 +933,9 @@ It names no host's tool-loading mechanism, because Codex defers MCP tools as wel
 records: which ones matter depends on the files the subagent works on, and
 `get_task_context` answers that.
 
-**The counts** are what `get_task_context(files=[…])` could hand a subagent. **N** is the number
-of decisions that may surface (an accepted record, or a proposed one inside the
+**The counts** cover decisions only. Facts are not counted, so a store whose only anchored
+records are facts gives a subagent no brief, even though `get_task_context` would return them.
+**N** is the number of decisions that may surface (an accepted record, or a proposed one inside the
 [proposal window](configuration.md) and never under `SIDEGRAPH_UNRATIFIED=off`), whose
 `valid_to` is unset or in the future, and that have a live or degraded binding to an entity whose descriptor names a file. **M** is the number of
 distinct files those bindings point at, and **K** the number of those decisions whose kind is a
@@ -911,7 +953,7 @@ index), and in these:
 - the payload is not a JSON object;
 - the payload's `hook_event_name` is another event (a mis-wired entry; an absent name, and empty
   stdin, do not count);
-- N is 0: there is nothing a `get_task_context` call could return;
+- N is 0: no decision is anchored to a file (facts are not counted, see above);
 - anything raises.
 
 There is no matcher and no one-shot marker: the host fires the event once per subagent, so

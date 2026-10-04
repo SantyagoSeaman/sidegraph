@@ -15,7 +15,8 @@ whether the store has any accepted domains yet:
 - **`render_toc(cache)`** — the real, domain-named table of contents (activated the moment the
   first domain is ratified — no sync required, see [below](#when-the-toc-goes-live)): one line
   per accepted domain (title, one-line summary truncated to 100 characters, mistake count,
-  subdomain count when non-zero), then initiatives, then global mistakes. This is what "the
+  subdomain count when non-zero), then initiatives, then global mistakes, then any proposed
+  global mistakes under `## Unratified proposals`. This is what "the
   mind model comes alive" means in practice. The per-domain mistake count is what
   [`drill_down`](#drill_downdomain_slug--the-axis-1-operation) would serve for that domain:
   the accepted `gotcha`/`lesson`/`constraint` decisions in the union of those tagged to the
@@ -25,8 +26,12 @@ whether the store has any accepted domains yet:
   (the ratify and capture paths) leaves out the document branch until the next sync pass that
   has one.
 - **`top_tier_map(store, reader)`** — the legacy, nameless fallback: top communities by member
-  count (labeled only by god-node name), initiatives, global mistakes. Runs on demand (no
-  cache) whenever the store has zero accepted domains — a fresh repo, or one that hasn't
+  count (labeled only by god-node name), initiatives, global mistakes, then up to 10 other
+  accepted decisions under `## Recorded decisions`, up to 10 accepted facts under
+  `## Known facts`, and the proposals inside the surfacing window under
+  `## Unratified proposals`. The last three are what keep a store that has recorded its first
+  decisions and named no domain yet from showing an agent only engine communities. Runs on
+  demand (no cache) whenever the store has zero accepted domains — a fresh repo, or one that hasn't
   bootstrapped/ratified any domains yet, sees exactly the same output as before this layer
   existed.
 
@@ -38,8 +43,14 @@ covers every search surface, not just `Read`/`Grep`: *"When you need to find or 
 code in this project, call `get_task_context(files=[…])` with repo-relative paths before any
 grep or file search — decisions, gotchas and a domain map are indexed here. Before a
 non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
-listed only by name, load it first."* Both degrade gracefully — an empty
-store still gets the instruction plus just the header. The `SessionStart` hook itself never
+listed only by name, load it first."* A `Sidegraph X.Y.Z` line follows it, so a session
+that launched an old install says so in its own context. Both degrade gracefully — an empty
+store still gets the instruction, the version line and the header. After the map the hook
+appends the integrity checks' status lines (records awaiting ratification, code drift, a stale
+or missing graph, uncommitted store files and the rest), and sends a notice to the person for
+the problems that need one; the texts and the order are in the
+[hooks reference](../reference/hooks.md#sidegraph-session-start) and
+[troubleshooting](../guides/troubleshooting.md). The `SessionStart` hook itself never
 blocks startup: any failure, or a cache it can't parse, falls back to `top_tier_map` rather
 than crashing; any failure in *that* prints `{}` and exits 0.
 
@@ -105,7 +116,8 @@ path with a stray `./`, a wrong prefix or a bare file name, a directory, and a `
 with no file. Every rewrite is a guess and is named as one in the reply, the seeds that resolved
 as written come first, and a guess that could mean several things is listed and never read (see
 [`get_task_context`](../reference/mcp-tools.md#seeds-are-read-tolerantly)). The rule is still
-exact matching, never similarity.
+exact matching, never similarity. `query_structure` and `query_decisions` have no such ladder:
+they take a seed exactly as written, so a loosely spelled path finds nothing there.
 
 A seed reaches the store's entities two ways, and both count: a named seed that matches a
 stored anchor name is that entity directly (whatever the graph calls the node, so a stored
@@ -297,9 +309,9 @@ and the old truncation behavior is unchanged, byte-for-byte.
 `query_structure(seeds, budget_chars)` and `query_decisions(seeds, budget_chars)` are
 `get_task_context` split down the middle — the structural-map half and the decision-memory half
 (mistakes, decisions, facts, related), exposed as their own MCP tools for a cheap follow-up once the
-caller already has one half and just needs the other. Both reuse the exact same seed-resolution
-and ranking code as `get_task_context` — they're thinner call surfaces, not a different
-algorithm. `query_structure` needs a reader (no graph, no structural map — it says so rather
+caller already has one half and just needs the other. Both reuse the same seed-resolution
+and ranking code as `get_task_context`, but not its [tolerant seed reading](#seeds): they match
+seeds exactly as written. They're thinner call surfaces, not a different algorithm. `query_structure` needs a reader (no graph, no structural map — it says so rather
 than crashing); `query_decisions` degrades like `get_task_context` always has: named-seed
 resolution needs a reader, but `scope: global` decisions still surface without one.
 
@@ -352,8 +364,35 @@ not a normalized repo-relative path to a file (check it). In a linked worktree t
 main checkout's graph, a file that exists only on the branch gets one sentence saying the graph
 does not hold it, and the rebuild advice for any other file names the main checkout. With no graph
 at all and at least one seed, a `## No code graph` block names the path looked at and says to build
-it (or, when the graph is there and cannot be read, that it is not readable). `render()` itself
-does not produce either block.
+it (or, when the graph is there and cannot be read, that it is not readable). A file seed with
+no current record of its own, and anchored files near it, gets a `## Nearest anchored` sentence
+that names those files (under `## Why this is empty` when the answer is empty). When the answer
+holds no decision memory at all, the records of the named files follow under
+`## Nearest anchored records (not anchored to your files)`; see
+[the nearest anchored records](../reference/mcp-tools.md#the-nearest-anchored-records).
+`render()` itself produces none of these blocks.
+
+## Records that arrive without a query
+
+An agent does not always call `get_task_context`, and a subagent starts without the session's
+context. So the read path has three more channels, all wired as hooks and all reading the
+store's index directly (see [hooks](../reference/hooks.md)):
+
+- **At the point of reading.** When a `Read`, `Edit`, `Write` or `Grep` call, or a Bash `sed`,
+  `grep`, `rg` or `cat` line, names a file that decisions are anchored to, the `PreToolUse` hook
+  hands the agent the top decisions for that file in the same tool call, mistakes first. Each file
+  is delivered once per agent. `SIDEGRAPH_GREP_NUDGE=off` stops it.
+- **In a subagent's brief.** On an `Agent` call, the hook reads the files the brief names, and
+  the files named in a plan or notes document it names, and appends the decisions anchored to them
+  to the brief. The subagent sees the block in its first message; the parent's transcript keeps
+  the prompt it wrote. `SIDEGRAPH_AGENT_BRIEF=off` stops it.
+- **At the start of a subagent.** The `SubagentStart` hook tells the new subagent that decision
+  memory exists, how to ask it, and how many decisions, files and mistakes it holds. It carries no
+  records. `SIDEGRAPH_SUBAGENT_BRIEF=off` stops it.
+
+The first two deliver decisions only: their index reader has no fact query, so facts reach an
+agent through `get_task_context`. The first two are Claude Code only. `SubagentStart` runs on Claude Code and on Codex. The day to
+day view is in [retrieval in sessions](../guides/retrieval-in-sessions.md#memory-without-asking).
 
 ## See also
 

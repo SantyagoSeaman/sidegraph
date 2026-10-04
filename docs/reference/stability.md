@@ -41,7 +41,7 @@ changes it, we follow the host; that is the point of keeping the host seam thin.
 | **Flow profiles** — the six names and their ingest globs | `spec-kit`'s glob reads `specs/*/plan.md`, while that flow writes its rejected alternatives to `research.md`, which nothing reads. Fixing that changes a glob. |
 | **`doctor` finding codes** | Advisory lint; the set grows as checks are added. Guarded against the docs, not frozen. |
 | **Integrity check ids and severities** — `store-unreadable`, `graph-stale`, `orphaned-records` and the rest of the [troubleshooting](../guides/troubleshooting.md) table, as they appear in `sidegraph-stats --json`'s `health[].check` and in the `integrity_notice:` meta rows | Beside the doctor codes, for the same reason: the set grows as checks are added (the host-wiring checks `version-skew` and `plugin-off-in-subdirectories` are the latest), and a severity or a threshold (such as the age that makes orphaned records degraded) may move once it is measured. |
-| **Auto-ratification policy** — `SIDEGRAPH_RATIFY_POLICY`'s `auto-low-risk`/`auto-all` values and eligibility gates, the `, auto-ratified N` CLI summary segment, and `sidegraph-doctor`'s `auto share`/`auto supersede rate` lines | Eligibility and reporting may tighten. `manual` remains the committed default. |
+| **Auto-ratification policy** — `SIDEGRAPH_RATIFY_POLICY`'s `auto-low-risk`/`auto-all` values and eligibility gates, the `, auto-ratified N` CLI summary segment (and the dry run's `, would auto-ratify M` and `[auto]` marker), and `sidegraph-doctor`'s `auto share`/`auto supersede rate` lines | Eligibility and reporting may tighten. `manual` remains the committed default. |
 
 ### Not a contract
 

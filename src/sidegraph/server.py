@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import posixpath
+import re
 import sys
 import threading
 from collections.abc import Callable
@@ -25,6 +26,7 @@ from typing import Literal, cast, get_args
 import anyio.to_thread
 import mcp.types as mt
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 from pydantic import ValidationError
@@ -73,8 +75,10 @@ from .retrieval import (
     RetrievalBudget,
     Seed,
     TaskContext,
+    _entities_by_node,
     build_toc,
     proposal_surfaces,
+    resolve_seeds,
 )
 from .retrieval import drill_down as _drill_down
 from .retrieval import get_task_context as _retrieve
@@ -111,6 +115,20 @@ def _server_version() -> str:
 
 
 mcp = FastMCP("sidegraph", version=_server_version())
+
+# What every tool tells a host about itself. A host with an auto-reviewer (Codex) reviews an MCP
+# call unless the tool is read-only, or non-destructive and closed-world: an unannotated tool
+# takes the MCP defaults (destructive, open-world) and has had memory reads denied. No tool
+# sends anything off the machine (``openWorldHint`` false) and none deletes a record
+# (``destructiveHint`` false: the store is append-only, a write adds a record or closes one with
+# ``valid_to``). ``readOnlyHint`` is true only for a tool that never changes a tracked file:
+# a write to ``.sidegraph/index.db`` (derived index, statistics, ledgers; gitignored, never sent)
+# and the first open of a store do not count. The tools that run the lazy sync
+# (``_synced_reader``) are not read-only: its moved rung can adopt a moved symbol into a tracked
+# entity file. ``tests/test_server_borrowed_graph.py::test_t2_*`` holds the read-only set to it.
+# see design/superpowers/specs/2026-10-04-tool-annotations-and-argument-names-design.md (D1, D2)
+_READ_ONLY = mt.ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
+_LOCAL_WRITE = mt.ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
 
 # One process-wide store, created LAZILY on first use -- never as a side effect of merely
 # importing this module. A bare eager `_store = Store(...)` at import time used to
@@ -197,6 +215,142 @@ class _RefreshStore(Middleware):
 
 
 mcp.add_middleware(_RefreshStore())
+
+
+# The tools that take seeds (``files`` / ``entities``): the only ones that also accept
+# ``paths`` and ``seeds``. Broader aliasing would hide a real mistake on a tool that has no
+# such parameter.
+_SEED_TOOLS = frozenset({"get_task_context", "query_decisions", "query_structure"})
+# The extensions that make a seed without a ``/`` a file path. A list, not "any short suffix":
+# ``Store.close`` and ``View.body`` end in what looks like a suffix and are symbols. Lowercase;
+# a seed's extension is lowercased before the lookup. Single letters that are also common member
+# names (``m``, ``r``, ``d``) are left out.
+_FILE_EXTENSIONS = frozenset(
+    """
+    py pyi pyx ipynb js jsx mjs cjs ts tsx vue svelte java kt kts scala groovy gradle swift go rs
+    rb php cs c h cc cpp cxx hh hpp mm dart lua pl ex exs erl hs ml clj zig nim jl sql sh bash zsh
+    ps1 bat proto graphql tf cmake mk
+    json jsonc yaml yml toml ini cfg conf env properties xml plist lock csv tsv
+    md mdx rst adoc txt tex html htm css scss sass less svg pdf log
+    """.split()  # noqa: SIM905 -- a word list reads better than 100 quoted strings
+)
+_NO_FREE_TEXT_QUERY = (
+    "There is no free-text query: pass files or entities. intent is only a label for statistics."
+)
+
+
+def _seed_strings(name: str, value: object) -> list[str]:
+    """The strings in a ``paths`` / ``seeds`` argument: a list of them, or one bare string."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    raise ToolError(f"`{name}` must be a list of strings, or one string.")
+
+
+def _looks_like_a_path(seed: str) -> bool:
+    """A seed with no whitespace that holds a ``/``, or ends in a known file extension
+    (:data:`_FILE_EXTENSIONS`), is a file path; a symbol (``RetryPolicy``, ``Store.close``), an
+    issue id (``ABC-42``) or free text is not.
+    see design/superpowers/specs/2026-10-04-tool-annotations-and-argument-names-design.md (D3, A1)
+    """
+    if re.search(r"\s", seed) is not None:
+        return False
+    if "/" in seed:
+        return True
+    _, dot, extension = seed.rpartition(".")
+    return bool(dot) and extension.lower() in _FILE_EXTENSIONS
+
+
+def _extend(args: dict, key: str, routed: list) -> None:
+    """Append ``routed`` to ``args[key]``, order kept and duplicates dropped. A value of any
+    other type than a list is left for the tool's own validation to refuse."""
+    if not routed:
+        return
+    current = args.get(key)
+    if current is not None and not isinstance(current, list):
+        return
+    merged: list = []
+    for item in [*(current or []), *routed]:
+        if item not in merged:
+            merged.append(item)
+    args[key] = merged
+
+
+def _route_seed_aliases(args: dict) -> dict:
+    """``paths`` is ``files``; each ``seeds`` item goes to ``files`` or, as ``{"name": seed}``,
+    to ``entities`` by its shape. Both are appended to any explicit ``files`` / ``entities``."""
+    args = dict(args)
+    files: list[str] = []
+    entities: list[dict] = []
+    if "paths" in args:
+        files += _seed_strings("paths", args.pop("paths"))
+    if "seeds" in args:
+        for seed in _seed_strings("seeds", args.pop("seeds")):
+            if _looks_like_a_path(seed):
+                files.append(seed)
+            else:
+                entities.append({"name": seed})
+    _extend(args, "files", files)
+    _extend(args, "entities", entities)
+    return args
+
+
+def _unknown_argument_error(tool: str, unknown: list[str], parameters: list[str]) -> ToolError:
+    """The error for an argument that is not a parameter: it names the argument and lists the
+    ones the tool has, so an agent can correct itself in one retry."""
+    names = ", ".join(f"`{u}`" for u in unknown)
+    noun = "argument" if len(unknown) == 1 else "arguments"
+    listed = (
+        f"Its parameters are: {', '.join(parameters)}." if parameters else "It takes no parameters."
+    )
+    message = f"Unknown {noun} {names} for `{tool}`. {listed}"
+    if "task" in unknown and tool in _SEED_TOOLS:
+        message += f"\n{_NO_FREE_TEXT_QUERY}"
+    return ToolError(message)
+
+
+class _ArgumentNames(Middleware):
+    """Accept the argument names agents try, and refuse the rest with a message they can act on.
+
+    The seed tools take ``paths`` as ``files`` and route each ``seeds`` item by shape (a path to
+    ``files``, anything else to ``entities``). ``task`` is not an alias: ``intent`` is a
+    statistics label that never affects the answer, and the field's ``task`` values were
+    queries, so renaming one into the other would turn a query into a seedless call that looks
+    successful; it gets the unknown-argument error with a line saying there is no free-text
+    query. Every tool, on any other unknown argument, gets a tool error that names it and lists
+    the tool's real parameters, read from the registered tool's input schema; FastMCP's own
+    validation error names the unknown argument but omits the parameters. Nothing is dropped
+    silently.
+    see design/superpowers/specs/2026-10-04-tool-annotations-and-argument-names-design.md (D3)
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        fastmcp_context = context.fastmcp_context
+        tool = (
+            await fastmcp_context.fastmcp.get_tool(context.message.name)
+            if fastmcp_context is not None
+            else None
+        )
+        if tool is None:  # not a tool of ours: FastMCP words its own error
+            return await call_next(context)
+        sent = context.message.arguments or {}
+        args = _route_seed_aliases(sent) if tool.name in _SEED_TOOLS else sent
+        parameters = list((tool.parameters or {}).get("properties", {}))
+        unknown = [name for name in args if name not in parameters]
+        if unknown:
+            raise _unknown_argument_error(tool.name, unknown, parameters)
+        if args is sent or args == sent:
+            return await call_next(context)
+        message = context.message.model_copy(update={"arguments": args})
+        return await call_next(context.copy(message=message))
+
+
+mcp.add_middleware(_ArgumentNames())
 
 
 def _commit_hint(store: Store) -> str | None:
@@ -534,7 +688,7 @@ def _resolve_anchors(
     return skipped, orphaned
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def add_decision(
     title: str,
     kind: str,
@@ -727,7 +881,7 @@ def _supersede_decision_impl(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def supersede_decision(
     old_decision_id: str,
     title: str,
@@ -910,7 +1064,7 @@ def _add_fact_impl(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def add_fact(
     statement: str,
     source: str,
@@ -1080,7 +1234,7 @@ def _supersede_fact_impl(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def supersede_fact(
     old_fact_id: str,
     statement: str,
@@ -1149,14 +1303,465 @@ def _retrieve_decisions_impl(store, include_superseded: bool = False) -> list[di
     return [d.model_dump(mode="json") for d in decisions]
 
 
-@mcp.tool
-def retrieve_decisions(include_superseded: bool = False) -> list[dict]:
-    """Return decisions from the store, mistakes/gotchas ranked first.
+# -- the bounded decision listing -----------------------------------------------------------
+# see design/superpowers/specs/2026-10-04-bounded-decision-listing-design.md (D1-D5)
 
-    The default listing excludes superseded and rejected (dropped) records; pass
-    ``include_superseded=True`` to see that history too.
+_LISTING_LIMIT_MAX = 100
+_LISTING_BUDGET_MIN = 4000
+_LISTING_BUDGET_MAX = 60000
+# The statuses a listing hides unless it is asked for them (``include_superseded``, ``status``).
+_HISTORY = frozenset({DecisionStatus.SUPERSEDED.value, DecisionStatus.REJECTED.value})
+_ROW_KEYS = ("id", "kind", "status", "title", "valid_from")
+_SEARCHED_FIELDS = ("title", "context", "choice", "rejected", "consequences")
+_MISTAKE_RANK = {DecisionKind.GOTCHA.value: 0, DecisionKind.LESSON.value: 1}
+# What an answer echoes of the caller's own text, counted as JSON writes it, so an echo cannot
+# break the budget.
+_ECHO_CHARS = 80
+_UNRESOLVED_LISTED = 10
+_CANDIDATES_LISTED = 3
+_OVERVIEW_HINT = (
+    "Full records come back only for a narrowed call: status=..., kind=..., files=[...], "
+    "query=..., ids=[...]."
+)
+
+
+def _dump(value) -> str:
+    """The wire form of an answer: compact JSON, and the unit ``budget_chars`` counts in."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _listing_values(value, enum, name: str) -> set[str] | None:
+    """``status`` or ``kind`` as a set of lowercase enum values; ``None`` when absent or empty.
+    An unknown value is an error that names the valid ones."""
+    items = [value] if isinstance(value, str) else list(value or [])
+    wanted = {text.lower() for item in items if (text := str(item).strip())}
+    if not wanted:
+        return None
+    valid = [member.value for member in enum]
+    unknown = sorted(wanted - set(valid))
+    if unknown:
+        raise ValueError(
+            f"unknown {name} {', '.join(repr(u) for u in unknown)}; "
+            f"valid values: {', '.join(valid)}"
+        )
+    return wanted
+
+
+def _listing_texts(values: list[str] | None) -> list[str]:
+    """``files`` or ``ids`` without blank entries; an empty list is an absent filter."""
+    return [text for item in values or [] if (text := str(item).strip())]
+
+
+def _listing_entities(
+    store, reader, files: list[str], borrowed_from: Path | None
+) -> tuple[set[str], list[dict]]:
+    """The entities each ``files`` entry names, and the entries nothing could read.
+
+    Read the way ``get_task_context`` reads file seeds. With a graph, a path it does not hold
+    goes through the seed ladder (a basename, a suffix, a case slip, a directory), the resulting
+    seeds through ``resolve_seeds`` (the node mapping and the descriptor), and every entity whose
+    descriptor ``file_path`` equals one of the paths read is added: that reaches a file that is
+    no longer in the graph. Without a graph only that last step runs, on the spelling
+    ``_normalized_seeds`` gives. An entry is judged alone, so each can be reported alone.
+
+    An entry that matched no entity is reported with the reason the ladder gave (``ambiguous``,
+    ``directory-too-large``, ``not-in-graph``) or ``no-graph``, and the candidates it offered.
+    A file the graph holds with nothing anchored to it is not reported: it was read, and
+    ``matched`` says it has no memory.
+    see design/superpowers/specs/2026-10-04-bounded-decision-listing-design.md (D3, A2)
     """
-    return _retrieve_decisions_impl(_get_store(), include_superseded=include_superseded)
+    entities = list(store.iter_concrete_entities())
+    by_path: dict[str, list[str]] = {}
+    for entity in entities:
+        if entity.descriptor is not None and entity.descriptor.file_path:
+            by_path.setdefault(entity.descriptor.file_path, []).append(entity.entity_id)
+    # One pass over the entities per call, not one per entry.
+    by_node = _entities_by_node(store, entities) if reader is not None else None
+    root_of = _once(
+        lambda: (
+            (repository_root(store.path) if borrowed_from is not None else None)
+            or (reader.repo_root() if reader is not None else None)
+        )
+    )
+    found: set[str] = set()
+    unresolved: list[dict] = []
+    for entry in files:
+        entry_ids: set[str] = set()
+        spelled: list[str] = []
+        note: seed_ladder.SeedNote | None = None
+        if reader is not None:
+            read = [Seed(file_path=entry)]
+            # Own try/except, as in get_task_context: a ladder that fails leaves the seed as given.
+            try:
+                if seed_ladder.needs_tolerance(read, reader):
+                    ladder = seed_ladder.tolerate(read, reader, root_of)
+                    read, spelled = ladder.exact + ladder.guessed, ladder.unresolved
+                    note = next(
+                        (
+                            n
+                            for n in ladder.notes
+                            if n.outcome in ("ambiguous", "directory-too-large")
+                        ),
+                        None,
+                    )
+            except Exception:
+                read, spelled, note = [Seed(file_path=entry)], [], None
+            resolved = resolve_seeds(read, reader, store, entities_by_node=by_node)
+            entry_ids = {e.entity_id for e in resolved.seed_entities}
+            paths = {s.file_path for s in read if s.file_path} | set(spelled)
+        else:
+            paths = set(_normalized_seeds(store, [entry]))
+        for path in paths:
+            entry_ids.update(by_path.get(path, ()))
+        if entry_ids:
+            found |= entry_ids
+            continue
+        reason: str
+        if note is not None:
+            reason, shown, candidates = note.outcome, entry, list(note.read_as[:_CANDIDATES_LISTED])
+        elif spelled:
+            reason, shown, candidates = "not-in-graph", spelled[0], []
+        elif reader is None:
+            reason, shown, candidates = (
+                "no-graph",
+                next(iter(paths)) if len(paths) == 1 else entry,
+                [],
+            )
+        else:
+            continue
+        unresolved.append(
+            {
+                "path": _clip(shown),
+                "reason": reason,
+                "candidates": [_clip(c) for c in candidates],
+            }
+        )
+    return found, unresolved
+
+
+def _newest_first(record: dict) -> tuple[datetime, str]:
+    """Sort key, newest ``valid_from`` first when reversed, ``id`` descending as the tie-break.
+    The stamp is parsed: ``...51Z`` and ``...51.5Z`` do not sort as text."""
+    return datetime.fromisoformat(record["valid_from"]), record["id"]
+
+
+def _take(
+    count: int, budget: int, size_of: Callable[[int], int], envelope: Callable[[int], int]
+) -> int:
+    """How many of ``count`` items fit: ``size_of(i)`` is the serialized length of item ``i``
+    and ``envelope(k)`` the length of the answer around ``k`` of them, empty list included. An
+    item is never cut; the first one that does not fit ends the list."""
+    used = 0
+    taken = 0
+    while taken < count:
+        item = size_of(taken) + (1 if taken else 0)  # the comma before every item but the first
+        if envelope(taken + 1) + used + item > budget:
+            break
+        used += item
+        taken += 1
+    return taken
+
+
+def _clip(text: str) -> str:
+    """``text`` cut, with a ``…``, so that it takes at most ``_ECHO_CHARS`` once JSON-escaped:
+    a quote or a backslash costs two characters and a control character six."""
+    if len(text) <= _ECHO_CHARS and len(_dump(text)) - 2 <= _ECHO_CHARS:
+        return text
+    used = kept = 0
+    for char in text:
+        width = len(_dump(char)) - 2
+        if used + width > _ECHO_CHARS - 1:
+            break
+        used += width
+        kept += 1
+    return text[:kept] + "…"
+
+
+def _listing_overview(
+    everything: list[dict], include_superseded: bool, limit: int, budget: int
+) -> str:
+    """The answer to a call with no narrowing filter: what the store holds, and the newest few
+    as compact rows. ``total`` and ``counts`` cover every record the proposal policy lets
+    through, history included, whatever ``include_superseded`` says."""
+
+    def tally(key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for record in everything:
+            counts[record[key]] = counts.get(record[key], 0) + 1
+        return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    admitted = [d for d in everything if include_superseded or d["status"] not in _HISTORY]
+    admitted.sort(key=_newest_first, reverse=True)
+    rows = [{key: d[key] for key in _ROW_KEYS} for d in admitted[:limit]]
+    counts = {"status": tally("status"), "kind": tally("kind")}
+    cut_hint = f"{_OVERVIEW_HINT} The newest list was cut by the character budget."
+
+    def answer(shown: list[dict], hint: str) -> dict:
+        return {
+            "overview": True,
+            "total": len(everything),
+            "counts": counts,
+            "newest": shown,
+            "hint": hint,
+        }
+
+    # An envelope is measured as it will read if the list ends there: with the plain hint after
+    # the last row, with the one that says the budget cut it otherwise.
+    taken = _take(
+        len(rows),
+        budget,
+        lambda i: len(_dump(rows[i])),
+        lambda k: len(_dump(answer([], _OVERVIEW_HINT if k == len(rows) else cut_hint))),
+    )
+    return _dump(answer(rows[:taken], _OVERVIEW_HINT if taken == len(rows) else cut_hint))
+
+
+def _listing_hint(
+    *,
+    matched: int,
+    returned: int,
+    cut: str | None,
+    limit: int,
+    budget: int,
+    unresolved: int,
+    unlisted: int,
+    echo: str | None,
+    has_query: bool,
+    history_hint: bool,
+) -> str | None:
+    """Why a filtered answer is empty, cut, or short of a file: ``None`` only when something
+    matched, nothing was left out and every file was read. ``cut`` is the bound that ended
+    the list, ``"limit"`` or ``"budget"``; ``unresolved`` counts the files nothing could read
+    and ``unlisted`` those ``unresolved_files`` leaves out. No file is named here: the list is
+    the one place that says which and why. ``echo`` is the caller's filters, ``None`` when the
+    answer had no room for them."""
+    parts: list[str] = []
+    if matched == 0:
+        text = f"Nothing matched {echo or 'the filters'}."
+        if has_query:
+            text += " Every word of query must occur in a record: try one or two distinctive words."
+        if history_hint:
+            text += " Superseded and rejected records are searched only with status=[...] or"
+            text += " include_superseded=True."
+        parts.append(text)
+    elif cut is not None and returned == 0:
+        text = f"{matched} matched, but the first one does not fit in budget_chars={budget}."
+        if budget < _LISTING_BUDGET_MAX:
+            text += f" Raise budget_chars (max {_LISTING_BUDGET_MAX})."
+        else:
+            text += " It is larger than the biggest budget_chars allowed."
+        parts.append(text)
+    elif cut == "limit":
+        raise_it = (
+            f", or raise limit (max {_LISTING_LIMIT_MAX})" if limit < _LISTING_LIMIT_MAX else ""
+        )
+        parts.append(
+            f"{matched - returned} more matched; limit={limit} cut the list. "
+            f"Narrow with files=[...] or query=...{raise_it}."
+        )
+    elif cut == "budget":
+        raise_it = (
+            f", or raise budget_chars (max {_LISTING_BUDGET_MAX})"
+            if budget < _LISTING_BUDGET_MAX
+            else ""
+        )
+        parts.append(
+            f"{matched - returned} more matched; the character budget cut the list. "
+            f"Narrow with files=[...] or query=...{raise_it}."
+        )
+    if unresolved:
+        text = "Some files could not be read: unresolved_files says which, why, and what to try."
+        if unlisted:
+            text += f" {unlisted} more are not listed."
+        parts.append(text)
+    return " ".join(parts) or None
+
+
+def _decision_listing(
+    store,
+    reader,
+    *,
+    include_superseded: bool = False,
+    status: str | list[str] | None = None,
+    kind: str | list[str] | None = None,
+    files: list[str] | None = None,
+    query: str | None = None,
+    ids: list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+    borrowed_from: Path | None = None,
+) -> str:
+    """The text ``retrieve_decisions`` sends: an overview, or, with a narrowing filter, full
+    records. The length of the text never exceeds the clamped ``budget_chars``.
+
+    Built from ``_retrieve_decisions_impl(store, include_superseded=True)``, so the proposal
+    policy lives in one place. The filters (``status``, ``kind``, ``files``, ``query``, ``ids``)
+    combine with AND; an empty value is an absent one. ``reader`` is the code graph, ``None``
+    without one; ``borrowed_from`` is the main checkout a linked worktree borrowed it from.
+    Raises ``ValueError`` naming the valid values for an unknown ``status`` or ``kind``.
+    see design/superpowers/specs/2026-10-04-bounded-decision-listing-design.md (D2-D5)
+    """
+    limit = max(1, min(_LISTING_LIMIT_MAX, limit))
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
+    statuses = _listing_values(status, DecisionStatus, "status")
+    kinds = _listing_values(kind, DecisionKind, "kind")
+    wanted_files = _listing_texts(files)
+    wanted_ids = _listing_texts(ids)
+    terms = (query or "").lower().split()
+    everything = _retrieve_decisions_impl(store, include_superseded=True)
+    if not (statuses or kinds or wanted_files or wanted_ids or terms):
+        return _listing_overview(everything, include_superseded, limit, budget)
+
+    pool = everything
+    if wanted_ids:
+        id_set = set(wanted_ids)
+        pool = [d for d in pool if d["id"] in id_set]
+    # `status` replaces the default exclusion, and so does asking for a record by id.
+    history_hidden = not (statuses or wanted_ids or include_superseded)
+    if statuses:
+        pool = [d for d in pool if d["status"] in statuses]
+    elif history_hidden:
+        pool = [d for d in pool if d["status"] not in _HISTORY]
+    if kinds:
+        pool = [d for d in pool if d["kind"] in kinds]
+    unresolved: list[dict] = []
+    if wanted_files:
+        entity_ids, unresolved = _listing_entities(store, reader, wanted_files, borrowed_from)
+        # Any binding counts, an orphaned one too: the question is where the record was
+        # anchored, not whether it is still delivered there.
+        anchored = {b.record_id for e in entity_ids for b in store.bindings_for_entity(e)}
+        pool = [d for d in pool if d["id"] in anchored]
+    if terms:
+        pool = [
+            d
+            for d in pool
+            if all(
+                term in "\n".join(str(d.get(f) or "") for f in _SEARCHED_FIELDS).lower()
+                for term in terms
+            )
+        ]
+
+    # Mistakes first, then newest first; the sort is stable, so the rank keeps the recency order.
+    pool.sort(key=_newest_first, reverse=True)
+    pool.sort(key=lambda d: _MISTAKE_RANK.get(d["kind"], 2))
+    matched = len(pool)
+    echo = ", ".join(
+        f"{name}={_clip(value)}"
+        for name, value in (
+            ("status", ",".join(sorted(statuses)) if statuses else ""),
+            ("kind", ",".join(sorted(kinds)) if kinds else ""),
+            ("files", f"[{', '.join(wanted_files)}]" if wanted_files else ""),
+            ("query", f'"{" ".join(terms)}"' if terms else ""),
+            ("ids", f"[{', '.join(wanted_ids)}]" if wanted_ids else ""),
+        )
+        if value
+    )
+    # Unreadable files are the whole story of an empty answer only when no file could be read.
+    history_hint = history_hidden and not (wanted_files and len(unresolved) == len(wanted_files))
+    sizes: dict[int, int] = {}
+
+    def size_of(i: int) -> int:
+        if i not in sizes:
+            sizes[i] = len(_dump(pool[i]))
+        return sizes[i]
+
+    def ended_by(k: int) -> str | None:
+        """The bound that ended a list of ``k`` records, as it will read if it ends there."""
+        if k >= matched:
+            return None
+        return "limit" if k >= limit else "budget"
+
+    def render(*, echoed: bool, listed: int) -> str:
+        """The answer with ``listed`` unresolved entries and, or not, the echo of the filters."""
+        shown = unresolved[:listed]
+
+        def answer(k: int, decisions: list[dict]) -> dict:
+            out: dict = {
+                "overview": False,
+                "matched": matched,
+                "returned": k,
+                "omitted": matched - k,
+                "decisions": decisions,
+            }
+            if wanted_files:
+                out["unresolved_files"] = shown
+                out["unresolved_omitted"] = len(unresolved) - len(shown)
+            out["hint"] = _listing_hint(
+                matched=matched,
+                returned=k,
+                cut=ended_by(k),
+                limit=limit,
+                budget=budget,
+                unresolved=len(unresolved),
+                unlisted=len(unresolved) - len(shown),
+                echo=echo if echoed else None,
+                has_query=bool(terms),
+                history_hint=history_hint,
+            )
+            return out
+
+        taken = _take(min(matched, limit), budget, size_of, lambda k: len(_dump(answer(k, []))))
+        return _dump(answer(taken, pool[:taken]))
+
+    # The ceiling is the contract: when the caller's own text leaves no room, drop the echo of
+    # the filters first, then the unresolved entries, last one first.
+    listed = min(len(unresolved), _UNRESOLVED_LISTED)
+    text = render(echoed=True, listed=listed)
+    if len(text) > budget:
+        text = render(echoed=False, listed=listed)
+    while len(text) > budget and listed:
+        listed -= 1
+        text = render(echoed=False, listed=listed)
+    return text
+
+
+@mcp.tool(annotations=_LOCAL_WRITE)
+def retrieve_decisions(
+    include_superseded: bool = False,
+    status: str | list[str] | None = None,
+    kind: str | list[str] | None = None,
+    files: list[str] | None = None,
+    query: str | None = None,
+    ids: list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+) -> ToolResult:
+    """List decisions from the store, bounded. The answer is one JSON object in one text block.
+
+    With no narrowing filter you get an overview: the total, counts by status and kind, and the
+    newest records as compact rows. Pass a filter to get full records, gotchas and lessons
+    first, then newest first, cut at ``limit`` (default 25, max 100) or ``budget_chars``
+    (default 24000, max 60000), whichever comes first; ``hint`` says what cut the list or why
+    it is empty.
+
+    Filters combine with AND, and an empty one is ignored. ``status`` and ``kind`` take one
+    value or a list (status: proposed, accepted, superseded, rejected, deprecated; kind: adr,
+    lesson, constraint, gotcha) and ``status`` replaces the default, which hides superseded
+    and rejected records. ``files`` are repo-relative paths, read the way ``get_task_context``
+    reads them (a basename or a directory works); records anchored to them match, and
+    ``unresolved_files`` says, for each path nothing could read, why and what to try instead
+    (``reason``, ``candidates``). ``query`` words must all occur
+    in a record's text. ``ids`` returns those records, superseded ones too. History of one
+    topic: ``query="<words>", include_superseded=True``.
+    """
+    # A `ToolResult` return is what keeps FastMCP from declaring an output schema and sending the
+    # JSON a second time as `structuredContent` (design D1; the smoke test reads the wire).
+    # The code graph is read only when a path has to be matched against it.
+    reader, borrowed_from = _synced_reader() if _listing_texts(files) else (None, None)
+    text = _decision_listing(
+        _get_store(),
+        reader,
+        include_superseded=include_superseded,
+        status=status,
+        kind=kind,
+        files=files,
+        query=query,
+        ids=ids,
+        limit=limit,
+        budget_chars=budget_chars,
+        borrowed_from=borrowed_from,
+    )
+    return ToolResult(content=text)
 
 
 def _list_facts_impl(store, include_superseded: bool = False) -> list[dict]:
@@ -1177,7 +1782,7 @@ def _list_facts_impl(store, include_superseded: bool = False) -> list[dict]:
     return [f.model_dump(mode="json") for f in facts]
 
 
-@mcp.tool
+@mcp.tool(annotations=_READ_ONLY)
 def list_facts(include_superseded: bool = False) -> list[dict]:
     """Return facts from the store, newest first (the ``retrieve_decisions`` counterpart
     for the facts layer -- Gap 1, previously only reachable via ``get_entity_history``,
@@ -1219,6 +1824,7 @@ def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
         return {"found": False}
 
     bindings = store.bindings_for_entity(entity.entity_id)
+    types = store.record_types(b.record_id for b in bindings)
     return {
         "found": True,
         "entity_id": entity.entity_id,
@@ -1228,7 +1834,7 @@ def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
         "bindings": [
             {
                 "record_id": b.record_id,
-                "record_type": "fact" if store.get_fact(b.record_id) else "decision",
+                "record_type": types.get(b.record_id, "unknown"),
                 "tier": b.tier,
                 "status": b.status,
             }
@@ -1237,7 +1843,7 @@ def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
     }
 
 
-@mcp.tool
+@mcp.tool(annotations=_READ_ONLY)
 def find_entity(name: str, file_path: str | None = None) -> dict:
     """Look up an entity_id by name (+ optional file_path) — the missing link that lets an
     agent chain ``add_decision``/``propose_decisions`` output into ``get_entity_history``
@@ -1250,7 +1856,8 @@ def find_entity(name: str, file_path: str | None = None) -> dict:
 
     Returns ``{"found": True, "entity_id", "canonical_name", "descriptor", ...
     "last_seen_node_id", "bindings": [{"record_id", "record_type", "tier", "status"}, ...]}``
-    (``record_type`` is ``"decision"`` or ``"fact"``) when resolved to exactly one entity;
+    (``record_type`` is ``"decision"`` or ``"fact"``, or ``"unknown"`` for a binding whose record
+    exists in neither table) when resolved to exactly one entity;
     ``{"found": False}`` when nothing matches; or
     ``{"found": False, "candidates": [{"entity_id", "canonical_name", "file_path"}, ...]}``
     when the name alone is ambiguous.
@@ -1263,23 +1870,27 @@ def _get_entity_history_impl(store: Store, entity_id: str) -> list[dict]:
     2026-07-10-ratification-ux-and-mcp-gaps-design.md): every decision AND fact anchored
     to ``entity_id``, newest first.
 
-    Per binding: try ``get_decision(record_id)``, else ``get_fact(record_id)``, else skip
-    (an unknown record kind stays skipped, same as before this wave). Previously this only
-    ever tried ``get_decision`` -- a fact-only binding vanished from history with no trace.
-    Every returned dict gains ``"record_type": "decision" | "fact"`` (additive -- existing
-    consumers keyed on the pre-existing fields are unaffected); the merged list stays
-    sorted ``valid_from`` desc, exactly as before.
+    The record types of all the entity's bindings come from one ``store.record_types`` read;
+    each record is then loaded with the getter its type names. A binding whose record exists
+    in neither table (an unknown record kind) stays skipped, same as before this wave.
+    Previously this only ever tried ``get_decision`` -- a fact-only binding vanished from
+    history with no trace. Every returned dict gains ``"record_type": "decision" | "fact"``
+    (additive -- existing consumers keyed on the pre-existing fields are unaffected); the
+    merged list stays sorted ``valid_from`` desc, exactly as before.
     """
     bindings = store.bindings_for_entity(entity_id)
+    types = store.record_types(b.record_id for b in bindings)
     records: list[tuple[str, Decision | Fact]] = []
     for b in bindings:
-        decision = store.get_decision(b.record_id)
-        if decision is not None:
-            records.append(("decision", decision))
-            continue
-        fact = store.get_fact(b.record_id)
-        if fact is not None:
-            records.append(("fact", fact))
+        kind = types.get(b.record_id)
+        if kind == "decision":
+            decision = store.get_decision(b.record_id)
+            if decision is not None:
+                records.append(("decision", decision))
+        elif kind == "fact":
+            fact = store.get_fact(b.record_id)
+            if fact is not None:
+                records.append(("fact", fact))
     records.sort(key=lambda pair: pair[1].valid_from, reverse=True)
     out = []
     for record_type, record in records:
@@ -1289,13 +1900,14 @@ def _get_entity_history_impl(store: Store, entity_id: str) -> list[dict]:
     return out
 
 
-@mcp.tool
+@mcp.tool(annotations=_READ_ONLY)
 def get_entity_history(entity_id: str) -> list[dict]:
     """Return every decision AND fact anchored to a given entity, newest first.
 
-    Per binding, tries a decision lookup then a fact lookup (an unknown record kind is
-    skipped, as before). Every dict now carries ``"record_type": "decision" | "fact"`` so
-    a caller can tell them apart without re-deriving it -- facts used to be silently
+    Resolves every binding's record type in one read, then loads each record (a binding whose
+    record exists nowhere is skipped, as before). Every dict now carries
+    ``"record_type": "decision" | "fact"`` so a caller can tell them apart without
+    re-deriving it -- facts used to be silently
     dropped here (this tool only ever called ``get_decision``; see ``list_facts`` for the
     facts-only counterpart of ``retrieve_decisions``).
     """
@@ -1737,7 +2349,7 @@ def _query_decisions_impl(
     return ctx.render(include_structure=False)
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def get_task_context(
     files: list[str] | None = None,
     entities: list[dict] | None = None,
@@ -1751,13 +2363,18 @@ def get_task_context(
     refs. Returns a compact slice: known mistakes/gotchas, then decisions, then a structural
     map, then related decisions. Best-effort — degrades if the graph or store is absent.
 
+    Also accepted: ``paths`` (the same as ``files``) and ``seeds``, a list or one string. A seed
+    with a ``/``, or ending in a known file extension (``.py``, ``.toml``), is read as a file;
+    every other seed (a symbol such as ``Store.close``, an issue id) as an entity ``name``.
+    There is no free-text query argument.
+
     ``intent``: optional label for what asked (e.g. a skill name). Recorded for local
     statistics only; never affects what is returned.
     """
     return _get_task_context_with_sync(files, entities, structure_budget, memory_budget, intent)
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def query_structure(
     files: list[str] | None = None,
     entities: list[dict] | None = None,
@@ -1766,14 +2383,15 @@ def query_structure(
     """The structural-map half of ``get_task_context`` alone (§5 FR8.2 thin tool) — a cheap
     follow-up once you already have decision memory and just need the code map.
 
-    Same ``files``/``entities`` shape as ``get_task_context``. Never crashes: with no
-    Graphify graph present, returns an explanatory note instead of a map.
+    Same ``files``/``entities`` shape as ``get_task_context``, and the same ``paths`` and
+    ``seeds`` aliases. Never crashes: with no Graphify graph present, returns an explanatory
+    note instead of a map.
     """
     reader, _ = _synced_reader()
     return _query_structure_impl(_get_store(), reader, files, entities, budget_chars)
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def query_decisions(
     files: list[str] | None = None,
     entities: list[dict] | None = None,
@@ -1783,12 +2401,13 @@ def query_decisions(
     """The decision-memory half of ``get_task_context`` alone (§5 FR8.2 thin tool):
     mistakes, decisions, related — no structural map.
 
-    Same ``files``/``entities`` shape as ``get_task_context``. Best-effort like every other
-    tool here: degrades gracefully with no graph present (global-scope decisions still
-    surface). This tool takes no ``structure_budget``, but internally the "related"
-    (peripheral) bucket is still gathered by walking the structural subgraph with
-    ``RetrievalBudget``'s DEFAULT ``structure_chars`` (the map itself is discarded — only
-    the peripheral entities it surfaces feed decision ranking).
+    Same ``files``/``entities`` shape as ``get_task_context``, and the same ``paths`` and
+    ``seeds`` aliases. Best-effort like every other tool here: degrades gracefully with no
+    graph present (global-scope decisions still surface). This tool takes no
+    ``structure_budget``, but internally the "related" (peripheral) bucket is still gathered
+    by walking the structural subgraph with ``RetrievalBudget``'s DEFAULT ``structure_chars``
+    (the map itself is discarded — only the peripheral entities it surfaces feed decision
+    ranking).
 
     ``intent``: optional label for what asked (e.g. a skill name). Recorded for local
     statistics only; never affects what is returned.
@@ -2167,7 +2786,7 @@ def _list_proposed_impl(store) -> str:
     return "\n\n".join(sections)
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def propose_decisions(
     drafts: list[dict],
     session_id: str | None = None,
@@ -2248,7 +2867,7 @@ def propose_decisions(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=_READ_ONLY)
 def list_proposed() -> str:
     """List decisions, facts, AND domains awaiting ratification, human-readably.
 
@@ -2435,7 +3054,7 @@ def _ratify_decisions_impl(
     return out
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> dict[str, str]:
     """Ratify pending proposals of ANY kind — decisions, facts, and domains share one gate.
 
@@ -2456,12 +3075,13 @@ def ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> di
     return _ratify_impl(_get_store(), accept=accept, drop=drop, reader=_load_reader())
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def ratify_decisions(
     accept: list[str] | None = None, drop: list[str] | None = None
 ) -> dict[str, str]:
-    """Deprecated alias for ``ratify`` (kept for one release; despite the name, it now
-    covers facts and domains too — identical behavior to ``ratify``). Prefer ``ratify``."""
+    """Deprecated alias for ``ratify`` (deprecated since 0.1.0 and still kept; despite the
+    name, it now covers facts and domains too — identical behavior to ``ratify``). Prefer
+    ``ratify``."""
     return _ratify_impl(_get_store(), accept=accept, drop=drop, reader=_load_reader())
 
 
@@ -2509,7 +3129,7 @@ def _add_domain_impl(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def add_domain(
     slug: str,
     title: str,
@@ -2626,7 +3246,7 @@ def _supersede_domain_impl(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def supersede_domain(
     old_slug_or_id: str,
     new_slug: str,
@@ -2702,7 +3322,7 @@ def _propose_domains_impl(
     return _hint_elements(store, [r.model_dump(mode="json") for r in results], "proposed")
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def propose_domains(
     drafts: list[dict],
     session_id: str | None = None,
@@ -2850,7 +3470,7 @@ def _list_domain_candidates_impl(
     return result
 
 
-@mcp.tool
+@mcp.tool(annotations=_READ_ONLY)
 def list_domain_candidates(
     min_members: int = 5,
     paths: list[str] | None = None,
@@ -2957,7 +3577,7 @@ def _list_domains_impl(store: Store, status: str | None = None) -> list[dict]:
     return out
 
 
-@mcp.tool
+@mcp.tool(annotations=_READ_ONLY)
 def list_domains(status: str | None = None) -> list[dict]:
     """List every Domain in the store — the full-listing counterpart to ``list_proposed``
     (proposed-only) and ``list_domain_candidates`` (unclaimed-only): the tool that
@@ -3012,7 +3632,7 @@ def _drill_down_impl(store: Store, reader, domain_slug: str) -> dict:
     return result
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def drill_down(domain_slug: str) -> dict:
     """Walk one domain: its WHY-IT-EXISTS summary, its accepted subdomains (title +
     one-liner), a capped member sample (current communities ∪ path_prefixes), and its
@@ -3066,7 +3686,7 @@ def _sync_anchors_impl(store: Store, reader: GraphifyReader | None, force: bool 
     return report_as_dict(report)
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def sync_anchors(force: bool = False) -> dict:
     """Re-anchor the decision store against the current graph and report exactly what
     happened -- the diagnostic/heal MCP counterpart to ``sidegraph-sync`` (Gap 3).
@@ -3164,7 +3784,7 @@ def _verify_store_impl(store: Store) -> dict:
     }
 
 
-@mcp.tool
+@mcp.tool(annotations=_READ_ONLY)
 def verify_store() -> dict:
     """Lint the decision store's canonical files against its write-path invariants — the
     MCP counterpart to ``sidegraph-verify`` (design/superpowers/specs/
@@ -3283,7 +3903,7 @@ def _add_anchors_impl(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=_LOCAL_WRITE)
 def add_anchors(record_id: str, anchors: list[dict]) -> dict:
     """Append bindings to an EXISTING decision or fact — in-place re-anchoring for the
     triage flow (design/superpowers/specs/2026-07-11-ci-integrity-design.md ruling 3).

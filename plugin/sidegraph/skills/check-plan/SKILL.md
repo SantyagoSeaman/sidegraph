@@ -28,9 +28,13 @@ plan would *delete or bypass* — that's where reversal records live.
 - **Area-level plans** ("rework how retrieval budgets work") → `list_domains()` +
   `drill_down(domain_slug)` — the domain's decisions, mistakes first.
 - **The reversal hunt — the step ordinary retrieval doesn't do:** live records answer
-  "what is true"; a plan needs "what was *abandoned*". Pull
-  `retrieve_decisions(include_superseded=True)` and scan superseded/rejected records
-  touching the same entities/area, plus every live record's `rejected` field. A match
+  "what is true"; a plan needs "what was *abandoned*". Run two calls:
+  `retrieve_decisions(status=["superseded", "rejected"], files=[<the plan's files>])` and
+  `retrieve_decisions(status=["superseded", "rejected"], query="<one or two distinctive
+  words for the plan's area>")`. The `files` call finds records anchored to those files;
+  the area's abandoned ideas may be anchored elsewhere, so the `query` call is the second
+  net. Add the `rejected` field of every live record `get_task_context` returned. Read
+  `unresolved_files` and `hint` before concluding that nothing was abandoned. A match
   here is the highest-value finding this skill can produce: the plan's approach, already
   tried, with the abandonment reason attached.
 

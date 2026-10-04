@@ -207,8 +207,9 @@ The env vars are inlined into the command because Claude Code hook entries have 
   ids, and a line naming `get_task_context` for the rest. Each file arrives once per agent, at
   most three files per call and ten per agent, and the session's own agent and every subagent it
   starts count separately; a file with no records prints nothing. Bash is wired as four entries
-  (`if` is `Bash(sed *)`, `Bash(grep *)`, `Bash(rg *)`, `Bash(cat *)`) with the same command, and
-  needs Claude Code 2.1.89 for correct matching. Set `SIDEGRAPH_GREP_NUDGE=off` (alongside the
+  (`if` is `Bash(sed *)`, `Bash(grep *)`, `Bash(rg *)`, `Bash(cat *)`) with the same command.
+  The `if` field exists from Claude Code 2.1.85, and matching on compound command lines is
+  correct from 2.1.89, so use 2.1.89 or later. Set `SIDEGRAPH_GREP_NUDGE=off` (alongside the
   other env vars in the command) to turn off all of it. See
   [`reference/hooks.md`](../reference/hooks.md#sidegraph-pre-tool-use).
 - The `Agent|Task` group runs that same command when the agent spawns a subagent. It appends the
@@ -238,5 +239,17 @@ start (a stub if the store is empty — that's expected). Then follow the
 
 ## Reset / cleanup
 
-Everything Sidegraph owns in the target repo is `.sidegraph/`; everything Graphify owns is
-`graphify-out/`. Delete both to start over — your source files are never touched.
+The store is `.sidegraph/`; everything Graphify owns is `graphify-out/`. Delete both to
+start over. Your source files are never touched. Sidegraph can also leave a few things
+outside those two directories:
+
+- If you installed the graph refresh hook (`sidegraph-init --hooks`, or a yes to its
+  question), run `sidegraph-init --remove-hooks` first. Deleting the directories does not
+  remove the helper and the three hook blocks in `.git/hooks/`.
+- `sidegraph-init --no-hooks` records the git config key `sidegraph.graphRefresh`.
+  `--remove-hooks` clears it.
+- `sidegraph-init` may have written `SIDEGRAPH_RATIFY_POLICY` into `.claude/settings.json`.
+- The SessionStart hook keeps `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`, one
+  file shared by every project on the machine.
+
+[SECURITY.md](../../SECURITY.md) lists every write.

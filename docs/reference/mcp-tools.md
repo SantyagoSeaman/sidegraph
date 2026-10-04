@@ -16,7 +16,7 @@ use — see [`configuration.md`](configuration.md#store-path-resolution)) and a 
 | [`supersede_decision`](#supersede_decision) | Close an old decision, write its replacement | When a past decision is explicitly reversed |
 | [`add_fact`](#add_fact) | Write one non-derivable fact directly, `status=accepted` | Mid-session, when a human asks to record a benchmark/limit/trial-learned fact now |
 | [`supersede_fact`](#supersede_fact) | Close an old fact, write its falsifying replacement | When a past fact is disproven or corrected |
-| [`retrieve_decisions`](#retrieve_decisions) | List all decisions in the store | Ad hoc "what's in memory" queries, audits |
+| [`retrieve_decisions`](#retrieve_decisions) | Filter decisions by status, kind, file, text or id (bounded) | Ad hoc "what's in memory" queries, audits |
 | [`list_facts`](#list_facts) | List all facts in the store, newest first | Ad hoc "what facts do we have" queries, audits |
 | [`find_entity`](#find_entity) | Look up an entity_id by name (+ file_path) | Before `get_entity_history`, when you only have a name |
 | [`get_entity_history`](#get_entity_history) | List every decision *and* fact anchored to one entity | Following the history of one specific component |
@@ -57,6 +57,71 @@ not the records behind it. `ratify` and
 `ratify_decisions` carry none, because their results are keyed by record id, and `sync_anchors`
 writes a committed file only when a rung moves. The key is additive, like every field the tools'
 results may still gain ([stability](stability.md)).
+
+## Annotations
+
+Every tool carries MCP annotations, so a host can tell what a call does before it makes one. A
+host with an auto-reviewer (Codex's `approvals_reviewer = auto_review`) reviews a call to a tool
+that has none, because the MCP defaults say "destructive" and "open-world". It skips the review
+for a tool marked read-only, or marked non-destructive and closed-world. Two annotation sets
+cover the 24 tools, defined once in `server.py`:
+
+| Hint | Read-only tools | Every other tool |
+|---|---|---|
+| `readOnlyHint` | `true` | `false` |
+| `destructiveHint` | `false` | `false` |
+| `openWorldHint` | `false` | `false` |
+
+- **`openWorldHint` is `false` everywhere.** No tool sends anything off the machine.
+- **`destructiveHint` is `false` everywhere.** The store is append-only: a write adds a record or
+  closes one with `valid_to`, and never deletes one.
+- **`readOnlyHint` is `true` only for a tool that never changes a tracked file.** `idempotentHint`
+  is not set.
+
+| Set | Tools |
+|---|---|
+| Read-only | `list_facts`, `find_entity`, `get_entity_history`, `list_proposed`, `list_domains`, `list_domain_candidates`, `verify_store` |
+| Not read-only: they run the lazy sync | `retrieve_decisions`, `get_task_context`, `query_structure`, `query_decisions`, `drill_down` |
+| Not read-only: they write records | `add_decision`, `supersede_decision`, `add_fact`, `supersede_fact`, `propose_decisions`, `ratify`, `ratify_decisions`, `add_domain`, `supersede_domain`, `propose_domains`, `sync_anchors`, `add_anchors` |
+
+What does not count as a write: `.sidegraph/index.db` is local, gitignored state (the derived
+index, usage statistics, the capture ledger and the session meta), never committed and never
+sent, so a tool that only writes there is still read-only. So is opening the store: the first
+open in a process may create the store's `format` file, its `.gitignore` and its record
+directories, or run a legacy migration, whichever tool comes first.
+
+The tools that run the lazy sync are not read-only. Its moved rung can adopt a moved symbol into
+a tracked `entities/<id>.json` file, which is the one tracked write a sync makes (see
+[`sync_anchors`](#sync_anchors)). A test holds the read-only set to this: it runs every
+read-only tool on a store where a lazy sync would adopt a moved symbol, and fails if any of them
+changes a tracked file.
+
+### Argument names
+
+`get_task_context`, `query_structure` and `query_decisions` also accept two names that agents
+try:
+
+- `paths` is `files`.
+- `seeds` is a list, or one bare string. Each item that has no whitespace and either contains a
+  `/` or ends in a known file extension (`.py`, `.swift`, `.toml`, `.md` and the like; the list
+  is `_FILE_EXTENSIONS` in `server.py`, matched without regard to case) is a file path and goes
+  to `files`. Any other item goes to `entities` as `{"name": item}`: a symbol (`RetryPolicy`,
+  `Store.close`, whose `.close` is not a file extension), an issue id, free text. Routed values
+  are appended to an explicit `files` or `entities`, order kept and duplicates dropped.
+
+`task` is not accepted: there is no free-text query. `intent` is a label for statistics and never
+affects the answer, so a query passed as `task` would become a call with no seeds that looks
+successful. Pass `files` or `entities`.
+
+Every tool answers an argument that is not one of its parameters with a tool error that names
+the argument and lists the parameters, so one retry corrects it:
+
+```text
+Unknown argument `include_archived` for `get_task_context`. Its parameters are: files, entities, structure_budget, memory_budget, intent.
+```
+
+For `task` on a seed tool, the error adds a line: `There is no free-text query: pass files or
+entities. intent is only a label for statistics.` Nothing is dropped silently.
 
 ## `add_decision`
 
@@ -290,25 +355,128 @@ plus `supersedes` (the predecessor's id), with the same `anchors_orphaned` shape
 ## `retrieve_decisions`
 
 ```python
-retrieve_decisions(include_superseded: bool = False) -> list[dict]
+retrieve_decisions(
+    include_superseded: bool = False,
+    status: str | list[str] | None = None,   # proposed | accepted | superseded | rejected | deprecated
+    kind: str | list[str] | None = None,     # adr | lesson | constraint | gotcha
+    files: list[str] | None = None,          # repo-relative paths, read as get_task_context reads them
+    query: str | None = None,                # every word must occur in the record's text
+    ids: list[str] | None = None,            # exact record ids
+    limit: int = 25,                         # clamped to 1..100
+    budget_chars: int = 24000,               # clamped to 4000..60000
+) -> ToolResult                              # one text block holding a JSON object
 ```
 
-Lists every decision in the store. By default excludes `status in {superseded, rejected}`;
-pass `include_superseded=True` to see that history too (despite the name, this also brings
-back `rejected`/dropped drafts). Results are ordered `gotcha`, `lesson`, then everything else
-— **not** by recency; within a rank, order is whatever `iter_decisions()` returns.
+Lists decisions, bounded. The tool used to return a full dump of every decision in the store,
+about 143,000 tokens on a store of 260 records, and agents that wanted a handful of records
+filtered that dump themselves. The answer is now one JSON object, sent once as text with no
+structured copy, so `budget_chars` is the real cost on every host. **The length of the
+serialized answer never exceeds the clamped `budget_chars`.**
 
-**Returns:** a list of full `Decision.model_dump(mode="json")` dicts (all fields, including
-`status`, so a `proposed` record is distinguishable from an `accepted` one here even though
-the tool doesn't tag it `[unratified]` the way rendered text does).
+**With no narrowing filter, an overview.** The narrowing filters are `status`, `kind`, `files`,
+`query` and `ids`; an empty value (`""`, a blank `query`, `[]`) counts as absent.
+`include_superseded` is not one of them: it widens.
 
-**Proposal policy applies here too.** Unranked does not mean unfiltered: a `proposed` record
+```json
+{
+  "overview": true,
+  "total": 263,
+  "counts": {"status": {"accepted": 226, "superseded": 28, "rejected": 8, "proposed": 1},
+             "kind": {"gotcha": 126, "lesson": 33, "adr": 86, "constraint": 18}},
+  "newest": [{"id": "01K…", "kind": "gotcha", "status": "accepted",
+              "title": "…", "valid_from": "2026-10-04T06:13:51Z"}],
+  "hint": "Full records come back only for a narrowed call: status=..., kind=..., files=[...], query=..., ids=[...]."
+}
+```
+
+`total` and `counts` cover every record the proposal policy lets through, superseded and
+rejected ones included, whatever `include_superseded` says: they tell the caller that history
+exists. `newest` holds up to `limit` compact rows (exactly the five keys above), newest
+`valid_from` first, of the records `include_superseded` admits: by default everything except
+`superseded` and `rejected`.
+
+**With a narrowing filter, full records.**
+
+```json
+{
+  "overview": false,
+  "matched": 36,
+  "returned": 9,
+  "omitted": 27,
+  "decisions": [{"…": "full Decision.model_dump(mode='json') dicts"}],
+  "unresolved_files": [],
+  "unresolved_omitted": 0,
+  "hint": "27 more matched; the character budget cut the list. Narrow with files=[...] or query=..., or raise budget_chars (max 60000)."
+}
+```
+
+The filters combine with AND:
+
+- **`status`** and **`kind`** take one value or a list, in any letter case. An unknown value is
+  an error that names the valid ones. `status` replaces the default exclusion of `superseded`
+  and `rejected`; without it, those two are left out unless `include_superseded=True`.
+  `deprecated` is listed by default.
+- **`files`** are read the way [`get_task_context`](#get_task_context) reads file seeds, so a
+  basename, a path suffix, a letter-case slip, a `./` prefix, an absolute path inside the
+  repository and a directory all work: a path the code graph does not hold goes through the
+  [seed ladder](#seeds-are-read-tolerantly), the seeds through the node mapping and the entity
+  descriptors, and every entity whose stored `file_path` equals a path read is added, which
+  reaches a file that has since left the graph. A record matches when any of its bindings, of
+  any status (an orphaned one too), points at one of those entities: the question is where
+  the record was anchored, not whether it is still delivered there. Without a code graph only
+  the stored paths are compared.
+- **`query`** is split on whitespace; every word must occur, in any letter case, in the
+  record's `title`, `context`, `choice`, `rejected` or `consequences`.
+- **`ids`** returns those records by exact id, superseded and rejected ones too; the default
+  exclusion does not apply to `ids` unless `status` is also given.
+
+**Order and bounds.** Records come back `gotcha`, then `lesson`, then everything else; within
+a rank newest `valid_from` first, `id` descending as the tie-break. Records are added in that
+order while the answer stays within `budget_chars` and the count within `limit`. A record is
+never cut in the middle: the first one that does not fit ends the list, and if even the first
+does not fit, `decisions` is empty and the hint says so. `limit` is clamped to 1..100 and
+`budget_chars` to 4,000..60,000, so no argument turns the call back into a dump.
+
+**`unresolved_files` and `hint`.** When `files` was given, `unresolved_files` lists the entries
+nothing could read, at most ten, and `unresolved_omitted` counts the rest. Each entry says why:
+
+```json
+{"path": "src/sidegraph", "reason": "directory-too-large",
+ "candidates": ["src/sidegraph/host 7", "src/sidegraph/engine 3", "src/sidegraph/sync.py"]}
+```
+
+- `path` is the entry in its normalized spelling, as given for a directory or a basename;
+- `reason` is `ambiguous` (several files match; `candidates` holds up to three of them),
+  `directory-too-large` (the directory holds more files than a path can stand for;
+  `candidates` holds up to three subdirectories, each followed by its file count, or files, to
+  pass instead), `not-in-graph`, or
+  `no-graph` when there is no code graph at all;
+- a file the graph holds with no record anchored to it is not listed: it was read, and
+  `matched` says it has no memory.
+
+`hint` is `null` only when something matched, nothing was left out and every file was read.
+Otherwise it says which case applies: nothing matched (with the filters as given, and for
+`query` a suggestion to try one or two distinctive words; it also says that superseded and
+rejected records need `status` or `include_superseded=True`, unless unreadable files already
+explain the empty answer); which bound cut the list, `limit` or the character budget, and how
+to narrow or raise it (a bound already at its maximum is not offered); or that some files
+could not be read, which it leaves to `unresolved_files` to name. Read it before concluding
+that the store holds nothing.
+
+Everything the caller's own text adds to the answer (the filters echoed in a hint, the paths
+and candidates of `unresolved_files`) is clipped to 80 characters as JSON writes them. If the
+answer still would not fit, the echo of the filters goes first, then entries of
+`unresolved_files`, last first, and `unresolved_omitted` counts them.
+
+**Proposal policy applies here too.** A `proposed` record
 outside the surfacing window (`SIDEGRAPH_PROPOSAL_WINDOW_DAYS`, default 30) or any proposed
-record in regulated mode (`SIDEGRAPH_UNRATIFIED=off`) is omitted from this listing, exactly as
-it is from the rendered surfaces. Accepted records are never affected. This closes what a
-2026-08-04 reviewer correctly identified as a documented bypass of an advertised control — an
-agent could otherwise fetch through a raw tool precisely the content regulated mode exists to
-withhold.
+record in regulated mode (`SIDEGRAPH_UNRATIFIED=off`) is omitted from every shape and every
+filter, `ids` included, and from `total` and `counts`. Accepted records are never affected.
+This closes what a 2026-08-04 reviewer correctly identified as a documented bypass of an
+advertised control — an agent could otherwise fetch through a raw tool precisely the content
+regulated mode exists to withhold. Each record carries its `status`, so a `proposed` record
+is distinguishable from an `accepted` one even though the tool doesn't tag it `[unratified]`
+the way rendered text does.
 
 ## `list_facts`
 
@@ -345,12 +513,16 @@ without reading the store directly. Tries an exact descriptor match (canonicaliz
 
 **Returns**, on a match: `{"found": true, "entity_id": str, "canonical_name": str,
 "descriptor": {"name": str, "file_path": str | None} | None, "last_seen_node_id": str |
-None, "bindings": [{"record_id": str, "record_type": "decision" | "fact", "tier": int,
-"status": str}, ...]}` — `record_id` is the id of whichever bound *record* the binding
+None, "bindings": [{"record_id": str, "record_type": "decision" | "fact" | "unknown", "tier":
+int, "status": str}, ...]}` — `record_id` is the id of whichever bound *record* the binding
 belongs to (a `Decision` or a `Fact`; `AnchorBinding.record_id` was renamed from
 `decision_id` when facts started sharing the same anchoring machinery), and `record_type`
-tells you which one it resolved to (via a `store.get_fact` probe) so a caller can dispatch
-to `get_decision`/`get_fact` without guessing. On ambiguity:
+tells you which one it resolved to, so a caller knows whether the id is a decision or a fact
+without guessing (`retrieve_decisions(ids=[…])` returns a decision's full record; a fact is
+listed by `list_facts`). The types of all the bindings come from one read of the index.
+`"unknown"` means the record exists in neither table: a binding whose record file was
+removed by hand or lost in a merge. Treat it as a dangling anchor, not as a decision to
+fetch. On ambiguity:
 `{"found": false, "candidates": [{"entity_id": str, "canonical_name": str, "file_path": str |
 None}, ...]}`. On no match: `{"found": false}`.
 
@@ -366,12 +538,13 @@ from [`find_entity`](#find_entity). Returns every decision **and** fact with any
 that entity, newest (`valid_from`) first, regardless of binding status or decision/fact
 status.
 
-Per binding, the tool tries a decision lookup first, then a fact lookup (an unknown record
-kind stays skipped, same as before). Previously this tool only ever called `get_decision`, so
+The tool resolves every binding's record type in one read of the index, then loads each
+record with the getter its type names. A binding whose record exists in neither table stays
+skipped, same as before (`find_entity` reports such a binding as `"unknown"`). Previously this tool only ever called `get_decision`, so
 a fact-only binding vanished from an entity's history with no trace — that gap is closed.
 
-**Returns:** a list of full `Decision`/`Fact` dicts (as `retrieve_decisions`/`list_facts`
-above), each with one additive key: `"record_type": "decision" | "fact"`, so a caller can
+**Returns:** a list of full `Decision`/`Fact` dicts (`model_dump(mode="json")`, all fields,
+including `status`), each with one additive key: `"record_type": "decision" | "fact"`, so a caller can
 tell them apart without re-deriving it. Existing consumers keyed on the pre-existing fields
 are unaffected.
 
@@ -599,14 +772,21 @@ behavior, same underlying ranking code (neither duplicates `get_task_context`'s 
   `"No structural context found."`/`"No graph reader available; structural map omitted."`
   rather than crashing — structure inherently needs the graph.
 - `query_decisions` renders `## ⚠ Known mistakes & gotchas`, `## Decisions` (with inline
-  `evidence:` lines), `## Known facts` (standalone facts), and `## Related` (no structural
-  map) — internally it still walks the structural subgraph to resolve peripheral entities for
+  `evidence:` lines), `## Known facts` (standalone facts), `## Related`, and
+  `## Unratified proposals` (proposed records inside the surfacing window, last), with no structural
+  map — internally it still walks the structural subgraph to resolve peripheral entities for
   bucket C, it just never renders the map itself. Degrades exactly like `get_task_context`:
   named-seed resolution needs a reader, but `scope: global` decisions still surface without
   one.
 
 `query_decisions` takes the same optional `intent` as `get_task_context`: a label for what
 asked, recorded for local statistics only, never affecting what is returned.
+
+**Neither tool has the seed ladder.** They match the seeds exactly as written. A path spelled
+`./pkg/mod.py` or `mod.py`, which [`get_task_context` reads](#seeds-are-read-tolerantly) as
+`pkg/mod.py`, finds nothing here, and `query_decisions` answers `No context found.` with none of
+the blocks that explain why: no `## How your seeds were read`, no `## Not in the code graph`, no
+`## Nearest anchored`. When a path might be spelled loosely, call `get_task_context` first.
 
 **Returns:** a Markdown string (or the tool-specific "nothing found" message above).
 
@@ -1050,7 +1230,8 @@ ratify_decisions(
 ) -> dict[str, str]
 ```
 
-**Deprecated alias for [`ratify`](#ratify), kept for one release.** Despite the name, it now
+**Deprecated alias for [`ratify`](#ratify), and still kept.** It has been deprecated since 0.1.0,
+and no removal date is set. Despite the name, it now
 covers facts and domains too — behavior is identical to `ratify`, including the cascade and the
 TOC-cache refresh. Prefer `ratify`; this alias exists only so existing callers written against
 the old decisions-only name keep working.

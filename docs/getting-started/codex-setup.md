@@ -15,15 +15,18 @@ and AGENTS.md registered separately, for fine control or a source checkout).
 
 ## Option A: plugin (recommended)
 
-Inside a Codex CLI session, in that repo:
+From a terminal, in that repo:
 
 The commands below follow the current development branch. For durable environments, see
 [how to pin mutable development references](installation.md#mutable-development-references).
 
+```bash
+codex plugin marketplace add SantyagoSeaman/sidegraph
+codex plugin add sidegraph@sidegraph
 ```
-/plugin marketplace add SantyagoSeaman/sidegraph
-/plugin install sidegraph@sidegraph
-```
+
+These are shell commands, not slash commands typed inside a Codex session. The marketplace
+source takes `owner/repo[@ref]`, a local path or a Git URL.
 
 Installs the MCP server, the `SessionStart`/`Stop`/`SubagentStart` hooks, and all 12 skills in one step,
 pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by default.

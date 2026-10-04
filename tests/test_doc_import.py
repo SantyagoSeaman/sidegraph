@@ -2380,6 +2380,73 @@ def test_rejected_beats_draft_like_on_a_value_that_reads_as_both():
     assert _is_draft_like_status(both) and _is_rejected_status(both)
 
 
+# A negation within the three preceding words of the same clause negates `reject`/`rejected`.
+# see design/superpowers/specs/2026-10-04-rejected-status-negation-design.md
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "rejected",
+        "Rejected in favour of ADR-9999",
+        "proposed, then rejected",
+        "was rejected, not accepted",
+        "not reviewed, rejected",
+        "not rejected, rejected",
+        # one row for each clause break, so dropping any one of them turns a row red
+        "not reviewed; rejected",
+        "not reviewed. rejected",
+        "not reviewed: rejected",
+        "Not accepted | rejected",
+        "Won't do / rejected",
+        "Not accepted \u2014 rejected",
+        "Not accepted \u2013 rejected",
+        "Not implemented - Rejected",
+        "Not approved -> rejected",
+        "Didn't ship \u2014 rejected by the board",
+    ],
+)
+def test_is_rejected_status_reads_a_rejection_a_negation_does_not_reach(value):
+    """T1. Red against unfixed code on the dash, slash, pipe and arrow rows (the last seven):
+    only `, ; . :` ended a clause, so `Not accepted \u2014 rejected` read as negated and landed as
+    not rejected. The first six, and the `; . :` rows, pass before the fix too: they are what
+    spec mutations M1 (no clause stop), M2 (first match only) and M4 (a break dropped) turn red."""
+    from sidegraph.doc_import import _is_rejected_status
+
+    assert _is_rejected_status(value), value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "should not be rejected",
+        "not  rejected",
+        "never rejected",
+        "isn't rejected",
+        "isn\u2019t rejected",
+        "unrejected",
+        "not rejected",
+        "accepted",
+    ],
+)
+def test_is_rejected_status_reads_a_negation_near_the_word_as_not_rejected(value):
+    """T2. Red against unfixed code on `should not be rejected`, `not  rejected` (two
+    spaces), `never rejected` and both `isn't rejected` spellings: `(?<!not )` saw only `not`
+    plus one space. `unrejected`, `not rejected` and `accepted` pass before and after."""
+    from sidegraph.doc_import import _is_rejected_status
+
+    assert not _is_rejected_status(value), value
+
+
+def test_is_rejected_status_negation_window_is_three_words():
+    """T3. Red against unfixed code on the first assertion; the second passes before and
+    after, and is what spec mutation M3 (a window of four) turns red."""
+    from sidegraph.doc_import import _is_rejected_status
+
+    assert not _is_rejected_status("not a b rejected")
+    assert _is_rejected_status("not a b c rejected")
+
+
 # Two heading shapes measured on real foreign Nygard-style ADR corpora (2026-08-03,
 # rancher/turtles 18 ADRs + alphagov/govuk-infrastructure 23 ADRs): option comparisons sit
 # under "## Proposed alternatives" (turtles 0009) or "## Options" with "### Option N"

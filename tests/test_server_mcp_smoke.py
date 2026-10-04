@@ -19,6 +19,7 @@ import importlib.metadata
 import json
 
 import fastmcp
+import mcp.types as mt
 
 import sidegraph.server as server_module
 from sidegraph.store import Store
@@ -47,8 +48,15 @@ def test_mcp_add_and_retrieve_decisions_roundtrip(tmp_path, monkeypatch):
     assert added["status"] == "accepted"
     assert added["id"]
 
-    decisions = retrieve_result.data
-    assert any(d["id"] == added["id"] for d in decisions)
+    # The listing is one JSON object in one text block: no structured copy for the host to
+    # print a second time (design/superpowers/specs/2026-10-04-bounded-decision-listing-design.md
+    # D1).
+    assert len(retrieve_result.content) == 1
+    assert isinstance(retrieve_result.content[0], mt.TextContent)
+    assert retrieve_result.structured_content is None
+    listing = json.loads(retrieve_result.content[0].text)
+    assert listing["overview"] is True
+    assert any(row["id"] == added["id"] for row in listing["newest"])
 
 
 def test_mcp_server_info_reports_own_package_version():

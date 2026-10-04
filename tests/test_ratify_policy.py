@@ -3070,6 +3070,8 @@ def test_importer_dry_run_never_auto_ratifies(store, tmp_path, monkeypatch):
     # test_importer_gotcha_auto_accepts_under_auto_low_risk_and_rerun_does_not_double_count.
     assert report.imported >= 1
     assert report.auto_ratified == 0
+    # The prediction lives in its own field, never in `auto_ratified` (2026-10-04 spec, D2).
+    assert report.would_auto_ratify == 2
     assert report.auto_ratify_failures == []
     assert calls == []
     assert list(store.iter_decisions()) == []
@@ -3297,6 +3299,8 @@ def test_doc_import_dry_run_never_auto_ratifies(store, tmp_path, monkeypatch):
     # the non-dry-run path by test_doc_import_gotcha_auto_accepts_under_auto_low_risk.
     assert report.imported >= 1
     assert report.auto_ratified == 0
+    # The prediction lives in its own field, never in `auto_ratified` (2026-10-04 spec, D2).
+    assert report.would_auto_ratify == 1
     assert report.auto_ratify_failures == []
     assert calls == []
     assert list(store.iter_decisions()) == []
@@ -3875,7 +3879,7 @@ def test_cli_domains_add_never_auto_ratifies_even_under_auto_all(tmp_path, monke
 # -- CLI: `, auto-ratified N` result-line segment + stderr failures (design D6) --------
 
 
-def test_cli_rationale_import_prints_auto_ratified_segment_and_dry_run_omits_it(
+def test_cli_rationale_import_prints_auto_ratified_segment_and_dry_run_says_would_auto_ratify(
     tmp_path, capsys, monkeypatch
 ):
     from tests.test_cli_import import GRAPH as _rationale_graph
@@ -3895,8 +3899,10 @@ def test_cli_rationale_import_prints_auto_ratified_segment_and_dry_run_omits_it(
     assert d.status == DecisionStatus.ACCEPTED
     assert d.ratified_by == "auto:auto-low-risk"
 
-    # Review round 1, m1: D6 says the segment is added to the non-dry-run line ONLY --
-    # the rationale-import dry-run printer had no test of its own before this fix.
+    # The real-run segment ("auto-ratified K") describes a transition that happened, so a dry
+    # run never carries it; it says what WOULD happen instead, as "would auto-ratify M"
+    # (2026-10-04 spec, D4). Before that, "auto-ratified" was merely not a substring of
+    # "auto-ratify", so a bare absence check could not tell the two segments apart.
     db2 = tmp_path / "t2.db"
     assert (
         import_main(
@@ -3906,9 +3912,10 @@ def test_cli_rationale_import_prints_auto_ratified_segment_and_dry_run_omits_it(
     )
     out2 = capsys.readouterr().out
     assert "auto-ratified" not in out2
+    assert "would import 1 decision(s), would auto-ratify 1 (skipped:" in out2
 
 
-def test_cli_doc_import_prints_auto_ratified_segment_and_dry_run_omits_it(
+def test_cli_doc_import_prints_auto_ratified_segment_and_dry_run_says_would_auto_ratify(
     tmp_path, capsys, monkeypatch
 ):
     from tests.test_cli_import import _DOC_MENTION_GRAPH, _adr_md
@@ -3945,7 +3952,8 @@ def test_cli_doc_import_prints_auto_ratified_segment_and_dry_run_omits_it(
     assert d.status == DecisionStatus.ACCEPTED
     assert d.ratified_by == "auto:auto-all"
 
-    # D6: the dry-run summary line never gets the segment.
+    # The dry-run summary never carries the real-run segment ("auto-ratified K"); it says
+    # "would auto-ratify M" instead (2026-10-04 spec, D4).
     db2 = tmp_path / "t2.db"
     assert (
         import_main(
@@ -3965,6 +3973,7 @@ def test_cli_doc_import_prints_auto_ratified_segment_and_dry_run_omits_it(
     )
     out2 = capsys.readouterr().out
     assert "auto-ratified" not in out2
+    assert "would import 1 decision(s), supersede 0, would auto-ratify 1 (skipped:" in out2
 
 
 def test_cli_domain_bootstrap_prints_auto_ratified_segment_and_dry_run_omits_it(

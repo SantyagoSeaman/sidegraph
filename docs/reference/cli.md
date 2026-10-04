@@ -105,14 +105,15 @@ sidegraph-init [--db PATH] [--graph PATH] [--no-settings | --ratify-policy VALUE
 | `--ratify-policy` | unset | `manual`, `auto-low-risk`, or `auto-all`: write this value into `.claude/settings.json` with no prompt (still never overwrites an existing value there); for a scripted, non-interactive setup that wants an explicit answer instead of the interactive question below. Mutually exclusive with `--no-settings` |
 | `--hooks` | off | install or refresh the graph refresh git hook (step 3) with no question: for a scripted setup, or after the person agreed in chat. Clears an earlier decline. Mutually exclusive with `--no-hooks` and `--remove-hooks` |
 | `--no-hooks` | off | install no hook and record the choice (`git config --local sidegraph.graphRefresh false`), so the session-start reminder stops. Mutually exclusive with `--hooks` and `--remove-hooks` |
-| `--remove-hooks` | off | remove Sidegraph's block from `post-commit`, `post-merge` and `post-checkout` (each foreign hook ends byte-identical to its state before install, and a file Sidegraph created is deleted), delete the helper and its lock files, clear the recorded choice, print what changed, and **exit without running the rest of init** (`0`, or `1` when a file cannot be removed or a hook was left holding its block): it creates no `.sidegraph/` and asks no settings question. Mutually exclusive with `--hooks` and `--no-hooks` |
+| `--remove-hooks` | off | remove Sidegraph's block from `post-commit`, `post-merge` and `post-checkout` (each foreign hook ends byte-identical to its state before install, and a file Sidegraph created is deleted), delete the helper and its lock files, clear the recorded choice, print what changed, and **exit without running the rest of init** (`0`, or `1` when a file cannot be removed or a hook was left untouched: a hook with damaged markers, or a symlinked hook, which counts even if it never held a block, because Sidegraph does not follow it to look): it creates no `.sidegraph/` and asks no settings question. Mutually exclusive with `--hooks` and `--no-hooks` |
 
 Bootstraps a target repo for Sidegraph. Run it once, in the repo you want memory over (not
 the Sidegraph checkout):
 
-1. Creates the store's directory (the canonical `decisions/`/`domains/`/`entities/`/
-   `bindings/`/`initiatives/` layout, a committed `format` marker, and a store-written
-   `.sidegraph/.gitignore` ignoring the derived `index.db`) at `--db` (via `Store(...)`, the
+1. Creates the store's directory (the canonical `decisions/`/`facts/`/`domains/`/`entities/`/
+   `bindings/`/`initiatives/` layout, a committed `format` marker, a committed
+   `stamping_live_since` file, and a store-written `.sidegraph/.gitignore` ignoring the derived
+   `index.db`) at `--db` (via `Store(...)`, the
    same call every other entry point makes — inherently idempotent). If the directory already
    looks initialized (an existing `format` marker, an un-migrated legacy `decisions.db`, or a
    legacy `*.db` file path), prints `already initialized: <path> exists.` instead of touching
@@ -165,15 +166,7 @@ the Sidegraph checkout):
    markers (a lone marker, reversed markers, two pairs) are reported and left alone. When
    Graphify's own hook is also installed, init says that it rebuilds in linked worktrees too
    and how to remove it (`graphify hook uninstall`); it never touches it.
-4. Prints the setup instructions: the plugin install path first (`/plugin marketplace add
-   SantyagoSeaman/sidegraph` + `/plugin install sidegraph@sidegraph` — installs the MCP server
-   and all four hooks automatically), then the no-plugin alternative (a single
-   `claude mcp add sidegraph -s project … -- uvx --from git+…` command that writes a
-   repo-committed `.mcp.json`), and a pointer to
-   [`claude-code-setup.md`](../getting-started/claude-code-setup.md) /
-   [`codex-setup.md`](../getting-started/codex-setup.md) for hook-by-hook manual wiring.
-   Printed on every run, not just the first, so it's easy to re-fetch.
-5. Settles `.claude/settings.json`'s `env.SIDEGRAPH_RATIFY_POLICY`
+4. Settles `.claude/settings.json`'s `env.SIDEGRAPH_RATIFY_POLICY`
    (see [`configuration.md`](configuration.md#environment-variables)), never by writing it
    silently. The library's own default is `manual` either way; this step only decides what a
    *fresh* project's committed settings say:
@@ -214,6 +207,14 @@ the Sidegraph checkout):
    Whatever happens above, a host without `.claude/settings.json` (Codex CLI, CI) gets the
    equivalent as a plain `export SIDEGRAPH_RATIFY_POLICY=<value>` line. A settings-file
    problem never fails the store creation in step 1.
+5. Prints the setup instructions: the plugin install path first (`/plugin marketplace add
+   SantyagoSeaman/sidegraph` + `/plugin install sidegraph@sidegraph` — installs the MCP server
+   and all four hooks automatically), then the no-plugin alternative (a single
+   `claude mcp add sidegraph -s project … -- uvx --from git+…` command that writes a
+   repo-committed `.mcp.json`), and a pointer to
+   [`claude-code-setup.md`](../getting-started/claude-code-setup.md) /
+   [`codex-setup.md`](../getting-started/codex-setup.md) for hook-by-hook manual wiring.
+   Printed on every run, not just the first, so it's easy to re-fetch.
 
 **Exit code:** `0` on success, including when the graph is missing (expected and non-fatal),
 when re-run on an already-initialized repo (idempotent), and when the hook step is skipped.
@@ -222,7 +223,8 @@ writable, or an existing store has an incompatible format/`schema_version`) — 
 not writable (<path>): <error>` — and, for the hook flags, if `--hooks` cannot write the helper
 or a hook file (`graph refresh hook: could not write (<error>)`; the rest of init has run), or
 `--remove-hooks` cannot remove them (`graph refresh hook: could not remove (<error>)`), or
-leaves a hook untouched because it is a symlink or its block markers are damaged
+leaves a hook untouched because it is a symlink (even one that never held a block) or its block
+markers are damaged
 (`graph refresh hook: removal was partial; Sidegraph's block may remain in <hooks>, left
 untouched: edit them by hand`; the other hooks and the helper are still removed). The
 hook question's own write failure prints the same message and leaves the exit code `0`.
@@ -417,8 +419,7 @@ non-empty `stale_decisions`, a non-empty `slug_conflicts`, or a non-empty `domai
 `overbroad_domains` are deliberately excluded — informational only, never fail the check on
 their own (they're still listed in
 `outcomes` in the JSON report for a human to triage on their own schedule, not because CI
-is red). The `orphaned`/`ambiguous` exclusion is a live-experiment refinement (design/
-superpowers/specs/2026-07-11-ci-live-findings-design.md ruling 1): a legitimate rename+heal
+is red). The `orphaned`/`ambiguous` exclusion is a refinement made after a live CI experiment: a legitimate rename+heal
 leaves the renamed-away entity's leaf orphaned for good — an append-only store has no
 retirement path — and that residue must not keep a healing PR (or the default branch after
 it merges) red forever. When an orphaned/ambiguous anchor actually costs reachability (it
@@ -564,12 +565,17 @@ over the same file's same rationale is deduplicated.
 **Real run:** `imported N decision(s) (skipped: X existing, Y unanchorable)`. Under a
 non-`manual` `SIDEGRAPH_RATIFY_POLICY`: `imported N decision(s), auto-ratified K (skipped: X
 existing, Y unanchorable)`, and each failed auto-ratify attempt prints `auto-ratify failure:
-<id>: <reason>` on stderr; `--dry-run` never carries the segment.
+<id>: <reason>` on stderr. A `--dry-run` never auto-ratifies. Under a non-`manual` policy its
+summary says how many records would be eligible (`would auto-ratify M`), and each eligible item
+is marked `[auto]`.
 
 **`--dry-run`:** one line per candidate — `<file_path or node_id>: <title>` — followed by a
-blank line, `would import N decision(s) (skipped: X existing, Y unanchorable, Z filtered)`,
-and a per-file breakdown (`  <file_path or '<unknown>'>: <count>`, sorted by path). Nothing is
-written to the store; counts reflect exactly what a real run would do.
+blank line, `would import N decision(s)[, would auto-ratify M] (skipped: X existing, Y
+unanchorable, Z filtered)` (the bracketed segment only under a non-`manual` policy), and a
+per-file breakdown (`  <file_path or '<unknown>'>: <count>`, sorted by path). No record is
+written, though opening a store that does not exist yet still creates its own files (`format`,
+`.gitignore`, `stamping_live_since` and `index.db`); counts reflect exactly what a real run would
+do.
 
 **Exit code:** `0` on success, including an empty import (nothing new to import) and every
 `--dry-run` invocation. Returns `1` before touching the graph or store if `--limit` is
@@ -697,9 +703,15 @@ landed `proposed` for this reason specifically (e.g. `N landed proposed (source 
 draft/proposed/pending/under review)`), printed only when `N > 0`.
 
 **Status-derived `rejected`:** when that same extracted status reads as *turned down* — a
-word-boundary `reject`/`rejected`, with parenthesised asides stripped and `not`/`un`
-negations excluded, so `Rejected in favour of ADR-9999` matches while `Accepted (rejected
-alternative: gRPC)` and `rejection criteria defined` do not — the decision lands
+word-boundary `reject`/`rejected`, with parenthesised asides stripped and negations
+excluded, so `Rejected in favour of ADR-9999` matches while `Accepted (rejected
+alternative: gRPC)` and `rejection criteria defined` do not. A negation is `not`, `never`, a
+word ending `n't`, or an `un` prefix. The first three count when they stand within the three
+words before `rejected` in the same clause, so `should not be rejected` and `isn't rejected`
+are not turned down, while `not reviewed, rejected` and `was rejected, not accepted` are. A
+clause ends at `,` `;` `.` `:`, a pipe, a slash, an em or en dash, or a spaced hyphen or `->`,
+so `Not accepted — rejected` and `Won't do / rejected` are turned down. A conjunction does not
+end a clause: `Not adopted and rejected` reads as negated. The decision lands
 `rejected`, **regardless of `--propose`**. It is deliberately not `proposed`: a document
 the team refused must not enter the human ratification queue as if it were awaiting
 review. It is not skipped either — a rejected proposal, with its reasons, is exactly the
@@ -763,7 +775,8 @@ N file(s) skipped: not valid UTF-8, re-save as UTF-8 to import:
 
 **Real run:** `imported N decision(s), superseded M (skipped: A existing, B unanchorable,
 C not-decision-shaped, D unparseable, E superseded-frontmatter, F outside-profile)`, followed
-by the status-derived-proposed line above when applicable, followed by the template-skip line
+by the status-derived lines above (`N landed rejected`, `N landed proposed`) when applicable,
+followed by the template-skip line
 and the degenerate-parent line above when applicable, then `N doc(s) refused: a symlink
 pointing outside the repository` and `N existing record(s) had their anchors repaired` when
 non-zero, and the undecodable-file block above last when applicable. A non-zero `F` is the profile scope filter, not a parse failure — see
@@ -771,19 +784,24 @@ the `--any-doc` note under the flag table above. Under a non-`manual`
 `SIDEGRAPH_RATIFY_POLICY`: `imported N decision(s), superseded M, auto-ratified K (skipped:
 …)` — only fresh `--propose` writes that land as a new `proposed` record are eligible;
 status-derived and `superseded` re-imports never auto-ratify; each failed auto-ratify attempt
-prints `auto-ratify failure: <id>: <reason>` on stderr; `--dry-run` never carries the
-segment.
+prints `auto-ratify failure: <id>: <reason>` on stderr. A `--dry-run` never auto-ratifies.
+Under a non-`manual` policy its summary says how many records would be eligible (`would
+auto-ratify M`), and each eligible item is marked `[auto]`.
 
 **`--dry-run`:** one line per candidate — `<path>: [imported|superseded] <title>`, with any
 skipped-anchor reasons indented underneath (`    anchor skipped: <name> (<reason>)`) —
-followed by a blank line, `would import N decision(s), supersede M (...)` (same skip breakdown
-as the real-run line above), the status-derived-proposed line when applicable (`N would land
+followed by a blank line, `would import N decision(s), supersede M[, would auto-ratify K]
+(...)` (same skip breakdown as the real-run line above; the bracketed segment only under a
+non-`manual` policy), the status-derived-rejected line when applicable (`N would land rejected
+(source status: rejected)`), the status-derived-proposed line when applicable (`N would land
 proposed (...)`), the template-skip line and the degenerate-parent line above when
 applicable, the `N doc(s) refused: a symlink pointing outside the repository` line when
 non-zero (a dry run never prints the anchors-repaired line), and a per-file breakdown. The
 undecodable-file block above prints last, after the per-file breakdown. Both indent their lines by two spaces, so breakdown lines printed
-after the block would read as more undecodable files. No decision or binding is written; opening the
-store may still migrate supported legacy data or rebuild the derived index.
+after the block would read as more undecodable files. No decision or binding is written. Opening the
+store may still create a fresh store's own files (`format`, `.gitignore`, `stamping_live_since`,
+`index.db` and the empty record directories), migrate supported legacy data or rebuild the derived
+index.
 
 **Exit code:** `0` on success, including an empty run and every `--dry-run` invocation.
 Returns `1` before touching the graph or store if `--profile` names an unknown profile
@@ -1001,10 +1019,10 @@ mutate anything it inspects (see [`reference/store-format.md`](store-format.md) 
 on-disk layout this walks). Two layers, combined into one report:
 
 - **Snapshot layer** (always runs): every *hot* record file parses against its schema (a
-  `Model.model_validate`, not just JSON decoding) — archived entries are JSON-parsed and
-  cross-referenced (supersedes chains, ULID uniqueness) but the lint stops short of
-  schema-validating them; a schema-invalid archived payload would instead surface at the
-  next cold `Store` reload, which does model-validate archived records; the `format` marker's
+  `Model.model_validate`, not just JSON decoding), and so does every archived decision and
+  domain — a schema-invalid archived payload is a `bad-archive-segment` violation naming the
+  segment and the line, the same line the store's reload leaves out; archived entries are also
+  cross-referenced (supersedes chains, ULID uniqueness); the `format` marker's
   `schema_version` is present and known; `valid_to >= valid_from` on every decision/fact; a
   `superseded` record's `supersedes` chain resolves to a real successor; every `supersedes`
   target exists; every binding references an existing entity; every fact's `supports`
@@ -1474,8 +1492,9 @@ Lines the report will not invent:
   line) instead of `recorded yet`, and the header drops `(N retained)`, which would read as an
   empty journal. `--json` carries `activation.outside_window`.
 - **A lookup is not counted if it never rendered.** Only `get_task_context` and
-  `query_decisions` are budgeted renders. A `check-plan` run that falls back to
-  `retrieve_decisions` leaves no journal row and is not reflected anywhere in this report.
+  `query_decisions` are budgeted renders. The reversal hunt that `check-plan` runs as a fixed step,
+  `retrieve_decisions` over superseded and rejected records, leaves no journal row and is not
+  reflected anywhere in this report.
 - **Windowed and all-time.** The header window cuts the session and file counts. `asked about
   most` and `no recorded showing` are running totals kept outside the window, and the report labels
   them `all time`.

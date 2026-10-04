@@ -105,7 +105,7 @@ write below — the three raw authoring paths underneath it are:
    asked to) names a domain directly, optionally nesting it under a `parent_slug`.
 
 All three land `status=proposed`. **Every path passes through the same ratification gate** —
-the unified `ratify` MCP tool (`ratify_decisions` is a deprecated alias, kept for one release)
+the unified `ratify` MCP tool (`ratify_decisions` is a deprecated alias, still kept)
 and the `sidegraph-ratify` CLI, which list and accept/drop decisions *and* domains side by
 side. By default no path bypasses human review, including bootstrap: a fresh repo can
 propose dozens of domains from its community structure in one command, but nothing is named

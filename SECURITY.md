@@ -25,10 +25,21 @@ Sidegraph is a local-only tool. Its entire data surface:
   the visualization, OKF export and bootstrap-report commands write to the output paths you
   give them; and the optional `sidegraph-prepare-commit-msg` git hook, once you install it,
   adds commented decision trailers to the commit message file git hands it
-  (normally `.git/COMMIT_EDITMSG`). Beyond those, the only filesystem writes are the standard config
-  snippets you install yourself (`.mcp.json`, hook entries) — Sidegraph touches nothing
-  else. See [`docs/reference/store-format.md`](docs/reference/store-format.md) for the full
-  layout.
+  (normally `.git/COMMIT_EDITMSG`). Three more writes sit outside the repository's own
+  files. `sidegraph-init --hooks` (or a yes to its refresh question) writes a helper script
+  and a marked block in three git hooks (`post-commit`, `post-merge`, `post-checkout`) under
+  `.git/hooks/`. When `core.hooksPath` is set, `sidegraph-init` writes only the helper (to
+  `.git/hooks/`) and prints the lines to add to your hooks by hand. While it runs, the helper
+  also keeps a lock, a flag file and a log in the git directory. `sidegraph-init --no-hooks`
+  writes the git config key `sidegraph.graphRefresh` to the repository's own config, and
+  `sidegraph-init --remove-hooks` takes the blocks, the helper and that key out again. The
+  SessionStart hook writes one 40-character commit id to
+  `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`, and only when the running package was
+  installed from the canonical `git+https://github.com/SantyagoSeaman/sidegraph.git@main`. That
+  covers the plugin and the manual `uvx --from …@main` recipe. A PyPI, tag, SHA or editable
+  install never writes it. Beyond those, the only filesystem writes are the standard config
+  snippets you install yourself (`.mcp.json`, hook entries). See
+  [`docs/reference/store-format.md`](docs/reference/store-format.md) for the full layout.
 - **Network:** none. No remote telemetry, no phone-home, nothing leaves your machine. Local
   retrieval telemetry is recorded in the gitignored `index.db` by default (which records
   were shown and which files were touched, never uploaded); set `SIDEGRAPH_TELEMETRY=off` to

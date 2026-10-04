@@ -73,7 +73,7 @@ Only after all nine steps pass is the public snapshot ready to tag.
 
 Every plugin manifest installs from the public repository's `main`. The MCP server and
 `SessionStart` let `uv` re-resolve that branch reference at each start, and `SessionStart`
-records the commit it got for the `Stop` and `PreToolUse` hooks to launch from, so pushing
+records the commit it got for the `Stop`, `PreToolUse` and `SubagentStart` hooks to launch from, so pushing
 `main` reaches every plugin user at their next session start, on their machine, in any project
 and either host. For that reason the public `main` moves only as part of a release: `tools/release-public.sh --push`
 refuses to push it unless the version being published is untagged in the public repository

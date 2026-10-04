@@ -52,8 +52,13 @@ uncommitted for a day, and `branch-only-records` reports records that exist only
 local branches, with a notice when such a branch is more than a week old
 ([troubleshooting](troubleshooting.md#store-uncommitted)). The fix is the ordinary one: commit
 `.sidegraph/` in the same pull request as the work that produced the records, and merge the
-branch that holds the rest. A pre-commit hook that runs `sidegraph-doctor --check` is safe, since
-files that are fully staged do not count.
+branch that holds the rest. Fully staged store files do not count toward `store-uncommitted`,
+so that one check never blocks the commit that fixes it. A pre-commit hook that runs
+`sidegraph-doctor --check` still fails often. `--check` makes every advisory finding exit `2`,
+and `code-drift` is one of them: it fires after any commit that touches a file an accepted
+record is anchored to. For a gate on the store itself, use `sidegraph-verify`. It exits `2`
+only for a violation of the store's own write rules, and `0` for a clean store whatever the
+code did ([CLI reference](../reference/cli.md#sidegraph-verify)).
 
 ## Ratification as part of PR review
 
@@ -71,8 +76,10 @@ Two things still help beyond just reading the diff:
   area of the system — worth a second look before reading the content, the same way a
   migration file in a diff draws attention.
 - **Run the tools for anything still pending.** `sidegraph-ratify` (no flags) against a
-  checkout of the branch lists everything still `proposed`, or call `list_proposed` /
-  `retrieve_decisions` from an agent session. With no `--db` flag, `sidegraph-ratify` resolves
+  checkout of the branch lists everything still `proposed`, or call `list_proposed` from an
+  agent session. Both list the whole queue. `retrieve_decisions(status="proposed")` does not:
+  it omits proposals older than the 30-day surfacing window, and every proposal when
+  `SIDEGRAPH_UNRATIFIED=off`. With no `--db` flag, `sidegraph-ratify` resolves
   the store via `$SIDEGRAPH_DIR` if set, else the deprecated `$SIDEGRAPH_DB` dispatch, else
   the default `.sidegraph/` — existing, or created fresh with a stderr warning (see
   [`reference/cli.md`](../reference/cli.md)) — so this "just works" from a checkout of the

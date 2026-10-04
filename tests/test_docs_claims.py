@@ -494,20 +494,46 @@ def test_stability_page_counts_match_the_surfaces_they_describe():
     assert f"The {len(env_names)} in" in doc
 
 
-def _mcp_tool_names() -> set[str]:
-    """Every function in server.py carrying an ``@mcp.tool`` decorator.
-
-    AST rather than a ``grep -c "@mcp.tool"``: that count returns 25 on this file because one
-    occurrence sits in prose, and a stability page that advertised 25 tools would be wrong in
-    the direction that matters -- promising a surface that isn't there.
-    """
-    tree = ast.parse((_ROOT / "src" / "sidegraph" / "server.py").read_text(encoding="utf-8"))
+def _tool_names_in(tree: ast.AST) -> set[str]:
+    """Functions decorated ``@mcp.tool`` or ``@mcp.tool(...)``: the bare and the call form."""
     return {
         node.name
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef)
-        and any(isinstance(d, ast.Attribute) and d.attr == "tool" for d in node.decorator_list)
+        and any(
+            isinstance(target := d.func if isinstance(d, ast.Call) else d, ast.Attribute)
+            and target.attr == "tool"
+            for d in node.decorator_list
+        )
     }
+
+
+def _mcp_tool_names() -> set[str]:
+    """Every function in server.py carrying an ``@mcp.tool`` decorator, bare or called.
+
+    AST rather than a ``grep -c "@mcp.tool"``: that count returns 25 on this file because one
+    occurrence sits in prose, and a stability page that advertised 25 tools would be wrong in
+    the direction that matters -- promising a surface that isn't there. Every tool is decorated
+    ``@mcp.tool(annotations=...)`` since the annotations landed, so the call form is the one
+    that counts; a guard for the bare form alone counts 0.
+    see design/superpowers/specs/2026-10-04-tool-annotations-and-argument-names-design.md (D1, T7)
+    """
+    return _tool_names_in(
+        ast.parse((_ROOT / "src" / "sidegraph" / "server.py").read_text(encoding="utf-8"))
+    )
+
+
+def test_t7_the_tool_count_includes_both_decorator_forms():
+    """Mutation M2 reverts the guard to the bare form: the count falls to 0."""
+    source = (
+        "@mcp.tool\ndef bare(): ...\n"
+        "@mcp.tool(annotations=x)\ndef called(): ...\n"
+        "@other.thing(1)\ndef other(): ...\n"
+        "@tool\ndef plain_name(): ...\n"
+    )
+
+    assert _tool_names_in(ast.parse(source)) == {"bare", "called"}
+    assert len(_mcp_tool_names()) == 24
 
 
 def test_stability_page_schema_version_and_upgrade_sets_match_the_code():

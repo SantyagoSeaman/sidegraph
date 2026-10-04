@@ -232,6 +232,10 @@ _FORMAT_MARKER_PREFIX = "sidegraph-store "
 # ``*.tmp`` — see ``Store._ensure_gitignore``.
 _GITIGNORE_CONTENT = "index.db*\n*.tmp\n"
 
+# ``Store.record_types`` binds each id twice (one ``IN`` list per table), so a chunk of 400 is
+# 800 variables: under the 999 of an old SQLite build. A real entity has far fewer bindings.
+_RECORD_TYPES_CHUNK = 400
+
 # Glob patterns matching the store's OWN root-level tmp artifacts (the format marker, the
 # stamping marker, and .gitignore -- everything else lives under the canonical subdirs,
 # _CANONICAL_SUBDIRS). Matches ``_atomic_write_text_race_tolerant``'s per-attempt UNIQUE tmp
@@ -2668,6 +2672,33 @@ class Store:
         with self._lock:
             row = self._conn.execute("SELECT data FROM facts WHERE id = ?", (fact_id,)).fetchone()
         return Fact.model_validate_json(row["data"]) if row else None
+
+    def record_types(self, ids: Iterable[str]) -> dict[str, Literal["decision", "fact"]]:
+        """The type of each record id, from one read of ``index.db`` rather than one lookup per
+        id: ``"decision"`` or ``"fact"``. An id found in neither table is ABSENT from the
+        result, so the caller decides what a dangling id means. A repeated id is asked once.
+
+        Parses no record, so it is the cheap way to ask "what is this binding's record?" before
+        loading it. The ids go in chunks of :data:`_RECORD_TYPES_CHUNK`; below that it is one
+        statement. An id in both tables (impossible for ULIDs minted per record) is a decision,
+        which is the order ``get_entity_history`` always used.
+        see design/superpowers/specs/2026-10-04-find-entity-unknown-record-type-design.md
+        """
+        wanted = list(dict.fromkeys(ids))
+        out: dict[str, Literal["decision", "fact"]] = {}
+        for start in range(0, len(wanted), _RECORD_TYPES_CHUNK):
+            chunk = wanted[start : start + _RECORD_TYPES_CHUNK]
+            marks = ", ".join("?" * len(chunk))
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT id, 'decision' AS kind FROM decisions WHERE id IN ({marks}) "
+                    f"UNION ALL SELECT id, 'fact' AS kind FROM facts WHERE id IN ({marks})",
+                    chunk + chunk,
+                ).fetchall()
+            for row in rows:
+                if row["kind"] == "decision" or row["id"] not in out:
+                    out[row["id"]] = row["kind"]
+        return out
 
     def iter_facts(self) -> Iterator[Fact]:
         with self._lock:

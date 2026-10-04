@@ -79,26 +79,40 @@ agent), this instruction is unconditional and covers every search surface — ba
 structure-query tools, a search that names no file, everything — by telling the agent up front,
 not by gating a specific tool call.
 
+The next line names the package the hooks run, so a session that launched an old install says so
+in its own context: `Sidegraph X.Y.Z`, where `X.Y.Z` is the running version. It appears in every
+`SessionStart` that injects the map.
+
 Both renderers also inject:
 
 - **Initiatives** — named work threads decisions have been grouped under, if any.
 - **Global mistakes & constraints** — the most recent `gotcha`/`lesson`/`constraint`
   decisions scoped `global` (not tied to one entity), capped at 10.
+- **Unratified proposals** — proposed records inside the surfacing window, after everything
+  accepted. The domain map lists proposed global mistakes only. The nameless map lists proposed
+  decisions and facts, up to 10 of each.
 
-Finally, unless `SIDEGRAPH_RATIFY_NUDGE=off`, one more line — own `try/except`, so a count
-failure never costs the map above it — whenever the pending-ratification queue is non-empty
-(nothing appended at zero):
+The nameless map adds two more sections that the domain map does not have: **Recorded
+decisions** (up to 10 accepted decisions that no section above already shows) and **Known
+facts** (up to 10 accepted facts). So the global mistakes are not the only decisions a session
+sees at start. Everything task-scoped still waits for `get_task_context`.
 
-> Sidegraph: N record(s) awaiting ratification (X decisions, Y facts, Z domains; oldest D days) — review
-> with the ratify MCP tool or sidegraph-ratify.
+After the map come the status lines. One run of the integrity checks decides which problems
+exist, and each one that does adds a line for the model, in this order: records awaiting
+ratification, code drift, a borrowed or stale code graph, a stray empty store, a plugin and
+package version mismatch, the plugin off in subdirectories, a missing code graph, orphaned
+records, store files left out of the index, no refresh hook, uncommitted store files, and
+records that exist only on unmerged branches. A line appears only while its problem does. A
+problem that needs a person also yields a notice, sent as a top-level `systemMessage` and shown
+to the user, at most once a day per check. Two environment variables switch their own lines
+off: `SIDEGRAPH_RATIFY_NUDGE=off` for the ratification line and `SIDEGRAPH_DRIFT_NUDGE=off` for
+the drift line. The texts, the order and the notice rules are in
+[`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start); each check is explained
+in [troubleshooting](../guides/troubleshooting.md).
 
-The count is proposed decisions, standalone proposed facts (one riding a proposed decision's
-cascade is covered by it and never double-counted), and proposed domains — see
-[`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start) for the exact
-`Store.pending_ratification_counts()` decomposition.
-
-If the store is empty and no graph exists, this renders a short stub — that's expected on a
-fresh repo, not an error.
+If the store is empty and no graph exists, this renders a short stub: the instruction, the
+version line, the header and a line saying there is no code graph. That's expected on a fresh
+repo, not an error.
 
 ### `Stop` — `sidegraph-stop`
 
@@ -160,7 +174,8 @@ needed. A call that names no file with records prints `{}`, and no counting form
 anywhere. Set `SIDEGRAPH_GREP_NUDGE=off` to stop delivery at the point of reading, on every tool
 but `Agent` (that has its own switch, below); touch recording is not affected. A Bash line counts only for the regular files that its `sed`, `grep`, `rg` and `cat`
 commands read (`head`, `awk` and `git grep` name nothing), and a Bash read is not a touch event;
-`if` needs Claude Code 2.1.89 for correct matching, and an older host runs the hook on every
+the `if` field exists from Claude Code 2.1.85 and matching on compound command lines is correct
+from 2.1.89, so use 2.1.89 or later; a host older than 2.1.85 runs the hook on every
 Bash call and gets an early exit with no output (details in the
 [hooks reference](../reference/hooks.md#bash-lines)). It reads the store's index directly rather
 than opening the store (see the [hooks reference](../reference/hooks.md#sidegraph-pre-tool-use)),
@@ -207,8 +222,11 @@ prints `{}`;
 any exception inside `stop` prints `{}` (Claude Code proceeds to stop normally); any exception
 inside `pre_tool_use` — or the nudge conditions simply not holding — also prints `{}` (the
 tool call proceeds through the normal permission flow); any exception inside `subagent_start`, or
-nothing anchored to code to describe, prints `{}` (the subagent starts with no brief). A missing store, missing graph, or
-misconfigured env var degrades to "no memory this session," never a broken session.
+nothing anchored to code to describe, prints `{}` (the subagent starts with no brief). A missing
+graph degrades to file-path anchors and a shorter map. A missing store is not an error either:
+`SessionStart` creates an empty one, so memory starts empty (the other hooks never create it). An
+env var that points at the wrong path gives an empty store there, so that session has no
+memory. None of these breaks the session.
 
 ## Plugin install path
 

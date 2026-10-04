@@ -55,7 +55,13 @@ class ImportReport(BaseModel):
     # below, always empty/zero under `manual` or when a written record was ineligible.
     auto_ratified: int = 0
     auto_ratify_failures: list[str] = Field(default_factory=list)  # ["<decision id>: <reason>"]
-    dry_run: list[dict] = Field(default_factory=list)  # [{"file_path", "title", "node_id"}, ...]
+    # What a real run would auto-ratify, filled ONLY by a dry run (the 2026-10-04 spec, D2):
+    # `auto_ratified` keeps meaning "transitions that actually happened", so it stays 0 in a
+    # dry run. An eligibility count, not a success guarantee -- a real `_auto_ratify` can
+    # still fail (a race, a cascade-guard refusal), which a dry run cannot foresee.
+    would_auto_ratify: int = 0
+    # [{"file_path", "title", "node_id", "auto_ratify_eligible"}, ...]
+    dry_run: list[dict] = Field(default_factory=list)
 
     def by_file(self) -> dict[str, int]:
         """Per-file breakdown of the dry-run listing, for the CLI's ``--dry-run`` printer."""
@@ -152,7 +158,14 @@ def import_rationales(
     helper — never a second copy of that predicate or stamp construction. Every importer
     write already carries ≥1 live Tier-2 binding (only resolved anchors are ever bound),
     so eligibility here turns on kind/policy/supersedes, same as everywhere else.
+
+    A dry run (``dry_run=True``) fires no transition, so ``auto_ratified`` stays 0; it runs the
+    same ``auto_ratify_eligible`` verdict on the signal the write would produce and reports it
+    in ``ImportReport.would_auto_ratify`` and, per item, ``"auto_ratify_eligible"``. A key
+    repeated within the run counts as ``skipped_existing`` the second time, as the real run's
+    idempotency lookup does once the first record is written.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2/D3
+    # see design/superpowers/specs/2026-10-04-import-dry-run-previews-auto-ratification-design.md
     """
     decision_kind = DecisionKind(kind)
     status = DecisionStatus.PROPOSED if propose else DecisionStatus.ACCEPTED
@@ -175,6 +188,10 @@ def import_rationales(
     process = kept[:limit] if limit is not None else kept
 
     report = ImportReport(filtered=filtered)
+    # The idempotency keys a dry run has already counted. A real run writes the first record
+    # and `find_decision_by_title` then skips the second; a dry run writes nothing, so without
+    # this set a key repeated within the run would count twice.
+    seen_keys: set[tuple[str, str]] = set()
 
     for node in process:
         ref = node.file_path if node.file_path is not None else node.node_id
@@ -190,7 +207,9 @@ def import_rationales(
         context, _ = redact(context)
 
         canonical_title = canonicalize(title)
-        if store.find_decision_by_title(canonical_title, "import", ref) is not None:
+        if (canonical_title, ref) in seen_keys or (
+            store.find_decision_by_title(canonical_title, "import", ref) is not None
+        ):
             report.skipped_existing += 1
             continue
 
@@ -200,9 +219,39 @@ def import_rationales(
             continue
 
         if dry_run:
+            # The same verdict the post-write block below reaches, built from the inputs the
+            # write uses (the 2026-10-04 spec, D1). Every anchor `_select_anchors` returns is
+            # confirmed `resolved`, so each binds as a live Tier-2 leaf: `len(anchors)` is at
+            # least 1 here and may be lower than the real `_anchor_signal` (Tier-1 community
+            # bindings come on top), which the gate's `>= 1` cannot tell apart. The importer
+            # never supersedes.
+            eligible = (
+                propose
+                and ratify_policy != RatifyPolicy.MANUAL
+                and auto_ratify_eligible(
+                    AutoEligibility(
+                        kind=decision_kind.value,
+                        live_tier12=len(anchors),
+                        ambiguous_or_orphan_only=False,
+                        pipeline_clean=True,
+                        has_provenance=True,
+                        domain_anchored=False,
+                        has_supersedes=False,
+                    ),
+                    ratify_policy,
+                )
+            )
+            seen_keys.add((canonical_title, ref))
             report.imported += 1
+            if eligible:
+                report.would_auto_ratify += 1
             report.dry_run.append(
-                {"file_path": node.file_path, "title": title, "node_id": node.node_id}
+                {
+                    "file_path": node.file_path,
+                    "title": title,
+                    "node_id": node.node_id,
+                    "auto_ratify_eligible": eligible,
+                }
             )
             continue
 

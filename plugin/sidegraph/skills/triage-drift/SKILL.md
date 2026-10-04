@@ -33,9 +33,9 @@ Triage in batches — a 35-record queue does not need 35 interrupts. Group verdi
 
 ## Per record: read both sides, then route
 
-1. **Read the record** — `get_entity_history(entity_id)` via `find_entity`, or match the
-   doctor finding's record id against `retrieve_decisions()`. Note what it *claims*:
-   the `choice`, the `consequences`, any evidence facts.
+1. **Read the record** — `get_entity_history(entity_id)` via `find_entity`, or read the
+   doctor finding's record by id with `retrieve_decisions(ids=["<record id>"])`. Note what
+   it *claims*: the `choice`, the `consequences`, any evidence facts.
 2. **Read the anchored code at HEAD** — the actual current implementation, not the diff.
    `git diff <provenance.commit> HEAD -- <file>` helps locate *what* changed, but the
    verdict comes from whether the record's claims still hold, not from how big the diff is.

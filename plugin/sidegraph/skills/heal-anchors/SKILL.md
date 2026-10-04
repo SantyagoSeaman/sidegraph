@@ -68,8 +68,8 @@ recommended heal — rather than one interrupt per finding. Every heal below is 
 store write or a source change: confirm before acting.
 
 1. **`possibly stale decisions (all anchors gone — verify):`** — every leaf anchor of the
-   listed decision is orphaned. Verify first (read the decision — `get_entity_history` /
-   `retrieve_decisions` — and look at the current code); then one of two heals:
+   listed decision is orphaned. Verify first (read the decision with `get_entity_history`,
+   or `retrieve_decisions(ids=[...])`, and look at the current code); then one of two heals:
    - **Restore the name** — the symbol/heading was renamed or dropped and the decision is
      still true of the code. Restoring it is a **source change**: propose the edit to the
      human, never do it silently. Then `graphify update . && sidegraph-sync` — the anchor
@@ -172,9 +172,10 @@ human, same as every other write this skill routes to a human instead of perform
 
 Everything above except the drop in (c) is a tool call, not a judgment a human has to make
 in the moment — `sync_anchors`/`find_entity`/`query_structure`/`add_anchors`/
-`propose_decisions` all run fine unattended, and so do the read-only verification tools
+`propose_decisions` all run fine unattended, and so do the tools that read records
 (`retrieve_decisions`/`get_entity_history`/`list_facts`/`verify_store`) used to confirm a
-stale decision's content before healing it. A scheduled job can run the
+stale decision's content before healing it. Of these, `retrieve_decisions` is not annotated
+read-only: it runs the lazy sync, whose moved rung can update a tracked entity file. A scheduled job can run the
 triage end to end and hand a human the result to review. Pin
 `"SIDEGRAPH_RATIFY_POLICY": "manual"` in `mcp-config.json`'s `env` block (same recipe as
 [`ci-cd-maintenance.md`](../../../../docs/guides/ci-cd-maintenance.md)) — an auto-ratification
@@ -217,7 +218,7 @@ read-only). The flags' guarantee is narrower than "no Bash/Edit/Write reachable"
 that overstates what they do: the run cannot **write** anything except through the
 allowlisted MCP tools, and the deny list blocks every write-gate tool outright, but the repo
 stays readable to the run's own judgment. This is also why the `--allowedTools` wildcard
-above should still be trusted to cover the read-only decision tools (`retrieve_decisions`,
+above should still be trusted to cover the decision-reading tools (`retrieve_decisions`,
 `get_entity_history`, `list_facts`, `verify_store`) rather than narrowed past them: a live
 run whose allowlist omitted them still completed the triage, but by falling back to raw
 `Read`/`Bash` reads of the committed store JSON instead of the MCP tools built for that job

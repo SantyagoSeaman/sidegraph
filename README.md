@@ -52,7 +52,9 @@ only ever reads `graph.json`, so the plain install above is all it needs.
 
 ```bash
 # 3. Install the CLIs + MCP server, then bootstrap the store in your repo
-#    (creates .sidegraph/, prints setup instructions)
+#    (creates .sidegraph/, prints setup instructions). In a terminal it also asks
+#    whether to install a git hook that rebuilds the code graph after each commit,
+#    merge and branch switch; `sidegraph-init --remove-hooks` takes it out again
 uv tool install sidegraph        # from PyPI — puts sidegraph-init / sidegraph-mcp / … on PATH
 sidegraph-init
 
@@ -142,6 +144,10 @@ projects the full store, history included, into an OKF v0.1 bundle any OKF consu
  Read / Edit / Bash read ──▶ the file's records delivered in the call (once per file per agent)
 ```
 
+Subagents get the memory too: on Claude Code a hook appends the decisions for the files a
+subagent's brief names to that brief, and on Claude Code and Codex another hook tells each new
+subagent that decision memory exists and how to ask it.
+
 Two layers age differently: the **structure** layer (the code graph — entities,
 dependencies, communities: *the what*) and the **decision** layer on top (*the why*). The
 graph is disposable — the engine regenerates it from source at any moment. The memory must
@@ -185,7 +191,7 @@ dropping a decision carries its still-pending facts along in the same verdict. D
 | `add_decision` / `supersede_decision` | Append / reverse a decision (nothing is ever deleted) |
 | `add_fact` / `supersede_fact` | Append / falsify a non-derivable fact — evidence for a decision, or standalone |
 | `find_entity` / `get_entity_history` | Which decisions *and facts* touch this entity, and how they evolved |
-| `retrieve_decisions` / `list_facts` | List current decisions / current facts |
+| `retrieve_decisions` / `list_facts` | Filter decisions (bounded) / list current facts |
 | `propose_decisions` / `propose_domains` / `add_domain` | Draft a decision (plus attached or standalone facts) or name a domain, from a session or by hand |
 | `supersede_domain` | Lineage-correct rename/re-scope of a domain: closes the old, writes a `proposed` successor |
 | `list_proposed` / `ratify` | The human gate (see `SIDEGRAPH_RATIFY_POLICY` in the configuration reference): review pending decisions, facts, *and* domains, accept/drop (a decision's verdict cascades to its still-pending facts) |
@@ -217,16 +223,22 @@ retrieval a richer graph to anchor against. Walkthrough:
 
 - **Everything is local.** Sidegraph reads your repo and the engine's `graph.json`
   (strictly read-only) and writes small human-readable JSON records inside your repo,
-  plus a local, gitignored index it can always rebuild. **Nothing leaves your machine** —
+  plus a local, gitignored index it can always rebuild. Two things sit outside the store:
+  the git hooks that `sidegraph-init` can install to keep the graph fresh (a helper and
+  three hooks under `.git/hooks/`) and one cache file, `sidegraph/launch-commit`, under
+  `${XDG_CACHE_HOME:-~/.cache}`. [SECURITY.md](SECURITY.md) lists every write.
+  **Nothing leaves your machine** —
   no network calls, no remote telemetry, no account. Sidegraph does keep local usage
   diagnostics in that gitignored index (which stored memory was shown, and which files a
   session touched afterwards) so you can see which memory was shown and which files
   those sessions then touched; they never travel, and `SIDEGRAPH_TELEMETRY=off` disables them.
 - **Secrets don't enter memory.** Proposed decisions and facts pass redaction before they
-  are stored. A ratification gate controls what the agent's drafts can persist: human for
-  `adr`/`constraint` decisions and domains always, and, if you answer yes to `sidegraph-init`'s
-  question (or set `SIDEGRAPH_RATIFY_POLICY` yourself), an auto-ratification stamp for lessons,
-  gotchas, and standalone facts instead of a person's review.
+  are stored. A ratification gate controls which of the agent's drafts become trusted
+  memory. Under the default `manual` policy a person ratifies them. A proposal is stored first
+  and waits as `proposed` until then. If you answer yes to `sidegraph-init`'s
+  question (or set `SIDEGRAPH_RATIFY_POLICY` yourself), eligible records ratify themselves
+  at write time with a stamp that says so: lessons, gotchas, and standalone facts under
+  `auto-low-risk`, and also ADRs, constraints, and domains under `auto-all`.
 - **Nothing is silently rewritten.** The store is append-only; every change of mind is
   recorded as a supersession with its reason.
 
@@ -239,7 +251,8 @@ The engine is optional at runtime: without a graph, records anchor to file paths
 domains and retrieval still works, but symbol-level anchors, communities, and moved-code
 resolution need it (see the [operations reference](docs/reference/operations.md#the-graph-dependency-stated-plainly)).
 Everything the engine produces is derived and regenerated on every rebuild; everything
-Sidegraph stores is deliberate, ratified, and permanent. **Own the memory, rent the graph.**
+Sidegraph stores is deliberate and permanent, and it is trusted only once ratified (by a
+person, or by the opt-in policy). **Own the memory, rent the graph.**
 
 ## Status
 

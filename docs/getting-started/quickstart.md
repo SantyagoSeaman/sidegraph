@@ -17,16 +17,30 @@ sidegraph-init
 it. `sidegraph-init` creates the repo-committed `.sidegraph/` record directories and a
 gitignored derived `index.db`. Both commands are safe to run again.
 
+In a terminal, `sidegraph-init` also asks whether to keep the code graph fresh. Yes installs a
+helper and a marked block in the `post-commit`, `post-merge` and `post-checkout` git hooks, which
+rebuild `graphify-out/graph.json` in the background. It never replaces a hook you already have.
+`sidegraph-init --hooks` answers yes without asking, `--no-hooks` answers no and stops the
+reminder, and `--remove-hooks` takes the hook out. Without a terminal it does not ask. See
+[keeping the graph fresh](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
+
 If the repository already contains ADRs or supported flow specs, you can now switch to the
 [preview-first bootstrap](bootstrap.md). Otherwise continue here.
 
 ## 2. Connect your host
 
-The plugin is the recommended route for both Claude Code and Codex:
+The plugin is the recommended route for both Claude Code and Codex. In Claude Code:
 
 ```text
 /plugin marketplace add SantyagoSeaman/sidegraph
 /plugin install sidegraph@sidegraph
+```
+
+In Codex, from a terminal:
+
+```bash
+codex plugin marketplace add SantyagoSeaman/sidegraph
+codex plugin add sidegraph@sidegraph
 ```
 
 Start a new interactive session in the repository and approve the hook trust prompt. For a
@@ -71,8 +85,11 @@ git status --short
 sidegraph-verify
 ```
 
-Commit `.sidegraph/format`, `.sidegraph/.gitignore`, and the canonical JSON directories.
-Do not commit `.sidegraph/index.db`; it is derived and already ignored.
+Commit the whole `.sidegraph/` directory (`git add .sidegraph`). Its own `.gitignore` already
+leaves out `index.db` (the derived index, with its SQLite sidecar files) and `*.tmp` files, so what
+gets staged is what should travel: the `format` marker, `stamping_live_since`, `.gitignore` and the
+record directories. A store file left uncommitted for a day is reported by
+[`store-uncommitted`](../guides/troubleshooting.md#store-uncommitted).
 
 The loop is now working. Next, run the short
 [verification checklist](../guides/verifying-your-setup.md), then
