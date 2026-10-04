@@ -7,8 +7,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from sidegraph.engine.reader import GraphifyReader
-from sidegraph.server import _add_decision_impl, _supersede_decision_impl
+from sidegraph.server import (
+    _add_decision_impl,
+    _add_fact_impl,
+    _supersede_decision_impl,
+    _supersede_fact_impl,
+)
 from sidegraph.store import Store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
@@ -301,3 +308,77 @@ def test_supersede_explicit_session_id_wins_over_fallback(tmp_path):
     )
 
     assert store.get_decision(out["id"]).provenance.session_id == "explicit-session"
+
+
+def _skip_bindings_of(db: Path, record_id: str) -> bytes:
+    """Give ``record_id`` a bindings file holding merge-conflict markers, which the next reload
+    leaves out of the index; return its bytes."""
+    bindings = db / "bindings" / f"{record_id}.json"
+    bindings.parent.mkdir(exist_ok=True)
+    bindings.write_text("<<<<<<< HEAD\n[]\n=======\n[]\n>>>>>>> branch\n", encoding="utf-8")
+    return bindings.read_bytes()
+
+
+def test_supersede_inheriting_from_a_skipped_bindings_file_is_refused_before_writing(tmp_path):
+    """Inheritance reads the predecessor's bindings from the index. While its bindings file is
+    left out of the index, that read returns nothing, so the successor would be written with no
+    anchors, silently. The call is refused instead, before the successor exists.
+    see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D5"""
+    db = tmp_path / "t.db"
+    with Store(db) as store:
+        old = _add_decision_impl(store, None, title="t", kind="adr", context="c", choice="ch")
+    before = _skip_bindings_of(db, old["id"])
+
+    with Store(db) as store:
+        assert store.is_skipped("bindings", old["id"])
+        with pytest.raises(ValueError, match=f"bindings/{old['id']}.json"):
+            _supersede_decision_impl(
+                store, None, old["id"], title="t2", kind="adr", context="c2", choice="ch2"
+            )
+        assert [d.id for d in store.iter_decisions()] == [old["id"]]
+        assert store.get_decision(old["id"]).status.value == "accepted"
+    assert (db / "bindings" / f"{old['id']}.json").read_bytes() == before
+
+
+def test_supersede_with_explicit_anchors_over_a_skipped_predecessor_file_still_works(tmp_path):
+    """Explicit anchors replace inheritance, so the skipped file is never read or written: the
+    successor is written, and the predecessor's file keeps its bytes. Passes before and after
+    the fix: it guards the refusal from reaching past inheritance."""
+    db = tmp_path / "t.db"
+    with Store(db) as store:
+        old = _add_decision_impl(store, None, title="t", kind="adr", context="c", choice="ch")
+    before = _skip_bindings_of(db, old["id"])
+
+    with Store(db) as store:
+        out = _supersede_decision_impl(
+            store,
+            None,
+            old["id"],
+            title="t2",
+            kind="adr",
+            context="c2",
+            choice="ch2",
+            anchors=[{"name": "sync.py", "file_path": "src/sync.py"}],
+        )
+        assert out["supersedes"] == old["id"]
+    assert (db / "bindings" / f"{old['id']}.json").read_bytes() == before
+
+
+def test_supersede_fact_inheriting_from_a_skipped_bindings_file_is_refused(tmp_path):
+    """The fact twin of the decision case above."""
+    db = tmp_path / "t.db"
+    with Store(db) as store:
+        old = _add_fact_impl(
+            store,
+            None,
+            statement="s",
+            source="trial-learned in session",
+            anchors=[{"name": "sync.py", "file_path": "src/sync.py"}],
+        )
+    before = _skip_bindings_of(db, old["id"])
+
+    with Store(db) as store:
+        with pytest.raises(ValueError, match=f"bindings/{old['id']}.json"):
+            _supersede_fact_impl(store, None, old["id"], statement="s2", source="re-measured")
+        assert [f.id for f in store.iter_facts()] == [old["id"]]
+    assert (db / "bindings" / f"{old['id']}.json").read_bytes() == before

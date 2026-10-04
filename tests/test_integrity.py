@@ -721,6 +721,41 @@ def test_one_skipped_file_has_no_and_more(store):
     )
 
 
+def test_a_skipped_archive_segment_says_what_the_stderr_warning_says(store):
+    """The first listed entry is an archive segment: the notice must not call it a "store
+    file" to fix, or tell the user to remove it. It says what ``Store`` warns on stderr: the
+    segment has lines that could not be read, the rest of it loaded, restore it with git and
+    never delete a segment."""
+    entries = [
+        {"path": "archive/2020-01-01-1-deadbeef0000.jsonl", "reason": "bad-archive-segment"},
+        {"path": "archive/2020-01-02-1-cafe00000000.jsonl", "reason": "bad-archive-segment"},
+    ]
+    problem = _skipped(store, json.dumps(entries))
+    assert problem.line == (
+        "Sidegraph: archive segment 2020-01-01-1-deadbeef0000.jsonl has lines that could not be "
+        "read; they are left out and the rest of it loaded. Restore it with git; never delete a "
+        "segment. Run `sidegraph-verify` to list the lines. 1 more store file(s) were left out "
+        "as well."
+    )
+    assert problem.notice == problem.line
+    assert (problem.severity, problem.summary) == ("degraded", "2 store file(s) skipped")
+
+
+def test_a_skipped_record_file_after_an_archive_segment_keeps_the_record_file_text(store):
+    """Only the first entry's reason picks the text: a record file leads, so the text names it
+    even when an archive segment follows."""
+    entries = [
+        {"path": "decisions/A.json", "reason": "parse-error"},
+        {"path": "archive/2020-01-01-1-deadbeef0000.jsonl", "reason": "bad-archive-segment"},
+    ]
+    problem = _skipped(store, json.dumps(entries))
+    assert problem.line == (
+        "Sidegraph: 2 store file(s) could not be indexed and are left out of memory: "
+        "decisions/A.json (parse-error), and 1 more. Run `sidegraph-verify` to list them, "
+        "then fix or restore them with git."
+    )
+
+
 @pytest.mark.parametrize("value", [None, "", "[]", "not json", "{}", '["x"]', '[{"reason": "r"}]'])
 def test_an_absent_empty_or_malformed_skip_list_is_clean(store, value):
     assert _skipped(store, value) is None

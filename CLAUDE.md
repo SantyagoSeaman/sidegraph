@@ -13,7 +13,7 @@ task-aware retrieval + decision memory riding on the engine's entity graph.
 continuing participant in the project. A core feature must preserve, organize, or deliver
 accumulated project understanding. Document search by itself is not the product.
 
-Sidegraph is pre-1.0 (v0.8.0) — the full loop (capture, ratification, mistakes-first
+Sidegraph is pre-1.0 (v0.9.0) — the full loop (capture, ratification, mistakes-first
 retrieval, refactor-surviving re-anchoring, semantic docs layer, mind-model domains, and the
 facts evidence layer) ships and is exercised end-to-end, but interfaces may still move before
 a stable release. See
@@ -53,11 +53,14 @@ src/sidegraph/
 ├── schema.py        # Pydantic models: Entity, Decision, Fact, AnchorBinding, Domain, Initiative
 ├── store.py         # owned append-only store (file-per-record JSON); enforces invariants on write
 ├── retrieval.py     # multi-altitude, budget-bounded, task-aware read path (mistakes first)
+├── hot_index.py     # raw-sqlite handle on index.db for the hook hot path (no Store, no pydantic)
+├── store_layout.py  # store constants and rules shared with the hot path (pydantic-free)
 ├── server.py        # FastMCP decision MCP — the tools agents call
 ├── engine/          # ── ENGINE SEAM ── the ONLY place Graphify specifics may live
 │   └── reader.py    #   GraphifyReader: reads graph.json (read-only input; no MCP)
-└── host/            # ── HOST SEAM ── Claude Code integration (SessionStart/Stop/PreToolUse)
-    └── hooks.py     #   host-specific; portable core never reaches in here
+└── host/            # ── HOST SEAM ── Claude Code integration (SessionStart/Stop/PreToolUse/SubagentStart)
+    ├── hooks.py     #   host-specific; portable core never reaches in here
+    └── subagent.py  #   SubagentStart: the memory brief for a starting subagent
 ```
 
 - **Portable core** (`schema`, `store`, `retrieval`, `server`) knows nothing about Graphify

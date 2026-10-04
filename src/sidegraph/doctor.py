@@ -25,6 +25,7 @@ import re
 import sqlite3
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,7 +37,12 @@ from ulid import ULID
 from . import integrity
 from .engine.reader import GraphifyReader
 from .schema import DecisionStatus, canonicalize
-from .store import _STAMPING_MARKER_NAME, _TERMINAL_DECISION_STATUSES
+from .store import (
+    _STAMPING_MARKER_NAME,
+    _TERMINAL_DECISION_STATUSES,
+    SKIPPED_CANONICAL_KEY,
+    parse_skip_list,
+)
 from .verify import (
     _check_archive_dir,
     _iter_json_files,
@@ -61,6 +67,7 @@ GRAPH_ROOT_MISMATCH = "graph-root-mismatch"
 GRAPH_STALE = "graph-stale"
 ORPHANED_RECORD = "orphaned-record"
 STORE_UNCOMMITTED = "store-uncommitted"
+PLUGIN_OFF_IN_SUBDIRECTORIES = "plugin-off-in-subdirectories"
 
 # The registry's check id -> the finding code doctor prints. They differ where one check yields
 # findings of one record each: check ``orphaned-records`` is one problem, code ``orphaned-record``
@@ -68,10 +75,12 @@ STORE_UNCOMMITTED = "store-uncommitted"
 # test resolves; a subscript would hide ``graph-stale`` from it.
 # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
 # see design/superpowers/specs/2026-10-02-stranded-store-writes-design.md (D1)
+# see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
 _FINDING_CODE = {
     "graph-stale": GRAPH_STALE,
     "orphaned-records": ORPHANED_RECORD,
     "store-uncommitted": STORE_UNCOMMITTED,
+    "plugin-off-in-subdirectories": PLUGIN_OFF_IN_SUBDIRECTORIES,
 }
 
 # Name reported in ``CurationReport.skipped`` when index.db is absent or unusable — the
@@ -160,11 +169,28 @@ def _binding_entries(store_dir: Path) -> dict[str, list[dict]]:
 # -- individual checks ---------------------------------------------------------------------
 
 
+def _skipped_paths(index: sqlite3.Connection | None) -> frozenset[str]:
+    """The store files its last reload left out (meta ``skipped_canonical_files``, as
+    ``<subdir>/<name>``), read from the ``mode=ro`` index; empty without one. Doctor reads the
+    canonical files silently, so this is how it tells a file the store could not read from one
+    that is absent or empty."""
+    if index is None:
+        return frozenset()
+    try:
+        row = index.execute(
+            "SELECT value FROM meta WHERE key = ?", (SKIPPED_CANONICAL_KEY,)
+        ).fetchone()
+    except sqlite3.Error:
+        return frozenset()
+    return frozenset(e["path"] for e in parse_skip_list(row[0])) if row else frozenset()
+
+
 def _check_dangling_records(
     decisions: list[tuple[Path, dict]],
     facts: list[tuple[Path, dict]],
     bindings: dict[str, list[dict]],
     decision_status_by_id: dict[str, str],
+    skipped: frozenset[str] = frozenset(),
 ) -> list[Finding]:
     """dangling-record: an OPEN record (decision proposed|accepted; fact valid_to null)
     whose committed anchor set is absent or empty -- AND, for a fact only, whose
@@ -205,12 +231,19 @@ def _check_dangling_records(
         if bindings.get(rid):
             continue  # an anchor set alone is reachability, for either kind
         if kind == "decision":
+            # A listed file is one the store could not read (a merge conflict, say): its anchors
+            # exist, they are just not loaded, so "absent or empty" would send the reader to
+            # re-anchor a record whose file needs restoring.
+            state = (
+                "is skipped (unreadable)"
+                if f"bindings/{rid}.json" in skipped
+                else "absent or empty"
+            )
             findings.append(
                 Finding(
                     DANGLING_RECORD,
                     str(path),
-                    f"open {kind} has no committed anchor set "
-                    f"(bindings/{rid}.json absent or empty)",
+                    f"open {kind} has no committed anchor set (bindings/{rid}.json {state})",
                 )
             )
             continue
@@ -975,7 +1008,11 @@ def _check_graph_root_mismatch(
 
 
 def _registry_findings(
-    store_dir: Path, now: datetime, reader: GraphifyReader | None, index: sqlite3.Connection | None
+    store_dir: Path,
+    now: datetime,
+    reader: GraphifyReader | None,
+    index: sqlite3.Connection | None,
+    host_checks: Sequence[integrity.Check] = (),
 ) -> list[Finding]:
     """The integrity registry's findings for doctor: ``graph-stale`` (the graph was built at a
     commit HEAD has moved past, so memory cannot see or anchor to code added after the build),
@@ -990,11 +1027,18 @@ def _registry_findings(
     ``store-uncommitted`` needs neither: it always runs two read-only git calls (``rev-parse``
     and ``status``) through ``integrity._git``, which that count does not see and
     ``test_curate_runs_two_read_only_git_calls_through_the_registry`` pins.
+
+    ``host_checks`` are the checks that need the host seam (``plugin-off-in-subdirectories``),
+    built by the caller: this module imports nothing from ``host/``. They run after the
+    registry's own, on the same surface.
     # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D6)
     # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
+    # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
     """
     result = integrity.run(
-        integrity.Inputs(store_dir=store_dir, now=now, index=index, reader=reader), "doctor"
+        integrity.Inputs(store_dir=store_dir, now=now, index=index, reader=reader),
+        "doctor",
+        (*integrity.CHECKS, *host_checks),
     )
     findings: list[Finding] = []
     for problem in result.problems:
@@ -1471,6 +1515,7 @@ def curate(
     repo_root: Path | None = None,
     reader: GraphifyReader | None = None,
     index: sqlite3.Connection | None = None,
+    host_checks: Sequence[integrity.Check] = (),
 ) -> CurationReport:
     """Run every advisory curation check over the store at ``store_dir``.
 
@@ -1498,9 +1543,14 @@ def curate(
     checks (``orphaned-record``); the caller opens and closes it (``open_curation_index``).
     ``None`` (the default) runs none of them, so direct ``curate(store_dir)`` callers see the
     findings they always did. Which skips to report is the CLI's call, not this function's.
+
+    ``host_checks`` (additive): registry checks the CLI builds from the host seam and hands
+    over, so this module stays free of host imports. Empty by default: a direct caller gets no
+    host-wiring finding.
     # see design/superpowers/specs/2026-07-23-sidegraph-doctor-design.md
     # see design/superpowers/specs/2026-07-30-staleness-machinery-design.md (D5)
     # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
+    # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
     """
     root = Path(store_dir)
     now = now or datetime.now(UTC)
@@ -1533,7 +1583,9 @@ def curate(
     )
 
     findings: list[Finding] = []
-    findings += _check_dangling_records(decisions, facts, bindings, decision_status_by_id)
+    findings += _check_dangling_records(
+        decisions, facts, bindings, decision_status_by_id, _skipped_paths(index)
+    )
     status_findings, skipped = _check_binding_statuses(root)
     findings += status_findings
     findings += _check_stale_proposals(decisions, domains, stale_days, now)
@@ -1561,5 +1613,5 @@ def curate(
     # The registry's findings, appended after the check above so the existing finding order is
     # unchanged: the graph never caught up with HEAD (``graph-stale``, where this module's own
     # check used to be), and records whose every code anchor is orphaned (``orphaned-record``).
-    findings += _registry_findings(root, now, reader, index)
+    findings += _registry_findings(root, now, reader, index, host_checks)
     return CurationReport(findings=findings, skipped=skipped)

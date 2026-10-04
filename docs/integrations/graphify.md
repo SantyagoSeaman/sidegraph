@@ -143,10 +143,11 @@ corpus) as part of the release gate. Re-verify the same way after upgrading past
 `explain`, and friends) over the same `graph.json`. It's entirely optional and coexists
 cleanly with Sidegraph: both read `graph.json` read-only, and Sidegraph never needs Graphify's
 server to function — it only ever reads the file directly via `GraphifyReader`. One honest
-caveat if you do register both: Sidegraph's `PreToolUse` nudge only intercepts Claude Code's
-own `Read`/`Grep` tool calls (see [`claude-code.md`](claude-code.md)), so a direct call to one
-of Graphify's own MCP tools bypasses that nudge entirely — it's not redirected toward
-`get_task_context`/`drill_down` the way a blind `Read`/`Grep` is.
+caveat if you do register both: Sidegraph's `PreToolUse` delivery of records only intercepts
+Claude Code's own `Read`/`Grep`/`Edit`/`Write` calls and Bash `sed`/`grep`/`rg`/`cat` lines (see
+[`claude-code.md`](claude-code.md)), so a direct call to one of Graphify's own MCP tools bypasses
+it entirely — the records of the files that call touches are not handed over the way they are
+for a `Read`.
 
 ### `graphify claude install` is redundant with the Sidegraph plugin — skip it
 
@@ -155,19 +156,28 @@ a `## graphify` section to `CLAUDE.md` **and two `PreToolUse` hooks into the pro
 `.claude/settings.json`** — a `Bash` matcher (fires when a shell command looks like
 `grep`/`rg`/`find`) and a `Read|Glob` matcher (fires on reads of source/doc files) — both
 injecting a "you MUST run `graphify query` first" nudge. This overlaps Sidegraph's own
-`PreToolUse` nudge, so the interaction is worth being explicit about.
+`PreToolUse` records block, so the interaction is worth being explicit about.
 
 It is **not a destructive conflict.** The two live in different files (Graphify's in
 `.claude/settings.json`, Sidegraph's in the plugin's `hooks/hooks.json`), which Claude Code
 merges rather than overwrites; both hooks only add `additionalContext` and neither ever
 denies a tool call, so there is no blocking or deadlock; and `graphify claude uninstall`
-filters strictly on Graphify's own matchers (`Bash`, `Read|Glob`, `Glob|Grep`), so it never
-removes Sidegraph's `Read|Grep|Edit|Write` hook. Safe to run — but redundant.
+filters on Graphify's own matchers (`Bash`, `Read|Glob`, `Glob|Grep`) plus the text `graphify`
+anywhere in the entry, so it never removes Sidegraph's `Read|Grep|Edit|Write` hook. Safe to run
+with the plugin — but redundant.
+
+**For a hand-wired setup,** the same filter would remove a Sidegraph `Bash` group whose command
+carries the word `graphify`. The commands in the
+[setup guide's snippet](../getting-started/claude-code-setup.md#2-add-the-hooks) do not: the hook
+reads no graph path, so `graphify claude install` and `uninstall` leave them alone (checked
+against `graphifyy` 0.9.6). Keep it that way when you edit them. A `PreToolUse` command that
+carries `SIDEGRAPH_GRAPH=graphify-out/graph.json` goes with the group, and Sidegraph then stops
+delivering records on Bash lines without a word.
 
 Redundant because the **Sidegraph plugin already fronts the graph for Claude Code**: its
-`SessionStart` hook injects the graph-derived top-tier map, its `PreToolUse` nudge already
-redirects blind `Read`/`Grep` toward retrieval (non-blocking, each of its two forms at most **once per agent**), and its
-MCP server exposes the query surface. Graphify's `Read|Glob` hook, by contrast, fires on
+`SessionStart` hook injects the graph-derived top-tier map, its `PreToolUse` hook already
+hands over the records of a file when it is read or edited (non-blocking, each file at most
+**once per agent**), and its MCP server exposes the query surface. Graphify's `Read|Glob` hook, by contrast, fires on
 **every** qualifying read and pushes toward the *code* graph (`graphify query`) rather than
 the *decision* memory — so on a plain read you get two nudges pulling different directions,
 and Graphify's is the noisier, unbounded one.

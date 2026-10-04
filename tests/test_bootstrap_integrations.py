@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,69 @@ args = ["--from", "sidegraph", "sidegraph-mcp"]
     assert result.session_start == "verified"
     assert result.stop == "verified"
     assert result.next_action is None
+
+
+def test_codex_stop_wrapped_in_sh_c_still_verifies(tmp_path: Path):
+    """The plugin's Codex hot command is `sh -c '<script>' || printf …`, so the entry point is
+    a word of the script, not of the outer command.
+    design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md (D3)"""
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('[mcp_servers.sidegraph]\ncommand = "sidegraph-mcp"\n')
+
+    def wrapped(entry: str) -> str:
+        script = (
+            'cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" && '
+            f'uvx --from "$u" {entry} || printf "{{}}\\n"'
+        )
+        return f"sh -c '{script}' || printf '{{}}\\n'"
+
+    hooks = {
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"command": "uvx --from sidegraph sidegraph-session-start"}]}
+            ],
+            "Stop": [{"hooks": [{"command": wrapped("sidegraph-stop")}]}],
+        }
+    }
+    (tmp_path / ".codex" / "hooks.json").write_text(json.dumps(hooks), encoding="utf-8")
+
+    result = verify_integration(tmp_path, HostKind.CODEX, codex_config=config)
+
+    assert result.session_start == "verified"
+    assert result.stop == "verified"
+
+    hooks["hooks"]["Stop"] = [{"hooks": [{"command": wrapped("sidegraph-other")}]}]
+    (tmp_path / ".codex" / "hooks.json").write_text(json.dumps(hooks), encoding="utf-8")
+
+    assert verify_integration(tmp_path, HostKind.CODEX, codex_config=config).stop == "missing"
+
+
+@pytest.mark.parametrize(
+    ("command", "found"),
+    [
+        pytest.param("sh -c 'uvx x sidegraph-stop'", True, id="sh"),
+        pytest.param("/bin/sh -c 'uvx x sidegraph-stop'", True, id="bin-sh"),
+        # The inner script need not parse: the outer words still count. It used to throw
+        # the whole command away.
+        pytest.param("sh -c 'echo \"' sidegraph-stop", True, id="inner-unparseable"),
+        # The script's words extend the outer ones, they do not replace them.
+        pytest.param("sh -c 'echo hi' sidegraph-stop", True, id="outer-word-kept"),
+        pytest.param("sh -c 'uvx x sidegraph-other'", False, id="other-entry"),
+        # Only `sh` and `/bin/sh` are unwrapped: another program's -c is not a script.
+        pytest.param("bash -c 'uvx x sidegraph-stop'", False, id="bash"),
+        pytest.param("echo -c 'uvx x sidegraph-stop'", False, id="not-a-shell"),
+        pytest.param("sh -x -c 'uvx x sidegraph-stop'", False, id="-c-not-second"),
+    ],
+)
+def test_sh_c_scripts_are_unwrapped_only_for_sh(command: str, found: bool) -> None:
+    """The plugin's Codex hot command is ``sh -c '<script>'``: the verifier looks inside it.
+    design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md (D3)"""
+    from sidegraph.bootstrap.integrations import _contains_entrypoint
+
+    assert _contains_entrypoint((command,), "sidegraph-stop") is found
 
 
 def test_swapped_or_misplaced_claude_commands_do_not_verify_hook_events(tmp_path: Path):

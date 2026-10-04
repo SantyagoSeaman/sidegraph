@@ -131,7 +131,7 @@ created for them; empty when every anchor resolved cleanly or no graph reader is
 (`{"entity_id", "canonical_name", "tier": 2, "reason": str}`) for every anchor that resolved
 to **nothing**.
 The leaf is still written — orphaned, never dropped — but it is dead on arrival: retrieval,
-`drill_down` and the PreToolUse nudge all skip orphaned bindings, and no Tier-1 community
+`drill_down` and the PreToolUse records block all skip orphaned bindings, and no Tier-1 community
 fallback is created either, so the record has **no delivery path at all** through that anchor.
 `reason` says which fix applies — the causes are not interchangeable:
 
@@ -191,7 +191,11 @@ the replacement instead **inherits the predecessor's bindings verbatim** — sam
 same entities the original decision did; task-seeded retrieval finds the successor everywhere
 it found the predecessor. The two paths are exclusive: passing `anchors` replaces inheritance,
 it never adds to it. Explicit `anchors` are validated exactly like `add_decision`'s, before the
-successor is written or the predecessor closed.
+successor is written or the predecessor closed. Inheriting from a predecessor whose bindings file
+the store could not read (it is left out of the index, see [`store-format.md`](store-format.md))
+is refused before anything is written, with an error naming `bindings/<id>.json`: there would be
+nothing to copy, and the successor would silently start with no anchors. Passing `anchors` still
+works.
 
 **Returns:** `{"id": str, "supersedes": str, "bindings": int, "entities": list[dict],
 "anchors_skipped": list[dict], "anchors_orphaned": list[dict], "redactions": int}` — same `bindings`/`entities`/
@@ -275,7 +279,8 @@ gives); omit `anchors` (the default) to **inherit the predecessor's bindings ver
 same `entity_id`/`tier`/`weight`/`relation`/`status`, *including* any `orphaned` ones,
 carried as-is. Passing `anchors` replaces inheritance; it never adds to it. Explicit
 `anchors` are validated exactly like `add_decision`'s, before the successor is written or
-the predecessor closed.
+the predecessor closed. Inheriting from a predecessor whose bindings file the store could not
+read is refused the same way as in `supersede_decision`.
 
 **Returns:** `{"id": str, "statement": str, "status": str, "redactions": int, "entities":
 list[dict], "anchors_skipped": list[dict], "anchors_orphaned": list[dict], "supersedes": str}` — same shape as `add_fact`'s
@@ -1234,7 +1239,10 @@ nothing and returns `{"error": "unknown record '<id>'"}` (never a guess). Anchor
 validated *before* anything is written, exactly like `add_decision`/`add_fact`: an invalid
 `relation`, a `name` or `file_path` that is not a string, or a non-empty list in which no
 anchor has a `name` raises, and the whole call fails atomically rather than leaving a
-half-anchored write behind.
+half-anchored write behind. A record whose bindings file the store could not read (it is left out
+of the index until restored or fixed, see [`store-format.md`](store-format.md)) is refused the
+same way, before any entity is minted: the call raises an error naming `bindings/<record_id>.json`
+and writes nothing.
 
 Per anchor: resolved against the graph via the same `resolve_and_bind` ladder every other
 anchoring tool here uses when a reader is present — an ambiguous name is reported, never

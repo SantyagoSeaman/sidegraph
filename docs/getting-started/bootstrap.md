@@ -180,5 +180,5 @@ Continue through the maintenance loop:
 
 The visual launch demo must show discovery and review, production proof, new-session capture
 and ratification, and later organic retrieval. An import-only recording does not satisfy the
-release package. The existing concrete-title PreToolUse nudge is part of normal delivery; its
+release package. The existing PreToolUse records block is part of normal delivery; its
 effect is measured separately and is not new Bootstrap functionality.

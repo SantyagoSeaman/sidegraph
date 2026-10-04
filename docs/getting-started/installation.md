@@ -45,15 +45,25 @@ Inside an interactive host session, in the repo you want memory over:
 /plugin install sidegraph@sidegraph
 ```
 
-The Claude Code host installs the MCP server and all three hooks (`SessionStart`, `Stop`,
-`PreToolUse`). Codex installs the MCP server, `SessionStart`/`Stop`, and the bundled skills;
-its tool surface has no equivalent target for the Claude-specific Read/Grep nudge. The
-plugin's bundled config runs everything via `uvx --from
-git+https://github.com/SantyagoSeaman/sidegraph.git@main`: unlike the package install, the
-plugin deliberately follows the public repository's `main` branch and does not use the
-PyPI package. See
+The Claude Code host installs the MCP server and all four hooks (`SessionStart`, `Stop`,
+`PreToolUse`, `SubagentStart`). Codex installs the MCP server, `SessionStart`/`Stop`/
+`SubagentStart`, and the bundled skills;
+its tool surface has no equivalent target for the Claude-specific `PreToolUse` records block. The
+plugin's bundled config installs from the public repository, not PyPI: the MCP server and
+`SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`, and the
+`Stop`, `PreToolUse` and `SubagentStart` hooks start from the commit `SessionStart` resolved. Unlike the package
+install, the plugin deliberately follows the public repository's `main` branch. See
 the integration details for [Claude Code](../integrations/claude-code.md#plugin-install-path)
 or [Codex](../integrations/codex.md#plugin-install-path).
+
+**Scope.** `/plugin install` offers three scopes: user, local and project. From a terminal the
+flag is `claude plugin install sidegraph@sidegraph --scope user|project|local`, and the default
+is user. Enable the plugin at user scope, or in the repository root's
+`.claude/settings.local.json`, and it covers sessions started in any subdirectory. Project scope
+(`.claude/settings.json`) covers only the directory it was installed from: Claude Code reads a
+launch directory's own project settings and no parent's, so a plugin installed at the repository
+root leaves sessions started below it without it. `sidegraph-doctor` reports the gap as
+[`plugin-off-in-subdirectories`](../guides/troubleshooting.md#plugin-off-in-subdirectories).
 
 ### Option C — uvx directly from git
 
@@ -114,7 +124,8 @@ setup, scripted/CI use, and the two deliberately human-run jobs (`sidegraph-impo
 | `sidegraph-mcp` | The decision MCP server (stdio transport). |
 | `sidegraph-session-start` | `SessionStart` hook — injects project memory. |
 | `sidegraph-stop` | `Stop` hook — nudges the agent to distill decisions. |
-| `sidegraph-pre-tool-use` | `PreToolUse` hook — redirects a blind `Read`/`Grep` toward `get_task_context`/`drill_down`. |
+| `sidegraph-pre-tool-use` | `PreToolUse` hook — hands the agent the records anchored to a file when it reads or edits it (`Read`, `Grep`, `Edit`, `Write`, and `sed`/`grep`/`rg`/`cat` in Bash). |
+| `sidegraph-subagent-start` | `SubagentStart` hook — tells a starting subagent that decision memory exists and how to ask it. |
 | `sidegraph-bootstrap` | Guided CLI — scan one of six supported ADR/spec profiles, preview and review candidates, write only after confirmation, verify anchors/host integration, and prove production retrieval. |
 | `sidegraph-init` | CLI — bootstrap `.sidegraph/` in a repo: create the store, check for the graph, print the plugin install path (and the no-plugin `claude mcp add` alternative). |
 | `sidegraph-ratify` | CLI — review/accept/drop proposed decisions, facts, and domains. |

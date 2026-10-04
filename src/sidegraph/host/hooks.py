@@ -10,10 +10,12 @@ portable core never reaches into host specifics.
   only once the session has produced >= ``_MIN_USER_PROMPTS`` real user prompts, to propose
   durable decisions via ``propose_decisions`` before the session ends. ``SIDEGRAPH_CAPTURE_
   NUDGE=off`` disables it entirely.
-- ``pre_tool_use`` (M6, FR8.3): redirect blind Read/Grep toward retrieval — a non-blocking
-  ``additionalContext`` nudge (never denies/blocks the tool call), at most once per agent
-  (the session's own agent and each subagent separately), when the store has decision memory
-  to offer.
+- ``pre_tool_use`` (M6, FR8.3): deliver the records anchored to a file when an agent
+  reads or edits it (Read, Grep, Edit, Write, and the Bash read commands ``sed``, ``grep``,
+  ``rg``, ``cat``) — a non-blocking ``additionalContext`` block (never denies/blocks the tool
+  call), once per file per agent, at most ten files per agent and three per call. On an
+  ``Agent`` (or ``Task``) call it instead appends the records for the files the brief names to
+  the brief itself, through ``updatedInput``.
 
 All three are wired as of M6.
 """
@@ -23,8 +25,10 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import sqlite3
 import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NamedTuple
@@ -37,10 +41,13 @@ from ..config import (
     TELEMETRY_SESSION_GROUP_KEY,
     TELEMETRY_SESSION_KEY,
     StoreLocation,
+    _store_project_root,
     ancestor_store,
 )
+from ..store_layout import MEMORY_GUARD_LINE, MISTAKE_KINDS, clip_line
 
 if TYPE_CHECKING:
+    from ..hot_index import HotIndex, Record
     from ..integrity import Check, Problem, RunResult
 
 CAPTURE_NUDGE = (
@@ -56,13 +63,13 @@ CAPTURE_NUDGE = (
 
 # Standing SessionStart instruction (owner-approved design, 2026-07-08): tells the agent,
 # up front and unconditionally, to use the decision memory before ANY search -- bash
-# grep/rg/find, MCP structure-query tools, everything -- not just Read/Grep (the PreToolUse
-# nudge in `pre_tool_use` below only ever covers those two tools and fires once per agent; this
-# is the behavioral instruction that's meant to cover the rest by telling the agent, not by
-# gating a specific tool call). Prepended at the hook-assembly level (here, in
-# `session_start`) rather than inside `retrieval.render_toc`/`top_tier_map` themselves, so
-# both renderers stay pure content-formatters and this line is written/tested in exactly one
-# place regardless of which of the two produced the rest of the text.
+# grep/rg/find, MCP structure-query tools, everything -- not just the files a Read, Edit or Bash
+# read command names (the PreToolUse delivery in `pre_tool_use` below covers those and fires once
+# per file per agent; this is the behavioral instruction that's meant to cover the rest by
+# telling the agent, not by gating a specific tool call). Prepended at the hook-assembly level
+# (here, in `session_start`) rather than inside `retrieval.render_toc`/`top_tier_map`
+# themselves, so both renderers stay pure content-formatters and this line is written/tested
+# in exactly one place regardless of which of the two produced the rest of the text.
 # The call it names must be one the tool accepts: `get_task_context` takes `files` and
 # `entities` and forbids extra properties, so an earlier wording (`seeds`) produced calls
 # that failed validation. The check-plan clause is conditional because the manual installs
@@ -77,14 +84,26 @@ STANDING_SEARCH_INSTRUCTION = (
     "load it first."
 )
 
+
+def version_line() -> str:
+    """The SessionStart line that names the running package, ``Sidegraph <version>``: the one
+    place a session shows which Sidegraph its hooks and tools run, so a launcher that resolved
+    an old install cannot stay unseen. Read at call time, from the package.
+    see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D1)
+    """
+    from .. import __version__
+
+    return f"Sidegraph {__version__}"
+
+
 # D7.2 (staleness-machinery wave, E7 observation): a user's own project/personal
 # settings.json can register a SECOND SessionStart hook alongside the plugin's, firing
 # session_start() twice for one logical session — a double map injection. ONE bounded
 # meta key (never a PER-SESSION key: meta rows are not pruned in general, so a per-session
 # key grows forever — fact `01KYFYMB0…` in this store is the reason the *value*, never
-# key-absence, carries the guard; only the PreToolUse nudge prefixes are expired, by
+# key-absence, carries the guard; only the PreToolUse key prefixes are expired, by
 # `prune_meta_prefixes` at SessionStart) holding ``<session_id>|<iso-timestamp>``. Precedent for
-# hooks writing meta: the pre_tool_use one-shot ledger (`_PRETOOL_NUDGE_KEY_PREFIX` below)
+# hooks writing meta: the pre_tool_use per-file ledger (`_PRETOOL_FILE_KEY_PREFIX` below)
 # and `TELEMETRY_SESSION_KEY` (config.py).
 _SESSION_START_KEY = "session_start"
 _SESSION_START_DEDUPE_SECONDS = 60
@@ -144,12 +163,6 @@ def _agent_identity(payload: dict) -> str | None:
     return raw if isinstance(raw, str) and raw else None
 
 
-def _nudge_key(prefix: str, session_id: str, agent_id: str | None) -> str:
-    """A PreToolUse one-shot key: ``prefix + session`` for the session's own agent, which is
-    the key every older version wrote, and ``prefix + session:agent`` for a subagent."""
-    return f"{prefix}{session_id}" if agent_id is None else f"{prefix}{session_id}:{agent_id}"
-
-
 def _store_holds_records(path: Path) -> bool:
     """True when any file sits under ``decisions/``, ``facts/`` or ``domains/`` of the store
     at ``path``: a few ``listdir`` calls, no ``Store`` opened (opening would create things).
@@ -195,13 +208,98 @@ def _stray_store_line(location: StoreLocation) -> str | None:
     )
 
 
+# `version-skew`: the plugin manifest sits under the plugin root Claude Code sets for its hooks
+# (`CLAUDE_PLUGIN_ROOT`) or Codex does (both, in fact; `PLUGIN_ROOT` is a generic name another
+# tool could set, which is why the manifest's own name is checked). Claude's cache holds the
+# `.claude-plugin` manifest, Codex's both.
+# see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D2)
+_PLUGIN_ROOT_VARS = ("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")
+_MANIFEST_PATHS = (
+    Path(".claude-plugin") / "plugin.json",
+    Path(".codex-plugin") / "plugin.json",
+)
+
+
+def _plugin_manifest_version() -> str | None:
+    """The ``version`` of the Sidegraph plugin manifest under the plugin root, or ``None`` when
+    there is no root, no manifest, a manifest that is not JSON or not named ``sidegraph``, or one
+    without a string version. The first manifest that exists is the one read.
+    see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D2)
+    """
+    root = next((os.environ[name] for name in _PLUGIN_ROOT_VARS if os.environ.get(name)), None)
+    if root is None:
+        return None
+    manifest = next((m for m in (Path(root) / rel for rel in _MANIFEST_PATHS) if m.is_file()), None)
+    if manifest is None:
+        return None
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("name") != "sidegraph":
+        return None
+    version = data.get("version")
+    return version if isinstance(version, str) else None
+
+
+def _numeric_version(text: str) -> tuple[int, ...] | None:
+    """The dotted numeric release of ``text`` (``0.10.0``), ignoring a local label (``+local``)
+    and anything after the numbers, with trailing zeros dropped so ``0.9`` equals ``0.9.0``;
+    ``None`` when it does not start with a number. A string comparison would put ``0.10.0``
+    below ``0.9.0``.
+    see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D2)"""
+    match = re.match(r"v?(\d+(?:\.\d+)*)", text.split("+", 1)[0].strip())
+    if match is None:
+        return None
+    parts = [int(part) for part in match.group(1).split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+_PACKAGE_NEWER = (
+    "Sidegraph: the package is {package} but the plugin is {plugin}: the installed plugin copy "
+    "is stale. Update the plugin from its marketplace."
+)
+_PLUGIN_NEWER = (
+    "Sidegraph: the plugin is {plugin} but the package is {package}: this session runs an old "
+    "launcher cache or a pinned install. Restart the session so SessionStart re-resolves "
+    "`@main`, or remove the pinned install (for example `uv tool uninstall sidegraph`)."
+)
+
+# `plugin-off-in-subdirectories`: case (a) names the file to move the enabling out of, case (b)
+# the first nested directory that leaves the plugin off. The fix changes the person's settings, so
+# the model line ends by telling the model to say so and not to edit them (as `refresh-hook-missing`
+# does). The human's notice is sent only with (b): a nested `enabledPlugins` is evidence that
+# someone launches there, whereas (a) alone is what every collaborator of a project-scoped install
+# has, and the fix is per person.
+_PLUGIN_OFF_TELL_THE_USER = "Tell the user, and do not change their settings unasked."
+_PLUGIN_OFF_AT_ROOT_ONLY = (
+    "Claude sessions started below the repository root run without Sidegraph: it is enabled only "
+    "in `.claude/settings.json`. Enable it in `.claude/settings.local.json` at the root (it "
+    "applies to every directory) or in your user settings."
+)
+_PLUGIN_OFF_NESTED = (
+    "Sidegraph is off in {count} {directories} with Claude settings of their own, the first "
+    "being `{first}`: sessions started there run without it. Enable it there, or at the "
+    "repository root in `.claude/settings.local.json` (it applies to every directory) or in "
+    "your user settings."
+)
+
+
 def host_checks(location: StoreLocation) -> tuple[Check, ...]:
     """The integrity checks that need the host: ``stray-store``, a closure over this launch's
-    ``StoreLocation`` because the portable registry's ``Inputs`` stays host-free. The hook
-    passes ``CHECKS[:5] + host_checks(location) + CHECKS[5:]`` to keep the line order.
+    ``StoreLocation`` because the portable registry's ``Inputs`` stays host-free, and the two
+    host-wiring checks, ``version-skew`` and ``plugin-off-in-subdirectories``. The hook passes
+    ``CHECKS[:5] + host_checks(location) + CHECKS[5:]`` to keep the line order, and
+    ``sidegraph-doctor`` passes them to ``doctor.curate``, so ``doctor.py`` imports nothing
+    from this seam.
     see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D1, D4 check 5)
+    see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D2, D3)
     """
-    from ..integrity import Check, Inputs, Problem
+    from .. import __version__
+    from ..integrity import Check, Inputs, Problem, _NotRun
+    from . import claude_settings
 
     def detect_stray_store(inputs: Inputs) -> Problem | None:
         line = _stray_store_line(location)
@@ -216,7 +314,72 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
             notice=line,
         )
 
-    return (Check("stray-store", frozenset({"session"}), detect_stray_store),)
+    def detect_version_skew(inputs: Inputs) -> Problem | None:
+        plugin = _plugin_manifest_version()
+        if plugin is None:
+            raise _NotRun
+        package_release, plugin_release = _numeric_version(__version__), _numeric_version(plugin)
+        if package_release is None or plugin_release is None:
+            raise _NotRun
+        if package_release == plugin_release:
+            return None
+        template = _PACKAGE_NEWER if package_release > plugin_release else _PLUGIN_NEWER
+        line = template.format(package=__version__, plugin=plugin)
+        return Problem(
+            check="version-skew",
+            severity="advisory",
+            summary="package and plugin versions differ",
+            fix="update the plugin" if template is _PACKAGE_NEWER else "restart the session",
+            line=line,
+            notice=line,
+        )
+
+    def detect_plugin_off(inputs: Inputs) -> Problem | None:
+        reach = claude_settings.plugin_reach(_store_project_root(inputs.store_dir))
+        if reach is None:
+            raise _NotRun
+        findings: list[tuple[str, str]] = []
+        if reach.project_only:
+            findings.append(
+                (
+                    str(reach.root / claude_settings.SETTINGS_RELATIVE_PATH),
+                    _PLUGIN_OFF_AT_ROOT_ONLY,
+                )
+            )
+        if reach.off:
+            count = len(reach.off)
+            findings.append(
+                (
+                    str(reach.off[0]),
+                    _PLUGIN_OFF_NESTED.format(
+                        count=count,
+                        directories="directory" if count == 1 else "directories",
+                        first=reach.off[0].relative_to(reach.root).as_posix(),
+                    ),
+                )
+            )
+        if not findings:
+            return None
+        details = " ".join(detail for _path, detail in findings)
+        return Problem(
+            check="plugin-off-in-subdirectories",
+            severity="advisory",
+            summary="plugin off in subdirectories",
+            fix="enable it in .claude/settings.local.json at the root, or in user settings",
+            line=f"{details} {_PLUGIN_OFF_TELL_THE_USER}",
+            notice=details if reach.off else None,
+            findings=tuple(findings),
+        )
+
+    return (
+        Check("stray-store", frozenset({"session"}), detect_stray_store),
+        Check("version-skew", frozenset({"session"}), detect_version_skew),
+        Check(
+            "plugin-off-in-subdirectories",
+            frozenset({"session", "doctor"}),
+            detect_plugin_off,
+        ),
+    )
 
 
 # A notice reaches the human at most once a day per check, and again at once when the severity
@@ -455,12 +618,35 @@ def _is_recent_stamp(raw: str, session_id: str, now: datetime) -> bool:
 _MIN_USER_PROMPTS = 2
 
 
-# Host-emitted slash-command wrappers persist as `type: "user"` entries with NO
-# distinguishing flag (measured on real session files, 2026-07-30) -- content prefix is
-# the only way to tell them from a typed prompt. A genuine prompt starting with one of
-# these literals would merely raise the nudge threshold by one; this is a heuristic gate,
-# not provenance.
-_HOST_EMITTED_PREFIXES = ("<command-name>", "<local-command-stdout>", "<local-command-caveat>")
+# Host-emitted turns persist as `type: "user"` entries with NO distinguishing flag (measured
+# on real session files, 2026-07-30; re-measured 2026-10-03 over the 400 most recent
+# transcripts) -- content prefix is the only way to tell them from a typed prompt. The
+# slash-command wrappers, a finished background agent's `<task-notification>`, an agent-team
+# `<teammate-message` (no closing `>`: it carries attributes) and a `!` command's output.
+# A typed slash command that starts `<command-message>` and a `!` command's `<bash-input>`
+# are a person's own turn and keep counting. A genuine prompt starting with one of these
+# literals would merely raise the nudge threshold by one; this is a heuristic gate, not
+# provenance.
+_HOST_EMITTED_PREFIXES = (
+    "<command-name>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "<task-notification>",
+    "<teammate-message",
+    "<bash-stdout>",
+    # The lead's own session receives a teammate's message as this plain-text line, with the
+    # `<teammate-message` tag on the next line.
+    "Another Claude session sent a message",
+)
+
+# Newer Claude Code writes provenance on some user lines. These values mark a line the host
+# wrote, including task notifications in plain prose that no prefix catches. They are only
+# ever a "not a person" signal: teammate, slash-command and `!` lines carry no fields at all,
+# so an absent field proves nothing (measured over the 400 most recent transcripts,
+# 2026-10-03).
+# see design/superpowers/specs/2026-10-03-stop-gate-host-messages-design.md
+_HOST_ORIGIN_KINDS = frozenset({"task-notification"})
+_HOST_PROMPT_SOURCES = frozenset({"system"})
 
 
 def _is_real_user_prompt(entry: object) -> bool:
@@ -478,6 +664,11 @@ def _is_real_user_prompt(entry: object) -> bool:
     if not isinstance(entry, dict) or entry.get("type") != "user":
         return False
     if entry.get("isMeta") or entry.get("isCompactSummary"):
+        return False
+    origin = entry.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") in _HOST_ORIGIN_KINDS:
+        return False
+    if entry.get("promptSource") in _HOST_PROMPT_SOURCES:
         return False
     message = entry.get("message")
     if not isinstance(message, dict):
@@ -699,7 +890,16 @@ def session_start() -> None:
     :data:`_SESSION_START_DEDUPE_SECONDS` exits silently, since a user's own hook
     registration can fire this alongside the plugin's for one logical session — see
     :func:`_session_start_duplicate`.
+
+    First of all, before the store opens, it records the commit uv resolved for an ``@main``
+    install so the hot-path hooks launch from it, in a ``try`` of its own: whatever happens
+    there changes nothing below — see :mod:`sidegraph.host.launch` and
+    design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md.
     """
+    with contextlib.suppress(Exception):
+        from . import launch
+
+        launch.record_launch_commit()
     try:
         from ..config import default_graph_path, resolve_store_location
         from ..engine.reader import GraphifyReader, open_borrowed_reader
@@ -762,12 +962,15 @@ def session_start() -> None:
             store.prune_telemetry_events()
         except Exception:
             pass
-        # The PreToolUse one-shot keys are one per agent now (about a hundred a day in a
-        # session that spawns subagents), so they expire like the journals do. Its own try:
-        # the journal prune above failing must not leave these to pile up, and vice versa.
+        # The PreToolUse per-file keys are up to ten per agent (hundreds a day in a session that
+        # spawns subagents), so they expire like the journals do; the two one-shot prefixes
+        # older versions wrote are cleared too, and so are the Stop hook's per-session re-arm
+        # stamps. Its own try: the journal prune above failing must not leave these to pile up,
+        # and vice versa.
+        # see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D2)
         with contextlib.suppress(Exception):
             store.prune_meta_prefixes(
-                (_PRETOOL_NUDGE_KEY_PREFIX, _PRETOOL_SPECIFIC_KEY_PREFIX),
+                (*_PRETOOL_PRUNE_PREFIXES, _CAPTURE_REARM_KEY_PREFIX),
                 older_than=timedelta(days=_PRETOOL_KEY_RETENTION_DAYS),
             )
 
@@ -833,8 +1036,9 @@ def session_start() -> None:
             text = top_tier_map(store, reader)
         # Standing instruction goes first, ahead of either renderer's content — see
         # STANDING_SEARCH_INSTRUCTION's docstring for why it lives here and not in the
-        # renderers.
-        text = f"{STANDING_SEARCH_INSTRUCTION}\n\n{text}"
+        # renderers. The version line follows it, so a session names the package it runs.
+        # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D1)
+        text = f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}\n\n{text}"
 
         # Drift refresh (drift→supersede D4): it runs UNCONDITIONALLY — it is what keeps the
         # retrieval markers' cache fresh; SIDEGRAPH_DRIFT_NUDGE=off gates the PROSE only (spec I5,
@@ -902,22 +1106,123 @@ def session_start() -> None:
         print(json.dumps({}))
 
 
+# A session that was already nudged is nudged again when at least this long has passed since its
+# last nudge AND at least this many commits were authored since then. The last nudge is the meta
+# key ``capture_rearm:<session>`` (an ISO timestamp; SessionStart expires it with the other
+# per-session keys). A session captured before the key existed falls back to the ``captured_at``
+# of its ``capture_sessions`` row, which the schema makes NOT NULL.
+# see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D2, D3)
+_CAPTURE_REARM_KEY_PREFIX = "capture_rearm:"
+_REARM_GAP = timedelta(minutes=30)
+_REARM_MIN_COMMITS = 10
+_REARM_GIT_TIMEOUT_SECONDS = 2
+# ``git log --since`` compares committer dates and stops at the first commit older than the
+# bound, while the count is by author date. A commit authored after the nudge whose committer
+# date is older (clock skew, an explicit GIT_COMMITTER_DATE) would hide everything behind it, so
+# the walk starts this much earlier than the nudge. Dropping the bound costs 0.36 s per call on
+# a 55,290-commit repository, and the check runs at every Stop of a nudged session.
+_REARM_SKEW_MARGIN = timedelta(days=1)
+
+
+def _parse_stamp(value: str | None) -> datetime | None:
+    """An ISO timestamp from the ledger as an aware datetime, or ``None`` when it is absent or
+    not one."""
+    try:
+        stamp = datetime.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+    if stamp is not None and stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp
+
+
+def _read_capture_ledger(
+    peek: sqlite3.Connection, session_id: str
+) -> tuple[str, str | None] | None:
+    """What the read-only peek knows of a session: ``(captured_at, capture_rearm)`` when it was
+    already nudged (the second is ``None`` for a session that predates the key), else ``None``.
+
+    One connection reads both, so the in-gap Stop stays one cheap open.
+    see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D5)
+    """
+    row = peek.execute(
+        "SELECT captured_at FROM capture_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    stamp = peek.execute(
+        "SELECT value FROM meta WHERE key = ?", (_CAPTURE_REARM_KEY_PREFIX + session_id,)
+    ).fetchone()
+    return row["captured_at"], (stamp["value"] if stamp else None)
+
+
+def _commits_since(store_path: Path, since: datetime) -> int | None:
+    """How many commits authored at or after ``since`` are reachable from a local branch or
+    ``HEAD``, or ``None`` when git could not say (a failure or a timeout means no re-arm).
+
+    Author dates, not committer dates: a rebase or cherry-pick of old commits is not new work.
+    ``--since`` only bounds the walk, and it compares committer dates: it is set
+    ``_REARM_SKEW_MARGIN`` before ``since`` so a commit authored after ``since`` with an older
+    committer date is still reached. The author-time filter is the count. Runs in the project
+    the store belongs to, with git's repository-local variables dropped. Stdlib and ``gitenv``
+    only: ``verify.find_store_project_repo`` would pull in the models on the hook's cheap path.
+    see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D3)
+    """
+    import subprocess
+
+    from .. import gitenv
+
+    since_epoch = int(since.timestamp())
+    walk_epoch = int((since - _REARM_SKEW_MARGIN).timestamp())
+    try:
+        done = subprocess.run(
+            ["git", "log", "--branches", "HEAD", f"--since={walk_epoch}", "--format=%at", "--"],
+            cwd=_store_project_root(store_path),
+            env=gitenv.git_env(),
+            capture_output=True,
+            text=True,
+            timeout=_REARM_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return sum(1 for line in done.stdout.split() if line.isdigit() and int(line) >= since_epoch)
+
+
+def _rearm_commits(store_path: Path, captured_at: str, stamp: str | None) -> int | None:
+    """The commits that make an already-nudged session due another nudge, or ``None`` when it
+    is not due: inside the gap (no git work at all), a git failure, or too few commits.
+    see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D2, D5)
+    """
+    last = _parse_stamp(stamp) or _parse_stamp(captured_at)
+    if last is None or datetime.now(UTC) - last < _REARM_GAP:
+        return None
+    commits = _commits_since(store_path, last)
+    return commits if commits is not None and commits >= _REARM_MIN_COMMITS else None
+
+
 def stop() -> None:
     """Stop hook (Stage 5): guarded block-to-distill.
 
-    Fires the distillation nudge at most once per session (capture ledger +
-    ``stop_hook_active``), and only once the session looks substantial: >=
+    Fires the distillation nudge once the session looks substantial: >=
     ``_MIN_USER_PROMPTS`` real prompts, OR — one-shot (``sdk-cli``) sessions only —
     >= ``_MIN_TOOL_USES`` assistant tool calls (see ``_transcript_stats``, ``_is_substantial``
-    and the scoping rationale above ``_MIN_TOOL_USES``). It reads a Claude Code transcript and
-    a Codex rollout alike; on Codex only a person's interactive thread can arm. Disable
-    entirely with ``SIDEGRAPH_CAPTURE_NUDGE=off``. Must never crash the session — any failure
-    allows the stop.
+    and the scoping rationale above ``_MIN_TOOL_USES``). A session that was already nudged
+    (capture ledger + ``stop_hook_active``) is nudged again only after at least
+    ``_REARM_GAP`` and ``_REARM_MIN_COMMITS`` new commits (``_rearm_commits``), and exactly
+    one of several parallel Stops wins that nudge (a compare-and-swap on ``capture_rearm``).
+    It reads a Claude Code transcript and a Codex rollout alike; on Codex only a person's
+    interactive thread can arm. Disable entirely with ``SIDEGRAPH_CAPTURE_NUDGE=off``. Must
+    never crash the session — any failure allows the stop.
+    see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D2-D5)
 
     Ordering matters: the substance gate runs BEFORE ``mark_captured`` is ever written, and
     a gate failure returns without touching the ledger at all. A session gated at turn 1 (not
     yet substantial) is therefore still eligible to nudge later once it becomes substantial —
-    marking it early would have permanently suppressed that later nudge.
+    marking it early would have permanently suppressed that later nudge. A captured session
+    skips the gate and the transcript: it passed the gate once, and the re-arm rests on
+    commits.
     """
     try:
         if os.environ.get("SIDEGRAPH_CAPTURE_NUDGE") == "off":
@@ -926,7 +1231,6 @@ def stop() -> None:
 
         from ..config import resolve_store_location
         from ..gitio import open_index_ro
-        from ..store import Store
 
         payload = _read_payload()
         if payload.get("stop_hook_active"):
@@ -940,50 +1244,74 @@ def stop() -> None:
         # Read-only peek at the capture ledger BEFORE the transcript parse: every Stop after
         # the capturing one would otherwise re-read the whole transcript just to learn the
         # session is done. Any failure (no index, a lock, an empty index.db) falls through
-        # to the authoritative `was_captured` check below; the peek never writes.
-        peek = open_index_ro(
-            Path(
-                resolve_store_location(
-                    root=os.environ.get("CLAUDE_PROJECT_DIR"),
-                    warn_on_create=False,
-                    search_ancestors=True,
-                ).path
-            )
+        # to the authoritative `was_captured` check below; the peek never writes. The same
+        # connection reads the session's `capture_rearm` stamp, so a Stop inside the gap exits
+        # here, and git runs only after the peek is closed.
+        store_path = Path(
+            resolve_store_location(
+                root=os.environ.get("CLAUDE_PROJECT_DIR"),
+                warn_on_create=False,
+                search_ancestors=True,
+            ).path
         )
+        peek = open_index_ro(store_path)
+        ledger: tuple[str, str | None] | None = None
         if peek is not None:
             try:
-                if peek.execute(
-                    "SELECT 1 FROM capture_sessions WHERE session_id = ?", (session_id,)
-                ).fetchone():
-                    print(json.dumps({}))
-                    return
+                ledger = _read_capture_ledger(peek, session_id)
             except sqlite3.Error:
                 pass
             finally:
                 peek.close()
+        rearm_commits: int | None = None
+        if ledger is not None:
+            rearm_commits = _rearm_commits(store_path, *ledger)
+            if rearm_commits is None:
+                print(json.dumps({}))
+                return
 
-        transcript_path = payload.get("transcript_path")
-        # Must be a non-empty str, not just truthy: a malformed/adversarial payload with an
-        # int here (e.g. `1`) would otherwise reach `open()`, which treats an int as a raw
-        # file descriptor -- `1` is stdout -- and closes it on the `with` block's exit,
-        # taking the hook's own ability to print its result down with it.
-        stats = (
-            _transcript_stats(transcript_path)
-            if isinstance(transcript_path, str) and transcript_path
-            else _TranscriptStats(0, 0, None)
-        )
-        if not _is_substantial(stats):
-            print(json.dumps({}))  # not substantial yet -- do NOT mark_captured
-            return
+        if ledger is None:
+            transcript_path = payload.get("transcript_path")
+            # Must be a non-empty str, not just truthy: a malformed/adversarial payload with an
+            # int here (e.g. `1`) would otherwise reach `open()`, which treats an int as a raw
+            # file descriptor -- `1` is stdout -- and closes it on the `with` block's exit,
+            # taking the hook's own ability to print its result down with it.
+            stats = (
+                _transcript_stats(transcript_path)
+                if isinstance(transcript_path, str) and transcript_path
+                else _TranscriptStats(0, 0, None)
+            )
+            if not _is_substantial(stats):
+                print(json.dumps({}))  # not substantial yet -- do NOT mark_captured
+                return
+
+        # Imported here, below both early exits, the peek and the substance gate: the models cost
+        # tens of milliseconds and the common Stop never reaches this point.
+        # see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D6)
+        from ..store import Store
 
         store = Store(
             resolve_store_location(
                 root=os.environ.get("CLAUDE_PROJECT_DIR"), search_ancestors=True
             ).path
         )
-        if store.was_captured(session_id):
-            print(json.dumps({}))
-            return
+        rearm_key = _CAPTURE_REARM_KEY_PREFIX + session_id
+        if ledger is None:
+            if store.was_captured(session_id):
+                print(json.dumps({}))
+                return
+        else:
+            # Compare-and-swap: the new stamp goes in only if the stored one is still what the
+            # peek read (`None` for a session that predates the key), so two parallel Stops
+            # past the threshold cannot both nudge. It is taken before the drift refresh so the
+            # losing Stop does none of that work.
+            expected = ledger[1]
+            stamp = datetime.now(UTC).isoformat()
+            if not store.update_meta_if(
+                rearm_key, lambda current: stamp if current == expected else None
+            ):
+                print(json.dumps({}))
+                return
 
         # Drift clause (drift→supersede D5): refresh AFTER the substance gate and ledger
         # check (no git work on trivial sessions), unconditionally — same I5 option-b rule
@@ -998,9 +1326,9 @@ def stop() -> None:
 
             n = _sync_drift.refresh_code_drift_cache(store)
             if n and os.environ.get("SIDEGRAPH_DRIFT_NUDGE") != "off":
-                # 601 + 183 = 784 <= 800 at n=5 — inside the staleness-wave's pinned
-                # anti-creep bound (test_host_stop.py's <=800 assert covers the
-                # concatenation).
+                # 601 + 183 = 784 at n=5 on a first nudge, inside the staleness-wave's pinned
+                # <=800 anti-creep bound. A re-armed nudge adds the commit sentence below (43
+                # characters), which is why test_host_stop.py's bound is 850.
                 reason += (
                     f" Also: {n} drifted record(s) — their anchored code changed after "
                     "capture; if this session's work overtook any of them, "
@@ -1009,36 +1337,77 @@ def stop() -> None:
         except Exception:
             pass
 
-        store.mark_captured(session_id)  # before emitting: a crash cannot double-nudge
+        if rearm_commits is None:
+            store.mark_captured(session_id)  # before emitting: a crash cannot double-nudge
+            # The stamp the re-arm counts from. A failed write only costs the fallback to
+            # `captured_at`, never the nudge.
+            with contextlib.suppress(Exception):
+                store.set_meta(rearm_key, datetime.now(UTC).isoformat())
+        else:
+            reason += f" Since the last capture prompt: {rearm_commits} commits."
         print(json.dumps({"decision": "block", "reason": reason, "suppressOutput": True}))
     except Exception:
         print(json.dumps({}))
 
 
-# Exact-match set (§5 FR8.3): only Read/Grep are blind-reading tools worth redirecting —
-# Bash/Edit/Write etc. are left alone (a matcher-level filter also does this in hooks.json;
-# this is the belt-and-braces check inside the hook itself).
-_PRETOOL_NUDGE_TOOLS = frozenset({"Read", "Grep"})
+# The tools whose calls deliver records (exact-match, inside the hook: `hooks.json`'s matcher is
+# user-editable, so trusting it alone would deliver for any tool in a hand-wired setup). Bash is
+# wired for four read commands only (the manifests' `if` entries); the hook still checks the line.
+# see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D3)
+_POINT_OF_READ_TOOLS = frozenset({"Read", "Grep", "Edit", "Write", "Bash"})
 
-# Meta-table key prefix (agent-scoped: `_nudge_key` names the session and, for a subagent, the
-# agent; the Stop hook's capture ledger is session-scoped) — deliberately
-# NOT the Stop hook's `capture_sessions` table: that table means "already nudged to
-# *distill*", a different guard. Reusing it here would make the first blind Read of a
-# session silently consume the Stop-hook's one-shot distillation nudge too. `store.get_meta`/
-# `set_meta` already exist for exactly this kind of session/process-scoped marker, so no new
-# table (and no SCHEMA_VERSION bump) is needed.
-_PRETOOL_NUDGE_KEY_PREFIX = "pretool_nudge:"
+# One claim per file per agent in the meta table, keyed
+# ``pretool_file:<session>:<agent or ->:<repo-relative path>`` with the claim's ISO timestamp as
+# the value (SessionStart expires it). ``-`` stands for the session's own agent: without it that
+# agent's key prefix would be the session alone, which every subagent's keys also start with, and
+# the subagents' claims would spend the main agent's cap. Deliberately NOT the Stop hook's
+# `capture_sessions` table: that table means "already nudged to *distill*", a different guard.
+# see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2)
+_PRETOOL_FILE_KEY_PREFIX = "pretool_file:"
 
-# SessionStart expires a one-shot key this many days after its claim. The value is the claim's
-# ISO timestamp (the keys used to hold "1", which SessionStart also expires).
+# The two one-shot prefixes older versions wrote. Nothing writes them now; SessionStart still
+# clears what is left of them.
+_PRETOOL_LEGACY_KEY_PREFIXES = ("pretool_nudge:", "pretool_nudge_path:")
+_PRETOOL_PRUNE_PREFIXES = (*_PRETOOL_LEGACY_KEY_PREFIXES, _PRETOOL_FILE_KEY_PREFIX)
+
+# SessionStart expires a per-file key this many days after its claim. The value is the claim's
+# ISO timestamp (the older one-shot keys held "1", which SessionStart also expires).
 _PRETOOL_KEY_RETENTION_DAYS = 30
 
-# Recording is a different mechanism from the nudge and needs a different tool set: an
-# Edit/Write is the strongest available evidence that the agent worked somewhere, while the
-# nudge is only about blind *reading*. Kept as its own frozenset because `hooks.json`'s
-# matcher is user-editable — trusting the matcher alone would record arbitrary tools in a
-# hand-wired setup, the same belt-and-braces reasoning `_PRETOOL_NUDGE_TOOLS` already applies.
+# At most this many files are delivered to one agent, and at most this many per call. The cap is
+# exact (one SQL statement counts and inserts); the per-call bound is applied before claiming, so
+# the several processes Claude Code spawns for one Bash line cannot add up past it.
+_FILES_PER_AGENT = 10
+_FILES_PER_CALL = 3
+
+# How much of a record the block carries: the title and the first sentence of the choice, each
+# clipped at a word boundary. Two records, or three when the first two are both mistakes.
+_RECORD_TITLE_CHARS = 90
+_RECORD_CHOICE_CHARS = 120
+_RECORDS_SHOWN = 2
+_RECORDS_SHOWN_WHEN_TWO_MISTAKES = 3
+
+# Recording is a different mechanism from delivering records and needs a different tool set: a
+# touch is evidence that the agent worked on a file, and a Bash read is not one (D8). Kept as its
+# own frozenset because `hooks.json`'s matcher is user-editable — trusting the matcher alone would
+# record arbitrary tools in a hand-wired setup, the same belt-and-braces reasoning
+# `_POINT_OF_READ_TOOLS` already applies.
 _TOUCH_TOOLS = frozenset({"Read", "Grep", "Edit", "Write"})
+
+# The tools whose input is a subagent's brief (``Task`` is the older name). Compared exactly:
+# ``TaskCreate`` and the other ``Task*`` tools carry no brief.
+# see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1)
+_AGENT_TOOLS = frozenset({"Agent", "Task"})
+
+# The block the Agent branch appends to a brief, and what bounds it: per file two records (a
+# brief covers several files, so not the Read path's two-or-three), then at most six record lines
+# and 3,000 characters for the whole block, whole files dropped from the end.
+# see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1, D3)
+_BRIEF_OPEN = "--- Recorded decisions for the files in this task (added by Sidegraph) ---"
+_BRIEF_CLOSE = "--- end of Sidegraph records ---"
+_BRIEF_RECORDS_PER_FILE = 2
+_BRIEF_MAX_LINES = 6
+_BRIEF_MAX_CHARS = 3000
 
 
 def _touch_path(tool_input: object, root: str) -> str | None:
@@ -1080,15 +1449,52 @@ def _touch_root(location: StoreLocation) -> str:
     return location.base or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
 
 
-def _record_touch_event(payload: dict) -> None:
-    """Record one touch. Runs FIRST in ``pre_tool_use``, before every nudge gate (D4).
+class _HotOpener:
+    """Opens the hot index at most once per hook run, however many steps ask for it.
 
-    The nudge's early exits belong to the nudge: inheriting them would record nothing for
-    Edit/Write, nothing after an agent's first Read, nothing in a store without memory yet,
-    and nothing when the grep nudge is disabled. The single gate shared with the nudge is
-    ``session_id``, because a touch that cannot be attributed cannot be written at all.
+    Touch recording and the nudge both need the index and both resolve the same store, so the
+    second step reuses the first one's handle (or its refusal: ``None`` is remembered too, so a
+    store that cannot be used is looked at once). A handle whose write hit the busy timeout
+    (``HotIndex.write_failed``) is not handed out again: the next write would wait out the same
+    timeout, so a Read under a held lock costs one wait, not two. ``close`` releases the handle
+    at the end of the run.
+    see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D3)
+    """
+
+    def __init__(self) -> None:
+        self._asked = False
+        self._index: HotIndex | None = None
+
+    def __call__(self, store_path: str | os.PathLike[str]) -> HotIndex | None:
+        if not self._asked:
+            from ..hot_index import HotIndex
+
+            self._asked = True
+            self._index = HotIndex.open(store_path)
+        if self._index is not None and self._index.write_failed:
+            return None
+        return self._index
+
+    def close(self) -> None:
+        if self._index is not None:
+            self._index.close()
+            self._index = None
+
+
+def _record_touch_event(payload: dict, hot: _HotOpener) -> None:
+    """Record one touch. Runs FIRST in ``pre_tool_use``, before every delivery gate (D4).
+
+    Delivery's early exits belong to delivery: inheriting them would record nothing after an
+    agent's first read of a file, nothing in a store without memory yet, and nothing when
+    delivery is switched off. The single gate shared with it is ``session_id``, because a touch
+    that cannot be attributed cannot be written at all.
     Never raises (D9) — this runs inside a PreToolUse hook, where an exception would
     interfere with the user's own tool call.
+
+    The row goes through the hot index (``hot_index.HotIndex``), not ``Store``: no package import,
+    no digest walk, and no store created as a side effect of a tool call. A project with no usable
+    index records nothing.
+    see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D3)
     """
     try:
         from ..config import resolve_store_location, telemetry_enabled
@@ -1102,76 +1508,39 @@ def _record_touch_event(payload: dict) -> None:
         if not session_id:
             return
         agent_id = _agent_identity(payload)
-        # warn_on_create=False: see the note on the Store below. Resolved before the path is
-        # made because the touch root depends on where the store was found (spec D2).
+        # warn_on_create=False: recording runs on every matching tool call regardless of
+        # delivery's own gates (D4), including SIDEGRAPH_GREP_NUDGE=off, and the location is only
+        # looked up here, never created: printing "creating new store" on a path the user
+        # explicitly silenced and cannot act on is noise. Resolved before the path is made
+        # because the touch root depends on where the store was found (spec D2).
         location = resolve_store_location(
             root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
         )
         path = _touch_path(payload.get("tool_input"), _touch_root(location))
         if path is None:
             return
-
-        from ..store import Store
-
-        # warn_on_create=False: recording runs on every matching tool call regardless of the
-        # nudge's own gates (D4), including SIDEGRAPH_GREP_NUDGE=off. Before this feature, a
-        # Read/Grep on a store-less repo with the nudge silenced returned at the env check
-        # before ever constructing a Store, so no warning fired. Recording now constructs one
-        # unconditionally on that same path, and printing "creating new store" stderr noise
-        # there would land on a path the user explicitly silenced and cannot act on.
-        store = Store(location.path)
-        store.record_touch(session_id, path, str(tool), agent=agent_id)
+        index = hot(location.path)
+        if index is None:
+            return
+        index.record_touch(session_id, path, str(tool), agent=agent_id)
     except Exception:
         return
 
 
-def _looks_like_source_target(tool_input: object) -> bool:
-    """Permissive on purpose (§5 FR8.3: "be permissive, any string arg"): this only screens
-    out a malformed or empty payload — not any particular path shape. The named keys are
-    Read/Grep's usual ones, but the catch-all below passes ANY dict with a non-empty string
-    value (a ``{"command": ...}`` payload sails through, review 2026-08-08) — the tool-set
-    check in ``pre_tool_use`` is the gate that decides which tools nudge, never this."""
-    if not isinstance(tool_input, dict):
-        return False
-    for key in ("file_path", "path", "pattern"):
-        value = tool_input.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    return any(isinstance(v, str) and v.strip() for v in tool_input.values())
+def _records_for_path(store, rel_path: str) -> list[tuple]:
+    """The live decisions anchored to ``rel_path``, each with whether it is a proposal, in the
+    order a reader should meet them: accepted mistakes, accepted rest, proposed last, newest
+    first within each bucket. The reference ``HotIndex.records_for`` must equal, byte for byte,
+    on raw index rows (``tests/test_hot_index.py``); the hook itself never builds a ``Store``.
 
+    Mistakes-first is the product's one hard ranking guarantee (``MISTAKE_KINDS``, imported,
+    never re-spelled). WITHIN each bucket the order is newest-first: the scan order is ULID mint
+    order, so without this a cap would spend itself on the OLDEST records of a busy path.
 
-# How many record titles the path-specific nudge names. Two: enough to show the store has
-# something concrete, short enough that the whole nudge stays readable at a glance — the
-# thing the counting form was not.
-_PRETOOL_TITLE_CAP = 2
-
-# Per-title clip, so one ADR-scale title cannot swallow the nudge. Matches the tight
-# render tier retrieval uses for the same job (`retrieval._LINE_CLIP_CHARS` is 240 for a
-# whole line; a title inside a two-title nudge gets less).
-_PRETOOL_TITLE_CHARS = 90
-
-# The path-specific nudge gets its OWN one-shot key (review finding 3). Sharing the
-# generic ledger meant a session whose first Read landed on an unanchored file — measured:
-# 94% of first reads on this repo, because sessions open a spec or a plan first — burned
-# its single nudge on the counting form and could never receive the specific one. Two
-# keys per agent, one nudge of each kind per agent at most.
-_PRETOOL_SPECIFIC_KEY_PREFIX = "pretool_nudge_path:"
-
-
-def _titles_for_path(store, rel_path: str) -> list[str]:
-    """Titles of live decisions anchored to ``rel_path``, accepted memory first and
-    proposed memory last, clipped and capped.
-
-    Mistakes-first is the product's one hard ranking guarantee (``retrieval._MISTAKE_KINDS``
-    — imported, never re-spelled, so the two definitions cannot drift). WITHIN each bucket
-    the order is newest-first: the scan order is ULID mint order, so without this the cap
-    spent itself on the two OLDEST records of a busy path (review finding 2 measured the
-    two oldest of eighteen on ``store.py``).
-
-    Pure read. A row that fails to parse is skipped individually — wrapping the whole walk
-    in one guard let a single bad row zero the titles for every path (review finding 8).
+    Pure read. A row that fails to parse is skipped individually.
+    see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1, D6)
     """
-    from ..retrieval import _MISTAKE_KINDS, partition_by_trust
+    from ..retrieval import partition_by_trust
 
     mistakes: list = []
     rest: list = []
@@ -1188,143 +1557,338 @@ def _titles_for_path(store, rel_path: str) -> list[str]:
                 if d.id in seen:
                     continue
                 seen.add(d.id)
-                (mistakes if d.kind in _MISTAKE_KINDS else rest).append(d)
+                (mistakes if d.kind.value in MISTAKE_KINDS else rest).append(d)
         except Exception:
             continue
     accepted_mistakes, proposed_mistakes = partition_by_trust(mistakes)
     accepted_rest, proposed_rest = partition_by_trust(rest)
     ordered = sorted(accepted_mistakes, key=lambda d: d.valid_from, reverse=True)
     ordered += sorted(accepted_rest, key=lambda d: d.valid_from, reverse=True)
-    ordered += sorted(
+    proposals = sorted(
         [*proposed_mistakes, *proposed_rest], key=lambda d: d.valid_from, reverse=True
     )
-    proposed_ids = {d.id for d in [*proposed_mistakes, *proposed_rest]}
+    return [(d, False) for d in ordered] + [(d, True) for d in proposals]
 
-    out: list[str] = []
-    for d in ordered[:_PRETOOL_TITLE_CAP]:
-        # Newlines and quotes in a title would break the emitted line and its quoting
-        # (review finding 7); the `[unratified]` tag is the same signal retrieval always
-        # attaches to a PROPOSED record (finding 5) — the nudge must not present an
-        # unreviewed draft as settled memory.
-        title = " ".join(d.title.split()).replace('"', "'")
-        if len(title) > _PRETOOL_TITLE_CHARS:
-            title = title[: _PRETOOL_TITLE_CHARS - 1].rstrip() + "…"
-        if d.id in proposed_ids:
-            title += " [unratified]"
-        out.append(title)
-    return out
+
+def _titles_for_path(store, rel_path: str) -> list[str]:
+    """The titles of :func:`_records_for_path`, clipped as the hook clips them and tagged
+    ``[unratified]`` when proposed: the part of the block that a test of a regulated mode reads."""
+    return [
+        clip_line(" ".join(d.title.split()), _RECORD_TITLE_CHARS)
+        + (" [unratified]" if proposed else "")
+        for d, proposed in _records_for_path(store, rel_path)
+    ]
+
+
+# A full stop after one of these does not end a sentence: "(e.g. the rows)" would otherwise
+# leave "…(e.g." as the whole gist. Matched case-insensitively, as a whole word.
+_ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.")
+
+
+def _ends_in_abbreviation(text: str, end: int) -> bool:
+    """Whether ``text[: end + 1]`` ends in one of :data:`_ABBREVIATIONS` as a whole word."""
+    head = text[: end + 1].lower()
+    for abbreviation in _ABBREVIATIONS:
+        if head.endswith(abbreviation):
+            before = head[: -len(abbreviation)]
+            if not before or not before[-1].isalnum():
+                return True
+    return False
+
+
+def _first_sentence(text: str) -> str:
+    """``text`` with its whitespace collapsed, up to and including the first sentence end: a
+    ``.``, ``!`` or ``?`` followed by a space, except a full stop that closes an abbreviation
+    (:data:`_ABBREVIATIONS`). All of it when there is none."""
+    collapsed = " ".join(text.split())
+    for i in range(len(collapsed) - 1):
+        if collapsed[i] in ".!?" and collapsed[i + 1] == " ":
+            if collapsed[i] == "." and _ends_in_abbreviation(collapsed, i):
+                continue
+            return collapsed[: i + 1]
+    return collapsed
+
+
+def _clip_choice(sentence: str, limit: int) -> str:
+    """:func:`clip_line` of ``sentence``, without the opening backtick of an inline code span the
+    clip cut in two: a lone backtick would read as the start of code that never ends. A sentence
+    whose own backticks do not pair is left alone."""
+    clipped = clip_line(sentence, limit)
+    if clipped != sentence and clipped.count("`") % 2 == 1 and sentence.count("`") % 2 == 0:
+        dangling = clipped.rfind("`")
+        clipped = clipped[:dangling] + clipped[dangling + 1 :]
+    return clipped
+
+
+def _record_line(record: Record) -> str:
+    decision = record.decision
+    title = clip_line(" ".join(decision["title"].split()), _RECORD_TITLE_CHARS)
+    if record.proposed:
+        title += " [unratified]"
+    choice = _clip_choice(_first_sentence(decision["choice"]), _RECORD_CHOICE_CHARS)
+    gist = f" — {choice}" if choice else ""
+    return f"- [{decision['kind']}] {title}{gist} (id {decision['id']})"
+
+
+def _records_block(rel: str, records: Sequence[Record]) -> str:
+    """The block for one file: a header, the top two records (three when the first two are both
+    mistakes), and a line naming the call that returns the rest when there is a rest.
+
+    The order is the one :meth:`HotIndex.records_for` returns, which is the model layer's
+    per-file order and not ``get_task_context(files=[f])``'s (that orders per entity), so the
+    last line promises the remaining records and not the same sequence.
+    see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1)
+    """
+    top_two_are_mistakes = len(records) >= 2 and all(
+        r.decision["kind"] in MISTAKE_KINDS for r in records[:2]
+    )
+    count = _RECORDS_SHOWN_WHEN_TWO_MISTAKES if top_two_are_mistakes else _RECORDS_SHOWN
+    shown = records[:count]
+    lines = [f"Recorded for {rel} ({len(shown)} of {len(records)}, mistakes first):"]
+    lines += [_record_line(r) for r in shown]
+    if len(records) > len(shown):
+        files = json.dumps([rel], ensure_ascii=False)
+        lines.append(f"More: get_task_context(files={files}).")
+    return "\n".join(lines)
+
+
+def _files_named(tool: object, payload: dict, tool_input: dict, root: str) -> list[str]:
+    """The repo-relative files this call reads or edits, in the order the call names them.
+
+    Read, Edit, Write and Grep name one (``_touch_path``: a directory, a pattern-only Grep and a
+    path outside the root name none). A Bash call names the regular files its ``sed``, ``grep``,
+    ``rg`` and ``cat`` commands read (``bash_paths.read_paths``), resolved from the payload's
+    ``cwd``.
+    """
+    if tool == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return []
+        from ..bash_paths import read_paths
+
+        cwd = payload.get("cwd")
+        return read_paths(command, cwd if isinstance(cwd, str) and cwd else root, root)
+    rel = _touch_path(tool_input, root)
+    return [rel] if rel else []
+
+
+def _delivery(payload: dict, hot: _HotOpener) -> str | None:
+    """The text :func:`pre_tool_use` hands the agent for this call, or ``None`` for nothing.
+
+    The order is the one the three delivery rules need: the files are taken first (no index is
+    opened for a call that names none), then ONE scan of the entities finds the anchored ones,
+    the first three that have records are chosen (the same three in every process of one Bash
+    line), and only then does each claim go through, so a file another process or an earlier
+    call already delivered, or an agent already at its cap, costs nothing and prints nothing.
+    see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2, D3, D5)
+    """
+    if os.environ.get("SIDEGRAPH_GREP_NUDGE") == "off":
+        return None
+    tool = payload.get("tool_name")
+    if tool not in _POINT_OF_READ_TOOLS:
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    session_id, _ = _session_identity(payload)
+    if not session_id:
+        return None
+
+    from ..config import resolve_store_location
+
+    # warn_on_create=False: a tool call never creates a store (D3), so the "creating new
+    # store" notice would announce something that is not going to happen.
+    location = resolve_store_location(
+        root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
+    )
+    files = _files_named(tool, payload, tool_input, _touch_root(location))
+    if not files:
+        return None
+    index = hot(location.path)
+    if index is None:
+        return None
+
+    anchored = index.anchored_entities(files)
+    chosen: list[tuple[str, list[Record]]] = []
+    for rel in dict.fromkeys(files):
+        if rel not in anchored:
+            continue
+        records = index.records_for(anchored[rel])
+        if records:
+            chosen.append((rel, records))
+            if len(chosen) == _FILES_PER_CALL:
+                break
+
+    prefix = f"{_PRETOOL_FILE_KEY_PREFIX}{session_id}:{_agent_identity(payload) or '-'}:"
+    now = datetime.now(UTC).isoformat()
+    blocks: list[str] = []
+    for rel, records in chosen:
+        # Claim BEFORE emitting, in one statement that also counts: a crash cannot deliver a
+        # file twice, two parallel reads of one agent cannot both deliver it, and the agent's
+        # eleventh file is refused.
+        try:
+            if index.claim_file(prefix, rel, now, _FILES_PER_AGENT):
+                blocks.append(_records_block(rel, records))
+        except sqlite3.OperationalError:
+            break  # the busy timeout: deliver what is already claimed, claim no more
+    if not blocks:
+        return None
+    return "\n".join([MEMORY_GUARD_LINE, *blocks])
+
+
+def _brief_block(chosen: Sequence[tuple[str | None, str, Sequence[Record]]]) -> str | None:
+    """The block for a brief: the opening marker, the guard, one group per file (the file, labelled
+    with the document that named it when the brief did not, and its top two records), a line naming
+    the call that returns the rest, and the closing marker. ``chosen`` is in the order D2 fixes
+    (the brief's files, then the hop's) and each file has records.
+
+    Files are taken in order while the record lines stay within six and the whole block within
+    3,000 characters. The first file that does not fit ends the list, with one exception: when
+    only the line cap stops it and a line is left, its first record fills that line (a file whose
+    second record is cut is still the top of its list, and the block shows no per-file counts).
+    A file the character cap stops is dropped whole. ``More:`` names exactly the files shown.
+    ``None`` when not even the first fits.
+    The record lines are the Read path's (``_record_line``); its ``_records_block`` layout is not
+    reused, because a brief covers several files.
+    see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1, D3)
+    """
+
+    def build(groups: list[list[str]], shown: list[str]) -> str:
+        more = f"More: get_task_context(files={json.dumps(shown, ensure_ascii=False)})."
+        return "\n".join(
+            [_BRIEF_OPEN, MEMORY_GUARD_LINE, *(ln for g in groups for ln in g), more, _BRIEF_CLOSE]
+        )
+
+    groups: list[list[str]] = []
+    shown: list[str] = []
+    lines = 0
+    for doc, rel, records in chosen:
+        # the file's top records, cut to the lines left (the first record fills a last line)
+        top = records[: min(_BRIEF_RECORDS_PER_FILE, _BRIEF_MAX_LINES - lines)]
+        if not top:
+            break
+        header = f"{rel}:" if doc is None else f"{rel} (named in {doc}):"
+        group = [header, *(_record_line(r) for r in top)]
+        if len(build([*groups, group], [*shown, rel])) > _BRIEF_MAX_CHARS:
+            break
+        groups.append(group)
+        shown.append(rel)
+        lines += len(top)
+    return build(groups, shown) if shown else None
+
+
+def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
+    """The ``hookSpecificOutput`` for an ``Agent`` call: its tool input with the records for the
+    files its brief names appended to ``prompt``, or ``None`` for nothing to add.
+
+    ``None`` when ``SIDEGRAPH_AGENT_BRIEF`` is ``off``, ``prompt`` is not a string, the prompt
+    already holds the opening marker (a brief forwarded from another agent), the store has no
+    usable index, or no file the brief names has records. The files are the ones ``text_paths``
+    finds in the brief and, one hop away, in the text documents it names (``brief_files``); each
+    resolves against the payload's ``cwd`` and then the store's project root, and the suffix
+    fallback matches against the one scan of the anchored files. The call's other fields are
+    copied through untouched and no ``permissionDecision`` is set. It claims none of the Read
+    path's per-agent keys: the parent cannot see the block, so claiming them would only suppress
+    the parent's own first delivery.
+    see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1-D4)
+    """
+    if os.environ.get("SIDEGRAPH_AGENT_BRIEF") == "off":
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str) or _BRIEF_OPEN in prompt:
+        return None
+
+    from ..config import resolve_store_location
+    from ..text_paths import brief_files
+
+    location = resolve_store_location(
+        root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
+    )
+    index = hot(location.path)
+    if index is None:
+        return None
+    anchored = index.anchored_files()
+    chosen: list[tuple[str | None, str, list[Record]]] = []
+    cwd = payload.get("cwd")
+    for doc, rel in brief_files(
+        prompt, _touch_root(location), anchored, cwd if isinstance(cwd, str) else None
+    ):
+        records = index.records_for(anchored[rel]) if rel in anchored else []
+        if records:
+            chosen.append((doc, rel, records))
+            if len(chosen) == _BRIEF_MAX_LINES:  # every file shown costs a line at least
+                break
+    block = _brief_block(chosen)
+    if block is None:
+        return None
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": {**tool_input, "prompt": f"{prompt}\n\n{block}"},
+        }
+    }
+
+
+def _hook_output(payload: dict, hot: _HotOpener) -> dict:
+    """What :func:`pre_tool_use` prints: the Agent branch's ``updatedInput`` for a subagent
+    spawn, else the Read path's ``additionalContext``, else ``{}``."""
+    if payload.get("tool_name") in _AGENT_TOOLS:
+        return _agent_brief(payload, hot) or {}
+    text = _delivery(payload, hot)
+    if text is None:
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}}
 
 
 def pre_tool_use() -> None:
-    """PreToolUse hook (M6, FR8.3): redirect blind Read/Grep toward retrieval.
+    """PreToolUse hook (M6, FR8.3): hand the agent the records anchored to the file it
+    is about to read or edit.
 
-    Fires a non-blocking ``additionalContext``-only nudge — no ``permissionDecision`` field is
+    Prints a non-blocking ``additionalContext`` block — no ``permissionDecision`` field is
     emitted, so the call never touches the permission decision (it neither allows, denies, nor
-    asks) — at most once per agent (the session's own agent and each subagent separately; see
-    :func:`_agent_identity`), when ALL hold: the tool is Read or Grep, the call targets
-    something that looks like a file/pattern string, and the store has >= 1 accepted domain OR
-    >= 1 valid decision (nothing to redirect to otherwise). Disable entirely with
-    ``SIDEGRAPH_GREP_NUDGE=off``. Must never crash or block the tool call: any failure — or any
-    of the above conditions not holding — prints ``{}``; either way the normal permission flow
+    asks) — for a Read, Grep, Edit, Write, or a Bash line whose ``sed``, ``grep``, ``rg`` or
+    ``cat`` names a file with records. Each file is delivered once per agent (the session's own
+    agent and each subagent separately; see :func:`_agent_identity`), up to ten files per agent
+    and three per call. Switch it off with ``SIDEGRAPH_GREP_NUDGE=off`` (the name is older than
+    the behaviour; touch recording is not affected). Must never crash or block the tool call:
+    any failure — or nothing to deliver — prints ``{}``; either way the normal permission flow
     applies untouched.
+
+    On an ``Agent`` (or ``Task``) call, the one that spawns a subagent, it prints the call's own
+    input with the records for the files the brief names appended to ``prompt`` (``updatedInput``,
+    see :func:`_agent_brief`). The subagent receives the block in its first message; the parent's
+    view of its own call is unchanged. On by default; ``SIDEGRAPH_AGENT_BRIEF=off`` disables it.
+
+    Runs on every Read, Grep, Edit, Write, Agent and matching Bash call, so it never imports the
+    models and never constructs a ``Store``: both the touch row and the delivery go through one
+    ``hot_index.HotIndex`` opened once, which trusts the index as the last full open left it and
+    does nothing when it cannot use it. A tool call therefore never creates a store (SessionStart
+    and the MCP server still do).
+    see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D3),
+    design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1-D3) and
+    design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1)
     """
     # Payload first: stdin can only be read once, and recording (D4) must see it even when
-    # the nudge is disabled. Then record, then run the nudge branch exactly as before.
+    # delivery is switched off. Then record, then deliver.
     try:
         payload = _read_payload()
     except Exception:
         payload = {}
-    _record_touch_event(payload)
-
+    if not isinstance(payload, dict):
+        payload = {}
+    hot = _HotOpener()
     try:
-        if os.environ.get("SIDEGRAPH_GREP_NUDGE") == "off":
-            print(json.dumps({}))
-            return
-        if payload.get("tool_name") not in _PRETOOL_NUDGE_TOOLS:
-            print(json.dumps({}))
-            return
-        if not _looks_like_source_target(payload.get("tool_input")):
-            print(json.dumps({}))
-            return
-        session_id, _ = _session_identity(payload)
-        if not session_id:
-            print(json.dumps({}))
-            return
-
-        from ..config import resolve_store_location
-        from ..schema import DecisionStatus, DomainStatus
-        from ..store import Store
-
-        location = resolve_store_location(
-            root=os.environ.get("CLAUDE_PROJECT_DIR"), search_ancestors=True
-        )
-        store = Store(location.path)
-        agent_id = _agent_identity(payload)
-        ledger_key = _nudge_key(_PRETOOL_NUDGE_KEY_PREFIX, session_id, agent_id)
-        specific_key = _nudge_key(_PRETOOL_SPECIFIC_KEY_PREFIX, session_id, agent_id)
-        rel = _touch_path(payload.get("tool_input"), _touch_root(location))
-        titles = _titles_for_path(store, rel) if rel else []
-        # Each form has its own one-shot key: a generic nudge early in a session must not
-        # consume the path-specific one the session may earn later (review finding 3). This
-        # read only spares the work below once the key is spent; the claim at the end decides.
-        if store.get_meta(specific_key if titles else ledger_key):
-            print(json.dumps({}))
-            return
-
-        domains = list(store.iter_domains(status=DomainStatus.ACCEPTED))
-        now = datetime.now(UTC)
-        decisions = [
-            d
-            for d in store.iter_decisions()
-            if d.status not in (DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED)
-            and (d.valid_to is None or d.valid_to > now)
-        ]
-        if not domains and not decisions:
-            print(json.dumps({}))
-            return
-
-        # Path-specific first (whitepaper Phase-1 finding): name what memory HOLDS about
-        # the file being opened. The counting form measurably did not work — it fired (its
-        # ledger keys are in the store) and the agent read the file anyway. Claude Code
-        # 2.1.259+ records the injected context in the transcript (`hook_success` and
-        # `hook_additional_context` attachments); before that the transcript never showed it.
-        if titles:
-            quoted = "; ".join(f'"{t}"' for t in titles)
-            text = (
-                f"Sidegraph: memory has {quoted} anchored to {rel} — "
-                "call get_task_context before reading it blind."
-            )
-        else:
-            # Nothing recorded about THIS path (or a pattern-only Grep with no path):
-            # keep the pre-fix generic form. Staying SILENT here was tried and rejected as
-            # out of scope — it changes documented behaviour rather than the wording, and
-            # the measured cost of the generic nudge is ~30 tokens, not the +5% regime
-            # (that is the SessionStart map). Left as a separate, measurable follow-up.
-            text = (
-                "Sidegraph: this project has a decision memory — call "
-                "get_task_context/drill_down before blind reading; "
-                f"{len(domains)} domains, {len(decisions)} decisions."
-            )
-
-        # Claim BEFORE emitting, in one statement: a crash cannot double-nudge, and two
-        # parallel reads of one agent (a subagent opens with two to four) cannot both pass
-        # the read above and both nudge. The value is the claim time, which SessionStart
-        # uses to expire the key.
-        if not store.claim_meta(specific_key if titles else ledger_key, now.isoformat()):
-            print(json.dumps({}))
-            return
-        print(
-            json.dumps(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "additionalContext": text,
-                    }
-                }
-            )
-        )
-    except Exception:
-        print(json.dumps({}))
+        _record_touch_event(payload, hot)
+        try:
+            output = _hook_output(payload, hot)
+        except Exception:
+            output = {}
+        print(json.dumps(output))
+    finally:
+        hot.close()
 
 
 def _read_payload() -> dict:

@@ -784,14 +784,16 @@ def _render_parity_surfaces(
     same text for the exact same store, with no hand-reimplemented rendering to drift out
     of sync with the real code.
 
-    ``now`` is patched into ``hooks.datetime``/``retrieval.datetime`` (module-level NAMES,
-    per T9 -- both do ``from datetime import datetime``) for the DURATION of this call,
-    exactly like Task 7's shifted-clock run will do. Required, not cosmetic: ``hooks.py``'s
-    ratification-queue line computes ``(datetime.now(UTC) - min(stamps)).days`` and
-    ``retrieval.py``'s proposal window computes ``datetime.now(UTC) - record.valid_from``
-    -- both against REAL wall-clock time otherwise, which would make "oldest N days"
-    (and the window's include/exclude boundary) drift upward every day this test suite
-    runs, even though ``_golden_store`` built every ``valid_from`` relative to ``now``.
+    ``now`` is patched into ``hooks.datetime``/``store_layout.datetime`` (module-level NAMES,
+    per T9 -- both do ``from datetime import datetime``; the proposal window lives in
+    ``store_layout.py`` now, and ``retrieval.proposal_surfaces`` delegates to it) for the
+    DURATION of this call, exactly like Task 7's shifted-clock run will do. Required, not
+    cosmetic: ``hooks.py``'s ratification-queue line computes
+    ``(datetime.now(UTC) - min(stamps)).days`` and the proposal window computes
+    ``datetime.now(UTC) - valid_from`` -- both against REAL wall-clock time otherwise, which
+    would make "oldest N days" (and the window's include/exclude boundary) drift upward every
+    day this test suite runs, even though ``_golden_store`` built every ``valid_from``
+    relative to ``now``.
     Freezing the render's own clock to the SAME ``now`` used to build the store is what
     makes the golden stable forever, not just at freeze time.
 
@@ -826,7 +828,7 @@ def _render_parity_surfaces(
       independent of any surrounding prose, so a regression in the counting logic itself
       is caught even if the text wrapping it is later reworded.
     """
-    import sidegraph.retrieval as retrieval_module
+    import sidegraph.store_layout as layout_module
     from sidegraph import server as server_module
     from sidegraph.host import hooks as hooks_module
     from sidegraph.retrieval import build_toc, render_toc
@@ -855,7 +857,7 @@ def _render_parity_surfaces(
     saved_stdin = sys.stdin
     frozen = _frozen_datetime(now)
     saved_hooks_datetime = hooks_module.datetime
-    saved_retrieval_datetime = retrieval_module.datetime
+    saved_layout_datetime = layout_module.datetime
 
     try:
         for k in env_keys:
@@ -866,13 +868,19 @@ def _render_parity_surfaces(
             os.environ[k] = v
         sys.stdin = io.StringIO("")
         hooks_module.datetime = frozen
-        retrieval_module.datetime = frozen
+        layout_module.datetime = frozen
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             hooks_module.session_start()
         session_start_out = json.loads(buf.getvalue())
-        session_start_text = session_start_out["hookSpecificOutput"]["additionalContext"]
+        # The golden predates the SessionStart version line, which changes at every release
+        # and so cannot be frozen: the harness takes it out before comparing (declared in the
+        # host-wiring spec, D1), and the golden file stays byte-identical.
+        # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D1)
+        session_start_text = session_start_out["hookSpecificOutput"]["additionalContext"].replace(
+            f"{hooks_module.version_line()}\n\n", "", 1
+        )
 
         # A file seed matching the fixture graph's `trader/exec.py` -- with NO seed at
         # all, get_task_context has nothing task-relevant to anchor to and renders the
@@ -889,7 +897,7 @@ def _render_parity_surfaces(
                 os.environ[k] = v
         sys.stdin = saved_stdin
         hooks_module.datetime = saved_hooks_datetime
-        retrieval_module.datetime = saved_retrieval_datetime
+        layout_module.datetime = saved_layout_datetime
 
     queue_counts = list(store.pending_ratification_counts())
 

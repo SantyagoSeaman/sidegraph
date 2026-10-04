@@ -30,9 +30,10 @@ from sidegraph.bootstrap.model import HostKind
 _ROOT = Path(__file__).resolve().parent.parent
 _PLUGIN = _ROOT / "plugin" / "sidegraph"
 
-# The guard each event ends with. Stop and PreToolUse answer an empty object, which both hosts
-# read as "no decision". SessionStart answers a systemMessage the user sees, so a broken
-# install is not silent.
+# The guard each event ends with. Stop, PreToolUse and SubagentStart answer an empty object,
+# which both hosts read as "no decision". SessionStart answers a systemMessage the user sees,
+# so a broken install is not silent. A SubagentStart guard never says more than that: a start
+# failure must not put a message in front of every subagent.
 _EMPTY_GUARD = " || printf '{}\\n'"
 _SESSION_MESSAGE = (
     "Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); "
@@ -47,11 +48,13 @@ _ENTRY_GUARDS = {
     "sidegraph-session-start": _SESSION_GUARD,
     "sidegraph-stop": _EMPTY_GUARD,
     "sidegraph-pre-tool-use": _EMPTY_GUARD,
+    "sidegraph-subagent-start": _EMPTY_GUARD,
 }
 _EVENT_GUARDS = {
     "SessionStart": _SESSION_GUARD,
     "Stop": _EMPTY_GUARD,
     "PreToolUse": _EMPTY_GUARD,
+    "SubagentStart": _EMPTY_GUARD,
 }
 
 _ANSWER = '{"decision":"block","reason":"x"}'
@@ -96,7 +99,7 @@ def _shells() -> list[Any]:
 
 
 _ENTRIES = _hook_entries()
-_STOP_AND_PRETOOL = [e for e in _ENTRIES if e.values[0] in ("Stop", "PreToolUse")]
+_EMPTY_ANSWER = [e for e in _ENTRIES if e.values[0] in ("Stop", "PreToolUse", "SubagentStart")]
 _SESSION_START = [e for e in _ENTRIES if e.values[0] == "SessionStart"]
 
 
@@ -160,8 +163,8 @@ def test_the_scan_found_the_manifests() -> None:
     labels = {_label(p) for p in _manifest_paths()}
     assert {"hooks/hooks.json", "codex/hooks.json"} <= labels
     events = {e.values[0] for e in _ENTRIES}
-    assert events == {"SessionStart", "Stop", "PreToolUse"}
-    assert _STOP_AND_PRETOOL and _SESSION_START
+    assert events == {"SessionStart", "Stop", "PreToolUse", "SubagentStart"}
+    assert _EMPTY_ANSWER and _SESSION_START
 
 
 @pytest.mark.parametrize(("event", "command"), _ENTRIES)
@@ -172,8 +175,8 @@ def test_t1_every_hook_command_ends_with_the_guard_for_its_event(event: str, com
 
 
 @pytest.mark.parametrize("shell", _shells())
-@pytest.mark.parametrize(("event", "command"), _STOP_AND_PRETOOL)
-def test_t2_a_failed_start_on_stop_or_pretooluse_answers_empty_json(
+@pytest.mark.parametrize(("event", "command"), _EMPTY_ANSWER)
+def test_t2_a_failed_start_on_an_empty_answer_event_answers_empty_json(
     shell: str, event: str, command: str, tmp_path: Path
 ) -> None:
     project = tmp_path / "project"
@@ -246,12 +249,12 @@ def test_t5_the_bootstrap_verifier_still_recognises_a_guarded_command(
 # The manual hook recipes. T6 scans every doc rather than naming three, so a recipe added
 # later is held to the same rule; the counts only stop the scan from passing on nothing.
 _RECIPE_DOCS = {
-    "docs/integrations/codex.md": 2,
-    "docs/getting-started/codex-setup.md": 2,
-    "docs/getting-started/claude-code-setup.md": 3,
+    "docs/integrations/codex.md": 3,
+    "docs/getting-started/codex-setup.md": 3,
+    "docs/getting-started/claude-code-setup.md": 8,
 }
 _COMMAND_RE = re.compile(r'"command":\s*("(?:[^"\\]|\\.)*")')
-_ENTRY_RE = re.compile(r"sidegraph-(?:session-start|stop|pre-tool-use)\b")
+_ENTRY_RE = re.compile(r"sidegraph-(?:session-start|stop|pre-tool-use|subagent-start)\b")
 
 
 def _doc_files() -> list[Path]:

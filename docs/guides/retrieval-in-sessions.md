@@ -35,9 +35,10 @@ search instruction**, once, ahead of the rest of the text (not inside either ren
 > are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
 > available. If the tool is listed only by name, load it first.
 
-Unlike the `PreToolUse` nudge (`Read`/`Grep` only, each of its two forms at most once per
-agent — see below), this line is unconditional and covers every search surface behaviorally, not just those two tools — bash
-`grep`/`rg`/`find` and MCP structure-query tools included.
+Unlike the `PreToolUse` records block (the files a `Read`, `Edit`, `Write`, `Grep` or
+`sed`/`grep`/`rg`/`cat` line names, each at most once per agent — see below), this line is
+unconditional and covers every search surface behaviorally, not just calls that name a file with
+records — bash `find` and MCP structure-query tools included.
 
 Both renderers also inject:
 

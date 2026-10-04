@@ -98,16 +98,26 @@ def _meta(store_dir: Path, key: str) -> str | None:
 # -- T1, T2, T19: a store that cannot open --------------------------------------------------
 
 
-def _conflicted_store(tmp_path: Path) -> Path:
-    """A store whose one decision file holds merge-conflict markers, and no index, so that the
-    next open reloads from the canonical files."""
+def _conflicted_store(tmp_path: Path, *, unreadable: bool = False) -> Path:
+    """A store whose one decision file cannot be indexed, and no index, so that the next open
+    reloads from the canonical files. By default the file holds merge-conflict markers, which
+    the reload skips and the store opens. With ``unreadable`` a directory stands where the file
+    was: ``read_text`` raises ``IsADirectoryError``, an ``OSError`` the reload does not skip
+    (and, unlike ``chmod 000``, that also fails under root), so the store cannot open.
+    see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D1, §5 step 7)"""
     store_dir = tmp_path / ".sidegraph"
     store = Store(store_dir)
     rid = add_record(store)
     store.close()
-    (store_dir / "decisions" / f"{rid}.json").write_text(
-        '<<<<<<< HEAD\n{"id": "x"}\n=======\n{"id": "y"}\n>>>>>>> branch\n', encoding="utf-8"
-    )
+    path = store_dir / "decisions" / f"{rid}.json"
+    if unreadable:
+        path.unlink()
+        path.mkdir()
+    else:
+        path.write_text(
+            '<<<<<<< HEAD\n{"id": "x"}\n=======\n{"id": "y"}\n>>>>>>> branch\n',
+            encoding="utf-8",
+        )
     (store_dir / "index.db").unlink()
     return store_dir
 
@@ -116,14 +126,14 @@ def test_t1_a_conflicted_record_file_is_reported_to_the_human_and_the_model(
     tmp_path, monkeypatch, capsys
 ):
     """Red against unfixed code, which prints ``{}``: memory switches off with no message."""
-    store_dir = _conflicted_store(tmp_path)
+    store_dir = _conflicted_store(tmp_path, unreadable=True)
 
     out = start(monkeypatch, capsys, store_dir)
 
     assert set(out) == {"systemMessage", "hookSpecificOutput"}
     notice = out["systemMessage"]
     assert notice.startswith(f"Sidegraph cannot open its store at {store_dir}, so memory is off")
-    assert "JSONDecodeError" in notice
+    assert "IsADirectoryError" in notice
     assert "`sidegraph-verify`" in notice
     assert context(out) == f"{notice} Sidegraph memory tools will fail until it is fixed."
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
@@ -132,7 +142,7 @@ def test_t1_a_conflicted_record_file_is_reported_to_the_human_and_the_model(
 def test_t19_the_unreadable_store_path_runs_that_check_alone(tmp_path, monkeypatch, capsys):
     """No "no code graph" line, no stray-store line, no pending line: only the one check ran.
     The model sees exactly the notice and the clause, and the map is not attempted."""
-    store_dir = _conflicted_store(tmp_path)
+    store_dir = _conflicted_store(tmp_path, unreadable=True)
 
     out = start(monkeypatch, capsys, store_dir)
 
@@ -142,6 +152,35 @@ def test_t19_the_unreadable_store_path_runs_that_check_alone(tmp_path, monkeypat
     )
     assert "no code graph" not in context(out)
     assert "get_task_context" not in context(out)
+
+
+def test_t13_a_conflicted_record_file_leaves_the_map_and_is_named_to_the_human(
+    tmp_path, monkeypatch, capsys
+):
+    """Red against unfixed code: the store would not open, so the hook said "cannot open its
+    store, memory is off" and printed no map.
+    see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D7, T13)"""
+    store_dir = tmp_path / ".sidegraph"
+    store = Store(store_dir)
+    broken = add_record(store)
+    kept = store.get_decision(add_record(store))
+    store.close()
+    (store_dir / "decisions" / f"{broken}.json").write_text(
+        '<<<<<<< HEAD\n{"id": "x"}\n=======\n{"id": "y"}\n>>>>>>> branch\n', encoding="utf-8"
+    )
+    (store_dir / "index.db").unlink()
+    graph = tmp_path / "graph.json"
+    write_graph(graph, None, ["pkg/m.py"])
+
+    out = start(monkeypatch, capsys, store_dir, graph=graph)
+
+    text = context(out)
+    assert "# Sidegraph — project memory" in text
+    assert "## Communities" in text
+    assert kept is not None and kept.title in text
+    assert "cannot open its store" not in text
+    assert f"decisions/{broken}.json" in out["systemMessage"]
+    assert out["systemMessage"].startswith("Sidegraph: 1 store file(s) could not be indexed")
 
 
 def _busy_error(code: int) -> sqlite3.OperationalError:

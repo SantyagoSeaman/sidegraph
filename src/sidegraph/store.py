@@ -62,6 +62,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from . import store_layout
+from .hot_index import CLAIM_META_SQL, GET_META_SQL, INSERT_EVENT_SQL
 from .schema import (
     SCHEMA_VERSION,
     AnchorBinding,
@@ -78,6 +80,7 @@ from .schema import (
     canonicalize,
     is_safe_record_id,
 )
+from .store_layout import symlinked_internals
 
 # One definition, two consumers: __init__ bootstraps with executescript (not inside a
 # transaction, so its implicit COMMIT is harmless), while _reload_index_from_canonical must
@@ -198,28 +201,14 @@ _MIGRATABLE_SCHEMA_VERSIONS = frozenset({"0.2.0", "0.3.0"})
 # binding entries — see _is_derived_entity and _write_bindings_canonical_for_record).
 _RELOADABLE_SCHEMA_VERSIONS = frozenset({"0.4.0", "0.5.0"})
 
-# The canonical, git-committed record directories (relative to Store.path). Order matters
-# only for readability; digest/reload iterate them in this order.
-_CANONICAL_SUBDIRS = ("decisions", "facts", "domains", "entities", "bindings", "initiatives")
-
-# Compaction (design §7): immutable archive segments. NOT one of _CANONICAL_SUBDIRS above —
-# segments are packed multi-record files, not one-file-per-record, and the directory only
-# comes into existence the first time ``Store.compact`` actually writes a segment (a store
-# that never compacts has no ``archive/`` at all). Still fully canonical/git-committed: the
-# freshness digest and the cold-load reload path both cover it (see
-# ``_compute_canonical_digest`` / ``_reload_index_from_canonical`` / ``_archived_records``).
-#
-# Segment filenames: ``<date>-<seq>-<hash12>.jsonl`` (amended in N5 review, Minor-4;
-# ``_parse_segment_seq`` still accepts the original bare ``<date>-<seq>.jsonl`` shape for
-# any pre-amendment segment). ``<hash12>`` is the first 12 hex chars of a sha256 over the
-# segment's own content (see ``Store._write_archive_segment``): without it, two branches
-# each running ``sidegraph-compact`` on the SAME day could both pick the same
-# ``<date>-<seq>`` name with DIFFERENT content — a real git-add/merge conflict on a file
-# design §7 promised could "never merge-conflict". With the content baked into the name,
-# different content always gets a different filename (both segments survive a merge, no
-# conflict — the loader's ULID dedup absorbs any record overlap), and identical content
-# always gets the identical name AND bytes (no conflict either — trivially the same file).
-_ARCHIVE_SUBDIR = "archive"
+# The record directories, the archive directory and the marker file names are defined in
+# store_layout.py (the hook hot path needs them without pydantic); bound here under the names
+# this module has always used. See there for what each one is.
+_CANONICAL_SUBDIRS = store_layout.CANONICAL_SUBDIRS
+_ARCHIVE_SUBDIR = store_layout.ARCHIVE_SUBDIR
+_FORMAT_MARKER_NAME = store_layout.FORMAT_MARKER_NAME
+_GITIGNORE_NAME = store_layout.GITIGNORE_NAME
+_STAMPING_MARKER_NAME = store_layout.STAMPING_MARKER_NAME
 
 # Terminal = a status after which append-only rules guarantee the record can never change
 # again (see CLAUDE.md invariant #2 and design §7). PROPOSED/ACCEPTED decisions can still be
@@ -236,23 +225,12 @@ _TERMINAL_DOMAIN_STATUSES = frozenset({DomainStatus.SUPERSEDED, DomainStatus.DRO
 # Committed format marker: a one-line ``<path>/format`` file (``sidegraph-store <version>``)
 # written at layout creation and migration, checked on every open — see
 # ``Store._ensure_format_marker``.
-_FORMAT_MARKER_NAME = "format"
 _FORMAT_MARKER_PREFIX = "sidegraph-store "
 
 # Committed layout convenience (design §1/§5): ``<path>/.gitignore`` ignoring the derived
 # index (and its sqlite WAL/SHM sidecars via the ``index.db*`` glob) and any crash-debris
 # ``*.tmp`` — see ``Store._ensure_gitignore``.
-_GITIGNORE_NAME = ".gitignore"
 _GITIGNORE_CONTENT = "index.db*\n*.tmp\n"
-
-# Committed creation marker: a one-line ``<path>/stamping_live_since`` file (an aware
-# ISO-8601 UTC timestamp) written ONLY on the open that finds the store genuinely new — see
-# ``Store._ensure_stamping_marker``. Unlike the format marker above, this one is never
-# backfilled onto a pre-existing store: its whole job is to tell doctor.py's
-# ``unratified-accept`` check the moment stamping capability became live for THIS store,
-# so that check has a trustworthy scope-start even when the store has never ratified
-# anything (see that check's docstring in doctor.py).
-_STAMPING_MARKER_NAME = "stamping_live_since"
 
 # Glob patterns matching the store's OWN root-level tmp artifacts (the format marker, the
 # stamping marker, and .gitignore -- everything else lives under the canonical subdirs,
@@ -303,11 +281,25 @@ VOLATILE_STALE_KEY = "volatile_stale"
 
 _CANONICAL_DIGEST_KEY = "canonical_digest"
 
-# Meta key: JSON list of the canonical files the last reload skipped for a record-identity
-# problem (design/superpowers/specs/2026-09-29-record-identity-design.md D3, D4). Each entry
-# is {"path", "reason", "size", "mtime_ns"}; deleted when empty. ``__init__`` repeats the
-# warning from it on every open and reloads once if a listed file changed or vanished.
+# Meta key: JSON list of the canonical files the last reload left out: a record-identity
+# problem (design/superpowers/specs/2026-09-29-record-identity-design.md D3, D4), a parse error
+# (a file that does not parse, validate or serialise) or an archive segment with lines it could
+# not read (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D1, D4).
+# Each entry is {"path", "reason", "size", "mtime_ns"}; deleted when empty. ``__init__`` repeats
+# the warning from it on every open and reloads once if a listed file changed or vanished.
 SKIPPED_CANONICAL_KEY = "skipped_canonical_files"
+
+# Skip-list reasons for a file that cannot be read as a record (design/superpowers/specs/
+# 2026-10-03-store-survives-a-bad-file-design.md D2): the words ``sidegraph-verify`` uses
+# (``verify.PARSE_ERROR``, ``verify.BAD_ARCHIVE_SEGMENT``) for the same files.
+SKIP_PARSE_ERROR = "parse-error"
+SKIP_BAD_ARCHIVE_SEGMENT = "bad-archive-segment"
+
+# What makes ONE file unreadable as a record, as opposed to the store unreadable: invalid JSON,
+# invalid UTF-8, a model that rejects the payload and a payload that cannot be serialised are
+# all ``ValueError``s on this interpreter; JSON nested deeper than the stack is a
+# ``RecursionError``. An ``OSError`` is deliberately not here: it can be transient.
+_UNPARSEABLE = (ValueError, RecursionError)
 
 # Folded into the canonical digest (D5): an index certified by code that predates the
 # identity rule mismatches once, reloads through the rule and is re-certified — otherwise a
@@ -380,6 +372,46 @@ def _record_identity_problem(data: object, id_field: str, stem: str) -> str | No
     return None
 
 
+def _parse_record_file[M: BaseModel](
+    path: Path, id_field: str, model: type[M]
+) -> tuple[M | None, str | None]:
+    """Step 1 of the reload for one record file: read, parse, check the identity, validate and
+    serialise it. Returns ``(record, None)``, or ``(None, reason)`` when the file must be left
+    out: ``reason`` is the identity problem, or ``parse-error`` for a file that does not parse,
+    validate or serialise (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md
+    D1, D2). The serialisation check makes a payload the index write could not store fail
+    here, where it skips one file, and not inside the unguarded index write. An ``OSError`` on
+    the read propagates."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        problem = _record_identity_problem(data, id_field, path.stem)
+        if problem is not None:
+            return None, problem
+        record = model.model_validate(data)
+        record.model_dump_json()
+    except _UNPARSEABLE:
+        return None, SKIP_PARSE_ERROR
+    return record, None
+
+
+def _parse_bindings_file(path: Path) -> list[AnchorBinding] | None:
+    """Step 1 of the reload for one ``bindings/<record id>.json``: a JSON list of objects, every
+    item a valid ``AnchorBinding``, all of them serialisable. ``None`` means the whole file is
+    left out (``parse-error``): all items are checked before any is returned, so a half-valid
+    file never leaves half of its bindings in the index
+    (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D3)."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+            return None
+        bindings = [AnchorBinding.model_validate({**item, "record_id": path.stem}) for item in raw]
+        for binding in bindings:
+            binding.model_dump_json()
+    except _UNPARSEABLE:
+        return None
+    return bindings
+
+
 def _atomic_write_json(path: Path, obj: object) -> os.stat_result:
     """Write ``obj`` as pretty, stably-sorted JSON to ``path`` atomically (see
     ``_atomic_write_text``, including the returned pre-replace stat).
@@ -441,29 +473,6 @@ def _atomic_write_text_race_tolerant(path: Path, text: str) -> None:
             last_error = e
     assert last_error is not None  # the loop always sets it before falling through
     raise last_error
-
-
-# Store-owned entries that must be real directories/files, never symlinks (see
-# ``symlinked_internals``). The three SQLite sidecars are created by SQLite itself next to
-# ``index.db``, so no ``self.path /`` join in this module names them.
-_SQLITE_SIDECAR_NAMES = ("index.db-journal", "index.db-wal", "index.db-shm")
-_STORE_INTERNAL_NAMES = (
-    *_CANONICAL_SUBDIRS,
-    _ARCHIVE_SUBDIR,
-    _FORMAT_MARKER_NAME,
-    _STAMPING_MARKER_NAME,
-    "index.db",
-    _GITIGNORE_NAME,
-    *_SQLITE_SIDECAR_NAMES,
-)
-
-
-def symlinked_internals(store_path: Path) -> list[str]:
-    """Every store-owned entry directly under ``store_path`` that is a symlink, in
-    ``_STORE_INTERNAL_NAMES`` order. ``is_symlink`` is ``lstat``-based, so a dangling link
-    counts. A symlinked store ROOT is not an internal and is not reported.
-    # see design/superpowers/specs/2026-09-29-store-symlinks-and-bootstrap-guards-design.md D1"""
-    return [name for name in _STORE_INTERNAL_NAMES if (store_path / name).is_symlink()]
 
 
 def refuse_symlinked_internals(store_path: Path) -> None:
@@ -566,19 +575,67 @@ def _warn_hot_archive_mismatch(kind: str, record_id: str) -> None:
     )
 
 
-def _warn_skipped_canonical(entries: list[dict]) -> None:
-    """A reload skipped canonical files whose identity does not hold (see
-    ``_record_identity_problem``). Repeated on every open while the list is non-empty."""
-    shown = "; ".join(f"{e['path']} ({e['reason']})" for e in entries[:3])
-    more = f" and {len(entries) - 3} more" if len(entries) > 3 else ""
-    print(
-        f"sidegraph: WARNING {len(entries)} record file(s) were left out of the index: "
-        f"{shown}{more}. Run `sidegraph-verify` to list them; fix or remove them.",
-        file=sys.stderr,
+def parse_skip_list(value: str) -> list[dict]:
+    """The entries of a stored ``skipped_canonical_files`` meta value. Bad JSON, a value that is
+    not a list and entries without a string ``path`` count as empty, never as an error: this is
+    read by the store, the integrity check and ``sidegraph-doctor``, none of which may fail on
+    it."""
+    try:
+        entries = json.loads(value)
+    except ValueError:
+        return []
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("path"), str)]
+
+
+def skipped_segment_text(path: str) -> str:
+    """What to tell a person about a skip-list entry for an archive segment: the sentence the
+    stderr warning and the integrity notice share, so the two cannot drift apart
+    (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D7)."""
+    return (
+        f"archive segment {Path(path).name} has lines that could not be read; they are left "
+        "out and the rest of it loaded. Restore it with git; never delete a segment."
     )
 
 
+def skipped_refusal_text(subdir: str, stem: str) -> str:
+    """The refusal for a write over ``<subdir>/<stem>.json`` while the reload has left it out:
+    one text for the canonical writers' guard and for a caller that checks ``Store.is_skipped``
+    first, so both give the person the same message."""
+    return (
+        f"refusing to overwrite {subdir}/{stem}.json: the last reload left it out of the index "
+        "because it could not be read. Restore it with git, or fix it by hand, then reopen "
+        "the store."
+    )
+
+
+def _warn_skipped_canonical(entries: list[dict]) -> None:
+    """A reload skipped canonical files whose identity does not hold (see
+    ``_record_identity_problem``) or that could not be read. Repeated on every open while the
+    list is non-empty.
+
+    Never says "remove": removing a record file breaks the append-only store, and removing an
+    archive segment destroys every archived record in it, whose hot files are gone. A record
+    file and an archive segment get one warning each, since the heal differs
+    (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D7)."""
+    segments = [e for e in entries if e.get("reason") == SKIP_BAD_ARCHIVE_SEGMENT]
+    files = [e for e in entries if e.get("reason") != SKIP_BAD_ARCHIVE_SEGMENT]
+    if files:
+        shown = "; ".join(f"{e['path']} ({e['reason']})" for e in files[:3])
+        more = f" and {len(files) - 3} more" if len(files) > 3 else ""
+        print(
+            f"sidegraph: WARNING {len(files)} record file(s) were left out of the index: "
+            f"{shown}{more}. Run `sidegraph-verify` to list them. Restore them with git, or "
+            "fix them by hand; a newer Sidegraph version may have written them.",
+            file=sys.stderr,
+        )
+    for e in segments:
+        print(f"sidegraph: WARNING {skipped_segment_text(e['path'])}", file=sys.stderr)
+
+
 _ARCHIVE_ID_FIELDS = {"decision": "id", "domain": "domain_id"}
+_ARCHIVE_MODELS: dict[str, type[BaseModel]] = {"decision": Decision, "domain": Domain}
 
 
 def _archive_line_problem(record_type: object, payload: dict) -> str | None:
@@ -593,6 +650,23 @@ def _archive_line_problem(record_type: object, payload: dict) -> str | None:
         return f"missing {id_field}"
     if not is_safe_record_id(payload[id_field]):
         return f"unsafe {id_field} {payload[id_field]!r}"
+    return None
+
+
+def _archive_payload_problem(record_type: object, payload: dict) -> str | None:
+    """Why a well-formed archive line's payload cannot become a record, or None: the model
+    rejects it, or it cannot be serialised for the index. A line of an unrecognized
+    ``record_type`` has nothing to check (it is skipped silently by the callers). Only the
+    tolerant read uses it, so that a line the reload would choke on at ``model_validate``
+    is skipped with its segment's name known
+    (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D4)."""
+    model = _ARCHIVE_MODELS.get(record_type) if isinstance(record_type, str) else None
+    if model is None:
+        return None
+    try:
+        model.model_validate(payload).model_dump_json()
+    except _UNPARSEABLE as e:
+        return f"its {record_type} does not validate ({type(e).__name__})"
     return None
 
 
@@ -652,13 +726,17 @@ def _hot_file_matches(path: Path, expected_payload: dict) -> bool | None:
     return json.loads(path.read_text(encoding="utf-8")) == expected_payload
 
 
-def _hot_file_skipped_by_reload(path: Path, id_field: str) -> bool:
-    """True when ``path`` exists, parses, and fails the record identity rule, i.e. the
-    reload left it out of the index. Such a file is not a second copy of the archived
-    record, so the compact leftover comparison ignores it (design D3). An unparseable file
-    is not decided here: the comparison reports it as it always did."""
+def _hot_file_skipped_by_reload(path: Path, id_field: str, listed: frozenset[str]) -> bool:
+    """True when ``path`` exists and the reload left it out of the index: its path is in the
+    skip list (``listed``, as ``<subdir>/<name>``), or it parses and fails the record identity
+    rule. Such a file is not a second copy of the archived record, so the compact leftover
+    comparison ignores it (design D3). A file that is neither listed nor parseable is not
+    decided here: the comparison reports it as it always did.
+    see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D6"""
     if not path.is_file():
         return False
+    if f"{path.parent.name}/{path.name}" in listed:
+        return True
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
@@ -1445,7 +1523,28 @@ class Store:
             "DELETE FROM canonical_stat WHERE subdir = ? AND stem = ?", (subdir, stem)
         )
 
+    def is_skipped(self, subdir: str, stem: str) -> bool:
+        """True while the last reload left ``<subdir>/<stem>.json`` out of the index because it
+        could not be read (it is in the meta skip list). The list is read here, not cached, so a
+        long-lived process sees a list another process changed. A caller that is about to write
+        by a record id the caller supplied asks this before it mints anything, so a refusal
+        leaves no orphan behind (the MCP ``add_anchors`` does).
+        see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D5"""
+        relpath = f"{subdir}/{stem}.json"
+        return any(e["path"] == relpath for e in self._read_skip_list())
+
+    def _refuse_if_skipped(self, subdir: str, stem: str) -> None:
+        """Refuse to replace ``<subdir>/<stem>.json`` while the last reload left it out of the
+        index: the index holds none of its content, so a recomputed write (a bindings file
+        rebuilt from the index, say) would destroy what is in the file — a conflicted merge
+        result a human has yet to resolve. Every canonical writer calls this before its
+        atomic write; no legitimate flow writes a listed path.
+        see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D5"""
+        if self.is_skipped(subdir, stem):
+            raise ValueError(skipped_refusal_text(subdir, stem))
+
     def _write_entity_canonical(self, entity: Entity) -> None:
+        self._refuse_if_skipped("entities", entity.entity_id)
         st = _atomic_write_json(
             _record_file(self.path, "entities", entity.entity_id),
             _entity_identity_payload(entity),
@@ -1453,18 +1552,21 @@ class Store:
         self._record_canonical_stat("entities", entity.entity_id, st)
 
     def _write_decision_canonical(self, decision: Decision) -> None:
+        self._refuse_if_skipped("decisions", decision.id)
         st = _atomic_write_json(
             _record_file(self.path, "decisions", decision.id), decision.model_dump(mode="json")
         )
         self._record_canonical_stat("decisions", decision.id, st)
 
     def _write_fact_canonical(self, fact: Fact) -> None:
+        self._refuse_if_skipped("facts", fact.id)
         st = _atomic_write_json(
             _record_file(self.path, "facts", fact.id), fact.model_dump(mode="json")
         )
         self._record_canonical_stat("facts", fact.id, st)
 
     def _write_domain_canonical(self, domain: Domain) -> None:
+        self._refuse_if_skipped("domains", domain.domain_id)
         st = _atomic_write_json(
             _record_file(self.path, "domains", domain.domain_id),
             _domain_canonical_payload(domain),
@@ -1472,6 +1574,7 @@ class Store:
         self._record_canonical_stat("domains", domain.domain_id, st)
 
     def _write_initiative_canonical(self, initiative: Initiative) -> None:
+        self._refuse_if_skipped("initiatives", initiative.id)
         st = _atomic_write_json(
             _record_file(self.path, "initiatives", initiative.id),
             initiative.model_dump(mode="json"),
@@ -1479,6 +1582,7 @@ class Store:
         self._record_canonical_stat("initiatives", initiative.id, st)
 
     def _write_bindings_file(self, record_id: str, items: list[dict]) -> None:
+        self._refuse_if_skipped("bindings", record_id)
         ordered = sorted(items, key=lambda x: (x["tier"], x["entity_id"]))
         st = _atomic_write_json(_record_file(self.path, "bindings", record_id), ordered)
         self._record_canonical_stat("bindings", record_id, st)
@@ -1646,6 +1750,20 @@ class Store:
             # that closed the rebuild's implicit transaction; leaving it now would invite
             # removing the rebuild's own commit, which would silently restore mechanism 1.
 
+    def refresh_if_stale(self) -> None:
+        """Re-check the canonical files against the index and rebuild it when they changed.
+
+        ``__init__`` does this once, and a ``Store`` held for a long time (the MCP server keeps
+        one for the life of the process) never would again: a ``git pull`` or another process's
+        write would stay invisible until a restart. A holder calls this before each unit of work.
+        No change costs one digest walk (about 8 ms on a store of 1,500 files); a change costs a
+        full rebuild (about 90 ms). It runs under the store's lock, so it cannot interleave with
+        a read or a write on another thread.
+        see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D4)
+        """
+        with self._lock:
+            self._refresh_freshness()
+
     def _warn_skipped_files(self) -> None:
         """Repeat the skip warning from meta on every open while the list is non-empty
         (design D4). Each listed file is stat-ed first: one that vanished or changed since
@@ -1675,15 +1793,7 @@ class Store:
         row = self._conn.execute(
             "SELECT value FROM meta WHERE key = ?", (SKIPPED_CANONICAL_KEY,)
         ).fetchone()
-        if row is None:
-            return []
-        try:
-            entries = json.loads(row["value"])
-        except ValueError:
-            return []
-        if not isinstance(entries, list):
-            return []
-        return [e for e in entries if isinstance(e, dict) and isinstance(e.get("path"), str)]
+        return [] if row is None else parse_skip_list(row["value"])
 
     def _reload_index_from_canonical(self, digest: str) -> None:
         """Rebuild the ENTIRE index from the canonical files on disk. Every volatile field
@@ -1771,69 +1881,79 @@ class Store:
                     # NOT indexed but still gets its ``canonical_stat`` row -- this reload
                     # did examine it in its current state, so a later write must not clear
                     # the digest over it (design D3/D4) -- and joins the skip list.
+                    #
+                    # Each file's work is two steps (design/superpowers/specs/
+                    # 2026-10-03-store-survives-a-bad-file-design.md D1). Step 1, read and
+                    # validate, is guarded: a file that does not parse, validate or serialise
+                    # is skipped like one whose identity fails, and the rest loads. Step 2,
+                    # the ``_index_write_*`` call, is NOT guarded: an index write that raises
+                    # still aborts the rebuild and rolls it back.
                     skipped: list[dict] = []
                     indexed_stems: dict[str, set[str]] = {"decisions": set(), "domains": set()}
 
-                    def load_identified(subdir: str, f: Path, id_field: str) -> dict | None:
+                    def skip(subdir: str, f: Path, reason: str, st: os.stat_result) -> None:
+                        skipped.append(
+                            {
+                                "path": f"{subdir}/{f.name}",
+                                "reason": reason,
+                                "size": st.st_size,
+                                "mtime_ns": st.st_mtime_ns,
+                            }
+                        )
+
+                    def load[M: BaseModel](
+                        subdir: str, f: Path, id_field: str, model: type[M]
+                    ) -> M | None:
                         st = f.stat()
-                        data = json.loads(f.read_text())
-                        problem = _record_identity_problem(data, id_field, f.stem)
+                        record, problem = _parse_record_file(f, id_field, model)
                         self._record_canonical_stat(subdir, f.stem, st)
                         if problem is not None:
-                            skipped.append(
-                                {
-                                    "path": f"{subdir}/{f.name}",
-                                    "reason": problem,
-                                    "size": st.st_size,
-                                    "mtime_ns": st.st_mtime_ns,
-                                }
-                            )
+                            skip(subdir, f, problem, st)
                             return None
+                        # After step 1, never before: a hot file that fails validation must
+                        # not hide its archived copy (D1).
                         indexed_stems.get(subdir, set()).add(f.stem)
-                        return data
+                        return record
 
                     for f in sorted((self.path / "entities").glob("*.json")):
-                        data = load_identified("entities", f, "entity_id")
-                        if data is not None:
-                            self._index_write_entity(Entity.model_validate(data))
+                        entity = load("entities", f, "entity_id", Entity)
+                        if entity is not None:
+                            self._index_write_entity(entity)
                     for f in sorted((self.path / "decisions").glob("*.json")):
-                        data = load_identified("decisions", f, "id")
-                        if data is not None:
-                            self._index_write_decision(Decision.model_validate(data))
+                        decision = load("decisions", f, "id", Decision)
+                        if decision is not None:
+                            self._index_write_decision(decision)
                     for f in sorted((self.path / "facts").glob("*.json")):
-                        data = load_identified("facts", f, "id")
-                        if data is not None:
-                            self._index_write_fact(Fact.model_validate(data))
+                        fact = load("facts", f, "id", Fact)
+                        if fact is not None:
+                            self._index_write_fact(fact)
                     for f in sorted((self.path / "domains").glob("*.json")):
-                        data = load_identified("domains", f, "domain_id")
-                        if data is not None:
-                            self._index_write_domain(Domain.model_validate(data))
+                        domain = load("domains", f, "domain_id", Domain)
+                        if domain is not None:
+                            self._index_write_domain(domain)
                     for f in sorted((self.path / "bindings").glob("*.json")):
                         record_id = f.stem
                         st = f.stat()
                         if not is_safe_record_id(record_id):
-                            skipped.append(
-                                {
-                                    "path": f"bindings/{f.name}",
-                                    "reason": "unsafe filename",
-                                    "size": st.st_size,
-                                    "mtime_ns": st.st_mtime_ns,
-                                }
-                            )
+                            skip("bindings", f, "unsafe filename", st)
                             self._record_canonical_stat("bindings", record_id, st)
                             continue
-                        for item in json.loads(f.read_text()):
-                            binding = AnchorBinding.model_validate({**item, "record_id": record_id})
-                            self._index_write_binding(binding)
+                        bindings = _parse_bindings_file(f)
+                        if bindings is None:
+                            skip("bindings", f, SKIP_PARSE_ERROR, st)
+                        else:
+                            for binding in bindings:
+                                self._index_write_binding(binding)
                         # An empty `[]` bindings file (hand edit / merge artifact — §3's
                         # debris shape) produces no index rows above, but still gets its
                         # row here: the check reads THIS table, not the record tables, so
-                        # there is no branch left to wedge on it (spec item 7).
+                        # there is no branch left to wedge on it (spec item 7). So does a
+                        # file that was skipped: this reload examined it in its current state.
                         self._record_canonical_stat("bindings", record_id, st)
                     for f in sorted((self.path / "initiatives").glob("*.json")):
-                        data = load_identified("initiatives", f, "id")
-                        if data is not None:
-                            self._index_write_initiative(Initiative.model_validate(data))
+                        initiative = load("initiatives", f, "id", Initiative)
+                        if initiative is not None:
+                            self._index_write_initiative(initiative)
 
                     # Archive segments (design Task 2 item 3): stat every segment BEFORE
                     # `_archived_records()` reads its content below, same stat-before-read
@@ -1856,7 +1976,15 @@ class Store:
                     # never something a mere reload should resolve by preferring the
                     # archive over live disk state. Only ids with NO hot file are indexed
                     # from the archive.
-                    archived_decisions, archived_domains = self._archived_records()
+                    # Tolerant here only (D4): a line that cannot be read costs that line,
+                    # and its segment joins the skip list once.
+                    bad_segments: list[Path] = []
+                    archived_decisions, archived_domains = self._archived_records(
+                        tolerate_corrupt_lines=True, bad_segments=bad_segments
+                    )
+                    for segment in bad_segments:
+                        st = archive_stats.get(segment.stem) or segment.stat()
+                        skip(_ARCHIVE_SUBDIR, segment, SKIP_BAD_ARCHIVE_SEGMENT, st)
                     # Built from the files actually indexed, not every stem: an archived
                     # copy of a SKIPPED id must still load (design D3).
                     hot_decision_ids = indexed_stems["decisions"]
@@ -3302,8 +3430,7 @@ class Store:
     ) -> None:
         with self._mutation():
             self._conn.execute(
-                "INSERT INTO retrieval_events (session_id, at, kind, key, detail, agent) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                INSERT_EVENT_SQL,
                 (session_id, datetime.now(UTC).isoformat(), kind, key, detail, agent),
             )
 
@@ -3466,34 +3593,64 @@ class Store:
         return sorted(archive_dir.glob("*.jsonl"))
 
     @staticmethod
-    def _read_archive_segment(path: Path) -> list[dict]:
-        """Parse every line of one archive segment. A malformed line (review Minor-5: a
-        merge-mangled segment, truncated write, or hand edit) raises a ``ValueError``
-        naming the offending segment PATH and LINE NUMBER — a bare ``JSONDecodeError``
-        gives no clue which of potentially many segments is at fault (mirrors
-        ``_validate_legacy_rows``'s "name the offending row" convention)."""
+    def _read_archive_segment(
+        path: Path,
+        *,
+        tolerate_corrupt_lines: bool = False,
+        bad_lines: list[int] | None = None,
+    ) -> list[dict]:
+        """Parse every line of one archive segment. The segment is read as bytes and decoded
+        line by line, so one line of invalid UTF-8 costs only that line.
+
+        A malformed line (review Minor-5: a merge-mangled segment, truncated write, or hand
+        edit) raises a ``ValueError`` naming the offending segment PATH and LINE NUMBER — a
+        bare ``JSONDecodeError`` gives no clue which of potentially many segments is at fault
+        (mirrors ``_validate_legacy_rows``'s "name the offending row" convention).
+
+        With ``tolerate_corrupt_lines`` the line is skipped instead, with a warning, and its
+        number is appended to ``bad_lines`` when one is given: only the reload asks for this,
+        because a compaction is a mutation and must not run over a segment it cannot fully read
+        (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D4)."""
         out: list[dict] = []
-        for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        for lineno, raw_line in enumerate(path.read_bytes().splitlines(), start=1):
             line = raw_line.strip()
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError as e:
-                raise ValueError(f"corrupt archive segment {path} at line {lineno}: {e}") from e
+                out.append(json.loads(line.decode("utf-8")))
+            except _UNPARSEABLE as e:
+                if not tolerate_corrupt_lines:
+                    raise ValueError(f"corrupt archive segment {path} at line {lineno}: {e}") from e
+                _warn_skipped_archive_line(path, f"line {lineno} cannot be read")
+                if bad_lines is not None:
+                    bad_lines.append(lineno)
         return out
 
-    def _archived_records(self) -> tuple[dict[str, dict], dict[str, dict]]:
+    def _archived_records(
+        self,
+        *,
+        tolerate_corrupt_lines: bool = False,
+        bad_segments: list[Path] | None = None,
+    ) -> tuple[dict[str, dict], dict[str, dict]]:
         """Every archived decision/domain payload (``record_type`` stripped), keyed by id,
         across ALL segments — oldest segment first, first occurrence wins. Two segments
         legitimately containing the same id (e.g. compaction run independently on two
         branches, later merged) are guaranteed byte-identical by design (terminal records
         never change once archived), so which one wins is never a correctness question —
-        see design §7."""
+        see design §7.
+
+        ``tolerate_corrupt_lines`` (the reload only; see ``_read_archive_segment``) also skips
+        a line whose payload fails the model, and appends each segment that had any such line
+        to ``bad_segments``, once, for the skip list
+        (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D4)."""
         decisions: dict[str, dict] = {}
         domains: dict[str, dict] = {}
         for segment in self._list_archive_segments():
-            for raw in self._read_archive_segment(segment):
+            bad_lines: list[int] = []
+            unreadable = False
+            for raw in self._read_archive_segment(
+                segment, tolerate_corrupt_lines=tolerate_corrupt_lines, bad_lines=bad_lines
+            ):
                 # One bad line in an immutable segment must wedge nothing (design D8): a
                 # non-object, or an id that is not a safe filename stem, is skipped with a
                 # warning before ``setdefault`` (a list id would raise ``TypeError``).
@@ -3506,6 +3663,12 @@ class Store:
                 if problem is not None:
                     _warn_skipped_archive_line(segment, problem)
                     continue
+                if tolerate_corrupt_lines:
+                    problem = _archive_payload_problem(record_type, payload)
+                    if problem is not None:
+                        _warn_skipped_archive_line(segment, problem)
+                        unreadable = True
+                        continue
                 if record_type == "decision":
                     decisions.setdefault(payload["id"], payload)
                 elif record_type == "domain":
@@ -3513,6 +3676,8 @@ class Store:
                 # an unrecognized record_type is silently skipped -- forward-compat with a
                 # future record kind this version of the code doesn't know how to load yet,
                 # rather than a hard failure that blocks opening the whole store.
+            if (bad_lines or unreadable) and bad_segments is not None:
+                bad_segments.append(segment)
         return decisions, domains
 
     def _archived_record_ids(self) -> tuple[set[str], set[str]]:
@@ -3535,11 +3700,12 @@ class Store:
         safe_decisions: set[str] = set()
         safe_domains: set[str] = set()
         mismatches = 0
+        listed = frozenset(e["path"] for e in self._read_skip_list())
         for did, archived_payload in archived_decisions.items():
             hot = _record_file(self.path, "decisions", did)
             match = (
                 None
-                if _hot_file_skipped_by_reload(hot, "id")
+                if _hot_file_skipped_by_reload(hot, "id", listed)
                 else _hot_file_matches(hot, archived_payload)
             )
             if match is True:
@@ -3551,7 +3717,7 @@ class Store:
             hot = _record_file(self.path, "domains", dmid)
             match = (
                 None
-                if _hot_file_skipped_by_reload(hot, "domain_id")
+                if _hot_file_skipped_by_reload(hot, "domain_id", listed)
                 else _hot_file_matches(hot, archived_payload)
             )
             if match is True:
@@ -3858,7 +4024,7 @@ class Store:
 
     def get_meta(self, key: str) -> str | None:
         with self._lock:
-            row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            row = self._conn.execute(GET_META_SQL, (key,)).fetchone()
         return row["value"] if row else None
 
     def canonical_digest(self) -> str | None:
@@ -3899,10 +4065,7 @@ class Store:
                 "schema_version is stamped at store creation and must not be overwritten"
             )
         with self._mutation():
-            cursor = self._conn.execute(
-                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
-                (key, value),
-            )
+            cursor = self._conn.execute(CLAIM_META_SQL, (key, value))
             return cursor.rowcount == 1
 
     def update_meta_if(self, key: str, decide: Callable[[str | None], str | None]) -> bool:

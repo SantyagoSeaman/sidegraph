@@ -27,35 +27,10 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 from ulid import ULID
 
-# The store format is a public contract from day one. Migration tooling is deferred beyond
-# one forward step; this field is not (see CLAUDE.md invariant #3). Bumped 0.2.0 -> 0.3.0 for
-# the mind-model layer (Domain record, Decision.layer, AnchorBinding.relation — see
-# docs/concepts/mind-model.md). Bumped 0.3.0 -> 0.4.0 for the git-native store rewrite
-# (file-per-record canonical layout + derived local index — see
-# docs/reference/store-format.md): a repo-committed single SQLite file cannot be merged by
-# git, and sync was rewriting the committed db on every graph rebuild. Legacy 0.2.x/0.3.x
-# single-file stores are migrated forward on ``Store.__init__`` (eagerly, not deferred to
-# first write — see store.py's ``_migrate_legacy``).
-#
-# NOT bumped for ``Domain.seed_anchors`` (durable domain membership, §2a amendment —
-# design/superpowers/specs/2026-07-08-domain-onboarding-design.md): purely additive,
-# defaulted (``[]``) field on an existing record. An existing ``domains/<id>.json`` with no
-# ``seed_anchors`` key loads unchanged (Pydantic fills the default); a new file WITH the key
-# is read fine by nothing-but-old code paths too, since nothing reads it except the new
-# sync logic added alongside it. No migration semantics change either direction — bumping
-# would only make ``Store._refresh_freshness``'s exact-match ``schema_version`` gate hard-
-# reject every teammate's already-fresh local ``index.db`` on next open, for zero actual
-# incompatibility.
-#
-# Bumped 0.5.0 -> 0.6.0 for derived community bindings (see
-# design/superpowers/specs/2026-07-10-derived-community-bindings-design.md): community
-# labels are snapshot labels, not identities, so ``community:*`` abstract entities and any
-# Tier-1 binding pointing at one are now fully DERIVED — index-only, never written to a
-# canonical file (neither at capture nor at sync/repointing time). A 0.5.0 store's
-# canonical files may still contain community entities/bindings written by the old code;
-# they load into the index unchanged (tolerant reload) and decay lazily off a record's
-# committed file on that record's next legitimate (non-community) canonical rewrite.
-SCHEMA_VERSION = "0.6.0"
+# The store format version is defined in store_layout.py (the hook hot path needs it without
+# importing this module, which pulls in pydantic) and re-exported here: every ``from
+# sidegraph.schema import SCHEMA_VERSION`` keeps working. The bump history lives beside it.
+from .store_layout import SCHEMA_VERSION as SCHEMA_VERSION
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 

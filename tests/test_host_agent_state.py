@@ -1,10 +1,12 @@
-"""Hook state is per agent: a Claude Code subagent gets its own nudges and touch rows.
+"""Hook state is per agent: a Claude Code subagent gets its own deliveries and touch rows.
 
 A subagent's PreToolUse payload carries its parent's ``session_id`` and ``transcript_path``,
 plus its own ``agent_id`` and ``agent_type``; it fires no SessionStart and no Stop. Keyed on
-the session alone, one agent's one-shot nudge covered the whole agent tree and every subagent
-after it read blind. ``agent_id`` is read in the host seam only; the store takes it opaque.
-See design/superpowers/specs/2026-10-01-per-agent-hook-state-design.md.
+the session alone, one agent's delivery covered the whole agent tree and every subagent after
+it read blind. ``agent_id`` is read in the host seam only; the store takes it opaque. The main
+agent's key carries ``-`` where a subagent's carries its id.
+See design/superpowers/specs/2026-10-01-per-agent-hook-state-design.md and
+design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2).
 """
 
 from __future__ import annotations
@@ -116,23 +118,6 @@ def test_one_subagent_is_nudged_once(tmp_path, monkeypatch, capsys):
     assert _run(monkeypatch, capsys, _sub(A, PATH_A), db) == {}
 
 
-def test_the_claim_decides_not_the_early_read_of_the_key(tmp_path, monkeypatch, capsys):
-    """Two parallel reads of one agent both pass the cheap early check before either has
-    written. Simulated by blinding that check: the second call must still be refused, by the
-    atomic claim."""
-    db = tmp_path / "db"
-    _two_anchored_paths(db)
-    real_get_meta = Store.get_meta
-    monkeypatch.setattr(
-        Store,
-        "get_meta",
-        lambda self, key: None if key.startswith("pretool_nudge") else real_get_meta(self, key),
-    )
-
-    assert _nudged(_run(monkeypatch, capsys, _sub(A, PATH_A), db))
-    assert _run(monkeypatch, capsys, _sub(A, PATH_A), db) == {}
-
-
 def test_two_subagents_of_one_type_are_each_nudged_once(tmp_path, monkeypatch, capsys):
     """Red against a key per session, and against a key on ``agent_type``: A and B are both
     "Explore"."""
@@ -145,50 +130,42 @@ def test_two_subagents_of_one_type_are_each_nudged_once(tmp_path, monkeypatch, c
     assert _run(monkeypatch, capsys, _sub(B, PATH_A, "Explore"), db) == {}
 
 
-def test_each_subagent_gets_its_own_generic_nudge_too(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "db"
-    _two_anchored_paths(db)
-    unanchored = "docs/readme.md"
-
-    assert "decision memory" in _text(_run(monkeypatch, capsys, _main(unanchored), db))
-    assert "decision memory" in _text(_run(monkeypatch, capsys, _sub(A, unanchored), db))
-    assert "decision memory" in _text(_run(monkeypatch, capsys, _sub(B, unanchored), db))
+# -- T4 / T4b: the main agent's key is ``-`` ---------------------------------------------------
 
 
-# -- T4 / T4b: the main agent's key does not change -----------------------------------------
-
-
-def test_a_main_payload_without_agent_id_keeps_the_session_key(tmp_path, monkeypatch, capsys):
-    """Red against nothing: the main agent's key was ``prefix + session`` before this change
-    and must stay exactly that, so a running session's key survives an upgrade."""
+def test_a_main_payload_without_agent_id_takes_the_dash_key(tmp_path, monkeypatch, capsys):
+    """The main agent's key names the session and ``-`` where a subagent's names its id, so its
+    prefix is not a prefix of any subagent's keys (the cap counts by prefix)."""
     db = tmp_path / "db"
     _two_anchored_paths(db)
 
     _run(monkeypatch, capsys, _main(PATH_A), db)
 
-    assert set(_nudge_keys(db)) == {f"pretool_nudge_path:{SESSION}"}
+    assert set(_nudge_keys(db)) == {f"pretool_file:{SESSION}:-:{PATH_A}"}
 
 
-def test_a_main_session_started_with_an_agent_keeps_the_session_key(tmp_path, monkeypatch, capsys):
+def test_a_main_session_started_with_an_agent_is_still_the_main_agent(
+    tmp_path, monkeypatch, capsys
+):
     """``claude --agent reader`` carries ``agent_type`` and no ``agent_id``: it is the main
-    agent, so it takes no subagent key. Keying on ``agent_type`` would fail this."""
+    agent, so it takes the ``-`` key. Keying on ``agent_type`` would fail this."""
     db = tmp_path / "db"
     _two_anchored_paths(db)
 
     out = _run(monkeypatch, capsys, _payload(PATH_A, agent_type="reader"), db)
 
     assert _nudged(out)
-    assert set(_nudge_keys(db)) == {f"pretool_nudge_path:{SESSION}"}
+    assert set(_nudge_keys(db)) == {f"pretool_file:{SESSION}:-:{PATH_A}"}
 
 
-def test_a_subagent_key_names_the_session_and_the_agent(tmp_path, monkeypatch, capsys):
+def test_a_subagent_key_names_the_session_the_agent_and_the_file(tmp_path, monkeypatch, capsys):
     db = tmp_path / "db"
     _two_anchored_paths(db)
 
     _run(monkeypatch, capsys, _sub(A, PATH_A), db)
 
     (key,) = _nudge_keys(db)
-    assert key == f"pretool_nudge_path:{SESSION}:{A}"
+    assert key == f"pretool_file:{SESSION}:{A}:{PATH_A}"
     # the value is the claim's timestamp, which is what lets SessionStart expire the key
     assert abs((datetime.now(UTC) - datetime.fromisoformat(_nudge_keys(db)[key])).seconds) < 60
 
@@ -204,7 +181,7 @@ def test_an_empty_or_non_string_agent_id_is_the_main_agent(tmp_path, monkeypatch
         payload["transcript_path"] = f"/work/repo/.claude/{SESSION}-{i}.jsonl"
         assert _nudged(_run(monkeypatch, capsys, payload, db))
 
-    assert set(_nudge_keys(db)) == {f"pretool_nudge_path:{SESSION}-{i}" for i in range(4)}
+    assert set(_nudge_keys(db)) == {f"pretool_file:{SESSION}-{i}:-:{PATH_A}" for i in range(4)}
 
 
 # -- T5 / T7: touch rows carry the agent and sessions are still counted once ----------------
@@ -214,6 +191,7 @@ def test_a_subagent_touch_is_a_row_with_the_agent_under_the_parent_session(
     tmp_path, monkeypatch, capsys
 ):
     db = tmp_path / "db"
+    Store(db).close()  # the hook records into an existing store; it never creates one
     _run(monkeypatch, capsys, _sub(A, "/work/repo/" + PATH_A), db)
     _run(monkeypatch, capsys, _main("/work/repo/" + PATH_B), db)
 
@@ -230,6 +208,7 @@ def test_a_subagent_touch_is_a_row_with_the_agent_under_the_parent_session(
 def test_stats_still_counts_the_agent_tree_as_one_session(tmp_path, monkeypatch, capsys):
     """Red against a session id that folds the agent in: each subagent would be a session."""
     db = tmp_path / "db"
+    Store(db).close()  # the hook records into an existing store; it never creates one
     _run(monkeypatch, capsys, _main("/work/repo/" + PATH_A), db)
     _run(monkeypatch, capsys, _sub(A, "/work/repo/" + PATH_A), db)
     _run(monkeypatch, capsys, _sub(B, "/work/repo/" + PATH_B), db)
@@ -279,6 +258,33 @@ def test_session_start_expires_stale_and_legacy_nudge_keys_and_keeps_the_rest(
         "pretool_nudge:fresh-session",
         f"pretool_nudge_path:fresh-session:{A}",
         "pretoolXnudge:other",
+    }
+
+
+def test_session_start_expires_stale_per_file_keys_and_keeps_the_fresh_ones(
+    tmp_path, monkeypatch, capsys
+):
+    """T9: the per-file keys are pruned with the same 30 days. Red against a prune list without
+    the ``pretool_file:`` prefix (they would pile up, up to ten per agent). A key of the same
+    shape under another prefix is not touched."""
+    db = tmp_path / "db"
+    store = Store(db)
+    for key, value in {
+        f"pretool_file:old-session:-:{PATH_A}": _iso(31),
+        f"pretool_file:old-session:{A}:{PATH_B}": _iso(60),
+        f"pretool_file:fresh-session:-:{PATH_A}": _iso(1),
+        f"pretool_file:fresh-session:{A}:{PATH_B}": _iso(29),
+        f"pretoolXfile:other:-:{PATH_A}": _iso(90),
+    }.items():
+        store.set_meta(key, value)
+    store.close()
+
+    _run_session_start(monkeypatch, capsys, db)
+
+    assert set(_nudge_keys(db)) == {
+        f"pretool_file:fresh-session:-:{PATH_A}",
+        f"pretool_file:fresh-session:{A}:{PATH_B}",
+        f"pretoolXfile:other:-:{PATH_A}",
     }
 
 

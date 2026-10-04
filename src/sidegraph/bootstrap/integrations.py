@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shlex
 import tomllib
@@ -60,10 +61,18 @@ def _command_strings(value: object) -> tuple[str, ...]:
 def _contains_entrypoint(commands: tuple[str, ...], entrypoint: str) -> bool:
     for command in commands:
         try:
-            if entrypoint in shlex.split(command):
-                return True
+            words = shlex.split(command)
         except ValueError:
             continue
+        # The plugin's Codex hot command is `sh -c '<script>' || printf …`: the entry point is
+        # a word of that script, not of the outer command. Only `sh` is unwrapped, the script's
+        # words extend the outer ones, and a script that does not split leaves them intact.
+        # see design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md (D3)
+        if len(words) > 2 and words[0] in ("sh", "/bin/sh") and words[1] == "-c":
+            with contextlib.suppress(ValueError):
+                words += shlex.split(words[2])
+        if entrypoint in words:
+            return True
     return False
 
 

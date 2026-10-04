@@ -47,7 +47,7 @@ claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRA
 
 ## Hooks in detail
 
-Three hooks, all console scripts, all read the same env vars as the server (see below).
+Four hooks, all console scripts, all read the same env vars as the server (see below).
 
 ### `SessionStart` — `sidegraph-session-start`
 
@@ -73,10 +73,10 @@ renderer's text follows — added once at the hook-assembly level, not inside ei
 > are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
 > available. If the tool is listed only by name, load it first.
 
-Unlike the `PreToolUse` nudge below (which only ever fires on `Read`/`Grep`, and fires each
-of its two forms, generic and path-specific, at most once per agent), this instruction is
-unconditional and covers every search surface — bash
-`grep`/`rg`/`find`, MCP structure-query tools, everything — by telling the agent up front,
+Unlike the `PreToolUse` records block below (which fires only when a `Read`, `Edit`, `Write`,
+`Grep` or `sed`/`grep`/`rg`/`cat` line names a file with records, each file at most once per
+agent), this instruction is unconditional and covers every search surface — bash `find`, MCP
+structure-query tools, a search that names no file, everything — by telling the agent up front,
 not by gating a specific tool call.
 
 Both renderers also inject:
@@ -102,8 +102,8 @@ fresh repo, not an error.
 
 ### `Stop` — `sidegraph-stop`
 
-A **guarded block-to-distill**, gated on the session actually looking substantial: at most
-once per session (a per-session capture ledger in the store, plus Claude Code's own
+A **guarded block-to-distill**, gated on the session actually looking substantial: the first
+nudge comes once per session (a per-session capture ledger in the store, plus Claude Code's own
 `stop_hook_active` re-entrancy flag), and only once the transcript has produced **>= 2 real
 user prompts** (counting actual typed prompts, not tool-result noise — a session's very first
 `Stop` no longer triggers it; see [`reference/hooks.md`](../reference/hooks.md#sidegraph-stop)
@@ -126,6 +126,9 @@ flag; see
 [`guides/capturing-decisions.md#4-auto-accept-opt-in`](../guides/capturing-decisions.md#4-auto-accept-opt-in)),
 or an opt-in `SIDEGRAPH_RATIFY_POLICY` accepts an eligible proposal at write time with an
 `auto:<policy>` stamp (see [configuration](../reference/configuration.md)).
+A session that was nudged early is nudged again after more work: at least 30 minutes and 10 new
+commits (on any local branch) after the last nudge, with the count added to the nudge's text
+(see [`reference/hooks.md`](../reference/hooks.md#re-arm-after-more-work)).
 Set `SIDEGRAPH_CAPTURE_NUDGE=off` to disable this hook entirely.
 
 Claude Code renders the block response under an error-styled banner (`Stop hook error: ...`)
@@ -135,36 +138,76 @@ transcript.
 
 ### `PreToolUse` — `sidegraph-pre-tool-use`
 
-Matcher `Read|Grep|Edit|Write` (see the snippet in
-[`claude-code-setup.md`](../getting-started/claude-code-setup.md#2-add-the-hooks)). On a
-`Read`/`Grep` call that looks like it targets a file (any string `file_path`/`path`/`pattern`
-argument — deliberately permissive), when the store has >= 1 accepted domain or >= 1 valid
-decision, it emits a **non-blocking**, `additionalContext`-only `hookSpecificOutput` nudge
-toward `get_task_context`/`drill_down` — no `permissionDecision` field is set, so the tool call
-is never denied, escalated, or auto-approved; it only gets annotated with the nudge text, and
-then runs through Claude Code's normal permission flow exactly as it would have otherwise.
-Fires at most once per agent for each of its two forms, generic and path-specific (each
-guarded by its own marker in the store's `meta` table, separate from the `Stop` hook's own
-capture ledger so the guards don't consume each other's one-shot), so one agent can see up
-to two of these nudges. The session's own agent and every subagent it starts count
-separately, because Claude Code gives a subagent's hook payload its parent's session id and
-its own `agent_id`: without that, the main agent's nudge would have used up the one a
-subagent needed. Set `SIDEGRAPH_GREP_NUDGE=off` to disable it
-entirely. The matcher also admits `Edit` and `Write`: those reach the process only to be
-recorded as touch events (no nudge). Like the other two hooks, it never crashes
-or blocks the tool call: any failure (or the store simply having nothing to offer yet) prints
-`{}`.
+Three groups in the snippet (see
+[`claude-code-setup.md`](../getting-started/claude-code-setup.md#2-add-the-hooks)): matcher
+`Read|Grep|Edit|Write`, matcher `Bash` with four entries whose `if` is `Bash(sed *)`,
+`Bash(grep *)`, `Bash(rg *)` and `Bash(cat *)`, and matcher `Agent|Task` (below). When a `Read`,
+`Grep`, `Edit`, `Write` or Bash call names a file that decisions are anchored to, the hook hands
+the agent those records in the same call, as a **non-blocking**, `additionalContext`-only
+`hookSpecificOutput` (the `Agent|Task` group is the exception: it returns `updatedInput`, below):
+the guard line, then for each file (at most three per call) its top two records, or three when the
+first two are mistakes, each as `- [kind] title — first sentence of the choice (id …)`, and a
+`More: get_task_context(files=[…])` line when records were left out. No `permissionDecision` field is set, so the tool call is never
+denied, escalated, or auto-approved; it only gets annotated with the block, and then runs
+through Claude Code's normal permission flow exactly as it would have otherwise.
+
+Each file is delivered **once per agent**, up to **ten files per agent** (one statement in the
+store's `meta` table counts and inserts, separate from the `Stop` hook's own capture ledger so the
+guards don't consume each other). The session's own agent and every subagent it starts count
+separately, because Claude Code gives a subagent's hook payload its parent's session id and its
+own `agent_id`: without that, the main agent's delivery would have used up the one a subagent
+needed. A call that names no file with records prints `{}`, and no counting form is printed
+anywhere. Set `SIDEGRAPH_GREP_NUDGE=off` to stop delivery at the point of reading, on every tool
+but `Agent` (that has its own switch, below); touch recording is not affected. A Bash line counts only for the regular files that its `sed`, `grep`, `rg` and `cat`
+commands read (`head`, `awk` and `git grep` name nothing), and a Bash read is not a touch event;
+`if` needs Claude Code 2.1.89 for correct matching, and an older host runs the hook on every
+Bash call and gets an early exit with no output (details in the
+[hooks reference](../reference/hooks.md#bash-lines)). It reads the store's index directly rather
+than opening the store (see the [hooks reference](../reference/hooks.md#sidegraph-pre-tool-use)),
+so a call costs a few tens of milliseconds, and in a project with no store it does nothing and
+creates nothing. Like the other hooks, it never crashes or blocks the tool call: any failure (or
+nothing to deliver) prints `{}`.
+
+**Subagent briefs.** The third group, matcher `Agent|Task`, runs the same command when the agent
+spawns a subagent. The brief the parent writes is where the task is, so the hook reads the files
+it names (and, one hop away, the files named in a plan or notes document it names), and appends a
+block with the records anchored to them to the brief: per file the top two records, at most six
+lines and 3,000 characters in all, under a header that names the document when a plan named the
+file. It returns the call's own input with only `prompt` changed (`updatedInput`), sets no
+`permissionDecision`, and claims none of the per-agent keys above. **The block reaches the
+subagent, in its first message, but the parent's view of its own `Agent` call does not show it**:
+the parent's transcript keeps the prompt it wrote. It is on by default; set
+`SIDEGRAPH_AGENT_BRIEF=off` to turn it off. It was not tested on agent-team teammates or `fork`
+spawns, and Codex does not carry it. See the
+[hooks reference](../reference/hooks.md#subagent-briefs).
+
+### `SubagentStart` — `sidegraph-subagent-start`
+
+No matcher. A subagent (Explore, Plan, general-purpose, or one you define) starts without the
+`SessionStart` context, and Explore and Plan agents load no `CLAUDE.md` either, so nothing
+standing tells one that decision memory exists. When Claude Code creates a subagent, this hook
+answers with an `additionalContext` that arrives in front of its first turn: the same standing
+call `SessionStart` gives the main agent (`get_task_context(files=[…])` with repo-relative
+paths, the check-plan skill before a non-trivial change, and a reminder to load the tool first if
+it is listed only by name), then one sentence of what memory holds: how many records are anchored
+to code, in how many files, and how many of them are recorded mistakes. It carries no records:
+which ones matter depends on the files the subagent works on, and `get_task_context` answers
+that. In a store with nothing anchored to code, or where the index cannot be used, it prints
+`{}`. Set `SIDEGRAPH_SUBAGENT_BRIEF=off` to disable it entirely. It reads the store's index
+directly like the `PreToolUse` hook, so it costs a few tens of milliseconds per subagent. The
+counts and the exact output are in the [hooks reference](../reference/hooks.md#sidegraph-subagent-start).
 
 ### Silent degradation
 
-All three hooks are written to **never crash the session** and never block a tool call. Any
+All four hooks are written to **never crash the session** and never block a tool call. Any
 exception inside `session_start` prints `{}` (Claude Code proceeds with no injected context),
 except that a store which cannot be opened prints a `systemMessage` naming the cause and the fix
 (and a model line saying memory tools will fail) instead, and a lock another process holds still
 prints `{}`;
 any exception inside `stop` prints `{}` (Claude Code proceeds to stop normally); any exception
 inside `pre_tool_use` — or the nudge conditions simply not holding — also prints `{}` (the
-tool call proceeds through the normal permission flow). A missing store, missing graph, or
+tool call proceeds through the normal permission flow); any exception inside `subagent_start`, or
+nothing anchored to code to describe, prints `{}` (the subagent starts with no brief). A missing store, missing graph, or
 misconfigured env var degrades to "no memory this session," never a broken session.
 
 ## Plugin install path
@@ -185,6 +228,17 @@ the recommended install path, and it works today, no PyPI publish required:
 > development repository run the checkout the plugin was loaded from, with
 > `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.." --package
 > sidegraph --frozen --no-active`, in whatever project the session is in.
+>
+> **What runs `@main` and what runs a commit.** The MCP server and `SessionStart` run `@main`,
+> once per session. `Stop`, `PreToolUse` and `SubagentStart` run many times a session, and `uv`
+> re-resolves a branch reference on every call (about 0.8 s on a warm cache, against about 0.2 s
+> for a commit it already holds). So `SessionStart` records the commit it resolved in
+> `${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit`, and the public `Stop`,
+> `PreToolUse` and `SubagentStart` commands launch `uvx --from` that commit, falling back to `@main` when there is
+> no valid record. A plugin pinned to a tag or commit ignores the record and launches its own
+> ref. The record is one per machine, so a release reaches a running session at the
+> next `SessionStart` on the machine, in any project, not at its next hook call. See
+> [Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file).
 
 ## Environment variables
 
@@ -193,8 +247,10 @@ the recommended install path, and it works today, no PyPI publish required:
 | `SIDEGRAPH_DIR` | `.sidegraph` | Path to the decision store directory (file-per-record, git-committed). Point it at a path inside the target repo, e.g. `.sidegraph`, so it can be committed as the repo's memory. `SIDEGRAPH_DB` is honored for back-compat (deprecated) — see [`reference/configuration.md`](../reference/configuration.md#store-path-resolution). |
 | `SIDEGRAPH_GRAPH` | `graphify-out/graph.json` | Path to Graphify's output graph, read-only. |
 | `SIDEGRAPH_CAPTURE_NUDGE` | unset | Set to `off` to disable the `Stop` hook's block-to-distill nudge entirely (no other value has any effect). |
-| `SIDEGRAPH_GREP_NUDGE` | unset | Set to `off` to disable the `PreToolUse` Read/Grep redirect nudge entirely (no other value has any effect). |
+| `SIDEGRAPH_GREP_NUDGE` | unset | Set to `off` to turn off `PreToolUse` delivery of records at the point of reading, on every tool including Bash (no other value has any effect; touch recording is separate). It does not touch the records added to a subagent's brief on an `Agent` call: that is `SIDEGRAPH_AGENT_BRIEF`. |
 | `SIDEGRAPH_RATIFY_NUDGE` | unset | Set to `off` to disable the `SessionStart` pending-ratification line entirely (no other value has any effect). |
+| `SIDEGRAPH_SUBAGENT_BRIEF` | unset | Set to `off` to disable the `SubagentStart` memory brief entirely (no other value has any effect). |
+| `SIDEGRAPH_AGENT_BRIEF` | unset | Set to `off` to stop the `PreToolUse` hook adding records to a subagent's brief on an `Agent` call (no other value has any effect; on by default). |
 | `SIDEGRAPH_AUTO_ACCEPT` | unset | Set to `on` to land agent-proposed decisions/facts as `accepted` immediately, bypassing the ratification queue (no other value has any effect; domains are always exempt). See [`guides/capturing-decisions.md#4-auto-accept-opt-in`](../guides/capturing-decisions.md#4-auto-accept-opt-in). |
 
 A relative `SIDEGRAPH_DIR` is anchored to the **launch directory**: `CLAUDE_PROJECT_DIR` for the
@@ -242,7 +298,8 @@ Two mitigations, both config-level (no source change needed to use them):
   `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from
   git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start`. This is
   the content of `plugin/sidegraph/hooks/hooks.public.json`; the release renames it to
-  `hooks.json`. The development variant uses the same prefix and runs the checkout the plugin
+  `hooks.json`. The `Stop`, `PreToolUse` and `SubagentStart` commands start with the `launch-commit` read
+  described in the note above and launch `uvx --from "$u"`. The development variant uses the same prefix and runs the checkout the plugin
   was loaded from: `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.."
   --package sidegraph --frozen --no-active`. Every hook command also ends with a guard (`|| printf '{}\n'`, and for
   `SessionStart` a `systemMessage` telling you to run the hook command in a terminal) that

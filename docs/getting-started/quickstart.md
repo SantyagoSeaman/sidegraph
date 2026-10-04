@@ -33,6 +33,15 @@ Start a new interactive session in the repository and approve the hook trust pro
 manual or source-checkout setup, use the host-specific page:
 [Claude Code](claude-code-setup.md) or [Codex](codex-setup.md).
 
+**Scope.** `/plugin install` offers three scopes: user, local and project. From a terminal the
+flag is `claude plugin install sidegraph@sidegraph --scope user|project|local`, and the default
+is user. Enable the plugin at user scope, or in the repository root's
+`.claude/settings.local.json`, and it covers sessions started in any subdirectory. Project scope
+(`.claude/settings.json`) covers only the directory it was installed from: Claude Code reads a
+launch directory's own project settings and no parent's, so a plugin installed at the repository
+root leaves sessions started below it without it. `sidegraph-doctor` reports the gap as
+[`plugin-off-in-subdirectories`](../guides/troubleshooting.md#plugin-off-in-subdirectories).
+
 ## 3. Record one real gotcha
 
 Choose a real file or symbol in the repository. Tell the agent:

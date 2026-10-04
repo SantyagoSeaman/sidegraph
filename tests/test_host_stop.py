@@ -129,7 +129,10 @@ def test_nudge_mentions_supersede_decision_within_length_bound(tmp_path, monkeyp
     exact-text test (test_nudge_text_is_the_one_liner, above) is a tautology that can't
     guard this -- it compares against the constant itself, so editing CAPTURE_NUDGE keeps
     it green regardless. This substring assert is the genuinely-red guard, plus the
-    ``<= 800`` char bound the same design decision commits to."""
+    ``<= 850`` char bound: 800 when the staleness design set it, raised by the 43-character
+    re-arm sentence (a re-armed nudge with the drift clause is pinned by
+    ``test_stop_rearm.py``). The first nudge itself stays far below it.
+    see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D4, T9)"""
     db = tmp_path / "s.db"
     transcript = _substantial(tmp_path)
     out = _run(
@@ -139,7 +142,7 @@ def test_nudge_mentions_supersede_decision_within_length_bound(tmp_path, monkeyp
         db,
     )
     assert "supersede_decision" in out["reason"]
-    assert len(out["reason"]) <= 800
+    assert len(out["reason"]) <= 850
 
 
 def test_block_response_sets_suppress_output(tmp_path, monkeypatch, capsys):
@@ -462,6 +465,142 @@ def test_compact_summary_and_slash_command_turns_do_not_count(tmp_path, monkeypa
         db,
     )
     assert out == {}
+
+
+# -- host-injected user turns (the prompt count must not include them) ------------------------
+#
+# Claude Code persists messages it injects itself as `type: "user"` lines with no `isMeta` flag.
+# Each shape below is a REAL line redacted to its opening tag and the minimal structure, with no
+# content (census of the 400 most recent transcripts, Claude Code 2.1.28x). The gate reads the
+# content prefix only; the `origin` field a newer host adds is not consulted.
+
+
+def _task_notification():
+    """A background agent or command finished: the host injects the notification as a user turn."""
+    entry = _user_prompt(
+        "<task-notification>\n<task-id></task-id>\n<status></status>\n"
+        "<summary></summary>\n</task-notification>"
+    )
+    entry["origin"] = {"kind": "task-notification"}
+    return entry
+
+
+_OTHER_HOST_INJECTED = {
+    # An agent-team message another agent sent; the attribute makes the prefix open-ended.
+    "teammate_message": '<teammate-message teammate_id="">\n</teammate-message>',
+    # The output of a `!` shell command the person ran; its input line is typed, so it counts.
+    "bash_stdout": "<bash-stdout></bash-stdout><bash-stderr></bash-stderr>",
+    # The same agent-team message as the lead's own session receives it: a plain-text line
+    # first, the tag on the second line.
+    "lead_session_teammate_message": (
+        'Another Claude session sent a message:\n<teammate-message teammate_id="">\n'
+        "</teammate-message>"
+    ),
+}
+
+
+def _stop_on(tmp_path, monkeypatch, capsys, session, entries):
+    """Run the Stop hook over a transcript of `entries`; return its output and the db."""
+    db = tmp_path / "s.db"
+    transcript = _write_transcript(tmp_path / f"{session}.jsonl", entries)
+    out = _run(
+        monkeypatch,
+        capsys,
+        {"session_id": session, "stop_hook_active": False, "transcript_path": transcript},
+        db,
+    )
+    return out, db
+
+
+def test_task_notification_messages_do_not_count_as_prompts(tmp_path, monkeypatch, capsys):
+    """T1: one typed prompt plus two injected task-notifications is one prompt, so the gate
+    stays shut. Red against `_HOST_EMITTED_PREFIXES` without `<task-notification>`: the three
+    lines read as three prompts and the nudge fires, then every later stop is silenced by the
+    once-per-session ledger. The control shows a second typed prompt still arms it."""
+    from sidegraph.store import Store
+
+    injected = [_task_notification(), _assistant(), _task_notification(), _assistant()]
+    out, db = _stop_on(
+        tmp_path, monkeypatch, capsys, "tn1", [_user_prompt(), _assistant(), *injected]
+    )
+    assert out == {}
+    assert Store(db).was_captured("tn1") is False
+
+    out, _ = _stop_on(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        "tn2",
+        [_user_prompt(), _assistant(), *injected, _user_prompt("second request")],
+    )
+    assert out["decision"] == "block"
+
+
+@pytest.mark.parametrize("kind", sorted(_OTHER_HOST_INJECTED))
+def test_other_host_injected_messages_do_not_count_as_prompts(tmp_path, monkeypatch, capsys, kind):
+    """T2: every further opening tag the census found host-injected, one redacted line each.
+    Red against `_HOST_EMITTED_PREFIXES` without that prefix. The control shows the injection
+    does not hide a second typed prompt."""
+    from sidegraph.store import Store
+
+    injected = _user_prompt(_OTHER_HOST_INJECTED[kind])
+    out, db = _stop_on(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        f"hi-{kind}",
+        [_user_prompt(), _assistant(), injected, _assistant(), injected],
+    )
+    assert out == {}, kind
+    assert Store(db).was_captured(f"hi-{kind}") is False
+
+    out, _ = _stop_on(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        f"hic-{kind}",
+        [_user_prompt(), _assistant(), injected, _user_prompt("second request")],
+    )
+    assert out["decision"] == "block", kind
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [{"origin": {"kind": "task-notification"}}, {"promptSource": "system"}],
+    ids=["origin-task-notification", "prompt-source-system"],
+)
+def test_a_line_the_host_marks_as_not_typed_does_not_count(
+    tmp_path, monkeypatch, capsys, provenance
+):
+    """T4: newer Claude Code marks some injected lines with provenance fields, including task
+    notifications written as plain prose that no prefix can catch ("2 background agents were
+    stopped"). A line marked `origin.kind == "task-notification"` or `promptSource == "system"`
+    is not a person's prompt. The fields are only ever a "not a person" signal: their absence
+    proves nothing, since teammate and slash-command lines never carry them. Red against a
+    gate that reads only the content prefix."""
+    from sidegraph.store import Store
+
+    injected = {**_user_prompt("2 background agents were stopped"), **provenance}
+    session = "pv-" + next(iter(provenance))
+    out, db = _stop_on(
+        tmp_path, monkeypatch, capsys, session, [_user_prompt(), _assistant(), injected]
+    )
+    assert out == {}
+    assert Store(db).was_captured(session) is False
+
+
+def test_typed_slash_command_still_counts_as_a_prompt(tmp_path, monkeypatch, capsys):
+    """T3, the regression guard: a slash command the person typed starts with
+    `<command-message>` in current Claude Code and is a prompt (origin `human`), unlike the
+    `<command-name>`-first wrapper of older versions. It counts by design; dropping it with
+    the host-injected tags would silence the gate for sessions driven by commands."""
+    typed = _user_prompt(
+        "<command-message></command-message>\n<command-name></command-name>\n"
+        "<command-args></command-args>"
+    )
+    typed["origin"] = {"kind": "human"}
+    out, _ = _stop_on(tmp_path, monkeypatch, capsys, "sc1", [_user_prompt(), _assistant(), typed])
+    assert out["decision"] == "block"
 
 
 def test_gated_session_nudges_on_a_later_substantial_stop(tmp_path, monkeypatch, capsys):

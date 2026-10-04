@@ -21,6 +21,10 @@ Behavior (owner-specified):
 - A merge is published by writing a temp file and replacing, so a reader never sees a
   truncated file; a new file is created with `O_EXCL`. Any `OSError` in the write phase
   gives a `skipped` outcome (`write_failed`), never an exception.
+
+The second half of the module reads the settings that decide whether the plugin runs in a
+session (`plugin_reach`, the `plugin-off-in-subdirectories` check's evidence); it never writes.
+see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
 """
 
 from __future__ import annotations
@@ -28,10 +32,13 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..config import _repository_boundary
+from ..gitenv import git_env
 from ..verify import _find_repo_root
 
 RATIFY_POLICY_ENV_VAR = "SIDEGRAPH_RATIFY_POLICY"
@@ -242,3 +249,133 @@ def _replace_atomically(path: Path, text: str) -> None:
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
+
+
+# -- which directories run Sidegraph (the `plugin-off-in-subdirectories` evidence) ------------
+
+PLUGIN_NAME = "sidegraph"
+LOCAL_SETTINGS_RELATIVE_PATH = Path(".claude") / "settings.local.json"
+_USER_SETTINGS_RELATIVE_PATH = Path(".claude") / "settings.json"
+
+# One `git ls-files` lists every directory that can hold a launch; this is its budget, seconds.
+_LS_FILES_TIMEOUT = 5.0
+
+
+@dataclass(frozen=True)
+class PluginReach:
+    """Where Sidegraph runs in the repository at ``root``, by Claude Code's settings model.
+
+    ``project_only`` (case a): the plugin is on for a launch at the root, but only through the
+    root's project settings, which no launch below the root reads. ``off`` (case b): nested
+    directories with a settings file of their own that sets ``enabledPlugins`` and whose merge
+    leaves the plugin off, sorted; a nested file without it cannot change the merge, so case (a)
+    already covers its directory.
+    see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
+    """
+
+    root: Path
+    project_only: bool
+    off: tuple[Path, ...]
+
+
+def _settings_map(path: Path) -> dict[str, object] | None:
+    """``enabledPlugins`` of the settings file at ``path``; ``None`` when the file does not
+    mention it: there is no such file, or it is not JSON, not an object, or holds no object under
+    the key. Such a file cannot change a merge, so a caller treats ``None`` as "no say"."""
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    plugins = data.get("enabledPlugins") if isinstance(data, dict) else None
+    return dict(plugins) if isinstance(plugins, dict) else None
+
+
+def _on(*maps: dict[str, object] | None) -> bool:
+    """Sidegraph is on under the key-wise merge of ``maps`` (later ones win): some key whose
+    plugin part, before ``@``, is ``sidegraph`` holds ``true``.
+    see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)"""
+    merged: dict[str, object] = {}
+    for one in maps:
+        merged.update(one or {})
+    return any(
+        key.partition("@")[0] == PLUGIN_NAME and value is True for key, value in merged.items()
+    )
+
+
+def _user_map() -> dict[str, object] | None:
+    """The user's ``enabledPlugins``: ``$CLAUDE_CONFIG_DIR/settings.json`` when the variable is
+    set and non-empty, else ``~/.claude/settings.json`` through ``Path.home()`` (``HOME``), which
+    is the directory Claude Code reads its user settings from."""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return _settings_map(Path(config_dir) / "settings.json")
+    try:
+        return _settings_map(Path.home() / _USER_SETTINGS_RELATIVE_PATH)
+    except RuntimeError:  # no home directory
+        return None
+
+
+def _listed_directories(listing: bytes) -> list[str]:
+    """The directories (relative, root excluded) that hold at least one path of a ``-z`` listing,
+    with every ancestor of one, sorted."""
+    seen: set[str] = set()
+    for raw in listing.split(b"\0"):
+        directory = os.path.dirname(os.fsdecode(raw))
+        while directory and directory not in seen:
+            seen.add(directory)
+            directory = os.path.dirname(directory)
+    return sorted(seen)
+
+
+def plugin_reach(project: Path) -> PluginReach | None:
+    """Whether Sidegraph runs in every directory of the repository that holds ``project``, or
+    ``None`` when that cannot be told (no repository, git missing or slow).
+
+    The model, verified against Claude Code 2.1.288: a session launched in ``D`` reads the user
+    settings, ``D/.claude/settings.json``, ``D/.claude/settings.local.json`` and the git root's
+    ``.claude/settings.local.json``, and ``enabledPlugins`` merges key by key in that order. The
+    root's project settings are therefore read by root launches only.
+
+    The repository root is the nearest ancestor with a ``.git`` entry (no subprocess). The
+    candidate directories are the parents of every path ``git ls-files --cached`` reports (the
+    index alone: ``--others`` scanned the whole work tree and cost most of the walk), each checked
+    directly for its two settings files: the files themselves are never taken from the listing,
+    because a repository may ignore ``.claude/`` and Claude Code's global ignore hides every
+    ``settings.local.json``. That is the only subprocess. A plugin that is off at the root too is
+    not reported: nothing was switched off.
+    see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
+    """
+    boundary = _repository_boundary(os.path.abspath(project))
+    if boundary is None:
+        return None
+    root = Path(boundary)
+    user = _user_map()
+    root_project = _settings_map(root / SETTINGS_RELATIVE_PATH)
+    root_local = _settings_map(root / LOCAL_SETTINGS_RELATIVE_PATH)
+    if not _on(user, root_project, root_local):
+        return PluginReach(root, project_only=False, off=())
+    project_only = not _on(user, root_local)
+    try:
+        done = subprocess.run(
+            ["git", "ls-files", "--cached", "-z"],
+            cwd=root,
+            env=git_env(),
+            capture_output=True,
+            timeout=_LS_FILES_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if done.returncode != 0:
+        return None
+    off: list[Path] = []
+    for relative in _listed_directories(done.stdout):
+        directory = root / relative
+        own_project = _settings_map(directory / SETTINGS_RELATIVE_PATH)
+        own_local = _settings_map(directory / LOCAL_SETTINGS_RELATIVE_PATH)
+        if own_project is None and own_local is None:  # neither file sets `enabledPlugins`
+            continue
+        if not _on(user, own_project, own_local, root_local):
+            off.append(directory)
+    return PluginReach(root, project_only=project_only, off=tuple(off))

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -19,13 +20,14 @@ from sidegraph.schema import (
     AnchorBinding,
     Decision,
     DecisionKind,
+    DecisionStatus,
     Descriptor,
     Domain,
     Entity,
     Fact,
     Provenance,
 )
-from sidegraph.store import Store
+from sidegraph.store import Store, _archive_record_line
 from sidegraph.verify import (
     BAD_ARCHIVE_SEGMENT,
     BAD_VALIDITY_WINDOW,
@@ -604,3 +606,166 @@ def test_verify_reports_symlinked_store_entry(store: Store, tmp_path):
         str(store.path / "decisions"),
         str(store.path / "index.db"),
     ]
+
+
+def test_a_record_file_of_invalid_utf8_is_a_parse_error_naming_its_path(tmp_path, capsys):
+    """Unfixed, ``_load_raw_json`` let the ``UnicodeDecodeError`` through: ``verify_snapshot``
+    raised, and the CLI exited 1 with "store not readable" and no file name.
+    see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D2, T14)"""
+    store_dir = tmp_path / ".sidegraph"
+    with Store(store_dir) as s:
+        d = s.add_decision(_decision())
+        path = _decision_path(s, d.id)
+    path.write_bytes(b'{"id": "\xff\xfe"}')
+
+    violations = verify_snapshot(store_dir)
+    assert [(v.code, v.path) for v in violations] == [(PARSE_ERROR, str(path))]
+
+    rc = verify_main(["--db", str(store_dir)])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert str(path) in out
+    assert "not readable" not in out
+
+
+# -- archive segments: verify lists what the reload skips -----------------------------------
+# The store's reload skips an archive line it cannot read and tells the human to run verify, so
+# verify must name the same lines (design/superpowers/specs/2026-10-03-store-survives-a-bad-
+# file-design.md D4).
+
+SEGMENT_NAME = "2026-07-11-1-deadbeefcafe.jsonl"
+
+
+def _archived_decision_line(**overrides) -> str:
+    """One archive line for a terminal decision that has no hot file."""
+    decision = _decision(
+        status=DecisionStatus.REJECTED, valid_to=datetime(2026, 1, 11, tzinfo=UTC), **overrides
+    )
+    return _archive_record_line("decision", decision.model_dump(mode="json"))
+
+
+def _segment(store: Store, *lines: str | bytes) -> Path:
+    archive_dir = store.path / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    path = archive_dir / SEGMENT_NAME
+    path.write_bytes(
+        b"\n".join(x if isinstance(x, bytes) else x.encode("utf-8") for x in lines) + b"\n"
+    )
+    return path
+
+
+def test_an_archive_line_of_invalid_utf8_is_a_bad_archive_segment_naming_its_line(
+    store: Store, capsys
+):
+    """Unfixed, the whole-file ``read_text`` raised ``UnicodeDecodeError``: ``verify_snapshot``
+    raised, and the CLI exited 1 with "store not readable"."""
+    seg = _segment(
+        store,
+        _archived_decision_line(),
+        b'{"record_type": "decision", "title": "\xff\xfe"}',
+    )
+
+    violations = verify_snapshot(store.path)
+    assert [(v.code, v.path) for v in violations] == [(BAD_ARCHIVE_SEGMENT, str(seg))]
+    assert "line 2" in violations[0].detail
+
+    assert verify_main(["--db", str(store.path)]) == 2
+    out = capsys.readouterr().out
+    assert str(seg) in out
+    assert "not readable" not in out
+
+
+def test_an_archive_line_nested_past_the_recursion_limit_is_a_bad_archive_segment(store: Store):
+    seg = _segment(store, _archived_decision_line(), "[" * 200_000 + "]" * 200_000)
+
+    violations = verify_snapshot(store.path)
+    assert [(v.code, v.path) for v in violations] == [(BAD_ARCHIVE_SEGMENT, str(seg))]
+    assert "line 2" in violations[0].detail
+
+
+@pytest.mark.parametrize("fault", ["invalid status", "lone surrogate"])
+def test_an_archive_line_whose_decision_does_not_validate_is_a_bad_archive_segment(
+    store: Store, fault
+):
+    """The store lists such a segment (its reload runs the model on every archive line);
+    unfixed, ``verify_snapshot`` returned ``[]`` for it."""
+    payload = json.loads(_archived_decision_line())
+    if fault == "invalid status":
+        payload["status"] = "bogus"
+    else:
+        payload["title"] = "\ud800"  # parses and validates, then cannot be serialised
+    seg = _segment(store, _archived_decision_line(), json.dumps(payload))
+
+    violations = verify_snapshot(store.path)
+    assert [(v.code, v.path) for v in violations] == [(BAD_ARCHIVE_SEGMENT, str(seg))]
+    assert "line 2" in violations[0].detail
+
+
+@pytest.mark.parametrize("char", ["\u2028", "\u0085"])
+def test_an_archive_line_holding_a_unicode_line_separator_is_not_a_bad_segment(store: Store, char):
+    """``str.splitlines`` splits a title that holds U+2028 or U+0085 in two, so unfixed,
+    verify reported ``bad-archive-segment`` for a segment the store reads fine."""
+    _segment(store, _archived_decision_line(title=f"before{char}after"))
+
+    assert verify_snapshot(store.path) == []
+
+
+# -- hot files: what the reload skips as ``parse-error`` ------------------------------------
+
+
+def test_a_record_file_nested_past_the_recursion_limit_is_a_parse_error_naming_its_path(
+    store: Store, capsys
+):
+    """Unfixed, ``json.loads`` raised ``RecursionError`` through ``_load_raw_json``: the CLI
+    exited 1 with "maximum recursion depth" and no file name."""
+    d = store.add_decision(_decision())
+    path = _decision_path(store, d.id)
+    path.write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+
+    violations = verify_snapshot(store.path)
+    assert [(v.code, v.path) for v in violations] == [(PARSE_ERROR, str(path))]
+
+    assert verify_main(["--db", str(store.path)]) == 2
+    out = capsys.readouterr().out
+    assert str(path) in out
+    assert "not readable" not in out
+
+
+@pytest.mark.parametrize("kind", ["decision", "entity", "bindings"])
+def test_a_record_that_validates_but_cannot_be_serialised_is_a_parse_error(store: Store, kind):
+    """A lone surrogate passes the model and fails ``model_dump_json``, which the store's
+    reload runs on every record and skips the file for; unfixed, verify reported it clean."""
+    d = store.add_decision(_decision())
+    entity = store.upsert_entity(
+        Entity(canonical_name="f_widget", descriptor=Descriptor(name="f_widget", file_path="a.py"))
+    )
+    store.add_binding(AnchorBinding(record_id=d.id, entity_id=entity.entity_id, tier=2))
+    if kind == "decision":
+        path = _decision_path(store, d.id)
+        _write(path, {**_read(path), "title": "\ud800"})
+    elif kind == "entity":
+        path = store.path / "entities" / f"{entity.entity_id}.json"
+        _write(path, {**_read(path), "canonical_name": "\ud800"})
+    else:
+        path = store.path / "bindings" / f"{d.id}.json"
+        _write(path, [{**item, "status": "\ud800"} for item in _read(path)])
+
+    violations = verify_snapshot(store.path)
+    assert [v.code for v in violations] == [PARSE_ERROR]
+    assert violations[0].path.startswith(str(path))
+
+
+def test_against_reader_reports_invalid_utf8_and_deep_nesting_as_unparsable(tmp_path):
+    """``--against`` reads the working-tree side through ``_read_json_object``. A record file of
+    invalid UTF-8, or JSON nested past the recursion limit, is unparsable content to report,
+    not a crash that takes verify down with exit 1.
+    see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D2"""
+    from sidegraph.verify import _read_json_object, _UnparsableContent
+
+    bad_utf8 = tmp_path / "a.json"
+    bad_utf8.write_bytes(b'{"id": "\xff"}')
+    deep = tmp_path / "b.json"
+    deep.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+    for path in (bad_utf8, deep):
+        with pytest.raises(_UnparsableContent):
+            _read_json_object(path)

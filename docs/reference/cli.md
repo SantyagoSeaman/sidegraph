@@ -1,13 +1,14 @@
 # CLI reference
 
-18 console scripts are registered in `pyproject.toml` (`[project.scripts]`): fourteen
+19 console scripts are registered in `pyproject.toml` (`[project.scripts]`): fourteen
 commands documented on this page — thirteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
 (including `sidegraph-prepare-commit-msg`, which doubles as a git hook — see
 [`reference/git-bindings.md`](git-bindings.md) for its installation and mechanism) and the
 guided `sidegraph-bootstrap` in
 [`src/sidegraph/bootstrap/cli.py`](../../src/sidegraph/bootstrap/cli.py) — plus the MCP server
-(`sidegraph-mcp`) and the three Claude Code hook entry points (`sidegraph-session-start`,
-`sidegraph-stop`, `sidegraph-pre-tool-use`; see [`reference/hooks.md`](hooks.md)).
+(`sidegraph-mcp`) and the four hook entry points (`sidegraph-session-start`,
+`sidegraph-stop`, `sidegraph-pre-tool-use`, `sidegraph-subagent-start`; see
+[`reference/hooks.md`](hooks.md)).
 Commands with `--db` use the shared path precedence documented in
 [`configuration.md`](configuration.md): explicit flag, `SIDEGRAPH_DIR`, deprecated
 `SIDEGRAPH_DB`, an existing `.sidegraph/`, then `.sidegraph`. Commands that construct a
@@ -166,7 +167,7 @@ the Sidegraph checkout):
    and how to remove it (`graphify hook uninstall`); it never touches it.
 4. Prints the setup instructions: the plugin install path first (`/plugin marketplace add
    SantyagoSeaman/sidegraph` + `/plugin install sidegraph@sidegraph` — installs the MCP server
-   and all three hooks automatically), then the no-plugin alternative (a single
+   and all four hooks automatically), then the no-plugin alternative (a single
    `claude mcp add sidegraph -s project … -- uvx --from git+…` command that writes a
    repo-committed `.mcp.json`), and a pointer to
    [`claude-code-setup.md`](../getting-started/claude-code-setup.md) /
@@ -965,9 +966,13 @@ cleanup happened and no new segment was written — followed by an `M domain(s) 
 terminal age unknown` line and/or a `cleaned up K leftover hot file(s) from an interrupted
 prior compact run` line, each only when applicable.
 
-**Exit code:** `0` on success, including a no-op run and every `--dry-run` invocation. Returns
-`1` before touching the store if `--older-than` is negative (`--older-than must be >= 0 (got
-N)`); returns `1` if the store can't be opened (`store not readable (<path>): <error>`).
+**Exit code:** `0` on success, including a no-op run and every `--dry-run` that completes.
+Returns `1` before touching the store if `--older-than` is negative (`--older-than must be >= 0
+(got N)`); returns `1` if the store can't be opened (`store not readable (<path>): <error>`); and
+returns `1`, `--dry-run` included, when an archive segment has a line the command cannot read
+(`cannot compact (<db>): corrupt archive segment <path> at line N: <error>`). The store itself
+opens over such a segment and leaves the line out, but a compaction is a mutation and does not run
+over a segment it cannot fully read. Restore the segment with git or fix the line by hand.
 
 **Examples:**
 
@@ -1022,7 +1027,7 @@ plain-text line):
 
 | Code | Layer | Meaning |
 |---|---|---|
-| `parse-error` | snapshot | a record file doesn't decode as JSON, isn't an object, or fails schema validation (a `valid_to < valid_from` failure is reported as `bad-validity-window` instead — see below) |
+| `parse-error` | snapshot | a record file isn't valid UTF-8 or JSON (or is nested past the recursion limit), isn't an object, fails schema validation, or can't be serialised for the index (a `valid_to < valid_from` failure is reported as `bad-validity-window` instead — see below) |
 | `unknown-schema-version` | snapshot | the `format` marker is missing, unreadable, malformed, or names a `schema_version` this version of the code doesn't recognize |
 | `bad-validity-window` | snapshot | `valid_to < valid_from` on a decision or fact |
 | `superseded-without-successor` | snapshot | a `status=superseded` record has no other record's `supersedes` pointing back at it |
@@ -1030,7 +1035,7 @@ plain-text line):
 | `dangling-binding-entity` | snapshot | a binding's `entity_id` doesn't resolve to any `entities/<id>.json` |
 | `dangling-fact-support` | snapshot | a fact's `supports` id doesn't resolve to any decision |
 | `duplicate-ulid` | snapshot | the same internal id appears in more than one canonical location — two hot files, a hot file plus any archive copy, or two archive segments whose payloads for that id actually differ. **Exempt:** two or more archive segments carrying byte-*identical* payloads for the same id — a sanctioned cross-branch `sidegraph-compact` merge (independent compaction on two branches, later merged) — see [`reference/store-format.md#archive-segments-sidegraph-compact`](store-format.md#archive-segments-sidegraph-compact) |
-| `bad-archive-segment` | snapshot | an `archive/*.jsonl` line doesn't parse as JSON, or isn't a JSON object |
+| `bad-archive-segment` | snapshot | an `archive/*.jsonl` line isn't valid UTF-8 or JSON, isn't a JSON object, or holds a decision or domain that fails its model or can't be serialised: the lines the store's reload leaves out (one violation per line, naming the segment and the line number) |
 | `filename-id-mismatch` | snapshot | a hot record file's name doesn't match its own internal id |
 | `unsafe-record-id` | snapshot | a record's id is not a safe filename (a single path segment, at most 128 characters, starting with a letter or digit), or is not a string; also a `bindings/` file or hot record file whose name is unsafe, and an `archive/*.jsonl` line whose id is missing, not a string or unsafe. The store's reload skips such a file, and its startup warning points here |
 | `symlinked-store-entry` | snapshot | a store-owned directory or file inside the store is a symlink, live or dangling (one violation per entry); `Store()` refuses to open such a store, see [`reference/store-format.md`](store-format.md#layout-file-per-record-json-plus-a-derived-local-index) |
@@ -1173,6 +1178,7 @@ plain-text line):
 | `graph-stale` | the graph was built at a commit HEAD has moved past (graph.json's `built_at_commit`), and a file the graph should reflect changed since: one it holds was edited after the graph was last built (the later of `graph.json`'s and its sibling `manifest.json`'s modification times) or deleted, or a new file of a type it holds now exists (not under a dot-directory, which Graphify skips). Memory cannot see or anchor to code added after the build. The detail gives the build commit, how many commits behind HEAD (or "a commit outside HEAD's history" after a checkout of an older commit), how many files changed, and up to five example paths; the fix is `graphify update .` from the repository root, then `sidegraph-sync`. Silent when the build commit is HEAD, when only file types the graph does not hold changed (a `.yml` against a `.py`-only graph), and when a graph built from a dirty tree was committed afterwards, or a `graphify update .` found nothing to change and rewrote only `manifest.json` (the file is no newer than the build); also silent when the comparison cannot be made (no `built_at_commit`, one that is not a full commit id, a graph outside a git repository, a build commit the repository lacks, git unavailable or slower than 3 seconds). **`--check` exits `2` on it**, so a CI job that runs doctor should rebuild the graph first; one that does is unaffected. Needs `--graph` to resolve |
 | `orphaned-record` | an open (`proposed`/`accepted`) decision or fact whose every Tier-2 (leaf) anchor is `orphaned`, so retrieval reaches it only through its file or domain; one finding per record, at its canonical file, naming how many leaf anchors it has. Statuses come from `index.db` and read "as of last sync", so the check is skipped while the index has been reloaded and not yet synced (see *Skipped checks* below; run `sidegraph-sync`). It is the record-level view of `orphaned-binding` (any record it flags has orphaned bindings, which that code already reports), so it adds no new reason for `--check` to exit `2`. The fix is to rebuild a stale graph, then `sidegraph-sync`; otherwise re-anchor the record with `add_anchors` or the `heal-anchors` skill, or supersede it if the code is gone. Needs a usable `index.db` |
 | `store-uncommitted` | store files nobody committed for at least 24 hours: records, bindings, entities, an archive segment or the root files (`format`, `.gitignore`, `stamping_live_since`) that `git status` shows as new, modified or deleted. One finding, at the store path, naming how many files there are, how old the oldest is and what kinds they are (a new `archive/` segment beside deleted records reads as "a compaction"). A new record or entity file is aged by its ULID name, which a `git stash` cannot rewrite; a modified file, or anything under `bindings/`, by its modification time; a deleted file by its subdirectory's, a lower bound. Entries fully staged in the index are not counted, so a `--check` run in a pre-commit hook does not block the commit that fixes the problem. **`--check` exits `2` on it.** The fix is to commit the store in a pull request. Silent, and not run, outside a git repository, with no `git`, or when git is slower than 2 seconds |
+| `plugin-off-in-subdirectories` | Claude Code sessions started below the repository root run without the Sidegraph plugin. Claude Code reads the project settings (`.claude/settings.json`) of the launch directory only, and the repository root's `.claude/settings.local.json` for every launch inside the repository; `enabledPlugins` merges key by key (user settings, then project, then local). Two problems, reported as up to two findings: (a) the plugin is enabled only in the root's `.claude/settings.json`, so every directory below the root without its own enabling settings runs without it (reported at that file); (b) nested directories with a `.claude/settings.json` or `.claude/settings.local.json` of their own that sets `enabledPlugins` and whose merge leaves the plugin off (reported at the first such directory, naming how many there are; a nested settings file without `enabledPlugins` cannot change the merge, so it is not counted). The walk covers every directory that holds a tracked file (one `git ls-files` over the index, a few tens of milliseconds on a large repository) and looks for the two settings files in each directly, so a repository that ignores `.claude/` is covered. User settings are read from `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set and non-empty, else from `~/.claude/settings.json`. Silent when the plugin is not enabled for a launch at the root at all, and not run outside a git repository, with no `git`, or when `git ls-files` takes longer than 5 seconds. **`--check` exits `2` on it**, like any finding; enabling the plugin at user scope or in the root's `.claude/settings.local.json` clears it |
 
 `degraded-binding`/`orphaned-binding` come from `index.db`, opened strictly read-only — it
 is the only source for binding status (canonical `bindings/*.json` files carry identity,

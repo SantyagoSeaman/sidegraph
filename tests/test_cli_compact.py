@@ -101,3 +101,35 @@ def test_cli_compact_older_than_skips_too_recent_and_says_so(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "nothing to compact; 1 skipped (not terminal enough)" in out
     assert (db / "decisions" / f"{d.id}.json").is_file()  # untouched, kept hot
+
+
+def test_cli_compact_over_a_corrupt_archive_segment_exits_nonzero_naming_it(tmp_path, capsys):
+    """The store opens over a segment with an unreadable line (the reload skips it), so the
+    refusal now comes from ``compact()``: the command reports it and exits 1, no traceback.
+    see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D4)"""
+    db = tmp_path / "t.db"
+    Store(db).close()
+    segment = db / "archive" / "2020-01-01-1-deadbeef0000.jsonl"
+    segment.parent.mkdir()
+    segment.write_text("not json at all\n", encoding="utf-8")
+
+    assert compact_main(["--db", str(db)]) == 1
+
+    out = capsys.readouterr().out
+    assert str(segment) in out
+    assert "line 1" in out
+
+
+def test_cli_compact_dry_run_over_a_corrupt_archive_segment_exits_nonzero_too(tmp_path, capsys):
+    """``docs/reference/cli.md`` says ``--dry-run`` is refused as well: it reads the same
+    segments, and a listing built over a segment it cannot read would be a guess."""
+    db = tmp_path / "t.db"
+    Store(db).close()
+    segment = db / "archive" / "2020-01-01-1-deadbeef0000.jsonl"
+    segment.parent.mkdir()
+    segment.write_text("not json at all\n", encoding="utf-8")
+
+    assert compact_main(["--db", str(db), "--dry-run"]) == 1
+
+    out = capsys.readouterr().out
+    assert f"cannot compact ({db}): corrupt archive segment {segment} at line 1" in out

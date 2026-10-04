@@ -205,7 +205,9 @@ def test_t10_a_touch_in_a_subdirectory_launch_is_repo_relative(repo, monkeypatch
     assert not (repo / "sub" / ".sidegraph").exists()
 
 
-def test_t10b_the_nudge_names_the_repo_relative_anchor(repo, monkeypatch, capsys):
+def test_t10b_the_records_block_names_the_repo_relative_anchor(repo, monkeypatch, capsys):
+    """Was ``..._the_nudge_names_...`` asserting the old "anchored to sub/a.py" wording: the
+    block's header names the file as the store anchors it, repo-relative, not as launched."""
     _remember(repo / ".sidegraph", "Retry budget lives in the gateway", file_path="sub/a.py")
     target = repo / "sub" / "a.py"
     target.write_text("x = 1\n")
@@ -213,7 +215,7 @@ def test_t10b_the_nudge_names_the_repo_relative_anchor(repo, monkeypatch, capsys
     out = _pre_tool_use(monkeypatch, capsys, target)
     text = out["hookSpecificOutput"]["additionalContext"]
     assert "Retry budget lives in the gateway" in text
-    assert "anchored to sub/a.py" in text
+    assert "Recorded for sub/a.py (1 of 1, mistakes first):" in text
 
 
 def test_t10c_a_nested_store_keeps_touches_repo_relative(repo, monkeypatch, capsys):

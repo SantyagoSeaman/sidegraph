@@ -101,7 +101,7 @@ anchors resurface as noise in someone else's task context later.
   effectively anchorless because of a silent skip.
 - **Check `anchors_orphaned` too — it is the more common failure.** An entry means the name
   is **not in the graph at all**. The leaf is still written, but orphaned, and an orphaned
-  binding is skipped by retrieval, by `drill_down` and by the PreToolUse nudge — the record
+  binding is skipped by retrieval, by `drill_down` and by the PreToolUse records block — the record
   has no delivery path through that anchor. It will never surface. **Read the `reason`
   before fixing anything — the causes need opposite actions:** `file-not-in-graph` usually
   means your graph is stale (run `graphify update .`, then re-anchor — the name was probably

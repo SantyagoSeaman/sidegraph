@@ -71,9 +71,11 @@ Only after all nine steps pass is the public snapshot ready to tag.
 
 ### The public main moves only at releases
 
-Every plugin manifest installs from the public repository's `main`, and `uv` re-resolves that
-branch reference on every call, so pushing `main` reaches every plugin user at once. For that
-reason the public `main` moves only as part of a release: `tools/release-public.sh --push`
+Every plugin manifest installs from the public repository's `main`. The MCP server and
+`SessionStart` let `uv` re-resolve that branch reference at each start, and `SessionStart`
+records the commit it got for the `Stop` and `PreToolUse` hooks to launch from, so pushing
+`main` reaches every plugin user at their next session start, on their machine, in any project
+and either host. For that reason the public `main` moves only as part of a release: `tools/release-public.sh --push`
 refuses to push it unless the version being published is untagged in the public repository
 and `CHANGELOG.md` dates it, checked before anything is written and again right before the
 push. A docs-only or other non-release change waits for the next release, or ships in an

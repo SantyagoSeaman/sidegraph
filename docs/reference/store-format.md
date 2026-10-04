@@ -214,7 +214,8 @@ it, your edits stand.
 
 `index.db` stores a canonical digest — a sha256 over the sorted `(relpath, size, mtime_ns)` of
 every committed record file (plus the format marker and any archive segments). On every
-`Store.__init__`:
+`Store.__init__`, and again before every MCP server tool call (`Store.refresh_if_stale()`, since
+the server keeps one `Store` open for the life of the process):
 
 - **Digest matches** the stamped value → fast path, index used as-is (after one guard: the
   index's own stamped `schema_version` must still agree with the running code, in case it was
@@ -227,25 +228,48 @@ every committed record file (plus the format marker and any archive segments). O
   triggers) re-derives that volatile state from the current graph.
 
 This is what "a pull is absorbed automatically" means in practice: nothing has to notice a
-teammate's new decision files landed — the next store open sees the digest disagree and
-reloads. No command is needed beyond what already runs on every session start / tool call.
+teammate's new decision files landed — the next store open, or the next MCP tool call, sees the
+digest disagree and reloads. No command is needed beyond what already runs on every session start /
+tool call. In the server, an `OSError` while walking the files (a checkout, pull or compact creating
+and deleting record files at that moment) does not fail the call: the tool answers from the previous
+index, which a failed reload leaves intact, one line goes to stderr, and the next call checks again.
 
 **A file whose identity does not hold is skipped, not indexed.** During a reload, a record
 file is indexed only if it is a JSON object whose id field (`id`, `entity_id` or
 `domain_id`) is present, is a safe id (see [Layout](#layout-file-per-record-json-plus-a-derived-local-index)),
 and equals the filename stem; a `bindings/` file needs only a safe stem. Anything else is left
 out of the index, so a crafted or copied id can neither become a path nor shadow the record
-that owns it, and an id-less file no longer mints a new ULID on every rebuild. The files
-skipped by the last reload are listed in the index's `skipped_canonical_files` meta key (path,
+that owns it, and an id-less file no longer mints a new ULID on every rebuild.
+
+**So is a file that cannot be read as a record.** A record file that is not valid JSON (a merge
+left conflict markers in it) or not valid UTF-8, that fails its model, or that cannot be serialised
+for the index, is left out with reason `parse-error`, and the rest of the store loads. A
+`bindings/` file must be a JSON list of objects that all validate; otherwise the whole file is
+left out, so a half-valid file never leaves half of its bindings in the index. The record the
+file belongs to stays retrievable, with no anchors until the file is fixed. A file that cannot be
+opened at all (`OSError`, such as a permission error) still fails the open: it can be transient.
+
+The files skipped by the last reload are listed in the index's `skipped_canonical_files` meta key (path,
 reason, size and mtime), and `Store.__init__` prints a warning naming them **on every open**
-while the list is non-empty, pointing at `sidegraph-verify`, which reports each one: a file that is not a JSON object or has
-no id as `parse-error`, an id that differs from the filename as `filename-id-mismatch`, and an
+while the list is non-empty, pointing at `sidegraph-verify`, which reports each one: a file that is not valid JSON or UTF-8, is
+not a JSON object or has no id as `parse-error`, an id that differs from the filename as `filename-id-mismatch`, and an
 unsafe id as `unsafe-record-id`. A listed file that has since vanished or changed makes the next open
-reload once, which rewrites the list, so fixing or deleting the file clears the warning.
+reload once, which rewrites the list, so restoring or fixing the file clears the warning. Restore
+it with git or fix it by hand: the warning never suggests deleting a record file, because that
+breaks the append-only store. **No canonical writer overwrites a listed file**: each of them
+refuses with an error naming the file, because the index holds none of its content and a
+recomputed write would destroy it.
+
 An archive segment line with a missing, unsafe or non-string id, or that is not a JSON object, is
 skipped with a warning too (a line of an unrecognized `record_type` is skipped silently); the rest of
 the segment loads. `sidegraph-verify` reports a missing, unsafe or non-string archive id as
-`unsafe-record-id`.
+`unsafe-record-id`. A line that is not valid UTF-8 or JSON, or whose decision or domain fails its
+model, is skipped the same way in the reload only (the segment is read as bytes and decoded line by
+line), and the segment is listed with reason `bad-archive-segment`, the code `sidegraph-verify`
+uses for it, with one violation per line naming the segment and the line number. Never delete a
+segment: its records have no other copy. `sidegraph-compact` keeps the
+strict rule: it refuses to run over a segment it cannot fully read, with an error naming the
+segment and the line.
 
 The digest also folds in a fixed identity-rule constant, so an index certified by code that
 predates this rule mismatches once, reloads through it and is re-certified: a poisoned index
@@ -454,7 +478,7 @@ happen on open when such a store's stamp is merely older than the running code's
 
 ## `SCHEMA_VERSION` and exact-match policy
 
-`SCHEMA_VERSION` (in `schema.py`) is currently `0.6.0`. The format-marker check (above) gates
+`SCHEMA_VERSION` (defined in `store_layout.py`, re-exported by `schema.py`) is currently `0.6.0`. The format-marker check (above) gates
 on the *major* component only; the index's own stamped `schema_version` inside `meta` is
 checked for an **exact** match on the fast (digest-matches) freshness path — a mismatch there
 normally raises immediately. The one exception is `_RELOADABLE_SCHEMA_VERSIONS` (currently

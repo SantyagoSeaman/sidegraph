@@ -115,6 +115,39 @@ def test_closed_fact_is_not_dangling(tmp_path):
     assert DANGLING_RECORD not in _codes(curate(tmp_path, now=NOW))
 
 
+def test_a_decision_whose_bindings_file_the_store_skipped_says_so_not_absent_or_empty(tmp_path):
+    """The bindings file exists but the store's reload left it out (a merge conflict): doctor
+    reads files silently, so it saw "no anchors" and said the file was "absent or empty"."""
+    from sidegraph.schema import Decision, DecisionKind, Provenance
+    from sidegraph.store import Store
+
+    db = tmp_path / ".sidegraph"
+    with Store(db) as store:
+        d = store.add_decision(
+            Decision(
+                title="t",
+                kind=DecisionKind.ADR,
+                context="c",
+                choice="ch",
+                valid_from=NOW,
+                provenance=Provenance(source="manual"),
+            )
+        )
+    (db / "bindings").mkdir(exist_ok=True)
+    (db / "bindings" / f"{d.id}.json").write_text("<<<<<<< HEAD\n[]\n", encoding="utf-8")
+    Store(db).close()  # the reload that lists the file
+
+    conn = doctor.open_curation_index(db)
+    try:
+        report = curate(db, now=NOW, index=conn)
+    finally:
+        conn.close()
+
+    [finding] = [f for f in report.findings if f.code == DANGLING_RECORD]
+    assert f"bindings/{d.id}.json is skipped (unreadable)" in finding.detail
+    assert "absent or empty" not in finding.detail
+
+
 def test_dangling_findings_are_path_sorted(tmp_path):
     r1 = _ulid_at(NOW - timedelta(seconds=2))
     r2 = _ulid_at(NOW - timedelta(seconds=1))

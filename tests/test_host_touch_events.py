@@ -13,6 +13,7 @@ import os
 from datetime import UTC, datetime
 
 import sidegraph.host.hooks as hooks
+from sidegraph.hot_index import HotIndex
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
 
@@ -52,6 +53,12 @@ def _repo(tmp_path):
     return root
 
 
+def _seed_store(db):
+    """The hook records into an existing store and never creates one (it reads the index
+    directly, see ``hot_index.HotIndex``), so a test about recording starts from one."""
+    Store(db).close()
+
+
 def test_absolute_payload_path_is_stored_repo_relative(tmp_path, monkeypatch, capsys):
     """THE row that matters (spec row 5). The host only ever sends absolute paths, while
     every anchor is repo-relative — recording the payload verbatim yields a join that is
@@ -59,6 +66,7 @@ def test_absolute_payload_path_is_stored_repo_relative(tmp_path, monkeypatch, ca
     root = _repo(tmp_path)
     absolute = str(root / "src" / "store.py")
     assert os.path.isabs(absolute)
+    _seed_store(tmp_path / "db")
 
     _run(monkeypatch, capsys, _payload("Read", file_path=absolute), tmp_path / "db", root)
 
@@ -112,6 +120,7 @@ def test_symlinked_root_still_yields_a_joining_key(tmp_path, monkeypatch, capsys
     root = _repo(tmp_path)
     link = tmp_path / "link"
     link.symlink_to(root)
+    _seed_store(tmp_path / "db")
 
     _run(
         monkeypatch,
@@ -130,6 +139,7 @@ def test_recording_survives_every_nudge_gate(tmp_path, monkeypatch, capsys):
     root = _repo(tmp_path)
     db = tmp_path / "db"
     target = str(root / "src" / "store.py")
+    _seed_store(db)
 
     # :319 — an empty store has no memory to nudge toward, but still records.
     _run(monkeypatch, capsys, _payload("Read", file_path=target), db, root)
@@ -236,13 +246,16 @@ def test_telemetry_off_records_nothing_while_on_records(tmp_path, monkeypatch, c
     assert len(_events(db)) == 1
 
 
-def test_a_store_failure_does_not_break_the_hook(tmp_path, monkeypatch, capsys):
+def test_an_index_failure_does_not_break_the_hook(tmp_path, monkeypatch, capsys):
+    """The hook writes through ``HotIndex``, not ``Store``: a failing touch write must still
+    leave the hook printing valid JSON."""
     root = _repo(tmp_path)
+    _seed_store(tmp_path / "db")
 
     def boom(*args, **kwargs):
         raise RuntimeError("index is on fire")
 
-    monkeypatch.setattr(Store, "record_touch", boom)
+    monkeypatch.setattr(HotIndex, "record_touch", boom)
     out = _run(
         monkeypatch,
         capsys,
@@ -263,6 +276,7 @@ def test_a_codex_touch_is_recorded_against_its_thread_not_the_workspace(
     db = tmp_path / "db"
     root = tmp_path
     (root / "a.py").write_text("x = 1\n")
+    _seed_store(db)
     umbrella = "01a0b3e2-39d2-7180-86a5-408a6f9ce058"
     thread = "rollout-2026-09-19T12-16-06-01a0b961-7463"
     payload = {

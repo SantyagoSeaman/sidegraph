@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import posixpath
+import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -21,7 +22,11 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast, get_args
 
+import anyio.to_thread
+import mcp.types as mt
 from fastmcp import FastMCP
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools import ToolResult
 from pydantic import ValidationError
 
 from . import nearest_anchored, seed_ladder
@@ -87,7 +92,7 @@ from .schema import (
     Relation,
     slugify,
 )
-from .store import VOLATILE_STALE_KEY, Store
+from .store import VOLATILE_STALE_KEY, Store, skipped_refusal_text
 from .sync import activate_accepted_domain, maybe_sync, report_as_dict, sync
 from .verify import verify_snapshot
 
@@ -140,6 +145,58 @@ def _get_store() -> Store:
             if _store is None:
                 _store = Store(resolve_store_location(search_ancestors=True).path)
     return _store
+
+
+def _refresh_store() -> None:
+    """Re-check the process's store against the record files, if it is open yet.
+
+    A store that is not open yet is not refreshed: the tool body that needs it opens it, and a
+    fresh open is current by construction. A filesystem error (``OSError``) does not fail the
+    tool call: a git checkout, pull or compact creates and deletes record files while the digest
+    walk lists and stats them, and the walk can lose that race. The reload is one transaction,
+    so the previous index is intact; the tool answers from it, one line says so on stderr, and
+    the next call checks again. Anything else (a schema mismatch, an index failure) propagates:
+    a tool call fails loudly rather than answer from an index it could not verify.
+    see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D4)
+    """
+    store = _store
+    if store is None:
+        return
+    try:
+        store.refresh_if_stale()
+    except OSError as exc:
+        print(
+            f"sidegraph: could not re-check the record files ({exc}); "
+            "answering from the previous index",
+            file=sys.stderr,
+        )
+
+
+class _RefreshStore(Middleware):
+    """Before every tool call, bring the open store up to date with the record files on disk.
+
+    ``_get_store()`` memoizes one ``Store`` for the life of the process and a ``Store`` checks
+    the record files only when it is constructed, so a record that arrives mid-session (a
+    ``git pull``, a teammate's write through another process) would stay invisible to every tool
+    until a restart. Middleware, not a call inside ``_get_store()``: that accessor runs two or
+    three times per tool, once after ``maybe_sync`` in ``get_task_context``, where a rebuild
+    would reset the synced bindings right before retrieval. Middleware also covers every tool,
+    including one added later, without a decorator anyone could forget. The check is a digest
+    walk with a rebuild only when the files changed; it runs on a worker thread so the event loop
+    never waits on the store's lock.
+    see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D4)
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        await anyio.to_thread.run_sync(_refresh_store)
+        return await call_next(context)
+
+
+mcp.add_middleware(_RefreshStore())
 
 
 def _commit_hint(store: Store) -> str | None:
@@ -425,7 +482,7 @@ def _resolve_anchors(
     ``orphaned`` is the entity summary of every leaf bound for an anchor that resolved to
     NOTHING. That leaf IS written (``anchoring.resolve_and_bind``: "created when resolved
     or unresolved"), deliberately — but it is dead on arrival: ``valid_decisions_for_entity``
-    skips orphaned bindings, so no retrieval path, no ``drill_down`` and no PreToolUse nudge
+    skips orphaned bindings, so no retrieval path, no ``drill_down`` and no PreToolUse hook
     can ever deliver the record through it, and no Tier-1 community fallback is created
     either (there is no resolved node to take a community from). Reporting it is the whole
     point: an unresolved anchor used to come back as ``bindings: 1``, an entity summary and
@@ -528,7 +585,7 @@ def add_decision(
     ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
     to nothing (always ``[]`` when no graph is present).
     The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
-    PreToolUse nudge skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
+    PreToolUse hook skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
     stale graph (run ``graphify update .``, then re-anchor), ``name-not-in-file`` means the
     name is wrong (``find_entity`` says what is there), ``no-file-path`` means pass
     ``file_path``. Repair with ``add_anchors`` — no duplicate record, no content-free
@@ -595,6 +652,11 @@ def _supersede_decision_impl(
     same best-effort ``git rev-parse HEAD`` (:func:`sidegraph.capture._capture_commit`).
     """
     _validate_anchors(anchors)
+    if not anchors and store.is_skipped("bindings", old_decision_id):
+        # Inheritance reads the predecessor's bindings from the index, and a bindings file the
+        # reload left out has no rows there, so the successor would be written with no anchors.
+        # see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D5
+        raise ValueError(skipped_refusal_text("bindings", old_decision_id))
     # See _add_decision_impl: title/context/choice are required, redacted directly (stays
     # `str`); only the optional pair goes through `_redact_fields` (returns `str | None`).
     title, n1 = redact(title)
@@ -712,7 +774,7 @@ def supersede_decision(
     ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
     to nothing (always ``[]`` when no graph is present).
     The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
-    PreToolUse nudge skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
+    PreToolUse hook skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
     stale graph (run ``graphify update .``, then re-anchor), ``name-not-in-file`` means the
     name is wrong (``find_entity`` says what is there), ``no-file-path`` means pass
     ``file_path``. Repair with ``add_anchors`` — no duplicate record, no content-free
@@ -887,7 +949,7 @@ def add_fact(
     ``{"entity_id", "canonical_name", "tier": 2}`` with no ``reason`` key; it heals on the
     next sync once a graph exists.
     The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
-    PreToolUse nudge skip it. When ``reason`` is present, read it first:
+    PreToolUse hook skip it. When ``reason`` is present, read it first:
     ``file-not-in-graph`` usually means a stale graph (run ``graphify update .``, then
     re-anchor), ``name-not-in-file`` means the name is wrong (``find_entity`` says what is
     there), ``no-file-path`` means pass
@@ -950,6 +1012,9 @@ def _supersede_fact_impl(
     if predecessor is None:
         raise ValueError(f"unknown fact {old_fact_id!r}")
     _validate_anchors(anchors)
+    if not anchors and store.is_skipped("bindings", old_fact_id):
+        # Same as _supersede_decision_impl: inheriting from a skipped bindings file copies nothing.
+        raise ValueError(skipped_refusal_text("bindings", old_fact_id))
     effective_supports = supports if supports is not None else predecessor.supports
     if not anchors and not store.bindings_for_record(old_fact_id):
         _require_fact_reachability(store, anchors, effective_supports)
@@ -3178,6 +3243,12 @@ def _add_anchors_impl(
     """
     if store.get_decision(record_id) is None and store.get_fact(record_id) is None:
         return {"error": f"unknown record {record_id!r}"}
+    # A bindings file the last reload left out (a merge conflict, say) cannot be written to:
+    # ``add_binding`` refuses. Say so BEFORE resolving the anchors, whose entities are minted
+    # and committed one mutation at a time and would stay behind as orphans.
+    # see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D5
+    if store.is_skipped("bindings", record_id):
+        raise ValueError(skipped_refusal_text("bindings", record_id))
     _validate_anchors(anchors)
 
     bound: list[dict] = []
@@ -3231,7 +3302,9 @@ def add_anchors(record_id: str, anchors: list[dict]) -> dict:
 
     Routing tries ``record_id`` as a decision, then as a fact; an id that resolves to
     neither writes nothing and returns ``{"error": "unknown record '<id>'"}`` (never a
-    guess). Anchors are validated before anything is written — an invalid ``relation``, a
+    guess). A record whose bindings file the store could not read (it is left out of the
+    index until restored or fixed) is refused with an error naming that file, before any
+    entity is minted. Anchors are validated before anything is written — an invalid ``relation``, a
     non-string ``name``/``file_path``, or a list with no named anchor raises, same as
     ``add_decision``/``add_fact``.
 

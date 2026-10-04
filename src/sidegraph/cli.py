@@ -64,6 +64,7 @@ from .capture import (
 from .config import (
     DEFAULT_GRAPH,
     DEFAULT_STORE_DIR,
+    StoreLocation,
     _store_project_root,
     borrowed_graph_candidate,
     default_graph_path,
@@ -640,8 +641,8 @@ def init_main(argv: list[str] | None = None) -> int:
     )
 
     print()
-    print("Wire up Claude Code — the plugin installs the MCP server and all three hooks")
-    print("(SessionStart, Stop, PreToolUse) automatically:")
+    print("Wire up Claude Code — the plugin installs the MCP server and all four hooks")
+    print("(SessionStart, Stop, PreToolUse, SubagentStart) automatically:")
     print()
     print("  /plugin marketplace add SantyagoSeaman/sidegraph")
     print("  /plugin install sidegraph@sidegraph")
@@ -1863,7 +1864,15 @@ def compact_main(argv: list[str] | None = None) -> int:
         print(f"store not readable ({args.db}): {e}")
         return 1
 
-    report = store.compact(older_than_days=args.older_than, dry_run=args.dry_run)
+    # A compaction is a mutation and stays strict about the archive: the store opens over a
+    # segment with an unreadable line, so the refusal (naming the segment and the line)
+    # arrives here and not from ``Store()``.
+    # see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D4)
+    try:
+        report = store.compact(older_than_days=args.older_than, dry_run=args.dry_run)
+    except ValueError as e:
+        print(f"cannot compact ({args.db}): {e}")
+        return 1
 
     if args.dry_run:
         for item in report.items:
@@ -2115,7 +2124,18 @@ def doctor_main(argv: list[str] | None = None) -> int:
     # check has nothing to say then, and the sync is what the skipped text already tells to run.
     index = open_curation_index(args.db)
     try:
-        report = curate(args.db, stale_days=args.stale_days, reader=reader, index=index)
+        # The host-wiring checks come from the host seam, so doctor.py stays free of it; only
+        # the ones listed for the doctor surface run.
+        # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
+        from .host.hooks import host_checks
+
+        report = curate(
+            args.db,
+            stale_days=args.stale_days,
+            reader=reader,
+            index=index,
+            host_checks=host_checks(StoreLocation(str(args.db), None)),
+        )
         statuses_known = index is not None and binding_statuses_computed(index)
     finally:
         if index is not None:

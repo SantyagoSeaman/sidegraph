@@ -7,6 +7,226 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-04
+
+### Added
+
+- **Host wiring that silently switched memory off is now visible.** Two field failures went
+  unnoticed for weeks: hooks that ran an old install under a newer plugin, and sessions started in
+  a subdirectory where the plugin was off. `SessionStart` now prints `Sidegraph <version>` right
+  after the standing instruction, and two advisory checks report the wiring, each with a notice
+  at most once a day (`plugin-off-in-subdirectories` only when a nested directory's own settings
+  leave the plugin off).
+  - `version-skew` compares the running package with the plugin manifest under
+    `$CLAUDE_PLUGIN_ROOT` (or else `$PLUGIN_ROOT`, which Codex sets) by numeric parts, and says
+    which side is stale. It does not run without a plugin root, a manifest named `sidegraph`, or a
+    version.
+  - `plugin-off-in-subdirectories` applies Claude Code's settings model (a launch directory's own
+    project settings only, the repository root's `.claude/settings.local.json` for every launch,
+    `enabledPlugins` merged key by key over user settings) to the directories of the repository.
+    It reports a plugin enabled only in the root's `.claude/settings.json`, and nested directories
+    whose own `enabledPlugins` leave it off. User settings are read from
+    `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, else from `~/.claude/settings.json`. It also lists in `sidegraph-doctor` under the finding code
+    `plugin-off-in-subdirectories`, and **`--check` exits `2` on it** like any finding.
+  The getting-started pages now say that enabling the plugin at user scope, or in the root's
+  `.claude/settings.local.json`, covers every subdirectory, and the setup skill reads the doctor
+  finding. See [troubleshooting](docs/guides/troubleshooting.md#version-skew).
+
+- **A subagent's brief carries the records for the files it names.** The task a subagent works
+  on is in the brief its parent wrote, which the `SubagentStart` brief cannot see. The
+  `sidegraph-pre-tool-use` entry point now also handles `Agent` (and `Task`, the older name): it
+  reads the files the brief names, and the files named in a `.md`, `.txt` or `.rst` document the
+  brief names (one hop, the first 64 KB), finds the records anchored to them, and returns the
+  call's own input with a block appended to `prompt` (`updatedInput`; no `permissionDecision`).
+  The subagent finds the block at the end of its first message. **The parent's view of its own
+  call does not show it**: its transcript keeps the prompt it wrote. A path resolves exactly when
+  it is an existing regular file inside the project root, and otherwise by a unique suffix among
+  the anchored files (`sub/x.py` for `pkg/sub/x.py`; an ambiguous suffix names nothing), tried
+  from the directory the agent was launched in before the root. A document is followed only when
+  it is a regular file inside the root, and **no hop goes through a project-instruction file**
+  (`CLAUDE.md`, `AGENTS.md` and their `.public` twins): they are still shown when records are
+  anchored to them, but the files they list are not followed. The block is grouped by file, two
+  records each, at most six record lines and 3,000 characters, and it ends with a
+  `More: get_task_context(files=[…])` line for the files shown; a file that misses the sixth
+  line by one still gets its first record there. It is **on by default**;
+  `SIDEGRAPH_AGENT_BRIEF=off` disables it. The plugin manifests (Claude Code only, the Codex ones
+  are unchanged) and the manual recipe gain a third `PreToolUse` group, matcher `Agent|Task`, on
+  the same command; a hand-wired setup needs that group added. Not tested: agent-team teammates
+  and `fork` spawns. See the
+  [hooks reference](docs/reference/hooks.md#subagent-briefs).
+
+- **Every subagent starts knowing that memory exists and how to ask it.** A subagent gets no
+  `SessionStart` context, and Explore and Plan agents load no `CLAUDE.md` either, so nothing
+  standing told one that decision memory exists. The new `sidegraph-subagent-start` hook, wired
+  to `SubagentStart` in the Claude Code and Codex plugins, answers with a short brief: the same
+  standing `get_task_context(files=[…])` call `SessionStart` gives the main agent, and one
+  sentence of what memory holds ("N records anchored to code in M files, K of them recorded
+  mistakes"). The counts are what `get_task_context` could return: live records that may surface,
+  with a live or degraded binding to an entity that names a file. It carries no records, prints
+  `{}` where there is nothing anchored to code, and, like `PreToolUse`, reads the index directly
+  and builds no `Store`. `SIDEGRAPH_SUBAGENT_BRIEF=off` disables it. Codex records trust per hook
+  definition, so approve the new hook once in `/hooks`; manual recipes for both hosts gain the
+  entry. See the [hooks reference](docs/reference/hooks.md#sidegraph-subagent-start).
+
+### Changed
+
+- **The capture nudge comes back after more work, instead of firing once per session.** A session
+  that runs for a day and spawns subagents used to get one chance to record what it decided, at
+  its first substantial `Stop`, often before the work worth recording. A session that was already
+  nudged is now nudged again when at least 30 minutes have passed since its last nudge and at
+  least 10 commits authored since then are reachable from a local branch or `HEAD`; the text of
+  that nudge ends with `Since the last capture prompt: N commits.`, and the first nudge is
+  unchanged. The count is one `git log --branches HEAD`, run in the project the store belongs to
+  with a 2-second timeout, and it goes by author dates, so a rebase or cherry-pick of old commits
+  is not new work. A git failure means no re-arm. The last nudge is the meta key
+  `capture_rearm:<session>`, which the first nudge writes too and SessionStart expires after 30
+  days; a session captured by an older version has no key and counts from the `captured_at` of its
+  `capture_sessions` row. The new stamp is written with a compare-and-swap, so two parallel `Stop`
+  hooks cannot both nudge. A `Stop` inside the 30 minutes still exits on the read-only peek and
+  runs no git: a subprocess measured on a copy of this repository's store with a 1,000-commit
+  repository takes about 39 ms inside the gap and about 47 ms past it with too few commits. The
+  nudge's length bound is 850 characters, up from 800, for the added sentence. The count includes
+  commits that other sessions or people make on the same machine's branches.
+  `SIDEGRAPH_CAPTURE_NUDGE=off` silences re-armed nudges too. See the
+  [hooks reference](docs/reference/hooks.md#re-arm-after-more-work).
+
+- **`PreToolUse` hands the agent the records of a file when it reads or edits it, instead of
+  asking it to fetch them.** The hook used to print a one-line nudge (a count, or the titles of
+  two records) and ask the agent to call `get_task_context`, which for a tool the host lists only
+  by name means loading it first. In the field study the one nudge that named a record worked and
+  the five that named counts did not, Edit and Write never nudged, and Bash, which is how current
+  Claude Code reads and searches, was never wired. The hook now prints the records themselves: the
+  guard line, then for each file a header and its top two records (three when the first two are
+  mistakes), each as `- [kind] title — first sentence of the choice (id …)`, accepted mistakes
+  first, proposals last and marked `[unratified]`, and a `More: get_task_context(files=[…])` line
+  when records were left out. It covers `Read`, `Grep`, `Edit` and `Write`, and four Bash read
+  commands, `sed`, `grep`, `rg` and `cat`, wired as four `if` entries on one command (`if` needs
+  Claude Code 2.1.89 for correct matching; an older host runs the hook on every Bash call, which
+  exits early with no output). A Bash line delivers the first three files it reads that have
+  records. Each file arrives once per agent, and an agent receives at most ten files: one SQL
+  statement counts and inserts a `pretool_file:<session>:<agent>:<path>` key, where `<agent>` is
+  `-` for the session's own agent, so concurrent hooks cannot exceed the cap. The counting form
+  (`this project has a decision memory … N domains, M decisions`) is gone, the `pretool_nudge:`
+  and `pretool_nudge_path:` keys are no longer written (SessionStart still prunes them, and the
+  new keys after 30 days), and a Bash read is still not a touch event. **`SIDEGRAPH_GREP_NUDGE=off`
+  keeps its name and now turns off all of this**, on every tool that reads (not the `Agent`
+  brief below, which has its own switch); it stops neither the hook from
+  launching on a Bash call nor touch recording. A subprocess median of nine on this repository's
+  store: about 26 ms when nothing is delivered, about 35 ms for a `Read` of the file with the most
+  records, about 38 ms for a Bash line naming three anchored files. A hand-wired
+  `.claude/settings.json` gains the Bash group (see the
+  [setup guide](docs/getting-started/claude-code-setup.md#2-add-the-hooks)). The `PreToolUse`
+  commands, in the plugin and in that snippet, no longer set `SIDEGRAPH_GRAPH`, which the hook
+  never read: Graphify's `graphify claude install` and `uninstall` remove a `Bash` entry whose
+  text mentions `graphify`, and would otherwise have removed the hand-wired group. See the
+  [hooks reference](docs/reference/hooks.md#sidegraph-pre-tool-use).
+
+- **The plugin's hot hooks start from the commit `SessionStart` resolved, not from `@main`.**
+  `uv` re-resolves a branch reference on every call, about 0.8 s on a warm cache, and `Stop` and
+  `PreToolUse` run many times a session. `SessionStart` now records the commit `uv` resolved for
+  an `@main` install in `${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit`: 40 hex bytes,
+  one file per machine, never written by an install pinned to a tag or SHA, an editable install
+  or a PyPI install. The public `Stop` and `PreToolUse` commands (Claude Code) and `Stop` (Codex)
+  launch `uvx --from` that commit, which `uv` serves from its cache in about 0.2 s, and fall back
+  to `@main` when there is no valid file, as before. A plugin pinned to a tag or commit ignores
+  the file and launches its own ref. `SessionStart` and the MCP server still run `@main`. A release therefore reaches a running session at the next `SessionStart` on the
+  machine, in any project and either host, not at its next hook call. The Codex `Stop` command is
+  wrapped in `sh -c '…'` so a fish login shell parses one literal. Codex records trust per hook
+  definition, so approve the changed `Stop` hook once in `/hooks`; the command no longer changes
+  between releases. `sidegraph-bootstrap`'s verification finds an entry point inside such a
+  `sh -c` script. See [troubleshooting](docs/guides/troubleshooting.md#the-launch-commit-file).
+
+- **`PreToolUse` and `Stop` start about three times faster, and a tool call no longer creates a
+  store.** `import sidegraph.<anything>` used to load pydantic, ulid and every model, and
+  `PreToolUse` constructed a `Store`, which walks every record file, once for the touch row and
+  once for the nudge. The package root now resolves its re-exports on first access;
+  `PreToolUse` reads and writes `index.db` through one raw SQLite handle, with the same nudge
+  text, the same one-shot claim and the same touch row; and `Stop` imports `Store` only past its
+  early exits. On this repository's own store (about 1,500 record files), a subprocess median of
+  nine: a hook call that does nothing falls from about 83 ms to about 25 ms, an `Edit` from about
+  96 ms to about 30 ms, a `Read` from about 127 ms to about 35 ms, and the two `Stop` early exits
+  from about 87 ms to about 34 ms. The handle trusts the index as the last full open left it and
+  does nothing, printing `{}`, when the index is missing, a store-owned entry is a symlink, the
+  `schema_version` is not this version's, `retrieval_events` has no `agent` column, or opening it
+  fails. A `Store` open (a `SessionStart`, a command, a started MCP server) repairs a missing, empty or
+  older-layout index and refuses a symlinked entry or an unknown `schema_version`, as before; a
+  running server does not recreate a deleted index. A write that waits out the one-second lock timeout is not
+  retried in that run. **Behaviour change:** a `Read` or
+  `Edit` in a project without a store no longer creates `.sidegraph/`, and the nudge path no
+  longer prints "creating new store"; `SessionStart` and the MCP server still create the store.
+  A record that arrives mid-session can be missing from the nudge's titles until the next MCP
+  call. See the [hooks reference](docs/reference/hooks.md#sidegraph-pre-tool-use).
+
+### Fixed
+
+- **A finished background agent, an agent-team message or a `!` command's output no longer counts
+  as a typed prompt.** Claude Code writes each of these into the transcript as a `type: "user"`
+  line without the `isMeta` flag, so the `Stop` gate counted it: a session with one request and two
+  background agents passed the two-prompt gate at its first stop, and the capture nudge, which fires
+  once per session, was spent before there was anything to record. The gate now skips content that
+  starts `<task-notification>`, `<teammate-message` (the tag carries attributes, and is how a
+  teammate's own session receives a message), `Another Claude session sent a message` (how the
+  lead's session receives one) or `<bash-stdout>`, next to the three slash-command wrappers it
+  already skipped. It also skips a line that newer Claude Code marks with
+  `origin.kind: "task-notification"` or `promptSource: "system"`, which catches task
+  notifications written in plain prose. A slash command the
+  person typed, which starts `<command-message>`, and a `!` command's own `<bash-input>` still
+  count. Codex rollouts share the prefixes. See the
+  [hooks reference](docs/reference/hooks.md#sidegraph-stop).
+- **A running MCP server sees a record that arrives mid-session.** The server keeps one `Store`,
+  and a `Store` checks the record files only when it is opened, so after a `git pull`
+  `get_task_context` and `retrieve_decisions` kept answering from the index as it stood until the
+  server restarted. The `PreToolUse` hook, which opened a `Store` on every call, was what
+  refreshed it, by accident. Every tool call now first re-checks the record files: a digest walk
+  (about 8 ms on 1,500 files), and a rebuild only when something changed. A filesystem error during
+  that check, such as a checkout deleting a record file mid-walk, does not fail the call: the tool
+  answers from the previous index and one line goes to stderr.
+- **One record file that does not parse no longer switches memory off.** A merge that left
+  conflict markers in a decision, entity, fact or bindings file made the index rebuild raise, so
+  the store could not be opened: every hook fell back to "cannot open its store", and the MCP
+  server served nothing. The rebuild now skips such a file, whether it is invalid JSON, invalid
+  UTF-8, a wrong shape, rejected by its model or impossible to serialise, lists it as
+  `parse-error`, and loads the rest. The usual notice names the first such file, and
+  `sidegraph-verify` reports each of them; a file that fails validation no longer hides its
+  archived copy. A bindings file is skipped whole, so a half-valid file never leaves half of its
+  anchors in the index, and its record stays retrievable without them. A file that cannot be
+  opened at all (a permission or I/O error) still fails the open.
+- **An archive line that cannot be read costs that line, not the store.** A line of an archive
+  segment that is not valid UTF-8 or JSON, or whose decision or domain fails its model, is skipped
+  with a warning in the rebuild, the rest of the segment loads, and the segment is listed as
+  `bad-archive-segment`. `sidegraph-verify` reports each such line with its segment and line
+  number. `sidegraph-compact` keeps the strict rule: it refuses to run over a segment it cannot
+  fully read and names the segment and the line (`--dry-run` included, with exit code 1 and no
+  traceback), and a hot file the rebuild left out no longer makes `--dry-run` fail with a bare
+  `JSONDecodeError`.
+- **A file the rebuild left out is never overwritten.** With the store open again, a write that
+  recomputes a record's bindings from the index (`add_anchors`, `add_binding`) would have replaced
+  a conflicted bindings file with only the new anchor. All six canonical writers now refuse to
+  replace a listed file, with an error that names it. `add_anchors` checks first, so its refusal
+  leaves no orphan entity file behind. `supersede_decision` and `supersede_fact` refuse to inherit
+  anchors from a predecessor whose bindings file is skipped, since the successor would silently
+  start with none. `sidegraph-doctor` now says a skipped bindings file is skipped (unreadable),
+  not absent or empty. While an entity file is skipped, an anchor to the
+  same name mints a second entity, which `sidegraph-doctor`'s `duplicate-entity` check shows once
+  the file is fixed.
+- **The skip warning no longer says "remove".** Removing a record file breaks the append-only
+  store, and removing an archive segment destroys every archived record in it. The warning now
+  says to restore the file with git or fix it by hand, and never to delete a segment. The
+  `store-files-skipped` notice says the same when the first listed file is an archive segment:
+  its lines that could not be read are left out, restore it with git, never delete it.
+- **`sidegraph-verify` and `sidegraph-doctor` report what the rebuild leaves out.** They read an
+  archive segment as one string, so a line of invalid UTF-8 made them exit 1 with "store not
+  readable" and no file, and a line whose decision or domain fails its model was not reported at
+  all. They now split a segment into lines as bytes and report each bad line as
+  `bad-archive-segment`, with its segment and line number. A record file of invalid UTF-8, one
+  nested past the recursion limit and one that validates but cannot be serialised (a lone
+  surrogate) are `parse-error`s naming the file, where the first two exited 1 and the third
+  reported clean. A title holding U+2028 or U+0085 no longer gives a false `bad-archive-segment`.
+- **Compacting a decision whose title holds U+2028 or U+0085 no longer leaves a store that will
+  not open.** The archive reader split a segment with `str.splitlines`, which breaks a line at
+  those characters (the segment holds them raw), so the next rebuild raised "corrupt archive
+  segment". A segment is now split as bytes, at `\n` and `\r` only.
+
 ## [0.8.0] — 2026-10-03
 
 ### Added

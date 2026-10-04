@@ -238,7 +238,7 @@ for how this differs from a `Domain`.
 
 ## `schema_version` — a public contract
 
-`SCHEMA_VERSION` (currently `0.6.0` in `schema.py`) is stamped into the store's `meta` table
+`SCHEMA_VERSION` (currently `0.6.0`, defined in `store_layout.py` and re-exported by `schema.py`) is stamped into the store's `meta` table
 once, at creation, and checked for an **exact** match on the fast (digest-matches) freshness
 path — a mismatch there normally raises immediately rather than silently reading mismatched
 data. The one exception: a store stamped with a version in `_RELOADABLE_SCHEMA_VERSIONS`

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from sidegraph.engine.reader import ResolveResult
 from sidegraph.schema import Decision, DecisionKind, Fact, Provenance
 from sidegraph.server import _add_anchors_impl
@@ -182,3 +184,28 @@ def test_add_anchors_leaves_record_file_byte_identical(tmp_path):
     after_mtime_ns = path.stat().st_mtime_ns
     assert after_bytes == before_bytes
     assert after_mtime_ns == before_mtime_ns
+
+
+def test_add_anchors_over_a_skipped_bindings_file_is_refused_before_any_entity_is_minted(
+    tmp_path,
+):
+    """The decision's bindings file is a merge conflict the reload left out, so ``add_binding``
+    refuses to overwrite it. Unfixed, the anchor's entity file was minted first, in its own
+    committed mutation, and stayed behind as an orphan.
+    see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D5"""
+    db = tmp_path / "srv.db"
+    with Store(db) as store:
+        d = _decision(store)
+    bindings = db / "bindings" / f"{d.id}.json"
+    bindings.parent.mkdir(exist_ok=True)
+    bindings.write_text("<<<<<<< HEAD\n[]\n=======\n[]\n>>>>>>> branch\n", encoding="utf-8")
+    before = bindings.read_bytes()
+
+    with Store(db) as store:
+        assert store.is_skipped("bindings", d.id)
+        with pytest.raises(ValueError, match=f"bindings/{d.id}.json"):
+            _add_anchors_impl(
+                store, None, d.id, anchors=[{"name": "sync.py", "file_path": "src/sync.py"}]
+            )
+    assert sorted((db / "entities").glob("*.json")) == []
+    assert bindings.read_bytes() == before

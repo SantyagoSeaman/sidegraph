@@ -4,15 +4,18 @@ What actually runs, where, and what it costs. Every number here was measured on 
 repository (216 Python files / 2,035 tracked files, and a store holding 239 decisions
 across 1,426 canonical JSON files) on an Apple-silicon laptop, measured 2026-09-17. They
 are **order-of-magnitude guidance, not a performance contract**, and they scale with your
-corpus, not with ours. Re-measure before quoting these numbers elsewhere.
+corpus, not with ours. Re-measure before quoting these numbers elsewhere. The hook and
+MCP-call rows were re-measured on 2026-10-03 (a subprocess median of nine, a store of about
+1,500 record files).
 
 ## What runs when
 
 | Trigger | What runs | Cost here | Notes |
 |---|---|---|---|
 | Every agent session start | `sidegraph-session-start` hook: opens the store, best-effort sync, renders the memory map | **~350 ms** | Degrades to a shorter map without a graph; a failure never blocks the session |
-| Every `Read`/`Grep`/`Edit`/`Write` tool call | `sidegraph-pre-tool-use` hook: path lookup + at most one nudge per agent per kind | **~110 ms** | May write local touch/one-shot telemetry to `index.db`; failure is swallowed by design |
-| Every agent session end | `sidegraph-stop` hook: capture nudge | ~110 ms | Same failure posture |
+| Every `Read`/`Grep`/`Edit`/`Write` tool call, and every Bash line that contains `sed`, `grep`, `rg` or `cat` | `sidegraph-pre-tool-use` hook: one scan of the entities, the records of at most three files, one claim per file | **~26 ms** when it prints nothing; **~35 ms** for a `Read` that delivers the busiest file here (48 records, 2 shown); **~38 ms** for a Bash line that names three anchored files | Reads and writes `index.db` directly, without opening a `Store`; may write local touch/per-file claim telemetry; failure is swallowed by design. In process the same three calls cost under 0.1 ms, 4.5 ms and 6.3 ms; the rest is the interpreter starting |
+| Every agent session end | `sidegraph-stop` hook: capture nudge | **~35-40 ms** for a Stop that exits before the capture check (hook already active, session already captured, not yet substantial); **~45-50 ms** for a Stop of a captured session past the 30-minute re-arm gap but below its commit threshold (one `git log`); **~175 ms** for a Stop that reaches the first nudge, and **~0.6-0.7 s** for a re-armed nudge, at most once per 30 minutes per session (opens the store, refreshes the drift cache) | Same failure posture |
+| Every MCP tool call | The server's freshness check before the tool runs: a digest walk over the record files, and a rebuild only if they changed | **+11 ms** per call (17 ms against 6 ms without the check); **~90 ms** when a record changed | A filesystem error during the walk does not fail the call: it answers from the previous index |
 | First store open after a `git pull` (or any change to canonical files) | SQLite index rebuild from the canonical JSON | **~160 ms** (1,106 files) | Automatic, no command to run; the index is gitignored and derived |
 | Store open with a fresh index | open + full decision scan | **~13 ms** | |
 | Code-graph rebuild (`graphify update .`) | The **engine's** job, not Sidegraph's | **~8 s** (5,508 nodes) | Optional layer; runs when you choose (commit hook / CI / manually). Sidegraph degrades to file-path anchors without it |
@@ -23,12 +26,16 @@ above does one pass and exits. A host may keep the stdio MCP server process aliv
 session; work still happens only when the host calls a tool.
 
 **Do the multiplication before you adopt.** The PreToolUse number is per *tool call*, and a
-heavy session makes hundreds: at ~110 ms, 200 calls is ~22 s and 500 calls is ~55 s of added
-wall clock per session, per developer. That is the number to weigh, not the 110 ms — and it
+heavy session makes hundreds: at ~35 ms, 200 calls is ~7 s and 500 calls is ~18 s of added
+wall clock per session, per developer. That is the number to weigh, not the 35 ms — and it
 is the strongest argument for keeping the hook matcher narrow (it fires on Read/Grep/Edit/
-Write only) or dropping the PreToolUse hook entirely while keeping SessionStart and the MCP
-tools, which costs you the nudge channel measured in the whitepaper's §8.3 and nothing
-else.
+Write, and on a Bash call only when the line contains `sed`, `grep`, `rg` or `cat`, through four
+`if` entries: over the field replay that was 2,977 hook processes for 3,923 Bash calls, fewer
+than a plain `Bash` matcher would start) or dropping the PreToolUse hook entirely while keeping
+SessionStart and the MCP tools, which costs you the point-of-read channel (measured for its
+earlier, request form in the whitepaper's §8.3) and nothing else. A host older than Claude Code
+2.1.85 ignores `if` and runs the hook on every Bash call, at the early-exit cost of about 26 ms
+from a source checkout (about 190 ms for the public `uvx` form).
 
 ## Disk
 

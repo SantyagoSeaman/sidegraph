@@ -534,7 +534,7 @@ class ProposeResult(BaseModel):
     anchors_skipped: list[dict] = Field(default_factory=list)
     # Entity summaries [{"entity_id", "canonical_name", "tier": 2}, ...] for anchors that
     # resolved to NOTHING. The leaf is still written -- orphaned, deliberately, never
-    # dropped -- but it is dead on arrival: retrieval, drill_down and the PreToolUse nudge
+    # dropped -- but it is dead on arrival: retrieval, drill_down and the PreToolUse hook
     # all skip orphaned bindings, and no Tier-1 community fallback is created either, so the
     # record has no delivery path through that anchor at all. Reported because the agent
     # writing the draft is the only one who can still fix the name, and it used to get back

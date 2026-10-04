@@ -70,6 +70,7 @@ from .store import (
     _MIGRATABLE_SCHEMA_VERSIONS,
     _RELOADABLE_SCHEMA_VERSIONS,
     _archive_line_problem,
+    _archive_payload_problem,
     symlinked_internals,
 )
 
@@ -141,15 +142,21 @@ def _iter_json_files(dir_path: Path) -> list[Path]:
 def _load_raw_json(path: Path) -> tuple[object | None, Violation | None]:
     """Read+parse one file as JSON. Never raises — a decode/read failure becomes a
     :data:`PARSE_ERROR` violation instead, so one corrupt file never aborts the whole
-    snapshot pass."""
+    snapshot pass. A file that is not UTF-8, or is nested past the recursion limit, is one too,
+    naming its path (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md
+    D2)."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
         return None, _violation(PARSE_ERROR, path, f"unreadable: {e}")
+    except ValueError as e:  # UnicodeDecodeError: the file is not UTF-8
+        return None, _violation(PARSE_ERROR, path, f"invalid UTF-8: {e}")
     try:
         return json.loads(text), None
     except json.JSONDecodeError as e:
         return None, _violation(PARSE_ERROR, path, f"invalid JSON: {e}")
+    except RecursionError:  # nested deeper than the stack: the reload skips such a file too
+        return None, _violation(PARSE_ERROR, path, "invalid JSON: nested too deeply")
 
 
 def _check_filename_matches_id(path: Path, rid: str) -> Violation | None:
@@ -227,13 +234,17 @@ def _check_temporal_dir(
             raw_by_id[rid] = raw
             path_by_id[rid] = path
         try:
-            model.model_validate(raw)
+            # ``model_dump_json`` too: the reload runs it on every record, so a payload that
+            # validates but cannot be serialised (a lone surrogate) is left out of the index.
+            model.model_validate(raw).model_dump_json()
         except ValidationError as e:
             errors = e.errors()
             if len(errors) == 1 and _VALIDITY_WINDOW_MSG in errors[0]["msg"]:
                 violations.append(_violation(BAD_VALIDITY_WINDOW, path, errors[0]["msg"]))
             else:
                 violations.append(_violation(PARSE_ERROR, path, str(e)))
+        except ValueError as e:  # pydantic's serialisation error
+            violations.append(_violation(PARSE_ERROR, path, f"cannot be serialised: {e}"))
     return raw_by_id, path_by_id, all_paths_by_id, violations
 
 
@@ -271,8 +282,8 @@ def _check_plain_dir(
             raw_by_id[rid] = raw
             path_by_id[rid] = path
         try:
-            model.model_validate(raw)
-        except ValidationError as e:
+            model.model_validate(raw).model_dump_json()  # see _check_temporal_dir
+        except ValueError as e:  # ValidationError, or a payload that cannot be serialised
             violations.append(_violation(PARSE_ERROR, path, str(e)))
     return raw_by_id, path_by_id, all_paths_by_id, violations
 
@@ -304,8 +315,8 @@ def _check_bindings_dir(
         for i, item in enumerate(raw):
             payload = item if isinstance(item, dict) else {}
             try:
-                AnchorBinding.model_validate({**payload, "record_id": record_id})
-            except ValidationError as e:
+                AnchorBinding.model_validate({**payload, "record_id": record_id}).model_dump_json()
+            except ValueError as e:  # ValidationError, or a payload that cannot be serialised
                 violations.append(_violation(PARSE_ERROR, f"{path}#{i}", str(e)))
                 continue
             items.append(payload)
@@ -331,11 +342,13 @@ class _ArchiveIndex:
 def _check_archive_dir(dir_path: Path) -> _ArchiveIndex:
     """``archive/*.jsonl`` — one JSON object per line (see
     ``docs/reference/store-format.md#archive-segments-sidegraph-compact`` and
-    ``store._archive_record_line``). A line that fails to parse is
+    ``store._archive_record_line``). A line that fails to decode, parse or validate is
     :data:`BAD_ARCHIVE_SEGMENT`, scoped separately from :data:`PARSE_ERROR` (which is
     reserved for the one-file-per-record canonical directories) since "this JSONL segment has
     a bad line" and "this record file is corrupt" are different failure shapes worth
-    distinguishing in a report."""
+    distinguishing in a report. These are exactly the lines the store's reload leaves out and
+    lists, so the notice that says "run ``sidegraph-verify``" finds them here
+    (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D4)."""
     decisions: dict[str, dict] = {}
     domains: dict[str, dict] = {}
     decision_entries: dict[str, list[tuple[Path, dict]]] = {}
@@ -345,17 +358,20 @@ def _check_archive_dir(dir_path: Path) -> _ArchiveIndex:
         return _ArchiveIndex(decisions, domains, decision_entries, domain_entries, violations)
     for path in sorted(dir_path.glob("*.jsonl")):
         try:
-            text = path.read_text(encoding="utf-8")
+            data = path.read_bytes()
         except OSError as e:
             violations.append(_violation(BAD_ARCHIVE_SEGMENT, path, f"unreadable: {e}"))
             continue
-        for lineno, raw_line in enumerate(text.splitlines(), start=1):
+        # Split and decode the way the store's reader does (``Store._read_archive_segment``):
+        # ``bytes.splitlines`` breaks only at \n and \r, so a title holding U+2028 or U+0085
+        # stays whole, and one line of invalid UTF-8 costs only that line.
+        for lineno, raw_line in enumerate(data.splitlines(), start=1):
             line = raw_line.strip()
             if not line:
                 continue
             try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as e:
+                obj = json.loads(line.decode("utf-8"))
+            except (ValueError, RecursionError) as e:  # not UTF-8, not JSON, or nested too deep
                 violations.append(_violation(BAD_ARCHIVE_SEGMENT, path, f"line {lineno}: {e}"))
                 continue
             if not isinstance(obj, dict):
@@ -377,6 +393,15 @@ def _check_archive_dir(dir_path: Path) -> _ArchiveIndex:
                     )
                 )
                 continue
+            # The same payload check the store's reload runs on every archive line: a record
+            # the model rejects is left out of the index. It stays in the id maps below, like
+            # a hot file that fails validation (see ``_check_temporal_dir``): its id and
+            # status are still real data for the cross-reference checks.
+            problem = _archive_payload_problem(record_type, payload)
+            if problem is not None:
+                violations.append(
+                    _violation(BAD_ARCHIVE_SEGMENT, path, f"line {lineno}: {problem}")
+                )
             if record_type == "decision" and "id" in payload:
                 decisions.setdefault(payload["id"], payload)
                 decision_entries.setdefault(payload["id"], []).append((path, payload))
@@ -1057,7 +1082,7 @@ def _git_show_json(repo_root: Path, ref: str, repo_path: str) -> dict:
         raise ValueError(f"git show {ref}:{repo_path} failed: {result.stderr.strip()}")
     try:
         obj = json.loads(result.stdout)
-    except json.JSONDecodeError as e:
+    except (ValueError, RecursionError) as e:
         raise _UnparsableContent(str(e)) from e
     if not isinstance(obj, dict):
         raise _UnparsableContent(f"{repo_path}@{ref} is not a JSON object")
@@ -1067,7 +1092,7 @@ def _git_show_json(repo_root: Path, ref: str, repo_path: str) -> dict:
 def _read_json_object(path: Path) -> dict:
     try:
         obj = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         raise _UnparsableContent(str(e)) from e
     if not isinstance(obj, dict):
         raise _UnparsableContent(f"{path} is not a JSON object")

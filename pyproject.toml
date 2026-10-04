@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.8.0"
+version = "0.9.0"
 description = "Own the memory, rent the graph — a durable decision/lessons layer as a sidecar over a code-graph engine."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -36,6 +36,10 @@ dependencies = [
     "pydantic>=2.9",
     "fastmcp>=3.4",
     "python-ulid>=3.0",
+    # Imported directly by server.py (the refresh middleware). Both arrive through fastmcp;
+    # the bounds are the ones that import needs (mcp: fastmcp-slim's own lower bound).
+    "anyio>=4",
+    "mcp>=1.24",
 ]
 
 [project.urls]
@@ -50,6 +54,7 @@ sidegraph-mcp = "sidegraph.server:main"
 sidegraph-session-start = "sidegraph.host.hooks:session_start"
 sidegraph-stop = "sidegraph.host.hooks:stop"
 sidegraph-pre-tool-use = "sidegraph.host.hooks:pre_tool_use"
+sidegraph-subagent-start = "sidegraph.host.subagent:subagent_start"
 sidegraph-init = "sidegraph.cli:init_main"
 sidegraph-ratify = "sidegraph.cli:ratify_main"
 sidegraph-sync = "sidegraph.cli:sync_main"

@@ -45,7 +45,7 @@ only ever reads `graph.json`, so the plain install above is all it needs.
 
 ```
 # 2. Inside a Claude Code session in that repo: install the plugin — MCP server + all
-#    three hooks, wired automatically.
+#    four hooks, wired automatically.
 /plugin marketplace add SantyagoSeaman/sidegraph
 /plugin install sidegraph@sidegraph
 ```
@@ -139,7 +139,7 @@ projects the full store, history included, into an OKF v0.1 bundle any OKF consu
  next session ◀── SessionStart TOC            anchored to entities in the
  of named domains ◀── get_task_context ◀────── engine's graph (read-only);
  mistakes first        drill_down             re-anchored after refactors
- blind Read/Grep ──▶ nudged back to get_task_context (each form once per agent)
+ Read / Edit / Bash read ──▶ the file's records delivered in the call (once per file per agent)
 ```
 
 Two layers age differently: the **structure** layer (the code graph — entities,

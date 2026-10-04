@@ -6,8 +6,8 @@ description: Use when Sidegraph needs to be set up (or its setup finished/verifi
 # Set up Sidegraph
 
 Bring a repo from zero to a working memory loop. One fact up front: **if this skill is
-running, the Sidegraph plugin is already installed** — the MCP server and all three hooks
-(`SessionStart`, `Stop`, `PreToolUse`) are wired and run via `uvx` straight from the
+running, the Sidegraph plugin is already installed** — the MCP server and all four hooks
+(`SessionStart`, `Stop`, `PreToolUse`, `SubagentStart`) are wired and run via `uvx` straight from the
 repository. What may still be missing: the engine, the graph, the store, and the first
 memory. Work through the steps in order; every one is idempotent and safe to re-run.
 
@@ -55,6 +55,17 @@ on an empty store is expected, not broken. For the full seven-case proof (durabi
 mistakes-first, refactor survival, ...), point the human at
 [verifying your setup](../../../../docs/guides/verifying-your-setup.md).
 
+Then run `sidegraph-doctor --json` (a pure read; with no command on `PATH`, run it the way step 3
+runs `sidegraph-init`) and read the finding `plugin-off-in-subdirectories`. It says that Claude
+sessions started below the repository root run without Sidegraph: the plugin is enabled only in
+the root's `.claude/settings.json`, which Claude Code reads for root launches alone, or a nested
+directory's own settings leave it off. The fix changes the human's settings, so put the options
+to them and do not edit the files unasked: enable the plugin in `.claude/settings.local.json` at
+the root (it applies to every directory of the repository) or in their user settings. Version
+skew is not part of this step: a session's Bash tool has no plugin root to compare against, so
+the `Sidegraph <version>` line `SessionStart` prints and its notice cover it. See
+[troubleshooting](../../../../docs/guides/troubleshooting.md#plugin-off-in-subdirectories).
+
 ## 5. Keep the graph fresh (ask the human first)
 
 A graph nobody rebuilds goes stale, and memory then cannot see or anchor to new code. Ask the
@@ -69,7 +80,7 @@ doc changes.) Details:
 [keeping the graph fresh](../../../../docs/integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
 
 **Do NOT run `graphify claude install`.** The plugin already fronts the graph for Claude
-Code (SessionStart map, read nudge, MCP); Graphify's own Claude wiring is redundant and
+Code (SessionStart map, records on read and edit, MCP); Graphify's own Claude wiring is redundant and
 noisier — see
 [why](../../../../docs/integrations/graphify.md#graphify-claude-install-is-redundant-with-the-sidegraph-plugin--skip-it).
 

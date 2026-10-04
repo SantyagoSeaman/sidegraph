@@ -131,11 +131,11 @@ def test_codex_mcp_config_public_twin_uses_uvx_not_uv_run() -> None:
 
 def test_codex_hooks_config_parses() -> None:
     """Same shape as test_codex_mcp_config_parses_and_names_sidegraph above: the base
-    `hooks.json` ships on both sides and must always parse with SessionStart/Stop hooks that
-    cd to the repo root first."""
+    `hooks.json` ships on both sides and must always parse with its SessionStart, Stop and
+    SubagentStart hooks, each cd-ing to the repo root first."""
     for path in (p for p in (_HOOKS, _HOOKS_PUBLIC) if p.is_file()):
         hooks = _load_json(path)["hooks"]
-        assert set(hooks.keys()) == {"SessionStart", "Stop"}
+        assert set(hooks.keys()) == {"SessionStart", "Stop", "SubagentStart"}
         for event_hooks in hooks.values():
             command = event_hooks[0]["hooks"][0]["command"]
             assert "git rev-parse --show-toplevel" in command

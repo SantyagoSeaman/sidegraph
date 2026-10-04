@@ -54,9 +54,12 @@ from .gitenv import git_env
 from .store import (
     _TERMINAL_DECISION_STATUSES,
     _TERMINAL_DOMAIN_STATUSES,
+    SKIP_BAD_ARCHIVE_SEGMENT,
     SKIPPED_CANONICAL_KEY,
     VOLATILE_STALE_KEY,
     Store,
+    parse_skip_list,
+    skipped_segment_text,
 )
 
 Severity = Literal["broken", "degraded", "advisory"]
@@ -533,24 +536,29 @@ def _detect_store_files_skipped(inputs: Inputs) -> Problem | None:
     if index is None:
         raise _NotRun
     row = index.execute("SELECT value FROM meta WHERE key = ?", (SKIPPED_CANONICAL_KEY,)).fetchone()
-    if row is None:
-        return None
-    try:
-        entries = json.loads(row[0])
-    except ValueError:
-        return None
-    if not isinstance(entries, list):
-        return None
-    entries = [e for e in entries if isinstance(e, dict) and isinstance(e.get("path"), str)]
+    entries = parse_skip_list(row[0]) if row is not None else []
     if not entries:
         return None
     first = entries[0]
-    more = f", and {len(entries) - 1} more" if len(entries) > 1 else ""
-    text = (
-        f"Sidegraph: {len(entries)} store file(s) could not be indexed and are left out of "
-        f"memory: {first['path']} ({first.get('reason') or 'no reason recorded'}){more}. Run "
-        "`sidegraph-verify` to list them, then fix or restore them with git."
-    )
+    if first.get("reason") == SKIP_BAD_ARCHIVE_SEGMENT:
+        # A segment is not a file to fix or remove: its other lines loaded, and deleting it
+        # would destroy every archived record in it. Say what ``Store`` warns on stderr.
+        also = (
+            f" {len(entries) - 1} more store file(s) were left out as well."
+            if len(entries) > 1
+            else ""
+        )
+        text = (
+            f"Sidegraph: {skipped_segment_text(first['path'])} Run `sidegraph-verify` to list "
+            f"the lines.{also}"
+        )
+    else:
+        more = f", and {len(entries) - 1} more" if len(entries) > 1 else ""
+        text = (
+            f"Sidegraph: {len(entries)} store file(s) could not be indexed and are left out of "
+            f"memory: {first['path']} ({first.get('reason') or 'no reason recorded'}){more}. Run "
+            "`sidegraph-verify` to list them, then fix or restore them with git."
+        )
     return Problem(
         check="store-files-skipped",
         severity="degraded",

@@ -112,6 +112,23 @@ def test_negative_stale_days_is_usage_error(tmp_path, capsys):
     assert "--stale-days" in capsys.readouterr().out
 
 
+def test_an_archive_segment_of_invalid_utf8_is_a_violation_not_an_unreadable_store(
+    tmp_path, capsys
+):
+    """Unfixed, the segment's whole-file read raised and the command exited 1 with "store not
+    readable" and no file name."""
+    db = _seed_healthy(tmp_path)
+    segment = db / "archive" / "2020-01-01-1-deadbeef0000.jsonl"
+    segment.parent.mkdir()
+    segment.write_bytes(b'{"record_type": "decision", "title": "\xff\xfe"}\n')
+
+    assert doctor_main(["--db", str(db)]) == 2
+
+    out = capsys.readouterr().out
+    assert f"bad-archive-segment  {segment}" in out
+    assert "not readable" not in out
+
+
 # -- --json --------------------------------------------------------------------------------
 
 

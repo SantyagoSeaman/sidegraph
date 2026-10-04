@@ -24,7 +24,7 @@
 ## Integrations
 
 - [integrations/graphify.md](integrations/graphify.md) — the engine seam: GraphifyReader over graph.json
-- [integrations/claude-code.md](integrations/claude-code.md) — the host seam: MCP server + SessionStart/Stop/PreToolUse hooks
+- [integrations/claude-code.md](integrations/claude-code.md) — the host seam: MCP server + SessionStart/Stop/PreToolUse/SubagentStart hooks
 - [integrations/codex.md](integrations/codex.md) — Codex integration
 
 ## Guides
@@ -43,7 +43,7 @@
 
 - [reference/mcp-tools.md](reference/mcp-tools.md) — all 24 MCP tools (including add_fact/supersede_fact, list_facts, sync_anchors, verify_store, add_anchors): parameters, return shape, when they're called
 - [reference/cli.md](reference/cli.md) — all fourteen commands documented on the page: sidegraph-bootstrap, sidegraph-init, sidegraph-ratify, sidegraph-sync (including --json/--check), sidegraph-import (rationale nodes and `--docs` markdown, including the profile scope filter and --any-doc), sidegraph-domains, sidegraph-compact, sidegraph-verify (snapshot + --against transition layer), sidegraph-doctor, sidegraph-viz, sidegraph-export-okf, sidegraph-stats (local usage statistics, `--window`/`--json`), sidegraph-prepare-commit-msg, and sidegraph-blame: flags, output, exit codes
-- [reference/hooks.md](reference/hooks.md) — sidegraph-session-start, sidegraph-stop, and sidegraph-pre-tool-use: env, JSON I/O, guarantees
+- [reference/hooks.md](reference/hooks.md) — sidegraph-session-start, sidegraph-stop, sidegraph-pre-tool-use, and sidegraph-subagent-start: env, JSON I/O, guarantees
 - [reference/git-bindings.md](reference/git-bindings.md) — commit trailers (candidate rules, comment-char handling, fail-open bounded stages, installation) and sidegraph-blame (trailer + provenance joins and output caps)
 - [reference/configuration.md](reference/configuration.md) — every environment variable (SIDEGRAPH_DIR primary, SIDEGRAPH_DB deprecated), store path resolution, budget defaults, graph version semantics, the domain sync/TOC cache
 - [reference/stability.md](reference/stability.md) — what is committed, provisional, or not a contract at all: the store format and CLI are committed, MCP return shapes and flow profiles are provisional, rendered retrieval text and archive segments are not a contract; plus the behaviours (mistakes-first, quarantine, drift marking, no egress) that stay guaranteed even where their surface is not

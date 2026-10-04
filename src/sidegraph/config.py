@@ -98,8 +98,8 @@ def _warn_deprecated_sidegraph_db(value: str) -> None:
 
 # The bridge between processes (D2): the PreToolUse hook knows the host's session id, the
 # MCP server does not. SessionStart publishes it here — index-only key/value, the same
-# mechanism host/hooks.py's `_PRETOOL_NUDGE_KEY_PREFIX` uses. The value carries a write
-# timestamp because `meta` does not expire on its own (the PreToolUse nudge prefixes are
+# mechanism host/hooks.py's `_PRETOOL_FILE_KEY_PREFIX` uses. The value carries a write
+# timestamp because `meta` does not expire on its own (the PreToolUse key prefixes are
 # the exception: SessionStart prunes them, but this key is not one of them; this repo's live
 # store once held 34 stale nudge keys), and a key that outlived its session would attribute
 # every later CLI or pytest retrieval to it. Defined here, not in host/hooks.py, so server.py

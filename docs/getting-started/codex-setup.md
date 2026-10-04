@@ -25,17 +25,19 @@ The commands below follow the current development branch. For durable environmen
 /plugin install sidegraph@sidegraph
 ```
 
-Installs the MCP server, the `SessionStart`/`Stop` hooks, and all 12 skills in one step,
+Installs the MCP server, the `SessionStart`/`Stop`/`SubagentStart` hooks, and all 12 skills in one step,
 pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by default.
-It runs everything via `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`
-under the hood, so it builds straight from this repository, no PyPI publish needed. See
+It builds straight from this repository, no PyPI publish needed: the MCP server and `SessionStart`
+run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main` under the hood, and
+`Stop` and `SubagentStart` start from the commit `SessionStart` resolved. See
 [the plugin install path](../integrations/codex.md#plugin-install-path) for exactly what
 gets registered and the cwd-pinning details, and what has and hasn't been verified live.
 
-1. Trust the hooks: start an interactive `codex` session in the repo. Codex detects the two
-   new Sidegraph hook definitions (`SessionStart`, `Stop`) and prompts you in the terminal to
-   trust them. Approve to complete it. Skip or decline and the MCP tools still work, but
-   retrieval at session start and the capture reminder at session end stay silent. A hook
+1. Trust the hooks: start an interactive `codex` session in the repo. Codex detects the new
+   Sidegraph hook definitions (`SessionStart`, `Stop`, `SubagentStart`) and prompts you in the
+   terminal to trust them. Approve to complete it. Skip or decline and the MCP tools still work,
+   but retrieval at session start, the capture reminder at session end and the memory brief a
+   subagent gets at its start stay silent. A hook
    definition change in a later release needs a fresh approval. Review or re-approve anytime
    with `/hooks`.
 
@@ -110,6 +112,16 @@ Create `.codex/hooks.json` in the repo:
           }
         ]
       }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-subagent-start || printf '{}\\n'"
+          }
+        ]
+      }
     ]
   }
 }
@@ -122,6 +134,10 @@ working on a non-git corpus too (Sidegraph doesn't require the corpus to be a gi
 [`integrations/graphify.md`](../integrations/graphify.md#non-git-and-doc-only-corpora)), where a
 bare `git rev-parse --show-toplevel` would fail and leave `cd` with no argument.
 
+The `SubagentStart` entry gives each subagent a short brief (the `get_task_context` call to make,
+and what memory holds), because a subagent gets no `SessionStart` context; see
+[`reference/hooks.md`](../reference/hooks.md#sidegraph-subagent-start).
+
 The trailing `|| printf …` is a guard, and it should stay. On `Stop`, Codex feeds a hook's stderr
 back to the model when the hook exits 2, and `uv` exits 2 on some of its own errors (a project it
 cannot find, a cache it cannot write), so a command that never reaches Python could keep
@@ -131,8 +147,8 @@ answers a `systemMessage` telling you to run the hook command in a terminal to s
 every hook command in the plugin; see [`integrations/codex.md`](../integrations/codex.md#hooks-ga).
 
 No `PreToolUse` entry is included above. Codex can invoke that event for local function tools,
-but it has no stable `Read`/`Grep` tool pair to which Sidegraph's Claude-specific redirect can
-attach. Therefore Claude Code's Read/Grep redirect nudge
+but it has no stable `Read`/`Grep` tool pair to which Sidegraph's Claude-specific records block
+can attach. Therefore Claude Code's `PreToolUse` delivery of a file's records
 (`sidegraph-pre-tool-use`) has no Codex counterpart to wire up yet — see
 [`integrations/codex.md`](../integrations/codex.md) for details.
 

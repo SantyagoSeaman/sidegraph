@@ -358,8 +358,11 @@ def test_corrupt_archive_segment_error_names_path_and_line(tmp_path) -> None:
     bad_segment = archive_dir / "2020-01-01-1-deadbeef0000.jsonl"
     bad_segment.write_text(good_line + "\nnot json at all\n", encoding="utf-8")
 
-    with pytest.raises(ValueError) as exc_info:
-        Store(tmp_path / "s")
+    # The reload tolerates the line and the store opens; the compaction, a mutation, does not
+    # run over a segment it cannot fully read (design/superpowers/specs/
+    # 2026-10-03-store-survives-a-bad-file-design.md D4, T11).
+    with Store(tmp_path / "s") as reopened, pytest.raises(ValueError) as exc_info:
+        reopened.compact()
     msg = str(exc_info.value)
     assert str(bad_segment) in msg
     assert "line 2" in msg

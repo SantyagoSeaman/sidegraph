@@ -21,13 +21,23 @@ The commands below follow the current development branch. For durable environmen
 /plugin install sidegraph@sidegraph
 ```
 
-Installs the MCP server and all three hooks (`SessionStart`, `Stop`, `PreToolUse`) in one
-step, pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by
-default. It runs everything via `uvx --from git+https://github.com/SantyagoSeaman/
-sidegraph.git@main` under the hood, so it builds straight from this repository — no PyPI
-publish needed, works today. See
+Installs the MCP server and all four hooks (`SessionStart`, `Stop`, `PreToolUse`,
+`SubagentStart`) in one step, pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by
+default. It builds straight from this repository — no PyPI publish needed, works today: the MCP
+server and `SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/
+sidegraph.git@main` under the hood, and `Stop`, `PreToolUse` and `SubagentStart` start from the
+commit `SessionStart` resolved. See
 [the plugin install path](../integrations/claude-code.md#plugin-install-path) for exactly
 what gets registered and the cwd-pinning details. Skip to [Verify](#verify) once installed.
+
+**Scope.** `/plugin install` offers three scopes: user, local and project. From a terminal the
+flag is `claude plugin install sidegraph@sidegraph --scope user|project|local`, and the default
+is user. Enable the plugin at user scope, or in the repository root's
+`.claude/settings.local.json`, and it covers sessions started in any subdirectory. Project scope
+(`.claude/settings.json`) covers only the directory it was installed from: Claude Code reads a
+launch directory's own project settings and no parent's, so a plugin installed at the repository
+root leaves sessions started below it without it. `sidegraph-doctor` reports the gap as
+[`plugin-off-in-subdirectories`](../guides/troubleshooting.md#plugin-off-in-subdirectories).
 
 ## Option B — manual registration
 
@@ -111,7 +121,51 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(sed *)",
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+          },
+          {
+            "type": "command",
+            "if": "Bash(grep *)",
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+          },
+          {
+            "type": "command",
+            "if": "Bash(rg *)",
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+          },
+          {
+            "type": "command",
+            "if": "Bash(cat *)",
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-subagent-start || printf '{}\\n'"
           }
         ]
       }
@@ -119,6 +173,10 @@ Add to `.claude/settings.json` (merge into an existing file):
   }
 }
 ```
+
+These recipes keep plain `@main` on every command, which is simpler to copy. The plugin's own
+`Stop`, `PreToolUse` and `SubagentStart` commands start from the commit `SessionStart` resolved,
+which is faster on each call; see [the plugin install path](../integrations/claude-code.md#plugin-install-path).
 
 From a source checkout, replace each `uvx --from git+... <entrypoint>` above with `uv run
 --project /ABSOLUTE/PATH/TO/sidegraph <entrypoint>` (see the note in step 1). Keep the trailing
@@ -136,18 +194,35 @@ The env vars are inlined into the command because Claude Code hook entries have 
   standing instruction to call `get_task_context` before any search — bash grep/rg/find and
   MCP structure-query tools included, not just `Read`/`Grep` (see
   [`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start)).
-- `Stop` nudges the agent, at most once per session and only once the session has produced
+- `Stop` nudges the agent, once per session and only once the session has produced
   **>= 2 real user prompts** (a substance gate — a session's very first `Stop` no longer
-  triggers it), to propose durable decisions via `propose_decisions` before it finishes; set
+  triggers it), to propose durable decisions via `propose_decisions` before it finishes, and
+  again after 30 minutes and 10 new commits; set
   `SIDEGRAPH_CAPTURE_NUDGE=off` (alongside the other env vars in the command) to disable it
   entirely. See [`reference/hooks.md`](../reference/hooks.md#sidegraph-stop) for the exact
   nudge text and the substance gate's mechanics.
-- `PreToolUse` redirects a blind `Read`/`Grep` on a source file toward
-  `get_task_context`/`drill_down` with a one-line, non-blocking nudge: a generic form and a
-  path-specific form, each firing at most once per agent on its own one-shot key, so the
-  session's own agent can see up to two, and so can each subagent it starts, only when the
-  store actually has decision memory to offer. Set
-  `SIDEGRAPH_GREP_NUDGE=off` (alongside the other env vars in the command) to disable it.
+- `PreToolUse` hands the agent the records anchored to a file when it reads or edits it — a
+  `Read`, `Grep`, `Edit` or `Write`, or a Bash line whose `sed`, `grep`, `rg` or `cat` names it —
+  as a non-blocking block: the top two records (three when the first two are mistakes) with their
+  ids, and a line naming `get_task_context` for the rest. Each file arrives once per agent, at
+  most three files per call and ten per agent, and the session's own agent and every subagent it
+  starts count separately; a file with no records prints nothing. Bash is wired as four entries
+  (`if` is `Bash(sed *)`, `Bash(grep *)`, `Bash(rg *)`, `Bash(cat *)`) with the same command, and
+  needs Claude Code 2.1.89 for correct matching. Set `SIDEGRAPH_GREP_NUDGE=off` (alongside the
+  other env vars in the command) to turn off all of it. See
+  [`reference/hooks.md`](../reference/hooks.md#sidegraph-pre-tool-use).
+- The `Agent|Task` group runs that same command when the agent spawns a subagent. It appends the
+  records for the files the subagent's brief names (and for the files named in a plan or notes
+  document that the brief names) to the brief, so the subagent starts with them. The subagent sees the block in
+  its first message; the parent's view of its own call is unchanged. Set
+  `SIDEGRAPH_AGENT_BRIEF=off` (alongside the other env vars in the command) to turn it off. See
+  [`reference/hooks.md`](../reference/hooks.md#subagent-briefs).
+- `SubagentStart` gives every subagent a short brief, because a subagent gets no `SessionStart`
+  context and Explore and Plan agents load no `CLAUDE.md`: the same `get_task_context` call the
+  `SessionStart` instruction names, and one sentence on how many records memory holds and on how
+  many files. Without this entry your subagents start unaware that memory exists. Set
+  `SIDEGRAPH_SUBAGENT_BRIEF=off` (alongside the other env vars in the command) to disable it. See
+  [`reference/hooks.md`](../reference/hooks.md#sidegraph-subagent-start).
 
 > **Don't also run `graphify claude install`.** It writes its own `PreToolUse` hooks into
 > `.claude/settings.json` that nudge toward `graphify query` on every read — redundant with
