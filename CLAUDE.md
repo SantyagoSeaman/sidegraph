@@ -13,7 +13,7 @@ task-aware retrieval + decision memory riding on the engine's entity graph.
 continuing participant in the project. A core feature must preserve, organize, or deliver
 accumulated project understanding. Document search by itself is not the product.
 
-Sidegraph is pre-1.0 (v0.10.0) — the full loop (capture, ratification, mistakes-first
+Sidegraph is pre-1.0 (v0.11.0) — the full loop (capture, ratification, mistakes-first
 retrieval, refactor-surviving re-anchoring, semantic docs layer, mind-model domains, and the
 facts evidence layer) ships and is exercised end-to-end, but interfaces may still move before
 a stable release. See
@@ -98,8 +98,9 @@ See [`docs/concepts/data-model.md`](docs/concepts/data-model.md) for the record 
 ```bash
 uv sync                            # install deps into .venv
 uv run pre-commit install          # once per clone — the lint gate runs before each commit
-uv run pytest                      # run tests
-uv run pytest tests/test_store.py -q
+uv run pytest tests/test_store.py -q   # while editing: the touched file (-x, --lf)
+uv run pytest -m "not slow"         # broader pre-push check: skips subprocess-heavy tests, still minutes
+uv run pytest                      # full suite: once before a commit or PR (CI runs it again)
 uv run pre-commit run --all-files  # lint + format + types, exactly what CI runs
 uv run sidegraph-mcp               # run the decision MCP server (stdio)
 ```

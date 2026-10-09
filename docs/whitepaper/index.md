@@ -1,6 +1,6 @@
 # Decision Memory for Coding Agents
 
-**Engineering whitepaper — rev 6.0, 2026-09-15.** *Author:* Alexander Makeev
+**Engineering whitepaper — rev 6.1, 2026-10-04.** *Author:* Alexander Makeev
 ([github.com/SantyagoSeaman](https://github.com/SantyagoSeaman)).
 
 ## Abstract
@@ -28,8 +28,8 @@ alternatives, and the evidence behind them, binds each decision to the code or t
 area of the project it governs, and keeps the old record whenever a decision is
 reversed. It then brings that memory to the next session at three moments: a map of
 where knowledge lives when the session starts, the relevant records when the agent
-asks for context on a task, and a reminder of what is anchored to a file when the
-agent opens it. Before a design is written, it can also pull every record the planned
+asks for context on a task, and short records anchored to a file when the agent
+reads or edits it. Before a design is written, it can also pull every record the planned
 change would touch.
 
 The result is the mental map of a project, the one that forms in people's heads, made
@@ -132,12 +132,12 @@ session does its work.
    that depend on the same code. From a decision, they can walk back through every
    earlier version it replaced.
 3. **The project can stop going in circles.** A rejected alternative travels inside
-   the record of the decision that rejected it, together with the reason, and arrives
-   whenever that record is delivered. The abandoned approach can reach the next
+   the record of the decision that rejected it, together with the reason. An agent can
+   retrieve that account in detail, so the abandoned approach can reach the next
    session before that session rebuilds it.
 4. **Memory tells you when it has gone stale.** When a commit changes a file a record
-   is anchored to, the record is marked as drifted wherever it is delivered. When the
-   code a record points at can no longer be found, or matches more than one candidate,
+   is anchored to, task retrieval marks the record as drifted. When the code a record
+   points at can no longer be found, or matches more than one candidate,
    the binding is marked orphaned or degraded instead of silently moving to the
    nearest similar symbol.
 5. **It rides beside the workflow a team already runs.** Sidegraph hooks into the
@@ -354,8 +354,8 @@ What one episode can show is the design session reading the earlier reasoning be
 choosing anything, and answering each record in writing.
 
 In this case memory arrived because the design session asked for it, but Sidegraph
-also pushes memory to the agent, as the session-start map and a reminder when the
-agent opens a file (Section 6.3).
+also pushes memory to the agent, as the session-start map and short records when the
+agent reads or edits a file (Section 6.3).
 
 ## 6. How it works
 
@@ -421,8 +421,9 @@ minted once and never reused. With [Graphify](https://github.com/safishamsi/grap
 the optional code-graph engine that maps a project's functions, classes, and files,
 Sidegraph also stores the entity's current name, file path, and graph node beside that
 id, so names and locations can change without breaking the records attached to them.
-Without Graphify, records still anchor to file paths and domains, and only
-symbol-level anchors are lost.
+Without Graphify, stored records retain their file and domain anchors and remain
+available through store tools, and the session-start map still works. Task context
+seeded by file paths and code-graph resolution require the graph.
 
 A record usually carries anchors at several levels. Leaf anchors point at concrete
 code: a function, a class, a module, a file. Broader anchors point at an area of the
@@ -480,20 +481,29 @@ an experienced engineer moves from the whole system to one piece of code.
    lessons, and gotchas come first, and the whole response fits a fixed budget, by
    default 6,000 characters of memory and 4,000 for a short map of the named entities
    and their neighbours in the code graph.
-3. **File contact:** the first time the agent reads or searches a source file in a
-   session, a hook adds a one-line note suggesting retrieval, and when memory is
-   anchored to that file, a second note names it. Each kind of note appears at most
-   once per session. The hook observes every read, search, edit, and write, but it
-   adds notes only on reads and searches.
+3. **File contact:** on supported read, search, edit, and write calls, a hook delivers
+   short records anchored to the files being touched. Delivery is bounded to once per
+   file per agent, for at most ten files per agent in a session. A subagent has its own
+   allowance, so a parent's earlier read does not consume the child's opportunity to
+   receive the same memory.
 
 The first and third stages happen without the agent asking. The second depends on the
-agent calling the tool, which it can skip. That choice is the largest gap in delivery,
-and Section 8.3 reports how large it was and what narrowed it.
+agent calling the tool, which it can skip. Short automatic delivery gives the agent
+record titles and the opening of each decision's choice even without that call; task
+retrieval supplies fuller context, including the rationale and rejected alternatives.
+Section 8.3 reports the gap measured under the earlier reminder-based mechanism.
 
-All three stages were measured on Claude Code. [Codex
-CLI](https://developers.openai.com/codex/cli) runs the session-start and session-end
-hooks, but its hook events do not yet cover file reads, so the third stage does not
-exist there.
+Subagents also receive a short starting brief explaining how to ask for memory when
+indexed file-anchored decisions exist. On Claude Code, the hook on an Agent call can
+add task-specific records to the delegated brief, using the files named in the task.
+These paths help memory reach the agent doing the work, even when it starts with a
+separate context.
+
+Claude Code supports all three stages. Sidegraph's [Codex
+CLI](https://developers.openai.com/codex/cli) integration wires session-start,
+session-end, and subagent-start hooks, but does not wire the file-contact or Agent-call
+delivery paths. The measurements in Section 8 used Claude Code and predate the current
+record-delivery hooks.
 
 One more path serves planning rather than work: the plan check that Section 5.3 showed
 in use. It takes the change a design intends and sorts every record it finds into one
@@ -511,8 +521,10 @@ The record is written as accepted because a person asked for it, even if that pe
 never read the agent's final wording.
 
 **Proposals at session end** catch what nobody asked for. When a substantial session
-ends, a hook reminds the agent once that it can record what the session produced. With
-its working context still loaded, the same agent drafts the durable parts: what was
+reaches a stopping point, a hook reminds the agent that it can record what the session
+produced. In a long session, the reminder can rearm after both thirty minutes and ten
+new authored commits reachable from local branches or HEAD since the previous reminder.
+With its working context still loaded, the same agent drafts the durable parts: what was
 decided and why, where it applies, and what a failing test, a reviewer's reversal, or
 a constraint discovered by trial taught the session. No second model is involved.
 
@@ -583,10 +595,11 @@ When the code graph changes, anchors are resolved again through the ladder in Se
 
 For each live record, Sidegraph also checks whether any commit made since the record
 was captured changed a file the record is anchored to. When one did, the record is
-marked `[drifted]` wherever it is delivered, and a health check, `sidegraph-doctor`,
-lists drifted records and unhealthy anchors for review. A person then confirms the
-record, repairs its anchor, or supersedes it with a current account, which extends the
-chain instead of rewriting it.
+marked `[drifted]` in task retrieval, and a health check, `sidegraph-doctor`,
+lists drifted records and unhealthy anchors for review. The short record excerpts
+injected by hooks do not carry this marker. A person then confirms the record, repairs
+its anchor, or supersedes it with a current account, which extends the chain instead
+of rewriting it.
 
 Drift detection sees files that changed. It cannot see prose that became false for
 another reason: a behavior change elsewhere in the system, an external constraint that
@@ -660,6 +673,9 @@ nothing to deliver them changed nothing observable, which is why everything memo
 contributes depends on a delivery path.
 
 ### 8.3 Delivered memory reaches answers, but agents often skip retrieval
+
+These measurements used the earlier file-contact hook, which prompted retrieval
+rather than delivering record excerpts.
 
 Every session in the full system received the session-start map, and the quality of
 its answer tracked what it did next. Sessions that called retrieval included 83% of
@@ -817,18 +833,16 @@ in a team unwilling to review and maintain records.
 
 ### 10.2 Count the full cost
 
-Every session spends context on the map injected at session start, and more when the
-agent calls the retrieval tool. People must review proposals, repair anchors that no
-longer resolve, and decide whether drifted records still hold. Those human costs have
-not been measured.
+Every session spends context on the map injected at session start, and more when
+hooks deliver records or the agent calls the retrieval tool, including in subagents.
+People must review proposals, repair anchors that no longer resolve, and decide whether
+drifted records still hold. Those human costs have not been measured.
 
-The file-contact hook adds about 110 ms to each read, search, edit, and write it
-observes. At 200 to 500 such calls, that adds roughly 22 to 55 seconds to a session.
-Disabling the hook removes only the reminder it adds when a file is read or searched,
-while the session-start map and the retrieval tool keep working. The [operations
-reference](../../docs/reference/operations.md) lists the measured local costs. Model
-cost can rise or fall depending on the repository (Section 8.5), so an expected saving
-is not a reason to adopt.
+The file-contact hook also adds latency to the calls it observes, which can add up
+across hundreds of calls. That cost depends on the launcher and execution path; the
+[operations reference](../../docs/reference/operations.md) describes the current paths
+and their measured local costs. Model cost can rise or fall depending on the repository
+(Section 8.5), so an expected saving is not a reason to adopt.
 
 ### 10.3 Run a bounded pilot
 
@@ -842,33 +856,37 @@ The [pilot kit](../../docs/pilot-kit/README.md) sets out a staged pilot:
    records captured during live work to the store, so that it does not rest on imports
    alone.
 4. Enable delivery, run the questions with and without memory, blind the answers, and
-   compare cost, quality, and how often sessions call the retrieval tool.
+   compare cost, quality, and whether records reach the agents doing the work. Count
+   explicit retrieval calls separately from automatic delivery.
 
 An imported ADR set can seed the store before step 3.
 
-The kit suggests stop conditions, derived from the measured repositories, to set
-before step 3:
+The kit suggests stop conditions to set before step 3. Some have starting values
+derived from the measured repositories; delivery and quality need pilot-specific limits:
 
 | Measure | Default stop condition |
 |---|---|
 | Model cost | The pilot's question set costs more than **15%** above baseline |
-| Delivery | With delivery enabled, more than **40%** of sessions never call the retrieval tool (Sidegraph's own first measured release, at 43%, would have failed this gate) |
+| Delivery | Records fail to reach working agents, including subagents, more often than a limit set before step 3; inspect record delivery through both tools and hooks |
 | Queue health | The oldest unreviewed proposal is older than **30 days** |
 | Answer quality | Blinded quality with memory falls below the no-memory run by more than a margin set before step 3 |
 
-The kit also recommends re-measuring, every month, the share of sessions that never
-call the retrieval tool, rather than assuming that agents keep paying attention to
-reminders.
+The earlier reminder-based pilot used a **40%** ceiling on sessions with no retrieval
+call; Sidegraph's first measured release, at 43%, would have failed it. That proxy no
+longer measures record delivery: a hook can deliver records without a retrieval call.
+The kit therefore recommends checking actual record receipt, including in subagents,
+every month, while tracking explicit retrieval calls separately. The current delivery
+paths have no measured default threshold; receipt alone also does not establish use.
 
 The quality gate comes without a default number. On the monorepo in Section 8.5, the
 cost gate would have caught the quality loss, but only because cost happened to rise
 at the same time. A repository can just as well lose quality while staying cheap, so
 the margin is worth choosing deliberately for each pilot.
 
-The measurements behind these gates come from diagnostics that stay on each
-developer's machine and are ignored by [Git](https://git-scm.com). A rollout across
-many developers needs its own privacy-reviewed way to aggregate them, which Sidegraph
-does not provide.
+Inspect saved hook output and agent transcripts for record receipt; a tool-call count
+alone is insufficient. Existing delivery diagnostics stay on each developer's machine
+and are ignored by [Git](https://git-scm.com). A rollout across many developers needs
+its own privacy-reviewed way to aggregate them, which Sidegraph does not provide.
 
 ### 10.4 Keep the exit cheap
 

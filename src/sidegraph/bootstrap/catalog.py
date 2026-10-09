@@ -12,6 +12,7 @@ from pydantic import BaseModel, ValidationError
 from sidegraph.bootstrap.model import FrozenModel
 from sidegraph.schema import Decision, DecisionStatus, Domain, Fact
 from sidegraph.store import _archive_line_problem, _record_identity_problem
+from sidegraph.store_layout import NOT_A_FILE_REASON, is_regular_file, stat_entry
 
 
 class CanonicalCatalog(FrozenModel):
@@ -34,6 +35,16 @@ class CanonicalCatalog(FrozenModel):
         )
 
 
+def _is_regular(path: Path) -> bool:
+    """False only for an entry that exists and is not a regular file (a directory or FIFO named
+    like a record, which a read would crash on or block). A path that cannot be statted is left
+    to the read, which reports it as before."""
+    try:
+        return is_regular_file(stat_entry(path))
+    except OSError:
+        return True
+
+
 def _load_identified[ModelT: BaseModel](
     path: Path, model: type[ModelT], id_field: str
 ) -> ModelT | None:
@@ -42,6 +53,9 @@ def _load_identified[ModelT: BaseModel](
     is skipped with a warning. Keying it by its JSON id would mint a fresh ULID for a missing
     id on every load, so the fingerprint would differ between two loads of one store (design/
     superpowers/specs/2026-09-29-record-identity-design.md D12)."""
+    if not _is_regular(path):
+        print(f"sidegraph: WARNING skipping {path}: {NOT_A_FILE_REASON}.", file=sys.stderr)
+        return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
@@ -64,6 +78,9 @@ def load_canonical_catalog(store_dir: Path) -> CanonicalCatalog:
     decisions: dict[str, Decision] = {}
     domains: dict[str, Domain] = {}
     for segment in sorted((store_dir / "archive").glob("*.jsonl")):
+        if not _is_regular(segment):
+            print(f"sidegraph: WARNING skipping {segment}: {NOT_A_FILE_REASON}.", file=sys.stderr)
+            continue
         try:
             lines = segment.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError) as exc:

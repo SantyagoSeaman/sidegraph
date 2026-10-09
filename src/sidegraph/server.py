@@ -3798,7 +3798,8 @@ def verify_store() -> dict:
     against its schema; ``schema_version`` is present and known; ``valid_to >=
     valid_from``; a ``superseded`` record has a successor (its ``supersedes`` chain
     resolves); every ``supersedes`` target exists; every binding references an existing
-    entity; every fact ``supports`` references an existing decision; ULIDs are unique
+    entity; every fact ``supports`` references an existing decision; every domain's
+    ``parent_id`` names an existing domain and no parent chain loops; ULIDs are unique
     across hot files AND archive segments (byte-IDENTICAL archive-archive duplicates from
     a sanctioned cross-branch ``sidegraph-compact`` merge are exempt); archive segments
     parse as JSONL; every hot record file is named ``<its own internal id>.json``.
@@ -3941,7 +3942,19 @@ def add_anchors(record_id: str, anchors: list[dict]) -> dict:
 
 
 def main() -> None:
-    """Console-script entry point (``sidegraph-mcp``)."""
+    """Console-script entry point (``sidegraph-mcp``).
+
+    ``-h``/``--help`` prints the usage and exits before the server starts; the transport's
+    stdin loop would otherwise wait on it. Other arguments are still ignored.
+    """
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        sys.stdout.write(
+            "usage: sidegraph-mcp [-h]\n"
+            "The Sidegraph decision MCP server, speaking MCP over stdio. An MCP client\n"
+            "starts it, not you. Configuration is by environment variable; see\n"
+            "docs/reference/configuration.md.\n"
+        )
+        raise SystemExit(0)
     mcp.run()
 
 

@@ -231,6 +231,7 @@ def _run_in_group(
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
+@pytest.mark.slow  # runs a real shell command and waits out its timeout
 def test_t2_a_timed_out_command_leaves_no_process_behind(tmp_path: Path) -> None:
     """The cleanup the FIFO case relies on, tested directly: the grandchild of a command that
     timed out is gone, not just the shell."""
@@ -326,6 +327,7 @@ _RECORDS: list[Any] = [
 ]
 
 
+@pytest.mark.slow  # runs the hot command in a real shell
 @pytest.mark.parametrize("shell", _SHELLS)
 @pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
 def test_t2_no_record_launches_the_branch(
@@ -346,6 +348,7 @@ _SHELL_RECORDS: list[Any] = [
 ]
 
 
+@pytest.mark.slow  # runs the hot command in a real shell
 @pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
 @pytest.mark.parametrize(("shell", "content", "want"), _SHELL_RECORDS)
 def test_t2_the_record_decides_the_launch_ref(
@@ -368,6 +371,7 @@ def test_t2_the_record_decides_the_launch_ref(
 _PINNED = "v0.9.0"
 
 
+@pytest.mark.slow  # runs the hot command in a real shell
 @pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
 def test_a1_a_pinned_ref_keeps_its_ref_whatever_the_record_holds(
     host: str, event: str, command: str, manifest: Path, tmp_path: Path
@@ -383,6 +387,7 @@ def test_a1_a_pinned_ref_keeps_its_ref_whatever_the_record_holds(
     assert _from_value("/bin/sh", pinned, tmp_path) == _URL + _PINNED
 
 
+@pytest.mark.slow  # runs the hot command in a real shell
 @pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
 def test_a2_a_fallback_on_the_branch_takes_the_record(
     host: str, event: str, command: str, manifest: Path, tmp_path: Path
@@ -396,6 +401,7 @@ def test_a2_a_fallback_on_the_branch_takes_the_record(
     assert _from_value("/bin/sh", on_branch, tmp_path) == _URL + COMMIT
 
 
+@pytest.mark.slow  # runs the hot command in a real shell
 @pytest.mark.parametrize("shell", _SHELLS)
 @pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
 def test_t2_a_fifo_or_a_directory_is_not_read(
@@ -411,6 +417,7 @@ def test_t2_a_fifo_or_a_directory_is_not_read(
     assert _from_value(shell, command, tmp_path) == _expected(command, None)
 
 
+@pytest.mark.slow  # runs the hot command in a real shell
 @pytest.mark.parametrize("shell", _SHELLS)
 @pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
 def test_t2_without_xdg_the_record_is_under_home(
@@ -428,6 +435,7 @@ def _utf8_locale() -> str | None:
     return None
 
 
+@pytest.mark.slow  # runs the hot command in a real shell
 @pytest.mark.parametrize("shell", _SHELLS)
 @pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
 @pytest.mark.parametrize(

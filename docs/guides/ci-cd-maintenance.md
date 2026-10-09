@@ -357,8 +357,10 @@ drafts. Proposed content stays below accepted memory and may be hidden by regula
   byte-**identical** copies of the same record (an independent `sidegraph-compact` run on
   each of two branches, later merged) are the store's own sanctioned shape and never flagged
   — see [`reference/store-format.md#archive-segments-sidegraph-compact`](../reference/store-format.md#archive-segments-sidegraph-compact).
-  If Recipe 2 does flag a `duplicate-ulid`, the segments differ in content, which is a real
-  problem, not this exemption misfiring.
+  If Recipe 2 does flag a `duplicate-ulid`, it is a real problem, not this exemption
+  misfiring. Read the finding's detail: two archive segments whose payloads differ, two hot
+  files with the same id (a copied record file, usually with a `filename-id-mismatch` beside
+  it) and a hot file next to an archived copy all produce it, identical content or not.
 - **Exit codes, all three CLIs used above:** `0` clean (or, for `sidegraph-sync`, a
   version-skip), `1` an *operational* error (unreadable graph/store; for verification's
   transition layer, an unresolvable `--against` ref or no git repository), `2`

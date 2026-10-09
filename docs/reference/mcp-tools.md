@@ -7,6 +7,7 @@ use — see [`configuration.md`](configuration.md#store-path-resolution)) and a 
 `GraphifyReader` loaded fresh per call from `SIDEGRAPH_GRAPH` — see
 [`configuration.md`](configuration.md) for both. See
 [mind model](../concepts/mind-model.md) for what `Domain`/`drill_down`/the thin tools are for.
+`sidegraph-mcp --help` (or `-h`) prints a short usage text and exits without starting the server.
 
 ## Summary
 
@@ -1375,7 +1376,8 @@ migration; it does not mutate valid canonical record content merely to perform t
 Checks (snapshot layer, always everything): every hot record file parses against its schema;
 `schema_version` is present and known; `valid_to >= valid_from`; a `superseded` record has a
 successor (its `supersedes` chain resolves); every `supersedes` target exists; every binding
-references an existing entity; every fact `supports` references an existing decision; ULIDs
+references an existing entity; every fact `supports` references an existing decision; every domain's `parent_id` names an existing domain and no
+parent chain loops; ULIDs
 are unique across hot files *and* archive segments (byte-identical archive-archive
 duplicates from a sanctioned cross-branch `sidegraph-compact` merge are exempt — see
 [`store-format.md#archive-segments-sidegraph-compact`](store-format.md#archive-segments-sidegraph-compact));

@@ -551,16 +551,25 @@ def test_write_cost_stays_in_single_digit_milliseconds(tmp_path):
     """Spec item 6 -- a tripwire, not a benchmark (design D5: the per-write digest walk is
     pre-existing and unchanged, ~5.1ms measured at 763 canonical files; canonical_stat adds
     one table read of the same cardinality, roughly a 10% addition). Guards against an
-    order-of-magnitude regression, not a precise number -- not red-first by nature."""
+    order-of-magnitude regression, not a precise number -- not red-first by nature.
+
+    It asserts on the MINIMUM of several writes: noise on a shared runner (a GC pause, an
+    fsync stall, a scheduler hiccup) only ever adds time, so one timed sample flaked at 58ms
+    on CI while the fastest of a few is the cleanest estimate of the real cost."""
     store = Store(tmp_path / "s")
     for i in range(300):  # comparable scale to this repo's own store (~700-1000 files)
         store.add_decision(_decision(f"bulk-{i}"))
 
-    start = time.perf_counter()
-    store.add_decision(_decision("timed-write"))
-    elapsed_ms = (time.perf_counter() - start) * 1000
+    samples_ms: list[float] = []
+    for i in range(5):
+        start = time.perf_counter()
+        store.add_decision(_decision(f"timed-write-{i}"))
+        samples_ms.append((time.perf_counter() - start) * 1000)
 
-    assert elapsed_ms < 50, f"write took {elapsed_ms:.2f}ms -- order-of-magnitude regression?"
+    elapsed_ms = min(samples_ms)
+    assert elapsed_ms < 50, (
+        f"fastest of 5 writes took {elapsed_ms:.2f}ms -- order-of-magnitude regression?"
+    )
 
 
 # == the reload must CLEAR canonical_stat, not merely upsert over it =========================

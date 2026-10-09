@@ -7,6 +7,178 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-09
+
+### Changed
+
+- **`index.db` no longer creates and deletes its journal in every write transaction.** SQLite's
+  default rollback mode (`DELETE`) created `index.db-journal` at the start of each write and
+  removed it at the end, and the hooks write on every tool call, so one store produced
+  hundreds of thousands of file-system events an hour. Every connection that writes now runs
+  `journal_mode=TRUNCATE`: the same rollback journal, locking and crash safety, but the journal
+  is emptied rather than deleted, so a 0-byte `index.db-journal` stays beside `index.db`
+  (gitignored by `index.db*`, as before). Each transaction still writes, truncates and syncs
+  that file, so the events do not vanish: they fall most for back-to-back writes (tests, bulk
+  imports: about nine times fewer on the journal) and by about a third for hook traffic.
+  Read-only connections still write nothing, and there is normally no `-wal`/`-shm`; an index
+  that another connection has pinned in WAL stays in WAL, which Sidegraph tolerates. A crash
+  mid-transaction still leaves a non-empty journal that the next writer rolls back.
+
+### Fixed
+
+- **The `UNANCHORED` line of `sidegraph-bootstrap` now names the graph in use.** It always said
+  to run `graphify update .`, which rebuilds only the default graph, so with `--graph` or
+  `$SIDEGRAPH_GRAPH` elsewhere the advice could not make the next run write the document. It now
+  uses the same step as the `ANCHORS` line: `rebuild the graph at <path> and rerun` for a custom
+  graph, `run `graphify update .` and rerun` for the default one.
+- **A fresh `sidegraph-bootstrap` run now lists the store's creation marker as changed.** The
+  `CHANGED` lines and `--report` named `format` and `.gitignore` but not the committed
+  `stamping_live_since` file the same run created.
+- **`sidegraph-bootstrap` now says what is wrong when a ratified or revived record is out of the
+  graph's reach.** For an accepted candidate with no anchor in the current graph whose content
+  is already stored (ratified in place, or revived from a rejected record), every rerun used to
+  print `ANCHORS incomplete: accepted candidate has unresolved or ambiguous anchors`,
+  `PROOF incomplete: selected decision did not surface` and a `RESUME` line that could never
+  succeed, and exit 2. The anchors are now judged by whether the
+  record still surfaces through production retrieval, the same test as `PROOF`: when it does
+  not, the run still exits 2 but prints ``ANCHORS      incomplete: stored record <id> for
+  <source> has no anchor in the current graph; run `graphify update .` and rerun``, a matching
+  `PROOF` reason and a `NEXT` line with that command instead of `RESUME`; once the graph has the
+  node, the rerun exits 0. The exact `RESUME` stays when something a resume can fix (a failed
+  write, missing host wiring) is also wrong, and with `--graph` the line names the graph to
+  rebuild instead. The `--report` file carries the same remedy. A written record with an
+  unresolved backticked mention keeps its old message.
+- **A directory named like a record no longer makes the whole store unopenable.** A directory
+  (or a dangling or looping symlink) called `.x.json`, or `01ABC.json`, in `decisions/`,
+  `facts/`, `domains/`, `entities/` or `initiatives/` (or in `bindings/` under a safe name, or
+  `archive/` as `*.jsonl`) crashed every open of the store, so every hook and MCP call failed
+  (`IsADirectoryError` for a directory, `Too many levels of symbolic links` for a looping
+  link), and a FIFO there blocked the open for ever. The reload now skips any entry that is not
+  a regular file before reading it, lists it in the skipped files with the reason `not a
+  regular file`, and the startup warning names it; the other records load and the next open
+  takes the fast path. `sidegraph-verify` reports such an entry once, as `unsafe-record-id`
+  for an unsafe record name and as `parse-error` (`bad-archive-segment` in `archive/`,
+  whatever the segment's name) otherwise, and no longer blocks on a FIFO, including
+  `--against` when a tracked file was replaced by one. A stale directory or looping symlink
+  named `*.tmp` no longer fails the open either. `sidegraph-stats` no longer ends in a
+  traceback on a looping link, and no longer reports the index as behind for ever because of a
+  dangling symlink. The skip reason for a file with an unsafe name now says `unsafe filename`
+  instead of "id 'A' does not match the filename".
+- **`sidegraph-prepare-commit-msg` no longer leaves its candidate block in `git commit -m`
+  messages under the `pre-commit` framework.** The framework passes the hook only the message
+  file and hands git's source in `PRE_COMMIT_COMMIT_MSG_SOURCE`, so the hook always saw "source
+  absent" and wrote its `# Sidegraph: uncomment the trailers…` and `# Sidegraph-Decision: …`
+  lines, which `-m` commits keep. With exactly one argument the hook now reads the source from
+  that variable (unset or empty means a plain commit); with two or three arguments, as raw git
+  passes them, the arguments still win.
+- **The hook entry points answer `--help` instead of running.** `sidegraph-session-start --help`
+  ran the SessionStart hook in the current directory and wrote into its `index.db`, and the other
+  three hook scripts (`sidegraph-stop`, `sidegraph-pre-tool-use`, `sidegraph-subagent-start`)
+  ignored their arguments the same way, while `sidegraph-prepare-commit-msg --help` printed
+  nothing and `sidegraph-mcp --help` started the server. Each now prints a short usage text for
+  `-h` or `--help` and exits 0 before it reads stdin, opens the store or writes anything. Any
+  other argument to a hook script is a usage error on stderr with exit 2. The git hook
+  `sidegraph-prepare-commit-msg` stays fail-open: it prints the same error for an unknown option
+  or a fourth argument but exits 0 and leaves the message untouched, so `git commit` never fails
+  because of a stray `args:` entry; git's one to three positional arguments are unchanged. Hosts call the hook scripts without
+  arguments, so nothing a host runs changes.
+- **`sidegraph-bootstrap` now converges when an accepted candidate has no anchor.** A document
+  with no backticked symbol and no node in the graph (typically one newer than the last graph
+  build) was never written, yet stayed pending: every run, `--resume` included, ended
+  `partial-recoverable` or `incomplete` with exit 2 and a `FAILED REF <none>` the operator
+  could not act on. Review now flags it with a `no-anchor` warning, and apply skips it by name
+  on an `UNANCHORED` line with its source path (`skipped_unanchorable_keys` in the report object)
+  and counts it as neither durable nor pending, so it no longer keeps the run partial. A run
+  where every approved candidate is skipped this way writes no record and ends as a diagnostic
+  that exits 0. It keeps the checks a run with records has, except the anchor and proof ones:
+  the store reopens and verifies clean, the host integration is verified, and `--report` is
+  written. A missing host integration or a store violation exits 2 instead (`STORE
+  incomplete`, with `RESUME`, or `sidegraph-verify` for a violation), as does an anchored
+  candidate kept proposed. Run `graphify update .` (or rebuild the `--graph` file) and the next
+  run writes it.
+  `sidegraph-import` is unchanged.
+- **`sidegraph-verify` now reports a domain whose `parent_id` is not a domain, or whose parent
+  chain loops.** The store refuses to write either, but a hand-edited domain with
+  `parent_id: "not-a-domain"` passed `sidegraph-verify` and `sidegraph-doctor` with exit 0. A
+  `parent_id` that names no domain, hot or archived, is now a `dangling-parent`, and a parent
+  chain that comes back to itself (a domain that is its own parent included) is one
+  `parent-cycle` per cycle, at the domain with the smallest id on it. A superseded, dropped or
+  compacted parent still counts as existing, so a history written through the tools stays
+  clean, and a parent held by a file skipped for its name is not reported twice. A non-string
+  `parent_id` stays a `parse-error` (a `bad-archive-segment` in an archive segment).
+- **A record directory the process cannot list or search is reported as unreadable, not as
+  missing records.** With `decisions/` at mode 000, `sidegraph-verify` printed a
+  `dangling-fact-support` for every fact and `--against` an `illegal-deletion` for every
+  record, as if the store had been tampered with. `sidegraph-verify` and `sidegraph-doctor` now
+  stop with one `store not readable` line naming the directory and exit 1, before any
+  cross-reference or deletion check runs. `sidegraph-stats` likewise says `cannot read the
+  store index` instead of `no store index` when the store directory cannot be searched, and no
+  longer ends in a traceback when a record directory cannot be listed. An empty record
+  directory without the search bit is reported the same way.
+- **`sidegraph-verify` reports only `unsafe-record-id` for a record file the store skips for
+  its name or id.** A copy such as `decisions/.x.json` was also reported as
+  `filename-id-mismatch` and `duplicate-ulid`, and a file with a safe name but an unsafe id as
+  `filename-id-mismatch` too, though the store never indexes either. A file with an unsafe
+  name that was not valid JSON, not UTF-8 or not an object showed only `parse-error`, and the
+  same went for a `bindings/` file that was not a JSON list, so the real problem, the name,
+  went unreported. The name is now checked before the content, in every record directory. A
+  file skipped for its name no longer counts as a second copy of a record, but a record that
+  points at its id is not reported either: renaming the file back is the only fix.
+- **`sidegraph-compact` no longer warns "DIFFERENT content" for a hot file that only lacks
+  newer keys.** A decision or domain written before `ratified_at`, `ratified_by` or
+  `provenance.commit` existed has no such keys, while its archive line, dumped from the model,
+  carries them as `null`. The raw comparison read that as a difference, kept the hot file and
+  repeated the warning on every index rebuild and every later compact. The visible damage was
+  that `sidegraph-verify` then exited 2 with a `duplicate-ulid` for each kept hot file, so the
+  store-lint gate failed after a compact. A key the hot file lacks now matches an explicit
+  `null` or an empty list or object in the archive, recursively, as `sidegraph-verify
+  --against` already treats it. The match is one-directional: a key only the hot file holds, at
+  any depth and whatever its value, still warns and keeps the file, so a field written by a
+  newer version is never lost to a compact by an older one.
+- **`sidegraph-doctor` keeps its `auto share` and `auto supersede rate` lines on a hand-edited
+  archived record.** An archived decision, a fact or a domain whose `status` was a list or a
+  dict made the auto-share tally raise, and doctor swallowed the error and dropped both lines
+  without a word. The bad value now counts as not retired and the lines print. Any other error
+  in the ratification lines is no longer swallowed.
+- **`sidegraph-verify` no longer crashes on a non-string `supersedes`.** A hand-edited record
+  whose `supersedes` was a list or a dict ended the run with a `TypeError` and lost every
+  other violation. The bad value is now reported as the violation it is and the run goes on.
+- **`sidegraph-verify` no longer crashes on an unhashable `supports` item, a status in
+  `--against`, or the malformed id of a deleted record.** Each used a raw hand-edited value as a
+  set member or lookup key; the run died with exit 1 where it should find the violation and exit
+  2. A malformed old status in `--against` is now reported as an illegal status jump.
+- **A symlinked store directory now stops `sidegraph-verify` and `sidegraph-doctor` at the
+  link.** Verify reported the link but still read through it: `facts -> decisions` linted every
+  decision as a fact, a link out of the store linted foreign files, and a linked-out `entities`,
+  `decisions` or `archive` made references into it look dangling. Both commands now report the
+  `symlinked-store-entry` findings, skip every other check (doctor's advisory checks and
+  `--against` included) and print one line saying so in text output; the exit code stays 2. An
+  `--against` ref that does not resolve, or a store outside git, is still checked first and exits
+  1 without reporting the links. A
+  symlinked `format` marker is no longer read, so its target's text cannot reach a CI log. A bindings file with
+  an unsafe name no longer also reports its entities as dangling, since the store skips that
+  file whole.
+- **`sidegraph-verify` and `sidegraph-doctor` report a store directory they cannot search as
+  `store not readable` on every Python.** With the store directory (or a parent) lacking the
+  search bit, for example `chmod 000` or `chmod 600 .sidegraph`, Python 3.14 reported
+  `unknown-schema-version … format marker missing` or `store directory not found` with exit 2
+  or 1, which read as a bad schema version or a missing store; Python 3.13 already printed
+  `store not readable (…)` with exit 1. Both commands now look the directory and its `format`
+  marker up with `os.stat`/`os.lstat`, which raise on every Python, and take the exit-1 path.
+  A directory that is searchable but not listable (`chmod 300`) is still checked normally.
+  The MCP `verify_store` tool now raises on 3.14 as it did on 3.13 instead of reporting
+  `unknown-schema-version`, and a store path that is a symlink loop reports the OS error
+  (`Too many levels of symbolic links`) instead of `store directory not found`, still with
+  exit 1.
+- **`sidegraph-doctor` no longer crashes on a list or dict `status` or `entity_id`.** A
+  hand-edited decision whose `status` was a list or a dict, or an anchor-set entry whose
+  `entity_id` was one, made the dangling-record, unreferenced-entity, expired-open-validity,
+  never-surfaced and code-drift checks raise a `TypeError`. The run exited 1 and lost the whole
+  report, including the `parse-error` that `sidegraph-verify` found for the same file, and the
+  hooks that swallow the error silently switched the code-drift line off for every record. The
+  bad value is now skipped by those checks and reported once, by the model check, so the run
+  exits 2 with the rest of its findings.
+
 ## [0.10.0] — 2026-10-04
 
 ### Added

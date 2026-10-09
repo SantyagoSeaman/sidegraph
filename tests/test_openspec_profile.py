@@ -12,10 +12,14 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from sidegraph.doc_import import import_docs, parse_decision_doc
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.profiles import GENERIC_ADR_DIALECT, OPENSPEC_DIALECT, get_profile
 from sidegraph.store import Store
+
+pytestmark = pytest.mark.usefixtures("cwd_outside_any_repository")
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "flows"
 _TITLE_PATTERN = get_profile("openspec").title_pattern

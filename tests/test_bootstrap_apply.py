@@ -189,7 +189,7 @@ def test_import_docs_dry_run_classification_does_not_mutate_store(tmp_path, monk
     assert after == before
 
 
-def accepted_plan(tmp_path, *, count=2, action=ReviewAction.ACCEPT):
+def accepted_plan(tmp_path, *, count=2, action=ReviewAction.ACCEPT, anchorless=()):
     graph = write_graph(tmp_path)
     reader = GraphifyReader(graph)
     candidates = []
@@ -215,7 +215,7 @@ def accepted_plan(tmp_path, *, count=2, action=ReviewAction.ACCEPT):
                 kind=DecisionKind.ADR,
                 default_status=DecisionStatus.PROPOSED,
                 redacted_anchor_text="submit_order",
-                anchor_intents=(Descriptor(name="submit_order"),),
+                anchor_intents=(() if number in anchorless else (Descriptor(name="submit_order"),)),
             )
         )
     plan = BootstrapPlan(
@@ -832,7 +832,11 @@ def test_manifest_tracks_only_committed_store_files(tmp_path):
     (store_dir / "decisions" / "ignored.tmp").write_bytes(b"temporary")
     (store_dir / "notes.txt").write_text("unrelated\n", encoding="utf-8")
     manifest = canonical_manifest(store_dir)
-    assert set(manifest) == {".sidegraph/.gitignore", ".sidegraph/format"}
+    assert set(manifest) == {
+        ".sidegraph/.gitignore",
+        ".sidegraph/format",
+        ".sidegraph/stamping_live_since",
+    }
 
 
 def test_manifest_labels_custom_store_paths_with_the_selected_directory(tmp_path):
@@ -843,7 +847,7 @@ def test_manifest_labels_custom_store_paths_with_the_selected_directory(tmp_path
 
     manifest = canonical_manifest(store_dir)
 
-    assert set(manifest) == {"state/.gitignore", "state/format"}
+    assert set(manifest) == {"state/.gitignore", "state/format", "state/stamping_live_since"}
 
 
 def test_review_debt_uses_oldest_parseable_ulid_and_ignores_custom_ids():
@@ -875,3 +879,39 @@ def test_review_debt_uses_oldest_parseable_ulid_and_ignores_custom_ids():
     count, oldest_days = proposal_debt(catalog)
     assert count == 2
     assert oldest_days == 9
+
+
+def test_all_unanchorable_run_is_a_diagnostic_naming_the_keys(tmp_path):
+    plan, review, reader = accepted_plan(tmp_path, count=2, anchorless=(1, 2))
+    report = apply_review(plan, review, store_dir=tmp_path / ".sidegraph", reader=reader)
+    assert report.status == RunStatus.DIAGNOSTIC
+    assert report.skipped_unanchorable_keys == tuple(i.candidate.key for i in review.items)
+    assert report.pending_candidate_keys == ()
+    assert report.canonical_files, "the store layout files the open created are reported"
+    assert load_canonical_catalog(tmp_path / ".sidegraph").decisions == ()
+
+
+def test_store_close_failure_is_not_hidden_by_an_all_unanchorable_diagnostic(tmp_path, monkeypatch):
+    """Red when the `error is None` guard is dropped: a failed close must not read as a clean
+    diagnostic, even though every approved item was skipped."""
+    plan, review, reader = accepted_plan(tmp_path, count=1, anchorless=(1,))
+    monkeypatch.setattr(
+        Store, "close", lambda self: (_ for _ in ()).throw(RuntimeError("close failure"))
+    )
+    report = apply_review(plan, review, store_dir=tmp_path / ".sidegraph", reader=reader)
+    assert report.status != RunStatus.DIAGNOSTIC
+    assert report.error and "close failure" in report.error
+
+
+def test_reconcile_failure_fallback_keeps_unanchorable_keys_out_of_pending(tmp_path, monkeypatch):
+    """Red when `_pending_keys` ignores the skipped keys: the fallback would list a candidate
+    that was never writable as pending, which is what kept every rerun incomplete."""
+    plan, review, reader = accepted_plan(tmp_path, count=2, anchorless=(1,))
+
+    def broken(*args, **kwargs):
+        raise ValueError("reconcile failure")
+
+    monkeypatch.setattr("sidegraph.bootstrap.apply.reconcile_plan", broken)
+    report = apply_review(plan, review, store_dir=tmp_path / ".sidegraph", reader=reader)
+    assert report.skipped_unanchorable_keys == (review.items[0].candidate.key,)
+    assert report.pending_candidate_keys == (review.items[1].candidate.key,)

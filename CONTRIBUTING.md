@@ -20,9 +20,15 @@ consequence for you:
 git clone https://github.com/SantyagoSeaman/sidegraph.git && cd sidegraph
 uv sync                        # runtime + dev dependencies (Python 3.13+)
 uv run pre-commit install      # once per clone — the lint gate runs before each commit
-uv run pytest -q               # full suite must be green
+uv run pytest tests/test_store.py -q -x --lf   # while editing: the touched file
+uv run pytest -m "not slow"   # broader pre-push check: skips subprocess-heavy tests, still takes minutes
+uv run pytest -q               # full suite: run before a commit or PR, must be green; CI runs it again
 uv run pre-commit run --all-files   # lint + format + types, exactly what CI runs
 ```
+
+A passing test's `tmp_path` tree is removed; a failing test's is kept for inspection
+(`tmp_path_retention_policy = "failed"` in `pyproject.toml`). Run with
+`-o tmp_path_retention_policy=all` to keep every test's tree.
 
 The suite is hermetic to `SIDEGRAPH_*` environment variables: `tests/conftest.py` strips every
 one of them before each test runs, so a variable already set in your shell can never change what

@@ -7,6 +7,7 @@ import os
 import shlex
 import sys
 import traceback
+from collections.abc import Collection
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -226,10 +227,21 @@ def render_preview(plan: BootstrapPlan) -> None:
             print(f"     {line}")
 
 
-def render_diagnostic(plan: BootstrapPlan, review: ReviewResult | None = None) -> None:
+def render_diagnostic(
+    plan: BootstrapPlan, review: ReviewResult | None = None, *, unanchored: int = 0
+) -> None:
     skipped = (
         0 if review is None else sum(item.action == ReviewAction.SKIP for item in review.items)
     )
+    if unanchored:
+        # Apply opened the store, so its layout files may exist: "no records written", not
+        # "no writes". `skipped` counts review skips only; unanchored candidates are separate.
+        print(
+            f"DIAGNOSTIC   no activation ({len(plan.files_read)} documents, "
+            f"{len(plan.candidates)} candidates, {skipped} skipped in review, "
+            f"{unanchored} unanchored); no records written"
+        )
+        return
     print(
         f"DIAGNOSTIC   no activation ({len(plan.files_read)} documents, "
         f"{len(plan.candidates)} candidates, {skipped} skipped); no writes"
@@ -384,6 +396,7 @@ def prove_after_apply(
     reader: GraphifyReader,
     *,
     file_path: str | None,
+    exclude: Collection[str] = (),
 ) -> ProofResult:
     if report.status != RunStatus.COMPLETE:
         return ProofResult(complete=False, reason=f"activation is {report.status.value}")
@@ -393,7 +406,11 @@ def prove_after_apply(
         return prove_task_context(
             store,
             reader,
-            accepted_record_ids=tuple(item.record_id for item in report.durable_accepted_records),
+            accepted_record_ids=tuple(
+                item.record_id
+                for item in report.durable_accepted_records
+                if item.record_id not in exclude
+            ),
             file_path=file_path,
         )
     except Exception as error:
@@ -409,9 +426,10 @@ def write_report_only_when_requested(
     root: Path,
     report: BootstrapReport,
     integration: IntegrationResult,
-    proof: ProofResult,
+    proof: ProofResult | None,
     task_proof: ProofResult | None,
     elapsed_seconds: float,
+    remedy: str | None = None,
 ) -> None:
     path = _resolve_optional_path(path_value, root)
     if path is None:
@@ -423,6 +441,7 @@ def write_report_only_when_requested(
         proof=proof,
         task_proof=task_proof,
         elapsed_seconds=elapsed_seconds,
+        remedy=remedy,
     )
     # Publish by replace, not by truncating the destination in place: the replace swaps the
     # name, so another hard link to the old file keeps its bytes.
@@ -447,12 +466,108 @@ def integration_ready_for_selected_host(result: IntegrationResult) -> bool:
     )
 
 
-def _accepted_anchors_complete(review: ReviewResult) -> bool:
-    accepted = [item.candidate for item in review.items if item.action == ReviewAction.ACCEPT]
+@dataclass(frozen=True)
+class StoredAnchors:
+    """How the durable records of accepted candidates are anchored in the CURRENT graph.
+
+    Judged from the bindings stored with the record, not from the plan-time intents: a record
+    written (or ratified, or revived) while the graph still had its node keeps a live binding
+    that the current graph may no longer resolve. ``anchored`` are candidate keys whose plan-time
+    anchors fall short but whose stored record is reachable; ``unreachable`` maps a candidate key
+    to its ``(record_id, source)`` when the record exists but nothing in the graph reaches it.
+    """
+
+    anchored: frozenset[str] = frozenset()
+    unreachable: tuple[tuple[str, str, str], ...] = ()  # (candidate key, record id, source)
+    remedy: str = "run `graphify update .` and rerun"
+
+    @property
+    def unreachable_keys(self) -> frozenset[str]:
+        return frozenset(key for key, _record, _source in self.unreachable)
+
+
+NO_STORED_ANCHORS = StoredAnchors()
+
+
+def _plan_time_anchored(candidate: BootstrapCandidate) -> bool:
+    return any(
+        anchor.status == "resolved" and anchor.tier == 2 for anchor in candidate.anchors
+    ) and all(anchor.status == "resolved" for anchor in candidate.anchors)
+
+
+def _record_reaches_graph(store: Store, reader: GraphifyReader, record_id: str) -> bool:
+    """Reachable means what the proof means: the record surfaces in ``get_task_context``.
+
+    One definition for ANCHORS and PROOF, so they cannot disagree about a stored record.
+    """
+    return prove_task_context(store, reader, accepted_record_ids=(record_id,)).complete
+
+
+def _graph_remedy(root: Path, graph_path: Path) -> str:
+    """The rebuild step for the graph in use; ``graphify update .`` only rebuilds the default."""
+    if graph_path == root / "graphify-out" / "graph.json":
+        return "run `graphify update .` and rerun"
+    return f"rebuild the graph at {_terminal_text(str(graph_path))} and rerun"
+
+
+def judge_stored_anchors(
+    report: BootstrapReport,
+    review: ReviewResult,
+    store_dir: Path,
+    reader: GraphifyReader,
+    *,
+    remedy: str = StoredAnchors().remedy,
+) -> StoredAnchors:
+    """Judge durable accepted candidates that the plan-time anchors do not cover.
+
+    Only a candidate with NO anchor at all in the plan (the anchorless identical-content paths:
+    ratified in place, revived) is judged by its stored record; one whose backticked mention
+    did not resolve keeps the plan-time verdict and its own message.
+    """
+    record_by_ref = {record.ref: record.record_id for record in report.durable_accepted_records}
+    pending = [
+        item.candidate
+        for item in review.items
+        if item.action == ReviewAction.ACCEPT
+        and item.candidate.key not in report.skipped_unanchorable_keys
+        and item.candidate.key in report.durable_candidate_keys
+        and not item.candidate.anchors
+        and item.candidate.ref in record_by_ref
+    ]
+    if not pending:
+        return StoredAnchors(remedy=remedy)
+    anchored: set[str] = set()
+    unreachable: list[tuple[str, str, str]] = []
+    store: Store | None = None
+    try:
+        store = Store(store_dir)
+        for candidate in pending:
+            record_id = record_by_ref[candidate.ref]
+            if _record_reaches_graph(store, reader, record_id):
+                anchored.add(candidate.key)
+            else:
+                unreachable.append((candidate.key, record_id, candidate.ref))
+    finally:
+        if store is not None:
+            with suppress(Exception):
+                store.close()
+    return StoredAnchors(
+        anchored=frozenset(anchored), unreachable=tuple(unreachable), remedy=remedy
+    )
+
+
+def _accepted_anchors_complete(
+    review: ReviewResult,
+    unanchored: Collection[str] = (),
+    stored: StoredAnchors = NO_STORED_ANCHORS,
+) -> bool:
+    accepted = [
+        item.candidate
+        for item in review.items
+        if item.action == ReviewAction.ACCEPT and item.candidate.key not in unanchored
+    ]
     return bool(accepted) and all(
-        any(anchor.status == "resolved" and anchor.tier == 2 for anchor in candidate.anchors)
-        and all(anchor.status == "resolved" for anchor in candidate.anchors)
-        for candidate in accepted
+        _plan_time_anchored(candidate) or candidate.key in stored.anchored for candidate in accepted
     )
 
 
@@ -461,10 +576,11 @@ def completion_exit_code(
     review: ReviewResult,
     integration: IntegrationResult,
     proof: ProofResult,
+    stored: StoredAnchors = NO_STORED_ANCHORS,
 ) -> int:
     complete_for_selected_host = (
         report.status == RunStatus.COMPLETE
-        and _accepted_anchors_complete(review)
+        and _accepted_anchors_complete(review, report.skipped_unanchorable_keys, stored)
         and integration_ready_for_selected_host(integration)
         and proof.complete
     )
@@ -504,6 +620,31 @@ def _safe_input_error(error: str | None) -> str | None:
     return error if details and all(part.startswith(allowed_prefixes) for part in details) else None
 
 
+def _render_unanchored(
+    report: BootstrapReport, review: ReviewResult, remedy: str = StoredAnchors().remedy
+) -> None:
+    paths = {item.candidate.key: item.candidate.file_path for item in review.items}
+    for key in report.skipped_unanchorable_keys:
+        print(
+            f"{'UNANCHORED':<13}{_terminal_text(key)} {_terminal_text(paths.get(key) or '<none>')} "
+            f"(no anchor in the graph, nothing written; {remedy})"
+        )
+
+
+def _render_integration(integration: IntegrationResult) -> None:
+    if integration.host == HostKind.CLAUDE_CODE and integration.fully_supported:
+        print("INTEGRATION  Claude Code MCP + hooks verified")
+    elif integration.host == HostKind.CODEX and integration_ready_for_selected_host(integration):
+        print("INTEGRATION  Codex best-effort")
+        print("             Read/Grep PreToolUse unsupported")
+    else:
+        print(f"INTEGRATION  {integration.host.value} incomplete")
+        if integration.host == HostKind.CODEX:
+            print("             Read/Grep PreToolUse unsupported")
+        if integration.next_action:
+            print(f"ACTION       {integration.next_action}")
+
+
 def render_completion(
     report: BootstrapReport,
     review: ReviewResult,
@@ -513,6 +654,7 @@ def render_completion(
     *,
     task: str | None,
     task_proof: ProofResult | None = None,
+    stored: StoredAnchors = NO_STORED_ANCHORS,
 ) -> None:
     if report.status == RunStatus.COMPLETE:
         print("STORE        ready")
@@ -528,30 +670,38 @@ def render_completion(
     )
     _render_structured_values("DURABLE", report.durable_candidate_keys)
     _render_structured_values("PENDING", report.pending_candidate_keys)
+    _render_unanchored(report, review, stored.remedy)
     _render_structured_values("VERIFY", report.verification_failures)
     _render_structured_values("CHANGED", report.canonical_files)
 
-    if _accepted_anchors_complete(review):
+    if _accepted_anchors_complete(review, report.skipped_unanchorable_keys, stored):
         print("ANCHORS      ready")
-    elif any(item.action == ReviewAction.ACCEPT for item in review.items):
-        print("ANCHORS      incomplete: accepted candidate has unresolved or ambiguous anchors")
     else:
-        print(
-            "ANCHORS      incomplete: activation needs at least one accepted candidate "
-            "(proposals neither block nor satisfy this check)"
-        )
+        for _key, record_id, source in stored.unreachable:
+            print(
+                f"ANCHORS      incomplete: stored record {_terminal_text(record_id)} for "
+                f"{_terminal_text(source)} has no anchor in the current graph; {stored.remedy}"
+            )
+        if any(
+            item.action == ReviewAction.ACCEPT
+            and item.candidate.key not in report.skipped_unanchorable_keys
+            and item.candidate.key not in stored.unreachable_keys
+            and item.candidate.key not in stored.anchored
+            and not _plan_time_anchored(item.candidate)
+            for item in review.items
+        ):
+            print("ANCHORS      incomplete: accepted candidate has unresolved or ambiguous anchors")
+        elif not stored.unreachable and not any(
+            item.action == ReviewAction.ACCEPT
+            and item.candidate.key not in report.skipped_unanchorable_keys
+            for item in review.items
+        ):
+            print(
+                "ANCHORS      incomplete: activation needs at least one accepted candidate "
+                "(proposals neither block nor satisfy this check)"
+            )
 
-    if integration.host == HostKind.CLAUDE_CODE and integration.fully_supported:
-        print("INTEGRATION  Claude Code MCP + hooks verified")
-    elif integration.host == HostKind.CODEX and integration_ready_for_selected_host(integration):
-        print("INTEGRATION  Codex best-effort")
-        print("             Read/Grep PreToolUse unsupported")
-    else:
-        print(f"INTEGRATION  {integration.host.value} incomplete")
-        if integration.host == HostKind.CODEX:
-            print("             Read/Grep PreToolUse unsupported")
-        if integration.next_action:
-            print(f"ACTION       {integration.next_action}")
+    _render_integration(integration)
 
     if proof.complete:
         print("PROOF        production retrieval returned")
@@ -731,6 +881,17 @@ def _main(args: argparse.Namespace) -> int:
         return 2
 
     report = apply_review(refreshed, review, store_dir=store_dir, reader=refreshed_reader)
+    # Every approved candidate was skipped as unanchorable: no record was written. Derived from
+    # the report's shape, so a store violation (an `incomplete` report) is the same kind of run
+    # as a clean one (`diagnostic`). It still went through a confirmed apply, so it keeps every
+    # check below except the anchor and proof requirement for records it never wrote.
+    approved = {item.candidate.key for item in review.items if item.action != ReviewAction.SKIP}
+    no_records = (
+        bool(report.skipped_unanchorable_keys)
+        and not report.durable_candidate_keys
+        and set(report.skipped_unanchorable_keys) == approved
+        and (report.error is None or bool(report.verification_failures))
+    )
     # Everything below this point runs AFTER apply_review has durably written canonical
     # state (report reflects it). A failure here is never a "usage or operational error
     # before review" — that meaning is reserved for exit 1 (see
@@ -760,12 +921,41 @@ def _main(args: argparse.Namespace) -> int:
         )
         codex_config = _resolve_optional_path(args.codex_config, root)
         integration = verify_integration(root, HostKind(args.host), codex_config=codex_config)
-        proof = prove_after_apply(
+        proof = (
+            ProofResult(complete=False, reason="no record written")
+            if no_records
+            else prove_after_apply(report, store_dir, refreshed_reader, file_path=None)
+        )
+        stored = judge_stored_anchors(
             report,
+            review,
             store_dir,
             refreshed_reader,
-            file_path=None,
+            remedy=_graph_remedy(root, graph_path),
         )
+        unreachable_only = False
+        if stored.unreachable and report.status == RunStatus.COMPLETE and not proof.complete:
+            # Is the unreachable record why the proof failed? Prove the other records alone.
+            reachable_proof = prove_after_apply(
+                report,
+                store_dir,
+                refreshed_reader,
+                file_path=None,
+                exclude={record for _key, record, _source in stored.unreachable},
+            )
+            others_exist = any(
+                item.record_id not in {record for _k, record, _s in stored.unreachable}
+                for item in report.durable_accepted_records
+            )
+            if reachable_proof.complete or not others_exist:
+                # The ANCHORS line names that cause and its remedy; no second, misleading one.
+                proof = ProofResult(
+                    complete=False,
+                    reason="stored record has no anchor in the current graph (see ANCHORS)",
+                )
+                unreachable_only = True
+        elif stored.unreachable and proof.complete:
+            unreachable_only = True
         elapsed_seconds = max(0.0, monotonic() - started_at)
         task_proof = (
             prove_after_apply(
@@ -774,11 +964,36 @@ def _main(args: argparse.Namespace) -> int:
                 refreshed_reader,
                 file_path=args.task,
             )
-            if args.task is not None
+            if args.task is not None and not no_records
             else None
         )
-        exit_code = completion_exit_code(report, review, integration, proof)
-        if exit_code == 2:
+        if no_records:
+            exit_code = (
+                0
+                if integration_ready_for_selected_host(integration)
+                and not report.verification_failures
+                else 2
+            )
+            if exit_code:
+                report = report.with_run_status(RunStatus.INCOMPLETE)
+        else:
+            exit_code = completion_exit_code(report, review, integration, proof, stored)
+        if (
+            exit_code == 2
+            # A resume cannot fix a store this run did not break: keep `sidegraph-verify`.
+            and not (no_records and report.verification_failures)
+        ) and not (
+            unreachable_only
+            and report.status == RunStatus.COMPLETE
+            and completion_exit_code(
+                report,
+                review,
+                integration,
+                ProofResult(complete=True),
+                StoredAnchors(anchored=stored.anchored | stored.unreachable_keys),
+            )
+            == 0
+        ):
             report = with_exact_resume_command(
                 report,
                 args,
@@ -788,15 +1003,35 @@ def _main(args: argparse.Namespace) -> int:
                 profile.name,
                 selected_candidate_key,
             )
-        render_completion(
-            report,
-            review,
-            integration,
-            proof,
-            domain_candidates,
-            task=args.task,
-            task_proof=task_proof,
-        )
+        if no_records:
+            unanchored = len(report.skipped_unanchorable_keys)
+            if exit_code == 0:
+                render_diagnostic(refreshed, review, unanchored=unanchored)
+            else:
+                print(f"STORE        {report.status.value}")
+                print(f"DETAIL       no records written ({unanchored} unanchored)")
+            _render_unanchored(report, review, stored.remedy)
+            _render_structured_values("PENDING", report.pending_candidate_keys)
+            if report.verification_failures:
+                _render_structured_values("VERIFY", report.verification_failures)
+            _render_structured_values("CHANGED", report.canonical_files)
+            _render_integration(integration)
+            if report.next_command is not None:
+                print(f"RESUME       {report.next_command}")
+        else:
+            render_completion(
+                report,
+                review,
+                integration,
+                proof,
+                domain_candidates,
+                task=args.task,
+                task_proof=task_proof,
+                stored=stored,
+            )
+        if stored.unreachable and graph_path == root / "graphify-out" / "graph.json":
+            # A resume cannot change the graph: the only next step is rebuilding it.
+            print(f"NEXT         cd {shlex.quote(str(root))} && graphify update .")
     except BaseException as error:
         # Any exception here is post-durable-write and must resolve to
         # partial-recoverable, never escape to main()'s narrower catch-all and get
@@ -832,9 +1067,10 @@ def _main(args: argparse.Namespace) -> int:
             root,
             report,
             integration,
-            proof,
+            None if no_records else proof,
             task_proof,
             elapsed_seconds,
+            remedy=stored.remedy if stored.unreachable else None,
         )
     except BaseException as error:
         # Same reasoning as the completion handler above: this runs after apply_review's

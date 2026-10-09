@@ -44,6 +44,7 @@ a paused generator.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -80,7 +81,14 @@ from .schema import (
     canonicalize,
     is_safe_record_id,
 )
-from .store_layout import symlinked_internals
+from .store_layout import (
+    INDEX_JOURNAL_PRAGMA,
+    NOT_A_FILE_REASON,
+    hot_matches_archive,
+    is_regular_file,
+    stat_entry,
+    symlinked_internals,
+)
 
 # One definition, two consumers: __init__ bootstraps with executescript (not inside a
 # transaction, so its implicit COMMIT is harmless), while _reload_index_from_canonical must
@@ -228,8 +236,8 @@ _TERMINAL_DOMAIN_STATUSES = frozenset({DomainStatus.SUPERSEDED, DomainStatus.DRO
 _FORMAT_MARKER_PREFIX = "sidegraph-store "
 
 # Committed layout convenience (design §1/§5): ``<path>/.gitignore`` ignoring the derived
-# index (and its sqlite WAL/SHM sidecars via the ``index.db*`` glob) and any crash-debris
-# ``*.tmp`` — see ``Store._ensure_gitignore``.
+# index (its always-present 0-byte rollback ``-journal`` and any WAL/SHM sidecars, all via the
+# ``index.db*`` glob) and any crash-debris ``*.tmp`` — see ``Store._ensure_gitignore``.
 _GITIGNORE_CONTENT = "index.db*\n*.tmp\n"
 
 # ``Store.record_types`` binds each id twice (one ``IN`` list per table), so a chunk of 400 is
@@ -298,6 +306,7 @@ SKIPPED_CANONICAL_KEY = "skipped_canonical_files"
 # (``verify.PARSE_ERROR``, ``verify.BAD_ARCHIVE_SEGMENT``) for the same files.
 SKIP_PARSE_ERROR = "parse-error"
 SKIP_BAD_ARCHIVE_SEGMENT = "bad-archive-segment"
+SKIP_UNSAFE_FILENAME = "unsafe filename"
 
 # What makes ONE file unreadable as a record, as opposed to the store unreadable: invalid JSON,
 # invalid UTF-8, a model that rejects the payload and a payload that cannot be serialised are
@@ -363,7 +372,10 @@ def _record_identity_problem(data: object, id_field: str, stem: str) -> str | No
     A file is a record only when its JSON is an object whose ``id_field`` is a safe id equal
     to the filename stem (design/superpowers/specs/2026-09-29-record-identity-design.md D3,
     D12): the id then IS the filename, and a crafted or missing id can neither become a
-    path nor mint a fresh ULID on every rebuild."""
+    path nor mint a fresh ULID on every rebuild. A stem that is not a safe id is named first:
+    the file is skipped for its name whatever it holds."""
+    if not is_safe_record_id(stem):
+        return SKIP_UNSAFE_FILENAME
     if not isinstance(data, dict):
         return "not a JSON object"
     if id_field not in data:
@@ -374,6 +386,19 @@ def _record_identity_problem(data: object, id_field: str, stem: str) -> str | No
     if value != stem:
         return f"{id_field} {value!r} does not match the filename"
     return None
+
+
+def _non_file_reason(path: Path, st: os.stat_result) -> str | None:
+    """Why the entry ``path`` (already ``stat``ed as ``st``) is not read at all, or None for a
+    regular file. A directory, FIFO or socket matched by ``*.json`` is not a file, and a read
+    of it raises ``IsADirectoryError`` or blocks for ever: it is skipped before any read, with
+    the filename reason when the name is unsafe (``sidegraph-verify`` reports the same entry
+    once, as ``unsafe-record-id``). Symlinks are followed, as ``stat`` does. An ``OSError`` on
+    the read of a real file still propagates.
+    see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D1, D2)"""
+    if is_regular_file(st):
+        return None
+    return NOT_A_FILE_REASON if is_safe_record_id(path.stem) else SKIP_UNSAFE_FILENAME
 
 
 def _parse_record_file[M: BaseModel](
@@ -629,7 +654,7 @@ def _warn_skipped_canonical(entries: list[dict]) -> None:
         shown = "; ".join(f"{e['path']} ({e['reason']})" for e in files[:3])
         more = f" and {len(files) - 3} more" if len(files) > 3 else ""
         print(
-            f"sidegraph: WARNING {len(files)} record file(s) were left out of the index: "
+            f"sidegraph: WARNING {len(files)} store file(s) were left out of the index: "
             f"{shown}{more}. Run `sidegraph-verify` to list them. Restore them with git, or "
             "fix them by hand; a newer Sidegraph version may have written them.",
             file=sys.stderr,
@@ -724,10 +749,14 @@ def _hot_file_matches(path: Path, expected_payload: dict) -> bool | None:
     trust an in-memory snapshot for a decision as destructive as unlinking a file — review
     Minor-6). Returns ``True``/``False`` if the file exists and does/doesn't match, or
     ``None`` if there is no hot file there at all (nothing to compare, nothing to
-    remove)."""
+    remove). A key the hot file LACKS matches an explicit null or empty container in the
+    archive (``hot_matches_archive``): a hot file written before a field existed lacks the key
+    the archive line, dumped from the model, fills with its default. A key only the hot file
+    holds, at any depth and whatever its value, always differs (the dump drops keys it does
+    not know, so unlinking would lose it), as does any other difference."""
     if not path.is_file():
         return None
-    return json.loads(path.read_text(encoding="utf-8")) == expected_payload
+    return hot_matches_archive(json.loads(path.read_text(encoding="utf-8")), expected_payload)
 
 
 def _hot_file_skipped_by_reload(path: Path, id_field: str, listed: frozenset[str]) -> bool:
@@ -879,6 +908,11 @@ class Store:
         self._ensure_gitignore()
         self._conn = sqlite3.connect(str(self.path / "index.db"), check_same_thread=False)
         try:
+            # First, before any write: a journal-mode change after the schema/freshness writes
+            # would let those transactions create and delete the journal once per open. A
+            # database another tool holds in WAL cannot switch (locked); stay in its mode.
+            with contextlib.suppress(sqlite3.OperationalError):
+                self._conn.execute(INDEX_JOURNAL_PRAGMA)
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA_SQL)
             self._migrate_retrieval_events_agent()
@@ -1012,9 +1046,12 @@ class Store:
         own writer's ``os.replace`` finally landing) — already gone is just as harmless as
         never having found it there."""
         try:
-            age = time.time() - path.stat().st_mtime
+            st = stat_entry(path)
         except FileNotFoundError:
             return  # already gone -- another opener's sweep, or its os.replace consumed it
+        if not is_regular_file(st):
+            return  # a directory named ``*.tmp`` is not our debris, and ``unlink`` would raise
+        age = time.time() - st.st_mtime
         if age > _TMP_DEBRIS_MIN_AGE_SECONDS:
             path.unlink(missing_ok=True)
 
@@ -1650,7 +1687,7 @@ class Store:
             for f in d.iterdir():
                 if f.suffix != ".json":
                     continue
-                st = f.stat()
+                st = stat_entry(f)
                 entries.append(f"{sub}/{f.name}\0{st.st_size}\0{st.st_mtime_ns}")
                 stats[(sub, f.stem)] = (st.st_size, st.st_mtime_ns)
         archive_dir = self.path / _ARCHIVE_SUBDIR
@@ -1658,7 +1695,7 @@ class Store:
             for f in archive_dir.iterdir():
                 if f.suffix != ".jsonl":
                     continue
-                st = f.stat()
+                st = stat_entry(f)
                 entries.append(f"{_ARCHIVE_SUBDIR}/{f.name}\0{st.st_size}\0{st.st_mtime_ns}")
                 stats[(_ARCHIVE_SUBDIR, f.stem)] = (st.st_size, st.st_mtime_ns)
         entries.sort()
@@ -1779,7 +1816,7 @@ class Store:
             return
         for e in entries:
             try:
-                st = (self.path / e["path"]).stat()
+                st = stat_entry(self.path / e["path"])
                 fresh = (st.st_size, st.st_mtime_ns) == (e["size"], e["mtime_ns"])
             except (OSError, KeyError, TypeError):
                 fresh = False
@@ -1908,8 +1945,12 @@ class Store:
                     def load[M: BaseModel](
                         subdir: str, f: Path, id_field: str, model: type[M]
                     ) -> M | None:
-                        st = f.stat()
-                        record, problem = _parse_record_file(f, id_field, model)
+                        st = stat_entry(f)
+                        record, problem = (
+                            (None, _non_file_reason(f, st))
+                            if not is_regular_file(st)
+                            else _parse_record_file(f, id_field, model)
+                        )
                         self._record_canonical_stat(subdir, f.stem, st)
                         if problem is not None:
                             skip(subdir, f, problem, st)
@@ -1937,9 +1978,12 @@ class Store:
                             self._index_write_domain(domain)
                     for f in sorted((self.path / "bindings").glob("*.json")):
                         record_id = f.stem
-                        st = f.stat()
-                        if not is_safe_record_id(record_id):
-                            skip("bindings", f, "unsafe filename", st)
+                        st = stat_entry(f)
+                        reason = _non_file_reason(f, st)
+                        if reason is None and not is_safe_record_id(record_id):
+                            reason = SKIP_UNSAFE_FILENAME
+                        if reason is not None:
+                            skip("bindings", f, reason, st)
                             self._record_canonical_stat("bindings", record_id, st)
                             continue
                         bindings = _parse_bindings_file(f)
@@ -1970,14 +2014,17 @@ class Store:
                     archive_stats: dict[str, os.stat_result] = {}
                     if archive_dir.is_dir():
                         for f in sorted(archive_dir.glob("*.jsonl")):
-                            archive_stats[f.stem] = f.stat()
+                            archive_stats[f.stem] = st = stat_entry(f)
+                            if not is_regular_file(st):  # a segment name is not an id
+                                skip(_ARCHIVE_SUBDIR, f, NOT_A_FILE_REASON, st)
 
                     # Archived decisions/domains (design §7): a hot file for the same id
                     # ALWAYS wins (it was just indexed above) — either it's the
-                    # crash-window duplicate a compact leaves behind (byte-identical,
-                    # silently a no-op here; ``Store.compact`` is what actually cleans
-                    # those up) or, if it genuinely differs, that's corruption-shaped and
-                    # never something a mere reload should resolve by preferring the
+                    # crash-window duplicate a compact leaves behind (identical modulo keys the
+                    # hot file lacks, silently a no-op here; ``Store.compact`` is what
+                    # actually cleans those up) or, if it genuinely differs, that's
+                    # corruption-shaped and never something a mere reload should resolve by
+                    # preferring the
                     # archive over live disk state. Only ids with NO hot file are indexed
                     # from the archive.
                     # Tolerant here only (D4): a line that cannot be read costs that line,
@@ -1987,7 +2034,7 @@ class Store:
                         tolerate_corrupt_lines=True, bad_segments=bad_segments
                     )
                     for segment in bad_segments:
-                        st = archive_stats.get(segment.stem) or segment.stat()
+                        st = archive_stats.get(segment.stem) or stat_entry(segment)
                         skip(_ARCHIVE_SUBDIR, segment, SKIP_BAD_ARCHIVE_SEGMENT, st)
                     # Built from the files actually indexed, not every stem: an archived
                     # copy of a SKIPPED id must still load (design D3).
@@ -1996,14 +2043,18 @@ class Store:
                     for did, payload in archived_decisions.items():
                         hot_path = _record_file(self.path, "decisions", did)
                         if did in hot_decision_ids:
-                            if json.loads(hot_path.read_text(encoding="utf-8")) != payload:
+                            if not hot_matches_archive(
+                                json.loads(hot_path.read_text(encoding="utf-8")), payload
+                            ):
                                 _warn_hot_archive_mismatch("decision", did)
                             continue
                         self._index_write_decision(Decision.model_validate(payload))
                     for dmid, payload in archived_domains.items():
                         hot_path = _record_file(self.path, "domains", dmid)
                         if dmid in hot_domain_ids:
-                            if json.loads(hot_path.read_text(encoding="utf-8")) != payload:
+                            if not hot_matches_archive(
+                                json.loads(hot_path.read_text(encoding="utf-8")), payload
+                            ):
                                 _warn_hot_archive_mismatch("domain", dmid)
                             continue
                         self._index_write_domain(Domain.model_validate(payload))
@@ -3621,7 +3672,8 @@ class Store:
         archive_dir = self.path / _ARCHIVE_SUBDIR
         if not archive_dir.is_dir():
             return []
-        return sorted(archive_dir.glob("*.jsonl"))
+        # ``is_file``: a directory or FIFO named like a segment is not one (the reload lists it)
+        return sorted(f for f in archive_dir.glob("*.jsonl") if f.is_file())
 
     @staticmethod
     def _read_archive_segment(
@@ -3718,12 +3770,14 @@ class Store:
     def _leftover_archived_hot(
         self, archived_decisions: dict[str, dict], archived_domains: dict[str, dict]
     ) -> tuple[set[str], set[str], int]:
-        """Ids whose hot canonical file duplicates an ALREADY-archived record exactly —
-        crash-window debris from a compact that durably wrote its segment but was
-        interrupted before removing the hot file (see :meth:`compact`). These are safe to
+        """Ids whose hot canonical file duplicates an ALREADY-archived record
+        (modulo keys the hot file lacks) — crash-window debris from a compact that durably
+        wrote its segment but was interrupted before removing the hot file (see
+        :meth:`compact`). These are safe to
         remove without writing a new segment: the archive already has them.
 
-        A hot file that instead DIFFERS from its archived counterpart is corruption-shaped,
+        A hot file that instead DIFFERS from its archived counterpart (including any key only
+        the hot file holds) is corruption-shaped,
         not crash debris — it is left exactly as it is (never destroy data) and surfaced via
         a stderr warning. Returns ``(decision_ids_safe_to_remove, domain_ids_safe_to_remove,
         mismatch_count)``.
@@ -3914,15 +3968,16 @@ class Store:
 
         Idempotent / crash-safe: a prior run that durably wrote its segment but crashed
         before removing the now-redundant hot files leaves those files as harmless
-        byte-identical duplicates of their archived copy. This run detects them (see
-        ``_leftover_archived_hot``) and removes them WITHOUT writing a second, duplicate
+        duplicates of their archived copy (modulo keys the hot file lacks). This run detects them
+        (see ``_leftover_archived_hot``) and removes them WITHOUT writing a second, duplicate
         segment for records that are already durably archived — ``CompactReport.
         cleaned_up_hot_files`` counts these separately from freshly-archived records.
 
         Every hot-file removal (fresh candidates AND crash-window leftovers alike) is
-        gated on the file's ON-DISK content still matching exactly what got archived
-        (review Minor-6): a candidate is read from the INDEX, which should always mirror
-        its hot file, but a removal is destructive enough that this never just trusts that
+        gated on the file's ON-DISK content still matching what got archived
+        (``hot_matches_archive``; review Minor-6): a candidate is read from the INDEX,
+        which should always mirror its hot file, but a removal is destructive enough that
+        this never just trusts that
         invariant — a mismatch (something changed the file out from under this pass, e.g.
         an external hand edit) leaves the file in place and surfaces a warning instead of
         silently discarding newer state nothing else preserved a copy of.
@@ -4002,8 +4057,8 @@ class Store:
                 segment_relpath = self._write_archive_segment(new_decisions, new_domains)
 
             # Fresh candidates: only remove a hot file if its ON-DISK content still
-            # matches exactly what was just archived (Minor-6) -- never trust the INDEX
-            # snapshot alone for a destructive removal. Its canonical_stat row is removed
+            # matches what was just archived, modulo keys it lacks (Minor-6) -- never trust the
+            # INDEX snapshot alone for a destructive removal. Its canonical_stat row is removed
             # in the SAME step (digest-integrity design Task 2): a file kept because it
             # MISMATCHED (the `continue` below) keeps its row too -- mirroring
             # `_hot_file_matches`'s own skip exactly, so a diverged-but-kept file is never

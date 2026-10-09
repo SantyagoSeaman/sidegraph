@@ -174,10 +174,17 @@ def idle(common: Path) -> bool:
     )
 
 
+# A ceiling, not a delay: the poll returns the moment the helper is idle. The rebuilds themselves
+# need about a second (the slowest case, a stale-lock burst, measured 1.2 s idle and under load),
+# but a burst of twenty shells on a machine starved of CPU needs room beyond ``wait_for``'s 10 s.
+REBUILD_WAIT = 30.0
+
+
 def await_rebuilds(sb: Sandbox, common: Path, *, at_least: int = 1) -> list[Start]:
     """Wait until ``at_least`` rebuilds have run and the helper has gone idle; return the starts."""
     wait_for(
         lambda: len(sb.starts()) >= at_least and idle(common),
+        timeout=REBUILD_WAIT,
         what=f"{at_least} rebuild(s) to finish",
     )
     return sb.starts()

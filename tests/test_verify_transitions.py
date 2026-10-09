@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from sidegraph.cli import doctor_main, verify_main
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -1026,3 +1027,122 @@ def test_absent_equals_null_guard_different_list_length_is_flagged():
     violations = classify_transition("domain", old, new)
     assert _codes(violations) == [ILLEGAL_FIELD_CHANGE]
     assert "seed_anchors" in violations[0].detail
+
+
+def _commit_all(repo: Path, msg: str) -> None:
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", msg], cwd=repo)
+
+
+def _edit(path: Path, **fields) -> None:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(fields)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_against_non_string_new_status_is_left_to_the_snapshot_parse_error(git_repo, capsys):
+    """Unfixed, ``(old_status, new_status) in legal`` hashed a tuple holding a list/dict and
+    ``--against`` crashed (exit 1). The snapshot layer already reports the malformed status
+    as parse-error, so the transition layer stays silent and the run exits 2."""
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as s:
+        d = s.add_decision(_decision())
+        dom = s.add_domain(_domain())
+    _commit_all(git_repo, "initial")
+    _edit(store_dir / "decisions" / f"{d.id}.json", status=["accepted"])
+    _edit(store_dir / "domains" / f"{dom.domain_id}.json", status={"a": 1})
+
+    assert verify_against(store_dir, "HEAD") == []
+    assert verify_main(["--db", str(store_dir), "--against", "HEAD"]) == 2
+    out = capsys.readouterr().out
+    assert "parse-error" in out
+
+
+@pytest.mark.parametrize("old_status", [["accepted"], ["rejected"]], ids=["accepted", "rejected"])
+def test_against_non_string_old_status_repaired_to_a_string_is_an_illegal_jump(
+    git_repo, capsys, old_status
+):
+    """A malformed status committed at the ref is no licence for any later status: the
+    repair is checked like every other field's (title, valid_to), and the unhashable old
+    value is never looked up in the legal table."""
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as s:
+        d = s.add_decision(_decision())
+    path = store_dir / "decisions" / f"{d.id}.json"
+    _edit(path, status=old_status)
+    _commit_all(git_repo, "malformed")
+    _edit(path, status="accepted")
+
+    assert _codes(verify_against(store_dir, "HEAD")) == [ILLEGAL_STATUS_JUMP]
+    assert verify_main(["--db", str(store_dir), "--against", "HEAD"]) == 2
+    assert "illegal-status-jump" in capsys.readouterr().out
+    # doctor shares the --against path: it used to fail with "doctor --against ... failed".
+    assert doctor_main(["--db", str(store_dir), "--against", "HEAD"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("kind_dir", "id_field", "bad"),
+    [("decisions", "id", ["x"]), ("domains", "domain_id", {"a": 1})],
+    ids=["decision-list-id", "domain-dict-id"],
+)
+def test_against_deleting_a_record_with_a_non_string_id_is_illegal_not_a_crash(
+    git_repo, capsys, kind_dir, id_field, bad
+):
+    """Unfixed, ``old.get(rid_field) in archived_ids[kind]`` hashed the raw id and crashed.
+    Only a string id can be an archived one, so the deletion is simply illegal."""
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as s:
+        rec = s.add_decision(_decision()) if kind_dir == "decisions" else s.add_domain(_domain())
+        rid = rec.id if kind_dir == "decisions" else rec.domain_id
+    path = store_dir / kind_dir / f"{rid}.json"
+    _edit(path, **{id_field: bad})
+    _commit_all(git_repo, "malformed id")
+    path.unlink()
+
+    assert ILLEGAL_DELETION in _codes(verify_against(store_dir, "HEAD"))
+    assert verify_main(["--db", str(store_dir), "--against", "HEAD"]) == 2
+    assert "illegal-deletion" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["archive", "decisions", "entities"])
+def test_against_with_a_symlinked_store_dir_reports_only_the_link(git_repo, tmp_path, capsys, name):
+    """The transition layer would read through the link (``archived_ids`` comes from the archive
+    walk, so a cut-off archive turns every compacted record into an ``illegal-deletion``): with
+    a symlinked internal it reports nothing and the snapshot's link finding is the whole report."""
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as s:
+        d1 = s.add_decision(_decision())
+        s.ratify(d1.id)
+        s.add_decision(
+            Decision(
+                title="v2",
+                kind=DecisionKind.ADR,
+                context="Context.",
+                choice="A revised choice.",
+                valid_from=datetime(2026, 2, 1, tzinfo=UTC),
+                supersedes=d1.id,
+                provenance=Provenance(source="manual"),
+            )
+        )
+        s.compact()
+        s.upsert_entity(
+            Entity(
+                canonical_name="f_widget",
+                descriptor=Descriptor(name="f_widget", file_path="a.py"),
+            )
+        )
+    _commit_all(git_repo, "initial")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (store_dir / name).rename(outside / name)
+    (store_dir / name).symlink_to(outside / name, target_is_directory=True)
+
+    assert verify_against(store_dir, "HEAD") == []
+
+    assert verify_main(["--db", str(store_dir), "--against", "HEAD"]) == 2
+    out = capsys.readouterr().out.splitlines()
+    assert [line.split("  ")[0] for line in out] == [
+        "symlinked-store-entry",
+        "remaining checks skipped (the store has symlinked entries — remove the links and rerun)",
+        "1 violation(s)",
+    ]

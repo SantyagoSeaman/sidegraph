@@ -143,6 +143,15 @@ class CurationReport:
 # -- canonical-file loading (silent-skip: parse errors are verify's territory) -------------
 
 
+def _is_open_decision(d: dict) -> bool:
+    """True for a decision whose raw ``status`` is a string in ``_OPEN_DECISION_STATUSES``.
+    A hand-edited list or dict status is unhashable, so testing it against the frozenset
+    raises TypeError; it is simply not open here and the model check reports the file
+    (parse-error). see the verify/doctor rule on never hashing a raw payload value."""
+    status = d.get("status")
+    return isinstance(status, str) and status in _OPEN_DECISION_STATUSES
+
+
 def _iter_records(store_dir: Path, subdir: str) -> list[tuple[Path, dict]]:
     """(path, payload) for every parseable JSON-object file in ``<store>/<subdir>``,
     sorted by path (findings inherit this order — deterministic output)."""
@@ -221,7 +230,7 @@ def _check_dangling_records(
       wins -- a broken reference is worth naming over "merely" terminal.
     """
     open_records: list[tuple[Path, dict, str]] = [
-        (p, d, "decision") for p, d in decisions if d.get("status") in _OPEN_DECISION_STATUSES
+        (p, d, "decision") for p, d in decisions if _is_open_decision(d)
     ] + [(p, f, "fact") for p, f in facts if f.get("valid_to") is None]
     findings: list[Finding] = []
     for path, rec, kind in open_records:
@@ -321,7 +330,12 @@ def _check_unreferenced_entities(
     """unreferenced-entity: a hot entity no committed anchor set references (bindings
     files persist when their record is archived, so historical references still count).
     Structural ``domain:*`` / ``community:*`` entities are exempt."""
-    referenced = {e.get("entity_id") for entries in bindings.values() for e in entries}
+    referenced = {
+        eid
+        for entries in bindings.values()
+        for e in entries
+        if isinstance(eid := e.get("entity_id"), str)
+    }
     findings: list[Finding] = []
     for path, ent in entities:
         eid = ent.get("entity_id")
@@ -456,7 +470,7 @@ def _check_expired_open(decisions: list[tuple[Path, dict]], now: datetime) -> li
     deprecated-unused and a fact with valid_to set is closed by convention."""
     findings: list[Finding] = []
     for path, d in decisions:
-        if d.get("status") not in _OPEN_DECISION_STATUSES:
+        if not _is_open_decision(d):
             continue
         valid_to = _parse_aware_iso(d.get("valid_to"))
         if valid_to is None or valid_to >= now:
@@ -477,7 +491,8 @@ def _check_binding_statuses(store_dir: Path) -> tuple[list[Finding], list[str]]:
     carry identity, no status; sync flips statuses; a reload resets them to live), so
     this check reads the index — strictly read-only — and reports "as of last sync".
 
-    ``mode=ro`` cannot write and, on this store's DELETE journal, creates no sidecar files.
+    ``mode=ro`` cannot write and, on this store's rollback journal (TRUNCATE for writers), creates
+    no sidecar files.
     The old ``immutable`` connection flag was dropped deliberately: the coverage journal
     makes ``index.db`` a write target on every tool call, and that flag disables locking
     and change detection — sound only on a quiescent file. See the coverage-telemetry
@@ -569,7 +584,7 @@ def _check_never_surfaced(store_dir: Path) -> tuple[list[Finding], list[str]]:
             {
                 file_by_entity[entry["entity_id"]]
                 for entry in bindings.get(rid, [])
-                if entry.get("entity_id") in file_by_entity
+                if isinstance(entry.get("entity_id"), str) and entry["entity_id"] in file_by_entity
             }
         )
         if not anchored_paths:
@@ -725,7 +740,7 @@ def _scan_code_drift(
     unstamped = 0
     by_commit: dict[str, list[tuple[Path, str, set[str]]]] = {}
     for path, d in decisions:
-        if d.get("status") not in _OPEN_DECISION_STATUSES:
+        if not _is_open_decision(d):
             continue
         prov = d.get("provenance")
         commit = prov.get("commit") if isinstance(prov, dict) else None
@@ -1428,7 +1443,11 @@ def _tally_kind(kind: _RecordKind, records: dict[str, dict], earliest: datetime)
     human_retired = 0
     excluded = 0
     for record_id, rec in records.items():
-        status = rec.get("status")
+        # A hand-edited non-string status (a list or dict is unhashable) must not reach the
+        # set membership tests below: it is neither retired nor accepted, the model check
+        # reports it. see the verify/doctor rule on never hashing a raw payload value.
+        raw_status = rec.get("status")
+        status = raw_status if isinstance(raw_status, str) else None
         if _parse_aware_iso(rec.get("ratified_at")) is not None:
             if _is_auto_stamped(rec):
                 auto_total += 1
@@ -1505,6 +1524,55 @@ def _auto_share_lines(store_dir: str | Path) -> list[str]:
         f"{_fmt_share(dom.human_retired, dom.human_total)} "
         f"({excluded} stamp-less record(s) after the first stamp excluded)",
     ]
+
+
+def _latency_days(rec: dict) -> float | None:
+    """Days from ``valid_from`` to ``ratified_at`` for one record, or ``None`` when the
+    record does not count: an ``auto:`` stamp (D5 -- ``ratified_at`` ~= ``valid_from``
+    there would collapse the median toward 0 and it would stop measuring human queue
+    latency), a missing stamp, or a timestamp that is not a parseable aware ISO string.
+    ``None`` is the one per-record "cannot compute" answer; nothing else is caught."""
+    if isinstance(rb := rec.get("ratified_by"), str) and rb.startswith("auto:"):
+        return None
+    ra = _parse_aware_iso(rec.get("ratified_at"))
+    vf = _parse_aware_iso(rec.get("valid_from"))
+    if ra is None or vf is None:
+        return None
+    return (ra - vf).total_seconds() / 86400
+
+
+def ratification_latency_lines(store_dir: str | Path) -> list[str]:
+    """The ``time-to-ratify`` informational line (median/max ``ratified_at - valid_from``
+    over hot records that carry the stamp), or ``[]`` when no record qualifies.
+    Pre-stamp records are excluded, never guessed. Informational only: never a finding,
+    never affects the exit code, deliberately absent from ``--json`` (pinned key set).
+    A record that is unusable is skipped on its own (see ``_latency_days``); an error
+    anywhere else is a bug and propagates.
+    # see design/superpowers/specs/2026-08-04-proposal-lifecycle-and-render-guard-design.md D4
+    """
+    root = Path(store_dir)
+    stamps = [
+        days
+        for subdir in ("decisions", "facts", "domains")
+        for _path, rec in _iter_records(root, subdir)
+        if (days := _latency_days(rec)) is not None
+    ]
+    latencies = sorted(stamps)
+    if not latencies:
+        return []
+    median = latencies[len(latencies) // 2]
+    return [
+        f"time-to-ratify: median {median:.0f} days, max {latencies[-1]:.0f} "
+        f"days ({len(latencies)} stamped record(s))"
+    ]
+
+
+def ratification_info_lines(store_dir: str | Path) -> list[str]:
+    """The informational ratification lines ``sidegraph-doctor`` prints, in print order:
+    the ``time-to-ratify`` line, then the D5 auto-share lines (each present only when it
+    has something to say). Computed here so the CLI only prints; an unusable record is
+    skipped inside each part and any other error propagates."""
+    return [*ratification_latency_lines(store_dir), *_auto_share_lines(store_dir)]
 
 
 def curate(

@@ -5,8 +5,13 @@ Four hook entry points, registered as console scripts: `sidegraph-session-start`
 [`src/sidegraph/host/hooks.py`](../../src/sidegraph/host/hooks.py), and
 `sidegraph-subagent-start` in
 [`src/sidegraph/host/subagent.py`](../../src/sidegraph/host/subagent.py). All four read a JSON
-payload from stdin and write a JSON response to stdout, per the Claude Code hooks contract. For
-wiring them into `.claude/settings.json`, see
+payload from stdin and write a JSON response to stdout, per the Claude Code hooks contract. They
+take no command-line arguments: `-h` or `--help` prints a short usage text and exits `0`, and any
+other argument is a usage error on stderr that exits `2` (the command guard below turns that exit
+into its fallback output, so a host never sees it, provided the wiring is guarded: every shipped
+manifest and recipe is). `-h` is honoured anywhere in the arguments. In both cases the entry point returns
+before it reads stdin or opens the store, so typing `--help` never runs a hook. A host calls them
+without arguments. For wiring them into `.claude/settings.json`, see
 [`getting-started/claude-code-setup.md`](../getting-started/claude-code-setup.md).
 
 ## The command guard

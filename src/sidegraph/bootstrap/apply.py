@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,6 +31,7 @@ from sidegraph.engine.reader import GraphifyReader
 from sidegraph.profiles import FlowProfile, get_profile
 from sidegraph.schema import Decision, DecisionStatus, DomainStatus
 from sidegraph.store import Store
+from sidegraph.store_layout import STAMPING_MARKER_NAME
 from sidegraph.verify import verify_snapshot
 
 _CANONICAL_DIRS = (
@@ -42,7 +43,7 @@ _CANONICAL_DIRS = (
     "initiatives",
     "archive",
 )
-_CANONICAL_ROOT_FILES = ("format", ".gitignore")
+_CANONICAL_ROOT_FILES = ("format", ".gitignore", STAMPING_MARKER_NAME)
 
 
 def _error_text(error: BaseException) -> str:
@@ -198,15 +199,20 @@ def reconcile_plan(
     review: ReviewResult,
     store_dir: Path,
     before: Mapping[str, str],
+    unanchored: Collection[str] = (),
 ) -> Reconciliation:
-    """Compare reviewed writes with canonical truth after reopen/rebuild."""
+    """Compare reviewed writes with canonical truth after reopen/rebuild.
+
+    ``unanchored`` are keys apply skipped by name (no anchor to write with): they are neither
+    durable nor pending, so an unchanged rerun converges.
+    """
     del plan  # Review items carry the possibly edited candidates that are authoritative here.
     catalog = load_canonical_catalog(Path(store_dir))
     durable: list[str] = []
     pending: list[str] = []
     accepted_records: list[AcceptedRecord] = []
     for item in review.items:
-        if item.action == ReviewAction.SKIP:
+        if item.action == ReviewAction.SKIP or item.candidate.key in unanchored:
             continue
         match = _matching_reviewed_decision(item, catalog)
         target = durable if match is not None else pending
@@ -306,8 +312,12 @@ def _counts(plan: BootstrapPlan, review: ReviewResult) -> dict[str, int | float]
     }
 
 
-def _pending_keys(review: ReviewResult) -> tuple[str, ...]:
-    return tuple(item.candidate.key for item in review.items if item.action != ReviewAction.SKIP)
+def _pending_keys(review: ReviewResult, unanchored: Collection[str] = ()) -> tuple[str, ...]:
+    return tuple(
+        item.candidate.key
+        for item in review.items
+        if item.action != ReviewAction.SKIP and item.candidate.key not in unanchored
+    )
 
 
 def _incomplete_report(
@@ -349,6 +359,8 @@ def _diagnostic_report(
     plan: BootstrapPlan,
     review: ReviewResult,
     store_dir: Path,
+    unanchored: tuple[str, ...] = (),
+    canonical_files: tuple[str, ...] = (),
 ) -> BootstrapReport:
     try:
         debt_count, oldest_days = proposal_debt(load_canonical_catalog(store_dir))
@@ -356,6 +368,8 @@ def _diagnostic_report(
         debt_count, oldest_days = 0, None
     return BootstrapReport(
         status=RunStatus.DIAGNOSTIC,
+        skipped_unanchorable_keys=unanchored,
+        canonical_files=canonical_files,
         **_counts(plan, review),
         review_debt_count=debt_count,
         oldest_proposal_days=oldest_days,
@@ -369,6 +383,7 @@ def _finalize(
     before: Mapping[str, str],
     error: str | None,
     failed_ref: str | None,
+    unanchored: tuple[str, ...] = (),
 ) -> BootstrapReport:
     reopen_error: str | None = None
     try:
@@ -389,7 +404,7 @@ def _finalize(
 
     reconciliation_error: str | None = None
     try:
-        reconciliation = reconcile_plan(plan, review, store_dir, before)
+        reconciliation = reconcile_plan(plan, review, store_dir, before, unanchored)
     except (OSError, ValueError) as exc:
         reconciliation_error = _error_text(exc)
         try:
@@ -401,7 +416,9 @@ def _finalize(
             )
         except OSError:
             changed = ()
-        reconciliation = Reconciliation(pending=_pending_keys(review), canonical_files=changed)
+        reconciliation = Reconciliation(
+            pending=_pending_keys(review, unanchored), canonical_files=changed
+        )
 
     complete = (
         not error
@@ -431,6 +448,7 @@ def _finalize(
         oldest_proposal_days=oldest_days,
         durable_candidate_keys=reconciliation.durable,
         pending_candidate_keys=reconciliation.pending,
+        skipped_unanchorable_keys=unanchored,
         durable_accepted_records=reconciliation.durable_accepted_records,
         canonical_files=reconciliation.canonical_files,
         verification_failures=verification_errors,
@@ -484,6 +502,7 @@ def apply_review(
 
     error: str | None = None
     failed_ref: str | None = None
+    unanchored: list[str] = []
     profile = get_profile(plan.profile)
     try:
         for item in review.items:
@@ -499,7 +518,11 @@ def apply_review(
                     raise AssertionError(
                         f"reviewed candidate ref changed during conversion: {item.candidate.ref}"
                     )
-                apply_doc_candidate(store, reader, request)
+                result = apply_doc_candidate(store, reader, request)
+                if result.action == "skipped-unanchorable":
+                    # Nothing was written (doc_import never writes a zero-anchor record);
+                    # name the key instead of leaving it pending forever.
+                    unanchored.append(item.candidate.key)
             except BaseException as exc:
                 error = _error_text(exc)
                 failed_ref = item.candidate.ref
@@ -511,7 +534,22 @@ def apply_review(
             if error is None:
                 error = _error_text(exc)
 
-    return _finalize(plan, review, store_dir, before, error, failed_ref)
+    skipped = tuple(unanchored)
+    if (
+        skipped
+        and error is None
+        and len(skipped) == sum(item.action != ReviewAction.SKIP for item in review.items)
+    ):
+        # Every approved item was unanchorable: no write happened, so a clean run is a
+        # diagnostic. It still went through the store open, so it takes the same reopen and
+        # strict verification as any other run: a violation the open tolerates must not
+        # read as a clean diagnostic. Opening the Store may also have created its layout
+        # files (format, .gitignore); `_finalize` reports them as CHANGED.
+        finalized = _finalize(plan, review, store_dir, before, error, failed_ref, skipped)
+        if finalized.status == RunStatus.COMPLETE:
+            return finalized.with_run_status(RunStatus.DIAGNOSTIC)
+        return finalized
+    return _finalize(plan, review, store_dir, before, error, failed_ref, skipped)
 
 
 def render_markdown_report(
@@ -521,6 +559,7 @@ def render_markdown_report(
     proof: ProofResult | None = None,
     task_proof: ProofResult | None = None,
     elapsed_seconds: float | None = None,
+    remedy: str | None = None,
 ) -> str:
     """Render operational aggregates without candidate/source/error content."""
     reviewed = report.reviewed_candidates
@@ -556,12 +595,15 @@ def render_markdown_report(
         f"- oldest proposal days: {report.oldest_proposal_days}",
         f"- durable candidates: {len(report.durable_candidate_keys)}",
         f"- pending candidates: {len(report.pending_candidate_keys)}",
+        f"- skipped unanchorable candidates: {len(report.skipped_unanchorable_keys)}",
         f"- verification failures: {len(report.verification_failures)}",
     ]
     if elapsed_seconds is not None:
         lines.append(f"- elapsed seconds: {elapsed_seconds:.3f}")
     if report.next_command is not None:
         lines.append(f"- next command: `{report.next_command}`")
+    if remedy is not None:
+        lines.append(f"- stored record has no anchor in the current graph: {remedy}")
 
     if report.canonical_files:
         lines.extend(("", "## Changed canonical files", ""))

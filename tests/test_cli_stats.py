@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from sidegraph.cli import stats_main
+from sidegraph.schema import Decision, DecisionKind, Provenance
 from sidegraph.stats.model import build_report
 from sidegraph.stats.render import render_text
 from sidegraph.store import Store
@@ -627,3 +629,48 @@ def test_the_ratify_help_says_all_includes_standalone_facts(capsys):
     from sidegraph.cli import ratify_main
 
     assert "standalone facts" in _help_of(ratify_main, capsys)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o400, 0o600])
+def test_stats_names_the_unreadable_record_directory_not_the_index(mode, tmp_path, capsys):
+    store_dir = tmp_path / ".sidegraph"
+    with Store(store_dir) as s:
+        s.add_decision(
+            Decision(
+                title="d",
+                kind=DecisionKind.ADR,
+                context="c",
+                choice="x",
+                valid_from=datetime(2026, 1, 10, tzinfo=UTC),
+                provenance=Provenance(source="manual"),
+            )
+        )
+    blocked = store_dir / "decisions"
+    blocked.chmod(mode)
+    try:
+        rc = stats_main(["--db", str(store_dir)])
+        err = capsys.readouterr().err
+    finally:
+        blocked.chmod(0o755)
+    assert rc == 2
+    assert err.startswith(f"cannot read the store ({blocked}): ")
+    assert "store index" not in err
+    assert f"{blocked}{os.sep}" not in err  # the directory, not a file inside it
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
+def test_stats_says_unreadable_not_missing_for_a_store_dir_it_cannot_search(tmp_path, capsys):
+    store_dir = tmp_path / ".sidegraph"
+    Store(store_dir).close()
+    assert (store_dir / "index.db").is_file()
+    store_dir.chmod(0o000)
+    try:
+        rc = stats_main(["--db", str(store_dir)])
+        err = capsys.readouterr().err
+    finally:
+        store_dir.chmod(0o755)
+    assert rc == 2
+    assert "no store index" not in err
+    assert err.startswith(f"cannot read the store index ({store_dir / 'index.db'}): ")
+    assert "Permission denied" in err  # the real error, not a fixed phrase

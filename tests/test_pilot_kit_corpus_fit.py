@@ -16,7 +16,9 @@ keep matching the measured outcome after any threshold change.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -38,13 +40,41 @@ def _verdict(root: Path) -> str:
 # ── the shapes a reviewer built and the first version waved through ──────────────────
 
 
-def test_service_monorepo_with_a_readme_per_module_is_not_waved_through(tmp_path):
-    """3,000 modules + a README each: ~50% prose by bytes, still entirely grep-answerable.
+# The kill rule fires at corpus_fit._BIG_CODE_SURFACE (2,000 code files) with density under
+# the floor. 2,100 modules is 5% over that threshold: a mutant that raises it to 2,200, or
+# drops the surface test, flips the verdict, while the tree stays 30% smaller than the 3,000
+# the first reviewer built. Both tests only read the tree, so it is built once per module.
+# The "drops the surface test" mutant is killed by the small-repository test below instead.
+_MONOREPO_MODULES = 2100
+
+
+@pytest.fixture(scope="module")
+def service_monorepo(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """Services, a README each, cloned into a directory whose name is design-shaped.
+
+    One tree serves both tests below: the first needs any root, the second needs this
+    parent name; the verdict must be the same for both. Because the shared root sits under
+    ``design-docs/``, the monorepo test also fails for a regression that matches decision
+    shapes on the absolute path: that parent can only ADD decision-shaped documents, which
+    moves the tree away from the kill rule, so the test cannot pass for a wrong reason.
+    """
+    base = tmp_path_factory.mktemp("monorepo")
+    inner = base / "design-docs" / "checkout"
+    for i in range(_MONOREPO_MODULES):
+        _write(inner, f"services/svc{i}/main.py", 900)
+        _write(inner, f"services/svc{i}/README.md", 900)
+    yield inner
+    # Pytest's retention policy covers ``tmp_path``, not factory dirs: a passing session
+    # without --basetemp removes the whole base anyway, but a --basetemp run or a failing
+    # session keeps them, and the tree is ~6,000 entries. Removing it here frees the peak too.
+    shutil.rmtree(base, ignore_errors=True)
+
+
+def test_service_monorepo_with_a_readme_per_module_is_not_waved_through(service_monorepo):
+    """2,100 modules + a README each: ~50% prose by bytes, still entirely grep-answerable.
     The first rule needed prose < 10% to fire, so it structurally could not reject this."""
-    for i in range(3000):
-        _write(tmp_path, f"services/svc{i}/main.py", 900)
-        _write(tmp_path, f"services/svc{i}/README.md", 900)
-    assert _verdict(tmp_path) == "DO NOT PILOT (kill rule)"
+    assert corpus_fit.scan(service_monorepo)["code_files"] == _MONOREPO_MODULES
+    assert _verdict(service_monorepo) == "DO NOT PILOT (kill rule)"
 
 
 def test_infrastructure_repo_is_code_not_prose(tmp_path):
@@ -68,14 +98,22 @@ def test_infrastructure_repo_is_code_not_prose(tmp_path):
     assert _verdict(tmp_path) == "PILOT ONLY WITH A COST GATE"
 
 
-def test_verdict_does_not_depend_on_the_parent_directory_name(tmp_path):
+def test_verdict_does_not_depend_on_the_parent_directory_name(service_monorepo):
     """The first version substring-matched the ABSOLUTE path, so cloning into
     ~/design-docs/ turned every file in the repo into a 'decision-shaped document'."""
-    inner = tmp_path / "design-docs" / "checkout"
-    for i in range(3000):
-        _write(inner, f"services/svc{i}/main.py", 900)
-        _write(inner, f"services/svc{i}/README.md", 900)
-    assert _verdict(inner) == "DO NOT PILOT (kill rule)"
+    assert "design-docs" in service_monorepo.parts
+    assert corpus_fit.scan(service_monorepo)["decision_shaped_docs"] == 0
+    assert _verdict(service_monorepo) == "DO NOT PILOT (kill rule)"
+
+
+def test_a_small_repository_without_decision_docs_is_not_killed(tmp_path):
+    """The kill rule needs BOTH a big code surface and a low density. 50 code files and no
+    decision documents have density 0, under the floor, but nothing there is a measured losing
+    shape: the verdict is the cost gate. Dropping the surface test would kill it."""
+    for i in range(50):
+        _write(tmp_path, f"src/mod{i}.py")
+    assert corpus_fit.scan(tmp_path)["code_files"] == 50
+    assert _verdict(tmp_path) == "PILOT ONLY WITH A COST GATE"
 
 
 def test_adr_substring_does_not_match_an_unrelated_word(tmp_path):

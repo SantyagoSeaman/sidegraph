@@ -823,6 +823,24 @@ def test_a_canonical_file_removed_behind_the_index_is_stale(tmp_path):
     assert build_report(tmp_path / "s", None, window_days=30, now=NOW).index_stale is True
 
 
+def test_a_dangling_symlink_the_store_recorded_is_not_stale(tmp_path):
+    """The store records a dangling ``*.json`` link by its lstat; the reader must see the same."""
+    import sqlite3
+    from contextlib import closing
+
+    from sidegraph.stats.model import _index_is_stale
+
+    store = Store(tmp_path / "s")
+    store.close()
+    (tmp_path / "s" / "decisions" / "01ABCDEFGHJKMNPQRSTVWXYZ00.json").symlink_to(
+        tmp_path / "no-such-target"
+    )
+    Store(tmp_path / "s").close()
+    with closing(sqlite3.connect(tmp_path / "s" / "index.db")) as conn:
+        conn.row_factory = sqlite3.Row
+        assert _index_is_stale(conn, tmp_path / "s") is False
+
+
 def test_the_staleness_check_writes_nothing(tmp_path):
     import hashlib
 

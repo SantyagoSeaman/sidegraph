@@ -434,3 +434,120 @@ def test_empty_candidate_set_writes_nothing(tmp_path, monkeypatch):
     rc = prepare_commit_msg_main([msg, None])
     assert rc == 0
     assert Path(msg).read_text() == "original\n"
+
+
+# ---- argument contract: git's positionals work, anything else is a usage error -------
+
+
+def test_prepare_commit_msg_accepts_one_to_three_git_positionals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """git passes <message-file> [<source> [<sha1>]]; none of those shapes is an error, and
+    a source other than absent or ``template`` leaves the file untouched."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "no-store"))
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_text("subject\n")
+    for argv in (
+        [str(msg)],
+        [str(msg), "template"],
+        [str(msg), "message"],
+        [str(msg), "commit", "abc1234"],
+        [str(msg), "template", "abc1234"],
+    ):
+        assert prepare_commit_msg_main(argv) == 0, argv
+        assert msg.read_text() == "subject\n", argv
+
+
+def test_prepare_commit_msg_help_prints_usage_and_touches_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_text("subject\n")
+    for flag in ("--help", "-h"):
+        assert prepare_commit_msg_main([flag]) == 0
+        assert prepare_commit_msg_main([str(msg), flag]) == 0
+    out = capsys.readouterr().out
+    assert out.count("usage: sidegraph-prepare-commit-msg") == 4
+    assert msg.read_text() == "subject\n"
+
+
+@pytest.mark.parametrize("extra", [["--bogus"], ["template", "abc", "extra"], ["-x", "template"]])
+def test_prepare_commit_msg_reports_an_unknown_option_or_too_many_arguments_but_stays_fail_open(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra: list[str]
+) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_text("subject\n")
+    # fail-open: a stray `args:` entry in a pre-commit config must not fail `git commit`
+    assert prepare_commit_msg_main([str(msg), *extra]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "sidegraph-prepare-commit-msg: error:" in captured.err
+    assert "usage: sidegraph-prepare-commit-msg" in captured.err
+    assert msg.read_bytes() == b"subject\n"
+
+
+# -- pre-commit framework argument shape: ONE argument + env vars ----------------------
+
+
+def _decision_repo(tmp_path, monkeypatch) -> str:
+    """A repo whose HEAD-stamped record makes the hook write a block; returns a message file."""
+    repo = _init_repo(tmp_path)
+    head = _commit_file(repo, "f.txt", "1", "initial")
+    store = Store(repo / ".sidegraph")
+    _decision(store, "framework candidate", commit=head)
+    store.close()
+    monkeypatch.chdir(repo)
+    for var in ("PRE_COMMIT_COMMIT_MSG_SOURCE", "PRE_COMMIT_COMMIT_OBJECT_NAME"):
+        monkeypatch.delenv(var, raising=False)
+    return _message_file(tmp_path, "original message\n")
+
+
+@pytest.mark.parametrize("source", ["message", "merge", "squash", "commit"])
+def test_framework_one_arg_non_plain_source_env_leaves_file_untouched(
+    tmp_path, monkeypatch, source
+):
+    msg = _decision_repo(tmp_path, monkeypatch)
+    monkeypatch.setenv("PRE_COMMIT_COMMIT_MSG_SOURCE", source)
+    if source == "commit":
+        monkeypatch.setenv("PRE_COMMIT_COMMIT_OBJECT_NAME", "HEAD")
+    before = Path(msg).read_bytes()
+    assert prepare_commit_msg_main([msg]) == 0
+    assert Path(msg).read_bytes() == before
+
+
+@pytest.mark.parametrize("value", [None, "", "template"])
+def test_framework_one_arg_absent_empty_or_template_source_writes_block(
+    tmp_path, monkeypatch, value
+):
+    msg = _decision_repo(tmp_path, monkeypatch)
+    if value is not None:
+        monkeypatch.setenv("PRE_COMMIT_COMMIT_MSG_SOURCE", value)
+    assert prepare_commit_msg_main([msg]) == 0
+    assert "framework candidate" in Path(msg).read_text()
+
+
+@pytest.mark.parametrize("value", [None, "template", "message"])
+def test_framework_zero_args_is_a_no_op_whatever_the_env_says(tmp_path, monkeypatch, value):
+    """`pass_filenames: false` makes the framework call the hook with no argument at all while
+    the source variable is still set; the hook must stay a no-op and exit 0 (fail-open), never
+    index an empty argv."""
+    _decision_repo(tmp_path, monkeypatch)
+    if value is not None:
+        monkeypatch.setenv("PRE_COMMIT_COMMIT_MSG_SOURCE", value)
+    before = sorted(p.name for p in Path.cwd().iterdir())
+    assert prepare_commit_msg_main([]) == 0
+    assert sorted(p.name for p in Path.cwd().iterdir()) == before
+
+
+def test_raw_git_positionals_win_over_pre_commit_env(tmp_path, monkeypatch):
+    msg = _decision_repo(tmp_path, monkeypatch)
+    # two positionals say "message" -> untouched, though the env says "template"
+    monkeypatch.setenv("PRE_COMMIT_COMMIT_MSG_SOURCE", "template")
+    before = Path(msg).read_bytes()
+    assert prepare_commit_msg_main([msg, "message"]) == 0
+    assert Path(msg).read_bytes() == before
+    # three positionals say "template" -> block written, though the env says "message"
+    monkeypatch.setenv("PRE_COMMIT_COMMIT_MSG_SOURCE", "message")
+    assert prepare_commit_msg_main([msg, "template", "abc123"]) == 0
+    assert "framework candidate" in Path(msg).read_text()

@@ -20,6 +20,7 @@ from sidegraph.schema import (
     Decision,
     DecisionKind,
     DecisionStatus,
+    Descriptor,
     Domain,
     DomainStatus,
     Entity,
@@ -597,3 +598,258 @@ def test_compact_git_status_shows_only_removed_hot_files_and_new_segment(tmp_pat
         f".sidegraph/decisions/{old.id}.json",
         ".sidegraph/archive/",
     }
+
+
+# -- a hot file older than the schema's newest fields is not a mismatch -----------------------
+
+
+def _strip_newer_keys(path) -> None:
+    """Rewrite a hot file the way a version before the ratifier stamp and ``provenance.commit``
+    wrote it: those keys are simply absent."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("ratified_at", None)
+    data.pop("ratified_by", None)
+    data["provenance"].pop("commit", None)
+    path.write_text(
+        json.dumps(data, sort_keys=True, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
+def _old_decision(store: Store) -> Decision:
+    old = store.add_decision(_decision(title="legacy"))
+    store.add_decision(_decision(title="successor", supersedes=old.id))
+    _strip_newer_keys(_hot_decision_path(store, old.id))
+    return old
+
+
+def test_compact_archives_a_hot_decision_that_lacks_newer_keys_without_a_warning(
+    store: Store, capsys
+) -> None:
+    old = _old_decision(store)
+    report = store.compact()
+    assert report.decisions_compacted == 1
+    assert not _hot_decision_path(store, old.id).exists()
+    assert "DIFFERENT" not in capsys.readouterr().err
+    path = store.path
+    store.close()
+    for f in path.glob("index.db*"):
+        f.unlink()
+    with Store(path) as fresh:
+        assert fresh.get_decision(old.id).title == "legacy"
+    assert "DIFFERENT" not in capsys.readouterr().err
+
+
+def test_compact_archives_a_hot_domain_that_lacks_newer_keys_without_a_warning(
+    store: Store, capsys
+) -> None:
+    dom = store.add_domain(_domain(slug="legacy-dom"))
+    store.ratify_domains(drop=[dom.domain_id])
+    _strip_newer_keys(_hot_domain_path(store, dom.domain_id))
+    report = store.compact()
+    assert report.domains_compacted == 1
+    assert not _hot_domain_path(store, dom.domain_id).exists()
+    assert "DIFFERENT" not in capsys.readouterr().err
+
+
+def test_compact_keeps_and_warns_on_a_real_difference_in_a_legacy_shaped_hot_file(
+    store: Store, capsys
+) -> None:
+    old = _old_decision(store)
+    path = _hot_decision_path(store, old.id)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["choice"] = "edited after the fact"
+    path.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    store.compact()
+    assert path.is_file()
+    err = capsys.readouterr().err
+    assert "DIFFERENT" in err and old.id in err
+
+
+def test_compact_keeps_and_warns_on_an_unknown_extra_key_holding_a_value(
+    store: Store, capsys
+) -> None:
+    old = _old_decision(store)
+    path = _hot_decision_path(store, old.id)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["from_a_newer_version"] = "keep me"
+    path.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    store.compact()
+    assert path.is_file()
+    assert "from_a_newer_version" in path.read_text(encoding="utf-8")
+    assert "DIFFERENT" in capsys.readouterr().err
+
+
+def test_second_compact_cleans_a_leftover_that_differs_only_by_absent_keys(
+    store: Store, capsys
+) -> None:
+    old = store.add_decision(_decision(title="legacy"))
+    store.add_decision(_decision(title="successor", supersedes=old.id))
+    hot = _hot_decision_path(store, old.id)
+    original = hot.read_text(encoding="utf-8")
+    store.compact()
+    assert not hot.exists()
+    hot.write_text(original, encoding="utf-8")
+    _strip_newer_keys(hot)
+    report = store.compact()
+    assert report.cleaned_up_hot_files == 1
+    assert not hot.exists()
+    assert "DIFFERENT" not in capsys.readouterr().err
+
+
+def test_second_compact_keeps_a_leftover_that_differs_for_real(store: Store, capsys) -> None:
+    old = store.add_decision(_decision(title="legacy"))
+    store.add_decision(_decision(title="successor", supersedes=old.id))
+    hot = _hot_decision_path(store, old.id)
+    original = hot.read_text(encoding="utf-8")
+    store.compact()
+    hot.write_text(original, encoding="utf-8")
+    _strip_newer_keys(hot)
+    data = json.loads(hot.read_text(encoding="utf-8"))
+    data["title"] = "tampered"
+    hot.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    report = store.compact()
+    assert report.cleaned_up_hot_files == 0
+    assert hot.is_file()
+    assert "DIFFERENT" in capsys.readouterr().err
+
+
+def test_reload_does_not_warn_for_a_hot_file_that_differs_only_by_absent_keys(
+    store: Store, capsys
+) -> None:
+    old = store.add_decision(_decision(title="legacy"))
+    store.add_decision(_decision(title="successor", supersedes=old.id))
+    hot = _hot_decision_path(store, old.id)
+    original = hot.read_text(encoding="utf-8")
+    store.compact()
+    path = store.path
+    store.close()
+    hot.write_text(original, encoding="utf-8")
+    _strip_newer_keys(hot)
+    for f in path.glob("index.db*"):
+        f.unlink()
+    capsys.readouterr()
+    with Store(path) as fresh:
+        assert fresh.get_decision(old.id).title == "legacy"
+    assert "DIFFERENT" not in capsys.readouterr().err
+
+
+# -- a key only the hot file holds always blocks the unlink ------------------------------------
+# The archive line is a model dump, which drops keys the running version does not know, so a
+# hot file from a newer version may hold a key the archive cannot. Keeping the file is the only
+# way not to lose it, whatever the value is.
+
+
+def _mutate_hot(path, fn) -> None:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    fn(data)
+    path.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def _set(key, value):
+    return lambda d: d.__setitem__(key, value)
+
+
+_HOT_ONLY_KEYS = [
+    pytest.param(_set("zz_extra", None), id="extra-null"),
+    pytest.param(_set("zz_extra", []), id="extra-empty-list"),
+    pytest.param(_set("zz_extra", {}), id="extra-empty-dict"),
+    pytest.param(_set("zz_extra", False), id="extra-false"),
+    pytest.param(_set("zz_extra", 0), id="extra-zero"),
+    pytest.param(lambda d: d["provenance"].__setitem__("zz_extra", None), id="provenance-null"),
+]
+
+
+@pytest.mark.parametrize("mutate", _HOT_ONLY_KEYS)
+def test_compact_keeps_a_hot_file_holding_a_key_the_archive_lacks(
+    store: Store, capsys, mutate
+) -> None:
+    old = store.add_decision(_decision(title="newer-version"))
+    store.add_decision(_decision(title="successor", supersedes=old.id))
+    hot = _hot_decision_path(store, old.id)
+    _mutate_hot(hot, mutate)
+    store.compact()
+    assert hot.is_file()
+    assert old.id in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mutate", _HOT_ONLY_KEYS)
+def test_leftover_hot_file_holding_a_key_the_archive_lacks_is_kept(
+    store: Store, capsys, mutate
+) -> None:
+    old = store.add_decision(_decision(title="newer-version"))
+    store.add_decision(_decision(title="successor", supersedes=old.id))
+    hot = _hot_decision_path(store, old.id)
+    original = hot.read_text(encoding="utf-8")
+    store.compact()
+    hot.write_text(original, encoding="utf-8")
+    _mutate_hot(hot, mutate)
+    capsys.readouterr()
+    report = store.compact()
+    assert report.cleaned_up_hot_files == 0
+    assert hot.is_file()
+    assert old.id in capsys.readouterr().err
+
+
+def test_compact_keeps_a_domain_whose_seed_anchor_holds_a_key_the_archive_lacks(
+    store: Store, capsys
+) -> None:
+    dom = store.add_domain(_domain(slug="seeded", seed_anchors=[Descriptor(name="widget")]))
+    store.ratify_domains(drop=[dom.domain_id])
+    hot = _hot_domain_path(store, dom.domain_id)
+    _mutate_hot(hot, lambda d: d["seed_anchors"][0].__setitem__("zz_extra", None))
+    store.compact()
+    assert hot.is_file()
+    assert dom.domain_id in capsys.readouterr().err
+
+
+def test_leftover_hot_domain_with_a_hot_only_key_is_kept(store: Store, capsys) -> None:
+    dom = store.add_domain(_domain(slug="seeded2", seed_anchors=[Descriptor(name="widget")]))
+    store.ratify_domains(drop=[dom.domain_id])
+    hot = _hot_domain_path(store, dom.domain_id)
+    original = hot.read_text(encoding="utf-8")
+    store.compact()
+    hot.write_text(original, encoding="utf-8")
+    _mutate_hot(hot, lambda d: d["seed_anchors"][0].__setitem__("zz_extra", None))
+    capsys.readouterr()
+    report = store.compact()
+    assert report.cleaned_up_hot_files == 0
+    assert hot.is_file()
+    assert dom.domain_id in capsys.readouterr().err
+
+
+def test_leftover_with_an_empty_string_against_an_archived_null_is_kept(
+    store: Store, capsys
+) -> None:
+    # `""` is a value, not an empty shape: a mutant treating every falsy value as empty
+    # would clean this file.
+    old = store.add_decision(_decision(title="legacy"))
+    store.add_decision(_decision(title="successor", supersedes=old.id))
+    hot = _hot_decision_path(store, old.id)
+    original = hot.read_text(encoding="utf-8")
+    store.compact()
+    hot.write_text(original, encoding="utf-8")
+    _mutate_hot(hot, lambda d: d.__setitem__("ratified_by", ""))
+    report = store.compact()
+    assert report.cleaned_up_hot_files == 0
+    assert hot.is_file()
+    assert old.id in capsys.readouterr().err
+
+
+def test_reload_does_not_warn_for_a_hot_domain_that_differs_only_by_absent_keys(
+    store: Store, capsys
+) -> None:
+    dom = store.add_domain(_domain(slug="legacy-dom2"))
+    store.ratify_domains(drop=[dom.domain_id])
+    hot = _hot_domain_path(store, dom.domain_id)
+    original = hot.read_text(encoding="utf-8")
+    store.compact()
+    path = store.path
+    store.close()
+    hot.write_text(original, encoding="utf-8")
+    _strip_newer_keys(hot)
+    for f in path.glob("index.db*"):
+        f.unlink()
+    capsys.readouterr()
+    with Store(path) as fresh:
+        assert fresh.get_domain(dom.domain_id).slug == "legacy-dom2"
+    assert "DIFFERENT" not in capsys.readouterr().err

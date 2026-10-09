@@ -23,6 +23,7 @@ that govern writing to it. Implemented in
 ├── archive/                 # optional — only exists once `sidegraph-compact` has run
 │   └── <date>-<seq>-<hash12>.jsonl  # immutable segments of terminal (closed) records
 └── index.db                 # DERIVED, gitignored: fast queries + every volatile field
+                             # (+ index.db-journal, a 0-byte rollback journal kept beside it)
 ```
 
 Every directory except `archive/` and `index.db` is created empty the first time a `Store`
@@ -43,9 +44,13 @@ SQLite's `index.db-journal`, `-wal` and `-shm`) is a symlink, live or dangling: 
 `decisions/` would send every record write to the link's target, and a linked `index.db` would
 make SQLite write there. The error names the entry (`… inside the store is a symlink`);
 replace it with a real directory or file. `sidegraph-verify` reports each such entry as
-`symlinked-store-entry`. A symlinked store **root** (`.sidegraph -> ../shared/store`) is fine:
-a deliberately shared store is a real use. Record files inside a real subdirectory are still
-read as they are.
+`symlinked-store-entry` and stops there: it lints no record, checks no reference and runs no
+`--against` comparison until the links are removed, and its text output says so in one line.
+An `--against` ref that does not resolve, or a store outside git, is checked before the stop and
+exits `1` without reporting the links.
+`sidegraph-doctor` does the same and skips its advisory checks. A symlinked store **root**
+(`.sidegraph -> ../shared/store`) is fine: a deliberately shared store is a real use. Record
+files inside a real subdirectory are still read as they are.
 
 **A symlinked store belongs to the project that holds the link.** The code a record is anchored
 to lives in that project, so the repository Sidegraph asks about the store is the project's, not
@@ -206,8 +211,9 @@ index.db*
 
 the moment any `Store` open touches the canonical layout — not just `sidegraph-init`, so a bare
 `sidegraph-mcp`/hook invocation against a pre-existing store also leaves `git status` clean. It
-covers `index.db` and its SQLite WAL/SHM sidecars (the `*` glob) and any crash-debris temp file
-left mid-write. The store **never overwrites an existing `.gitignore`** — if you've hand-edited
+covers `index.db` and its SQLite sidecars (the `*` glob): the 0-byte
+`index.db-journal` that stays beside it, and a `-wal`/`-shm` pair should another tool ever open
+it in WAL mode. The `*.tmp` line covers any crash-debris temp file left mid-write. The store **never overwrites an existing `.gitignore`** — if you've hand-edited
 it, your edits stand.
 
 ## Freshness: absorbing a `git pull`
@@ -248,12 +254,21 @@ for the index, is left out with reason `parse-error`, and the rest of the store 
 left out, so a half-valid file never leaves half of its bindings in the index. The record the
 file belongs to stays retrievable, with no anchors until the file is fixed. A file that cannot be
 opened at all (`OSError`, such as a permission error) still fails the open: it can be transient.
+An entry that is not a regular file is not a record file at all: a directory, FIFO, socket,
+dangling or looping symlink whose name matches `*.json` in a record directory (or `*.jsonl` in `archive/`) is
+left out and never opened (a read of it would fail with `IsADirectoryError`, or block for ever on a
+FIFO). The reason is `not a regular file`, except that a record-directory entry whose name is not a
+safe id gets `unsafe filename`; an archive segment name is not an id, so a segment always gets `not
+a regular file`. Symlinks are followed, so a link to a regular file reads as one and a link to a
+directory is skipped. The entry is listed
+and warned about like any skipped file, and the index is certified as usual, so the next open takes
+the fast path.
 
 The files skipped by the last reload are listed in the index's `skipped_canonical_files` meta key (path,
 reason, size and mtime), and `Store.__init__` prints a warning naming them **on every open**
 while the list is non-empty, pointing at `sidegraph-verify`, which reports each one: a file that is not valid JSON or UTF-8, is
-not a JSON object or has no id as `parse-error`, an id that differs from the filename as `filename-id-mismatch`, and an
-unsafe id as `unsafe-record-id`. A listed file that has since vanished or changed makes the next open
+not a JSON object or has no id as `parse-error`, an id that differs from the filename as `filename-id-mismatch`, a non-file entry with a safe name (or any non-file entry in `archive/`) as `parse-error` (`unreadable: not a regular file`; in `archive/` a `bad-archive-segment`), and an
+unsafe id or an unsafe filename as `unsafe-record-id`, which is then the only finding for that file. An unsafe filename is reported whatever the content; an unsafe id needs the content to parse. A listed file that has since vanished or changed makes the next open
 reload once, which rewrites the list, so restoring or fixing the file clears the warning. Restore
 it with git or fix it by hand: the warning never suggests deleting a record file, because that
 breaks the append-only store. **No canonical writer overwrites a listed file**: each of them
@@ -419,7 +434,9 @@ two branches before they merged — but terminal records are immutable, so any d
 byte-identical and it doesn't matter which copy wins). If a hot file and an archived copy of
 the same id ever disagree, the hot file wins and a warning prints — that shape means
 corruption or a hand-edit, and the store never silently prefers the archive over live disk
-state. The freshness digest (above) covers `archive/*.jsonl` too, so a segment absorbed from a
+state. A key the hot file lacks, against `null` or an empty list or object in the archive, is
+not a disagreement (the file predates the field); a key only the hot file holds, at any depth
+and whatever its value, always is, and `sidegraph-compact` keeps such a file. The freshness digest (above) covers `archive/*.jsonl` too, so a segment absorbed from a
 teammate's branch via `git pull` is picked up on the next open exactly like any other new
 committed file.
 

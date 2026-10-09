@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -412,7 +413,8 @@ def test_t7_a_proposed_id_outside_its_window_is_not_returned(store, monkeypatch)
 @pytest.fixture(scope="module")
 def big_store(tmp_path_factory):
     """300 records of about 2,000 characters, in every kind and in all five statuses."""
-    s = Store(tmp_path_factory.mktemp("big") / "big.db")
+    root = tmp_path_factory.mktemp("big")
+    s = Store(root / "big.db")
     statuses = ["accepted"] * 6 + ["proposed", "deprecated"]
     kinds = ["gotcha", "lesson", "adr", "constraint"]
     for i in range(300):
@@ -429,6 +431,7 @@ def big_store(tmp_path_factory):
     _add(s, "Record dropped", status="rejected", hours_ago=998, context="payload " * 5)
     yield s
     s.close()
+    shutil.rmtree(root, ignore_errors=True)
 
 
 ALL_STATUSES = ["proposed", "accepted", "superseded", "rejected", "deprecated"]

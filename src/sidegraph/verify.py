@@ -45,10 +45,13 @@ a separate finding, :data:`FILENAME_ID_MISMATCH` — the store always writes
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from pydantic import BaseModel, ValidationError
 
@@ -73,6 +76,13 @@ from .store import (
     _archive_payload_problem,
     symlinked_internals,
 )
+from .store_layout import (
+    NOT_A_FILE_REASON,
+    is_regular_file,
+    require_listable_record_dirs,
+    same_modulo_absent,
+    stat_entry,
+)
 
 # Violation codes — pinned constants (design ruling 2). The CLI's --json output and every
 # test assert against these exact strings, never a free-form message.
@@ -83,11 +93,17 @@ SUPERSEDED_WITHOUT_SUCCESSOR = "superseded-without-successor"
 DANGLING_SUPERSEDES = "dangling-supersedes"
 DANGLING_BINDING_ENTITY = "dangling-binding-entity"
 DANGLING_FACT_SUPPORT = "dangling-fact-support"
+DANGLING_PARENT = "dangling-parent"
+PARENT_CYCLE = "parent-cycle"
 DUPLICATE_ULID = "duplicate-ulid"
 BAD_ARCHIVE_SEGMENT = "bad-archive-segment"
 FILENAME_ID_MISMATCH = "filename-id-mismatch"
 UNSAFE_RECORD_ID = "unsafe-record-id"
 SYMLINKED_STORE_ENTRY = "symlinked-store-entry"
+# The one line the CLIs print when a symlinked store entry stops the run at the links.
+SYMLINK_STOP_NOTE = (
+    "remaining checks skipped (the store has symlinked entries — remove the links and rerun)"
+)
 
 # Transition-layer codes (design ruling 2, "Transition layer" — see that section below).
 ILLEGAL_FIELD_CHANGE = "illegal-field-change"
@@ -146,6 +162,10 @@ def _load_raw_json(path: Path) -> tuple[object | None, Violation | None]:
     naming its path (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md
     D2)."""
     try:
+        # Before any read: a directory or FIFO matched by ``*.json`` is not a file, and a read
+        # of a FIFO blocks (the reload skips such an entry the same way).
+        if not is_regular_file(stat_entry(path)):
+            return None, _violation(PARSE_ERROR, path, f"unreadable: {NOT_A_FILE_REASON}")
         text = path.read_text(encoding="utf-8")
     except OSError as e:
         return None, _violation(PARSE_ERROR, path, f"unreadable: {e}")
@@ -172,24 +192,58 @@ def _check_filename_matches_id(path: Path, rid: str) -> Violation | None:
     return None
 
 
-def _check_safe_record_id(path: Path, rid: object) -> Violation | None:
+def _check_safe_stem(path: Path) -> Violation | None:
     """A record's id IS its filename (design/superpowers/specs/2026-09-29-record-identity-
-    design.md D7): either the id or the file's stem failing :func:`is_safe_record_id` is an
-    :data:`UNSAFE_RECORD_ID` finding, and the store's reload skips such a file. A non-string
-    id (list, dict) lands here too instead of crashing the callers' ``setdefault``."""
-    if not is_safe_record_id(rid):
-        return _violation(UNSAFE_RECORD_ID, path, f"record id {rid!r} is not a safe filename")
+    design.md D7): a stem failing :func:`is_safe_record_id` is an :data:`UNSAFE_RECORD_ID`
+    finding, and the store's reload skips such a file whole. Checked BEFORE the file is
+    parsed, so the finding does not depend on the content: a file that is not JSON, not UTF-8
+    or not an object is the same skipped file, and ``parse-error`` would hide why."""
     if not is_safe_record_id(path.stem):
         return _violation(UNSAFE_RECORD_ID, path, f"filename {path.stem!r} is not a safe id")
+    return None
+
+
+def _stem_skipped_record(path: Path, id_field: str) -> tuple[str, dict] | None:
+    """``(id, payload)`` of a file skipped for its stem when it holds a parseable object with a
+    SAFE string id, else None: nothing legitimate references an unsafe id. The skip hides the
+    file from the index, not from its neighbours: a record that points at that id has not lost
+    anything, so the cross-reference checks must not report it (fixing the filename is the
+    heal; editing the referrer would be an illegal field change). Never adds a finding: a file
+    that does not parse has no id to offer."""
+    raw, err = _load_raw_json(path)
+    if err is not None or not isinstance(raw, dict) or not is_safe_record_id(raw.get(id_field)):
+        return None
+    return raw[id_field], raw
+
+
+def _check_safe_record_id(path: Path, rid: object) -> Violation | None:
+    """The other half of :func:`_check_safe_stem`: the id INSIDE a parsed record failing
+    :func:`is_safe_record_id` is an :data:`UNSAFE_RECORD_ID` finding, and the reload skips
+    that file whole too. A non-string id (list, dict) lands here too instead of crashing the
+    callers' ``setdefault``."""
+    if not is_safe_record_id(rid):
+        return _violation(UNSAFE_RECORD_ID, path, f"record id {rid!r} is not a safe filename")
     return None
 
 
 # -- per-directory checks ------------------------------------------------------------------
 
 
-def _check_temporal_dir(
-    dir_path: Path, model: type[BaseModel]
-) -> tuple[dict[str, dict], dict[str, Path], dict[str, list[Path]], list[Violation]]:
+class _WalkResult(NamedTuple):
+    """What a record-directory walk hands the cross-reference checks: ``skipped_by_id`` maps
+    the id of each file skipped for its STEM (and holding a parseable object with a string id)
+    to its payload. It is kept apart from ``raw_by_id``/``path_by_id``/``all_paths_by_id`` so
+    the file is no duplicate and takes over no record's findings, yet the references into it
+    still resolve."""
+
+    raw_by_id: dict[str, dict]
+    path_by_id: dict[str, Path]
+    all_paths_by_id: dict[str, list[Path]]
+    skipped_by_id: dict[str, dict]
+    violations: list[Violation]
+
+
+def _check_temporal_dir(dir_path: Path, model: type[BaseModel]) -> _WalkResult:
     """``decisions/`` or ``facts/``: both carry the ``valid_to >= valid_from``
     ``model_validator`` (schema.py), which this function reports under its OWN code
     (:data:`BAD_VALIDITY_WINDOW`) rather than lumping it into :data:`PARSE_ERROR` — pydantic
@@ -206,13 +260,25 @@ def _check_temporal_dir(
     overwrite. A record stays in ``raw_by_id`` even when it fails full model validation (either
     code) as long as its JSON decodes and carries an ``id`` — its
     ``status``/``supersedes``/``supports`` are still real, checkable data; only a file that
-    fails to decode at all contributes no id anywhere.
+    fails to decode at all contributes no id anywhere. A file the reload skips for an unsafe
+    stem or an unsafe id gets :data:`UNSAFE_RECORD_ID` and nothing else, and joins no pool, so
+    it is no duplicate and takes over no record's findings. A stem-skipped file's id is still
+    returned in ``skipped_by_id``: a reference to it is not dangling, because renaming the file
+    back is the heal. An unsafe id is not: nothing legitimate can reference it.
     """
     raw_by_id: dict[str, dict] = {}
     path_by_id: dict[str, Path] = {}
     all_paths_by_id: dict[str, list[Path]] = {}
+    skipped_by_id: dict[str, dict] = {}
     violations: list[Violation] = []
     for path in _iter_json_files(dir_path):
+        unsafe = _check_safe_stem(path)
+        if unsafe is not None:
+            violations.append(unsafe)
+            peeked = _stem_skipped_record(path, "id")  # the reload skips this file whole
+            if peeked is not None:
+                skipped_by_id.setdefault(*peeked)
+            continue
         raw, err = _load_raw_json(path)
         if err is not None:
             violations.append(err)
@@ -224,8 +290,7 @@ def _check_temporal_dir(
         unsafe = _check_safe_record_id(path, rid)
         if unsafe is not None:
             violations.append(unsafe)
-        if not isinstance(rid, str):
-            continue  # nothing can be keyed on it (an unhashable id would crash setdefault)
+            continue  # skipped whole by the reload too; a non-string id is unhashable as well
         all_paths_by_id.setdefault(rid, []).append(path)
         mismatch = _check_filename_matches_id(path, rid)
         if mismatch is not None:
@@ -245,20 +310,26 @@ def _check_temporal_dir(
                 violations.append(_violation(PARSE_ERROR, path, str(e)))
         except ValueError as e:  # pydantic's serialisation error
             violations.append(_violation(PARSE_ERROR, path, f"cannot be serialised: {e}"))
-    return raw_by_id, path_by_id, all_paths_by_id, violations
+    return _WalkResult(raw_by_id, path_by_id, all_paths_by_id, skipped_by_id, violations)
 
 
-def _check_plain_dir(
-    dir_path: Path, model: type[BaseModel], id_field: str
-) -> tuple[dict[str, dict], dict[str, Path], dict[str, list[Path]], list[Violation]]:
+def _check_plain_dir(dir_path: Path, model: type[BaseModel], id_field: str) -> _WalkResult:
     """``domains/``, ``entities/``, ``initiatives/`` — no validity window, straightforward
     schema validation. ``id_field`` is ``"domain_id"``/``"entity_id"``/``"id"``. See
     :func:`_check_temporal_dir` for the ``path_by_id`` vs. ``all_paths_by_id`` split."""
     raw_by_id: dict[str, dict] = {}
     path_by_id: dict[str, Path] = {}
     all_paths_by_id: dict[str, list[Path]] = {}
+    skipped_by_id: dict[str, dict] = {}
     violations: list[Violation] = []
     for path in _iter_json_files(dir_path):
+        unsafe = _check_safe_stem(path)
+        if unsafe is not None:
+            violations.append(unsafe)
+            peeked = _stem_skipped_record(path, id_field)  # the reload skips this file whole
+            if peeked is not None:
+                skipped_by_id.setdefault(*peeked)
+            continue
         raw, err = _load_raw_json(path)
         if err is not None:
             violations.append(err)
@@ -272,8 +343,7 @@ def _check_plain_dir(
         unsafe = _check_safe_record_id(path, rid)
         if unsafe is not None:
             violations.append(unsafe)
-        if not isinstance(rid, str):
-            continue  # nothing can be keyed on it (an unhashable id would crash setdefault)
+            continue  # skipped whole by the reload too; a non-string id is unhashable as well
         all_paths_by_id.setdefault(rid, []).append(path)
         mismatch = _check_filename_matches_id(path, rid)
         if mismatch is not None:
@@ -285,7 +355,7 @@ def _check_plain_dir(
             model.model_validate(raw).model_dump_json()  # see _check_temporal_dir
         except ValueError as e:  # ValidationError, or a payload that cannot be serialised
             violations.append(_violation(PARSE_ERROR, path, str(e)))
-    return raw_by_id, path_by_id, all_paths_by_id, violations
+    return _WalkResult(raw_by_id, path_by_id, all_paths_by_id, skipped_by_id, violations)
 
 
 def _check_bindings_dir(
@@ -299,6 +369,10 @@ def _check_bindings_dir(
     path_by_record: dict[str, Path] = {}
     violations: list[Violation] = []
     for path in _iter_json_files(dir_path):
+        unsafe = _check_safe_stem(path)
+        if unsafe is not None:
+            violations.append(unsafe)
+            continue  # the store's reload skips this file whole: no follow-on checks on it
         raw, err = _load_raw_json(path)
         if err is not None:
             violations.append(err)
@@ -307,10 +381,6 @@ def _check_bindings_dir(
             violations.append(_violation(PARSE_ERROR, path, "bindings file must be a JSON list"))
             continue
         record_id = path.stem
-        if not is_safe_record_id(record_id):
-            violations.append(
-                _violation(UNSAFE_RECORD_ID, path, f"filename {record_id!r} is not a safe id")
-            )
         items: list[dict] = []
         for i, item in enumerate(raw):
             payload = item if isinstance(item, dict) else {}
@@ -358,6 +428,11 @@ def _check_archive_dir(dir_path: Path) -> _ArchiveIndex:
         return _ArchiveIndex(decisions, domains, decision_entries, domain_entries, violations)
     for path in sorted(dir_path.glob("*.jsonl")):
         try:
+            if not is_regular_file(stat_entry(path)):  # not a segment; a FIFO would block the read
+                violations.append(
+                    _violation(BAD_ARCHIVE_SEGMENT, path, f"unreadable: {NOT_A_FILE_REASON}")
+                )
+                continue
             data = path.read_bytes()
         except OSError as e:
             violations.append(_violation(BAD_ARCHIVE_SEGMENT, path, f"unreadable: {e}"))
@@ -420,6 +495,10 @@ def _check_format_marker(store_dir: Path) -> list[Violation]:
     ``store._ensure_format_marker``). Missing, malformed, or an unrecognized version are all
     reported the same way: :data:`UNKNOWN_SCHEMA_VERSION`."""
     marker = store_dir / _FORMAT_MARKER_NAME
+    if marker.is_symlink():
+        # Reported as ``symlinked-store-entry`` by the caller; reading it would echo the link
+        # target's text into a violation detail, and so into a CI log.
+        return []
     if not marker.is_file():
         return [_violation(UNKNOWN_SCHEMA_VERSION, marker, "format marker missing")]
     try:
@@ -437,7 +516,9 @@ def _check_format_marker(store_dir: Path) -> list[Violation]:
 # -- cross-reference checks -----------------------------------------------------------------
 
 
-def _check_supersedes(combined: dict[str, dict], path_by_id: dict[str, Path]) -> list[Violation]:
+def _check_supersedes(
+    combined: dict[str, dict], path_by_id: dict[str, Path], skipped: dict[str, dict]
+) -> list[Violation]:
     """Generic across decisions/facts/domains — mirrors the real write-path rule
     (``store.add_decision``/``add_fact``/``supersede_domain``): a successor's ``supersedes``
     must reference a record that exists (:data:`DANGLING_SUPERSEDES`), and a record whose
@@ -445,14 +526,25 @@ def _check_supersedes(combined: dict[str, dict], path_by_id: dict[str, Path]) ->
     (:data:`SUPERSEDED_WITHOUT_SUCCESSOR`) — the same "close + link, atomically" guarantee
     ``add_decision``'s docstring describes. ``combined`` is the union of hot and archived
     payloads for one record type (a superseded record's successor may itself have since been
-    compacted, so both pools count as "exists")."""
+    compacted, so both pools count as "exists"). ``skipped`` holds the files the reload skips for
+    their name (:class:`_WalkResult`): a reference to one, or from one, raises no finding."""
     violations: list[Violation] = []
+    # Only a string can name a record: a hand-edited list/dict ``supersedes`` is unhashable
+    # (it would crash the set and the ``in combined`` test) and is already reported by the
+    # model check (parse-error, or bad-archive-segment for an archived line).
     successors = {
-        payload["supersedes"] for payload in combined.values() if payload.get("supersedes")
+        payload["supersedes"]
+        for payload in (*combined.values(), *skipped.values())
+        if isinstance(payload.get("supersedes"), str) and payload["supersedes"]
     }
     for rid, payload in combined.items():
         supersedes = payload.get("supersedes")
-        if supersedes and supersedes not in combined:
+        if (
+            supersedes
+            and isinstance(supersedes, str)
+            and supersedes not in combined
+            and supersedes not in skipped
+        ):
             violations.append(
                 _violation(
                     DANGLING_SUPERSEDES,
@@ -468,6 +560,63 @@ def _check_supersedes(combined: dict[str, dict], path_by_id: dict[str, Path]) ->
                     f"status is superseded but no record's supersedes references {rid!r}",
                 )
             )
+    return violations
+
+
+_CYCLE_TEXT_IDS = 10
+
+
+def _cycle_text(cycle: list[str]) -> str:
+    """``a -> b -> a``; past :data:`_CYCLE_TEXT_IDS` ids the middle is counted, not listed."""
+    shown = cycle if len(cycle) <= _CYCLE_TEXT_IDS else cycle[:_CYCLE_TEXT_IDS]
+    tail = [] if len(cycle) <= _CYCLE_TEXT_IDS else [f"... ({len(cycle)} domains)"]
+    return " -> ".join([*shown, *tail, cycle[0]])
+
+
+def _check_domain_parents(
+    combined: dict[str, dict], path_by_id: dict[str, Path], skipped: dict[str, dict]
+) -> list[Violation]:
+    """Mirrors ``Store._check_domain_parent_acyclic``: a domain's ``parent_id`` must name an
+    existing domain (:data:`DANGLING_PARENT`) and the parent chain must not loop
+    (:data:`PARENT_CYCLE`). ``parent_id`` is immutable and the write path refuses both shapes, so
+    only a hand edit can produce them. Like the write path, existence is all that counts: a
+    superseded, dropped or archived parent is still a parent, so ``combined`` is the hot plus
+    archived pool, and ``skipped`` (:class:`_WalkResult`) holds the files the reload skips for
+    their name: a parent reference to one raises no finding. Only a string can name a domain: a
+    hand-edited list/dict ``parent_id`` is unhashable and is already reported by the model check."""
+    violations: list[Violation] = []
+    for did, payload in combined.items():
+        parent = payload.get("parent_id")
+        if isinstance(parent, str) and parent not in combined and parent not in skipped:
+            violations.append(
+                _violation(
+                    DANGLING_PARENT,
+                    path_by_id.get(did, did),
+                    f"parent_id references unknown domain {parent!r}",
+                )
+            )
+    # Each domain has at most one parent, so a walk from every unvisited id, in sorted order,
+    # meets each cycle exactly once; the finding sits at the cycle's smallest id.
+    done: set[str] = set()
+    for start in sorted(combined):
+        walk: dict[str, int] = {}
+        current: object = start
+        while isinstance(current, str) and current in combined and current not in done:
+            if current in walk:
+                cycle = list(walk)[walk[current] :]
+                first = min(cycle)
+                cycle = cycle[cycle.index(first) :] + cycle[: cycle.index(first)]
+                violations.append(
+                    _violation(
+                        PARENT_CYCLE,
+                        path_by_id.get(first, first),
+                        "parent_id chain loops back on itself: " + _cycle_text(cycle),
+                    )
+                )
+                break
+            walk[current] = len(walk)
+            current = combined[current].get("parent_id")
+        done.update(walk)
     return violations
 
 
@@ -501,8 +650,14 @@ def _check_fact_supports(
     — mirrors ``store.add_fact``'s own existence check."""
     violations: list[Violation] = []
     for fid, payload in facts_raw.items():
-        for did in payload.get("supports") or []:
-            if did not in decision_ids:
+        # A hand-edited non-list ``supports`` (int, str, dict) or a non-string item (list/dict,
+        # unhashable) is already reported by the model check as parse-error; only a list of
+        # strings is checkable here.
+        supports = payload.get("supports")
+        if not isinstance(supports, list):
+            continue
+        for did in supports:
+            if isinstance(did, str) and did not in decision_ids:
                 violations.append(
                     _violation(
                         DANGLING_FACT_SUPPORT, path_by_id[fid], f"supports unknown decision {did!r}"
@@ -549,19 +704,47 @@ def _check_duplicate_ulids(
 # -- entry point ------------------------------------------------------------------------
 
 
+def _require_store_dir(store_dir: Path) -> None:
+    """Raise unless ``store_dir`` is a directory the format marker can be looked up in.
+
+    Python 3.13's ``Path.is_dir``/``is_file``/``is_symlink`` re-raise EACCES while 3.14's return
+    False, so a store directory (or a parent) without the search bit made 3.14 report
+    ``store directory not found`` or, worse, ``unknown-schema-version`` / "format marker
+    missing" for what is a permission problem. This probes with ``os.stat`` and ``os.lstat``
+    instead, which raise ``PermissionError`` on every Python, so the CLI's ``store not
+    readable`` path catches it before any predicate runs. The probe is the search bit (the one
+    the predicates need), not the read bit: a directory that is searchable but not listable is
+    still checked normally. Only a path that is missing or not a directory is the caller's
+    ``NotADirectoryError``; a missing marker is left to :func:`_check_format_marker`."""
+    try:
+        is_dir = stat.S_ISDIR(os.stat(store_dir).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        is_dir = False
+    if not is_dir:
+        raise NotADirectoryError(f"store directory not found: {store_dir}")
+    try:
+        os.lstat(store_dir / _FORMAT_MARKER_NAME)
+    except FileNotFoundError:
+        pass
+    except PermissionError as e:
+        # The marker's own mode is fine; the directory's search bit is what is missing, and
+        # the message must name the thing a user has to chmod.
+        raise PermissionError(e.errno, e.strerror, str(store_dir)) from e
+
+
 def verify_snapshot(store_dir: str | Path) -> list[Violation]:
     """Lint every canonical file under ``store_dir`` against the invariants ``store.py``'s
     write API enforces at write time (see this module's docstring for why this reads the
     files directly rather than opening a ``Store``). Returns ``[]`` for a clean store.
 
-    Raises ``NotADirectoryError`` if ``store_dir`` does not exist or is not a directory —
-    the CLI (``verify_main``) treats that as the operational-error exit path (1), distinct
-    from a violation (exit 2): an unreadable store dir is not itself an integrity finding
+    Raises ``NotADirectoryError`` if ``store_dir`` does not exist or is not a directory, and
+    ``PermissionError`` if it, or a record directory in it, cannot be searched or listed —
+    the CLI (``verify_main``) treats those as the operational-error exit path (1), distinct
+    from a violation (exit 2): an unreadable store is not itself an integrity finding
     about the store's contents.
     """
     store_dir = Path(store_dir)
-    if not store_dir.is_dir():
-        raise NotADirectoryError(f"store directory not found: {store_dir}")
+    _require_store_dir(store_dir)
 
     violations: list[Violation] = []
     violations += _check_format_marker(store_dir)
@@ -575,23 +758,31 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
         )
         for name in symlinked_internals(store_dir)
     ]
+    if any(v.code == SYMLINKED_STORE_ENTRY for v in violations):
+        # A store ``Store()`` refuses to open has no records worth linting: walking through the
+        # link lints foreign files (or the same files as the wrong type), and a pool that is
+        # cut off makes every cross-reference into it dangle. Stop at the links.
+        return violations
+    require_listable_record_dirs(store_dir)
 
-    decisions_raw, decision_paths, decision_all_paths, v = _check_temporal_dir(
+    decisions_raw, decision_paths, decision_all_paths, decisions_skipped, v = _check_temporal_dir(
         store_dir / "decisions", Decision
     )
     violations += v
-    facts_raw, fact_paths, fact_all_paths, v = _check_temporal_dir(store_dir / "facts", Fact)
+    facts_raw, fact_paths, fact_all_paths, facts_skipped, v = _check_temporal_dir(
+        store_dir / "facts", Fact
+    )
     violations += v
-    domains_raw, domain_paths, domain_all_paths, v = _check_plain_dir(
+    domains_raw, domain_paths, domain_all_paths, domains_skipped, v = _check_plain_dir(
         store_dir / "domains", Domain, "domain_id"
     )
     violations += v
-    entities_raw, _entity_paths, entity_all_paths, v = _check_plain_dir(
+    entities_raw, _entity_paths, entity_all_paths, entities_skipped, v = _check_plain_dir(
         store_dir / "entities", Entity, "entity_id"
     )
     violations += v
-    _initiatives_raw, _initiative_paths, initiative_all_paths, v = _check_plain_dir(
-        store_dir / "initiatives", Initiative, "id"
+    _initiatives_raw, _initiative_paths, initiative_all_paths, _initiatives_skipped, v = (
+        _check_plain_dir(store_dir / "initiatives", Initiative, "id")
     )
     violations += v
     bindings_by_record, binding_paths, v = _check_bindings_dir(store_dir / "bindings")
@@ -599,7 +790,7 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
     archive = _check_archive_dir(store_dir / "archive")
     violations += archive.violations
 
-    entity_ids = set(entities_raw)
+    entity_ids = set(entities_raw) | set(entities_skipped)
 
     # Decisions/domains: a superseded record's successor (or the dangling-supersedes target
     # itself) may live only in the archive, so the cross-reference checks run against the
@@ -611,20 +802,23 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
         **{did: entries[0][0] for did, entries in archive.decision_entries.items()},
         **decision_paths,
     }
-    violations += _check_supersedes(combined_decisions, decision_path_by_id)
+    violations += _check_supersedes(combined_decisions, decision_path_by_id, decisions_skipped)
 
     # Facts are never archived (see docs/reference/store-format.md) -- hot only.
-    violations += _check_supersedes(facts_raw, fact_paths)
+    violations += _check_supersedes(facts_raw, fact_paths, facts_skipped)
 
     combined_domains = {**archive.domains, **domains_raw}
     domain_path_by_id = {
         **{dmid: entries[0][0] for dmid, entries in archive.domain_entries.items()},
         **domain_paths,
     }
-    violations += _check_supersedes(combined_domains, domain_path_by_id)
+    violations += _check_supersedes(combined_domains, domain_path_by_id, domains_skipped)
+    violations += _check_domain_parents(combined_domains, domain_path_by_id, domains_skipped)
 
     violations += _check_binding_entities(bindings_by_record, binding_paths, entity_ids)
-    violations += _check_fact_supports(facts_raw, fact_paths, set(combined_decisions))
+    violations += _check_fact_supports(
+        facts_raw, fact_paths, set(combined_decisions) | set(decisions_skipped)
+    )
 
     # duplicate-ulid: decisions/domains compare hot against BOTH archive pools (the only two
     # archived record types); facts/entities/initiatives are never archived, so only hot-hot
@@ -689,12 +883,12 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
 # (``Provenance.commit``, or ``Domain.seed_anchors``/``path_prefixes``, whose defaults are the
 # empty list) is absent from an old file's JSON and appears back in as that default the next
 # time anything rewrites the file — a ratify, a drop, a supersede-close, or a domain
-# drop/supersede all do this incidentally, not because the field itself changed. :func:`_same`
-# treats an absent key as equal to ``null``/``[]``/``{}``, recursing into nested objects and
-# into the items of a list, so this never reads as an ``illegal-field-change`` on its own; a
-# key that actually changes value, or that is removed while holding a non-empty value, still
-# does. A field whose default is a non-empty value is not covered by this (see :func:`_same`'s
-# own docstring).
+# drop/supersede all do this incidentally, not because the field itself changed.
+# :func:`same_modulo_absent` treats an absent key as equal to ``null``/``[]``/``{}``,
+# recursing into nested objects and into the items of a list, so this never reads as an
+# ``illegal-field-change`` on its own; a key that actually changes value, or that is removed
+# while holding a non-empty value, still does. A field whose default is a non-empty value is
+# not covered by this (see :func:`same_modulo_absent`'s own docstring).
 
 # Decisions/facts (store.py's ``add_decision``, ``add_fact``, ``ratify``, ``drop``,
 # ``ratify_fact``, ``drop_fact``): the only fields any write path ever changes on an EXISTING
@@ -788,7 +982,15 @@ def _check_status_transition(
     old: dict, new: dict, legal: frozenset[tuple[str, str]], path: str
 ) -> list[Violation]:
     old_status, new_status = old.get("status"), new.get("status")
-    if old_status == new_status or (old_status, new_status) in legal:
+    # A malformed NEW status is the snapshot layer's parse-error, so stay silent. A malformed
+    # OLD status that is now a string is a repair of a value the ref never legitimised, so it
+    # is a jump like any other unlisted pair (as for title or valid_to) -- but an unhashable
+    # old value must never reach the ``legal`` lookup.
+    if not isinstance(new_status, str):
+        return []
+    if old_status == new_status or (
+        isinstance(old_status, str) and (old_status, new_status) in legal
+    ):
         return []
     return [
         _violation(
@@ -820,36 +1022,6 @@ def _check_valid_to_transition(old: dict, new: dict, path: str) -> list[Violatio
 # rather than a plain mutable-field entry: unlike ``status``/``valid_to``, a stamp may be set
 # only once, and only alongside a specific status move.
 _RATIFIER_STAMP = ("ratified_at", "ratified_by")
-
-# An absent key (``dict.get`` already turns it into ``None``) and these two defaults are the
-# other information-free shapes a field can serialize back in as, once a rewrite touches the
-# record it lives on — see :func:`_same`.
-_EMPTY_DEFAULTS: tuple[dict, list] = ({}, [])
-
-
-def _absent_or_empty(v: object) -> bool:
-    return v is None or v in _EMPTY_DEFAULTS
-
-
-def _same(a: object, b: object) -> bool:
-    """Equality where an absent key counts as the same value as ``null`` or an empty
-    list/object (Rule B) — see the module comment above the mutable-field tables: a field
-    added to a model after a record was written (``Provenance.commit``, the ratifier stamp,
-    ``Domain.seed_anchors``/``path_prefixes``) is missing from an old file and appears as its
-    default — ``null``, ``[]``, or ``{}`` — the next time anything rewrites it. Recurses into
-    nested dicts key-by-key and into lists element-by-element (so a change buried inside a
-    ``seed_anchors`` entry is still caught), and treats two lists of different length as
-    different. A field whose default is a NON-empty value (``Decision.scope``, ``"repo"``) is
-    not covered: an absent key there still reads as changed. That is a known, accepted gap —
-    no file in this store lacks ``scope`` today — not something this function papers over.
-    """
-    if isinstance(a, dict) and isinstance(b, dict):
-        return all(_same(a.get(k), b.get(k)) for k in set(a) | set(b))
-    if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b, strict=True))
-    if _absent_or_empty(a) or _absent_or_empty(b):
-        return _absent_or_empty(a) and _absent_or_empty(b)
-    return a == b
 
 
 def _check_ratifier_stamp(old: dict, new: dict, path: str) -> list[Violation]:
@@ -883,18 +1055,19 @@ def _check_immutable_fields(
     old: dict, new: dict, mutable: frozenset[str], path: str, exempt: tuple[str, ...] = ()
 ) -> list[Violation]:
     """Every key present in ``old`` or ``new`` but not in ``mutable`` or ``exempt`` must be
-    the same value on both sides (:func:`_same`, Rule B — an absent key counts as equal to
-    ``null`` or an empty list/object) — covers a changed value, a field that disappeared, AND
-    a field that newly appeared (all three are "this immutable field changed"). One violation
-    per offending field (design ruling 2: "detail names the field"), in sorted key order for a
-    deterministic report. ``exempt`` (the ratifier stamp, for decisions/facts/domains) is
+    the same value on both sides (:func:`same_modulo_absent`, Rule B — an absent key counts as
+    equal to ``null`` or an empty list/object) — covers a changed value, a field that
+    disappeared, AND a field that newly appeared (all three are "this immutable field
+    changed"). One violation per offending field (design ruling 2: "detail names the
+    field"), in sorted key order for a deterministic report.
+    ``exempt`` (the ratifier stamp, for decisions/facts/domains) is
     skipped here entirely — its own rule is :func:`_check_ratifier_stamp`, run alongside this
     one by :func:`classify_transition`, never by this function."""
     violations: list[Violation] = []
     for key in sorted(set(old) | set(new)):
         if key in mutable or key in exempt:
             continue
-        if not _same(old.get(key), new.get(key)):
+        if not same_modulo_absent(old.get(key), new.get(key)):
             violations.append(_violation(ILLEGAL_FIELD_CHANGE, path, f"field {key!r} changed"))
     return violations
 
@@ -1091,6 +1264,10 @@ def _git_show_json(repo_root: Path, ref: str, repo_path: str) -> dict:
 
 def _read_json_object(path: Path) -> dict:
     try:
+        # A FIFO (or a symlink to one) put in a tracked file's place would block the read; the
+        # snapshot layer already reports the entry.
+        if not is_regular_file(stat_entry(path)):
+            raise _UnparsableContent(NOT_A_FILE_REASON)
         obj = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError) as e:
         raise _UnparsableContent(str(e)) from e
@@ -1165,8 +1342,7 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
     :func:`verify_snapshot` uses; this function always corrects it to the real changed path.
     """
     store_dir = Path(store_dir)
-    if not store_dir.is_dir():
-        raise NotADirectoryError(f"store directory not found: {store_dir}")
+    _require_store_dir(store_dir)
 
     repo_root = _find_repo_root(store_dir)
     store_dir_abs = store_dir.resolve()
@@ -1182,6 +1358,11 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
     # tampering, the worst possible failure mode for a CI lint. git accepts an absolute
     # pathspec regardless of cwd, so always pass the already-resolved absolute path here.
     changed = _git_diff_name_status(repo_root, ref, store_dir_abs)
+    if symlinked_internals(store_dir):
+        # The snapshot layer stops at the links; a transition diff would read through them. The
+        # repo and the ref are resolved first, so a bad ref stays an operational error.
+        return []
+    require_listable_record_dirs(store_dir)
 
     # The NEW tree's archive contents (on-disk, right now) -- what deletion legality
     # consults. Only the id sets matter here; any BAD_ARCHIVE_SEGMENT-shaped finding is the
@@ -1250,7 +1431,9 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
         found = classify_transition(kind, old, new)
         if new is None and found and kind in ("decision", "domain"):
             rid_field = "id" if kind == "decision" else "domain_id"
-            if old is not None and old.get(rid_field) in archived_ids[kind]:
+            old_id = old.get(rid_field) if old is not None else None
+            # Only a string id can be an archived one (a list/dict id is unhashable).
+            if isinstance(old_id, str) and old_id in archived_ids[kind]:
                 found = []  # legitimate sidegraph-compact -- archived in the new tree
         violations.extend(replace(v, path=repo_path) for v in found)
 

@@ -31,8 +31,9 @@ Tests/fixtures: `tests/`; plugin skills/configuration in `plugin/sidegraph/`.
 Python 3.13+; `uv`:
 
 - `uv sync --locked`: install dependencies.
-- `uv run pytest tests/test_store.py -q`: focused tests.
-- `uv run pytest -q`: full suite; CI covers 3.13/3.14.
+- `uv run pytest tests/test_store.py -q`: the touched test file while editing (`-x`, `--lf`).
+- `uv run pytest -m "not slow"`: the broader pre-push check; skips the subprocess-heavy tests, but still takes minutes.
+- `uv run pytest -q`: full suite; run it once before a commit or PR, not while editing. CI runs it again (3.13/3.14).
 - `uv run pre-commit run --all-files`: shared lint/format/type/secret-scanning gate (also
   runs `gitleaks`, `detect-private-key`, `zizmor`, `actionlint`, `check-toml`, and a
   `uv.lock`-in-sync check).

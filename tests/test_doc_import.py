@@ -17,6 +17,8 @@ from sidegraph.engine.reader import GraphifyReader
 from sidegraph.schema import AnchorBinding, DecisionKind, DecisionStatus, Entity
 from sidegraph.store import Store
 
+pytestmark = pytest.mark.usefixtures("cwd_outside_any_repository")
+
 _SPECS_DIR = Path(__file__).resolve().parent.parent / "design" / "superpowers" / "specs"
 
 # ---------------------------------------------------------------------------------------

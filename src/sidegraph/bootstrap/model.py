@@ -20,6 +20,7 @@ class WarningCode(StrEnum):
     MISSING_REJECTED = "missing-rejected-alternatives"
     UNRESOLVED_ANCHOR = "unresolved-anchor"
     AMBIGUOUS_ANCHOR = "ambiguous-anchor"
+    NO_ANCHOR = "no-anchor"
     CURRENT_STATE = "likely-current-state-summary"
     DUPLICATE_PLAN = "duplicate-within-plan"
     DUPLICATE_CANONICAL = "duplicate-canonical-memory"
@@ -63,6 +64,14 @@ WARNING_CONSEQUENCES: Mapping[WarningCode, str] = {
     ),
     WarningCode.AMBIGUOUS_ANCHOR: (
         "several entities match; Sidegraph never guesses, so the anchor stays degraded"
+    ),
+    WarningCode.NO_ANCHOR: (
+        "the document has no anchor in the graph, so apply writes no record without one: if a "
+        "record with identical content is already stored for this source, it is ratified, or "
+        "a rejected one is revived as a new record that inherits its bindings; otherwise the "
+        "candidate is skipped and listed on an UNANCHORED line. Rebuild the graph "
+        "(`graphify update .` for the default one) so the document has a node, or add a "
+        "backticked mention of a real symbol, then rerun"
     ),
     WarningCode.CURRENT_STATE: (
         "this reads as a current-state summary, not a decision with a fork"
@@ -237,12 +246,17 @@ class BootstrapReport(FrozenModel):
     oldest_proposal_days: int | None = None
     durable_candidate_keys: tuple[str, ...] = ()
     pending_candidate_keys: tuple[str, ...] = ()
+    skipped_unanchorable_keys: tuple[str, ...] = ()
     durable_accepted_records: tuple[AcceptedRecord, ...] = ()
     canonical_files: tuple[str, ...] = ()
     verification_failures: tuple[str, ...] = ()
     failed_ref: str | None = None
     error: str | None = None
     next_command: str | None = None
+
+    def with_run_status(self, status: RunStatus) -> BootstrapReport:
+        """The same report under another RUN status (a run outcome, not a record's status)."""
+        return self.model_copy(update={"status": status})
 
 
 class HostKind(StrEnum):

@@ -227,6 +227,8 @@ def _enrich_candidate(
             warnings.append(WarningCode.AMBIGUOUS_ANCHOR)
         if any(anchor.status == "unresolved" for anchor in anchors):
             warnings.append(WarningCode.UNRESOLVED_ANCHOR)
+        if not anchor_intents and file_anchor_intent is None:
+            warnings.append(WarningCode.NO_ANCHOR)
 
     return candidate.model_copy(
         update={

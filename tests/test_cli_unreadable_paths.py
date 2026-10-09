@@ -175,7 +175,8 @@ def test_stats_unreadable_index_is_reported_not_raised(world, monkeypatch, capsy
     db, g = world
     _eacces_on(monkeypatch, db / "index.db")
     rc = cli.stats_main(["--db", str(db)])
-    assert rc == 2 and "no store index at" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert rc == 2 and "cannot read the store index" in err and "no store index" not in err
 
 
 def test_helper_survives_an_unreadable_format_marker(tmp_path, monkeypatch):

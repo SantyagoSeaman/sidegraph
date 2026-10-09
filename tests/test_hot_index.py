@@ -105,6 +105,12 @@ class _Seeder:
 
 def _fixture_store(path: Path) -> Store:
     store = Store(path)
+    with store._mutation():  # one transaction for the whole fixture, not one per write
+        _seed_fixture(store)
+    return store
+
+
+def _seed_fixture(store: Store) -> None:
     s = _Seeder(store)
     G, L, A = DecisionKind.GOTCHA, DecisionKind.LESSON, DecisionKind.ADR
     P = DecisionStatus.PROPOSED
@@ -169,7 +175,6 @@ def _fixture_store(path: Path) -> Store:
     )
     # a deprecated and a global-scope decision still count as live records
     s.decision("Global ruling", DecisionKind.CONSTRAINT)
-    return store
 
 
 _ENVIRONMENTS = [
@@ -573,6 +578,8 @@ def _break_symlinked_index(store: Path, elsewhere: Path) -> None:
 
 
 def _break_symlinked_sidecar(store: Path, elsewhere: Path) -> None:
+    # a TRUNCATE-mode index leaves a real 0-byte journal behind; replace it with the link
+    (store / "index.db-journal").unlink(missing_ok=True)
     os.symlink(elsewhere / "victim-journal", store / "index.db-journal")
 
 

@@ -59,8 +59,8 @@ candidates is `diagnostic`: it exits safely without creating canonical memory an
 claim activation.
 
 Candidate warnings distinguish missing choice, missing rejected alternatives, unresolved or
-ambiguous anchors, likely current-state summaries, duplicates within the plan, and duplicates
-of live canonical memory. Warnings inform review; they never silently accept a candidate. Each
+ambiguous anchors, a document with no anchor at all, likely current-state summaries,
+duplicates within the plan, and duplicates of live canonical memory. Warnings inform review; they never silently accept a candidate. Each
 warning code is rendered beside the consequence of accepting it anyway:
 
 | Warning code | Consequence of accepting |
@@ -69,6 +69,7 @@ warning code is rendered beside the consequence of accepting it anyway:
 | `missing-rejected-alternatives` | no rejected alternatives were found; the most valuable field stays empty |
 | `unresolved-anchor` | the anchor does not resolve; the record would not surface for that code |
 | `ambiguous-anchor` | several entities match; Sidegraph never guesses, so the anchor stays degraded |
+| `no-anchor` | the document has no anchor in the graph, so apply writes no record without one: if a record with identical content is already stored for this source, it is ratified, or a rejected one is revived as a new record that inherits its bindings; otherwise the candidate is skipped and listed on an UNANCHORED line. Rebuild the graph (`graphify update .` for the default one) so the document has a node, or add a backticked mention of a real symbol, then rerun |
 | `likely-current-state-summary` | this reads as a current-state summary, not a decision with a fork |
 | `duplicate-within-plan` | another candidate in this same plan carries identical content |
 | `duplicate-canonical-memory` | a record already exists for this source; accepting identical content leaves an accepted record unchanged, ratifies a pending proposal, or revives a rejected record — accepting changed content writes a replacement (closing any open record at this source), and edits made in an earlier review are not carried over |
@@ -109,25 +110,51 @@ with an explicit warning. The terminal never prints `fully supported` for Codex 
 supported check is actionable incomplete and exits `2`.
 
 Exit `0` also covers full Claude Code activation and safe diagnostics with no required write.
+A run whose approved candidates were all skipped as unanchored (see below) is such a
+diagnostic: it writes no record, so it needs no anchor and no retrieval proof (no `ANCHORS` or
+`PROOF` line, and no proof section in `--report`), but it still verifies the host integration,
+reopens and strictly verifies the store, and writes `--report`. When the integration is not
+ready, or verification finds a violation, it is `incomplete` instead: it prints `STORE
+incomplete`, the `VERIFY` lines when verification failed, the `INTEGRATION` lines and exits `2`.
+Its `RESUME` is the exact `--resume` command when the integration is the problem, and
+`sidegraph-verify --db <store>` when the store is, since a resume cannot repair a store this
+run did not break.
 Exit `1` is a usage or operational error, and is unreachable once anything has been durably
 written — a broken output pipe or similar I/O failure after a confirmed write is at worst
 `partial-recoverable`, never `1`, so a `1` never leaves partial memory behind for a resume to
-reconcile. Exit `2` is `incomplete` or `partial-recoverable`. The final run status has these
-meanings:
+reconcile. Exit `2` is `incomplete` or `partial-recoverable`, or a `complete` store whose
+`ANCHORS`, `INTEGRATION` or `PROOF` check is incomplete. The `status` in the output and in
+`--report` is the apply status: it covers the canonical writes, not anchors, host integration
+or the retrieval proof, so a stored record the graph cannot reach, or a run that only kept
+proposals, can exit `2` with `status: complete`. The run status has these meanings:
 
 | Status | Meaning |
 | --- | --- |
-| `complete` | Confirmed writes reopened, reconciled with the plan, strictly verified, anchored, and ready for host/proof checks. |
+| `complete` | Confirmed writes reopened, reconciled with the plan and strictly verified; anchors, host integration and proof are checked separately. |
 | `partial-recoverable` | At least one canonical file is durable, but later write, index, reopen, reconciliation, or verification work failed; activation is not claimed. |
 | `incomplete` | No durable candidate completed the confirmed plan, or an actionable prerequisite/check remains. |
-| `diagnostic` | No useful candidate required a write; the scan and explanation succeeded, but activation did not. |
+| `diagnostic` | No useful candidate required a write; the scan and explanation succeeded, but activation did not. A run whose approved candidates were all skipped as unanchored is a `diagnostic` only while its store verifies and its host integration is ready; otherwise it is `incomplete`. |
 
 The canonical store and its rebuildable SQLite index are not one filesystem transaction.
 After a post-confirmation failure, Bootstrap preserves known-durable files, reports the failed
 source and pending candidates, and prints an exact `--resume` command. Reopening rebuilds a
 mismatched index from canonical files; an unchanged rerun converges without duplicate records
-or bindings. Existing records and unrelated working-tree files are preserved. `--resume` is a
-marker only — the underlying scan/review/reconcile flow is idempotent, so reissuing the same
+or bindings. A candidate you accept or keep as a proposal that has no anchor in the graph
+gets no new record: Bootstrap skips it, lists it on an `UNANCHORED` line with its key and
+source path, and does not count it as pending, so an unchanged rerun does not stay
+partial-recoverable on it. The `UNANCHORED` line names the rebuild step: once `graphify update .`
+(or, with `--graph` pointing elsewhere, a rebuild of that graph file) gives the document a node,
+the next run writes it. A record that was ratified in place or revived for such a document is judged by
+whether production retrieval can still surface it from its own stored bindings. When the current
+graph no longer reaches it, the run exits 2 with an `ANCHORS` line that names the stored record
+and its source (``ANCHORS      incomplete: stored record <id> for <source> has no anchor in the
+current graph; run `graphify update .` and rerun``) and a `NEXT` line with that command, and
+prints no `RESUME`, because a resume cannot change the graph. If the run also has a reason a
+resume can fix, such as a failed write or missing host wiring, the exact `RESUME` stays. With
+`--graph` pointing elsewhere, `ANCHORS` names that graph file to rebuild and there is no `NEXT`,
+because `graphify update .` rebuilds only the default location. Once the graph has the node
+again, the same rerun exits 0. Existing records and unrelated working-tree files are preserved.
+`--resume` is a marker only — the underlying scan/review/reconcile flow is idempotent, so reissuing the same
 command without it behaves identically.
 
 ## Privacy and optional report
@@ -137,9 +164,13 @@ git-ignored retrieval diagnostics are enabled by default and failure-tolerant; s
 `SIDEGRAPH_TELEMETRY=off` to stop recording. The selected coding-agent host's own transmission
 policy is separate.
 
-`--report bootstrap-report.md` writes aggregate counts, separate edit/action rates, candidate
+`--report bootstrap-report.md` is written after a confirmed apply, including the
+all-unanchored diagnostic above. The pre-apply diagnostics (no candidates, every candidate
+skipped in review, a changed plan with no writes) exit without writing it. The report holds
+aggregate counts, separate edit/action rates, candidate
 precision, per-action and CLI-to-proof elapsed seconds, anchor coverage, proof state, review
-debt, and the canonical paths changed. It excludes source content and candidate text and is
+debt, and the canonical paths changed (including the `stamping_live_since` creation marker
+of a fresh store). It excludes source content and candidate text and is
 never uploaded automatically. The report never overwrites any host's config file, the graph, a scanned
 source or a store file, hard links included. The reviewed action summary starts with the
 resolved `store:` path, and names a symlink when the path or a directory above it in the

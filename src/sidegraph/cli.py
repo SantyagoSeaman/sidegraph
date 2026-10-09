@@ -80,7 +80,7 @@ from .doc_import import (
     _glob_repo_root_info,
     import_docs,
 )
-from .doctor import curate, open_curation_index
+from .doctor import curate, open_curation_index, ratification_info_lines
 from .domains import DEFAULT_CANDIDATE_LIMIT, bootstrap_domains, collect_domain_candidates
 from .engine.reader import GraphifyReader
 from .host.claude_settings import (
@@ -101,13 +101,14 @@ from .schema import Decision, DecisionKind, DecisionStatus, Domain, DomainStatus
 from .stats.model import UnreadableRecordError, build_report
 from .stats.render import render_json, render_text
 from .store import VOLATILE_STALE_KEY, Store
+from .store_layout import require_listable_record_dirs, symlinked_internals
 from .sync import (
     activate_accepted_domain,
     report_as_dict,
     report_has_findings,
     sync,
 )
-from .verify import verify_against, verify_snapshot
+from .verify import SYMLINK_STOP_NOTE, verify_against, verify_snapshot
 from .viz.model import build_graph
 from .viz.render import to_html, to_json
 
@@ -1433,7 +1434,8 @@ def import_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="list what would be imported; write nothing",
+        help="list what would be imported; write no records (opening the store may still "
+        "initialise or migrate it, or rebuild index.db)",
     )
     parser.add_argument("--limit", type=int, default=None, metavar="N")
     parser.add_argument(
@@ -1797,7 +1799,8 @@ def domains_main(argv: list[str] | None = None) -> int:
     boot.add_argument(
         "--dry-run",
         action="store_true",
-        help="list what would be proposed; write nothing",
+        help="list what would be proposed; write no records (opening the store may still "
+        "initialise or migrate it, or rebuild index.db)",
     )
 
     add = sub.add_parser("add", help="Manually propose a domain.")
@@ -1839,8 +1842,9 @@ def compact_main(argv: list[str] | None = None) -> int:
     ``valid_to``; domains have no such field at all and are conservatively excluded —
     reported separately as "terminal age unknown" — whenever this flag is set; see
     ``Store.compact``'s docstring). ``--dry-run`` lists what would be compacted (and what
-    leftover hot files from an interrupted prior run would be cleaned up) without writing
-    or removing anything.
+    leftover hot files from an interrupted prior run would be cleaned up) without writing an
+    archive segment or removing hot files; opening the store may still initialise or migrate
+    it, or rebuild ``index.db``.
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-compact",
@@ -1865,7 +1869,8 @@ def compact_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="list what would be compacted; write nothing",
+        help="list what would be compacted; write no segment and remove no hot file (opening the "
+        "store may still initialise or migrate it, or rebuild index.db)",
     )
     args = parser.parse_args(argv)
 
@@ -1961,8 +1966,9 @@ def verify_main(argv: list[str] | None = None) -> int:
       write rules (git plumbing via subprocess — ``git diff``/``git show``). Its violations
       are appended to the snapshot layer's, under the same report and exit contract.
 
-    Unlike every other subcommand here, a missing/unreadable store directory is NOT
-    auto-created: ``verify_snapshot`` raises, and that is the operational-error exit path
+    Like the other inspection commands (``sidegraph-doctor``, ``sidegraph-stats``), it
+    refuses a missing/unreadable store directory instead of auto-creating one:
+    ``verify_snapshot`` raises, and that is the operational-error exit path
     (1) — a lint has nothing to lint if there is nothing to open, and silently creating an
     empty store just to report "clean" would be actively misleading in CI. Likewise,
     ``--against`` on a store dir outside any git repository, or against an unresolvable
@@ -2033,6 +2039,8 @@ def verify_main(argv: list[str] | None = None) -> int:
     else:
         for v in violations:
             print(f"{v.code}  {v.path}  {v.detail}")
+        if symlinked_internals(Path(args.db)):
+            print(SYMLINK_STOP_NOTE)  # the run stopped at the links (verify_snapshot)
         if violations:
             print(f"{len(violations)} violation(s)")
         else:
@@ -2126,6 +2134,30 @@ def doctor_main(argv: list[str] | None = None) -> int:
             print(f"doctor --against {args.against!r} failed: {e}")
             return 1
 
+    if symlinked_internals(Path(args.db)):
+        # Verify stopped at the links; the advisory checks read records and would read through
+        # them too, so report the violations and say what was skipped (never a clean pass).
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "clean": False,
+                        "violations": [
+                            {"code": v.code, "path": v.path, "detail": v.detail} for v in violations
+                        ],
+                        "findings": [],
+                        "skipped": ["advisory-checks"],
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            for v in violations:
+                print(f"{v.code}  {v.path}  {v.detail}")
+            print(SYMLINK_STOP_NOTE)
+            print(f"{len(violations)} violation(s), 0 finding(s)")
+        return 2
+
     graph: Path | None = None
     try:
         graph = _resolve_cli_graph(args.graph, args.db)
@@ -2188,49 +2220,11 @@ def doctor_main(argv: list[str] | None = None) -> int:
             print(f"{f.code}  {f.path}  {f.detail}")
         for name in skipped:
             print(f"{name} check skipped (no usable index.db — run sidegraph-sync)")
-        # Ratification latency (2026-08-04 lifecycle D4 follow-up, practitioner
-        # resolution 1.2): median/max ratified_at − valid_from over records that carry
-        # the stamp. Pre-stamp records are excluded, never guessed; no stamped records →
-        # no line. Informational only: never a finding, never affects the exit code, and
-        # deliberately absent from --json (whose key set is a pinned contract).
-        try:
-            from .doctor import _iter_records, _parse_aware_iso
-
-            stamps = []
-            for subdir in ("decisions", "facts", "domains"):
-                for _path, rec in _iter_records(Path(args.db), subdir):
-                    # D5: auto stamps excluded -- ratified_at ~= valid_from for those
-                    # would collapse the median toward 0 and it would stop measuring
-                    # human queue latency.
-                    if isinstance(rb := rec.get("ratified_by"), str) and rb.startswith("auto:"):
-                        continue
-                    ra = _parse_aware_iso(rec.get("ratified_at"))
-                    vf = _parse_aware_iso(rec.get("valid_from"))
-                    if ra is not None and vf is not None:
-                        stamps.append((ra - vf).total_seconds() / 86400)
-            latencies = sorted(stamps)
-            if latencies:
-                median = latencies[len(latencies) // 2]
-                print(
-                    f"time-to-ratify: median {median:.0f} days, max {latencies[-1]:.0f} "
-                    f"days ({len(latencies)} stamped record(s))"
-                )
-        except Exception:
-            pass  # a stat failure must never cost the health report
-        # Auto-ratification audit (design D5, 2026-09-11): auto share of ever-ratified
-        # records and their later-retired rate vs. human, per kind -- the early-warning
-        # metric for a hallucinating auto-ratify loop. Informational only: never a
-        # finding, never affects the exit code, deliberately absent from --json (key set
-        # pinned, tests/test_cli_doctor.py:118-127). Printed only when at least one
-        # auto: stamp exists anywhere (hot plus archive) -- a manual deployment's output
-        # is otherwise byte-identical (D4: "manual deployments see zero render diff").
-        try:
-            from .doctor import _auto_share_lines
-
-            for line in _auto_share_lines(args.db):
-                print(line)
-        except Exception:
-            pass  # a stat failure must never cost the health report
+        # Informational lines (never findings, never the exit code, absent from --json):
+        # time-to-ratify and the D5 auto-ratification audit. Computed in doctor.py; an
+        # unusable record is skipped there, and any other error is a bug and propagates.
+        for line in ratification_info_lines(args.db):
+            print(line)
         if reader is None:
             # Not the text above, which blames the index, and not a finding: see the comment
             # where the reader is opened. Last before the summary line.
@@ -2411,8 +2405,23 @@ def stats_main(argv: list[str] | None = None) -> int:
 
     store_dir = Path(resolve_store_path(args.db, warn_on_create=False))
     index = store_dir / "index.db"
+    # os.stat, not path_is_file alone: 3.14 reads an unsearchable directory as "missing".
+    try:
+        os.stat(index)
+    except (FileNotFoundError, NotADirectoryError):
+        print(f"no store index at {index} — run `sidegraph-init` first", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
+        return 2
     if not path_is_file(index):
         print(f"no store index at {index} — run `sidegraph-init` first", file=sys.stderr)
+        return 2
+    try:
+        require_listable_record_dirs(store_dir)
+    except PermissionError as e:
+        # The index is fine; a record directory is not, and the person has to chmod that.
+        print(f"cannot read the store ({e.filename}): {e.strerror}", file=sys.stderr)
         return 2
 
     graph_path = _resolve_cli_graph(args.graph, store_dir)
@@ -2421,7 +2430,7 @@ def stats_main(argv: list[str] | None = None) -> int:
         report = build_report(
             store_dir, graph_path if path_exists(graph_path) else None, window_days=args.window
         )
-    except sqlite3.Error as e:
+    except (sqlite3.Error, PermissionError) as e:
         print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
         return 2
     except UnreadableRecordError as e:
@@ -2485,6 +2494,13 @@ def export_okf_main(argv: list[str] | None = None) -> int:
     return 0
 
 
+_PREPARE_COMMIT_MSG_USAGE = (
+    "usage: sidegraph-prepare-commit-msg [-h] <message-file> [<source> [<sha1>]]\n"
+    "git's prepare-commit-msg hook: comments candidate Sidegraph-Decision trailers into the\n"
+    "commit message template. git runs it, not you. Documented in docs/reference/cli.md.\n"
+)
+
+
 def prepare_commit_msg_main(argv: list[str] | None = None) -> int:
     """``sidegraph-prepare-commit-msg`` — git's ``prepare-commit-msg`` hook (design/
     superpowers/specs/2026-08-07-git-bindings-design.md §1). Comments candidate
@@ -2497,18 +2513,38 @@ def prepare_commit_msg_main(argv: list[str] | None = None) -> int:
     arg (source absent). This hook acts only when ``source`` is absent or
     ``"template"``; every other source (``message``/``merge``/``squash``/``commit`` —
     amend) leaves the message file untouched, and any malformed invocation (no args at
-    all) is also a no-op.
+    all) is also a no-op. Under the ``pre-commit`` framework only the message file is
+    passed, so with exactly ONE argument ``source`` is read from
+    ``PRE_COMMIT_COMMIT_MSG_SOURCE`` (empty = absent); with two or three arguments the
+    positionals win. ``-h``/``--help`` prints the usage and returns 0; an option or
+    more than three arguments is a usage error on stderr, the file untouched, and still
+    returns 0: a pre-commit config with a stray ``args:`` entry must not fail ``git commit``.
 
     Never blocks and never stalls (§0): every internal error, and the mechanism's own
     2s wall-clock budget (:data:`sidegraph.gitio.HOOK_WALL_CLOCK_BUDGET_SECONDS`), degrade
-    to writing nothing — this function ALWAYS returns 0. A ``git commit`` must never fail
-    or hang because this hook did.
+    to writing nothing — this function ALWAYS returns 0, a bad argument included. A
+    ``git commit`` must never fail or hang because this hook did.
     """
     argv = list(sys.argv[1:]) if argv is None else list(argv)
     if not argv:
         return 0
+    flags = [a for a in argv if isinstance(a, str) and a.startswith("-") and a != "-"]
+    if any(a in ("-h", "--help") for a in flags):
+        sys.stdout.write(_PREPARE_COMMIT_MSG_USAGE)
+        return 0
+    if flags or len(argv) > 3:
+        reason = f"unexpected argument '{flags[0]}'" if flags else "too many arguments"
+        sys.stderr.write(
+            f"sidegraph-prepare-commit-msg: error: {reason}\n{_PREPARE_COMMIT_MSG_USAGE}"
+        )
+        return 0
     message_file = argv[0]
     source = argv[1] if len(argv) > 1 else None
+    if len(argv) == 1:
+        # The pre-commit framework passes only the message file; git's source/sha reach
+        # the hook as these env vars. Empty string = absent. Only with ONE positional:
+        # two or three are raw git's own and win over whatever env a wrapper left set.
+        source = os.environ.get("PRE_COMMIT_COMMIT_MSG_SOURCE") or None
     if source not in (None, "", "template"):
         return 0
     try:

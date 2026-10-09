@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 from ..hot_index import HotIndex
-from .hooks import STANDING_SEARCH_INSTRUCTION, _read_payload
+from .hooks import STANDING_SEARCH_INSTRUCTION, _read_payload, refuse_arguments
 
 _EVENT = "SubagentStart"
 
@@ -93,6 +94,10 @@ def subagent_start() -> None:
     index it cannot use, or a store with nothing anchored to code prints ``{}``.
     see design/superpowers/specs/2026-10-03-subagent-start-brief-design.md (D1, D5)
     """
+    if len(sys.argv) > 1:
+        refuse_arguments(
+            "sidegraph-subagent-start", "Prints the memory brief for a starting subagent."
+        )
     try:
         answer = _answer()
     except Exception:

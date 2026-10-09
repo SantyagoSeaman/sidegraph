@@ -47,7 +47,15 @@ repos:
 ```
 
 then `pre-commit install --hook-type prepare-commit-msg` (the framework does not install
-`prepare-commit-msg`-stage hooks with a bare `pre-commit install`). `sidegraph-init` does not
+`prepare-commit-msg`-stage hooks with a bare `pre-commit install`). The framework passes the
+hook only the message file; git's `<source>` and `<sha1>` reach it as the environment variables
+`PRE_COMMIT_COMMIT_MSG_SOURCE` and `PRE_COMMIT_COMMIT_OBJECT_NAME`. When the hook gets exactly
+one argument it reads the source from `PRE_COMMIT_COMMIT_MSG_SOURCE` (unset or empty means a
+plain `git commit`), so `git commit -m`, a merge and an amend keep their messages free of the
+block under the framework as they do under a raw hook. With two or three arguments, as raw git
+passes them, the arguments win and the variables are ignored. A raw-git plain `git commit`
+also passes one argument, so a `PRE_COMMIT_COMMIT_MSG_SOURCE` left exported in the shell is read
+there too: a stale non-plain value only suppresses the block, it never adds one. `sidegraph-init` does not
 install this hook: it stays opt-in, by hand. `sidegraph-init` does write git hooks for one
 other purpose, the graph refresh block in `post-commit`, `post-merge` and `post-checkout`, and
 only after its question or `--hooks` (see
@@ -90,7 +98,9 @@ comments). Degrading to "write nothing" beats guessing.
 
 `git commit` must never fail, warn, or hang because this hook did:
 
-- any internal error writes nothing and exits `0`;
+- any internal error writes nothing and exits `0`, and so does an argument it does not accept
+  (an option a `pre-commit` config adds, a fourth positional): one error line on stderr, the
+  message untouched;
 - the store's `index.db` is opened **strictly read-only** (`file:…?mode=ro&immutable=0`)
   with a 0.5-second busy-timeout fallback — well under Python `sqlite3`'s default 5.0s,
   which against a concurrent writer's held lock would otherwise turn into a multi-second

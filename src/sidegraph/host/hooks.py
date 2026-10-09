@@ -896,6 +896,10 @@ def session_start() -> None:
     there changes nothing below — see :mod:`sidegraph.host.launch` and
     design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md.
     """
+    if len(sys.argv) > 1:
+        refuse_arguments(
+            "sidegraph-session-start", "Injects the project's decision map at session start."
+        )
     with contextlib.suppress(Exception):
         from . import launch
 
@@ -1224,6 +1228,11 @@ def stop() -> None:
     skips the gate and the transcript: it passed the gate once, and the re-arm rests on
     commits.
     """
+    if len(sys.argv) > 1:
+        refuse_arguments(
+            "sidegraph-stop",
+            "Nudges the agent to record what the session learned, once it has done enough.",
+        )
     try:
         if os.environ.get("SIDEGRAPH_CAPTURE_NUDGE") == "off":
             print(json.dumps({}))
@@ -1871,6 +1880,11 @@ def pre_tool_use() -> None:
     design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1-D3) and
     design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1)
     """
+    if len(sys.argv) > 1:
+        refuse_arguments(
+            "sidegraph-pre-tool-use",
+            "Hands the agent the records anchored to the file it is about to read or edit.",
+        )
     # Payload first: stdin can only be read once, and recording (D4) must see it even when
     # delivery is switched off. Then record, then deliver.
     try:
@@ -1889,6 +1903,34 @@ def pre_tool_use() -> None:
         print(json.dumps(output))
     finally:
         hot.close()
+
+
+def _hook_usage(prog: str, summary: str) -> str:
+    return (
+        f"usage: {prog} [-h]\n"
+        f"{summary} Reads the host's JSON payload on stdin and prints a JSON answer;\n"
+        "Claude Code or Codex runs it, not you. Takes no arguments. Documented in\n"
+        "docs/reference/hooks.md.\n"
+    )
+
+
+def refuse_arguments(prog: str, summary: str) -> None:
+    """Answer an argument on the command line of a hook entry point, then exit.
+
+    The hooks take their input from stdin, so a person's ``--help`` used to run the hook against
+    the repository. Called first, before stdin, the store or any cache, and only when ``argv``
+    is not empty, so the no-argument hot path costs one list check. ``-h``/``--help`` prints
+    the usage and exits 0 when it appears anywhere in the arguments (as ``sidegraph-mcp`` and
+    ``sidegraph-prepare-commit-msg`` treat it); anything else is a usage error naming the first
+    argument on stderr and exits 2.
+    """
+    args = sys.argv[1:]
+    usage = _hook_usage(prog, summary)
+    if any(a in ("-h", "--help") for a in args):
+        sys.stdout.write(usage)
+        raise SystemExit(0)
+    sys.stderr.write(f"{prog}: error: unexpected argument '{args[0]}'\n{usage}")
+    raise SystemExit(2)
 
 
 def _read_payload() -> dict:

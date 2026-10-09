@@ -45,6 +45,7 @@ from sidegraph.schema import (
     Entity,
     Fact,
 )
+from sidegraph.store_layout import stat_entry
 
 if TYPE_CHECKING:
     from sidegraph.engine.reader import GraphifyReader
@@ -238,7 +239,7 @@ def _canonical_files(store_dir: Path) -> dict[tuple[str, str], tuple[int, int]]:
             if f.suffix != suffix:
                 continue
             try:
-                st = f.stat()
+                st = stat_entry(f)
             except FileNotFoundError:  # removed between the listing and the stat
                 continue
             found[(sub, f.stem)] = (st.st_size, st.st_mtime_ns)

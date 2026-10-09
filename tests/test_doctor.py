@@ -383,16 +383,16 @@ def test_index_read_leaves_file_bytes_untouched(tmp_path):
     before = (tmp_path / "index.db").read_bytes()
     curate(tmp_path, now=NOW)
     assert (tmp_path / "index.db").read_bytes() == before
-    # store's DELETE journal + mode=ro creates no -wal/-shm sidecars either
+    # store's rollback journal + mode=ro creates no -journal/-wal/-shm sidecars either
     assert sorted(p.name for p in tmp_path.iterdir()) == ["index.db"]
 
 
 def test_doctor_opens_the_index_without_immutable():
     """D8: the coverage journal makes index.db a write target on every tool call, and
     doctor runs mid-session. `immutable=1` disables locking and change detection, which is
-    only sound on a quiescent file; the store is DELETE-journal, so plain `mode=ro` locks
-    correctly and adds no sidecars. Asserted over BOTH connect sites — fixing one and
-    leaving the other is the single-call-site trap this repo keeps falling into."""
+    only sound on a quiescent file; the store uses a rollback journal (TRUNCATE), so plain
+    `mode=ro` locks correctly and adds no sidecars. Asserted over BOTH connect sites —
+    fixing one and leaving the other is the single-call-site trap this repo keeps falling into."""
     source = Path(inspect.getfile(doctor)).read_text()
     assert "immutable=1" not in source, "both connect strings and both docstrings must drop it"
     # The URI form specifically (not just "mode=ro" anywhere) -- two docstring mentions

@@ -487,6 +487,7 @@ def _import_bmad_fixture(tmp_path, store=None):
     return store, reader, str(doc), report
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_bmad_split_imports_parent_plus_one_record_per_ad(tmp_path):
     """Spec T6/T7: the fixture spine (2 ADs) imports as parent + 2 children; children
     carry the AD content at per-AD refs. Red against unfixed code (single record)."""
@@ -528,6 +529,7 @@ def test_bmad_split_imports_parent_plus_one_record_per_ad(tmp_path):
     assert tier2_names(parent.id) == {"IntakeQueue", "IdempotencyStore"}
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_bmad_split_reimport_is_idempotent(tmp_path):
     # Spec T8: same spine again → every record skipped_existing, nothing duplicated.
     store, reader, doc, _ = _import_bmad_fixture(tmp_path)
@@ -538,6 +540,7 @@ def test_bmad_split_reimport_is_idempotent(tmp_path):
     assert len(list(store.iter_decisions())) == 3
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_bmad_split_editing_one_ad_supersedes_only_that_child(tmp_path):
     # Spec T9: edit one AD's body → that child superseded; siblings + parent skipped.
     store, reader, doc, _ = _import_bmad_fixture(tmp_path)
@@ -563,6 +566,7 @@ def test_bmad_split_editing_one_ad_supersedes_only_that_child(tmp_path):
     assert "overflow is rejected" in edited[0].choice
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_bmad_split_upgrades_a_pre_split_import(tmp_path):
     """Spec T10 — the E10b upgrade path as a unit test: a store holding the OLD one-record
     truncated import at the parent's bare ref gets that record superseded by the new
@@ -594,6 +598,7 @@ def test_bmad_split_upgrades_a_pre_split_import(tmp_path):
     assert len(successor) == 1 and "money as integer minor units" in successor[0].choice
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_split_section_without_h3_children_is_ordinary_choice_material(tmp_path):
     """Spec T13 (red against the unconditional-exclusion reading of D2, review F7). The
     fixture MUST carry a `## Consistency Conventions` section (code review F2): without
@@ -616,6 +621,7 @@ def test_split_section_without_h3_children_is_ordinary_choice_material(tmp_path)
     assert "flat rule paragraph" in with_split.choice
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_split_children_come_only_from_the_split_section(tmp_path):
     """Spec T16 (review F1 — the red that separates the naive positional reading from the
     containment rule): H3s under a LATER, non-split H2 must not become children."""
@@ -647,6 +653,7 @@ def test_split_children_come_only_from_the_split_section(tmp_path):
     assert report.imported == 2  # parent + the one real child
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_split_colliding_slugs_get_ordinal_suffixes(tmp_path):
     """Spec T15 (review F8): two H3s that slugify identically → distinct refs, both
     imported, neither supersedes the other. Red against unfixed code (no collision rule
@@ -672,6 +679,7 @@ def test_split_colliding_slugs_get_ordinal_suffixes(tmp_path):
     assert all(d.supersedes is None for d in store.iter_decisions())
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_split_natural_dash2_slug_does_not_collide(tmp_path):
     """Code review F1 (BLOCKING): a heading whose slug is NATURALLY `<base>-2` collided
     with the second occurrence of `<base>` under the per-base counter — one AD silently
@@ -701,6 +709,7 @@ def test_split_natural_dash2_slug_does_not_collide(tmp_path):
     assert report2.superseded == 0 and report2.imported == 0
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_split_intro_is_the_parent_choice_when_no_other_section_matches(tmp_path):
     """Code review F9: the split section's pre-H3 intro is a named step of the parent's
     choice chain; no test exercised it. A spine with intro prose, one child, and NO
@@ -720,6 +729,7 @@ def test_split_intro_is_the_parent_choice_when_no_other_section_matches(tmp_path
     assert "IntakeQueue" not in parsed.choice  # the child's content stayed with the child
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_duplicate_heading_text_does_not_evict_unrelated_sections(tmp_path):
     """Code review F3: the exclusion is keyed on (heading, body) pairs, not heading text.
     Shape H — a child H3 named like a later real H2 must not knock the real section out
@@ -740,6 +750,7 @@ def test_duplicate_heading_text_does_not_evict_unrelated_sections(tmp_path):
     assert "Hex." not in parsed.choice
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_dry_run_items_carry_ref_and_by_file_groups_by_document(tmp_path):
     # Code review F4: the `ref` key existed but nothing read or guarded it, and by_file()
     # had no doc-import test at all.
@@ -969,6 +980,7 @@ def _write_md(tmp_path, rel, text):
     return p
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_import_docs_superpowers_profile_lands_proposed_and_anchors(tmp_path):
     graph_path = tmp_path / "g.json"
     reader = _reader(tmp_path, SUPERPOWERS_GRAPH)
@@ -997,6 +1009,7 @@ def test_import_docs_superpowers_profile_lands_proposed_and_anchors(tmp_path):
     assert graph_path.read_bytes() == graph_bytes_before
 
 
+@pytest.mark.usefixtures("cwd_outside_any_repository")
 def test_import_docs_unknown_profile_raises_valueerror(tmp_path):
     reader = _reader(tmp_path, SUPERPOWERS_GRAPH)
     store = Store(tmp_path / "s.db")

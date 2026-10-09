@@ -30,8 +30,9 @@ Rubric conventions: [`rubric-template.md`](rubric-template.md).
 ## Stage 2 — shadow capture (2–3 weeks, no delivery)
 
 Use a separate store such as `.sidegraph-shadow/` and keep it out of the normal host wiring.
-Do not enable the `SessionStart` or `PreToolUse` hooks for the measured sessions. Give the
-agent an explicit end-of-session capture instruction and allow only the write-side
+Do not enable the `SessionStart`, `SubagentStart`, or `PreToolUse` hooks for the measured
+sessions. Give the agent an explicit end-of-session capture instruction and allow only
+the write-side
 `propose_decisions` MCP path; deny `get_task_context`, `query_decisions`,
 `retrieve_decisions`, `list_facts`, `drill_down`, and other store reads. Review the queue
 outside the measured agent session with `sidegraph-ratify --db .sidegraph-shadow`.
@@ -78,10 +79,17 @@ your results:
 | Gate | Default stop condition |
 |---|---|
 | Cost | Battery cost delta > **+15%** on your corpus (the losing cell measured +25.5%) |
-| Delivery | The share of sessions that never call the retrieval tool (they receive the session-start map and stop there) stays above **40%** after configuring the nudge/routing (measured post-improvement pooled share: 26%) |
+| Delivery | Records fail to reach working agents, including subagents, more often than a limit **you set before stage 3**; inspect receipt through tools, file-contact hooks, and delegated task briefs. No measured default threshold exists for the current delivery paths |
 | Queue health | Oldest unreviewed proposal exceeds **30 days** (a neglected queue is an unreviewed influence channel) |
 | Answer quality | Blinded quality with memory falls below the no-memory arm by more than a margin **you set before stage 3** — the kit ships no default number, because cost and quality moved independently across the measured corpora |
-| Cadence | Re-measure the share of sessions that never call the retrieval tool **monthly** — attention to nudges is expected to decay, not hold |
+| Cadence | Check actual record receipt, including in subagents, **monthly**; track explicit retrieval calls separately. Receipt does not by itself establish that the agent used a record |
+
+The earlier reminder-based protocol used a **40%** ceiling on sessions without a
+retrieval call (the measured post-improvement pooled share was 26%). Current hooks can
+deliver records without that call, so the old proxy cannot serve as the delivery gate.
+Inspect saved hook output and agent transcripts for actual record receipt; a session-start
+map or a suggestion to retrieve is not a delivered record. Freeze the delivery unit and
+limit before stage 3, and keep explicit tool-call counts as a separate diagnostic.
 
 ## What this kit does not give you
 

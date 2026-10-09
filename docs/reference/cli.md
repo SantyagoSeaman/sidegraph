@@ -69,7 +69,7 @@ exclusions, review/state table, host matrix, and recovery semantics.
 | `--codex-config` | `.codex/config.toml` | alternate Codex MCP config path |
 | `--candidate` | all candidates | review only the displayed candidate key |
 | `--task` | deterministic proof selection | additional repository path for production retrieval proof |
-| `--report` | none | write an aggregate, source-content-free Markdown report; never uploaded. The destination must not be, or be hard-linked to, the graph, any host's config file (both hosts', whichever `--host` is set) or a scanned source, and must not lie inside the store; the report replaces the file rather than truncating it in place |
+| `--report` | none | after a confirmed apply (including the all-unanchored diagnostic), write an aggregate, source-content-free Markdown report; never uploaded. The pre-apply diagnostics (no candidates, every candidate skipped in review, a changed plan with no writes) write none. The destination must not be, or be hard-linked to, the graph, any host's config file (both hosts', whichever `--host` is set) or a scanned source, and must not lie inside the store; the report replaces the file rather than truncating it in place |
 | `--resume` | off | marker only, for the resume command a failed run prints — it changes no behavior. The scan/review/reconcile flow is idempotent, so reissuing the same command without it behaves identically |
 
 Output keeps `STORE`, `ANCHORS`, `INTEGRATION`, and `PROOF` independent. Claude Code can
@@ -574,7 +574,8 @@ blank line, `would import N decision(s)[, would auto-ratify M] (skipped: X exist
 unanchorable, Z filtered)` (the bracketed segment only under a non-`manual` policy), and a
 per-file breakdown (`  <file_path or '<unknown>'>: <count>`, sorted by path). No record is
 written, though opening a store that does not exist yet still creates its own files (`format`,
-`.gitignore`, `stamping_live_since` and `index.db`); counts reflect exactly what a real run would
+`.gitignore`, `stamping_live_since`, `index.db` and its 0-byte `index.db-journal`); counts reflect
+exactly what a real run would
 do.
 
 **Exit code:** `0` on success, including an empty import (nothing new to import) and every
@@ -800,8 +801,8 @@ non-zero (a dry run never prints the anchors-repaired line), and a per-file brea
 undecodable-file block above prints last, after the per-file breakdown. Both indent their lines by two spaces, so breakdown lines printed
 after the block would read as more undecodable files. No decision or binding is written. Opening the
 store may still create a fresh store's own files (`format`, `.gitignore`, `stamping_live_since`,
-`index.db` and the empty record directories), migrate supported legacy data or rebuild the derived
-index.
+`index.db`, its 0-byte `index.db-journal` and the empty record directories), migrate supported
+legacy data or rebuild the derived index.
 
 **Exit code:** `0` on success, including an empty run and every `--dry-run` invocation.
 Returns `1` before touching the graph or store if `--profile` names an unknown profile
@@ -967,6 +968,14 @@ before removing the now-redundant hot files leaves those as harmless leftover du
 run detects and removes them without writing a second, duplicate segment — counted separately
 in the output as "leftover hot file(s)".
 
+**A hot file that differs from its archived copy.** Compact keeps a hot file whose content
+differs from what it just archived, for example one holding a key the archive line lacks
+(written by a newer Sidegraph), and prints a `DIFFERENT content` warning on stderr. The record
+is still counted in `compacted N record(s)`, because it is in the new segment; its hot file is
+not removed. The warning repeats on every later compact and store open, and `sidegraph-verify`
+reports `duplicate-ulid` for the pair until a Sidegraph version that knows the key compacts it,
+or you restore the hot file and remove the segment by hand.
+
 **`--dry-run` output:** one line per candidate — `<ulid>  <kind>  <status>  <title>` — or a bare
 `nothing to compact` if there is nothing eligible at all (no candidates, nothing age-filtered
 out, no leftovers). Otherwise: `would compact N record(s) (X decisions, Y domains); Z skipped
@@ -1022,12 +1031,13 @@ on-disk layout this walks). Two layers, combined into one report:
   `Model.model_validate`, not just JSON decoding), and so does every archived decision and
   domain — a schema-invalid archived payload is a `bad-archive-segment` violation naming the
   segment and the line, the same line the store's reload leaves out; archived entries are also
-  cross-referenced (supersedes chains, ULID uniqueness); the `format` marker's
+  cross-referenced (supersedes chains, parent chains, ULID uniqueness); the `format` marker's
   `schema_version` is present and known; `valid_to >= valid_from` on every decision/fact; a
   `superseded` record's `supersedes` chain resolves to a real successor; every `supersedes`
   target exists; every binding references an existing entity; every fact's `supports`
   references an existing *decision* (never a fact — `Fact.supports` only ever holds decision
-  ids); internal ids (ULIDs) are unique across hot files *and* archive segments; archive
+  ids); every domain's `parent_id` names an existing domain and no parent chain loops;
+  internal ids (ULIDs) are unique across hot files *and* archive segments; archive
   segments parse as JSONL; every hot record file is named `<its own internal id>.json` (the
   store always writes that); no store-owned directory or file (the subdirectories, `format`,
   `stamping_live_since`, `.gitignore`, `index.db` and its SQLite sidecars) is a symlink.
@@ -1045,18 +1055,20 @@ plain-text line):
 
 | Code | Layer | Meaning |
 |---|---|---|
-| `parse-error` | snapshot | a record file isn't valid UTF-8 or JSON (or is nested past the recursion limit), isn't an object, fails schema validation, or can't be serialised for the index (a `valid_to < valid_from` failure is reported as `bad-validity-window` instead — see below) |
+| `parse-error` | snapshot | a record file isn't valid UTF-8 or JSON (or is nested past the recursion limit), isn't an object, fails schema validation, or can't be serialised for the index, or is a directory, FIFO or other entry that is not a regular file (`unreadable: not a regular file`; never opened) (a `valid_to < valid_from` failure is reported as `bad-validity-window` instead — see below) |
 | `unknown-schema-version` | snapshot | the `format` marker is missing, unreadable, malformed, or names a `schema_version` this version of the code doesn't recognize |
 | `bad-validity-window` | snapshot | `valid_to < valid_from` on a decision or fact |
-| `superseded-without-successor` | snapshot | a `status=superseded` record has no other record's `supersedes` pointing back at it |
-| `dangling-supersedes` | snapshot | a `supersedes` id doesn't resolve to any record, hot or archived |
-| `dangling-binding-entity` | snapshot | a binding's `entity_id` doesn't resolve to any `entities/<id>.json` |
-| `dangling-fact-support` | snapshot | a fact's `supports` id doesn't resolve to any decision |
+| `superseded-without-successor` | snapshot | a `status=superseded` record has no other record's `supersedes` pointing back at it (a successor held by a file skipped for its unsafe name still counts) |
+| `dangling-supersedes` | snapshot | a `supersedes` id doesn't resolve to any record, hot or archived (a file skipped for its unsafe name still counts as the record it holds, so renaming it back is the only heal) |
+| `dangling-binding-entity` | snapshot | a binding's `entity_id` doesn't resolve to any `entities/<id>.json` (an entity held by a file skipped for its unsafe name still counts) |
+| `dangling-fact-support` | snapshot | a fact's `supports` id doesn't resolve to any decision (a file skipped for its unsafe name still counts, as for `dangling-supersedes`) |
+| `dangling-parent` | snapshot | a domain's `parent_id` doesn't resolve to any domain, hot or archived (a superseded, dropped or archived parent still counts, as the write path only checks that it exists; a file skipped for its unsafe name counts too, as for `dangling-supersedes`) |
+| `parent-cycle` | snapshot | the `parent_id` chain of some domains loops back on itself (a domain that is its own parent included); reported once per cycle, at the domain with the smallest id on it, and not for a domain that merely hangs off the cycle |
 | `duplicate-ulid` | snapshot | the same internal id appears in more than one canonical location — two hot files, a hot file plus any archive copy, or two archive segments whose payloads for that id actually differ. **Exempt:** two or more archive segments carrying byte-*identical* payloads for the same id — a sanctioned cross-branch `sidegraph-compact` merge (independent compaction on two branches, later merged) — see [`reference/store-format.md#archive-segments-sidegraph-compact`](store-format.md#archive-segments-sidegraph-compact) |
-| `bad-archive-segment` | snapshot | an `archive/*.jsonl` line isn't valid UTF-8 or JSON, isn't a JSON object, or holds a decision or domain that fails its model or can't be serialised: the lines the store's reload leaves out (one violation per line, naming the segment and the line number) |
+| `bad-archive-segment` | snapshot | an `archive/*.jsonl` entry is not a regular file (`unreadable: not a regular file`), or a line isn't valid UTF-8 or JSON, isn't a JSON object, or holds a decision or domain that fails its model or can't be serialised: the lines the store's reload leaves out (one violation per line, naming the segment and the line number) |
 | `filename-id-mismatch` | snapshot | a hot record file's name doesn't match its own internal id |
-| `unsafe-record-id` | snapshot | a record's id is not a safe filename (a single path segment, at most 128 characters, starting with a letter or digit), or is not a string; also a `bindings/` file or hot record file whose name is unsafe, and an `archive/*.jsonl` line whose id is missing, not a string or unsafe. The store's reload skips such a file, and its startup warning points here |
-| `symlinked-store-entry` | snapshot | a store-owned directory or file inside the store is a symlink, live or dangling (one violation per entry); `Store()` refuses to open such a store, see [`reference/store-format.md`](store-format.md#layout-file-per-record-json-plus-a-derived-local-index) |
+| `unsafe-record-id` | snapshot | a record's id is not a safe filename (a single path segment, at most 128 characters, starting with a letter or digit), or is not a string; also a `bindings/` file or hot record file whose name is unsafe, and an `archive/*.jsonl` line whose id is missing, not a string or unsafe. The store's reload skips such a file, and its startup warning points here. A file with an unsafe name gets this code whether or not its content parses; a file with an unsafe name or an unsafe id gets no other snapshot finding (no `filename-id-mismatch`, `duplicate-ulid` or `parse-error`) |
+| `symlinked-store-entry` | snapshot | a store-owned directory or file inside the store is a symlink, live or dangling (one violation per entry); `Store()` refuses to open such a store, so `sidegraph-verify` and `sidegraph-doctor` report the links and stop: no record is linted, no reference checked, no `--against` diff run and no advisory check made until the links are removed (an `--against` ref that does not resolve, or a store outside git, is checked first and still exits `1` without reporting the links) (the text output says so in one line; `--json` carries no marker), see [`reference/store-format.md`](store-format.md#layout-file-per-record-json-plus-a-derived-local-index) |
 | `illegal-field-change` | transition | an immutable field changed between `GIT_REF` and the working tree (the detail names the field); also covers a modified already-published archive segment (write-once) |
 | `illegal-status-jump` | transition | `status` changed to something that isn't a real write-path transition for that record kind |
 | `valid-to-unset` | transition | `valid_to` reverted from a value back to `null` |
@@ -1127,12 +1139,18 @@ lint on PR) and why the false positive happens.
 
 **Exit code:** `0` clean (snapshot layer, and the transition layer too when `--against` is
 given, report zero violations). `1` **operational error** — the store directory doesn't
-exist or isn't readable; when `--against` is present, an unresolvable ref or a store outside
+exist or isn't readable (the store directory cannot be searched, or an existing record
+directory in it cannot be searched or listed: one `store not readable` line naming it, never
+a pile of dangling or deleted-record findings). The store directory itself need not be
+listable: one that is searchable but not listable (`chmod 300`) is linted normally. When `--against` is present, an unresolvable ref or a store outside
 git is also operational error. Snapshot verification alone does not require git.
-`sidegraph-verify` never constructs a `Store`, so a missing/non-directory `--db` raises instead — a lint has
-nothing to lint if there's nothing to open, and silently reporting "clean" against a store
-it just created would be actively misleading in CI. `2` violations found (printed one line
-each as `<code>  <path>  <detail>`, or in `--json`'s `violations` list).
+`sidegraph-verify` never constructs a `Store`, so a missing or non-directory `--db` is not
+created: it prints `store not readable (<path>): store directory not found: <path>` and exits
+`1` — a lint has nothing to lint if there's nothing to open, and silently reporting "clean"
+against a store it just created would be actively misleading in CI. `2` violations found
+(printed as `<code>  <path>  <detail>`, one entry per violation, or in `--json`'s
+`violations` list; a `parse-error` from schema validation carries pydantic's multi-line
+message in its detail, so use `--json` to parse the output).
 
 **Examples:**
 
@@ -1246,7 +1264,10 @@ recomputes the statuses, so the check has nothing to say. Without a readable gra
 graph checks (`graph-root-mismatch`, `graph-stale`) are listed as `"graph"` in `skipped`, and the
 plain-text report prints one line just before its summary:
 ``graph checks skipped (no code graph at <path> — build it from the repository root with `graphify update .`)``.
-`--json` prints nothing extra. A missing graph is deliberately not a finding: `--check` escalates
+`--json` prints nothing extra. A store with symlinked entries skips every advisory check:
+`skipped` is then `["advisory-checks"]` alone and the text report prints
+`remaining checks skipped (the store has symlinked entries — remove the links and rerun)` instead
+of the lines above. A missing graph is deliberately not a finding: `--check` escalates
 every finding, so a CI job that runs doctor without building a graph would start exiting `2`.
 
 **Exit code:** `0` healthy — advisory findings alone stay `0` without `--check`. `1`
@@ -1503,8 +1524,10 @@ Lines the report will not invent:
 output; `2` on an operational error: a non-positive or unrepresentable `--window`, no store
 index at the resolved path (run `sidegraph-init` first — a fresh clone has the committed
 records but not the derived index, and `sidegraph-init` rebuilds it), an index SQLite cannot
-read, or a record row in it that does not parse (the message names the index file, the table
-and the record id). An index from before the render journal, and a graph that is missing or unreadable, are
+read, an index or store directory the process may not search (`cannot read the store index`,
+not "no store index"), a record directory it may not list or search (`cannot read the store`,
+naming that directory), or a record row in it that does not parse (the message names the index
+file, the table and the record id). An index from before the render journal, and a graph that is missing or unreadable, are
 not errors.
 
 The `/sidegraph:stats` skill runs this command and shows its output verbatim. The
@@ -1524,8 +1547,14 @@ sidegraph-prepare-commit-msg <message-file> [<source> [<sha1>]]
 
 Not something you run directly — it's wired up as git's own `prepare-commit-msg` hook
 (see [`reference/git-bindings.md`](git-bindings.md) for installation, both raw-git and the
-`pre-commit` framework). Takes no flags of its own: git invokes it with the message-file
-path plus git's own `<source>`/`<sha1>` positional args. Comments candidate
+`pre-commit` framework). Takes git's one to three positional arguments and no options except
+`-h`/`--help`, which prints the usage and exits `0`; any other option, or a fourth argument,
+is reported on stderr, touches nothing, and still exits `0`, so a stray `args:` entry in a
+`pre-commit` config never fails `git commit`. git invokes it with the
+message-file path plus git's own `<source>`/`<sha1>` positional args. The `pre-commit`
+framework passes only the message file; with exactly one argument the hook reads `<source>`
+from the environment variable `PRE_COMMIT_COMMIT_MSG_SOURCE` (unset or empty means absent),
+where the framework puts it. With two or three arguments the arguments win. Comments candidate
 `Sidegraph-Decision:` trailers into the commit message template — captured-this-session
 records plus decisions anchored to files you've staged — for you (or your agent) to
 uncomment; never auto-appends one. Acts only when `<source>` is absent (a plain `git

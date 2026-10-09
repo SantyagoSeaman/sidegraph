@@ -34,6 +34,9 @@ from tests.githooks_support import (
     wait_for,
 )
 
+# Marked per test: the tests that run the shell hooks as real subprocesses are `slow`; the two pure
+# text tests (D2, D5) are not.
+
 sandbox = githooks_support.sandbox  # the fixture, bound by name so that test arguments find it
 
 OLD_BLOCK = (
@@ -109,6 +112,7 @@ def test_the_manual_line_is_the_blocks_command_line():
 # -- T3: where the block goes ------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "shebang",
     [
@@ -133,6 +137,7 @@ def test_t3_the_block_goes_right_after_the_shebang_line(sandbox, shebang):
     assert results(report)["post-commit"].action == "inserted"
 
 
+@pytest.mark.slow
 def test_t3_a_commit_runs_the_foreign_line_and_the_rebuild(sandbox):
     repo = sandbox.repo()
     marker = sandbox.root / "foreign-ran"
@@ -145,6 +150,7 @@ def test_t3_a_commit_runs_the_foreign_line_and_the_rebuild(sandbox):
     assert len(starts) == 1
 
 
+@pytest.mark.slow
 def test_an_absent_hook_is_created_with_the_header_and_the_block(sandbox):
     repo = sandbox.repo()
     report = githooks.install(info_for(repo), graphify=fake(sandbox))
@@ -155,6 +161,7 @@ def test_an_absent_hook_is_created_with_the_header_and_the_block(sandbox):
         assert results(report)[hook].action == "created"
 
 
+@pytest.mark.slow
 def test_the_helper_is_installed_executable_in_the_common_hooks_directory(sandbox):
     repo = sandbox.repo()
     shutil.rmtree(repo / ".git" / "hooks")  # a repository created without templates
@@ -166,6 +173,7 @@ def test_the_helper_is_installed_executable_in_the_common_hooks_directory(sandbo
     assert info.helper == helper
 
 
+@pytest.mark.slow
 def test_the_helper_lives_in_the_common_directory_even_from_a_linked_worktree(sandbox):
     repo = sandbox.repo()
     wt = sandbox.root / "wt"
@@ -190,6 +198,7 @@ REFUSED = {
 }
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("case", sorted(REFUSED))
 def test_t4_an_unsafe_hook_is_refused_and_left_untouched(sandbox, case):
     repo = sandbox.repo()
@@ -207,6 +216,7 @@ def test_t4_an_unsafe_hook_is_refused_and_left_untouched(sandbox, case):
     assert results(report)["post-checkout"].action == "created"
 
 
+@pytest.mark.slow
 def test_t4_a_symlinked_hook_is_refused_and_its_target_untouched(sandbox):
     repo = sandbox.repo()
     target = sandbox.root / "shared-hook"
@@ -224,6 +234,7 @@ def test_t4_a_symlinked_hook_is_refused_and_its_target_untouched(sandbox):
 # -- T5: idempotent, replaced in place, damaged markers ------------------------------------
 
 
+@pytest.mark.slow
 def test_t5_a_second_install_leaves_every_file_byte_identical(sandbox):
     repo = sandbox.repo()
     write_hook(repo, "post-commit", "#!/bin/sh -e\necho one\n")
@@ -238,6 +249,7 @@ def test_t5_a_second_install_leaves_every_file_byte_identical(sandbox):
     assert {r.action for r in report.hooks} == {"unchanged"}
 
 
+@pytest.mark.slow
 def test_t5_an_older_block_is_replaced_in_place(sandbox):
     repo = sandbox.repo()
     write_hook(repo, "post-commit", f"#!/bin/sh\necho before\n{OLD_BLOCK}echo after\n")
@@ -257,6 +269,7 @@ DAMAGED = {
 }
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("case", sorted(DAMAGED))
 def test_t5_damaged_markers_are_left_untouched_and_reported(sandbox, case):
     repo = sandbox.repo()
@@ -272,6 +285,7 @@ def test_t5_damaged_markers_are_left_untouched_and_reported(sandbox, case):
 # -- T6: removal ------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_t6_removal_restores_foreign_hooks_to_their_exact_bytes(sandbox):
     repo = sandbox.repo()
     foreign_a = b"#!/bin/sh -e\necho foreign a\nexit 0\n"
@@ -305,6 +319,7 @@ def test_t6_removal_restores_foreign_hooks_to_their_exact_bytes(sandbox):
     assert report.helper_removed
 
 
+@pytest.mark.slow
 def test_t6_removal_touches_nothing_with_damaged_markers_and_says_so(sandbox):
     repo = sandbox.repo()
     write_hook(repo, "post-commit", DAMAGED["a lone start marker"])
@@ -315,6 +330,7 @@ def test_t6_removal_touches_nothing_with_damaged_markers_and_says_so(sandbox):
     assert results(report)["post-commit"].action == "damaged"
 
 
+@pytest.mark.slow
 def test_removal_of_a_hook_without_a_block_changes_nothing(sandbox):
     repo = sandbox.repo()
     write_hook(repo, "post-commit", "#!/bin/sh\necho mine\n")
@@ -325,6 +341,7 @@ def test_removal_of_a_hook_without_a_block_changes_nothing(sandbox):
     assert not report.helper_removed
 
 
+@pytest.mark.slow
 def test_removal_leaves_a_symlinked_hook_alone(sandbox):
     repo = sandbox.repo()
     target = sandbox.root / "shared-hook"
@@ -337,6 +354,7 @@ def test_removal_leaves_a_symlinked_hook_alone(sandbox):
     assert results(report)["post-commit"].action == "refused"
 
 
+@pytest.mark.slow
 def test_removal_after_a_file_was_edited_keeps_the_edit(sandbox):
     """A Sidegraph-created file the owner has since extended is kept, minus the block."""
     repo = sandbox.repo()
@@ -360,6 +378,7 @@ def sentinel(sb: Sandbox, main: Path) -> list[Start]:
     return starts
 
 
+@pytest.mark.slow
 def test_t8_a_commit_in_a_linked_worktree_does_not_rebuild(sandbox):
     main = sandbox.repo()
     githooks.install(info_for(main), graphify=fake(sandbox))
@@ -369,6 +388,7 @@ def test_t8_a_commit_in_a_linked_worktree_does_not_rebuild(sandbox):
     sentinel(sandbox, main)
 
 
+@pytest.mark.slow
 def test_t8_a_file_checkout_does_not_rebuild(sandbox):
     main = sandbox.repo()
     githooks.install(info_for(main), graphify=fake(sandbox))
@@ -377,6 +397,7 @@ def test_t8_a_file_checkout_does_not_rebuild(sandbox):
     sentinel(sandbox, main)
 
 
+@pytest.mark.slow
 def test_t8_post_checkout_with_the_branch_flag_off_does_not_rebuild(sandbox):
     """Different shas and flag 0: only the ``$3`` test stops this one (git itself always passes
     equal shas for a file checkout, so the call is made by hand)."""
@@ -388,6 +409,7 @@ def test_t8_post_checkout_with_the_branch_flag_off_does_not_rebuild(sandbox):
     sentinel(sandbox, main)
 
 
+@pytest.mark.slow
 def test_t8_switch_c_does_not_rebuild(sandbox):
     main = sandbox.repo()
     githooks.install(info_for(main), graphify=fake(sandbox))
@@ -395,6 +417,7 @@ def test_t8_switch_c_does_not_rebuild(sandbox):
     sentinel(sandbox, main)
 
 
+@pytest.mark.slow
 def test_t8_a_branch_switch_to_another_commit_rebuilds_once(sandbox):
     main = sandbox.repo()
     git(main, "switch", "-q", "-c", "other")
@@ -406,6 +429,7 @@ def test_t8_a_branch_switch_to_another_commit_rebuilds_once(sandbox):
     assert [(s.cwd.resolve(), s.head) for s in starts] == [(main.resolve(), other_head)]
 
 
+@pytest.mark.slow
 def test_each_of_the_three_hooks_rebuilds_in_the_main_checkout(sandbox):
     main = sandbox.repo()
     git(main, "switch", "-q", "-c", "b1")
@@ -426,6 +450,7 @@ def test_each_of_the_three_hooks_rebuilds_in_the_main_checkout(sandbox):
     assert starts[-1].head == b3
 
 
+@pytest.mark.slow
 def test_the_rebuild_is_graphify_update_with_a_pinned_hash_seed_and_a_log(sandbox):
     main = sandbox.repo()
     info = info_for(main)
@@ -462,6 +487,7 @@ def burst(repo: Path, calls: int, shell: str, *, spread: float = 0.0) -> None:
     gate.unlink(missing_ok=True)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("shell", SHELLS)
 @pytest.mark.parametrize("calls", [2, 20])
 def test_t9_simultaneous_calls_never_overlap_on_a_fresh_lock(
@@ -533,6 +559,7 @@ def make_lock(info: githooks.RepoInfo, state: str) -> Path:
 STALE_STATES = ["dead pid", "no pid, aged", "empty pid, aged"]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("shell", SHELLS)
 @pytest.mark.parametrize("calls", [2, 20])
 @pytest.mark.parametrize("state", STALE_STATES)
@@ -556,6 +583,7 @@ def test_t9_simultaneous_calls_never_overlap_on_a_stale_lock(
     assert max_concurrent(sandbox.log) == 1
 
 
+@pytest.mark.slow
 def test_t9_a_burst_during_a_rebuild_gives_a_rebuild_after_it(sandbox, monkeypatch):
     """The burst lands while a rebuild runs: that rebuild cannot have consumed it, so a second
     one must start after, and never alongside."""
@@ -574,6 +602,7 @@ def test_t9_a_burst_during_a_rebuild_gives_a_rebuild_after_it(sandbox, monkeypat
 # -- T10: a request during a rebuild ----------------------------------------------------
 
 
+@pytest.mark.slow
 def test_t10_a_request_during_a_rebuild_gives_a_second_rebuild(sandbox, monkeypatch):
     """Commit, then switch away and back while the rebuild runs: HEAD is unchanged at the end,
     and the tree moved in between, so a HEAD comparison would rebuild once, and this must twice."""
@@ -597,6 +626,7 @@ def test_t10_a_request_during_a_rebuild_gives_a_second_rebuild(sandbox, monkeypa
 # -- a lock without a usable pid ----------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("pid_file", [None, b""], ids=["no pid file", "empty pid file"])
 def test_a_lock_without_a_usable_pid_is_broken_once_it_is_old(sandbox, pid_file):
     """The job died (or could not write: a full disk, a quota) between creating the lock and
@@ -627,6 +657,7 @@ def log_find(sb: Sandbox, monkeypatch, calls: Path) -> None:
     )
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("pid_file", [None, b""], ids=["no pid file", "empty pid file"])
 def test_a_fresh_lock_without_a_pid_is_an_owner_still_writing(
     sandbox, monkeypatch, tmp_path, pid_file
@@ -649,6 +680,7 @@ def test_a_fresh_lock_without_a_pid_is_an_owner_still_writing(
     assert len(starts) == 1
 
 
+@pytest.mark.slow
 def test_a_pid_write_that_fails_does_not_block_later_rebuilds(sandbox):
     """The reproduction: a process that cannot write files takes the lock and leaves it with an
     empty pid file. Ten minutes on, a normal call recovers."""
@@ -672,6 +704,7 @@ def test_a_pid_write_that_fails_does_not_block_later_rebuilds(sandbox):
     assert len(starts) == 1
 
 
+@pytest.mark.slow
 def test_the_age_is_checked_again_under_the_gate(sandbox, monkeypatch, tmp_path):
     """A call may see an old lock, and reach the gate after a live owner replaced that lock with
     its own, still without a pid. The first ``find`` of the test lies (the lock is "old"); the
@@ -699,6 +732,7 @@ def test_the_age_is_checked_again_under_the_gate(sandbox, monkeypatch, tmp_path)
     assert sandbox.starts() == []
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("state", STALE_STATES)
 def test_install_removes_a_dead_lock(sandbox, state):
     """Re-running ``--hooks`` is the documented way out of a lock that a dead job left."""
@@ -710,6 +744,7 @@ def test_install_removes_a_dead_lock(sandbox, state):
     assert not lock.exists()
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("state", ["live pid", "no pid, fresh", "empty pid, fresh"])
 def test_install_keeps_a_lock_that_may_be_live(sandbox, state):
     repo = sandbox.repo()
@@ -723,6 +758,7 @@ def test_install_keeps_a_lock_that_may_be_live(sandbox, state):
 # -- a request while the lock is being released ------------------------------------------------
 
 
+@pytest.mark.slow
 def test_a_request_while_the_lock_is_being_released_is_not_lost(sandbox, monkeypatch):
     """The runner has finished and is about to release the lock (its removal is slow here); a
     call arrives in that gap, finds the lock held, and leaves. The runner must look at the flag
@@ -746,6 +782,7 @@ def test_a_request_while_the_lock_is_being_released_is_not_lost(sandbox, monkeyp
 REAL_GRAPHIFY = shutil.which("graphify")
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(REAL_GRAPHIFY is None, reason="graphify is not installed")
 def test_t13_graphifys_own_hook_and_ours_leave_each_other_byte_identical(sandbox):
     repo = sandbox.repo()
@@ -764,6 +801,7 @@ def test_t13_graphifys_own_hook_and_ours_leave_each_other_byte_identical(sandbox
     assert snapshot(repo) == ours
 
 
+@pytest.mark.slow
 def test_graphifys_markers_are_reported(sandbox):
     repo = sandbox.repo()
     write_hook(
@@ -779,6 +817,7 @@ def test_graphifys_markers_are_reported(sandbox):
 # -- T14: the scripts are valid shell ------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("shell", SHELLS)
 def test_t14_the_helper_and_the_hooks_parse(sandbox, shell):
     repo = sandbox.repo()
@@ -788,6 +827,7 @@ def test_t14_the_helper_and_the_hooks_parse(sandbox, shell):
         assert done.returncode == 0, done.stderr
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("shell", ["sh", "bash", "dash", "zsh", "ksh"])
 @pytest.mark.parametrize("flags", ["-e", "-u", "-eu"])
 def test_the_block_line_passes_strict_shebangs(sandbox, shell, flags):
@@ -813,6 +853,7 @@ def only_system_path() -> dict:
     return env
 
 
+@pytest.mark.slow
 def test_t15_a_path_with_a_space_is_quoted_and_used_when_path_has_no_graphify(
     sandbox,
     tmp_path,
@@ -829,6 +870,7 @@ def test_t15_a_path_with_a_space_is_quoted_and_used_when_path_has_no_graphify(
     assert len(starts) == 1
 
 
+@pytest.mark.slow
 def test_t15_a_path_with_a_newline_is_not_recorded(sandbox):
     repo = sandbox.repo()
     info = info_for(repo)
@@ -841,6 +883,7 @@ def test_t15_a_path_with_a_newline_is_not_recorded(sandbox):
     assert run_helper(repo, "post-commit", env=only_system_path()) == 0  # no graphify: quietly out
 
 
+@pytest.mark.slow
 def test_a_recorded_path_that_is_gone_exits_quietly(sandbox, tmp_path):
     repo = sandbox.repo()
     info = info_for(repo)
@@ -852,6 +895,7 @@ def test_a_recorded_path_that_is_gone_exits_quietly(sandbox, tmp_path):
 # -- D4: the recorded choice -----------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_the_choice_round_trips_through_the_local_config(sandbox):
     repo = sandbox.repo()
     assert githooks.read_choice(repo) is None
@@ -863,6 +907,7 @@ def test_the_choice_round_trips_through_the_local_config(sandbox):
     assert githooks.record_choice(repo, declined=False)  # an absent key is fine
 
 
+@pytest.mark.slow
 def test_a_raw_no_in_the_config_reads_as_declined(sandbox):
     repo = sandbox.repo()
     git(repo, "config", "--local", "sidegraph.graphRefresh", "no")
@@ -870,6 +915,7 @@ def test_a_raw_no_in_the_config_reads_as_declined(sandbox):
     assert choice is not None and choice.declined
 
 
+@pytest.mark.slow
 def test_a_global_false_counts_as_declined_and_survives_the_local_unset(sandbox):
     repo = sandbox.repo()
     git(repo, "config", "--global", "sidegraph.graphRefresh", "false")
@@ -879,12 +925,14 @@ def test_a_global_false_counts_as_declined_and_survives_the_local_unset(sandbox)
     assert choice is not None and choice.declined and choice.scope == "global"
 
 
+@pytest.mark.slow
 def test_a_true_value_is_not_declined(sandbox):
     repo = sandbox.repo()
     git(repo, "config", "--local", "sidegraph.graphRefresh", "yes")
     assert githooks.read_choice(repo) == githooks.Choice(declined=False, scope="local")
 
 
+@pytest.mark.slow
 def test_the_choice_from_a_linked_worktree_lands_in_the_common_config(sandbox):
     repo = sandbox.repo()
     git(repo, "config", "extensions.worktreeConfig", "true")
@@ -897,6 +945,7 @@ def test_the_choice_from_a_linked_worktree_lands_in_the_common_config(sandbox):
 # -- status helpers ------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_is_installed_needs_the_helper_and_all_three_blocks(sandbox):
     repo = sandbox.repo()
     info = info_for(repo)
@@ -910,6 +959,7 @@ def test_is_installed_needs_the_helper_and_all_three_blocks(sandbox):
     assert not githooks.status(info).installed
 
 
+@pytest.mark.slow
 def test_is_wired_counts_a_call_added_by_hand(sandbox):
     repo = sandbox.repo()
     info = info_for(repo)
@@ -928,6 +978,7 @@ def wire_all(repo: Path, body, mode: int = 0o755) -> None:
         write_hook(repo, hook, "#!/bin/sh\n" + body(hook), mode)
 
 
+@pytest.mark.slow
 def test_a_hook_that_only_names_the_helper_in_a_comment_is_not_wired(sandbox):
     """A comment runs nothing, so a hook that holds one is not wired (D7 would read clean while
     no refresh runs)."""
@@ -940,6 +991,7 @@ def test_a_hook_that_only_names_the_helper_in_a_comment_is_not_wired(sandbox):
     assert not githooks.status(info).wired
 
 
+@pytest.mark.slow
 def test_one_hook_that_only_comments_the_helper_out_is_not_wired(sandbox):
     repo = sandbox.repo()
     info = info_for(repo)
@@ -950,6 +1002,7 @@ def test_one_hook_that_only_comments_the_helper_out_is_not_wired(sandbox):
     assert not githooks.status(info).wired
 
 
+@pytest.mark.slow
 def test_a_hook_git_would_not_run_is_not_wired(sandbox):
     """Git ignores a hook that is not executable, whatever line it carries."""
     repo = sandbox.repo()
@@ -964,6 +1017,7 @@ def test_a_hook_git_would_not_run_is_not_wired(sandbox):
     assert githooks.status(info).wired
 
 
+@pytest.mark.slow
 def test_the_installed_block_is_wired_and_a_real_line_after_a_comment_counts(sandbox):
     repo = sandbox.repo()
     info = info_for(repo)
@@ -973,5 +1027,6 @@ def test_the_installed_block_is_wired_and_a_real_line_after_a_comment_counts(san
     assert githooks.status(info).wired  # an indented real line after a comment
 
 
+@pytest.mark.slow
 def test_repo_info_outside_a_repository_is_none(tmp_path):
     assert githooks.repo_info(tmp_path / "nowhere") is None

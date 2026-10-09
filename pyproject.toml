@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.10.0"
+version = "0.11.0"
 description = "Own the memory, rent the graph — a durable decision/lessons layer as a sidecar over a code-graph engine."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -109,7 +109,10 @@ addopts = "-q --strict-markers"
 pythonpath = ["."]
 markers = [
     "integration: spawns real git repositories and subprocesses (release-script contract)",
+    "slow: creates thousands of files or spawns subprocesses",
 ]
+# A passing test leaves no temp dir behind; a failing one keeps its dir for inspection.
+tmp_path_retention_policy = "failed"
 
 [tool.mypy]
 python_version = "3.13"

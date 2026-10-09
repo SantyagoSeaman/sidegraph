@@ -133,7 +133,10 @@ does not match its file name. An archive segment with a line that cannot be read
 the first file and the reason; for a segment it says what the segment needs (the lines that could
 not be read are left out, restore it with git, never delete it). Run `sidegraph-verify` to list
 them all, naming each file and, for a segment, each line, then restore them with git or fix them
-by hand, and reopen the store. Do not delete a record file, and never an archive segment: its
+by hand, and reopen the store. Two reasons are not fixed by a restore: `not a regular file` (a
+directory, FIFO, socket or broken symlink named like a record or segment) means remove or
+rename the entry, or replace it with the real file; `unsafe filename` means rename the file to
+`<its id>.json`. Do not delete a record file, and never an archive segment: its
 records have no other copy.
 
 While a record file is left out, Sidegraph refuses to write it. A tool that would rewrite it, such

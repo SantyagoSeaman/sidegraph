@@ -12,8 +12,10 @@ see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D2)
 
 from __future__ import annotations
 
+import errno
 import os
 import re
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -85,6 +87,14 @@ GITIGNORE_NAME = ".gitignore"
 # anything (see that check's docstring in doctor.py).
 STAMPING_MARKER_NAME = "stamping_live_since"
 
+# Every connection that WRITES ``index.db`` runs this pragma (a rollback-mode choice is per
+# connection). The default DELETE mode creates and unlinks ``index.db-journal`` in every write
+# transaction, which the hooks make on every tool call; TRUNCATE keeps the same rollback
+# journal, locking and crash safety but empties the file instead of deleting it, so one 0-byte
+# ``index.db-journal`` stays beside ``index.db``. Not WAL (``-wal``/``-shm`` while open would
+# break the read-only contract of ``mode=ro`` readers) and not MEMORY/OFF (unsafe on a crash).
+INDEX_JOURNAL_PRAGMA = "PRAGMA journal_mode=TRUNCATE"
+
 # Store-owned entries that must be real directories/files, never symlinks (see
 # ``symlinked_internals``). The three SQLite sidecars are created by SQLite itself next to
 # ``index.db``, so no ``self.path /`` join in store.py names them.
@@ -150,6 +160,65 @@ def proposal_surfaces(valid_from: datetime) -> bool:
     return (datetime.now(UTC) - valid_from) <= timedelta(days=days)
 
 
+# Why a record-directory entry that is not a regular file (a directory or FIFO named like a
+# record, matched by ``*.json``) is left out. The reload and ``sidegraph-verify`` both say it
+# this way; a read of such an entry would raise ``IsADirectoryError`` or, for a FIFO, block.
+NOT_A_FILE_REASON = "not a regular file"
+
+
+def is_regular_file(st: os.stat_result) -> bool:
+    """Whether a ``stat`` (symlinks followed) describes a regular file. Decided from the stat
+    the caller already took, so a non-file entry is skipped before any read.
+    # see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D1)"""
+    return stat.S_ISREG(st.st_mode)
+
+
+def stat_entry(path: Path) -> os.stat_result:
+    """``path.stat()``, except that a symlink ``stat`` cannot resolve is described by ``lstat``:
+    a dangling one (``FileNotFoundError``) or one in a cycle (``ELOOP``) is still there, as a
+    symlink, so not a regular file. Any other ``OSError`` propagates, and so does
+    ``FileNotFoundError`` for an entry that is really gone. Used wherever a record-directory
+    entry is stat-ed before it is read.
+    # see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D1)"""
+    try:
+        return path.stat()
+    except FileNotFoundError:
+        if path.is_symlink():
+            return path.lstat()
+        raise
+    except OSError as e:
+        if e.errno == errno.ELOOP and path.is_symlink():
+            return path.lstat()
+        raise
+
+
+def require_listable_record_dirs(store_dir: Path) -> None:
+    """Raise ``PermissionError`` naming the first store-owned record directory that exists but
+    cannot be listed or searched.
+
+    The record walkers (``verify._iter_json_files``, ``verify._check_archive_dir``) take
+    "nothing came back" for "no records", so an unlistable directory emptied its pool: every fact
+    supporting a decision in it dangled, and ``--against`` read each committed file as deleted
+    (a permission problem reported as a breach of append-only). Like an unsearchable store
+    directory (``verify._require_store_dir``), this is an operational error, not a finding about
+    the records, so the CLI's ``store not readable`` path takes it before any walker runs.
+
+    Both bits are probed because they fail differently: ``os.listdir`` needs the read bit and
+    ``os.stat`` of ``<dir>/.`` needs the search bit (it works with no entry to look up, so an
+    empty directory is probed too), and each raises on every Python where the 3.14 pathlib
+    predicates go quiet. A missing path, or one that is not a directory, is left to
+    the walkers (the store creates directories lazily)."""
+    for name in (*CANONICAL_SUBDIRS, ARCHIVE_SUBDIR):
+        record_dir = store_dir / name
+        try:
+            os.listdir(record_dir)
+            os.stat(os.path.join(record_dir, "."))  # not Path / ".": pathlib drops the dot
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except PermissionError as e:
+            raise PermissionError(e.errno, e.strerror, str(record_dir)) from e
+
+
 def symlinked_internals(store_path: Path) -> list[str]:
     """Every store-owned entry directly under ``store_path`` that is a symlink, in
     ``STORE_INTERNAL_NAMES`` order. ``is_symlink`` is ``lstat``-based, so a dangling link
@@ -189,3 +258,58 @@ def clip_line(text: str, limit: int) -> str:
     if last_ws > 0:
         cut = cut[:last_ws]
     return cut.rstrip() + _LINE_CLIP_MARKER
+
+
+# An absent key (``dict.get`` already turns it into ``None``) and these two defaults are the
+# other information-free shapes a field can serialize back in as, once a rewrite touches the
+# record it lives on — see :func:`same_modulo_absent`.
+_EMPTY_DEFAULTS: tuple[dict, list] = ({}, [])
+
+
+def _absent_or_empty(v: object) -> bool:
+    return v is None or v in _EMPTY_DEFAULTS
+
+
+def same_modulo_absent(a: object, b: object) -> bool:
+    """Equality where an absent key counts as the same value as ``null`` or an empty
+    list/object (verify's Rule B, also the compact hot-file-vs-archive-line match) — see
+    verify.py's module comment above the mutable-field tables: a field added to a model after
+    a record was written (``Provenance.commit``, the ratifier stamp,
+    ``Domain.seed_anchors``/``path_prefixes``) is missing from an old file and appears as its
+    default — ``null``, ``[]``, or ``{}`` — the next time anything rewrites it. Recurses into
+    nested dicts key-by-key and into lists element-by-element (so a change buried inside a
+    ``seed_anchors`` entry is still caught), and treats two lists of different length as
+    different. A field whose default is a NON-empty value (``Decision.scope``, ``"repo"``) is
+    not covered: an absent key there still reads as changed. That is a known, accepted gap —
+    no file in this store lacks ``scope`` today — not something this function papers over.
+    """
+    if isinstance(a, dict) and isinstance(b, dict):
+        return all(same_modulo_absent(a.get(k), b.get(k)) for k in set(a) | set(b))
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(same_modulo_absent(x, y) for x, y in zip(a, b, strict=True))
+    if _absent_or_empty(a) or _absent_or_empty(b):
+        return _absent_or_empty(a) and _absent_or_empty(b)
+    return a == b
+
+
+def hot_matches_archive(hot: object, archived: object) -> bool:
+    """One-directional :func:`same_modulo_absent` for the compact hot-file-vs-archive-line
+    match. The archive side is a model dump of the running version, and pydantic drops keys
+    it does not know, so a hot file written by a NEWER version can hold a key the archive
+    line cannot. Unlinking it would lose that key. Therefore: a key present in ``hot``, at any
+    depth (nested dicts, dicts inside lists), that ``archived`` lacks is a mismatch whatever
+    its value; a key absent from ``hot`` still equals ``null``, ``[]`` or ``{}`` in
+    ``archived`` (a file older than the field). Leaves compare as in ``same_modulo_absent``,
+    so a hot ``[]``/``{}`` against an archived ``null`` (no information either way) matches,
+    while ``""``, ``0`` and ``false`` are values and differ from ``null``."""
+    if isinstance(hot, dict) and isinstance(archived, dict):
+        if any(k not in archived for k in hot):
+            return False
+        return all(hot_matches_archive(hot.get(k), archived[k]) for k in archived)
+    if isinstance(hot, list) and isinstance(archived, list):
+        return len(hot) == len(archived) and all(
+            hot_matches_archive(h, a) for h, a in zip(hot, archived, strict=True)
+        )
+    if _absent_or_empty(hot) or _absent_or_empty(archived):
+        return _absent_or_empty(hot) and _absent_or_empty(archived)
+    return hot == archived

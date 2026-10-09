@@ -18,6 +18,7 @@ design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -28,6 +29,7 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from .store_layout import (
+    INDEX_JOURNAL_PRAGMA,
     MISTAKE_KINDS,
     SCHEMA_VERSION,
     proposal_surfaces,
@@ -122,6 +124,12 @@ class HotIndex:
             if "agent" not in columns:
                 conn.close()
                 return None
+            # Set after every refusal check, so a refused open touches nothing (the pragma can
+            # change a database another tool left in WAL). A rollback mode is per connection.
+            # A pragma that cannot run (another connection holds the file in WAL) is not a
+            # reason to refuse: the handle works in whatever mode the file is in.
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.execute(INDEX_JOURNAL_PRAGMA)
             return cls(conn)
         except Exception:
             if conn is not None:

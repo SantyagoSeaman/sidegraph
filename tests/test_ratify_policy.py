@@ -4659,12 +4659,20 @@ def _c1_hits_in_source(src: str, filename: str = "<synthetic>") -> list[tuple[in
                     hits.append((node.lineno, "status-flip"))
             elif isinstance(func, ast.Attribute) and func.attr == "model_copy":
                 for kw in node.keywords:
-                    if (
-                        kw.arg == "update"
-                        and isinstance(kw.value, ast.Dict)
-                        and any(
-                            isinstance(k, ast.Constant) and k.value == "status"
-                            for k in kw.value.keys
+                    if kw.arg == "update" and (
+                        (
+                            isinstance(kw.value, ast.Dict)
+                            and any(
+                                isinstance(k, ast.Constant) and k.value == "status"
+                                for k in kw.value.keys
+                            )
+                        )
+                        or (
+                            # update=dict(status=...): the same flip, spelled as a call.
+                            isinstance(kw.value, ast.Call)
+                            and isinstance(kw.value.func, ast.Name)
+                            and kw.value.func.id == "dict"
+                            and any(k.arg == "status" for k in kw.value.keywords)
                         )
                     ):
                         hits.append((node.lineno, "status-flip"))
@@ -4698,6 +4706,21 @@ def _c1_hits_in_source(src: str, filename: str = "<synthetic>") -> list[tuple[in
     return hits
 
 
+# Run outcomes, not record statuses: ``BootstrapReport.with_run_status`` swaps the RUN status
+# (``RunStatus``: complete, incomplete, diagnostic, ...) of a report, which the key-only
+# ``model_copy`` shape below cannot tell from a record flip. Pinned by (file, function).
+_C1_RUN_STATUS_EXEMPT = frozenset({("bootstrap/model.py", "with_run_status")})
+
+
+def _c1_exempt_lines(path: Path, text: str) -> set[int]:
+    rel = path.relative_to(_SRC).as_posix()
+    lines: set[int] = set()
+    for node in ast.walk(ast.parse(text, filename=str(path))):
+        if isinstance(node, ast.FunctionDef) and (rel, node.name) in _C1_RUN_STATUS_EXEMPT:
+            lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return lines
+
+
 def _c1_status_flip_or_canonical_write_hits() -> list[tuple[Path, int, str]]:
     """C1's real driver: ``_c1_hits_in_source`` over every file in ``src/sidegraph/``
     EXCLUDING ``store.py`` -- the only module allowed to flip a record's status or call a
@@ -4706,14 +4729,16 @@ def _c1_status_flip_or_canonical_write_hits() -> list[tuple[Path, int, str]]:
     assignments (``sync.py:72``, ``:110``, ``anchoring.py:61``) -- a different field
     entirely, not a record-status flip. Excludes by PATH, not basename (Minor 5, mirrors
     T7(b)'s own form above): a future ``src/sidegraph/<pkg>/store.py`` must still be
-    scanned, not silently skipped whole."""
+    scanned, not silently skipped whole. The only exemption is ``_C1_RUN_STATUS_EXEMPT``."""
     hits: list[tuple[Path, int, str]] = []
     for path in sorted(_SRC.rglob("*.py")):
         if path.relative_to(_SRC) == Path("store.py"):
             continue
         text = path.read_text(encoding="utf-8")
+        exempt = _c1_exempt_lines(path, text)
         for lineno, shape in _c1_hits_in_source(text, filename=str(path)):
-            hits.append((path, lineno, shape))
+            if lineno not in exempt:
+                hits.append((path, lineno, shape))
     return hits
 
 
@@ -4732,6 +4757,16 @@ def test_c1_no_status_flip_or_canonical_write_outside_store_py():
         f"Store.ratify/ratify_fact/ratify_domains (or a canonical _write_*/_atomic_write* "
         f"call) inside store.py instead: {rendered}"
     )
+
+
+def test_c1_run_status_exemption_names_a_real_function_that_would_otherwise_hit():
+    """The pinned exemption must stay load-bearing: the function exists and, unexempted, hits."""
+    for rel, name in _C1_RUN_STATUS_EXEMPT:
+        path = _SRC / rel
+        text = path.read_text(encoding="utf-8")
+        exempt = _c1_exempt_lines(path, text)
+        assert exempt, f"{rel}::{name} no longer exists; drop the exemption"
+        assert any(ln in exempt for ln, _ in _c1_hits_in_source(text)), f"{rel}::{name} is stale"
 
 
 def test_c1_checker_bites_on_a_synthetic_status_flip_and_write():
@@ -4759,6 +4794,7 @@ def test_c1_checker_bites_on_a_synthetic_status_flip_and_write():
         "    d.status = getattr(DecisionStatus, name)\n"  # status-flip: getattr on enum
         "    d.status, x = DecisionStatus.ACCEPTED, 1\n"  # status-flip: tuple target
         '    d2 = d.model_copy(update={"status": "accepted"})\n'  # status-flip: model_copy
+        '    d3 = d.model_copy(update=dict(status="accepted"))\n'  # status-flip: model_copy dict()
         '    object.__setattr__(d, "status", "accepted")\n'  # status-flip: unbound __setattr__
         '    d.__setattr__("status", "accepted")\n'  # status-flip: bound __setattr__
         '    d.__dict__["status"] = "accepted"\n'  # status-flip: __dict__ subscript
@@ -4771,7 +4807,7 @@ def test_c1_checker_bites_on_a_synthetic_status_flip_and_write():
     hits = _c1_hits_in_source(synthetic)
     assert Counter(shape for _ln, shape in hits) == Counter(
         {
-            "status-flip": 14,
+            "status-flip": 15,
             "canonical-write": 3,
             "canonical-write-import": 1,
             "canonical-write-getattr": 2,

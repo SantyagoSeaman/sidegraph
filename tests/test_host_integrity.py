@@ -101,9 +101,9 @@ def _meta(store_dir: Path, key: str) -> str | None:
 def _conflicted_store(tmp_path: Path, *, unreadable: bool = False) -> Path:
     """A store whose one decision file cannot be indexed, and no index, so that the next open
     reloads from the canonical files. By default the file holds merge-conflict markers, which
-    the reload skips and the store opens. With ``unreadable`` a directory stands where the file
-    was: ``read_text`` raises ``IsADirectoryError``, an ``OSError`` the reload does not skip
-    (and, unlike ``chmod 000``, that also fails under root), so the store cannot open.
+    the reload skips and the store opens. With ``unreadable`` the file is a regular file at mode
+    000: reading it raises ``PermissionError``, an ``OSError`` the reload does not skip, so the
+    store cannot open (the test is skipped where the mode changes nothing, as under root).
     see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D1, §5 step 7)"""
     store_dir = tmp_path / ".sidegraph"
     store = Store(store_dir)
@@ -111,8 +111,14 @@ def _conflicted_store(tmp_path: Path, *, unreadable: bool = False) -> Path:
     store.close()
     path = store_dir / "decisions" / f"{rid}.json"
     if unreadable:
-        path.unlink()
-        path.mkdir()
+        path.chmod(0o000)
+        try:
+            path.read_bytes()
+        except PermissionError:
+            pass
+        else:
+            path.chmod(0o644)
+            pytest.skip("chmod has no effect here")
     else:
         path.write_text(
             '<<<<<<< HEAD\n{"id": "x"}\n=======\n{"id": "y"}\n>>>>>>> branch\n',
@@ -133,7 +139,7 @@ def test_t1_a_conflicted_record_file_is_reported_to_the_human_and_the_model(
     assert set(out) == {"systemMessage", "hookSpecificOutput"}
     notice = out["systemMessage"]
     assert notice.startswith(f"Sidegraph cannot open its store at {store_dir}, so memory is off")
-    assert "IsADirectoryError" in notice
+    assert "PermissionError" in notice
     assert "`sidegraph-verify`" in notice
     assert context(out) == f"{notice} Sidegraph memory tools will fail until it is fixed."
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
@@ -181,6 +187,24 @@ def test_t13_a_conflicted_record_file_leaves_the_map_and_is_named_to_the_human(
     assert "cannot open its store" not in text
     assert f"decisions/{broken}.json" in out["systemMessage"]
     assert out["systemMessage"].startswith("Sidegraph: 1 store file(s) could not be indexed")
+
+
+def test_a_directory_named_like_a_record_is_named_in_the_startup_notice(
+    tmp_path, monkeypatch, capsys
+):
+    """A directory where a record file was is skipped, not fatal; the notice names the entry
+    and why. Red against unfixed code, where the store cannot open."""
+    store_dir = _conflicted_store(tmp_path)
+    for entry in (store_dir / "decisions").glob("*.json"):
+        entry.unlink()
+        entry.mkdir()
+    (store_dir / "index.db").unlink(missing_ok=True)
+
+    out = start(monkeypatch, capsys, store_dir)
+
+    assert "cannot open its store" not in out["systemMessage"]
+    assert out["systemMessage"].startswith("Sidegraph: 1 store file(s) could not be indexed")
+    assert "decisions/" in out["systemMessage"] and "(not a regular file)" in out["systemMessage"]
 
 
 def _busy_error(code: int) -> sqlite3.OperationalError:

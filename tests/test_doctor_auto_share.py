@@ -17,6 +17,8 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from sidegraph.capture import RatifyPolicy, _auto_ratify
 from sidegraph.cli import doctor_main
 from sidegraph.doctor import UNRATIFIED_ACCEPT, curate
@@ -548,3 +550,138 @@ def test_json_key_set_and_exit_code_unaffected_by_auto_stamps(tmp_path, capsys, 
     doc = json.loads(capsys.readouterr().out)  # pure JSON: parse the WHOLE stdout
     assert set(doc) == {"clean", "violations", "findings", "skipped"}
     assert doc["clean"] is True
+
+
+# -- the lines are computed in doctor.py, with a narrow per-record error boundary ----------
+
+
+def _write_record(db: Path, subdir: str, rid: str, payload: dict) -> None:
+    (db / subdir).mkdir(parents=True, exist_ok=True)
+    (db / subdir / f"{rid}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _stamped(rid: str, *, days: int, **over: object) -> dict:
+    """A hand-written canonical decision payload ratified ``days`` after it was valid."""
+    vf = datetime(2026, 1, 1, tzinfo=UTC)
+    rec: dict = {
+        "id": rid,
+        "status": "accepted",
+        "valid_from": vf.isoformat(),
+        "ratified_at": (vf + timedelta(days=days)).isoformat(),
+        "ratified_by": "alice",
+    }
+    rec.update(over)
+    return rec
+
+
+def test_latency_lines_normal_and_empty_store(tmp_path):
+    from sidegraph import doctor
+
+    empty = tmp_path / "empty"
+    Store(empty)
+    assert doctor.ratification_latency_lines(empty) == []
+
+    db = tmp_path / "store"
+    _write_record(db, "decisions", "A", _stamped("A", days=2))
+    _write_record(db, "decisions", "B", _stamped("B", days=4))
+    _write_record(db, "decisions", "C", _stamped("C", days=9, ratified_by="auto:auto-all"))
+    assert doctor.ratification_latency_lines(db) == [
+        "time-to-ratify: median 4 days, max 4 days (2 stamped record(s))"
+    ]
+
+
+def test_latency_lines_skip_malformed_records_without_losing_the_rest(tmp_path):
+    """Chosen behaviour: a record whose timestamps are not usable (non-string, naive,
+    unparseable) contributes nothing; every other record still counts. Never a crash."""
+    from sidegraph import doctor
+
+    db = tmp_path / "store"
+    _write_record(db, "decisions", "A", _stamped("A", days=3))
+    _write_record(db, "decisions", "B", _stamped("B", days=3, ratified_at="not a date"))
+    _write_record(db, "decisions", "C", _stamped("C", days=3, valid_from=["x"]))
+    _write_record(db, "facts", "D", _stamped("D", days=3, ratified_at=17, ratified_by=["a"]))
+    _write_record(db, "domains", "E", _stamped("E", days=3, valid_from="2026-01-01T00:00:00"))
+    # A VALID stamped fact: facts count toward the line, so the total is A plus F.
+    _write_record(db, "facts", "F", _stamped("F", days=3))
+    assert doctor.ratification_latency_lines(db) == [
+        "time-to-ratify: median 3 days, max 3 days (2 stamped record(s))"
+    ]
+
+
+def test_auto_share_lines_survive_an_unhashable_status(tmp_path):
+    """A hand-edited list-valued status must not raise out of the tally (it used to be
+    swallowed by the CLI, deleting both lines); it just is not retired."""
+    from sidegraph import doctor
+
+    db = tmp_path / "store"
+    _write_record(db, "decisions", "A", _stamped("A", days=0, ratified_by="auto:auto-all"))
+    _write_record(
+        db, "decisions", "B", _stamped("B", days=0, status=["superseded"], ratified_by="auto:x")
+    )
+    _write_record(db, "decisions", "C", _stamped("C", days=1, status={"k": 1}))
+    lines = doctor._auto_share_lines(db)
+    assert len(lines) == 2
+    assert lines[0].startswith("auto share: decisions 2/3 (66%)")
+    assert "decisions+facts superseded 0/2 (0%) vs human 0/1 (0%)" in lines[1]
+
+
+def test_programming_error_in_the_latency_computation_is_not_swallowed(tmp_path, monkeypatch):
+    from sidegraph import doctor
+
+    db = tmp_path / "store"
+    _write_record(db, "decisions", "A", _stamped("A", days=2))
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise TypeError("programming error")
+
+    monkeypatch.setattr(doctor, "_latency_days", boom)
+    with pytest.raises(TypeError):
+        doctor.ratification_latency_lines(db)
+
+
+def test_doctor_main_does_not_swallow_a_programming_error_in_the_auto_share_lines(
+    tmp_path, monkeypatch
+):
+    """Red against the old cli.py (`except Exception: pass` around the lines): the
+    run exited 0 with the lines silently gone."""
+    db = tmp_path / "store"
+    _t8_fixture(Store(db), monkeypatch)
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise TypeError("programming error")
+
+    monkeypatch.setattr("sidegraph.doctor._tally_kind", boom)
+    with pytest.raises(TypeError):
+        doctor_main(["--db", str(db)])
+
+
+def test_programming_error_in_the_latency_part_propagates_out_of_the_combined_lines(
+    tmp_path, monkeypatch
+):
+    """The boundary is pinned on the function ``doctor_main`` calls, not only on its
+    latency part: wrapping either part in a swallow must fail a test."""
+    from sidegraph import doctor
+
+    db = tmp_path / "store"
+    _write_record(db, "decisions", "A", _stamped("A", days=2))
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise TypeError("programming error")
+
+    monkeypatch.setattr(doctor, "_latency_days", boom)
+    with pytest.raises(TypeError):
+        doctor.ratification_info_lines(db)
+
+
+def test_ratification_info_lines_order_is_latency_then_share_then_rate(tmp_path, monkeypatch):
+    from sidegraph import doctor
+
+    db = tmp_path / "store"
+    _t8_fixture(Store(db), monkeypatch)
+    lines = doctor.ratification_info_lines(db)
+    assert [line.split(":")[0] for line in lines] == [
+        "time-to-ratify",
+        "auto share",
+        "auto supersede rate",
+    ]
+    assert lines[0] == "time-to-ratify: median 5 days, max 5 days (2 stamped record(s))"

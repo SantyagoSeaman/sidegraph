@@ -49,6 +49,9 @@ from one that ran and approved.
 from __future__ import annotations
 
 import os
+import shutil
+import sys
+from collections.abc import Iterator
 
 import pytest
 
@@ -74,9 +77,48 @@ def _git_discovery_stays_in_temp_tree(
     it. With a basetemp placed inside a checkout (a reviewer's setup), discovery would walk
     up into that repository and name its branch. ``GIT_CEILING_DIRECTORIES`` is exclusive:
     a repository a test builds inside ``tmp_path`` sits below the ceiling and is still found.
+
+    This fences only discovery that runs ``git`` from a path under the temp tree. It does not
+    fence the lexical ``.git`` walk of ``config.repository_root``, which ignores the ceiling,
+    and it does not move the process cwd (see ``cwd_outside_any_repository``).
     # see design/superpowers/specs/2026-09-30-initiative-from-store-repo-design.md D3
     """
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path_factory.getbasetemp().parent))
+
+
+@pytest.fixture
+def cwd_outside_any_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[None]:
+    """Run the test from an empty directory that sits in no repository, whatever the basetemp.
+
+    Opt in with ``pytest.mark.usefixtures``. It is not autouse: tests elsewhere read repository
+    files by a cwd-relative path and need the checkout root as their cwd.
+
+    Doc import resolves its repository root from the PROCESS cwd (``git rev-parse
+    --show-toplevel``, else the cwd itself), not from a store path, so the
+    ``GIT_CEILING_DIRECTORIES`` fence above does not reach it. Pytest starts in the checkout
+    root: with the default basetemp every ``tmp_path`` document lies outside that root and is
+    keyed on the path the caller passed, but with ``--basetemp`` inside the checkout (a review
+    panel keeps its scratch there) the same documents are in-repo and keyed repo-relative, and
+    the tests that expect the first form fail. A fresh directory under the temp tree is below
+    the ceiling, so discovery cannot climb out of it in either mode; the root falls back to
+    that directory and the documents stay outside it. A test that needs another cwd (a repo it
+    built, a subdirectory) still calls ``monkeypatch.chdir``, which wins over this one.
+    """
+    cwd = tmp_path_factory.mktemp("cwd")
+    before = os.getcwd()
+    monkeypatch.chdir(cwd)
+    yield
+    os.chdir(before)  # leave the directory before removing it
+    shutil.rmtree(cwd, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _hook_argv_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hook entry points refuse a command-line argument, and a test that calls one in
+    process would otherwise see pytest's own arguments."""
+    monkeypatch.setattr(sys, "argv", ["hook"])
 
 
 @pytest.fixture(autouse=True)
