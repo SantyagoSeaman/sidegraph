@@ -28,6 +28,7 @@ jobs:
       # leak them.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0   # committed-history secret scan needs every reachable commit
           persist-credentials: false
 
       - name: Install uv
@@ -48,6 +49,27 @@ jobs:
 
       - name: Run pre-commit checks
         run: uv run pre-commit run --all-files
+
+      - name: Scan committed history for secrets
+        run: |
+          test "$(git rev-parse --is-shallow-repository)" = false
+          uv run pre-commit run gitleaks-history --hook-stage manual --all-files
+
+      - name: Exercise secret scanner integration
+        env:
+          SIDEGRAPH_SECRET_SCAN_INTEGRATION: "1"
+        run: |
+          uv run pytest tests/test_secret_scan_gate.py -q --junitxml="$RUNNER_TEMP/secret-scan.xml"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path(os.environ["RUNNER_TEMP"]) / "secret-scan.xml"
+          suites = list(ElementTree.parse(report).getroot().iter("testsuite"))
+          assert sum(int(s.attrib["tests"]) for s in suites) > 0, "no scanner tests ran"
+          assert sum(int(s.attrib["skipped"]) for s in suites) == 0, "scanner tests skipped"
+          PY
 
   test:
     runs-on: ubuntu-latest

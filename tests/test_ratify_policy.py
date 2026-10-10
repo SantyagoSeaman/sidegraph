@@ -1584,7 +1584,10 @@ def test_failed_auto_all_superseder_leaves_predecessor_open(store, tmp_path, mon
         ratify_policy=RatifyPolicy.AUTO_ALL,
     )
     assert successor.ratified_by is None
-    assert successor.auto_ratify_error == "simulated race: decision already ratified"
+    assert (
+        successor.auto_ratify_error
+        == "ratification failed; reopen the store and inspect the record before retrying"
+    )
     assert store.get_decision(successor.decision_id).status == DecisionStatus.PROPOSED
     assert store.get_decision(predecessor_id).status == DecisionStatus.ACCEPTED  # untouched
 
@@ -1690,7 +1693,10 @@ def test_ratify_exception_is_reported_and_batch_continues(store, tmp_path, monke
     )
     assert first.status == "written"
     assert first.ratified_by is None
-    assert first.auto_ratify_error == str(exc)
+    assert (
+        first.auto_ratify_error
+        == "ratification failed; reopen the store and inspect the record before retrying"
+    )
     assert store.get_decision(first.decision_id).status == DecisionStatus.PROPOSED
 
     assert second.status == "written"
@@ -1799,7 +1805,9 @@ def test_domain_refresh_failure_sets_stale_flag_and_reports(store, tmp_path, mon
         [_eligible_domain_draft()], store, reader, ratify_policy=RatifyPolicy.AUTO_ALL
     )
     assert result.ratified_by == "auto:auto-all"  # the transition itself succeeded
-    assert result.auto_ratify_error == "activation: resolve blew up"
+    assert (
+        result.auto_ratify_error == "activation: membership unresolved; run sync_anchors to retry"
+    )
     assert store.get_domain(result.domain_id).status == DomainStatus.ACCEPTED
     assert store.get_meta(VOLATILE_STALE_KEY) == "1"
 
@@ -1808,7 +1816,7 @@ def test_domain_transition_error_outcome_is_reported(store, tmp_path, monkeypatc
     """T15(c): `store.ratify_domains` never raises for a bad id — it RETURNS an
     `"error: ..."` outcome string. `_auto_ratify` must normalize that returned failure the
     same way it normalizes a raised `ValueError`: the domain stays proposed,
-    `ratified_by` stays `None`, and the exact outcome string lands in
+    `ratified_by` stays `None`, and a safe controlled failure reason lands in
     `auto_ratify_error`."""
     reader = _feature_graph(tmp_path)
 
@@ -1822,7 +1830,10 @@ def test_domain_transition_error_outcome_is_reported(store, tmp_path, monkeypatc
     )
     assert result.status == "proposed"
     assert result.ratified_by is None
-    assert result.auto_ratify_error == "error: domain vanished mid-flight"
+    assert (
+        result.auto_ratify_error
+        == "ratification failed; reopen the store and inspect the record before retrying"
+    )
     assert store.get_domain(result.domain_id).status == DomainStatus.PROPOSED
 
 
@@ -2089,7 +2100,10 @@ def test_standalone_fact_ratify_exception_is_reported(store, tmp_path, monkeypat
     )
     assert first.status == "written"
     assert first.ratified_by is None
-    assert first.auto_ratify_error == "simulated race: fact already ratified"
+    assert (
+        first.auto_ratify_error
+        == "ratification failed; reopen the store and inspect the record before retrying"
+    )
     assert store.get_fact(first.fact_id).status == DecisionStatus.PROPOSED
 
     assert second.status == "written"
@@ -2270,7 +2284,7 @@ def test_domain_overbroad_path_rule_reports_and_stays_accepted(store, tmp_path):
     assert result.ratified_by == "auto:auto-all"
     assert result.auto_ratify_error is not None
     assert result.auto_ratify_error.startswith(
-        "activation: path rule too broad: 'trader' match 3/10"
+        "activation: path rule too broad: path_prefixes match 3/10"
     )
     domain = store.get_domain(result.domain_id)
     assert domain.status == DomainStatus.ACCEPTED
@@ -2360,7 +2374,7 @@ def test_cascade_race_injected_fact_is_blocked_by_the_guard(store, tmp_path, mon
     assert result.status == "written"
     assert result.ratified_by is None
     assert result.auto_ratify_error is not None
-    assert "cascade guard refused" in result.auto_ratify_error
+    assert "ratification failed" in result.auto_ratify_error
     assert store.get_decision(result.decision_id).status == DecisionStatus.PROPOSED
 
     # The decision's OWN attached fact (eligible by itself) must also stay blocked -- the
@@ -2426,7 +2440,7 @@ def test_cascade_guard_rereads_an_attached_facts_bindings_fresh(store, tmp_path,
     assert result.status == "written"
     assert result.ratified_by is None
     assert result.auto_ratify_error is not None
-    assert "cascade guard refused" in result.auto_ratify_error
+    assert "ratification failed" in result.auto_ratify_error
     assert store.get_decision(result.decision_id).status == DecisionStatus.PROPOSED
 
     [fact_result] = result.facts
@@ -2627,7 +2641,7 @@ def test_cascade_guard_sees_a_fact_that_lands_just_before_the_write_lock(
     assert result.status == "written"
     assert result.ratified_by is None
     assert result.auto_ratify_error is not None
-    assert "cascade guard refused" in result.auto_ratify_error
+    assert "ratification failed" in result.auto_ratify_error
     assert store.get_decision(result.decision_id).status == DecisionStatus.PROPOSED
 
     [attached_fact_result] = result.facts
@@ -2704,7 +2718,7 @@ def test_cascade_race_refusal_on_a_superseding_decision_leaves_predecessor_untou
     assert successor_result.status == "written"
     assert successor_result.ratified_by is None
     assert successor_result.auto_ratify_error is not None
-    assert "cascade guard refused" in successor_result.auto_ratify_error
+    assert "ratification failed" in successor_result.auto_ratify_error
 
     assert snapshots["before"] == snapshots["after"], (
         "canonical files changed despite the guard's refusal"
@@ -2809,12 +2823,12 @@ def test_domain_activation_failure_reports_and_batch_continues(store, tmp_path, 
 
     assert first.status == "proposed"
     assert first.ratified_by == "auto:auto-all"  # the transition itself already committed
-    assert first.auto_ratify_error == "activation: stale marker write failed"
+    assert first.auto_ratify_error == "activation: operation failed; run sync_anchors to retry"
     assert store.get_domain(first.domain_id).status == DomainStatus.ACCEPTED
 
     assert second.status == "proposed"  # the batch did not abort after the first failure
     assert second.ratified_by == "auto:auto-all"
-    assert second.auto_ratify_error == "activation: stale marker write failed"
+    assert second.auto_ratify_error == "activation: operation failed; run sync_anchors to retry"
     assert store.get_domain(second.domain_id).status == DomainStatus.ACCEPTED
 
     # the once-per-batch TOC rebuild still happens (design D2) despite both activations
@@ -3111,7 +3125,9 @@ def test_importer_ratify_failure_reported_and_batch_continues(store, tmp_path, m
     assert second.status == DecisionStatus.ACCEPTED
     assert second.ratified_by == "auto:auto-low-risk"
     assert report.auto_ratified == 1
-    assert report.auto_ratify_failures == [f"{first.id}: not proposed"]
+    assert report.auto_ratify_failures == [
+        f"{first.id}: ratification failed; reopen the store and inspect the record before retrying"
+    ]
 
 
 # -- doc_import.import_docs ----------------------------------------------------------
@@ -3376,7 +3392,9 @@ def test_doc_import_ratify_failure_reported_and_batch_continues(store, tmp_path,
     assert second.status == DecisionStatus.ACCEPTED
     assert second.ratified_by == "auto:auto-low-risk"
     assert report.auto_ratified == 1
-    assert report.auto_ratify_failures == [f"{first.id}: not proposed"]
+    assert report.auto_ratify_failures == [
+        f"{first.id}: ratification failed; reopen the store and inspect the record before retrying"
+    ]
 
 
 # -- domains.bootstrap_domains ---------------------------------------------------------
@@ -3571,7 +3589,10 @@ def test_bootstrap_ratify_transition_failure_reported_and_batch_continues(
     assert other.status == DomainStatus.ACCEPTED
     assert other.ratified_by == "auto:auto-all"
     assert report.auto_ratified == 1
-    assert report.auto_ratify_failures == [f"{alpha.domain_id}: error: domain vanished mid-flight"]
+    assert report.auto_ratify_failures == [
+        f"{alpha.domain_id}: ratification failed; "
+        "reopen the store and inspect the record before retrying"
+    ]
 
 
 def test_bootstrap_activation_refresh_failure_reports_and_still_counts_accepted(
@@ -4029,7 +4050,10 @@ def test_cli_rationale_import_auto_ratify_failure_prints_on_stderr(tmp_path, cap
     err = capsys.readouterr().err
 
     d = next(Store(db).iter_decisions())
-    assert f"auto-ratify failure: {d.id}: boom" in err
+    assert (
+        f"auto-ratify failure: {d.id}: ratification failed; "
+        "reopen the store and inspect the record before retrying" in err
+    )
 
 
 def test_cli_doc_import_auto_ratify_failure_prints_on_stderr(tmp_path, capsys, monkeypatch):
@@ -4067,7 +4091,10 @@ def test_cli_doc_import_auto_ratify_failure_prints_on_stderr(tmp_path, capsys, m
     err = capsys.readouterr().err
 
     d = next(Store(db).iter_decisions())
-    assert f"auto-ratify failure: {d.id}: boom" in err
+    assert (
+        f"auto-ratify failure: {d.id}: ratification failed; "
+        "reopen the store and inspect the record before retrying" in err
+    )
 
 
 def test_cli_bootstrap_auto_ratify_failure_prints_on_stderr(tmp_path, capsys, monkeypatch):
@@ -4108,8 +4135,8 @@ def test_cli_bootstrap_auto_ratify_failure_prints_on_stderr(tmp_path, capsys, mo
     succeeded = next(d for d in store.iter_domains() if d.status == DomainStatus.ACCEPTED)
     assert succeeded.ratified_by == "auto:auto-all"
     assert (
-        f"auto-ratify failure: {failed.domain_id}: error: domain vanished mid-flight"
-        in captured.err
+        f"auto-ratify failure: {failed.domain_id}: ratification failed; "
+        "reopen the store and inspect the record before retrying" in captured.err
     )
 
 

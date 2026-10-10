@@ -30,9 +30,11 @@ from .capture import (
     _anchor_signal,
     _auto_ratify,
     auto_ratify_eligible,
+    normalize_tags,
     redact,
 )
 from .engine.reader import GraphifyReader
+from .input_limits import MAX_IMPORT_BYTES, check_document_text, preflight_direct
 from .profiles import GENERIC_ADR_DIALECT, FlowProfile, ReaderDialect, get_profile
 from .schema import (
     AnchorBinding,
@@ -301,6 +303,8 @@ class DocImportReport(BaseModel):
     be *superseded* (edited since its last import) as well as freshly *imported*, and each
     reason a document can be skipped for has its own ``skipped_*`` counter below."""
 
+    # Operator tag substitutions, once per raw tag in the batch, including dry runs.
+    tag_redactions: int = 0
     imported: int = 0
     superseded: int = 0
     skipped_existing: int = 0
@@ -344,6 +348,8 @@ class DocImportReport(BaseModel):
     # named skip and the run continues instead of raising `UnicodeDecodeError` and aborting
     # the whole import. Distinct from `skipped_unparseable` (decision-shaped but no usable
     # `choice`): this file was never even decoded far enough to be parsed.
+    skipped_oversized: int = 0
+    oversized_files: list[str] = Field(default_factory=list)
     skipped_undecodable: int = 0
     undecodable_files: list[str] = Field(default_factory=list)  # on-disk rel_path, in order
     # E3 (design note §7, review Major 4/Blocker N1): a split-produced parent that is
@@ -1116,6 +1122,7 @@ def parse_decision_docs(
     dialect: ReaderDialect = GENERIC_ADR_DIALECT,
     title_pattern: str | None = None,
 ) -> tuple[list[ParsedDoc], str | None]:
+    check_document_text(text, limit=MAX_IMPORT_BYTES)
     return _parse_decision_docs_with_reason(
         text, rel_path, section_limit=section_limit, dialect=dialect, title_pattern=title_pattern
     )
@@ -1195,6 +1202,7 @@ def parse_decision_doc(
     signal; the run's own ``--kind``, when explicitly given, always overrides it — applied
     by the caller when constructing the :class:`~sidegraph.schema.Decision`.
     """
+    check_document_text(path_text, limit=MAX_IMPORT_BYTES)
     parsed, _ = _parse_decision_doc_with_reason(
         path_text,
         rel_path,
@@ -1766,17 +1774,18 @@ def import_docs(
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2/D3
     # see design/superpowers/specs/2026-10-04-import-dry-run-previews-auto-ratification-design.md
     """
+    preflight_direct(tags, kind, profile, section_limit, limit, ratify_policy)
     # None = "auto per document" (B4); an explicit kind (including "adr") always wins.
     decision_kind_override = DecisionKind(kind) if kind is not None else None
     graph_version = reader.graph_version()
     active_profile = get_profile(profile)
     dialect = active_profile.dialect
-    tag_slugs = [s for s in (slugify(t) for t in (tags or [])) if s and s != "redacted"]
+    tag_slugs, tag_redactions = normalize_tags(tags or [])
 
     files = _collect_markdown_files(paths)
     process = files[:limit] if limit is not None else files
 
-    report = DocImportReport()
+    report = DocImportReport(tag_redactions=tag_redactions)
     # A dry run's view of the refs it has already counted a write for: per ref, the records a
     # real run would hold there by now. A real run writes the first record at a ref and the
     # next copy sees it in the store; a dry run writes nothing, so a ref repeated within the
@@ -1836,9 +1845,14 @@ def import_docs(
                 report.skipped_outside_repo += 1
                 continue
             with os.fdopen(fd, "rb") as handle:
-                source_bytes = handle.read()
+                source_bytes = handle.read(MAX_IMPORT_BYTES + 1)
         else:
-            source_bytes = read_path.read_bytes()
+            with read_path.open("rb") as handle:
+                source_bytes = handle.read(MAX_IMPORT_BYTES + 1)
+        if len(source_bytes) > MAX_IMPORT_BYTES:
+            report.skipped_oversized += 1
+            report.oversized_files.append(rel_path)
+            continue
         source_hash = hashlib.sha256(source_bytes).hexdigest()
         # D1/D2 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): decode
         # as utf-8-sig (plain UTF-8 plus a stripped BOM, never guessed) inside a narrow

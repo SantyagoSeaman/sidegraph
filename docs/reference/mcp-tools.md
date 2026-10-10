@@ -38,6 +38,86 @@ use — see [`configuration.md`](configuration.md#store-path-resolution)) and a 
 | [`verify_store`](#verify_store) | Integrity lint of the store's canonical files | CI or ad hoc — checking the store hasn't been hand-corrupted |
 | [`add_anchors`](#add_anchors) | Append bindings to an EXISTING decision or fact | The `heal-anchors` triage flow — "code moved, decision still valid" |
 
+## Safe write diagnostics
+
+Malformed proposal drafts and logical write arguments report schema fields, bounded
+indices and fixed error codes without repeating input values or custom validator text.
+The formatter shows at most 10 errors, 8 path components and 1,024 characters; unknown
+fields/codes use fixed placeholders. Validation semantics and per-item draft isolation
+are unchanged. A malformed outer signature still rejects the whole call.
+
+Raw admission runs before signature coercion. All logical MCP writes, including
+`ratify`, `ratify_decisions`, `sync_anchors` and `add_anchors`, apply the finite input
+shape, string and node policy described below. Unknown write parameter names are omitted
+from errors while valid parameter help remains. Read-tool aliases/help are unchanged.
+The server rejects unsupported tool registrations rather than executing an unguarded
+write. The isolated FastMCP compatibility adapter requires the tested argument-only
+core-schema shape (locked FastMCP 3.4.2 / Pydantic 2.13.4); it validates no function body.
+
+An incomplete store operation can report `rejected` after canonical replacement. Follow
+its may-have-written warning: do not repeat the proposal in the same session; reopen the
+store and check `list_proposed` in the next session. Generic store exceptions, including
+`ValueError`, use this conservative remedy even when a particular refusal preceded a write:
+the error class alone cannot prove atomicity. Known controlled validation errors retain
+safe field/code help. A failure after a successful record write keeps its write-action status and reports a controlled stage/recovery message.
+
+Write exception guards prevent raw validation/generic causes in framework WARNING/ERROR
+logs. FastMCP DEBUG argument tracing occurs before middleware and remains outside this
+protection. Read/filesystem diagnostics, successful descriptors and paths, record IDs
+and ratify result keys keep their usual semantics; historical logs/data are unchanged.
+See [security policy](../../SECURITY.md#write-diagnostics-and-logging).
+
+## Capture and direct-write resource limits
+
+`propose_decisions`, `propose_domains`, and direct add/supersede decision, fact and domain
+writes check inputs before redaction, additional model validation, anchor validation or
+canonical mutation. These fixed limits include tags, metadata, descriptors, mapping keys
+and nested facts:
+
+| Resource | Limit |
+|---|---|
+| Each string field | 256 KiB UTF-8 |
+| Admitted strings in one agent or direct write request | 4 MiB UTF-8 |
+| Agent decision/fact/domain drafts, including attached facts | 100 |
+| Structure depth per draft | 32 |
+| Visited structure nodes per draft | 4,096 |
+| Admitted structure nodes in one agent or direct write request | 65,536 |
+
+`propose_decisions(drafts=..., facts=...)` uses one shared preflight and budget for both
+halves. An attached fact counts toward the draft limit and is inspected with its parent.
+A field/structure violation anywhere in that decision rejects the whole decision before
+its parent or facts write; valid top-level siblings retain normal behavior. Each invalid
+item returns a static rejected result and consumes neither admitted-byte nor admitted-node
+request budgets; rejected drafts still count toward the 100-draft ceiling. Cycles and
+strings that cannot encode as UTF-8 are item violations too. A node is each scalar/container
+visit, including mapping keys; root depth is zero and a leaf at depth 32 is allowed.
+A request-wide draft, admitted-byte or admitted-node violation raises `InputLimitError`
+before any canonical write. Direct-write violations likewise fail before a write; no input
+is silently truncated and there is no disabling environment switch. Policy errors do not
+echo input keys, values or secrets. Request metadata violations reject the whole request.
+
+Raw Python inputs use strings, strict UTF-8 bytes/bytearray, `None`, booleans, `int`/`float`,
+mappings, lists/tuples and stored Pydantic model fields. Draft batches and metadata
+sequences must be lists/tuples. Other opaque values, including sets, deques, dict views,
+iterators/generators and non-string Enum objects, are rejected without consuming them even
+when Pydantic would otherwise coerce them. Only Enum subclasses of `str` retain their
+measured base-string behavior; numeric and binary Enum subclasses are rejected before
+conversion. Numeric enums can become strings in Pydantic string fields, unlike plain numbers. An unsupported nested value rejects its containing draft; unsupported
+request metadata or batch shape rejects the whole request. These are data checks, not a
+sandbox for caller-defined Python methods.
+
+Python callers of `propose`, `propose_facts` and `propose_domains` receive the same checks
+when calling each independently, including existing Pydantic models. The reusable `redact`
+helper has no global field cap. Caller-side model construction may already have validated
+or normalized fields before the entrypoint; MCP framing and transport allocation before
+Python invocation are outside this application boundary.
+
+Documents use an independent 8 MiB per-file limit; an import may exceed 4 MiB total or
+produce more than 100 records. Operator tags and free-text import options are bounded
+separately. See [document import](cli.md#importing-decision-shaped-markdown---docs) and
+[security policy](../../SECURITY.md#resource-limits-and-redaction-runtime) for file admission
+and the practical scope of the four linear redaction recognizers.
+
 ## Commit hint
 
 A store is committed with the repository, so a record follows the branch and the checkout it was
@@ -114,12 +194,14 @@ try:
 affects the answer, so a query passed as `task` would become a call with no seeds that looks
 successful. Pass `files` or `entities`.
 
-Every tool answers an argument that is not one of its parameters with a tool error that names
-the argument and lists the parameters, so one retry corrects it:
+Read tools answer an unknown argument with a tool error that names it and lists the
+parameters, so one retry corrects it:
 
 ```text
 Unknown argument `include_archived` for `get_task_context`. Its parameters are: files, entities, structure_budget, memory_budget, intent.
 ```
+
+Logical writes list valid parameters without repeating an unknown argument name.
 
 For `task` on a seed tool, the error adds a line: `There is no free-text query: pass files or
 entities. intent is only a label for statistics.` Nothing is dropped silently.
@@ -259,9 +341,9 @@ it found the predecessor. The two paths are exclusive: passing `anchors` replace
 it never adds to it. Explicit `anchors` are validated exactly like `add_decision`'s, before the
 successor is written or the predecessor closed. Inheriting from a predecessor whose bindings file
 the store could not read (it is left out of the index, see [`store-format.md`](store-format.md))
-is refused before anything is written, with an error naming `bindings/<id>.json`: there would be
-nothing to copy, and the successor would silently start with no anchors. Passing `anchors` still
-works.
+is refused before anything is written: there would be nothing to copy, and the successor
+would silently start with no anchors. MCP omits the raw cause/file name; use `sidegraph-doctor` to identify the binding file to repair. Passing
+`anchors` still works.
 
 **Returns:** `{"id": str, "supersedes": str, "bindings": int, "entities": list[dict],
 "anchors_skipped": list[dict], "anchors_orphaned": list[dict], "redactions": int}` — same `bindings`/`entities`/
@@ -291,8 +373,9 @@ library capabilities), trial-learned knowledge — never 'the code does X'.
 
 `statement` is the fact itself (1-2 sentences, hard-compact); `source` is the epistemics — how
 it's known ("benchmark run 2026-07-09", "httpx docs"). `supports` is a list of decision ids
-this fact informed; every id must already reference an existing `Decision` or the write raises
-`ValueError` before anything is committed. An anchorless fact additionally needs at least one
+this fact informed; every id must already reference an existing `Decision` or the write is
+refused before anything is committed. MCP returns a controlled error rather than a raw
+`ValueError`; generic store failures retain the conservative inspection remedy above. An anchorless fact additionally needs at least one
 supported decision that is still live (`proposed` or `accepted`); terminal-only support is
 rejected as unreachable. `anchors` is the same `{"name", "file_path", "relation"?}` ref shape
 `add_decision` takes, resolved against the current Graphify graph and multi-anchored (leaf +
@@ -334,8 +417,8 @@ Falsifies a fact: closes the predecessor (`valid_to` set, `status` flipped to `s
 and writes a replacement (`status="accepted"`, `provenance.source="human"`) with
 `supersedes=old_fact_id`, under one serialized store mutation with the successor written
 first — the predecessor is never deleted,
-it stays retrievable as "believed before, corrected because…". Raises `ValueError` if
-`old_fact_id` doesn't resolve to an existing fact. Every text field is redacted exactly like
+it stays retrievable as "believed before, corrected because…". An `old_fact_id` that does
+not resolve to an existing fact refuses the write with controlled MCP diagnostics. Every text field is redacted exactly like
 `add_fact`'s. `supports` defaults to the **predecessor's own** `supports` when omitted — a
 superseding fact is assumed to inform the same decisions unless told otherwise.
 
@@ -946,7 +1029,8 @@ redacted title on a shared anchor entity) → validate → write with `status="p
 current branch of the repository the store lives in → bind tags → write each of the draft's
 own `facts` (attached — see below). Per-draft failures don't abort the batch: a step that
 fails after the write leaves the result `written` with a `reason` naming the step; an error
-before the write makes that draft `rejected` with an `internal error` reason.
+in an incomplete pipeline makes that draft `rejected` with an `internal error` reason;
+a store-operation failure can still have left a canonical record on disk.
 
 **Returns:** a list of `ProposeResult` dicts, one per draft, in the same order:
 `{"status": "written" | "deduped" | "rejected", "decision_id": str | None, "reason": str |
@@ -1047,8 +1131,8 @@ resolve to any domain) → write as `status="proposed"`. A human ratifies later 
 [`ratify`](#ratify)/`sidegraph-ratify` — unless `SIDEGRAPH_RATIFY_POLICY=auto-all` ratifies an
 eligible draft at write time (stamp `auto:auto-all`) and resolves its membership immediately.
 When that membership step hits a problem, the domain stays accepted anyway, and
-`auto_ratify_error` opens with `activation:` followed by one of two things: the error that
-stopped membership from resolving, or a `path rule too broad` notice, which means the
+`auto_ratify_error` opens with `activation:` followed by a controlled unresolved-membership or operation-failure
+notice with a sync retry hint, or a `path rule too broad` notice, which means the
 `path_prefixes` claim was rejected and only the `seed_anchors` that resolve, if any, are
 still applied. Per-draft failures don't abort the batch: a step that fails after the write
 leaves the result `proposed` with a `reason` telling you to review the domain's
@@ -1208,10 +1292,10 @@ it. Order-independence:
 nested fact before that fact's own turn), then everything else.
 
 An id present in both lists is accepted; the drop result for it reads `"<accept-result> (drop
-ignored)"`. An unknown id (not a pending decision, fact, or domain) gets `"error: unknown id
-'<id>' (not a pending decision, fact, or domain)"`; any id not in an eligible status for the
-requested action gets `"error: <ValueError message>"`. One bad id never aborts the rest of the
-batch.
+ignored)"`. An unknown id gets a fixed unknown-ID error; an unsuccessful transition
+gets a controlled ratification failure with reopen/inspect guidance. Raw exception text
+is omitted. The result's keys remain the caller's requested IDs. One bad id never aborts
+the rest of the batch.
 
 **Side effect:** whenever this call actually accepted or dropped at least one domain, it
 immediately rebuilds the `SessionStart` TOC cache (`toc_cache` in store meta) — this is what
@@ -1418,14 +1502,15 @@ intact (a record's content fields otherwise being immutable outside real status/
 transitions).
 
 Routing tries `record_id` as a decision, then as a fact; an id resolving to neither writes
-nothing and returns `{"error": "unknown record '<id>'"}` (never a guess). Anchors are
+nothing and returns `{"error": "unknown record"}` (never a guess). Anchors are
 validated *before* anything is written, exactly like `add_decision`/`add_fact`: an invalid
 `relation`, a `name` or `file_path` that is not a string, or a non-empty list in which no
 anchor has a `name` raises, and the whole call fails atomically rather than leaving a
 half-anchored write behind. A record whose bindings file the store could not read (it is left out
 of the index until restored or fixed, see [`store-format.md`](store-format.md)) is refused the
-same way, before any entity is minted: the call raises an error naming `bindings/<record_id>.json`
-and writes nothing.
+same way, before any entity is minted, and writes nothing. MCP omits the raw file name and
+cause; use `sidegraph-doctor` to identify the binding file to repair. Generic errors retain
+the conservative inspection remedy above.
 
 Per anchor: resolved against the graph via the same `resolve_and_bind` ladder every other
 anchoring tool here uses when a reader is present — an ambiguous name is reported, never

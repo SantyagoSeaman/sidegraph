@@ -573,7 +573,7 @@ def test_post_write_failure_keeps_the_batch_going(tmp_path, monkeypatch):
     assert r1.status == "written"
     assert r1.decision_id is not None
     assert "initiative" in (r1.reason or "")
-    assert "OSError" in r1.reason
+    assert "operation failed" in r1.reason
     assert "ratify(drop=" in r1.reason
     assert r1.redactions >= 1  # the guard falls through to the normal return
     assert r1.anchors_orphaned  # ...so do the fields the earlier steps filled
@@ -607,7 +607,7 @@ def test_attached_fact_failure_is_isolated(tmp_path, monkeypatch):
     [r] = propose([_draft(anchors=[], facts=facts)], store, None)
     assert r.status == "written"
     assert [f.status for f in r.facts] == ["written", "rejected", "written"]
-    assert "internal error: RuntimeError" in r.facts[1].reason
+    assert "internal error: operation failed" in r.facts[1].reason
 
 
 def test_fact_post_write_failure_is_isolated(tmp_path, monkeypatch):
@@ -619,7 +619,7 @@ def test_fact_post_write_failure_is_isolated(tmp_path, monkeypatch):
     ]
     r1, r2 = propose_facts(facts, store, None)
     assert r1.status == "written" and r1.fact_id is not None
-    assert "anchors" in r1.reason and "OSError" in r1.reason
+    assert "anchors" in r1.reason and "operation failed" in r1.reason
     assert r2.status == "written" and r2.reason is None
 
 
@@ -739,7 +739,7 @@ def test_domain_post_write_failure_is_isolated(tmp_path, monkeypatch):
     )
     r1, r2 = propose_domains(_domain_drafts(), store, None)
     assert r1.status == "proposed" and r1.domain_id is not None
-    assert "path_prefixes" in r1.reason and "OSError" in r1.reason
+    assert "path_prefixes" in r1.reason and "operation failed" in r1.reason
     assert r2.status == "proposed" and r2.reason is None
 
 
@@ -770,7 +770,7 @@ def test_pre_write_internal_error_is_rejected_not_raised(tmp_path, monkeypatch, 
         monkeypatch.setattr(Store, "find_domain_by_slug", flaky)
         r1, r2 = propose_domains(_domain_drafts(), store, None)
     assert r1.status == "rejected"
-    assert "internal error: RuntimeError" in r1.reason
+    assert "internal error: operation failed" in r1.reason
     assert "may be on disk" in r1.reason
     assert r2.status in ("written", "proposed")
 
@@ -792,7 +792,9 @@ def test_toc_rebuild_failure_surfaces_as_a_warning(tmp_path, monkeypatch):
     [r] = propose_domains([draft], store, reader, ratify_policy=RatifyPolicy.AUTO_ALL)
     assert r.status == "proposed"
     assert r.ratified_by == "auto:auto-all"
-    assert any(w.startswith("toc: OSError") and "next sync rebuilds it" in w for w in r.warnings)
+    assert any(
+        w.startswith("toc: operation failed") and "next sync rebuilds it" in w for w in r.warnings
+    )
 
 
 def test_keyboard_interrupt_still_propagates(tmp_path, monkeypatch):
@@ -800,3 +802,159 @@ def test_keyboard_interrupt_still_propagates(tmp_path, monkeypatch):
     monkeypatch.setattr(capture, "_bind_orphaned", _raise_once(KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
         propose([_draft()], store, None)
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected", "count"),
+    [
+        ([], [], 0),
+        (["Safe", "safe", "", "!!!", "Other"], ["safe", "other"], 0),
+        (["Café", "Привет", "Über Café"], ["caf", "ber-caf"], 0),
+        (["[REDACTED]", "redacted", "REDACTED!", "redacted-config"], ["redacted-config"], 0),
+    ],
+)
+def test_normalize_tags_stable_slugs(tags, expected, count):
+    assert capture.normalize_tags(tags) == (expected, count)
+
+
+def test_normalize_tags_counts_each_raw_secret_before_deduplication():
+    secret = "password" + "=" + "synthetictagmarkervalue"
+    token = "ghp_" + "syntheticmarkervalue" * 2
+    tags = ["safe", secret, "Safe", secret, "", "!!!", token + "-config"]
+    assert capture.normalize_tags(tags) == (["safe", "redacted-config"], 3)
+
+
+def test_propose_duplicate_secret_tags_counted_and_safe_binding_unique(tmp_path):
+    secret = "password" + "=" + "synthetictagmarkervalue"
+    with Store(tmp_path / "t.db") as store:
+        result = propose([_draft(tags=[secret, secret, "Safe", "safe"], anchors=[])], store, None)[
+            0
+        ]
+        assert result.status == "written"
+        assert result.redactions == 2
+        bindings = store.bindings_for_record(result.decision_id)
+        names = [store.get_entity(b.entity_id).canonical_name for b in bindings if b.tier == 0]
+        assert names == ["tag:safe"]
+
+
+@pytest.mark.parametrize("as_model", [False, True])
+def test_propose_string_tags_redacted_before_comma_split(tmp_path, as_model):
+    marker = "second" + "secretmarker"
+    draft = _draft(tags="password" + "=hunter," + marker, anchors=[])
+    if as_model:
+        draft = capture.DraftDecision.model_validate(draft)
+        assert marker not in str(draft.model_dump())
+        assert "_tag_string_redactions" not in draft.model_dump()
+    with Store(tmp_path / "t.db") as store:
+        result = propose([draft], store, None)[0]
+        assert result.status == "written"
+        assert result.redactions == 1
+        assert store.find_abstract_entity("tag:" + marker) is None
+        assert store.find_abstract_entity("tag:redacted") is None
+        assert not any(b.tier == 0 for b in store.bindings_for_record(result.decision_id))
+
+
+def test_normalize_string_tags_preserves_clean_comma_grammar_and_counts_once():
+    assert capture.normalize_tags(" Safe,Other,safe ,, ") == (["safe", "other"], 0)
+    secret = "password" + "=hunter," + "secondsecretmarker"
+    assert capture.normalize_tags(secret) == ([], 1)
+
+
+@pytest.mark.parametrize("separator", [",", ", ", ",\t", ",\n", " , "])
+@pytest.mark.parametrize("quoted_key", [False, True])
+def test_secret_bearing_comma_string_drops_all_ambiguous_fragments(separator, quoted_key):
+    key = '"password":' if quoted_key else "password="
+    raw = "safe," + key + "hunter" + separator + "secondsecretmarker,other"
+    assert capture.normalize_tags(raw) == ([], 1)
+
+
+def test_string_tag_model_keeps_clean_shape_ignores_fake_private_count_and_copy_staleness(tmp_path):
+    clean = capture.DraftDecision.model_validate(
+        _draft(tags=" Alpha , Beta ,, ", anchors=[], _tag_string_redactions=999)
+    )
+    assert clean.tags == ["Alpha", "Beta"]
+    assert "_tag_string_redactions" not in clean.model_dump()
+    with Store(tmp_path / "t.db") as store:
+        assert propose([clean], store, None)[0].redactions == 0
+        secret = capture.DraftDecision.model_validate(
+            _draft(title="Different", tags="password" + "=hunter,secondsecretmarker", anchors=[])
+        )
+        assert capture.DraftDecision.model_validate(secret) is secret
+        copied = secret.model_copy(update={"tags": ["safe"]})
+        result = propose([copied], store, None)[0]
+        assert result.status == "written"
+        assert result.redactions == 0
+        names = [
+            store.get_entity(b.entity_id).canonical_name
+            for b in store.bindings_for_record(result.decision_id)
+            if b.tier == 0
+        ]
+        assert names == ["tag:safe"]
+
+
+def test_scalar_no_comma_partial_token_tag_keeps_safe_suffix():
+    token = "ghp_" + "synthetictokenmarker" * 2
+    assert capture.normalize_tags(token + "-config") == (["redacted-config"], 1)
+
+
+def test_mapping_string_tags_redacted_before_comma_split(tmp_path):
+    from collections import UserDict
+
+    marker = "second" + "secretmarker"
+    raw = UserDict(_draft(tags="password" + ":start, " + marker, anchors=[]))
+    draft = capture.DraftDecision.model_validate(raw)
+    assert draft.tags == []
+    assert marker not in str(draft.model_dump())
+    with Store(tmp_path / "t.db") as store:
+        result = propose([draft], store, None)[0]
+        assert result.status == "written"
+        assert result.redactions == 1
+        assert store.find_abstract_entity("tag:" + marker) is None
+        for path in tmp_path.rglob("*.json"):
+            assert marker not in path.read_text()
+
+
+def test_attribute_scalar_tags_rejected_instead_of_unsafe_comma_split():
+    from types import SimpleNamespace
+
+    from pydantic import ValidationError
+
+    raw = SimpleNamespace(**_draft(tags="password" + "=hunter, secondsecretmarker"))
+    with pytest.raises(ValidationError):
+        capture.DraftDecision.model_validate(raw, from_attributes=True)
+    raw.tags = ["safe"]
+    assert capture.DraftDecision.model_validate(raw, from_attributes=True).tags == ["safe"]
+
+
+def test_copied_model_with_raw_scalar_tags_keeps_secret_out_of_store(tmp_path):
+    draft = capture.DraftDecision.model_validate(_draft(anchors=[]))
+    copied = draft.model_copy(update={"tags": "password" + "=hunter, secondsecretmarker"})
+    with Store(tmp_path / "t.db") as store:
+        result = propose([copied], store, None)[0]
+        assert result.status == "written"
+        assert result.redactions == 1
+        assert store.find_abstract_entity("tag:secondsecretmarker") is None
+
+
+@pytest.mark.parametrize("replacement", [[], ""])
+def test_copied_model_explicit_empty_tags_has_no_stale_redaction_count(tmp_path, replacement):
+    draft = capture.DraftDecision.model_validate(
+        _draft(tags="password" + "=hunter, secondsecretmarker", anchors=[])
+    )
+    assert draft._tag_string_redactions == 1
+    copied = draft.model_copy(update={"tags": replacement})
+    assert draft._tag_string_redactions == 1
+    with Store(tmp_path / "t.db") as store:
+        result = propose([copied], store, None)[0]
+        assert result.status == "written"
+        assert result.redactions == 0
+
+
+@pytest.mark.parametrize("deep", [False, True])
+def test_unchanged_model_copy_retains_tag_redaction_provenance(tmp_path, deep):
+    draft = capture.DraftDecision.model_validate(
+        _draft(tags="password" + "=hunter, secondsecretmarker", anchors=[])
+    )
+    copied = draft.model_copy(deep=deep)
+    with Store(tmp_path / "t.db") as store:
+        assert propose([copied], store, None)[0].redactions == 1

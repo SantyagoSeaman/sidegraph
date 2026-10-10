@@ -28,7 +28,7 @@ import mcp.types as mt
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.tools import ToolResult
+from fastmcp.tools import FunctionTool, Tool, ToolResult
 from pydantic import ValidationError
 
 from . import nearest_anchored, seed_ladder
@@ -48,6 +48,7 @@ from .capture import (
     format_path_prefixes,
     format_proposal,
     format_seed_anchors_sample,
+    normalize_tags,
     parse_ratify_policy,
     propose,
     propose_facts,
@@ -68,6 +69,7 @@ from .config import (
 from .domains import DEFAULT_CANDIDATE_LIMIT, collect_domain_candidates, community_group_path
 from .engine.reader import GraphifyReader, open_borrowed_reader
 from .freshness import staleness_phrase
+from .input_limits import MAX_DRAFTS, InputLimitError, preflight_direct, preflight_drafts
 from .retrieval import (
     _STANDING_SUPERSEDE_HINT,
     MEMORY_GUARD_LINE,
@@ -94,11 +96,12 @@ from .schema import (
     Fact,
     Provenance,
     Relation,
-    slugify,
 )
 from .store import VOLATILE_STALE_KEY, Store, skipped_refusal_text
 from .sync import activate_accepted_domain, maybe_sync, report_as_dict, sync
+from .validation_errors import SafeWriteError
 from .verify import verify_snapshot
+from .write_boundary import CONFIGURATION_ERROR, is_safe_write, safe_write, validate_write_arguments
 
 
 def _server_version() -> str:
@@ -310,6 +313,68 @@ def _unknown_argument_error(tool: str, unknown: list[str], parameters: list[str]
     return ToolError(message)
 
 
+_WRITE_TOOLS = frozenset(
+    {
+        "add_decision",
+        "supersede_decision",
+        "add_fact",
+        "supersede_fact",
+        "propose_decisions",
+        "ratify",
+        "ratify_decisions",
+        "add_domain",
+        "supersede_domain",
+        "propose_domains",
+        "sync_anchors",
+        "add_anchors",
+    }
+)
+_READ_TOOLS = frozenset(
+    {
+        "list_facts",
+        "find_entity",
+        "get_entity_history",
+        "list_proposed",
+        "list_domain_candidates",
+        "list_domains",
+        "verify_store",
+    }
+)
+_LAZY_READ_TOOLS = frozenset(
+    {
+        "retrieve_decisions",
+        "get_task_context",
+        "query_structure",
+        "query_decisions",
+        "drill_down",
+    }
+)
+
+
+def _classify_tool(tool: Tool) -> bool:
+    """Classify only audited names, annotations and exact registered callable identities."""
+    if not isinstance(tool, FunctionTool):
+        raise ToolError(CONFIGURATION_ERROR)
+    expected = _REGISTERED_CALLABLES.get(tool.name)
+    fn = tool.fn
+    annotations = tool.annotations
+    if (
+        expected is None
+        or fn is not expected
+        or annotations is None
+        or annotations.destructiveHint is not False
+        or annotations.openWorldHint is not False
+    ):
+        raise ToolError(CONFIGURATION_ERROR)
+    if tool.name in _READ_TOOLS and annotations.readOnlyHint is True:
+        return False
+    if tool.name in _LAZY_READ_TOOLS and annotations.readOnlyHint is False:
+        return False
+    if tool.name in _WRITE_TOOLS and annotations.readOnlyHint is False and is_safe_write(fn):
+        return True
+    raise ToolError(CONFIGURATION_ERROR)
+
+
 class _ArgumentNames(Middleware):
     """Accept the argument names agents try, and refuse the rest with a message they can act on.
 
@@ -318,10 +383,11 @@ class _ArgumentNames(Middleware):
     statistics label that never affects the answer, and the field's ``task`` values were
     queries, so renaming one into the other would turn a query into a seedless call that looks
     successful; it gets the unknown-argument error with a line saying there is no free-text
-    query. Every tool, on any other unknown argument, gets a tool error that names it and lists
-    the tool's real parameters, read from the registered tool's input schema; FastMCP's own
-    validation error names the unknown argument but omits the parameters. Nothing is dropped
-    silently.
+    query. Read tools name an unknown argument and list their real parameters. Logical
+    writes keep parameter help but never repeat the unknown name. Their identity-bound
+    registration, raw admission and argument-only validation run before dispatch; guarded
+    callables stop arbitrary exception text from reaching framework warning/error logging.
+    Nothing is dropped silently.
     see design/superpowers/specs/2026-10-04-tool-annotations-and-argument-names-design.md (D3)
     """
 
@@ -331,19 +397,27 @@ class _ArgumentNames(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         fastmcp_context = context.fastmcp_context
-        tool = (
-            await fastmcp_context.fastmcp.get_tool(context.message.name)
-            if fastmcp_context is not None
-            else None
-        )
-        if tool is None:  # not a tool of ours: FastMCP words its own error
-            return await call_next(context)
+        if fastmcp_context is None:
+            raise ToolError(CONFIGURATION_ERROR)
+        try:
+            tool = await fastmcp_context.fastmcp.get_tool(context.message.name)
+        except Exception:
+            raise ToolError(CONFIGURATION_ERROR) from None
+        if tool is None:
+            raise ToolError(CONFIGURATION_ERROR)
+        write = _classify_tool(tool)
         sent = context.message.arguments or {}
         args = _route_seed_aliases(sent) if tool.name in _SEED_TOOLS else sent
         parameters = list((tool.parameters or {}).get("properties", {}))
         unknown = [name for name in args if name not in parameters]
         if unknown:
+            if write:
+                raise ToolError(
+                    "Unknown write argument. Its parameters are: " + ", ".join(parameters) + "."
+                )
             raise _unknown_argument_error(tool.name, unknown, parameters)
+        if write:
+            validate_write_arguments(tool, args)
         if args is sent or args == sent:
             return await call_next(context)
         message = context.message.model_copy(update={"arguments": args})
@@ -444,17 +518,6 @@ def _unreadable_graph_error(store: Store) -> str:
 _VALID_RELATIONS = frozenset(get_args(Relation))
 
 
-def _coerce_tags(tags: list[str] | str | None) -> list[str]:
-    """Liberal-input tags: agents routinely pass a bare (often comma-separated) string on
-    the first try — accept it instead of failing schema validation and forcing a retry
-    (live finding, manual test 2026-07-08). A string splits on commas; blanks drop."""
-    if tags is None:
-        return []
-    if isinstance(tags, str):
-        return [part.strip() for part in tags.split(",") if part.strip()]
-    return list(tags)
-
-
 def _redact_fields(*fields: str | None) -> tuple[list[str | None], int]:
     """Scrub every text field through ``capture.redact`` (``None`` passes through).
 
@@ -487,20 +550,15 @@ def _validate_anchors(anchors: list[dict] | None) -> None:
     for raw in anchors:
         relation = raw.get("relation")
         if relation is not None and relation not in _VALID_RELATIONS:
-            raise ValueError(
-                f"invalid relation {relation!r} for anchor {raw.get('name')!r}: must be "
-                f"one of {sorted(_VALID_RELATIONS)}"
-            )
+            raise SafeWriteError("relation", "enum")
         name = raw.get("name")
         if name:
             try:
                 Descriptor(name=name, file_path=raw.get("file_path"))
-            except ValidationError as e:
-                raise ValueError(
-                    f"invalid anchor {name!r}: name and file_path must be strings"
-                ) from e
+            except ValidationError:
+                raise SafeWriteError("anchors", "string_type") from None
     if not any(raw.get("name") for raw in anchors):
-        raise ValueError("anchors: none of the given anchors has a name")
+        raise SafeWriteError("anchors", "no_named_anchor")
 
 
 def _require_fact_reachability(store, anchors: list[dict] | None, supports: list[str]) -> None:
@@ -518,10 +576,7 @@ def _require_fact_reachability(store, anchors: list[dict] | None, supports: list
     if anchors:
         return
     if not _resolves_to_live_decision(store, supports):
-        raise ValueError(
-            "anchorless fact has no live supporting decision — add an anchor, or "
-            "re-point supports at the successor of a superseded/rejected/deprecated one"
-        )
+        raise SafeWriteError("supports", "no_live_support")
 
 
 def _add_decision_impl(
@@ -541,6 +596,20 @@ def _add_decision_impl(
     layer: str | None = None,
 ) -> dict:
     """Testable core: redact, write the decision, then best-effort multi-anchor it (+ tag it)."""
+    preflight_direct(
+        title,
+        kind,
+        context,
+        choice,
+        rejected,
+        consequences,
+        author,
+        session_id,
+        anchors,
+        initiative,
+        tags,
+        layer,
+    )
     _validate_anchors(anchors)
     # title/context/choice are required (non-Optional) here, so they're redacted directly
     # (keeps them typed `str`, not the `str | None` `_redact_fields` returns uniformly);
@@ -589,15 +658,9 @@ def _add_decision_impl(
     redactions += n5
     if clean_initiative:
         _bind_initiative(store, decision.id, clean_initiative)
-    for tag in _coerce_tags(tags):
-        scrubbed, n = redact(tag)
-        redactions += n
-        slug = slugify(scrubbed)
-        # Same rule as the propose pipeline: a tag whose entire text WAS the secret
-        # slugifies to exactly "redacted" -- skip it, never mint a meaningless
-        # `tag:redacted` entity.
-        if not slug or slug == "redacted":
-            continue
+    tag_slugs, tag_redactions = normalize_tags(tags or [])
+    redactions += tag_redactions
+    for slug in tag_slugs:
         tag_entity = store.get_or_create_abstract_entity(f"tag:{slug}")
         store.add_binding(
             AnchorBinding(
@@ -689,6 +752,7 @@ def _resolve_anchors(
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def add_decision(
     title: str,
     kind: str,
@@ -720,10 +784,12 @@ def add_decision(
     redacted first — same secret patterns as the propose/import
     pipelines; the scrubbed text is the only text that reaches the repo-committed store.
 
-    ``tags`` are free-form labels — a bare comma-separated string is accepted too —
-    slugified (lowercase, spaces->'-', ``[a-z0-9-]`` only) into durable ``tag:<slug>``
-    entities (tier-0, many-to-many — a decision can carry several, and
-    ``get_entity_history`` finds it via any of them, same as an initiative).
+    ``tags`` are free-form labels; a bare comma-separated string is accepted too. If the raw
+    string contains both a matched secret and a comma, all its tags are omitted conservatively.
+    Use a list for explicit boundaries. Safe tags are slugified (lowercase, spaces->'-',
+    ``[a-z0-9-]`` only) into durable ``tag:<slug>`` entities (tier-0, many-to-many — a decision
+    can carry several, and ``get_entity_history`` finds it via any of them, same as an
+    initiative).
     ``layer`` optionally marks the decision "business" or "technical" — a filter axis for
     mixed corpora.
 
@@ -805,6 +871,19 @@ def _supersede_decision_impl(
     stamps them too — ``graph_version`` from the reader when present, ``commit`` via the
     same best-effort ``git rev-parse HEAD`` (:func:`sidegraph.capture._capture_commit`).
     """
+    preflight_direct(
+        old_decision_id,
+        title,
+        kind,
+        context,
+        choice,
+        rejected,
+        consequences,
+        anchors,
+        session_id,
+        author,
+        source,
+    )
     _validate_anchors(anchors)
     if not anchors and store.is_skipped("bindings", old_decision_id):
         # Inheritance reads the predecessor's bindings from the index, and a bindings file the
@@ -882,6 +961,7 @@ def _supersede_decision_impl(
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def supersede_decision(
     old_decision_id: str,
     title: str,
@@ -1019,6 +1099,7 @@ def _add_fact_impl(
     ``add_fact(..., supports=[<terminal id>])`` wrote one born flagged by doctor's tightened
     ``dangling-record`` check. ``_require_fact_reachability`` closes both.
     """
+    preflight_direct(statement, source, supports, anchors, author, session_id)
     _validate_anchors(anchors)
     _require_fact_reachability(store, anchors, supports or [])
     # statement/source are both required (non-Optional) — redact directly, same reasoning
@@ -1065,6 +1146,7 @@ def _add_fact_impl(
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def add_fact(
     statement: str,
     source: str,
@@ -1081,9 +1163,10 @@ def add_fact(
 
     ``statement`` is the fact itself (1-2 sentences, hard-compact); ``source`` is the
     epistemics — how we know ("benchmark run 2026-07-09", "httpx docs"). ``supports`` is a
-    list of decision ids this fact informed (each must already exist — raises
-    ``ValueError`` otherwise). ``anchors`` is the same ``{"name", "file_path", "relation"?}``
-    ref shape ``add_decision`` takes; resolved against the current Graphify graph and bound
+    list of decision ids this fact informed (each must already exist; missing references
+    refuse the write with controlled MCP diagnostics). ``anchors`` uses the same
+    ``{"name", "file_path", "relation"?}`` ref shape ``add_decision`` takes; resolved against
+    the current Graphify graph and bound
     when a graph is present. With no graph, an anchor still gets an ORPHANED Tier-2 leaf
     (unlike ``add_decision``, which silently skips anchors with no reader) — a fact must
     never write unreachable, so the binding heals once a graph exists.
@@ -1162,6 +1245,7 @@ def _supersede_fact_impl(
     residual note, but a predecessor's inherited BINDING is not a request — it is the same
     reachability the predecessor already had).
     """
+    preflight_direct(old_fact_id, statement, source, supports, anchors, session_id, author)
     predecessor = store.get_fact(old_fact_id)
     if predecessor is None:
         raise ValueError(f"unknown fact {old_fact_id!r}")
@@ -1235,6 +1319,7 @@ def _supersede_fact_impl(
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def supersede_fact(
     old_fact_id: str,
     statement: str,
@@ -2670,6 +2755,18 @@ def _propose_decisions_impl(
     not once per core call.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1
     """
+    if not isinstance(drafts, (list, tuple)) or (
+        facts is not None and not isinstance(facts, (list, tuple))
+    ):
+        raise InputLimitError()
+    if len(drafts) + len(facts or []) > MAX_DRAFTS:
+        raise InputLimitError()
+    preflight_drafts(
+        [*drafts, *(facts or [])],
+        decision_indices=range(len(drafts)),
+        # The core decision path also visits its default ref=None, even for no drafts.
+        metadata=(session_id, author, None),
+    )
     results = [
         r.model_dump(mode="json")
         for r in propose(
@@ -2787,6 +2884,7 @@ def _list_proposed_impl(store) -> str:
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def propose_decisions(
     drafts: list[dict],
     session_id: str | None = None,
@@ -2900,8 +2998,11 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
                 return "accepted", cascaded
             _decision, cascaded = store.drop(id_)
             return "dropped", cascaded
-        except ValueError as e:
-            return f"error: {e}", []
+        except ValueError:
+            return (
+                "error: ratification failed; reopen the store and inspect status before retrying",
+                [],
+            )
     if store.get_fact(id_) is not None:
         try:
             if action == "accept":
@@ -2909,16 +3010,23 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
             else:
                 store.drop_fact(id_)
             return ("accepted" if action == "accept" else "dropped"), []
-        except ValueError as e:
-            return f"error: {e}", []
+        except ValueError:
+            return (
+                "error: ratification failed; reopen the store and inspect status before retrying",
+                [],
+            )
     if store.get_domain(id_) is not None:
         result = (
             store.ratify_domains(accept=[id_])
             if action == "accept"
             else store.ratify_domains(drop=[id_])
         )
-        return result[id_], []
-    return f"error: unknown id {id_!r} (not a pending decision, fact, or domain)", []
+        return (
+            "error: ratification failed; reopen the store and inspect status before retrying"
+            if result[id_].startswith("error")
+            else result[id_]
+        ), []
+    return "error: unknown id (not a pending decision, fact, or domain)", []
 
 
 def _ratified_domain(store: Store, id_: str, result: str) -> bool:
@@ -3007,9 +3115,8 @@ def _ratify_impl(
                 # (a literal trigger phrase for the heal-anchors skill), not in the helper.
                 activation = activate_accepted_domain(domain, store, reader)
                 if activation.overbroad is not None:
-                    prefixes = ", ".join(repr(p) for p in domain.path_prefixes)
                     out[id_] += (
-                        f" (path rule too broad: {prefixes} match "
+                        " (path rule too broad: path_prefixes match "
                         f"{activation.overbroad['matched']}/{activation.overbroad['total']} "
                         "communities — not applied; seed_anchors, if any, still applied)"
                     )
@@ -3040,8 +3147,10 @@ def _ratify_decisions_impl(
         try:
             _decision, _cascaded = store.ratify(did)
             out[did] = "accepted"
-        except ValueError as e:
-            out[did] = f"error: {e}"
+        except ValueError:
+            out[did] = (
+                "error: ratification failed; reopen the store and inspect status before retrying"
+            )
     for did in drop or []:
         if did in out:
             out[did] = f"{out[did]} (drop ignored)"
@@ -3049,12 +3158,15 @@ def _ratify_decisions_impl(
         try:
             _decision, _cascaded = store.drop(did)
             out[did] = "dropped"
-        except ValueError as e:
-            out[did] = f"error: {e}"
+        except ValueError:
+            out[did] = (
+                "error: ratification failed; reopen the store and inspect status before retrying"
+            )
     return out
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> dict[str, str]:
     """Ratify pending proposals of ANY kind — decisions, facts, and domains share one gate.
 
@@ -3076,6 +3188,7 @@ def ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> di
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def ratify_decisions(
     accept: list[str] | None = None, drop: list[str] | None = None
 ) -> dict[str, str]:
@@ -3100,11 +3213,14 @@ def _add_domain_impl(
     """Testable core for add_domain (§4.3, manual path). Always lands `status=proposed` —
     manual authoring is not an exception to the ratification gate (§4: "one gate, no
     exceptions")."""
+    preflight_direct(
+        slug, title, summary, parent_slug, path_prefixes, communities, seed_anchors, author
+    )
     parent_id = None
     if parent_slug is not None:
         parent = store.find_domain_by_slug(parent_slug)
         if parent is None:
-            raise ValueError(f"parent_slug {parent_slug!r} does not resolve to any domain")
+            raise SafeWriteError("parent_slug")
         parent_id = parent.domain_id
 
     # Title and summary are prose in a repo-committed store: same gate as propose_domains.
@@ -3130,6 +3246,7 @@ def _add_domain_impl(
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def add_domain(
     slug: str,
     title: str,
@@ -3209,15 +3326,25 @@ def _supersede_domain_impl(
     (that's what "supersede" means), but the new name/scope still needs a human `ratify`
     before it's TOC-visible.
     """
+    preflight_direct(
+        old_slug_or_id,
+        new_slug,
+        new_title,
+        new_summary,
+        path_prefixes,
+        seed_anchors,
+        parent_slug,
+        author,
+    )
     old = _resolve_domain_ref(store, old_slug_or_id)
     if old is None:
-        raise ValueError(f"old_slug_or_id {old_slug_or_id!r} does not resolve to any domain")
+        raise SafeWriteError("old_slug_or_id")
 
     parent_id = None
     if parent_slug is not None:
         parent = store.find_domain_by_slug(parent_slug)
         if parent is None:
-            raise ValueError(f"parent_slug {parent_slug!r} does not resolve to any domain")
+            raise SafeWriteError("parent_slug")
         parent_id = parent.domain_id
 
     new_title, n1 = redact(new_title)
@@ -3247,6 +3374,7 @@ def _supersede_domain_impl(
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def supersede_domain(
     old_slug_or_id: str,
     new_slug: str,
@@ -3323,6 +3451,7 @@ def _propose_domains_impl(
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def propose_domains(
     drafts: list[dict],
     session_id: str | None = None,
@@ -3687,6 +3816,7 @@ def _sync_anchors_impl(store: Store, reader: GraphifyReader | None, force: bool 
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def sync_anchors(force: bool = False) -> dict:
     """Re-anchor the decision store against the current graph and report exactly what
     happened -- the diagnostic/heal MCP counterpart to ``sidegraph-sync`` (Gap 3).
@@ -3863,7 +3993,7 @@ def _add_anchors_impl(
     a re-anchor request is never silently dropped for lack of a graph.
     """
     if store.get_decision(record_id) is None and store.get_fact(record_id) is None:
-        return {"error": f"unknown record {record_id!r}"}
+        return {"error": "unknown record"}
     # A bindings file the last reload left out (a merge conflict, say) cannot be written to:
     # ``add_binding`` refuses. Say so BEFORE resolving the anchors, whose entities are minted
     # and committed one mutation at a time and would stay behind as orphans.
@@ -3905,6 +4035,7 @@ def _add_anchors_impl(
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
 def add_anchors(record_id: str, anchors: list[dict]) -> dict:
     """Append bindings to an EXISTING decision or fact — in-place re-anchoring for the
     triage flow (design/superpowers/specs/2026-07-11-ci-integrity-design.md ruling 3).
@@ -3922,10 +4053,11 @@ def add_anchors(record_id: str, anchors: list[dict]) -> dict:
     history and verify's transition rules stay intact.
 
     Routing tries ``record_id`` as a decision, then as a fact; an id that resolves to
-    neither writes nothing and returns ``{"error": "unknown record '<id>'"}`` (never a
+    neither writes nothing and returns ``{"error": "unknown record"}`` (never a
     guess). A record whose bindings file the store could not read (it is left out of the
-    index until restored or fixed) is refused with an error naming that file, before any
-    entity is minted. Anchors are validated before anything is written — an invalid ``relation``, a
+    index until restored or fixed) is refused before any entity is minted. MCP omits raw
+    file names and causes; use ``sidegraph-doctor`` to identify the binding file to repair.
+    Anchors are validated before anything is written — an invalid ``relation``, a
     non-string ``name``/``file_path``, or a list with no named anchor raises, same as
     ``add_decision``/``add_fact``.
 
@@ -3939,6 +4071,12 @@ def add_anchors(record_id: str, anchors: list[dict]) -> dict:
     per-anchor feedback ``add_decision``'s ``anchors_skipped`` gives.
     """
     return _add_anchors_impl(_get_store(), _load_reader(), record_id, anchors)
+
+
+# Capture registration-time identities: rebinding a familiar name is not a read exemption.
+_REGISTERED_CALLABLES = {
+    name: globals()[name] for name in _READ_TOOLS | _LAZY_READ_TOOLS | _WRITE_TOOLS
+}
 
 
 def main() -> None:

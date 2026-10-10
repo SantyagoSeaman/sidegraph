@@ -130,7 +130,7 @@ def test_add_anchors_ambiguous_reports_candidates_and_writes_nothing(tmp_path):
 def test_add_anchors_unknown_record_returns_error_dict(tmp_path):
     store = Store(tmp_path / "srv.db")
     out = _add_anchors_impl(store, None, "01NOPE", anchors=[{"name": "x"}])
-    assert out == {"error": "unknown record '01NOPE'"}
+    assert out == {"error": "unknown record"}
 
 
 def test_add_anchors_invalid_relation_writes_nothing(tmp_path):

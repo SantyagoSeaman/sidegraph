@@ -1900,3 +1900,43 @@ def test_import_from_a_subdirectory_keys_the_repo_path(tmp_path, capsys, monkeyp
     out = capsys.readouterr().out
     assert "imported 0 decision(s)" in out
     assert "1 existing" in out
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("secret_tag", [False, True])
+def test_cli_import_tag_redaction_summary_precedes_undecodable_block(
+    tmp_path,
+    capsys,
+    dry_run,
+    secret_tag,
+):
+    graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
+    bad = tmp_path / "docs" / "0001-legacy.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(_CP1251_FIXTURE)
+    _write_md(tmp_path, "docs/0002-good.md", _adr_md("Submit path"))
+    marker = "synthetictag" + "markervalue"
+    tag = "password" + "=" + marker if secret_tag else "safe"
+    args = [
+        "--db",
+        str(tmp_path / "t.db"),
+        "--graph",
+        str(graph),
+        "--docs",
+        str(tmp_path / "docs"),
+        "--any-doc",
+        "--tag",
+        tag,
+    ]
+    if dry_run:
+        args.append("--dry-run")
+    assert import_main(args) == 0
+    out = capsys.readouterr().out
+    summary = "redacted 1 secret(s) from tag values"
+    assert marker not in out
+    if secret_tag:
+        assert out.count(summary) == 1
+        assert out.index(summary) < out.index("file(s) skipped: not valid UTF-8")
+    else:
+        assert "secret(s) from tag values" not in out
+    assert out.rstrip().endswith(str(bad))

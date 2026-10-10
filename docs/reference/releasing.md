@@ -45,10 +45,15 @@ Prepare the release on internal `main`, then run the clean-tree preflight:
 1. Update `CHANGELOG.md`: keep a fresh empty `## [Unreleased]` first and add
    `## [X.Y.Z] — YYYY-MM-DD` beneath it. Group changes using Keep a Changelog headings.
 2. Update every file in the version table above and any affected `docs/` page.
+   Run `uv lock` so the root package version in `uv.lock` agrees with `pyproject.toml`;
+   inspect the diff to ensure no unrelated dependency versions changed.
 3. `uv run pytest -q`. Full suite green.
-4. `uv run pre-commit run --all-files`. Lint, format, and types clean; this is exactly what
-   CI runs, and now also gitleaks, zizmor, actionlint, and the shipped-surface/public-twin/
-   docs-link checkers described in `CONTRIBUTING.md`.
+4. `uv run pre-commit run --all-files`. Lint, format, types, and staged secret scanning
+   clean, including store-only changes; also zizmor, actionlint, and the shipped-surface/
+   public-twin/docs-link checkers described in `CONTRIBUTING.md`. Additionally run
+   `uv run pre-commit run gitleaks-history --hook-stage manual --all-files` from a full
+   checkout: CI rejects shallow history and scans all reachable commits, including merge
+   changes, separately from the staged hook.
 5. `uv build`. Must succeed and produce both `dist/sidegraph-X.Y.Z.tar.gz` and
    `dist/sidegraph-X.Y.Z-py3-none-any.whl`.
 6. A real-install smoke test against the freshly built wheel, before anything is tagged:

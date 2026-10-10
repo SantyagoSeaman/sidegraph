@@ -504,9 +504,15 @@ Two independent importers behind one command, switched by `--docs` and/or `--pro
 | `--path PREFIX` | none | only import rationales whose `file_path` is under directory `PREFIX`, or is that exact file (repeatable); **rationale mode only** — combining with `--docs` is a hard error |
 | `--docs PATH` | none | switch to markdown-import mode: `PATH` is a file or a directory (recursed for `*.md`); repeatable. Bare (no `PATH`) imports the active profile's ingest globs — `generic-adr`'s by default, or the profile named by `--profile` — see below |
 | `--profile NAME` | `generic-adr` | flow-profile selecting the reader dialect and default ingest globs; also switches to `--docs` mode on its own (repeatable is N/A — a single name); **`--docs` mode only** — see below |
-| `--tag TAG` | none | tag every imported/superseded decision with a durable `tag:<slug>` entity (repeatable); **`--docs` mode only** |
+| `--tag TAG` | none | tag every imported/superseded decision with a durable `tag:<slug>` entity; redact before slugifying and deduplicate slugs (repeatable); **`--docs` mode only** |
 | `--section-limit N` | `2000` | per-field char cap for `context`/`choice`/`rejected`/`consequences`, applied after redaction at a word boundary (never mid-word); must be `>= 200`; **`--docs` mode only** |
 | `--any-doc` | off | import every enumerated `*.md` file regardless of the active profile's `ingest_globs`; **`--docs` mode only** — see the scope filter below |
+
+When a `--tag` value contains a matched secret, both real and dry runs print
+`redacted N secret(s) from tag values`. The count covers every raw operator tag once
+per batch, including duplicates, even if no documents are imported. Empty tags and tags
+whose slug is exactly `redacted` are omitted; partial safe slugs remain. The library's
+`DocImportReport.tag_redactions` exposes this count, separate from document text redaction.
 
 **The profile's globs filter explicit `--docs` paths too.** By default a file that matches
 none of the active profile's `ingest_globs` is skipped without being parsed and counted as
@@ -762,6 +768,31 @@ import on their own. Both the real run and `--dry-run` print an extra line whene
 `skipped_degenerate_parent > 0`: `N split parent(s) skipped as degenerate (echoed context
 or empty choice) — children imported on their own`.
 
+**Documents are limited to 8 MiB per file, independently of capture request budgets.**
+A multi-file import may exceed 4 MiB overall and produce more than 100 records. After
+path/profile/escape checks and the existing final-component no-follow check, the importer
+reads at most 8 MiB plus one byte from the opened file before hashing, decoding, parsing or
+redaction. Exactly 8 MiB is allowed; a larger file is skipped whole, with no prefix parsing,
+partial output or raw fallback. Resource admission never silently truncates input; the
+explicit post-redaction `--section-limit` summarization option remains unchanged.
+
+Real and dry runs count oversized inputs in `DocImportReport.skipped_oversized` and list
+repository-relative paths in `oversized_files`. When non-zero, they print a block before
+the undecodable-file block:
+
+```text
+N file(s) skipped: exceeds 8 MiB input limit:
+  path/to/large-file.md
+```
+
+Operator tags and free-text import options are checked once before tag normalization or
+candidate collection, in both real and dry runs: 256 KiB UTF-8 per string, depth 32,
+4,096 visited nodes per item, and shared totals of 4 MiB admitted strings and 65,536 nodes.
+Cycles and invalid UTF-8 strings are rejected with a static `InputLimitError`; the CLI
+returns `1` before any record write. Python `parse_decision_doc`/`parse_decision_docs` callers
+have the equivalent 8 MiB UTF-8 document-text limit before redaction. There is no total
+import byte or output-count cap and no environment switch disabling these limits.
+
 **A file that is not valid UTF-8 is skipped, named, and the run continues.** Every document
 is decoded as `utf-8-sig` — plain UTF-8, with a leading byte-order mark stripped when one is
 present. No encoding is guessed. A file whose bytes don't decode (for example, one saved in
@@ -780,7 +811,8 @@ by the status-derived lines above (`N landed rejected`, `N landed proposed`) whe
 followed by the template-skip line
 and the degenerate-parent line above when applicable, then `N doc(s) refused: a symlink
 pointing outside the repository` and `N existing record(s) had their anchors repaired` when
-non-zero, and the undecodable-file block above last when applicable. A non-zero `F` is the profile scope filter, not a parse failure — see
+non-zero, and the oversized-file block when applicable, with the undecodable-file block
+above last. A non-zero `F` is the profile scope filter, not a parse failure — see
 the `--any-doc` note under the flag table above. Under a non-`manual`
 `SIDEGRAPH_RATIFY_POLICY`: `imported N decision(s), superseded M, auto-ratified K (skipped:
 …)` — only fresh `--propose` writes that land as a new `proposed` record are eligible;
@@ -798,7 +830,8 @@ non-`manual` policy), the status-derived-rejected line when applicable (`N would
 proposed (...)`), the template-skip line and the degenerate-parent line above when
 applicable, the `N doc(s) refused: a symlink pointing outside the repository` line when
 non-zero (a dry run never prints the anchors-repaired line), and a per-file breakdown. The
-undecodable-file block above prints last, after the per-file breakdown. Both indent their lines by two spaces, so breakdown lines printed
+oversized-file block prints after the per-file breakdown; the undecodable-file block above
+prints last. Both indent their lines by two spaces, so breakdown lines printed
 after the block would read as more undecodable files. No decision or binding is written. Opening the
 store may still create a fresh store's own files (`format`, `.gitignore`, `stamping_live_since`,
 `index.db`, its 0-byte `index.db-journal` and the empty record directories), migrate supported
@@ -907,6 +940,11 @@ touching the graph or store if `--min-members < 1` or `--limit < 0`; returns `1`
 
 ### `sidegraph-domains add`
 
+Invalid domain fields use bounded known-field/error-code diagnostics. An unresolvable
+`--parent` reports the field without repeating its value. Invalid slug validation still
+runs before a store is created. Other CLI filesystem diagnostics retain their existing
+behavior.
+
 | Flag | Default | Meaning |
 |---|---|---|
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated) |
@@ -923,7 +961,7 @@ empty store as a side effect. A slug collision against a *live* (proposed/accept
 reported as a skip, not a hard failure.
 
 **Output:** `proposed 1 domain(s) (skipped: 0 existing)` followed by `<domain_id>  <slug>` on
-success, then `redacted N secret(s) from the title/summary` when N > 0; `proposed 0 domain(s) (skipped: 1 existing — <error>)` on a slug collision (exit `0`
+success, then `redacted N secret(s) from the title/summary` when N > 0; `proposed 0 domain(s) (skipped: 1 existing)` on a slug collision, with the cause omitted (exit `0`
 — an expected outcome, not a failure, same treatment as bootstrap's idempotency skip).
 
 **Exit code:** `0` on success or a slug-collision skip. Returns `1` only for an unreadable
@@ -1030,7 +1068,9 @@ on-disk layout this walks). Two layers, combined into one report:
 - **Snapshot layer** (always runs): every *hot* record file parses against its schema (a
   `Model.model_validate`, not just JSON decoding), and so does every archived decision and
   domain — a schema-invalid archived payload is a `bad-archive-segment` violation naming the
-  segment and the line, the same line the store's reload leaves out; archived entries are also
+  segment and the line, the same line the store's reload leaves out. A nonterminal archived
+  decision or domain also reports `bad-archive-segment`, even though the reload keeps it;
+  archived entries are also
   cross-referenced (supersedes chains, parent chains, ULID uniqueness); the `format` marker's
   `schema_version` is present and known; `valid_to >= valid_from` on every decision/fact; a
   `superseded` record's `supersedes` chain resolves to a real successor; every `supersedes`
@@ -1050,6 +1090,19 @@ on-disk layout this walks). Two layers, combined into one report:
   a durable leaf-file move in an entity descriptor, and `sidegraph-compact` legally deletes
   a hot file once archived. See "What's legally mutable" below for the exact table.
 
+`--against` accepts one Git commit-ish: for example `HEAD`, `HEAD~1`, a branch, a
+lightweight or annotated tag, or a full SHA-1/SHA-256 commit ID. The value is resolved once
+with option parsing disabled; the same validated full commit ID is used for diff enumeration
+and every baseline record read, even if a named branch moves during the check. Empty,
+leading-dash or NUL-containing values, unknown or unavailable revisions, trees, blobs and
+revision ranges fail operationally with exit `1`. Git without the protected resolver option
+also fails operationally; there is no raw-ref fallback. The working tree is still read during
+the check and is not atomically snapshotted. `sidegraph-doctor --against` uses the same rules.
+
+These exit-`1` rules apply after CLI argument parsing. Malformed syntax such as
+`--against --bad` exits `2` because the option has no value; `--against=--bad` reaches
+the protected resolver and exits `1`.
+
 **Violation codes** (the `code` field in `--json`'s `violations`, or the first column of a
 plain-text line):
 
@@ -1065,15 +1118,23 @@ plain-text line):
 | `dangling-parent` | snapshot | a domain's `parent_id` doesn't resolve to any domain, hot or archived (a superseded, dropped or archived parent still counts, as the write path only checks that it exists; a file skipped for its unsafe name counts too, as for `dangling-supersedes`) |
 | `parent-cycle` | snapshot | the `parent_id` chain of some domains loops back on itself (a domain that is its own parent included); reported once per cycle, at the domain with the smallest id on it, and not for a domain that merely hangs off the cycle |
 | `duplicate-ulid` | snapshot | the same internal id appears in more than one canonical location — two hot files, a hot file plus any archive copy, or two archive segments whose payloads for that id actually differ. **Exempt:** two or more archive segments carrying byte-*identical* payloads for the same id — a sanctioned cross-branch `sidegraph-compact` merge (independent compaction on two branches, later merged) — see [`reference/store-format.md#archive-segments-sidegraph-compact`](store-format.md#archive-segments-sidegraph-compact) |
-| `bad-archive-segment` | snapshot | an `archive/*.jsonl` entry is not a regular file (`unreadable: not a regular file`), or a line isn't valid UTF-8 or JSON, isn't a JSON object, or holds a decision or domain that fails its model or can't be serialised: the lines the store's reload leaves out (one violation per line, naming the segment and the line number) |
+| `bad-archive-segment` | snapshot | an `archive/*.jsonl` entry is not a regular file (`unreadable: not a regular file`), or a line isn't valid UTF-8 or JSON, isn't a JSON object, or holds a decision or domain that fails its model, can't be serialised, or has a nonterminal status. Schema/decode failures match the lines the reload leaves out; the verifier additionally rejects nonterminal archive records (one violation per line, naming the segment and the line number) |
 | `filename-id-mismatch` | snapshot | a hot record file's name doesn't match its own internal id |
 | `unsafe-record-id` | snapshot | a record's id is not a safe filename (a single path segment, at most 128 characters, starting with a letter or digit), or is not a string; also a `bindings/` file or hot record file whose name is unsafe, and an `archive/*.jsonl` line whose id is missing, not a string or unsafe. The store's reload skips such a file, and its startup warning points here. A file with an unsafe name gets this code whether or not its content parses; a file with an unsafe name or an unsafe id gets no other snapshot finding (no `filename-id-mismatch`, `duplicate-ulid` or `parse-error`) |
 | `symlinked-store-entry` | snapshot | a store-owned directory or file inside the store is a symlink, live or dangling (one violation per entry); `Store()` refuses to open such a store, so `sidegraph-verify` and `sidegraph-doctor` report the links and stop: no record is linted, no reference checked, no `--against` diff run and no advisory check made until the links are removed (an `--against` ref that does not resolve, or a store outside git, is checked first and still exits `1` without reporting the links) (the text output says so in one line; `--json` carries no marker), see [`reference/store-format.md`](store-format.md#layout-file-per-record-json-plus-a-derived-local-index) |
-| `illegal-field-change` | transition | an immutable field changed between `GIT_REF` and the working tree (the detail names the field); also covers a modified already-published archive segment (write-once) |
+| `illegal-field-change` | transition | an immutable field changed between `GIT_REF` and the working tree (the detail names the field); also covers immutable raw keys lost during hot-to-archive transfer, or a modified already-published archive segment (write-once) |
 | `illegal-status-jump` | transition | `status` changed to something that isn't a real write-path transition for that record kind |
 | `valid-to-unset` | transition | `valid_to` reverted from a value back to `null` |
 | `valid-to-changed` | transition | `valid_to` changed from one value to a *different* value (only `null → value`, once, is legal) |
-| `illegal-deletion` | transition | a record file — or an already-published archive segment — was deleted with no sanctioned reason. The one exception: a decision/domain whose id is present in an `archive/*.jsonl` segment in the new tree (a legitimate `sidegraph-compact`) |
+| `illegal-deletion` | transition | a record file — or an already-published archive segment — was deleted with no sanctioned reason. The one exception: a decision/domain preserved by same-kind, same-ID archive copies in the new tree, every copy schema-valid, compactable and a legal raw-payload transition from the baseline (a legitimate `sidegraph-compact`). An ID match alone is insufficient |
+
+Changed paths come from `git diff --no-renames --name-status -z` as bytes, preserving
+filesystem names without Git quoting or newline translation, including Unicode, TAB/LF/CR,
+quotes, backslashes and surrounding whitespace. JSON escapes these characters normally;
+its decoded `path` is the actual repository-relative name. Empty diff output is clean, but
+incomplete framing or unsupported statuses fail operationally (exit `1`) before any path
+classification. This preserves the frozen baseline described below and does not make
+concurrent working-tree reads an atomic snapshot.
 
 **What's legally mutable** (transition layer only; derived from `store.py`'s write methods,
 not invented — see `verify.py`'s module comment above the mutable-field tables for exactly
@@ -1151,6 +1212,10 @@ against a store it just created would be actively misleading in CI. `2` violatio
 (printed as `<code>  <path>  <detail>`, one entry per violation, or in `--json`'s
 `violations` list; a `parse-error` from schema validation carries pydantic's multi-line
 message in its detail, so use `--json` to parse the output).
+
+**Reporting limitation:** a human-readable report can fail with exit `1` if the terminal
+cannot encode a reported path. Use `--json` for undecodable pathname bytes: JSON escapes
+them and preserves the violation exit `2`, without a false clean result.
 
 **Examples:**
 

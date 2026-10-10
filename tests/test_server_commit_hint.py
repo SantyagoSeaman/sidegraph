@@ -104,9 +104,7 @@ def test_t15_no_dict_write_tool_has_the_hint_outside_a_git_repository(tmp_path, 
 def test_t15_add_anchors_error_dict_has_no_hint(tmp_path):
     store = git_store(tmp_path)
 
-    assert _add_anchors_impl(store, None, "01NOPE", [{"name": "x"}]) == {
-        "error": "unknown record '01NOPE'"
-    }
+    assert _add_anchors_impl(store, None, "01NOPE", [{"name": "x"}]) == {"error": "unknown record"}
 
 
 def propose_decisions(store: Store) -> list[dict]:

@@ -390,6 +390,7 @@ def test_dangling_fact_support(store: Store):
 
 def test_duplicate_ulid_hot_and_archive(store: Store):
     d = store.add_decision(_decision())
+    store.drop(d.id)
     payload = _read(_decision_path(store, d.id))
     archive_dir = store.path / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
@@ -414,6 +415,7 @@ def test_archive_archive_byte_identical_duplicate_is_exempt(store: Store):
             provenance=Provenance(source="manual"),
         )
     )
+    store.ratify_domains(drop=[dom.domain_id])
     path = store.path / "domains" / f"{dom.domain_id}.json"
     payload = _read(path)
     path.unlink()  # a compacted record has no hot file left
@@ -438,6 +440,7 @@ def test_archive_archive_byte_different_duplicate_is_flagged(store: Store):
             provenance=Provenance(source="manual"),
         )
     )
+    store.ratify_domains(drop=[dom.domain_id])
     path = store.path / "domains" / f"{dom.domain_id}.json"
     payload = _read(path)
     path.unlink()
@@ -1666,3 +1669,24 @@ def test_a_huge_cycle_gets_a_short_detail(store: Store):
         + " -> ".join(ids[:10])
         + f" -> ... ({n} domains) -> D00000"
     )
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+@pytest.mark.parametrize("status", ["proposed", "accepted"])
+def test_nonterminal_archive_record_is_a_bad_segment(store: Store, kind, status):
+    record = (
+        _decision(status=status)
+        if kind == "decision"
+        else Domain(
+            slug="payments",
+            title="Payments",
+            summary="Settlement",
+            status=status,
+            provenance=Provenance(source="manual"),
+        )
+    )
+    segment = _segment(store, _archive_record_line(kind, record.model_dump(mode="json")))
+
+    findings = verify_snapshot(store.path)
+    assert _codes(findings) == [BAD_ARCHIVE_SEGMENT]
+    assert findings[0].path == str(segment)

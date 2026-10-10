@@ -229,6 +229,15 @@ uv run sidegraph-import --docs docs/adr --dry-run
 uv run sidegraph-import --docs docs/adr
 ```
 
+Each document has an independent 8 MiB byte limit, checked before hashing, decoding,
+parsing or redaction. Exactly 8 MiB is allowed; larger files are skipped whole and named in
+both real and dry-run reports, with no prefix import or raw fallback. A multi-file import
+can exceed 4 MiB total and produce more than 100 records. Tags and other free-text options
+are bounded separately before normalization: 256 KiB UTF-8 per string, depth 32 and 4,096
+visited nodes per item, with shared 4 MiB string and 65,536-node request limits. Violations
+fail safely before a record write. The existing `--section-limit` post-redaction summary
+option remains unchanged.
+
 See [`reference/cli.md`](../reference/cli.md#importing-decision-shaped-markdown---docs) for
 the full flag reference (qualifying-document rules, anchor resolution, idempotency, output
 shape) and [`guides/capturing-decisions.md`](capturing-decisions.md#already-have-adrs-import-them)

@@ -223,17 +223,18 @@ retrieval a richer graph to anchor against. Walkthrough:
 
 - **Everything is local.** Sidegraph reads your repo and the engine's `graph.json`
   (strictly read-only) and writes small human-readable JSON records inside your repo,
-  plus a local, gitignored index it can always rebuild. Two things sit outside the store:
-  the git hooks that `sidegraph-init` can install to keep the graph fresh (a helper and
-  three hooks under `.git/hooks/`) and one cache file, `sidegraph/launch-commit`, under
-  `${XDG_CACHE_HOME:-~/.cache}`. [SECURITY.md](SECURITY.md) lists every write.
+  plus a local, gitignored index it can always rebuild. Commands can also write graph-refresh
+  hooks and their helper files, repository configuration, reports and visualization output;
+  the plugin launch hook can write a cache file under `${XDG_CACHE_HOME:-~/.cache}`.
+  [SECURITY.md](SECURITY.md) lists every write.
   **Nothing leaves your machine** —
   no network calls, no remote telemetry, no account. Sidegraph does keep local usage
   diagnostics in that gitignored index (which stored memory was shown, and which files a
   session touched afterwards) so you can see which memory was shown and which files
   those sessions then touched; they never travel, and `SIDEGRAPH_TELEMETRY=off` disables them.
-- **Secrets don't enter memory.** Proposed decisions and facts pass redaction before they
-  are stored. A ratification gate controls which of the agent's drafts become trusted
+- **Captured text is redacted before storage.** Redaction is best-effort pattern matching;
+  review drafts and scan the committed store for secrets. Proposed decisions and facts pass
+  this redaction step before they are stored. A ratification gate controls which of the agent's drafts become trusted
   memory. Under the default `manual` policy a person ratifies them. A proposal is stored first
   and waits as `proposed` until then. If you answer yes to `sidegraph-init`'s
   question (or set `SIDEGRAPH_RATIFY_POLICY` yourself), eligible records ratify themselves

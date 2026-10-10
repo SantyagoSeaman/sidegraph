@@ -23,8 +23,25 @@ uv run pre-commit install      # once per clone — the lint gate runs before ea
 uv run pytest tests/test_store.py -q -x --lf   # while editing: the touched file
 uv run pytest -m "not slow"   # broader pre-push check: skips subprocess-heavy tests, still takes minutes
 uv run pytest -q               # full suite: run before a commit or PR, must be green; CI runs it again
-uv run pre-commit run --all-files   # lint + format + types, exactly what CI runs
+uv run pre-commit run --all-files   # lint + format + types + staged secrets
 ```
+
+
+The Gitleaks commit hook scans staged content even when all changed paths are excluded from
+formatting, including `.sidegraph/`. `--all-files` does not turn it into a committed scan.
+CI additionally scans all history reachable from HEAD with the same pinned scanner:
+
+```bash
+uv run pre-commit run gitleaks-history --hook-stage manual --all-files
+SIDEGRAPH_SECRET_SCAN_INTEGRATION=1 uv run pytest tests/test_secret_scan_gate.py -q
+```
+
+The history scanner includes merge changes and traverses every commit reachable from HEAD.
+Use a full checkout; CI rejects shallow history before scanning.
+
+The second command runs real scanner integration tests; they are skipped in ordinary Python
+test runs to avoid implicit scanner installation. The opt-in is read at collection time.
+Findings are redacted. The history command needs a full Git checkout to cover earlier commits.
 
 A passing test's `tmp_path` tree is removed; a failing test's is kept for inspection
 (`tmp_path_retention_policy = "failed"` in `pyproject.toml`). Run with

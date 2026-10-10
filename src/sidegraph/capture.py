@@ -12,19 +12,29 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    ValidationError,
+    model_validator,
+)
 
 from .anchoring import entity_summaries, orphan_reason, resolve_and_bind
 from .config import TELEMETRY_SESSION_KEY
 from .engine.reader import GraphifyReader
 from .gitenv import git_env
+from .input_limits import MAX_DRAFTS, preflight_drafts
+from .redaction_scan import PhaseScanner
+from .redaction_tokens import iter_jwt_spans, iter_private_key_spans
 from .retrieval import TOC_CACHE_KEY, build_toc
 from .schema import (
     AnchorBinding,
@@ -43,42 +53,38 @@ from .schema import (
 )
 from .store import _TERMINAL_DECISION_STATUSES, Store
 from .sync import activate_accepted_domain
+from .validation_errors import format_validation_error
 from .verify import _run_git, find_store_project_repo
 
 # v1 secret patterns. Redaction runs FIRST: its output is the only text that proceeds to
 # validation/storage — mandatory for a repo-committed store.
-_SECRET_PATTERNS: list[re.Pattern[str]] = [
+_SECRET_PATTERNS_BEFORE_ASSIGNMENTS: list[re.Pattern[str]] = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"ghp_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{20,}"),
-    # Assignment: `key = value` / `key: value`. A quoted value is taken whole (`password:
-    # "one two"`), plus any non-space text glued to it, so no input redacts less than a bare
-    # `\S+` would; a backtick value likewise. Quoted values are escape-aware (`\"` does not
-    # close them). An unterminated escape-aware value falls back to the plain quote pair, so
-    # nothing redacts less than the plain form did (`"a \" b"c` keeps its glued tail).
-    # `(?![a-z0-9])` after a single-quoted value keeps a later apostrophe in prose (`don't`)
-    # from closing a false "quoted value".
-    # Two entries, in this order. A QUOTED key (`{"password": ...}`) needs its own entry
-    # with the quote REQUIRED: folded into one pattern as an optional quote, a match could
-    # start at a quoted keyword key and its `\S+` value would swallow the next keyword
-    # (`` `password`: DB_PASSWORD = hunter2 ``), leaving the secret behind. The unquoted-key
-    # entry runs first, so it takes such a secret before the quoted-key entry can shadow it.
-    # The quoted-key entry also stops at `,;}])`, so it does not eat the next JSON field.
-    re.compile(
-        r"(?i)\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|secret|password)"
-        r"(?:[_-][a-z0-9]+)*\s*[=:]\s*"
-        r"(?:(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'(?![a-z0-9])|`[^`\n]*`)\S*"
-        r"|(?:\"[^\"\n]*\"|'[^'\n]*'(?![a-z0-9]))\S*|\S+)"
-    ),
-    re.compile(
-        r"(?i)\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|secret|password)"
-        r"(?:[_-][a-z0-9]+)*[\"'`]\s*[=:]\s*"
-        r"(?:(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'(?![a-z0-9])|`[^`\n]*`)"
-        r"[^\s,;}\])]*|(?:\"[^\"\n]*\"|'[^'\n]*'(?![a-z0-9]))[^\s,;}\])]*|[^\s,;}\])]+)"
-    ),
+]
+
+# Keep unquoted keys first: a quoted key may precede a nested assignment whose value
+# must be removed before the outer quoted-key pass can swallow its keyword.
+# Immutable regex grammars remain compatibility oracles; production uses PhaseScanner.
+_ASSIGNMENT_KEY_NAME_SOURCE = r"(?i)\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|secret|password)"
+_ASSIGNMENT_KEY_NAME = re.compile(_ASSIGNMENT_KEY_NAME_SOURCE)
+_ASSIGNMENT_KEYS = (
+    re.compile(_ASSIGNMENT_KEY_NAME_SOURCE + r"(?:[_-][a-z0-9]+)*\s*[=:]\s*"),
+    re.compile(_ASSIGNMENT_KEY_NAME_SOURCE + r"(?:[_-][a-z0-9]+)*[\"'`]\s*[=:]\s*"),
+)
+_QUOTED_KEY_STOPS = frozenset(",;})]")
+# Python str.splitlines boundaries, including direct MCP input without normalization.
+_LINE_BREAK = re.compile(r"[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
+
+_URL_SCHEME_SOURCE = r"[a-z][a-z0-9+.-]*://"
+_URL_SCHEME_START = re.compile(r"(?i)\b" + _URL_SCHEME_SOURCE)
+_URL_CREDENTIAL = re.compile(r"(?i)\b(" + _URL_SCHEME_SOURCE + r"[^/\s:@]+):([^@\s]+)@")
+
+_SECRET_PATTERNS_AFTER_ASSIGNMENTS: list[re.Pattern[str]] = [
     # 2026-08-04 seeded-leak eval additions (design/testing/2026-08-04-redaction-seeded-leak.md):
     # the five adjacent classes the eval showed leaking that admit low-false-positive
     # patterns. Emails and bare hex tokens remain DOCUMENTED misses — both are too
@@ -86,7 +92,7 @@ _SECRET_PATTERNS: list[re.Pattern[str]] = [
     # collides with commit SHAs/digests) and are covered by the defense-in-depth guidance
     # (run the org's secret scanner over the store path in CI).
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),  # JWT
-    re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+):([^@\s]+)@"),  # URL credential
+    _URL_CREDENTIAL,
     re.compile(r"\bAIza[0-9A-Za-z_-]{30,}\b"),  # Google API key
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),  # sk- style API key (OpenAI et al.)
 ]
@@ -96,6 +102,7 @@ _SECRET_PATTERNS: list[re.Pattern[str]] = [
 # (check-what-you-redact, not pattern-and-pray). Applied by `redact` after the pattern
 # passes above.
 _PAN_CANDIDATE = re.compile(r"\b(?:\d[ -]?){15}\d\b")
+_PAN_START = re.compile(r"\b\d")
 
 
 def _luhn_ok(digits: str) -> bool:
@@ -110,10 +117,133 @@ def _luhn_ok(digits: str) -> bool:
     return total % 10 == 0
 
 
+def _span_shadows_assignment(
+    text: str, start: int, end: int, scanner: PhaseScanner | None = None
+) -> bool:
+    """Discover bounded NAME prefixes and verify uncapped full assignment keys."""
+    return (scanner or PhaseScanner(text)).shadows_assignment(start, end)
+
+
+def _crossing_secret_end(
+    text: str, start: int, end: int, scanner: PhaseScanner | None = None
+) -> int:
+    """Extend through crossing URL/PAN matches without rescanning earlier starts."""
+    scanner = scanner or PhaseScanner(text)
+    window_start = start
+    window_end = end
+    while window_start < window_end:
+        extended = window_end
+        for scheme_start in scanner.scheme_starts(window_start, window_end):
+            credential_end = scanner.credential_end(scheme_start)
+            if credential_end is not None:
+                extended = max(extended, credential_end)
+        for hit in _PAN_START.finditer(text, window_start, window_end):
+            match = _PAN_CANDIDATE.match(text, hit.start())
+            if match is not None and match.end() > window_end:
+                digits = re.sub(r"[ -]", "", match.group(0))
+                if len(digits) == 16 and _luhn_ok(digits):
+                    extended = max(extended, match.end())
+        if extended == window_end:
+            break
+        window_start, window_end = window_end, extended
+    return window_end
+
+
+def _assignment_value_end(
+    text: str, start: int, *, quoted_key: bool, scanner: PhaseScanner | None = None
+) -> int:
+    """Consume a complete assignment value, conservatively to EOF if unclosed."""
+    size = len(text)
+    if start == size:
+        return start
+    quote = text[start]
+    end = start
+    after_closer: int | None = None
+    content_start = start
+    if quote in "\"'`":
+        delimiter = quote * 3 if text.startswith(quote * 3, start) else quote
+        end = start + len(delimiter)
+        content_start = end
+        while end < size:
+            if text[end] == "\\":
+                end = min(end + 2, size)
+                continue
+            if text.startswith(delimiter, end):
+                after = end + len(delimiter)
+                if delimiter == "'" and after < size and text[after].isalnum():
+                    end += 1
+                    continue
+                end = after
+                after_closer = after
+                break
+            end += 1
+        else:
+            return size
+    # Preserve bare-value/glued-tail coverage, and the quoted-key JSON separator stops.
+    while end < size and not text[end].isspace():
+        if quoted_key and text[end] in _QUOTED_KEY_STOPS:
+            break
+        end += 1
+    # Bare/quoted assignment spans must not fragment a later URL or grouped PAN.
+    # Incremental expansion includes overlapping valid chains.
+    extended = _crossing_secret_end(text, content_start, end, scanner)
+    # A bare or quoted value, including URL/PAN expansion, can swallow the next
+    # assignment's key; conservatively discard its ambiguous remainder.
+    if _span_shadows_assignment(text, content_start, extended, scanner):
+        return size
+    if (
+        after_closer is not None
+        and _LINE_BREAK.search(text, start, after_closer) is not None
+        and extended > end
+    ):
+        return size
+    return extended
+
+
+def _redact_assignments(text: str, *, quoted_key: bool) -> tuple[str, int]:
+    scanner = PhaseScanner(text)
+    parts: list[str] = []
+    cursor = 0
+    total = 0
+    while match := scanner.next_assignment(cursor, quoted_key=quoted_key):
+        match_start, value_start = match
+        end = _assignment_value_end(text, value_start, quoted_key=quoted_key, scanner=scanner)
+        if end == value_start:
+            parts.append(text[cursor:value_start])
+        else:
+            parts.extend((text[cursor:match_start], "[REDACTED]"))
+            total += 1
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts), total
+
+
+def _replace_secret_spans(text: str, spans: Iterable[tuple[int, int]]) -> tuple[str, int]:
+    parts: list[str] = []
+    cursor = 0
+    count = 0
+    for start, end in spans:
+        parts.extend((text[cursor:start], "[REDACTED]"))
+        cursor = end
+        count += 1
+    parts.append(text[cursor:])
+    return "".join(parts), count
+
+
 def redact(text: str) -> tuple[str, int]:
     """Scrub secrets from text. Returns (clean_text, replacement_count)."""
-    total = 0
-    for pattern in _SECRET_PATTERNS:
+    text, total = _replace_secret_spans(text, iter_private_key_spans(text))
+    for pattern in _SECRET_PATTERNS_BEFORE_ASSIGNMENTS[1:]:
+        text, n = pattern.subn("[REDACTED]", text)
+        total += n
+    for quoted_key in (False, True):
+        text, n = _redact_assignments(text, quoted_key=quoted_key)
+        total += n
+    text, n = _replace_secret_spans(text, iter_jwt_spans(text))
+    total += n
+    text, n = _replace_secret_spans(text, PhaseScanner(text).url_spans())
+    total += n
+    for pattern in _SECRET_PATTERNS_AFTER_ASSIGNMENTS[2:]:
         text, n = pattern.subn("[REDACTED]", text)
         total += n
 
@@ -127,6 +257,37 @@ def redact(text: str) -> tuple[str, int]:
 
     text = _PAN_CANDIDATE.sub(_pan_sub, text)
     return text, total
+
+
+def _redact_tag_string(tags: str) -> tuple[list[str], int]:
+    """Clean the scalar input before interpreting its comma-separated boundaries."""
+    clean, count = redact(tags)
+    if count and "," in tags:
+        # A comma can be part of the matched credential, including a tail separated
+        # by whitespace. Keep no guessed fragments from this ambiguous scalar input.
+        return [], count
+    return [part.strip() for part in clean.split(",") if part.strip()], count
+
+
+def normalize_tags(tags: Sequence[str] | str) -> tuple[list[str], int]:
+    """Redact raw tags, then return distinct meaningful slugs and substitution count.
+
+    Count every input before deduplication, including repeated secret-bearing tags.
+    Never pass raw tag text to the durable entity-name path.
+    """
+    slugs: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    if isinstance(tags, str):
+        tags, total = _redact_tag_string(tags)
+    for tag in tags:
+        clean, count = redact(tag)
+        total += count
+        slug = slugify(clean)
+        if slug and slug != "redacted" and slug not in seen:
+            slugs.append(slug)
+            seen.add(slug)
+    return slugs, total
 
 
 class RatifyPolicy(StrEnum):
@@ -346,7 +507,13 @@ def _auto_ratify(
         if kind == "domain":
             outcome = store.ratify_domains(accept=[record_id], actor=stamp)[record_id]
             if outcome.startswith("error"):
-                return AutoRatifyOutcome(ratified_by=None, error=outcome)
+                return AutoRatifyOutcome(
+                    ratified_by=None,
+                    error=(
+                        "ratification failed; reopen the store and inspect the record "
+                        "before retrying"
+                    ),
+                )
             return AutoRatifyOutcome(ratified_by=stamp, error=None)
 
         def _cascade_guard(facts: Sequence[Fact]) -> bool:
@@ -356,8 +523,11 @@ def _auto_ratify(
         return AutoRatifyOutcome(
             ratified_by=stamp, error=None, cascaded_fact_ids=tuple(f.id for f in cascaded)
         )
-    except Exception as e:
-        return AutoRatifyOutcome(ratified_by=None, error=str(e))
+    except Exception:
+        return AutoRatifyOutcome(
+            ratified_by=None,
+            error=("ratification failed; reopen the store and inspect the record before retrying"),
+        )
 
 
 def _anchor_signal(store: Store, record_id: str) -> tuple[int, bool]:
@@ -489,14 +659,31 @@ class DraftDecision(BaseModel):
     tags: list[str] = Field(default_factory=list)  # free text; slugified below
     facts: list[DraftFact] = Field(default_factory=list)  # attached, non-derivable knowledge
 
-    @field_validator("tags", mode="before")
+    _tag_string_redactions: int = PrivateAttr(default=0)
+    _tag_string_fragments: tuple[str, ...] = PrivateAttr(default=())
+
+    @model_validator(mode="wrap")
     @classmethod
-    def _coerce_string_tags(cls, v: object) -> object:
-        """Liberal-input: agents pass tags as a bare comma-separated string on the first
-        try — split it instead of failing the draft (mirrors server._coerce_tags)."""
-        if isinstance(v, str):
-            return [part.strip() for part in v.split(",") if part.strip()]
-        return v
+    def _redact_string_tag_input(
+        cls, value: object, handler: ModelWrapValidatorHandler[Self]
+    ) -> Self:
+        if isinstance(value, Mapping):
+            raw_tags = value.get("tags")
+            if isinstance(raw_tags, str):
+                fragments, count = _redact_tag_string(raw_tags)
+                result = handler({**value, "tags": fragments})
+                result._tag_string_redactions = count
+                result._tag_string_fragments = tuple(result.tags)
+                return result
+        return handler(value)
+
+    def model_copy(self, *, update: Mapping[str, object] | None = None, deep: bool = False) -> Self:
+        """Keep tag provenance only when the caller has not replaced its input."""
+        result = super().model_copy(update=update, deep=deep)
+        if update is not None and "tags" in update:
+            result._tag_string_redactions = 0
+            result._tag_string_fragments = ()
+        return result
 
     layer: Literal["business", "technical"] | None = None
 
@@ -924,7 +1111,7 @@ def _internal_error_reason(exc: Exception) -> str:
     # see design/superpowers/specs/2026-09-29-capture-write-path-design.md D6
     """
     return (
-        f"internal error: {type(exc).__name__}: {exc} \u2014 the record may be on disk but "
+        "internal error: operation failed \u2014 the record may be on disk but "
         "not indexed until the store is reopened; do not re-propose it in this session, "
         "check list_proposed in the next one"
     )
@@ -983,7 +1170,7 @@ def _propose_fact_one(
     try:
         draft = DraftFact.model_validate(raw)
     except ValidationError as e:
-        return ProposeFactResult(status="rejected", reason=f"invalid draft: {e}")
+        return ProposeFactResult(status="rejected", reason=format_validation_error(e))
 
     # 2. Redact first — same gate as _propose_one's text fields; the scrubbed text is the
     # only text that proceeds to reachability/dedup/storage.
@@ -1038,9 +1225,16 @@ def _propose_fact_one(
                 commit=_capture_commit(store),
             ),
         )
+    except ValidationError as e:
+        return ProposeFactResult(
+            status="rejected", reason=format_validation_error(e), redactions=redactions
+        )
+    try:
         store.add_fact(fact)
-    except (ValidationError, ValueError) as e:
-        return ProposeFactResult(status="rejected", reason=str(e), redactions=redactions)
+    except Exception as e:
+        return ProposeFactResult(
+            status="rejected", reason=_internal_error_reason(e), redactions=redactions
+        )
 
     # 6. Anchor — identical ladder to _propose_one's (see that function's step 5): anchors
     # carry their own optional relation override; strip it before handing the bare
@@ -1134,8 +1328,8 @@ def _propose_fact_one(
                 outcome = _auto_ratify(store, fact.id, "fact", ratify_policy)
                 ratified_by = outcome.ratified_by
                 auto_ratify_error = outcome.error
-    except Exception as e:
-        cause = f"{type(e).__name__}: {e}"
+    except Exception:
+        cause = "operation failed"
         if auto_accept:
             # Accepted already: Store.drop_fact refuses it, so the remedy is add_anchors (it
             # takes fact ids). Facts carry no initiative or tags.
@@ -1202,7 +1396,7 @@ def _propose_one(
     try:
         draft = DraftDecision.model_validate(raw)
     except ValidationError as e:
-        return ProposeResult(status="rejected", reason=f"invalid draft: {e}")
+        return ProposeResult(status="rejected", reason=format_validation_error(e))
 
     # D7.3: best-effort session_id fallback when the caller passed none (E8 measured
     # author=None session=None on Stop-channel captures) — see _session_id_fallback's
@@ -1215,7 +1409,9 @@ def _propose_one(
 
     # 1. Redact first — the scrubbed text is the only text that proceeds. Tags are free
     # text until slugified, so they go through the same gate.
-    redactions = 0
+    redactions = (
+        draft._tag_string_redactions if tuple(draft.tags) == draft._tag_string_fragments else 0
+    )
     clean: dict[str, str | None] = {}
     for name in _TEXT_FIELDS:
         value = getattr(draft, name)
@@ -1226,18 +1422,8 @@ def _propose_one(
             clean[name] = scrubbed
             redactions += n
 
-    tag_slugs: list[str] = []
-    for tag in draft.tags:
-        scrubbed, n = redact(tag)
-        redactions += n
-        slug = slugify(scrubbed)
-        # A tag whose entire text WAS the secret redacts down to "[REDACTED]" -> slugifies
-        # to exactly "redacted" -- skip it (never mint a nameless `tag:redacted` entity
-        # that leaks nothing but also means nothing; see M2 review fold-in). A tag that
-        # merely CONTAINS "redacted" alongside real words (e.g. "redacted-config") still
-        # slugifies to something else and is kept.
-        if slug and slug != "redacted":
-            tag_slugs.append(slug)
+    tag_slugs, tag_redactions = normalize_tags(draft.tags)
+    redactions += tag_redactions
 
     # The initiative names a canonical entity, so it is cleaned with the other fields --
     # before dedup, so a `deduped` result still counts what it redacted. An empty string
@@ -1316,9 +1502,16 @@ def _propose_one(
             and ratify_policy != RatifyPolicy.MANUAL
             and draft.supersedes is not None
         )
+    except ValidationError as e:
+        return ProposeResult(
+            status="rejected", reason=format_validation_error(e), redactions=redactions
+        )
+    try:
         store.add_decision(decision, close_predecessor=not defer_close)
-    except (ValidationError, ValueError) as e:
-        return ProposeResult(status="rejected", reason=str(e), redactions=redactions)
+    except Exception as e:
+        return ProposeResult(
+            status="rejected", reason=_internal_error_reason(e), redactions=redactions
+        )
 
     # 5. Anchor (Stage-3 path with the engine; orphaned leaves without it). Anchors carry
     # their own optional relation override; strip it before handing the bare Descriptor to
@@ -1486,8 +1679,8 @@ def _propose_one(
                         for fr in fact_results
                     ]
 
-    except Exception as e:
-        cause = f"{type(e).__name__}: {e}"
+    except Exception:
+        cause = "operation failed"
         if auto_accept:
             guard_reason = (
                 f"written (accepted), but {step} and the later steps did not run ({cause}); "
@@ -1542,9 +1735,15 @@ def propose(
     ``_propose_one``'s own post-write block.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2
     """
+    input_errors = preflight_drafts(
+        drafts, decision_indices=range(MAX_DRAFTS), metadata=(session_id, author, ref)
+    )
     graph_version = reader.graph_version() if reader is not None else None
     results: list[ProposeResult] = []
-    for raw in drafts:
+    for raw, input_error in zip(drafts, input_errors, strict=True):
+        if input_error is not None:
+            results.append(ProposeResult(status="rejected", reason=str(input_error)))
+            continue
         try:
             results.append(
                 _propose_one(
@@ -1596,9 +1795,13 @@ def propose_facts(
     writes).
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2
     """
+    input_errors = preflight_drafts(drafts, metadata=(session_id, author))
     graph_version = reader.graph_version() if reader is not None else None
     results: list[ProposeFactResult] = []
-    for raw in drafts:
+    for raw, input_error in zip(drafts, input_errors, strict=True):
+        if input_error is not None:
+            results.append(ProposeFactResult(status="rejected", reason=str(input_error)))
+            continue
         try:
             results.append(
                 _propose_fact_one(
@@ -1673,23 +1876,23 @@ def _lint_domain_path_prefixes(
     which those guards don't cover. Store-only, no reader needed. "Live" = ACCEPTED —
     the same addressable-domain notion ``retrieval.py``'s TOC/drill_down use. Deduped one
     warning per ``(domain, prefix)`` pair (NIT-3, code review) — a domain with several
-    seed anchors all falling under the SAME prefix names only the first match, rather
-    than repeating the same complaint once per anchor.
+    seed anchors under the SAME prefix emits one fixed warning. Domain names and matching
+    anchor paths are omitted; separate domains may therefore emit identical warnings.
     """
     warnings: list[str] = []
     if reader is not None:
-        for p in path_prefixes:
+        for index, p in enumerate(path_prefixes):
             covers_something = any(
                 n.file_path and matches_path_prefix(n.file_path, p) for n in reader.list_nodes()
             )
             if not covers_something:
                 warnings.append(
-                    f"path_prefix {p!r} matches no file in the current graph (dead prefix)"
+                    f"path_prefixes[{index}] matches no file in the current graph (dead prefix)"
                 )
 
     if path_prefixes:
         for domain in store.iter_domains(status=DomainStatus.ACCEPTED):
-            for p in path_prefixes:
+            for index, p in enumerate(path_prefixes):
                 match = next(
                     (
                         anchor.file_path
@@ -1700,7 +1903,7 @@ def _lint_domain_path_prefixes(
                 )
                 if match is not None:
                     warnings.append(
-                        f"path_prefix {p!r} subsumes domain {domain.slug!r}'s seed anchor {match!r}"
+                        f"path_prefixes[{index}] subsumes an accepted domain's seed anchor"
                     )
 
     return warnings
@@ -1732,7 +1935,7 @@ def _propose_domain_one(
     try:
         draft = DraftDomain.model_validate(raw)
     except ValidationError as e:
-        return ProposeDomainResult(status="rejected", reason=f"invalid draft: {e}")
+        return ProposeDomainResult(status="rejected", reason=format_validation_error(e))
 
     redactions = 0
     title, n = redact(draft.title)
@@ -1748,7 +1951,7 @@ def _propose_domain_one(
         return ProposeDomainResult(
             status="skipped",
             domain_id=existing.domain_id,
-            reason=f"slug {draft.slug!r} already used by domain {existing.domain_id}",
+            reason=f"slug already used by domain {existing.domain_id}",
             redactions=redactions,
         )
 
@@ -1758,7 +1961,7 @@ def _propose_domain_one(
         if parent is None:
             return ProposeDomainResult(
                 status="rejected",
-                reason=f"parent_slug {draft.parent_slug!r} does not resolve to any domain",
+                reason="parent_slug does not resolve to any domain",
                 redactions=redactions,
             )
         parent_id = parent.domain_id
@@ -1775,9 +1978,16 @@ def _propose_domain_one(
                 source="agent", author=author, session_id=session_id, graph_version=graph_version
             ),
         )
+    except ValidationError as e:
+        return ProposeDomainResult(
+            status="rejected", reason=format_validation_error(e), redactions=redactions
+        )
+    try:
         store.add_domain(domain)
-    except (ValidationError, ValueError) as e:
-        return ProposeDomainResult(status="rejected", reason=str(e), redactions=redactions)
+    except Exception as e:
+        return ProposeDomainResult(
+            status="rejected", reason=_internal_error_reason(e), redactions=redactions
+        )
 
     warnings: list[str] = []
     ratified_by: str | None = None
@@ -1824,8 +2034,10 @@ def _propose_domain_one(
                     # those byte-identical-proven paths too.
                     try:
                         activation = activate_accepted_domain(domain, store, reader)
-                    except Exception as e:
-                        auto_ratify_error = f"activation: {e}"
+                    except Exception:
+                        auto_ratify_error = (
+                            "activation: operation failed; run sync_anchors to retry"
+                        )
                     else:
                         # `resolved` and `overbroad` are independent fields on
                         # `sync.DomainActivation` (checked separately, not elif'd, so neither
@@ -1836,18 +2048,19 @@ def _propose_domain_one(
                         # is that same sentence, the literal `sidegraph:heal-anchors` trigger
                         # phrase, so an unattended auto-all caller gets it too (D2, D6).
                         if not activation.resolved:
-                            auto_ratify_error = f"activation: {activation.error}"
+                            auto_ratify_error = (
+                                "activation: membership unresolved; run sync_anchors to retry"
+                            )
                         if activation.overbroad is not None:
-                            prefixes = ", ".join(repr(p) for p in domain.path_prefixes)
                             broad = activation.overbroad
                             auto_ratify_error = (
-                                f"activation: path rule too broad: {prefixes} match "
+                                "activation: path rule too broad: path_prefixes match "
                                 f"{broad['matched']}/{broad['total']} "
                                 "communities — not applied; seed_anchors, if any, still applied"
                             )
-    except Exception as e:
+    except Exception:
         guard_reason = (
-            f"proposed, but {step} failed ({type(e).__name__}: {e}); review the domain's "
+            f"proposed, but {step} failed (operation failed); review the domain's "
             "path_prefixes and anchors before ratifying"
         )
 
@@ -1888,9 +2101,13 @@ def propose_domains(
     activation step never rebuilds it).
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2
     """
+    input_errors = preflight_drafts(drafts, metadata=(session_id, author))
     graph_version = reader.graph_version() if reader is not None else None
     results: list[ProposeDomainResult] = []
-    for raw in drafts:
+    for raw, input_error in zip(drafts, input_errors, strict=True):
+        if input_error is not None:
+            results.append(ProposeDomainResult(status="rejected", reason=str(input_error)))
+            continue
         try:
             results.append(
                 _propose_domain_one(
@@ -1908,9 +2125,9 @@ def propose_domains(
     if any(r.ratified_by is not None for r in results):
         try:
             store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store)))
-        except Exception as e:
+        except Exception:
             # The domains are already accepted; an unhealed TOC must not be silent.
-            warning = f"toc: {type(e).__name__}: {e} \u2014 the next sync rebuilds it"
+            warning = "toc: operation failed \u2014 the next sync rebuilds it"
             results = [
                 r.model_copy(update={"warnings": [*r.warnings, warning]})
                 if r.ratified_by is not None

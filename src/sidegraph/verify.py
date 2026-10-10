@@ -46,12 +46,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple, overload
 
 from pydantic import BaseModel, ValidationError
 
@@ -72,12 +73,15 @@ from .store import (
     _FORMAT_MARKER_PREFIX,
     _MIGRATABLE_SCHEMA_VERSIONS,
     _RELOADABLE_SCHEMA_VERSIONS,
+    _TERMINAL_DECISION_STATUSES,
+    _TERMINAL_DOMAIN_STATUSES,
     _archive_line_problem,
     _archive_payload_problem,
     symlinked_internals,
 )
 from .store_layout import (
     NOT_A_FILE_REASON,
+    hot_matches_archive,
     is_regular_file,
     require_listable_record_dirs,
     same_modulo_absent,
@@ -409,6 +413,25 @@ class _ArchiveIndex:
     violations: list[Violation]
 
 
+_ARCHIVE_TERMINAL_STATUSES = {
+    "decision": frozenset(status.value for status in _TERMINAL_DECISION_STATUSES),
+    "domain": frozenset(status.value for status in _TERMINAL_DOMAIN_STATUSES),
+}
+
+
+def _archive_compaction_problem(kind: object, payload: dict) -> str | None:
+    """Recognized archive records must be eligible for the Store's compaction API."""
+    if not isinstance(kind, str):
+        return None  # the archive reader also skips non-string future kind markers
+    terminal = _ARCHIVE_TERMINAL_STATUSES.get(kind)
+    if terminal is None:
+        return None  # unknown future kinds retain the loader's forward compatibility
+    status = payload.get("status")
+    if not isinstance(status, str) or status not in terminal:
+        return "record status is not eligible for compaction"
+    return None
+
+
 def _check_archive_dir(dir_path: Path) -> _ArchiveIndex:
     """``archive/*.jsonl`` — one JSON object per line (see
     ``docs/reference/store-format.md#archive-segments-sidegraph-compact`` and
@@ -416,9 +439,10 @@ def _check_archive_dir(dir_path: Path) -> _ArchiveIndex:
     :data:`BAD_ARCHIVE_SEGMENT`, scoped separately from :data:`PARSE_ERROR` (which is
     reserved for the one-file-per-record canonical directories) since "this JSONL segment has
     a bad line" and "this record file is corrupt" are different failure shapes worth
-    distinguishing in a report. These are exactly the lines the store's reload leaves out and
-    lists, so the notice that says "run ``sidegraph-verify``" finds them here
-    (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D4)."""
+    distinguishing in a report. Decode/schema failures match the lines the store's reload
+    leaves out and lists (design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md
+    D4); the verifier additionally rejects recognized nonterminal records, which the reload
+    still reads. Only compaction-eligible records belong in an archive."""
     decisions: dict[str, dict] = {}
     domains: dict[str, dict] = {}
     decision_entries: dict[str, list[tuple[Path, dict]]] = {}
@@ -472,7 +496,9 @@ def _check_archive_dir(dir_path: Path) -> _ArchiveIndex:
             # the model rejects is left out of the index. It stays in the id maps below, like
             # a hot file that fails validation (see ``_check_temporal_dir``): its id and
             # status are still real data for the cross-reference checks.
-            problem = _archive_payload_problem(record_type, payload)
+            problem = _archive_payload_problem(record_type, payload) or _archive_compaction_problem(
+                record_type, payload
+            )
             if problem is not None:
                 violations.append(
                     _violation(BAD_ARCHIVE_SEGMENT, path, f"line {lineno}: {problem}")
@@ -1143,6 +1169,30 @@ def classify_transition(kind: str, old: dict | None, new: dict | None) -> list[V
     return _check_immutable_fields(old, new, ENTITY_MUTABLE_FIELDS, path)
 
 
+def _classify_archive_transfer(kind: str, old: dict, archived: dict) -> list[Violation]:
+    """Check a hot record's relocation without losing raw fields or legal lifecycle moves."""
+    path = _synthetic_path(kind, old)
+    if _archive_payload_problem(kind, archived) or _archive_compaction_problem(kind, archived):
+        return [
+            _violation(ILLEGAL_DELETION, path, "archive copy is not a valid compactable record")
+        ]
+
+    findings = classify_transition(kind, old, archived)
+    mutable = DECISION_MUTABLE_FIELDS if kind == "decision" else DOMAIN_MUTABLE_FIELDS
+    for field in sorted(old):
+        if field in mutable or not same_modulo_absent(old[field], archived.get(field)):
+            continue  # actual changes already follow classify_transition's lifecycle rules
+        # The general classifier tolerates absent/default keys symmetrically. Compaction's
+        # destructive removal requires every baseline key to survive, even a nested empty
+        # key which a model dump could otherwise discard. Older absent defaults still expand.
+        archive_field = {field: archived[field]} if field in archived else {}
+        if not hot_matches_archive({field: old[field]}, archive_field):
+            findings.append(
+                _violation(ILLEGAL_FIELD_CHANGE, path, f"field {field!r} lost raw keys")
+            )
+    return findings
+
+
 class _UnparsableContent(Exception):
     """One side of a changed file's diff failed to parse as a JSON object. Caught by
     :func:`verify_against` to skip just that one file's transition check — the ALWAYS-ON
@@ -1151,13 +1201,28 @@ class _UnparsableContent(Exception):
     would be noise, and one unparsable file must never abort the whole ``--against`` pass."""
 
 
+@overload
 def _run_git(
-    args: list[str], cwd: Path, *, timeout: float | None = None
-) -> subprocess.CompletedProcess[str]:
+    args: list[str], cwd: Path, *, timeout: float | None = None, text: Literal[True] = True
+) -> subprocess.CompletedProcess[str]: ...
+
+
+@overload
+def _run_git(
+    args: list[str], cwd: Path, *, timeout: float | None = None, text: Literal[False]
+) -> subprocess.CompletedProcess[bytes]: ...
+
+
+def _run_git(
+    args: list[str], cwd: Path, *, timeout: float | None = None, text: bool = True
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     """``timeout`` (drift→supersede D1) bounds the subprocess for hook-path callers; the
     default ``None`` is byte-for-byte today's behavior for every existing call site. A
     ``TimeoutExpired`` maps onto the same ``ValueError`` contract as ``OSError`` — every
     caller already treats that as "git unavailable".
+
+    ``text=False`` preserves raw pathname bytes for NUL-framed diff output; existing
+    callers keep decoded text by default.
 
     Git runs with its repository-local variables (``GIT_DIR`` and friends) dropped, so it
     answers about the repository containing ``cwd``, never an ambient one."""
@@ -1166,7 +1231,7 @@ def _run_git(
             ["git", *args],
             cwd=cwd,
             capture_output=True,
-            text=True,
+            text=text,
             timeout=timeout,
             env=git_env(),
         )
@@ -1218,8 +1283,45 @@ def find_store_project_repo(store_dir: Path, *, timeout: float | None = None) ->
     return None
 
 
+def _resolve_commit_oid(repo_root: Path, ref: str) -> str:
+    """Resolve one baseline commit without interpreting user input as options."""
+    if not isinstance(ref, str) or not ref or ref.startswith("-") or "\0" in ref:
+        raise ValueError("Invalid Git baseline revision.")
+    result = _run_git(
+        ["rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
+        cwd=repo_root,
+    )
+    if result.returncode != 0:
+        raise ValueError("Could not resolve Git baseline to one commit.")
+    match = re.fullmatch(r"([0-9a-f]{40}|[0-9a-f]{64})\n?", result.stdout)
+    if match is None:
+        raise ValueError("Git returned an invalid baseline commit ID.")
+    return match.group(1)
+
+
+def _parse_git_name_status_z(stdout: bytes) -> list[tuple[str, str]]:
+    """Validate the whole no-rename diff stream before exposing filesystem paths."""
+    error = "Git returned malformed or unsupported NUL-framed diff output."
+    if not isinstance(stdout, bytes):
+        raise ValueError(error)
+    if not stdout:
+        return []
+    if not stdout.endswith(b"\0"):
+        raise ValueError(error)
+    fields = stdout[:-1].split(b"\0")
+    if len(fields) % 2:
+        raise ValueError(error)
+    changed: list[tuple[str, str]] = []
+    for index in range(0, len(fields), 2):
+        status, path = fields[index : index + 2]
+        if status not in {b"A", b"D", b"M", b"T", b"U"} or not path:
+            raise ValueError(error)
+        changed.append((status.decode("ascii"), os.fsdecode(path)))
+    return changed
+
+
 def _git_diff_name_status(repo_root: Path, ref: str, store_dir: Path) -> list[tuple[str, str]]:
-    """``git diff --no-renames --name-status <ref> -- <store_dir>``, run from ``repo_root``
+    """``git diff --no-renames --name-status -z <ref> -- <store_dir>``, run from ``repo_root``
     (design ruling 2: "git plumbing ... ``git diff --name-status <ref> -- <store-dir>``").
 
     ``--no-renames`` is deliberate: a renamed-but-identical record file would otherwise
@@ -1229,27 +1331,25 @@ def _git_diff_name_status(repo_root: Path, ref: str, store_dir: Path) -> list[tu
     from any archive) alongside an unrelated addition is the MORE informative shape, not a
     loss of information.
 
-    Compares ``ref`` against the CURRENT WORKING TREE (git's default for a single-ref
+    ``ref`` is the validated full commit OID resolved once by ``verify_against``.
+    Compares that frozen baseline against the CURRENT WORKING TREE (git's default for a single-ref
     ``diff`` — no second ref, no ``--cached``), matching the CI use case this exists for:
     ``origin/main`` vs. whatever the PR branch has checked out right now. Untracked files
     never appear in ``git diff`` output at all (git diff semantics, not a bug here) — a
     normal CI checkout has none.
     """
     result = _run_git(
-        ["diff", "--no-renames", "--name-status", ref, "--", str(store_dir)], cwd=repo_root
+        ["diff", "--no-renames", "--name-status", "-z", ref, "--", str(store_dir)],
+        cwd=repo_root,
+        text=False,
     )
     if result.returncode != 0:
-        raise ValueError(f"git diff against {ref!r} failed: {result.stderr.strip()}")
-    changed: list[tuple[str, str]] = []
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            continue
-        status, _, path = line.partition("\t")
-        changed.append((status[:1], path))
-    return changed
+        raise ValueError(f"git diff against {ref!r} failed: {os.fsdecode(result.stderr).strip()}")
+    return _parse_git_name_status_z(result.stdout)
 
 
 def _git_show_json(repo_root: Path, ref: str, repo_path: str) -> dict:
+    """Read a record from the same validated full commit OID used by the diff."""
     result = _run_git(["show", f"{ref}:{repo_path}"], cwd=repo_root)
     if result.returncode != 0:
         raise ValueError(f"git show {ref}:{repo_path} failed: {result.stderr.strip()}")
@@ -1324,10 +1424,10 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
 
     Deletion legality (design ruling 2's "Deletions" bullet): :func:`classify_transition`
     alone always reports a decision/domain deletion as illegal (it has no I/O access to the
-    archive). This function applies the one sanctioned exception — a deleted record whose id
-    appears in an ``archive/*.jsonl`` segment PRESENT IN THE NEW TREE (i.e. on disk right
-    now, under ``store_dir/archive`` — a legitimate ``sidegraph-compact``) — by dropping
-    that specific :data:`ILLEGAL_DELETION` finding after the fact. Entity/initiative
+    archive). This function applies the one sanctioned exception: every archive copy of
+    the same kind and id in the new tree must be a schema-valid compactable record whose
+    raw payload is a legal transition from the baseline, preserving its immutable keys.
+    An ID alone never authorizes deletion. Entity/initiative
     deletions have no such exception (no compact path exists for either kind) and stay
     illegal unconditionally. Binding-file changes of any shape, including deletion, are
     never classified at all here, matching :func:`classify_transition`. An already-
@@ -1357,7 +1457,8 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
     # that doesn't exist and yielding an EMPTY diff -- a silently "clean" verdict over real
     # tampering, the worst possible failure mode for a CI lint. git accepts an absolute
     # pathspec regardless of cwd, so always pass the already-resolved absolute path here.
-    changed = _git_diff_name_status(repo_root, ref, store_dir_abs)
+    baseline_oid = _resolve_commit_oid(repo_root, ref)
+    changed = _git_diff_name_status(repo_root, baseline_oid, store_dir_abs)
     if symlinked_internals(store_dir):
         # The snapshot layer stops at the links; a transition diff would read through them. The
         # repo and the ref are resolved first, so a bad ref stays an operational error.
@@ -1365,12 +1466,12 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
     require_listable_record_dirs(store_dir)
 
     # The NEW tree's archive contents (on-disk, right now) -- what deletion legality
-    # consults. Only the id sets matter here; any BAD_ARCHIVE_SEGMENT-shaped finding is the
-    # always-on snapshot layer's job, not re-reported by this pass.
+    # consults. Preserve every raw occurrence: selecting the first ID match could hide an
+    # altered second copy. The snapshot layer separately reports malformed/duplicate lines.
     new_tree_archive = _check_archive_dir(store_dir_abs / "archive")
-    archived_ids = {
-        "decision": set(new_tree_archive.decisions),
-        "domain": set(new_tree_archive.domains),
+    archived_entries = {
+        "decision": new_tree_archive.decision_entries,
+        "domain": new_tree_archive.domain_entries,
     }
 
     violations: list[Violation] = []
@@ -1423,7 +1524,7 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
             continue
 
         try:
-            old = None if status == "A" else _git_show_json(repo_root, ref, repo_path)
+            old = None if status == "A" else _git_show_json(repo_root, baseline_oid, repo_path)
             new = None if status == "D" else _read_json_object(repo_root / repo_path)
         except _UnparsableContent:
             continue  # the always-on snapshot layer already reports this as parse-error
@@ -1433,8 +1534,13 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
             rid_field = "id" if kind == "decision" else "domain_id"
             old_id = old.get(rid_field) if old is not None else None
             # Only a string id can be an archived one (a list/dict id is unhashable).
-            if isinstance(old_id, str) and old_id in archived_ids[kind]:
-                found = []  # legitimate sidegraph-compact -- archived in the new tree
+            if isinstance(old_id, str) and (entries := archived_entries[kind].get(old_id)):
+                assert old is not None  # old_id came from this baseline payload
+                found = [
+                    violation
+                    for _, archived in entries
+                    for violation in _classify_archive_transfer(kind, old, archived)
+                ]
         violations.extend(replace(v, path=repo_path) for v in found)
 
     return violations

@@ -1633,7 +1633,7 @@ def test_bootstrap_warns_when_derived_prefix_subsumes_sibling_seed_anchor(tmp_pa
     ten = next(d for d in store.iter_domains() if d.communities == ["10"])
     assert ten.path_prefixes == ["domainA"]
     entry = next(w for w in report.warnings if w["slug"] == ten.slug)
-    assert any("subsumes" in w and "alpha-notes" in w for w in entry["warnings"])
+    assert "path_prefixes[0] subsumes an accepted domain's seed anchor" in entry["warnings"]
 
 
 def test_bootstrap_no_warnings_in_the_common_case(tmp_path):

@@ -655,7 +655,8 @@ def test_propose_domains_warns_when_prefix_subsumes_sibling_seed_anchor(tmp_path
     )
     assert out[0]["status"] == "proposed"
     assert any(
-        "subsumes" in w and "payments" in w and "trader/exec.py" in w for w in out[0]["warnings"]
+        w == "path_prefixes[0] subsumes an accepted domain's seed anchor"
+        for w in out[0]["warnings"]
     )
 
 

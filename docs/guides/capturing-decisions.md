@@ -121,11 +121,47 @@ Each draft maps directly onto the decision schema:
 | Learned | `consequences` | trade-offs accepted |
 | (rejected) | `rejected` | what was tried and abandoned |
 
+Before processing any batch item, capture checks the raw input against fixed limits:
+256 KiB UTF-8 per string, 4 MiB of admitted strings per request, 100 drafts including
+attached facts, depth 32, 4,096 visited nodes per draft and 65,536 admitted nodes per request.
+Tags, metadata, descriptor strings and mapping keys count too. The combined MCP decisions
+and standalone facts share one budget. A field or structure violation rejects the entire
+top-level draft, including attached facts, while valid siblings continue; rejected items
+consume no admitted byte/node budget. A request-wide limit violation fails before any
+canonical write. Cycles and invalid UTF-8 strings are rejected with static errors. Inputs
+are never silently truncated and no environment switch disables these limits. Direct
+add/supersede writes use the same field, depth, item-node and aggregate limits. See the
+[MCP reference](../reference/mcp-tools.md#capture-and-direct-write-resource-limits).
+
+Malformed drafts report bounded known-field/error-code diagnostics without reflecting
+values or arbitrary exception causes. Invalid drafts write nothing and valid siblings
+continue. An incomplete store operation can already have written canonical data: follow
+the may-have-written warning, reopen in the next session and inspect before retrying.
+Post-write failures keep their write-action status and useful recovery hints. See
+[safe write diagnostics](../reference/mcp-tools.md#safe-write-diagnostics); the guard
+covers warning/error exception logging, while upstream FastMCP DEBUG argument tracing
+can still record raw inputs.
+
 The write pipeline (`src/sidegraph/capture.py`) is deterministic — no LLM key required:
 
-1. **Redact** every text field first (AWS keys, GitHub/Slack tokens, bearer tokens, private
-   key blocks, `key=value`/`key: value` secrets) — the scrubbed text is the only text that
-   ever reaches the store.
+1. **Redact** admitted text fields (AWS keys, GitHub/Slack tokens, bearer tokens,
+   private key blocks, `key=value`/`key: value` secrets) — the scrubbed text is the only
+   text that ever reaches the store. Tags are redacted before slugification and duplicate
+   slugs are combined. Comma-separated string input is cleaned before splitting: if any
+   secret matches in a comma-containing string, all its tags are omitted. Use a list to
+   make tag boundaries explicit. Quoted assignment values are consumed whole, including
+   multiline and triple-quoted values. If no legal closer is found, or an assignment span
+   including URL/card expansion would swallow another assignment's key, the remaining
+   input is removed. A multiline quote splitting a matched URL credential or
+   checksum-valid grouped card number does so too. This can remove following prose,
+   including after key-like text inside a closed value. Bare assignment values and
+   single-line glued tails extend through crossing URL/card matches while otherwise
+   preserving later prose. A single quote followed by a Unicode letter or digit stays
+   inside the value as an apostrophe; without a later closer, the remaining input is
+   removed. Review the redacted draft. Assignment-key, URL-credential, JWT and private-key
+   block recognizers use linear scanners for the four known repeated-suffix attack families.
+   This is not a guarantee of complete secret detection or universal regex linearity;
+   email addresses and bare hexadecimal strings remain documented misses.
 2. **Dedup** conservatively: a draft is dropped as `deduped` only if a currently-valid
    decision with the same `kind` and the same canonicalized `title` already binds one of the
    same anchor entities. When unsure, it writes — the human drops it at ratification instead.

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import codecs
+import os
+import stat
 from fnmatch import fnmatchcase
 from pathlib import Path
+from typing import BinaryIO
 
 from sidegraph.bootstrap.model import Exclusion, ScanResult
 from sidegraph.profiles import FlowProfile
@@ -75,6 +79,42 @@ def _excluded_directory(root: Path, path: Path) -> Path | None:
     return None
 
 
+def _validate_source(handle: BinaryIO, *, budget: int, overflow_reason: str) -> str | None:
+    """Sniff and strictly decode one unbuffered handle within a physical byte budget."""
+    consumed = 0
+    prefix = bytearray()
+    eof = False
+    while len(prefix) < 4096:
+        chunk = handle.read(min(4096 - len(prefix), budget + 1 - consumed))
+        if chunk is None:
+            return "unreadable"
+        if not chunk:
+            eof = True
+            break
+        consumed += len(chunk)
+        if consumed > budget:
+            return overflow_reason
+        if b"\0" in chunk:
+            return "binary"
+        prefix.extend(chunk)
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    decoder.decode(prefix, final=eof)
+    if eof:
+        return None
+    while True:
+        chunk = handle.read(min(4096, budget + 1 - consumed))
+        if chunk is None:
+            return "unreadable"
+        if not chunk:
+            decoder.decode(b"", final=True)
+            return None
+        consumed += len(chunk)
+        if consumed > budget:
+            return overflow_reason
+        decoder.decode(chunk, final=False)
+
+
 def _accept_file(
     root: Path, path: Path, *, included: set[Path], max_bytes: int
 ) -> tuple[str | None, Exclusion | None]:
@@ -82,23 +122,47 @@ def _accept_file(
     if not _inside(root, path):
         return None, Exclusion(path=rel, reason="outside-repository")
     try:
-        size = path.stat().st_size
+        metadata = path.stat()
     except OSError:
         return None, Exclusion(path=rel, reason="unreadable")
+    if not stat.S_ISREG(metadata.st_mode):
+        return None, Exclusion(path=rel, reason="non-regular-file")
     resolved = _resolve(path)
-    if resolved is None:
+    resolved_root = _resolve(root)
+    if resolved is None or resolved_root is None or not resolved.is_relative_to(resolved_root):
         return None, Exclusion(path=rel, reason="outside-repository")
     override = resolved in included
-    if size > max_bytes and not override:
+    if _lexical_excluded_directory(resolved_root, resolved) is not None and not override:
+        return None, Exclusion(path=rel, reason="excluded-directory")
+    if metadata.st_size > max_bytes and not override:
         return None, Exclusion(path=rel, reason="over-size-limit")
+
+    fd: int | None = None
     try:
-        with path.open("rb") as handle:
-            prefix = handle.read(4096)
-        if b"\0" in prefix:
-            return None, Exclusion(path=rel, reason="binary")
-        path.read_text(encoding="utf-8")
+        flags = os.O_RDONLY
+        for flag in ("O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC"):
+            flags |= getattr(os, flag, 0)
+        fd = os.open(resolved, flags)
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            return None, Exclusion(path=rel, reason="non-regular-file")
+        if opened.st_size > max_bytes and not override:
+            return None, Exclusion(path=rel, reason="over-size-limit")
+        handle = os.fdopen(fd, "rb", buffering=0)
+        fd = None  # The handle owns closure only after fdopen succeeds.
+        with handle:
+            reason = _validate_source(
+                handle,
+                budget=opened.st_size if override else max_bytes,
+                overflow_reason="changed-during-scan" if override else "over-size-limit",
+            )
+        if reason is not None:
+            return None, Exclusion(path=rel, reason=reason)
     except (OSError, UnicodeDecodeError):
         return None, Exclusion(path=rel, reason="unreadable")
+    finally:
+        if fd is not None:
+            os.close(fd)
     return rel, None
 
 

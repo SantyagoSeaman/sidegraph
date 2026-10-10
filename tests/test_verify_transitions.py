@@ -38,6 +38,7 @@ from sidegraph.verify import (
     _DECISION_STATUS_TRANSITIONS,
     _DOMAIN_STATUS_TRANSITIONS,
     _FACT_STATUS_TRANSITIONS,
+    BAD_ARCHIVE_SEGMENT,
     DECISION_MUTABLE_FIELDS,
     DOMAIN_MUTABLE_FIELDS,
     ENTITY_MUTABLE_FIELDS,
@@ -50,6 +51,7 @@ from sidegraph.verify import (
     Violation,
     classify_transition,
     verify_against,
+    verify_snapshot,
 )
 
 
@@ -1146,3 +1148,337 @@ def test_against_with_a_symlinked_store_dir_reports_only_the_link(git_repo, tmp_
         "remaining checks skipped (the store has symlinked entries — remove the links and rerun)",
         "1 violation(s)",
     ]
+
+
+# Archive transfers must preserve the baseline payload, not just its ID.
+
+
+def _hot_record(store_dir: Path, kind: str, *, terminal: bool = True) -> Path:
+    with Store(store_dir) as store:
+        if kind == "decision":
+            record = store.add_decision(_decision())
+            if terminal:
+                store.drop(record.id)
+            return store_dir / "decisions" / f"{record.id}.json"
+        record = store.add_domain(_domain())
+        if terminal:
+            store.ratify_domains(drop=[record.domain_id])
+        return store_dir / "domains" / f"{record.domain_id}.json"
+
+
+def _archive_payload(store_dir: Path, kind: str, payload: dict, *, seq: int = 1) -> Path:
+    archive = store_dir / "archive"
+    archive.mkdir(exist_ok=True)
+    path = archive / f"2026-10-09-{seq}-0123456789ab.jsonl"
+    path.write_text(json.dumps({"record_type": kind, **payload}) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("kind,field", [("decision", "choice"), ("domain", "summary")])
+@pytest.mark.parametrize("change", ["content", "provenance"])
+def test_archive_transfer_rejects_changed_immutable_payload(git_repo, kind, field, change):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, kind)
+    payload = json.loads(hot.read_text())
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
+    if change == "content":
+        payload[field] = "Altered after baseline."
+    else:
+        payload["provenance"]["author"] = "Another author"
+    _archive_payload(store_dir, kind, payload)
+    hot.unlink()
+    _git(["add", "-A"], cwd=git_repo)
+
+    # Snapshot is valid: only comparison with committed history reveals the tampering.
+    assert verify_snapshot(store_dir) == []
+    findings = verify_against(store_dir, "HEAD")
+    assert _codes(findings) == [ILLEGAL_FIELD_CHANGE]
+    assert findings[0].path == hot.relative_to(git_repo).as_posix()
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+@pytest.mark.parametrize("value", [None, [], {}, "future content"])
+@pytest.mark.parametrize("nested", [False, True, "list"])
+def test_archive_transfer_preserves_baseline_only_raw_keys(git_repo, kind, value, nested):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, kind)
+    payload = json.loads(hot.read_text())
+    if nested == "list":
+        payload["future_list"] = [{}]
+        target = payload["future_list"][0]
+    else:
+        target = payload["provenance"] if nested else payload
+    target["future_field"] = value
+    hot.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline with future field"], cwd=git_repo)
+    del target["future_field"]
+    _archive_payload(store_dir, kind, payload)
+    hot.unlink()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert _codes(verify_against(store_dir, "HEAD")) == [ILLEGAL_FIELD_CHANGE]
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+def test_archive_transfer_rejects_nonterminal_payload(git_repo, kind):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, kind, terminal=False)
+    payload = json.loads(hot.read_text())
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
+    segment = _archive_payload(store_dir, kind, payload)
+    hot.unlink()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert _codes(verify_against(store_dir, "HEAD")) == [ILLEGAL_DELETION]
+    snapshot = verify_snapshot(store_dir)
+    assert _codes(snapshot) == [BAD_ARCHIVE_SEGMENT]
+    assert snapshot[0].path == str(segment)
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+@pytest.mark.parametrize("bad_status", [[], {}, "unknown"])
+def test_archive_transfer_rejects_invalid_same_id_payload(git_repo, kind, bad_status):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, kind)
+    payload = json.loads(hot.read_text())
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
+    payload["status"] = bad_status
+    _archive_payload(store_dir, kind, payload)
+    hot.unlink()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert _codes(verify_snapshot(store_dir)) == [BAD_ARCHIVE_SEGMENT]
+    assert _codes(verify_against(store_dir, "HEAD")) == [ILLEGAL_DELETION]
+
+
+@pytest.mark.parametrize("kind,field", [("decision", "choice"), ("domain", "summary")])
+def test_archive_transfer_checks_all_same_id_copies(git_repo, kind, field):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, kind)
+    payload = json.loads(hot.read_text())
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
+    _archive_payload(store_dir, kind, payload)
+    _archive_payload(store_dir, kind, {**payload, field: "Conflicting second copy"}, seq=2)
+    hot.unlink()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert _codes(verify_against(store_dir, "HEAD")) == [ILLEGAL_FIELD_CHANGE]
+
+
+def test_archive_transfer_of_wrong_kind_does_not_permit_deletion(git_repo):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, "decision")
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
+    domain = _domain(domain_id=hot.stem, status="dropped")
+    _archive_payload(store_dir, "domain", domain.model_dump(mode="json"))
+    hot.unlink()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert _codes(verify_against(store_dir, "HEAD")) == [ILLEGAL_DELETION]
+
+
+@pytest.mark.parametrize("ratify_first", [False, True])
+def test_archive_transfer_allows_supersede_and_compact_in_one_diff(git_repo, ratify_first):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, "decision", terminal=False)
+    if ratify_first:
+        with Store(store_dir) as store:
+            store.ratify(hot.stem)
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
+    with Store(store_dir) as store:
+        if not ratify_first:
+            store.ratify(hot.stem)
+        store.add_decision(
+            Decision(
+                title="Successor",
+                kind=DecisionKind.ADR,
+                context="Revised context",
+                choice="Revised choice",
+                supersedes=hot.stem,
+                valid_from=datetime(2026, 2, 1, tzinfo=UTC),
+                provenance=Provenance(source="manual"),
+            )
+        )
+        store.compact()
+        store.compact()
+    _git(["add", "-A"], cwd=git_repo)
+
+    before = {p.relative_to(store_dir): p.read_bytes() for p in store_dir.rglob("*") if p.is_file()}
+    assert verify_snapshot(store_dir) == []
+    assert verify_against(store_dir, "HEAD") == []
+    assert before == {
+        p.relative_to(store_dir): p.read_bytes() for p in store_dir.rglob("*") if p.is_file()
+    }
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+def test_archive_transfer_allows_drop_and_compact_in_one_diff(git_repo, kind):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, kind, terminal=False)
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
+    with Store(store_dir) as store:
+        if kind == "decision":
+            store.drop(hot.stem)
+        else:
+            store.ratify_domains(accept=[hot.stem])
+            store.ratify_domains(drop=[hot.stem])
+        store.compact()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert verify_snapshot(store_dir) == []
+    assert verify_against(store_dir, "HEAD") == []
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+def test_archive_transfer_allows_older_absent_defaults(git_repo, kind):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, kind)
+    payload = json.loads(hot.read_text())
+    del payload["ratified_at"]
+    del payload["ratified_by"]
+    del payload["provenance"]["commit"]
+    if kind == "domain":
+        del payload["seed_anchors"]
+        del payload["path_prefixes"]
+    hot.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "older baseline"], cwd=git_repo)
+    with Store(store_dir) as store:
+        store.compact()
+    assert not hot.exists()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert verify_snapshot(store_dir) == []
+    assert verify_against(store_dir, "HEAD") == []
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+def test_archive_transfer_allows_identical_merge_copies(git_repo, kind):
+    store_dir = git_repo / ".sidegraph"
+    _hot_record(store_dir, kind)
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
+    with Store(store_dir) as store:
+        store.compact()
+    segment = next((store_dir / "archive").glob("*.jsonl"))
+    (segment.parent / "2026-10-09-2-0123456789ab.jsonl").write_bytes(segment.read_bytes())
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert verify_snapshot(store_dir) == []
+    assert verify_against(store_dir, "HEAD") == []
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+def test_archive_transfer_allows_crash_cleanup(git_repo, kind):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, kind)
+    original = hot.read_bytes()
+    with Store(store_dir) as store:
+        store.compact()
+    hot.write_bytes(original)  # archive publication completed, hot unlink did not
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "crash-window baseline"], cwd=git_repo)
+    with Store(store_dir) as store:
+        report = store.compact()
+    assert report.cleaned_up_hot_files == 1
+    assert report.segment_path is None
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert verify_snapshot(store_dir) == []
+    assert verify_against(store_dir, "HEAD") == []
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+def test_archive_transfer_allows_new_terminal_records(git_repo, kind):
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir):
+        pass
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "empty baseline"], cwd=git_repo)
+    _hot_record(store_dir, kind)
+    with Store(store_dir) as store:
+        store.compact()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert verify_snapshot(store_dir) == []
+    assert verify_against(store_dir, "HEAD") == []
+
+
+@pytest.mark.parametrize(
+    "changes,codes",
+    [
+        ({"status": "superseded"}, [ILLEGAL_STATUS_JUMP]),
+        ({"status": "deprecated"}, [ILLEGAL_STATUS_JUMP]),
+        ({"valid_to": "2026-01-11T00:00:00Z"}, [VALID_TO_CHANGED]),
+        ({"valid_to": None}, [VALID_TO_UNSET]),
+        (
+            {"ratified_at": "2026-01-11T00:00:00Z", "ratified_by": "forged"},
+            [ILLEGAL_FIELD_CHANGE, ILLEGAL_FIELD_CHANGE],
+        ),
+    ],
+)
+def test_archive_transfer_rejects_illegal_lifecycle(git_repo, changes, codes):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, "decision")
+    payload = json.loads(hot.read_text())
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "rejected baseline"], cwd=git_repo)
+    _archive_payload(store_dir, "decision", {**payload, **changes})
+    hot.unlink()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert _codes(verify_against(store_dir, "HEAD")) == codes
+
+
+def test_archive_transfer_preserves_existing_ratifier_stamp(git_repo):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, "domain", terminal=False)
+    with Store(store_dir) as store:
+        store.ratify_domains(accept=[hot.stem], actor="reviewer")
+        store.ratify_domains(drop=[hot.stem])
+    payload = json.loads(hot.read_text())
+    assert payload["ratified_at"] is not None and payload["ratified_by"] is not None
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "ratified then dropped baseline"], cwd=git_repo)
+    _archive_payload(store_dir, "domain", {**payload, "ratified_at": None, "ratified_by": None})
+    hot.unlink()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert _codes(verify_against(store_dir, "HEAD")) == [ILLEGAL_FIELD_CHANGE, ILLEGAL_FIELD_CHANGE]
+
+
+def test_archive_transfer_rejects_superseded_domain_becoming_dropped(git_repo):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, "domain", terminal=False)
+    with Store(store_dir) as store:
+        store.supersede_domain(hot.stem, _domain(supersedes=hot.stem))
+    payload = json.loads(hot.read_text())
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "superseded baseline"], cwd=git_repo)
+    _archive_payload(store_dir, "domain", {**payload, "status": "dropped"})
+    hot.unlink()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert _codes(verify_against(store_dir, "HEAD")) == [ILLEGAL_STATUS_JUMP]
+
+
+def test_archive_transfer_allows_domain_supersede_and_compact(git_repo):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, "domain", terminal=False)
+    _git(["add", "-A"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
+    with Store(store_dir) as store:
+        store.supersede_domain(hot.stem, _domain(supersedes=hot.stem))
+        store.compact()
+    _git(["add", "-A"], cwd=git_repo)
+
+    assert verify_snapshot(store_dir) == []
+    assert verify_against(store_dir, "HEAD") == []

@@ -93,6 +93,7 @@ from .host.claude_settings import (
     repo_root_for_settings,
 )
 from .importer import import_rationales
+from .input_limits import InputLimitError
 from .integrity import binding_statuses_computed
 from .okf import build_bundle, write_bundle
 from .profiles import PROFILES, get_profile
@@ -108,6 +109,7 @@ from .sync import (
     report_has_findings,
     sync,
 )
+from .validation_errors import format_validation_error
 from .verify import SYMLINK_STOP_NOTE, verify_against, verify_snapshot
 from .viz.model import build_graph
 from .viz.render import to_html, to_json
@@ -1246,7 +1248,11 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
     )
     if args.section_limit is not None:
         import_docs_kwargs["section_limit"] = args.section_limit
-    report = import_docs(store, reader, docs_paths, **import_docs_kwargs)
+    try:
+        report = import_docs(store, reader, docs_paths, **import_docs_kwargs)
+    except InputLimitError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     report.skipped_outside_repo += discovery_refused
 
     # BUG F, reworded (design/superpowers/specs/2026-09-29-import-paths-design.md D5): a
@@ -1318,6 +1324,12 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
             )
         for fp, n in sorted(report.by_file().items()):
             print(f"  {fp}: {n}")
+        if report.skipped_oversized:
+            print(f"{report.skipped_oversized} file(s) skipped: exceeds 8 MiB input limit:")
+            for fp in report.oversized_files:
+                print(f"  {fp}")
+        if report.tag_redactions:
+            print(f"redacted {report.tag_redactions} secret(s) from tag values")
         # D4 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): printed
         # LAST. The by_file lines share the block's two-space indent, so any printed after
         # the block would read as more undecodable files.
@@ -1366,6 +1378,12 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
         )
     if report.anchors_repaired:
         print(f"{report.anchors_repaired} existing record(s) had their anchors repaired")
+    if report.skipped_oversized:
+        print(f"{report.skipped_oversized} file(s) skipped: exceeds 8 MiB input limit:")
+        for fp in report.oversized_files:
+            print(f"  {fp}")
+    if report.tag_redactions:
+        print(f"redacted {report.tag_redactions} secret(s) from tag values")
     # D4 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): printed last
     # on stdout, after the degenerate-parent line — the auto-ratify-failures loop below
     # goes to stderr, so this stays the last stdout line either way.
@@ -1714,7 +1732,7 @@ def _domains_add(args: argparse.Namespace) -> int:
             provenance=Provenance(source="manual"),
         )
     except ValidationError as e:
-        print(f"error: {e}")
+        print(f"error: {format_validation_error(e)}")
         return 1
 
     args.db = resolve_store_path(args.db)
@@ -1729,7 +1747,7 @@ def _domains_add(args: argparse.Namespace) -> int:
     if args.parent is not None:
         parent = store.find_domain_by_slug(args.parent)
         if parent is None:
-            print(f"error: --parent {args.parent!r} does not resolve to any domain")
+            print("error: --parent does not resolve to any domain")
             return 1
         parent_id = parent.domain_id
 
@@ -1743,8 +1761,8 @@ def _domains_add(args: argparse.Namespace) -> int:
     )
     try:
         store.add_domain(domain)
-    except ValueError as e:
-        print(f"proposed 0 domain(s) (skipped: 1 existing — {e})")
+    except ValueError:
+        print("proposed 0 domain(s) (skipped: 1 existing)")
         return 0
 
     print("proposed 1 domain(s) (skipped: 0 existing)")

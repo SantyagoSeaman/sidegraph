@@ -414,6 +414,19 @@ sync/retrieval/ratify) packs every eligible terminal record into a new segment u
 records of either kind are never touched — a decision has to actually close before it's
 eligible.
 
+`sidegraph-verify` reports recognized nonterminal archive records as `bad-archive-segment`.
+With `--against`, deleting a baseline hot decision or domain requires a schema-valid,
+compactable archive copy of the same kind and ID. Every copy is compared with the baseline
+using the legal status, validity, provenance, and immutable-field transition rules. Raw
+immutable keys must survive even if their value is `null`, `[]`, or `{}`; older absent keys
+may still expand to `null`, `[]`, or `{}` under the existing transition rules. A matching
+ID alone cannot hide altered history.
+A legal supersede or drop followed by compaction within the compared range remains valid.
+If an older writer first drops a newer, unknown empty immutable key during a hot rewrite,
+then compacts within the same range, the archive transfer still reports that loss. The
+ordinary hot rewrite retains the existing symmetric absent/default rule; this stricter
+transfer check preserves the baseline rather than normalizing away the lost key.
+
 **Facts are not compacted in this wave (deferred).** `facts/` stays entirely hot regardless of
 status — a `superseded`/`rejected` `Fact` is never packed into `archive/` the way a terminal
 `Decision`/`Domain` is; `Store.compact` only ever walks `decisions/` and `domains/`.

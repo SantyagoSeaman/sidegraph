@@ -7,6 +7,92 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-10-10
+
+### Fixed
+
+- **Bootstrap excludes special files and validates one bounded regular descriptor.** FIFO,
+  sockets and devices cannot become selected text sources, including through `--include`.
+  Available nonblocking/no-follow flags guard final-component replacement; the opened
+  descriptor is rechecked before strict incremental UTF-8 validation. Directory aliases
+  are rechecked against exclusions. Include retains its size override but observed growth
+  past opened size is excluded. Later planner/apply reads and ancestor races retain their
+  existing scope.
+
+- **Git verification preserves unusual filenames through binary NUL framing.** Verify and
+  doctor detect immutable edits and archive deletions at paths containing Unicode, TAB,
+  LF, CR, quotes, backslashes or surrounding whitespace. Malformed or unsupported diff
+  output is an operational error (exit `1`), never a partial clean report. Shared Git
+  callers keep their decoded-text behavior; only diff reads raw pathname bytes.
+
+- **Git verification resolves `--against` to one protected, frozen commit ID.** Verify and
+  doctor reject option-shaped, empty, NUL-containing, unavailable and non-commit baselines
+  operationally (exit `1`). Diff and every baseline record read use the same full SHA-1 or
+  SHA-256 ID, so a branch moving between those operations cannot hide an immutable edit.
+  There is no raw-ref fallback. Current working-tree reads retain
+  their existing concurrency limits.
+
+- **Malformed write diagnostics omit raw input and arbitrary failure causes.** Capture
+  errors use bounded schema fields/codes; logical MCP writes apply raw admission before
+  signature coercion and intercept exceptions before framework warning/error logging.
+  Unknown write arguments keep valid parameter help without echoing their names.
+  Unsupported registrations fail closed. Partial-write warnings and recovery guidance
+  remain truthful; domain/ratify causes are controlled. Read diagnostics and upstream
+  FastMCP DEBUG argument tracing retain their existing scope.
+
+- **Capture and direct writes reject oversized input before redaction or canonical writes.**
+  Limits are 256 KiB UTF-8 per string, 4 MiB admitted strings and 65,536 admitted nodes per
+  request, depth 32 and 4,096 nodes per draft, and 100 agent drafts including attached facts.
+  Combined decisions/facts share one budget; item violations reject the containing draft,
+  while request-wide violations fail before any write. Documents have an independent 8 MiB
+  per-file limit with whole-file skips, matching real/dry reports and no total-import cap.
+  Import tags and free-text options are bounded separately; input is never silently truncated.
+  Raw Python batches use lists/tuples; supported scalar, mapping and model fields are
+  inspected. Other opaque Python values (including sets, deques, generators and non-string
+  Enum objects) are rejected before Pydantic coercion, without consuming iterators. Numeric
+  enums can become strings rather than behave as numbers in Pydantic string fields; only
+  string-derived enums keep their measured base-string behavior.
+- **Redaction avoids repeated suffix searches in four known attack families.** Linear
+  assignment-key, URL-credential, JWT and private-key-block recognizers preserve matching
+  order/counts and the existing conservative quoted-value behavior. This does not claim
+  universal regex linearity or complete secret detection. See [security policy](SECURITY.md).
+
+- **Secret-bearing tags are redacted before document import stores their slugs.** Capture,
+  direct MCP writes and document import share tag normalization. Import reports tag
+  substitutions once per batch in real and dry runs, including duplicate raw tags.
+  Comma-separated MCP strings are cleaned before splitting; a secret-bearing string with
+  commas drops all its tags conservatively. List input keeps explicit boundaries.
+
+- **Quoted assignment redaction consumes multiline, triple-quoted and unterminated values.**
+  Escaped closers and glued tails stay covered. An unterminated value removes the
+  remaining input conservatively if no legal closer is found. An assignment span,
+  including URL/card expansion, that would swallow another assignment's key also consumes
+  the remaining input and following prose. A multiline quoted span splitting a URL
+  credential or checksum-valid grouped card number does so too. Bare values and
+  single-line glued tails extend through crossing URL/card matches while otherwise
+  preserving later prose. Prior tag entities and Git history remain: review old tags and
+  rotate exposed credentials. Unicode letters/digits after a single quote keep it inside
+  the value as an apostrophe; an unclosed value removes the remainder.
+
+- **Secret scanning covers store-only commits and committed CI history.** The pinned
+  Gitleaks hook runs even when changed files are excluded from formatting. A separate manual
+  `gitleaks-history` hook scans committed HEAD history, also run by CI with a full checkout.
+  Scanner integration tests exercise staged, committed, and removed synthetic secrets.
+
+- **Store verification checks the content of newly archived history.** A matching archive ID
+  alone no longer permits deletion of a committed hot decision or domain: every archive copy
+  must be compactable and a legal transition from the baseline, preserving raw immutable keys.
+  The snapshot check also reports nonterminal archive records. Legal supersede/drop followed
+  by compaction, older absent `null`/empty defaults, identical merge copies, and crash cleanup
+  still pass.
+
+### Changed
+
+- **Security documentation states the limits explicitly.** The privacy overview describes
+  best-effort redaction and writes outside the store. CLI documentation distinguishes
+  argument syntax errors from rejected Git baselines and recommends JSON output when
+  a terminal cannot encode a reported pathname.
+
 ## [0.11.0] — 2026-10-09
 
 ### Changed

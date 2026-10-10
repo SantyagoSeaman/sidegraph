@@ -259,7 +259,7 @@ def test_t6_a_write_tool_gets_the_same_error_and_writes_nothing(repo):
         {"title": "t", "kind": "adr", "context": "c", "choice": "ch", "confidence": 1},
     )
 
-    assert "Unknown argument `confidence` for `add_decision`. Its parameters are: title," in message
+    assert "Unknown write argument. Its parameters are: title," in message
     assert len(list(store.iter_decisions())) == before
 
 

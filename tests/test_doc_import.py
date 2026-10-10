@@ -2943,3 +2943,70 @@ def test_dangling_binding_does_not_block_the_repair(tmp_path, monkeypatch):
 
     report = import_docs(store, reader, ["docs/a.md"], any_doc=True)
     assert (report.skipped_existing, report.anchors_repaired) == (1, 1)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_import_docs_tag_secrets_never_persist_and_count_once_per_batch(tmp_path, dry_run):
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    paths = [
+        str(
+            _write_md(
+                tmp_path,
+                f"docs/{i}.md",
+                _adr(f"Submit path {i}", decision="Calls `submit_order` here."),
+            )
+        )
+        for i in range(2)
+    ]
+    marker = "synthetictag" + "markervalue"
+    token_marker = "synthetictoken" + "markervalue" * 2
+    secret = "password" + "=" + marker
+    token = "ghp_" + token_marker
+    db = tmp_path / "s.db"
+    with Store(db) as store:
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+        report = import_docs(
+            store,
+            reader,
+            paths,
+            any_doc=True,
+            dry_run=dry_run,
+            tags=[secret, "Safe", secret, token + "-config", "safe", "", "!!!"],
+        )
+        assert report.imported == 2
+        after = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+        # Assert the actual persistence defect before inspecting the additive report field.
+        for content in after.values():
+            assert marker.encode() not in content.lower()
+            assert token_marker.encode() not in content.lower()
+        assert report.tag_redactions == 3
+        assert report.model_dump()["tag_redactions"] == 3
+        if dry_run:
+            assert before == after
+            assert list(store.iter_decisions()) == []
+            assert store.find_abstract_entity("tag:safe") is None
+            assert store.find_abstract_entity("tag:redacted-config") is None
+    with Store(db) as reopened:
+        assert reopened.find_abstract_entity("tag:redacted") is None
+        decisions = list(reopened.iter_decisions())
+        assert len(decisions) == (0 if dry_run else 2)
+        for decision in decisions:
+            names = [
+                reopened.get_entity(b.entity_id).canonical_name
+                for b in reopened.bindings_for_record(decision.id)
+                if b.tier == 0
+            ]
+            assert len(names) == 2
+            assert set(names) == {"tag:safe", "tag:redacted-config"}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_import_docs_tag_redactions_count_even_without_candidates(tmp_path, dry_run):
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    secret = "password" + "=" + "synthetictagmarkervalue"
+    with Store(tmp_path / "s.db") as store:
+        report = import_docs(store, reader, [], tags=[secret, secret], dry_run=dry_run)
+        assert report.imported == 0
+        assert report.tag_redactions == 2
+        assert report.model_dump()["tag_redactions"] == 2
+        assert list(store.iter_decisions()) == []
