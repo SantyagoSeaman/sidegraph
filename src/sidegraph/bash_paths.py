@@ -20,6 +20,7 @@ import contextlib
 import os
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import NamedTuple
 
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
@@ -433,7 +434,7 @@ def _resolve(arg: str, cwd: str | None, walk: _Walk) -> str | None:
             return None
     except (OSError, ValueError):
         return None
-    return rel
+    return Path(rel).as_posix()  # anchors key on POSIX spelling, Windows included
 
 
 def _change_directory(cwd: str | None, args: Sequence[str], walk: _Walk) -> str | None:

@@ -1558,7 +1558,9 @@ def _repo_relative(path: str | Path, repo_root: Path) -> str:
     With no such ancestor it is computed from the resolved parent directories, with the
     file's own name kept, so a symlinked document stays under its LINK path. Whether the
     document really lies inside the repository is decided by the caller from the fully
-    resolved file, not from this key. Independent of the process's current directory.
+    resolved file, not from this key. Independent of the process's current directory. The
+    result is always in the POSIX spelling (``os.path.relpath`` gives backslashes on
+    Windows), the form globs and Graphify's ``source_file`` use.
     # see design/superpowers/specs/2026-09-29-import-paths-design.md D1"""
     absolute = os.path.abspath(path)
     target = Path(path).resolve()
@@ -1567,23 +1569,38 @@ def _repo_relative(path: str | Path, repo_root: Path) -> str:
     def names_the_file(rel: str) -> bool:
         return _in_repo(rel) and (resolved_root / rel).resolve() == target
 
-    lexical = os.path.relpath(absolute, repo_root)
+    lexical = _relpath(absolute, repo_root)
+    if lexical is None:  # another drive: no repository-relative form exists
+        return str(path)
     if names_the_file(lexical):
-        return lexical
+        return Path(lexical).as_posix()
     for ancestor in Path(absolute).parents:
         if ancestor.resolve() == resolved_root:
-            rel = os.path.relpath(absolute, ancestor)
-            if names_the_file(rel):
-                return rel
+            rel = _relpath(absolute, ancestor)
+            if rel is not None and names_the_file(rel):
+                return Path(rel).as_posix()
             break
     p = Path(path)
-    return os.path.relpath(p.parent.resolve() / p.name, repo_root)
+    fallback = _relpath(p.parent.resolve() / p.name, repo_root)
+    return str(path) if fallback is None else Path(fallback).as_posix()
+
+
+def _relpath(path: str | Path, start: str | Path) -> str | None:
+    """``os.path.relpath``, or None when no relative form exists (Windows: ``ValueError`` for
+    a path on another drive than ``start``)."""
+    try:
+        return os.path.relpath(path, start)
+    except ValueError:
+        return None
 
 
 def _in_repo(rel: str) -> bool:
     """True iff a ``relpath`` result names a location inside the repository. Exact tests,
-    not ``startswith("..")``, which would also match a directory named ``..foo``."""
-    return not (rel == ".." or rel.startswith("../") or os.path.isabs(rel))
+    not ``startswith("..")``, which would also match a directory named ``..foo``. Accepts the
+    native spelling (``..\\x`` on Windows) and the POSIX one (``../x``)."""
+    return not (
+        rel == os.pardir or rel.startswith((os.pardir + os.sep, "../")) or os.path.isabs(rel)
+    )
 
 
 def import_docs(
@@ -1815,17 +1832,23 @@ def import_docs(
             # link after the check, which needs write access to the repository; per-component
             # `openat` pinning is out of scope.
             read_path = Path(rel_path).resolve()
-            if not _in_repo(os.path.relpath(read_path, repo_root)):
+            resolved_rel = _relpath(read_path, repo_root)
+            if resolved_rel is None or not _in_repo(resolved_rel):
                 report.skipped_outside_repo += 1
                 continue
             keyed_path = lookup_path = glob_check_path = repo_rel
         else:
             keyed_path = lookup_path = rel_path
+            if os.sep != "/" and not os.path.isabs(rel_path):
+                keyed_path = lookup_path = str(rel_path).replace(os.sep, "/")
             # An outside document keeps its pre-existing lookup (absolute -> cwd-relative):
             # tests and callers that build a graph from `relpath(doc, cwd)` depend on it.
             if os.path.isabs(lookup_path):
-                lookup_path = os.path.relpath(lookup_path, os.getcwd())
-            glob_check_path = os.path.relpath(Path(rel_path).resolve(), repo_root)
+                cwd_rel = _relpath(lookup_path, os.getcwd())
+                if cwd_rel is not None:
+                    lookup_path = Path(cwd_rel).as_posix()
+            glob_rel = _relpath(Path(rel_path).resolve(), repo_root)
+            glob_check_path = str(rel_path) if glob_rel is None else Path(glob_rel).as_posix()
         # D7.1: enforcement runs FIRST after that, before the file is even read — an
         # out-of-profile doc costs nothing beyond the glob check itself. `glob_check_path`
         # is the repo-root-relative form a glob like `docs/adr/*.md` actually means — see

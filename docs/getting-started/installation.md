@@ -1,15 +1,94 @@
 # Installation
 
-Sidegraph has two parts: **Sidegraph itself** (the decision store + MCP server + hooks) and
-**Graphify** (the code-graph engine it rents). Install both.
+Install **Sidegraph** for the decision store, MCP server, CLI, and host hooks. Add
+**Graphify** for symbol-level anchors and structural context. Sidegraph can retrieve
+file- and domain-linked records without a graph; the complete workflow below installs both.
 
 ## Prerequisites
 
 - **Python 3.13+** for Sidegraph (`.python-version` pins it).
 - **Python 3.10+** for Graphify.
 - [`uv`](https://docs.astral.sh/uv/) — used to install and run both.
-- An MCP- and hooks-capable agent host: [Claude Code](claude-code-setup.md) or
-  [OpenAI Codex CLI](codex-setup.md).
+- For automatic session integration: [Claude Code](claude-code-setup.md) or
+  [Codex](codex-setup.md). Other stdio MCP clients can call the tools directly; the CLI
+  also works without an agent host.
+
+### Platform coverage
+
+The automated matrix runs the full suite on Linux with Python 3.13 and 3.14. Native
+Windows x64 (`windows-2022`) runs a selected portable core/MCP suite on both versions:
+Store mutation/rollback and cross-process conflicts, UTF-8 and descriptor cleanup,
+MCP result contracts, invocation admission, and wheel-probe guards. It also builds and
+installs a non-editable wheel outside the checkout, checks its package bytes against the
+artifact, runs a CLI, and exchanges real MCP stdio messages in a Unicode/spaced directory.
+The exact selection is in [the CI workflow](../../.github/workflows/ci.yml).
+
+Separately, each release candidate runs real Claude Code and Codex sessions with the
+installed plugin, in fresh host profiles, on Windows Server 2022 x64 and macOS 15 arm64,
+each with Python 3.13 and 3.14:
+
+- **macOS arm64:** the full plugin session, for both hosts: the plugin's MCP server,
+  `SessionStart` context, records before a Read, a bundled skill, a subagent brief, the
+  `Stop` capture prompt, capture and ratification, and recall in a fresh session.
+- **Windows x64:** plugin installation, capture and ratification through the plugin's MCP
+  server, and recall in a fresh session, for both hosts.
+
+**Last verified: 2026-10-12, the 0.12.0 release candidate,** with Claude Code 2.1.296 and
+Codex CLI 0.162.1. The README's blue platform badges summarize these checks, rather than
+live workflow status or support for every published version.
+
+On native Windows, supplied hook commands and bundled MCP launchers require a
+POSIX shell. The native checks run with Git for Windows' Bash; they do not
+establish support for Windows hosts without that toolchain. Graphify integration
+remains outside these checks.
+See [Windows](#windows) before installing a host plugin.
+
+Package dependencies support `fastmcp>=3.4.2,<4` and `mcp>=1.24,<2`. Major SDK upgrades
+require a separate compatibility review; an unlocked package install may resolve newer
+versions within those bounds than the development lockfile.
+
+### Windows
+
+The native checks above cover the tested release, not every published version. On
+Windows they cover plugin installation, the plugin's MCP tools, capture and
+fresh-session recall; WSL is not a separate CI target.
+
+**Version requirement:** releases before 0.12.0 can stall a native Windows write: a Git
+child inherits the MCP stdin pipe and holds the write until the request times out (see
+the [changelog](../../CHANGELOG.md)). Use 0.12.0 or later; marketplace plugin users get
+the fix from the public repository's `main`, which their launchers fetch. WSL is the
+workaround for older versions.
+
+For the complete supplied plugin workflow, install and launch the agent host, uv/Python,
+Sidegraph and optional Graphify inside the same WSL distribution. Follow the Linux setup
+commands there and use Linux paths. Do not point a WSL host at a Windows Python environment
+or mix `C:\...` and `/mnt/c/...` paths in one launch recipe. The host-specific WSL setup is
+described by [Claude Code](https://code.claude.com/docs/en/setup#set-up-on-windows) and
+[Codex](https://learn.chatgpt.com/docs/windows/wsl).
+
+On native Windows, both bundled plugin MCP configurations explicitly launch `sh -c`.
+Their hook commands also use POSIX syntax, including environment assignments, command
+substitution and `printf`. Every Codex hook command is wrapped in `sh -c '…'`, and Codex's
+PowerShell 7 hook shell only has to start `sh`. Windows PowerShell 5.1 cannot run the Codex
+hooks, so install PowerShell 7. PowerShell and CMD cannot execute the recipes unwrapped. Git for Windows supplies a
+POSIX shell, but installing it or configuring the host's Bash tool alone does not prove
+that `sh`, `git` and `uvx` are visible to the plugin subprocesses. Native Git Bash plugin
+integration still needs an end-to-end check. See
+[Windows launch troubleshooting](../guides/troubleshooting.md#windows-plugin-launch).
+
+For MCP-only use with a client that can launch `uvx` directly, Claude Code's
+[manual MCP JSON recipe](claude-code-setup.md#1-register-the-mcp-server) avoids the plugin's
+shell wrapper. Set `SIDEGRAPH_DIR` and `SIDEGRAPH_GRAPH` to absolute paths for the intended
+repository, or set a working directory supported by your client. In JSON, use forward
+slashes (`C:/work/your repo/.sidegraph`) or escape each backslash
+(`C:\\work\\your repo\\.sidegraph`); keep paths with spaces as single argument values.
+If `uvx` is not on the host's PATH, use the full executable path in `command`.
+This registration is separate from automatic hooks: it supplies MCP tools but no
+SessionStart memory brief, Stop capture reminder, or SubagentStart brief. Claude's
+PreToolUse delivery also requires its hooks. The supplied
+[Codex manual recipe](codex-setup.md#1-register-the-mcp-server) uses Bash and belongs to
+the WSL route. Native manual MCP registration using these recipes is outside the
+current CI coverage.
 
 ## Mutable development references
 
@@ -23,16 +102,53 @@ that `main` only when it cuts a release. See
 
 ## Install Sidegraph
 
-### Option A — PyPI (recommended for the package + CLIs)
+### Option A — the CLI on your PATH (PyPI)
 
-`sidegraph` is a pure-Python package on PyPI. Install with pip or uv:
+This puts the `sidegraph-*` commands on your `PATH` under their bare names, for your own
+terminal, scripts and CI. Without a plugin it is the usual setup, though the `uvx` forms below
+and in [Option C](#option-c--uvx-directly-from-git) run Sidegraph with no install at all. Beside
+the Claude Code or Codex plugin
+([Option B](#option-b--host-plugin-recommended-for-claude-code-and-codex)) it is optional: the
+plugin runs its own Sidegraph through `uvx` and its skills never use this copy, so install it only
+if you want to type the commands yourself.
+
+`sidegraph` is a pure-Python package on PyPI. For isolated command-line tools, use `uv`;
+with pip, install into a virtual environment:
 
 ```bash
-pip install sidegraph            # or: uv tool install sidegraph
+uv tool install sidegraph
+# Or, inside an activated virtual environment:
+# python -m pip install sidegraph
 ```
 
-That puts `sidegraph-mcp` and every `sidegraph-*` CLI on your PATH. Pin a version with
-`pip install 'sidegraph==X.Y.Z'`. For an ephemeral run without installing,
+That puts `sidegraph-mcp` and every `sidegraph-*` CLI on your PATH, where the documentation's
+bare command names work.
+
+**Keep it updated. This step is part of the install.** A `uv tool` install never updates
+itself: it stays at the version you installed until you replace it. After every Sidegraph
+release (listed in the [CHANGELOG](../../CHANGELOG.md) and on
+[GitHub Releases](https://github.com/SantyagoSeaman/sidegraph/releases)), run:
+
+```bash
+uv tool install sidegraph@latest
+# Or, inside the virtual environment:
+# python -m pip install --upgrade sidegraph
+```
+
+`@latest` also upgrades a pinned install, where `uv tool upgrade sidegraph` says "Nothing to
+upgrade".
+
+Beside a plugin, an old copy keeps answering your own shell while the code the plugin runs moves
+to each release, and it can lack commands or flags the documentation shows. On macOS and Linux,
+SessionStart adds a [`path-skew`](../guides/troubleshooting.md#path-skew) line naming both
+versions when the copy on `PATH` differs from the session's, and shows it to you at most once a
+day.
+
+To stop maintaining the copy, run `uv tool uninstall sidegraph`. The plugin keeps working, and
+any command still runs as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`.
+
+For CI or a reproducible pilot, pin a version instead (`pip install 'sidegraph==X.Y.Z'`) and move
+the pin when you upgrade. For an ephemeral run without installing,
 `uvx --from sidegraph sidegraph-mcp` works — the entry-point name differs from the package
 name, so `--from sidegraph` is required (a bare `uvx sidegraph-mcp` will not resolve).
 
@@ -62,6 +178,10 @@ plugin's bundled config installs from the public repository, not PyPI: the MCP s
 install, the plugin deliberately follows the public repository's `main` branch. See
 the integration details for [Claude Code](../integrations/claude-code.md#plugin-install-path)
 or [Codex](../integrations/codex.md#plugin-install-path).
+
+**Terminal commands beside the plugin.** The plugin needs no other install. If you also want
+the bare `sidegraph-*` commands in your own terminal, install the CLI as in
+[Option A](#option-a--the-cli-on-your-path-pypi), together with its update step.
 
 **Scope.** `/plugin install` offers three scopes: user, local and project. From a terminal the
 flag is `claude plugin install sidegraph@sidegraph --scope user|project|local`, and the default
@@ -95,7 +215,7 @@ must use `--from git+<url>@<ref> <entrypoint>` — a bare `uvx sidegraph-init` w
 ```bash
 git clone https://github.com/SantyagoSeaman/sidegraph.git   # or your local checkout
 cd sidegraph
-uv sync                 # installs into .venv
+uv sync --locked        # installs the checked-in dependency versions into .venv
 uv run pytest -q        # sanity check — all tests should pass
 ```
 

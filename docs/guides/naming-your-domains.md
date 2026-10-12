@@ -19,14 +19,15 @@ reading the actual code behind an ambiguous candidate rather than trusting a lab
 With roughly 20 or fewer candidates it proposes one sensible set. For a larger result it
 composes 2–3 alternatives at different granularities (typically Coarse, Medium, and Fine).
 
-**On a big repo, the skill sees the top ~100 candidates by default**, not the full list —
+**On a big repo, the skill sees a part of the candidates by default**, not the full list —
 `list_domain_candidates` caps at 100 significant communities (deterministic community-id
-order) unless told otherwise, because an unbounded call on a monorepo-scale corpus is a
-~276K-token dump (a real cross-project finding: Apache Airflow has 2,578 significant
-communities). The tool flags this itself (`"truncated": true`, `"total_significant"` showing
-the full count) and the skill can always ask for more — a narrower `min_members`/`paths`, an
-explicit `limit=N`, or `limit=0` for everything — same convention as `sidegraph-domains
-bootstrap --limit` below.
+order) and at a 24,000-character budget, whichever cuts first, because an unbounded call on a
+monorepo-scale corpus is a ~276K-token dump (a real cross-project finding: Apache Airflow has
+2,578 significant communities). The tool flags this itself (`"truncated": true`,
+`"total_significant"` showing the full count, a `note` saying what cut) and the skill narrows
+rather than widens: a narrower `min_members`/`paths` reaches the candidates that were left out,
+and `budget_chars` (up to 40,000) shows more of the same window. `limit=0` lifts the count
+limit (the convention of `sidegraph-domains bootstrap --limit` below), not the budget.
 
 Each domain in each set carries
 a human name, a one-line WHY-IT-EXISTS summary, and its membership as durable `seed_anchors`
@@ -188,12 +189,11 @@ uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-ratify --accept 01J... 01
 
 **This is where the CLI path stops scaling.** On anything but a small, tightly-scoped
 `--paths`/`--min-members` run, bootstrap can propose up to its default `--limit` of 100
-domains — or well over a hundred if you've explicitly widened `--limit` — and nobody reads a
-hundred-line list end to end and hand-picks the ones worth naming — that's exactly the gap
-[the skill](#the-fast-path-ask-your-agent) closes: instead of a human reading and curating a
-flat list, an agent studies the same candidates and offers either one sensible small-repo set
-or 2–3 curated alternatives to pick from. Reach for `sidegraph-ratify --accept <ids>` here only when you're scripting a pipeline or
-already know precisely which ids you want.
+domains — or well over a hundred if you've explicitly widened `--limit`. Reviewing that
+list can be substantial work. [The skill](#the-fast-path-ask-your-agent) studies the same
+candidates and offers either one small-repo set or 2–3 alternatives to review. Use
+`sidegraph-ratify --accept <ids>` when you prefer direct review, are scripting a pipeline,
+or already know which ids you want.
 
 ### Why selective, not `--all`
 

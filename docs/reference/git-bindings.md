@@ -1,7 +1,7 @@
 # Git bindings: commit trailers + `sidegraph-blame`
 
-Two features that make git history itself carry pointers to decision memory, then join
-blame hunks back to it — line-granularity "why" (killer feature #2, "walk the chain").
+Commit trailers carry pointers to decision memory; `sidegraph-blame` joins blame hunks
+back to those records so you can inspect the reasoning associated with a line's history.
 Both are read-only over records: neither creates, mutates, or supersedes a `Decision` or
 `Fact`. A trailer or a blame hunk names a ULID; the record's content always lives in the
 store — never in git history itself. A wrong pointer is corrected by store-side

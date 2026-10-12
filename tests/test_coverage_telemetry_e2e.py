@@ -21,7 +21,9 @@ from sidegraph.store import Store
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
 
 
-def test_redirect_is_reconstructable_from_the_journal(tmp_path, monkeypatch, capsys):
+def test_redirect_is_reconstructable_from_the_journal(
+    tmp_path, monkeypatch, capsys, current_session
+):
     root = tmp_path / "repo"
     (root / "trader").mkdir(parents=True)
     (root / "trader" / "exec.py").write_text("x = 1\n")
@@ -65,7 +67,9 @@ def test_redirect_is_reconstructable_from_the_journal(tmp_path, monkeypatch, cap
     hooks.session_start()
     capsys.readouterr()
 
-    # 2. The agent asks about exec.py; the gotcha surfaces, carrying risk.py too.
+    # 2. The agent asks about exec.py; the gotcha surfaces, carrying risk.py too. The host
+    # entry's middleware names the calling session (the MCP server, not the hook, knows it).
+    current_session("e2e-1")
     store = Store(db)
     _get_task_context_impl(store, reader, ["trader/exec.py"], None, 4000, 6000)
     store.close()

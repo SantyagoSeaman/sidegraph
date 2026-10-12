@@ -24,8 +24,10 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
+from . import worktree_seeds
 from .retrieval import Seed
 from .schema import Descriptor
+from .worktree_seeds import Worktree
 
 # A directory seed reads at most this many files (shallowest first); a directory of more than
 # `_DIR_GATE` files is listed instead of read: ordering a large directory by anything else
@@ -130,13 +132,23 @@ class _FileRead:
     of_files: bool = False  # `listed` holds files because the directory has no subdirectories
     complete: bool = False  # `listed` names everything under the directory
     on_disk: bool = False  # unresolved because the path is a file on disk the graph lacks
+    # the spelling came from mapping an absolute or nested path to another checkout (or a
+    # Windows separator): said as a "normalised" note even though nothing read it
+    remapped: bool = False
 
 
 class _Files:
     """The graph's file set with the indices the rungs need, built on first use."""
 
-    def __init__(self, files: frozenset[str], root: Path | Callable[[], Path | None] | None):
+    def __init__(
+        self,
+        files: frozenset[str],
+        root: Path | Callable[[], Path | None] | None,
+        worktrees: Callable[[], list[Worktree]] | None = None,
+    ):
         self.held = files
+        self._worktrees_arg = worktrees
+        self._worktrees: list[Worktree] | None = None
         self._root_arg = root
         self._root_done = not callable(root)
         self._root: Path | None = None if callable(root) else root
@@ -151,6 +163,23 @@ class _Files:
             self._root = self._root_arg()
             self._root_done = True
         return self._root
+
+    def worktrees(self) -> list[Worktree]:
+        """The other checkouts, listed at most once per call (``[]`` with no provider)."""
+        if self._worktrees is None:
+            self._worktrees = list(self._worktrees_arg()) if self._worktrees_arg else []
+        return self._worktrees
+
+    def rebase(self, path_abs: str) -> tuple[Worktree | None, str] | None:
+        """``path_abs`` mapped to the checkout that holds it (shortest remainder), or ``None``."""
+        root = self.root
+        if root is None or (worktree_seeds.has_drive(path_abs) and not worktree_seeds.WINDOWS):
+            return None
+        return worktree_seeds.rebase(path_abs, root, self.worktrees())
+
+    def in_worktrees(self, rel: str) -> bool:
+        """Whether ``rel`` is a file, spelled exactly, in some other checkout."""
+        return bool(worktree_seeds.locate(rel, self.worktrees(), is_file_exact))
 
     @property
     def sorted(self) -> list[str]:
@@ -218,24 +247,49 @@ def is_file_exact(root: Path, rel: str) -> bool:
     return True
 
 
-def _normalise(p: str, files: _Files, *, location: bool = True) -> str | None:
-    """``p`` as a repo-relative path: surrounding whitespace and, with ``location``, a trailing
-    ``:12`` or ``:12:3`` dropped, an absolute path under the root made relative, ``./``
-    stripped, then ``normpath``. ``None`` when the result is the root itself, climbs out of
-    it, or is still absolute."""
+def _normalise_ex(p: str, files: _Files, *, location: bool = True) -> tuple[str | None, bool]:
+    """:func:`_normalise` and whether the result came from mapping the path to another checkout
+    (or from a Windows separator)."""
     s = p.strip()
     if location:
         s = _LOCATION_RE.sub("", s)
-    if posixpath.isabs(s):
+    remapped = False
+    if worktree_seeds.WINDOWS and "\\" in s:
+        s = s.replace("\\", "/")
+        remapped = True
+    drive = worktree_seeds.has_drive(s)
+    if posixpath.isabs(s) or drive:
         root = files.root
         if root is not None:
-            s = _under_root(s, root) or s
+            stripped = None if drive else _under_root(s, root)
+            if drive:
+                # A drive path under the root itself needs no listing when the graph holds it.
+                own = worktree_seeds.rebase(s, root, [])
+                stripped = own[1] if own is not None else None
+            if stripped is None or posixpath.normpath(stripped) not in files.held:
+                hit = files.rebase(s)
+                if hit is not None:
+                    s = hit[1]
+                    remapped = remapped or hit[0] is not None
+                elif stripped is not None:
+                    s = stripped
+            else:
+                s = stripped
     while s.startswith("./"):
         s = s[2:]
     q = posixpath.normpath(s)
-    if q in (".", "..") or q.startswith("../") or posixpath.isabs(q):
-        return None
-    return q
+    if q in (".", "..") or q.startswith("../") or posixpath.isabs(q) or worktree_seeds.has_drive(q):
+        return None, remapped
+    return q, remapped
+
+
+def _normalise(p: str, files: _Files, *, location: bool = True) -> str | None:
+    """``p`` as a repo-relative path: surrounding whitespace and, with ``location``, a trailing
+    ``:12`` or ``:12:3`` dropped, an absolute path under the root (or under another checkout of
+    the repository) made relative, ``./`` stripped, then ``normpath``. ``None`` when the result
+    is the root itself, climbs out of it, or is still absolute (a drive-letter path no checkout
+    holds is absolute too)."""
+    return _normalise_ex(p, files, location=location)[0]
 
 
 def _read_file(p: str, files: _Files, *, directories: bool) -> _FileRead:
@@ -244,7 +298,7 @@ def _read_file(p: str, files: _Files, *, directories: bool) -> _FileRead:
     which is never read as a directory."""
     if p in files.held:
         return _FileRead("exact", (p,), shown=p)
-    q = _normalise(p, files)
+    q, remapped = _normalise_ex(p, files)
     if q is None:
         return _FileRead("unresolved", shown=p)
     dir_intent = p.strip().endswith("/")  # a trailing slash tries the directory rung only
@@ -262,7 +316,17 @@ def _read_file(p: str, files: _Files, *, directories: bool) -> _FileRead:
     if root is not None:
         for spelling in spellings:
             if is_file_exact(root, spelling):
-                return _FileRead("unresolved", shown=spelling, on_disk=True)
+                # The hit may be a file of a worktree nested under the root.
+                hit = files.rebase(str(root / spelling))
+                if hit is not None and hit[0] is not None:
+                    if hit[1] in files.held:
+                        return _FileRead("normalised", (hit[1],), shown=hit[1])
+                    return _FileRead("unresolved", shown=hit[1], on_disk=True, remapped=True)
+                return _FileRead("unresolved", shown=spelling, on_disk=True, remapped=remapped)
+        # A real file in another checkout is not guessed to be a graph file either.
+        for spelling in spellings:
+            if files.in_worktrees(spelling):
+                return _FileRead("unresolved", shown=spelling, on_disk=True, remapped=remapped)
     if not dir_intent:
         same_letters = files.folded(q)
         if len(same_letters) == 1:
@@ -307,7 +371,7 @@ def _read_file(p: str, files: _Files, *, directories: bool) -> _FileRead:
             # that matches anything.
             listed = tuple(matches[:_CANDIDATES_LISTED])
             return _FileRead("ambiguous", shown=q, listed=listed, total=len(matches))
-    return _FileRead("unresolved", shown=q)
+    return _FileRead("unresolved", shown=q, remapped=remapped)
 
 
 def _listed_candidates(
@@ -383,8 +447,13 @@ def _file_seed(seed: Seed, files: _Files, out: _Build) -> str:
         if read.outcome == "directory-too-large":
             return read.shown
     else:
+        if read.remapped:
+            out.notes.append(SeedNote(p, "normalised", (read.shown,)))
         out.unresolved.append(read.shown)
         out.file_seeds.append(FileSeed(read.shown, "unresolved"))
+        # The spelling the answer shows is the key telemetry stores, so it joins the records'
+        # descriptor paths; an absolute or nested worktree path would not.
+        return read.shown if read.remapped else p
     return p
 
 
@@ -426,6 +495,7 @@ def _entity_seed(seed: Seed, reader: _Reader, files: _Files, out: _Build) -> str
     given = f"{name} ({seed.file_path})" if path else name
     found = reader.resolve(Descriptor(name=name, file_path=seed.file_path))
     read: _FileRead | None = None
+    spelled = seed.file_path  # the spelling telemetry stores; the normalised one once read
     if path:
         if found.status != "unresolved":
             out.exact.append(seed)  # resolved as given
@@ -439,12 +509,16 @@ def _entity_seed(seed: Seed, reader: _Reader, files: _Files, out: _Build) -> str
         # The file is not in the graph. Read it the way a path is read, and keep the rewrite
         # only when the entity really is in the file that comes out.
         read = _read_file(path, files, directories=False)
+        if read.remapped:
+            spelled = read.shown
         if read.on_disk:
             # A file on disk the graph lacks: the not-in-graph block explains it. The name is
             # not hunted for in other files.
             out.exact.append(seed)
+            if read.remapped:
+                out.notes.append(SeedNote(given, "normalised", (read.shown,), name=name))
             out.unresolved.append(read.shown)
-            return seed.file_path
+            return read.shown if read.remapped else seed.file_path
         if read.outcome in _SINGLE_FILE:
             target = read.paths[0]
             if reader.resolve(Descriptor(name=name, file_path=target)).status != "unresolved":
@@ -464,10 +538,10 @@ def _entity_seed(seed: Seed, reader: _Reader, files: _Files, out: _Build) -> str
     elif found.status == "ambiguous":
         no_file = _report_ambiguous(seed, given, list(found.candidates), reader, out)
         if not no_file:
-            return seed.file_path if path else None
+            return spelled if path else None
     settled, moved = _by_member(seed, given, reader, out)
     if settled:
-        return moved or (seed.file_path if path else None)
+        return moved or (spelled if path else None)
     if no_file and read is None:
         # Several nodes answer to the name and none has a file: an ambiguous seed is never
         # expanded, so it is not an exact seed either.
@@ -476,7 +550,7 @@ def _entity_seed(seed: Seed, reader: _Reader, files: _Files, out: _Build) -> str
     out.exact.append(seed)
     if read is not None:
         out.unresolved.append(read.shown)
-        return seed.file_path
+        return read.shown if read.remapped else seed.file_path
     out.notes.append(SeedNote(given, "unresolved-name", (), no_file, name=name))
     return None
 
@@ -517,16 +591,21 @@ def needs_tolerance(seeds: list[Seed], reader: _Reader) -> bool:
 
 
 def tolerate(
-    seeds: list[Seed], reader: _Reader, root: Path | Callable[[], Path | None] | None
+    seeds: list[Seed],
+    reader: _Reader,
+    root: Path | Callable[[], Path | None] | None,
+    worktrees: Callable[[], list[Worktree]] | None = None,
 ) -> Ladder:
     """Read ``seeds`` through the ladder (spec D1) and return what each became.
 
     ``root`` is the repository root (a ``Path``, or a callable that returns one, called at most
     once and only when a rung needs it; ``None`` when there is none). With a root, an absolute
     path under it is made relative and a file that exists on disk is never guessed to be
-    another file.
+    another file. ``worktrees`` lists the repository's other checkouts (called at most once, and
+    only when a rung needs it): an absolute path under one is made relative to it, and a file
+    that exists in one is never guessed to be another file either.
     """
-    files = _Files(reader.source_files(), root)
+    files = _Files(reader.source_files(), root, worktrees)
     out = _Build()
     for seed in seeds:
         recorded: str | None = None
@@ -545,8 +624,13 @@ def _quoted(items: tuple[str, ...]) -> str:
     return ", ".join(f"`{i}`" for i in items)
 
 
+_ECHO_CHARS = 200
+
+
 def _line(note: SeedNote) -> str:
     given = note.given.replace("\n", " ")
+    if len(given) > _ECHO_CHARS:  # one absurd seed must not fill the cap the advice fits in
+        given = f"{given[:120]}…{given[-70:]}"
     head = f"- `{given}` → "
     if note.outcome in ("normalised", "case", "suffix", "basename", "name"):
         target = f"`{note.name}` in `{note.read_as[0]}`" if note.name else f"`{note.read_as[0]}`"

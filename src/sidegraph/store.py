@@ -64,7 +64,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from . import store_layout
-from .hot_index import CLAIM_META_SQL, GET_META_SQL, INSERT_EVENT_SQL
+from .hot_index import CLAIM_META_SQL, GET_META_SQL, INSERT_EVENT_SQL, SHOW_UPSERT_SQL
 from .schema import (
     SCHEMA_VERSION,
     AnchorBinding,
@@ -844,7 +844,11 @@ def _ratifier_identity(actor: str | None = None) -> str | None:
 
     try:
         out = subprocess.run(
-            ["git", "config", "user.name"], capture_output=True, text=True, timeout=5
+            ["git", "config", "user.name"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         name = out.stdout.strip()
         return name or None
@@ -859,6 +863,10 @@ def _sentinel_age_seconds(sentinel: Path) -> float:
         return time.time() - sentinel.stat().st_mtime
     except OSError:
         return float("inf")
+
+
+class StoreBusyError(sqlite3.OperationalError):
+    """The outermost mutation could not reserve SQLite before running its body."""
 
 
 class Store:
@@ -2157,56 +2165,39 @@ class Store:
         self._conn.commit()
 
     @contextmanager
-    def _mutation(self, *, immediate: bool = False) -> Iterator[None]:
-        """Every public write runs inside this: commit on success, roll back on any failure
-        (design D1/D2 — the fix for Defect A, external review).
+    def _mutation(self, *, immediate: bool = True) -> Iterator[None]:
+        """Reserve the writer before state checks; only the outermost scope commits.
 
-        Canonical files are already on disk by the time anything here fails and cannot be
-        un-replaced (see ``supersede_domain``'s ordering comment). What must not survive is a
-        half-staged SQLite transaction: the connection is shared, so a long-lived process
-        that returns one error would keep the write lock and every hook and CLI after it
-        would get ``database is locked`` (measured: 2.1s wait, then failure).
+        SQLite's BEGIN IMMEDIATE serializes separate Store connections before canonical
+        publication. The instance RLock serializes threads. Nested calls check the actual
+        connection transaction, not depth: an explicitly deferred outer scope may only
+        have read, so a nested immediate scope still needs to reserve.
 
-        Reentrant (design D2): ``ratify_domains`` -> ``get_or_create_abstract_entity`` ->
-        ``upsert_entity`` is a real nesting chain today, and only the OUTERMOST scope may
-        commit or roll back — an earlier draft of the design spec claimed nesting was
-        hypothetical; it is not, and ``ratify_domains`` wraps per item instead of once
-        around the whole method for exactly this reason (D2a).
-
-        The commit is INSIDE the try on purpose (design H1): COMMIT is exactly where
-        SQLITE_BUSY lands, so a commit raising must roll back too, not propagate untouched.
-        An earlier draft of the design put the commit after the whole try/except/finally and
-        review caught that it silently reintroduces Defect A on its single most likely
-        trigger.
-
-        ``BaseException``, not ``Exception`` — matches ``_reload_index_from_canonical``'s
-        existing guard (design D3, that method's own transaction, NOT this helper): a
-        ``KeyboardInterrupt`` mid-write must roll back before propagating.
-
-        ``immediate=True`` (design D6, entity-identity-uniqueness spec) issues ``BEGIN
-        IMMEDIATE`` before yielding, so a get-or-create's check-then-create runs as one
-        atomic unit and a second connection cannot slip its own lookup in between (external
-        review, finding 2). Gated on the CONNECTION (``self._conn.in_transaction``), NOT on
-        the depth. Python's legacy transaction control opens nothing until the first DML, so
-        an outer ``_mutation()`` that has only READ holds no lock at all — measured,
-        ``in_transaction`` is ``False`` after a read inside a mutation. An earlier draft
-        gated this on depth instead (a nested immediate at depth 2 is a no-op because "the
-        outer transaction already holds RESERVED"); that reasoning is false whenever the
-        outer scope hasn't written yet, and review reproduced the consequence directly:
-        outer plain mutation -> nested depth-2 immediate treated as a no-op -> two ids
-        minted again, straight through the hole this flag exists to close. Checking
-        ``in_transaction`` instead is correct at any depth: if the outer scope already
-        performed DML (so a transaction is already open), the nested ``BEGIN IMMEDIATE`` is
-        skipped — issuing a second ``BEGIN`` on an open transaction would raise
-        ``OperationalError: cannot start a transaction within a transaction`` — and if it
-        hasn't, the nested call is the one that actually takes the write lock, for real,
-        while the outermost scope still owns commit and rollback either way.
+        A failed outermost BEGIN can report StoreBusyError because its body has not run.
+        It says nothing about earlier mutations in a multi-step caller. Body and COMMIT
+        failures may follow canonical publication, which SQLite rollback cannot undo.
+        COMMIT stays inside the try, and BaseException rollback releases the connection
+        even on interruption. Explicit immediate=False is for deferred composition only;
+        public canonical writers use the immediate default.
         """
         with self._lock:
             self._mutation_depth += 1
             try:
                 if immediate and not self._conn.in_transaction:
-                    self._conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        self._conn.execute("BEGIN IMMEDIATE")
+                    except sqlite3.OperationalError as exc:
+                        code = getattr(exc, "sqlite_errorcode", 0)
+                        if (
+                            self._mutation_depth == 1
+                            and isinstance(code, int)
+                            and code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                        ):
+                            busy = StoreBusyError("store writer reservation is busy")
+                            busy.sqlite_errorcode = code
+                            busy.sqlite_errorname = getattr(exc, "sqlite_errorname", "SQLITE_BUSY")
+                            raise busy from None
+                        raise
                 yield
                 if self._mutation_depth == 1:
                     self._commit()
@@ -3299,21 +3290,9 @@ class Store:
         ``_ratifier_identity`` itself (falls back to the git identity, never stores the
         blank string).
 
-        ``cascade_guard`` (keyword-only, design D2 checkpoint-2 fix, Ruling Q): closes the
-        race window between an outer eligibility check and this method's own write (external
-        review finding A1, reproduced by ``scratchpad/probe_race.py`` — a fact landing
-        between the two could self-certify with no anchor). When supplied, the whole
-        transition runs under ``_mutation(immediate=True)`` so the write lock is taken
-        BEFORE the cascade set is even read — see ``_mutation``'s own docstring for why
-        ``immediate`` is required here: an outer mutation that has only READ so far holds no
-        lock, so without it a second connection could still slip a write in between. The
-        cascade set (still-``proposed`` facts whose ``supports`` names this decision, read
-        fresh under that lock) is handed to the guard; a ``False`` return raises
-        ``ValueError`` BEFORE any write happens — no status flip, no stamp, no predecessor
-        close — leaving the decision proposed. Omitted (every existing human path — MCP,
-        CLI, doc-import): behavior is byte-identical to before this parameter existed, plain
-        ``_mutation()``, no guard, no re-check. Only ``capture._auto_ratify``'s decision route
-        ever supplies one.
+        ``cascade_guard`` receives the proposed evidence fresh under the same writer
+        reservation as human ratification. A refused guard leaves every canonical file
+        unchanged. Human calls omit the guard but still reserve before checking status.
 
         Cascade (facts layer, design §2026-07-10): every still-``proposed`` :class:`Fact`
         whose ``supports`` names this decision rides its verdict — flipped to ``accepted``
@@ -3321,7 +3300,7 @@ class Store:
         facts inherit ``ratified_by`` directly from ``d`` below, so an explicit ``actor``
         reaches them the same way the git identity always did — no separate threading.
         """
-        with self._mutation(immediate=cascade_guard is not None):
+        with self._mutation():
             d = self.get_decision(decision_id)
             if d is None or d.status != DecisionStatus.PROPOSED:
                 raise ValueError(f"decision {decision_id!r} is not proposed")
@@ -3456,6 +3435,8 @@ class Store:
 
     def record_retrieval(self, record_ids: Iterable[str], seeds: Iterable[str]) -> None:
         """Count records that reached a render, and areas that were asked about.
+        (The PreToolUse hook bumps the same counter per block it prints, via
+        ``hot_index.SHOW_UPSERT_SQL``.)
 
         Derived state, index-only: this is a *read* path, and writing anything canonical
         here would make retrieval dirty git — the sync-clean invariant's most direct
@@ -3466,12 +3447,7 @@ class Store:
         now = datetime.now(UTC).isoformat()
         with self._mutation():
             for rid in dict.fromkeys(record_ids):
-                self._conn.execute(
-                    "INSERT INTO retrieval_shows (record_id, shows, last_shown_at) "
-                    "VALUES (?, 1, ?) ON CONFLICT(record_id) DO UPDATE SET "
-                    "shows = shows + 1, last_shown_at = excluded.last_shown_at",
-                    (rid, now),
-                )
+                self._conn.execute(SHOW_UPSERT_SQL, (rid, now))
             for seed in dict.fromkeys(seeds):
                 self._conn.execute(
                     "INSERT INTO retrieval_seeds (seed, queries, last_seen_at) "
@@ -3536,14 +3512,19 @@ class Store:
         session_id: str,
         seeds: Iterable[str],
         shows: Iterable[tuple[str, str]],
+        *,
+        at: str | None = None,
     ) -> None:
         """Record what a retrieval asked about and what it surfaced.
+
+        ``at`` is the call's timestamp when the caller shares one with the call's render row
+        (``server._record`` does, so stats can tell one call from two); default is now.
 
         ``shows`` are ``(record_id, anchored_file_path)`` pairs — one event per pair, since
         a record anchored to three files can be reached by a touch of any of them. Both
         sequences are deduped per call: one render showing a record twice is one showing.
         """
-        now = datetime.now(UTC).isoformat()
+        now = at or datetime.now(UTC).isoformat()
         with self._mutation():
             for seed in dict.fromkeys(seeds):
                 self._conn.execute(
@@ -3581,6 +3562,7 @@ class Store:
         chars_used: int,
         had_rejected: bool,
         had_superseded: bool,
+        at: str | None = None,
     ) -> None:
         """Record what one retrieval render selected and what survived the budget.
 
@@ -3596,7 +3578,7 @@ class Store:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
-                    datetime.now(UTC).isoformat(),
+                    at or datetime.now(UTC).isoformat(),
                     intent,
                     selected,
                     emitted,
@@ -4112,6 +4094,23 @@ class Store:
         with self._lock:
             row = self._conn.execute(GET_META_SQL, (key,)).fetchone()
         return row["value"] if row else None
+
+    def meta_with_prefix(self, prefix: str) -> dict[str, str]:
+        """Every ``meta`` row whose key starts with ``prefix``, as ``{key: value}``.
+
+        A primary-key range (``prefix <= key < prefix with its last character + 1``), not
+        ``LIKE``: ``_`` is a ``LIKE`` wildcard and the host's prefixes contain it. An empty
+        prefix is refused.
+        see design/superpowers/specs/2026-10-11-session-attribution-design.md (D4)
+        """
+        if not prefix:
+            raise ValueError("an empty prefix matches every meta key; name what to read")
+        upper = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value FROM meta WHERE key >= ? AND key < ?", (prefix, upper)
+            ).fetchall()
+        return {row["key"]: row["value"] for row in rows}
 
     def canonical_digest(self) -> str | None:
         """The digest this index is certified against: the stamp of the canonical files as

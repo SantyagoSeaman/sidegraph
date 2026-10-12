@@ -1,6 +1,7 @@
 ---
 name: manage-domains
-description: Use for managing, editing, fixing, splitting, or dropping domains after the initial naming pass — "this domain is wrong", "split payments into two", "add a domain for X", "rename that domain", "drop this domain", "show me all domains". Also reachable directly as /sidegraph:manage-domains. The escape hatch and ongoing-maintenance flow for individual domains, by key — the a-la-carte counterpart to name-domains' whole-set picker.
+description: >-
+  Use for managing, editing, fixing, splitting, or dropping domains after the initial naming pass — "this domain is wrong", "split payments into two", "add a domain for X", "rename that domain", "drop this domain", "show me all domains". Also reachable directly as /sidegraph:manage-domains. The escape hatch and ongoing-maintenance flow for individual domains, by key — the a-la-carte counterpart to name-domains' whole-set picker.
 ---
 
 # Manage domains
@@ -30,10 +31,10 @@ narrow. This is the tool for "show me all domains" — prefer it over the narrow
 - **`list_proposed()`** — domains awaiting ratification only (`status=proposed`), rendered
   human-readably with their `paths:`/`communities:` membership rule — reach for this
   specifically at ratify time, not as a general listing.
-- **`drill_down(domain_slug)`** — full detail (summary, subdomains, members, decisions) for one
-  **known** slug — the natural follow-up once `list_domains` has given you the slug you want
-  to go deeper on. Passing an unknown slug returns up to 10 currently-accepted slugs to retry
-  with instead of guessing.
+- **`drill_down(domain_slug)`** — detail (summary, subdomains, members, and the decisions,
+  mistakes first; the ones that do not fit come as ids) for one **known** slug — the natural
+  follow-up once `list_domains` has given you the slug you want to go deeper on. Passing an
+  unknown slug returns up to 10 currently-accepted slugs to retry with instead of guessing.
 - **`list_domain_candidates()`** — the *unclaimed* side only (communities with no domain yet);
   `already_claimed` gives you a count of already-named communities but not their slugs (use
   `list_domains` for that).
@@ -53,7 +54,7 @@ narrow. This is the tool for "show me all domains" — prefer it over the narrow
 3. `ratify(accept=[<domain_id>])` to make it live — this also resolves `seed_anchors`/
    `path_prefixes` into `communities` immediately, so `drill_down` shows real membership
    without a separate sync — or leave it `proposed` for a human to accept later via
-   `sidegraph-ratify`/`list_proposed`.
+   `list_proposed` (or the `sidegraph-ratify` CLI; see the CLI note under Related).
 
 ## Rename a domain
 
@@ -120,3 +121,5 @@ membership), ratify both, then drop the original (see "Drop a wrong domain" abov
 - [`docs/guides/naming-your-domains.md`](../../../../docs/guides/naming-your-domains.md) —
   background on bootstrap idempotency, mass-drop recovery, and the CLI equivalents
   (`sidegraph-domains add`, `sidegraph-ratify`).
+- CLI commands run as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, at the session's version, never the copy on `PATH`:
+  [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).

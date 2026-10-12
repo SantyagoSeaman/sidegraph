@@ -90,8 +90,8 @@ def test_t3_the_path_alias_is_not_empty_text(repo):
 
 
 def test_t3_a_symbol_seed_is_an_entity_not_a_file(repo):
-    """``files=["fn_0()"]`` is "not a repo-relative path"; the entity form resolves the symbol and
-    returns its records and the map. Mutation M3 sends every seed to ``files``."""
+    """``files=["fn_0()"]`` is "not a file in this checkout"; the entity form resolves the
+    symbol and returns its records and the map. Mutation M3 sends every seed to ``files``."""
     as_files = text("get_task_context", {"files": ["fn_0()"]})
     as_entity = text("get_task_context", {"entities": [{"name": "fn_0()"}]})
 
@@ -122,7 +122,7 @@ def test_t3_seeds_are_routed_by_shape(received, repo):
 
 def test_t3_a_dotted_symbol_is_an_entity_not_a_file(received, repo):
     """``Store.close`` ends in ``.close``, which is no file extension: a method reads as a symbol,
-    so it reaches the graph by name where ``files`` would only say "not a repo-relative path"."""
+    so it reaches the graph by name where ``files`` would only say "not a file in this checkout"."""
     text(
         "get_task_context",
         {"seeds": ["Store.close", "server.mcp", "Store.refresh_if_stale", "v1.2", "README"]},
@@ -264,9 +264,9 @@ def test_t6_a_write_tool_gets_the_same_error_and_writes_nothing(repo):
 
 
 def test_t6_a_tool_without_parameters_says_so(repo):
-    message = error("list_proposed", {"x": 1})
+    message = error("verify_store", {"x": 1})
 
-    assert message == "Unknown argument `x` for `list_proposed`. It takes no parameters."
+    assert message == "Unknown argument `x` for `verify_store`. It takes no parameters."
 
 
 def test_known_arguments_pass_through_untouched(repo):

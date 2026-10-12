@@ -1225,11 +1225,13 @@ def _run_git(
     callers keep decoded text by default.
 
     Git runs with its repository-local variables (``GIT_DIR`` and friends) dropped, so it
-    answers about the repository containing ``cwd``, never an ambient one."""
+    answers about the repository containing ``cwd``, never an ambient one. These
+    noninteractive commands receive EOF on stdin, keeping subprocesses off the MCP pipe."""
     try:
         return subprocess.run(
             ["git", *args],
             cwd=cwd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=text,
             timeout=timeout,

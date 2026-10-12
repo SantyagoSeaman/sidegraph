@@ -87,7 +87,9 @@ Domain acceptance is the special case refreshed in the ratify operation itself.
 One level deeper than the TOC: `drill_down` returns a domain's full summary, its accepted
 subdomains (title + one-line summary), a capped sample (20) of the code/doc entities currently
 in it (`communities` ∪ `path_prefixes`, deduplicated), and the decisions bound to it —
-mistakes first, same ranking convention as everything else. Works on a not-yet-ratified
+mistakes first, same ranking convention as everything else. The decisions are cut at 25 (or
+`limit`) and at `budget_chars` (default 24,000), and the cut ones come back as `omitted_ids`.
+Works on a not-yet-ratified
 (`proposed`) domain too; `status` in the result reflects that.
 
 Unknown `domain_slug` never guesses a match: it returns `{"found": false, "candidates": [...]}`
@@ -260,7 +262,7 @@ claim on the field's clip budget and the remainder fills in with what came befor
 `rejected` field built from multiple bold-pseudo-heading blocks (see
 [importing decision-shaped markdown](../reference/cli.md#importing-decision-shaped-markdown---docs))
 gets the same treatment so a second rejected alternative isn't silently starved by the
-first. `drill_down` (an explicit, unbudgeted "go deeper" call) renders its decisions at the
+first. `drill_down` (an explicit "go deeper" call with no relevance budget; its output is capped by `budget_chars`) renders its decisions at the
 direct tier too, for the same reason; `top_tier_map`/`build_toc`'s global-mistakes lines
 stay at the tight tier deliberately — a TOC is a pointer to the real payload, not the
 payload itself.
@@ -359,8 +361,11 @@ Missing sections are omitted; an empty result renders `"No context found."`. Aft
 rendered text, `get_task_context` appends a `## Not in the code graph` block when a seed path is
 not a file the graph holds, saying why: a file that exists but is missing from a stale graph
 (rebuild it), from a graph with no committed change since its build (the file may be newer than
-the build and uncommitted, or sit on a path or have a type the engine skips), or a path that is
-not a normalized repo-relative path to a file (check it). In a linked worktree that borrows the
+the build and uncommitted, or sit on a path or have a type the engine skips), a file that exists
+only in another checkout of the repository (a sibling linked worktree: the sentence names the
+worktree and branch), a well-formed path that is
+not a file in any checkout (check the branch and the spelling), or a path that is not a
+normalized repo-relative path (check it). In a linked worktree that borrows the
 main checkout's graph, a file that exists only on the branch gets one sentence saying the graph
 does not hold it, and the rebuild advice for any other file names the main checkout. With no graph
 at all and at least one seed, a `## No code graph` block names the path looked at and says to build

@@ -90,12 +90,13 @@ def test_a_raising_writer_does_not_cost_the_other_journals(tmp_path, monkeypatch
     store.close()
 
 
-def test_a_missing_session_key_writes_no_render_event(tmp_path, monkeypatch):
-    """No session means no event, never a misattributed one."""
+def test_a_missing_session_key_writes_a_sentinel_render_event(tmp_path, monkeypatch):
+    """No session means the call is journaled as unattributed, never under a guessed session
+    and never dropped (stats counts the sentinel as a call, not as a session)."""
     store = Store(tmp_path / "s")
     monkeypatch.setattr(server, "_session_key", lambda _s: None)
     server._record(store, ["rec-1"], [], ctx=_ctx(), intent="check-plan")
-    assert store.render_events() == []
+    assert [e["session_id"] for e in store.render_events()] == ["unattributed"]
     store.close()
 
 
@@ -201,10 +202,10 @@ def test_the_tools_forward_intent_to_their_impls(tmp_path, monkeypatch):
 
 # --- drill_down delivers records, so it writes a render event (usage-stats fix wave 3) -------
 #
-# It applies no budget, so its row carries the records returned as `emitted` and zeros for every
-# budget field, under the reserved intent the report reads to keep those zeros out of the budget
-# figures. Before this it wrote none, and a session that also had an ordinary render row lost
-# the drill-down's records from `showings`.
+# It applies no relevance budget, so its row carries the records returned as `emitted` and zeros
+# for every budget field, under the reserved intent the report reads to keep those zeros out of
+# the budget figures. Before this it wrote none, and a session that also had an ordinary render
+# row lost the drill-down's records from `showings`.
 
 
 def _domain_store(tmp_path, *, rejected=""):

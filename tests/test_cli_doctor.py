@@ -18,7 +18,7 @@ from sidegraph.schema import (
     Entity,
     Provenance,
 )
-from sidegraph.store import Store
+from sidegraph.store import VOLATILE_STALE_KEY, Store
 
 
 def _seed_healthy(tmp_path: Path) -> Path:
@@ -142,7 +142,7 @@ def test_json_output_shape_and_purity(tmp_path, capsys):
     assert doc["findings"][0]["code"] == "dangling-record"
     assert set(doc["findings"][0]) == {"code", "path", "detail"}
     # An index that no sync has computed the statuses of, and no graph in this test's directory.
-    assert doc["skipped"] == ["orphaned-records", "graph"]
+    assert doc["skipped"] == ["binding-status", "orphaned-records", "graph"]
 
 
 def test_json_clean_true_on_healthy_store(tmp_path, capsys):
@@ -178,9 +178,46 @@ def test_degraded_binding_surfaces_through_cli(tmp_path, capsys):
         Entity(canonical_name="beta", descriptor=Descriptor(name="beta", file_path="b.py"))
     )
     s.add_binding(AnchorBinding(record_id=d.id, entity_id=e.entity_id, tier=2, status="degraded"))
+    s.set_meta(VOLATILE_STALE_KEY, "0")  # a finished sync; a new store's index is cold
+    s.close()
     assert doctor_main(["--db", str(db), "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
     assert "degraded-binding" in [f["code"] for f in doc["findings"]]
+
+
+def test_reloaded_index_withholds_binding_statuses_end_to_end(tmp_path, capsys):
+    """Reload probe: an orphaned binding after a sync, then a touch and a Store open (a reload
+    resets every status to live and sets the flag). Doctor lists the check as skipped."""
+    db = _seed_healthy(tmp_path)
+    s = Store(db)
+    d = next(iter(db.glob("decisions/*.json")))
+    e = s.upsert_entity(
+        Entity(canonical_name="beta", descriptor=Descriptor(name="beta", file_path="b.py"))
+    )
+    s.add_binding(AnchorBinding(record_id=d.stem, entity_id=e.entity_id, tier=2, status="orphaned"))
+    s.set_meta(VOLATILE_STALE_KEY, "0")
+    s.close()
+    assert doctor_main(["--db", str(db), "--json"]) == 0
+    assert "orphaned-binding" in [
+        f["code"] for f in json.loads(capsys.readouterr().out)["findings"]
+    ]
+
+    time.sleep(0.05)
+    d.touch()
+    Store(db).close()  # the reload
+
+    assert doctor_main(["--db", str(db), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "binding-status" in doc["skipped"] and "orphaned-records" in doc["skipped"]
+    assert not {"orphaned-binding", "orphaned-record"} & {f["code"] for f in doc["findings"]}
+
+    assert doctor_main(["--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "binding-status check skipped (binding statuses are not computed for the current "
+        "graph — run sidegraph-sync)"
+    ) in out
+    assert "no usable index.db" not in out
 
 
 # -- --stale-days passthrough --------------------------------------------------------------

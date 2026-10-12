@@ -1,8 +1,8 @@
 # What is stable, and what is not
 
-Sidegraph is pre-1.0. That is not a licence to change anything at any time — some of this
-project's surfaces are load-bearing for anyone who adopts it, and a few genuinely are not
-settled. This page says which is which, so you can tell what you are allowed to build on.
+Sidegraph is pre-1.0. This page identifies the interfaces covered by compatibility
+commitments and those that may still change. Use it when deciding what your integration
+can depend on.
 
 Read it before you write a script, a CI job, a prompt, or a tool against Sidegraph.
 
@@ -27,7 +27,7 @@ described a mode that had not existed for weeks, because no test looked there.
 |---|---|---|
 | **The store on disk** — `.sidegraph/` layout, one JSON file per record, the `format` marker, `schema_version` | The current version is **0.6.0**. `0.2.0`/`0.3.0` stores migrate automatically on first open (original kept as `*.migrated-backup`, never deleted). `0.4.0`/`0.5.0` reload in place. A future bump does one of those two — it never orphans a store. | `sidegraph-verify` lints every canonical file against the write-path invariants; `--against <ref>` classifies every changed file against the store's own transition rules |
 | **CLI commands, flags, exit codes** | 19 entry points, 80 flags. A flag is not removed without a deprecation window; documented exit codes keep their meaning | every parser option must appear in its `cli.md` section (`tests/test_docs_claims.py`) |
-| **Environment variables** | The 15 in [`configuration.md`](configuration.md), and the store-path precedence between them. `SIDEGRAPH_DB` stays honoured as the documented deprecated form. `SIDEGRAPH_RATIFY_POLICY`'s name and its `manual` default are committed; its auto values and their gates are Provisional (below). | bidirectional test: the documented set must equal what `src/` actually reads |
+| **Environment variables** | The 16 in [`configuration.md`](configuration.md), and the store-path precedence between them. `SIDEGRAPH_DB` stays honoured as the documented deprecated form. `SIDEGRAPH_RATIFY_POLICY`'s name and its `manual` default are committed; its auto values and their gates are Provisional (below). | bidirectional test: the documented set must equal what `src/` actually reads |
 | **Hook process contract** | Read one JSON payload on stdin, write one JSON object on stdout, never block the host, never crash it — any internal failure exits normally, printing `{}`, or for SessionStart a store that cannot be opened prints a `systemMessage` naming the cause. Hosts call the hooks without arguments: `-h`/`--help` prints usage on stdout and exits `0`, and any other argument is a usage error on stderr that exits `2` (keep the `\|\| printf` guard on hand-written wiring) | the hook tests, and a live host run per release |
 
 The *payload schema* inside the hook contract is **Claude Code's**, not ours. If the host
@@ -40,7 +40,7 @@ changes it, we follow the host; that is the point of keeping the host seam thin.
 | **The MCP tool set and return shapes** (24 tools) | Fields and tools may still be added or deprecated; `ratify_decisions` is already a deprecated alias. Pin a version if a client depends on an exact shape. |
 | **Flow profiles** — the six names and their ingest globs | `spec-kit`'s glob reads `specs/*/plan.md`, while that flow writes its rejected alternatives to `research.md`, which nothing reads. Fixing that changes a glob. |
 | **`doctor` finding codes** | Advisory lint; the set grows as checks are added. Guarded against the docs, not frozen. |
-| **Integrity check ids and severities** — `store-unreadable`, `graph-stale`, `orphaned-records` and the rest of the [troubleshooting](../guides/troubleshooting.md) table, as they appear in `sidegraph-stats --json`'s `health[].check` and in the `integrity_notice:` meta rows | Beside the doctor codes, for the same reason: the set grows as checks are added (the host-wiring checks `version-skew` and `plugin-off-in-subdirectories` are the latest), and a severity or a threshold (such as the age that makes orphaned records degraded) may move once it is measured. |
+| **Integrity check ids and severities** — `store-unreadable`, `graph-stale`, `orphaned-records` and the rest of the [troubleshooting](../guides/troubleshooting.md) table, as they appear in `sidegraph-stats --json`'s `health[].check` and in the `integrity_notice:` meta rows | Beside the doctor codes, for the same reason: the set grows as checks are added (the host-wiring checks `version-skew`, `path-skew` and `plugin-off-in-subdirectories` are the latest), and a severity or a threshold (such as the age that makes orphaned records degraded) may move once it is measured. |
 | **Auto-ratification policy** — `SIDEGRAPH_RATIFY_POLICY`'s `auto-low-risk`/`auto-all` values and eligibility gates, the `, auto-ratified N` CLI summary segment (and the dry run's `, would auto-ratify M` and `[auto]` marker), and `sidegraph-doctor`'s `auto share`/`auto supersede rate` lines | Eligibility and reporting may tighten. `manual` remains the committed default. |
 
 ### Not a contract
@@ -62,7 +62,7 @@ change; what it is telling you is not.
 | **Mistakes-first.** Direct gotcha, constraint, and lesson records rank ahead of direct ADRs and related/global memory. | the order of lines in `get_task_context` output |
 | **Unratified memory cannot outrank accepted memory.** Proposed records render only in a final quarantine block and may be withheld entirely by the surfacing window or `SIDEGRAPH_UNRATIFIED=off`. Raw MCP listings apply the same policy. Withholding never deletes the record or removes it from the ratification queue. | the `[unratified]` tag, block placement, and default window |
 | **Memory signals its own decay.** A record anchored to code that changed since capture is marked, not silently served as current. | the `[drifted]` tag |
-| **Nothing leaves your machine.** No network calls, no remote telemetry. Optional local diagnostics live in the gitignored index and switch off with one variable. | `SIDEGRAPH_TELEMETRY` (the variable name is committed; the diagnostics tables are not) |
+| **Local runtime.** Sidegraph makes no outbound network calls and sends no remote telemetry. The MCP client controls where tool results go; installation and updates download dependencies. Optional local diagnostics live in the gitignored index and switch off with one variable. | `SIDEGRAPH_TELEMETRY` (the variable name is committed; the diagnostics tables are not) |
 
 If you need one of these guarantees in a script, assert on the store or the MCP return value,
 never on rendered text.

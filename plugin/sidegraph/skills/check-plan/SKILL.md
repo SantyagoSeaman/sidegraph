@@ -1,6 +1,7 @@
 ---
 name: check-plan
-description: Use BEFORE designing or implementing anything non-trivial — entering plan mode, drafting a spec, "we're going to do X", "план такой", "давай сделаем X через Y", a refactor about to start — to ask memory what is already known against the plan. Also reachable directly as /sidegraph:check-plan. Pulls the touched area's rejected alternatives, constraints, and paid-for gotchas and returns a verdict: conflicts (the plan re-proposes something already tried and abandoned — with the record saying why), constraints the plan must respect, or a clean bill. The one-tool-call version of the review a long-tenured teammate used to give for free.
+description: >-
+  Use BEFORE designing or implementing anything non-trivial — entering plan mode, drafting a spec, "we're going to do X", "план такой", "давай сделаем X через Y", a refactor about to start — to ask memory what is already known against the plan. Also reachable directly as /sidegraph:check-plan. Pulls the touched area's rejected alternatives, constraints, and paid-for gotchas and returns a verdict: conflicts (the plan re-proposes something already tried and abandoned — with the record saying why), constraints the plan must respect, or a clean bill. The one-tool-call version of the review a long-tenured teammate used to give for free.
 ---
 
 # Check a plan against memory

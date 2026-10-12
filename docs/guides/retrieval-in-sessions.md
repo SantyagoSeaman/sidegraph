@@ -129,8 +129,8 @@ seeds that resolve to the right part of the graph:
   through the same name+file matching `add_decision`'s anchors use.
 
 A seed does not have to be spelled the way the graph spells it. `./trader/exec.py`,
-`trader/exec.py:42`, `exec.py` and an absolute path inside the repository all read as the same
-file, a directory (`trader/`) reads as up to eight of its files, and `Trader.place` finds the
+`trader/exec.py:42`, `exec.py` and an absolute path inside the repository or any linked worktree
+all read as the same file, a directory (`trader/`) reads as up to eight of its files, and `Trader.place` finds the
 method with no file at all. Each such rewrite is a guess, and the reply says so in a
 `## How your seeds were read` block. When a name could mean several files or symbols, the tool
 lists them and reads none: pass the repo-relative path.
@@ -158,8 +158,8 @@ by a block that says why. A seed that was read some other way than written gets 
 `## How your seeds were read` line (guessed, normalised, a directory, ambiguous, or a name that
 matches no symbol). If a file you passed is not in the code graph, a trailing
 `## Not in the code graph` block says why: the graph is stale and needs `graphify update .`, the
-file is newer than the build or one the engine skips, or the path names no file in the
-repository (see [`get_task_context`](../reference/mcp-tools.md#get_task_context)). A file seed
+file is newer than the build or one the engine skips, the file exists only in another
+checkout (a sibling worktree), or the path names no file in any checkout (see [`get_task_context`](../reference/mcp-tools.md#get_task_context)). A file seed
 that has no current record of its own, but has anchored files near it, gets a `## Nearest anchored`
 sentence naming them, and when the answer holds no decision memory at all the records of those
 files follow under `## Nearest anchored records (not anchored to your files)` (see

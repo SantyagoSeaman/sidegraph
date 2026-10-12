@@ -1,6 +1,7 @@
 ---
 name: ratify-decisions
-description: Use when pending Sidegraph proposals need human review — "review pending decisions", "what's waiting for ratification", "ratify the queue", "что там накопилось", right after a propose_decisions/propose_domains call, when SessionStart shows a "Sidegraph: N record(s) awaiting ratification (X decisions, Y facts, Z domains)" line, or when retrieval output shows [unratified] tags. Also reachable directly as /sidegraph:ratify-decisions. Walks the human through the pending queue (decisions, facts, and domains) item by item — present with a recommendation, wait for explicit verdicts, then one ratify call. A decision's nested evidence (its attached, still-proposed facts) rides that decision's own verdict, not a separate one. Never auto-accepts.
+description: >-
+  Use when pending Sidegraph proposals need human review — "review pending decisions", "what's waiting for ratification", "ratify the queue", "что там накопилось", right after a propose_decisions/propose_domains call, when SessionStart shows a "Sidegraph: N record(s) awaiting ratification (X decisions, Y facts, Z domains)" line, or when retrieval output shows [unratified] tags. Also reachable directly as /sidegraph:ratify-decisions. Walks the human through the pending queue (decisions, facts, and domains) item by item — present with a recommendation, wait for explicit verdicts, then one ratify call. A decision's nested evidence (its attached, still-proposed facts) rides that decision's own verdict, not a separate one. Never auto-accepts.
 ---
 
 # Ratify decisions
@@ -30,8 +31,9 @@ see it).
 
 ## Flow
 
-1. **Call `list_proposed()`** — renders every `status="proposed"` decision, fact, *and*
-   domain human-readably, sectioned "Decisions:" (each block carries its still-proposed
+1. **Call `list_proposed()`** — renders the `status="proposed"` decisions, facts, *and*
+   domains human-readably (a long queue is shown in part: a first line counts it, and the end
+   lists the rest by id; ratify what is shown, then call again), sectioned "Decisions:" (each block carries its still-proposed
    supporting facts nested underneath as `  evidence: <statement> [<source>]  (<id>)`
    lines — a preview of the cascade below), then "Facts:" (standalone facts — ones not
    nested under any decision above), then "Domains:" — each section printed only when
@@ -131,16 +133,15 @@ record that was never valid in the first place.
   [why selective, not --all](../../../../docs/guides/naming-your-domains.md#why-selective-not---all).
   Present the batch grouped, recommend a subset, let the human widen it.
 - **CLI parity:** `sidegraph-ratify` (no flags = the same pending listing;
-  `--accept`/`--drop`/`--all`) is the terminal/PR-review equivalent — in a repo without a
-  Sidegraph checkout, run it as `uvx --from
-  git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-ratify`. Point the
-  human there when they'd rather review outside the session.
+  `--accept`/`--drop`/`--all`) is the terminal/PR-review equivalent. Run it as
+  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-ratify`, at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  Point the human there when they'd rather review outside the session.
 - A proposed record is not hidden while it waits: by default it surfaces in retrieval tagged
   `[unratified]`, and ratification removes the tag without making the record appear. Two
   settings change that. A proposal older than the surfacing window (30 days,
   `SIDEGRAPH_PROPOSAL_WINDOW_DAYS`) stops surfacing, and `SIDEGRAPH_UNRATIFIED=off` stops all of
-  them. `list_proposed` and `sidegraph-ratify` still list every pending record, so review the
-  queue with those, never with `retrieve_decisions`.
+  them. `list_proposed` and `sidegraph-ratify` still list the pending records (a long queue in
+  parts, the rest by id), so review the queue with those, never with `retrieve_decisions`.
 
 ## See also
 

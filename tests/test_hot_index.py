@@ -13,11 +13,13 @@ design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import inspect
 import os
 import shutil
 import sqlite3
+import textwrap
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -346,16 +348,19 @@ def test_retrieval_proposal_surfaces_delegates_to_the_layout_rule(monkeypatch):
 
 
 def test_the_hot_sql_is_defined_once_and_shared_with_the_store():
-    """The claim, the meta read and the touch insert are one statement each, in
+    """The claim, the meta read, the event insert and the shows upsert are one statement each, in
     ``hot_index.py``, and ``Store`` runs those same constants."""
     src = Path(store_module.__file__).parent
     shared = (
         ("CLAIM_META_SQL", Store.claim_meta),
         ("GET_META_SQL", Store.get_meta),
         ("INSERT_EVENT_SQL", Store._append_event),
+        ("SHOW_UPSERT_SQL", Store.record_retrieval),
     )
     for name, method in shared:
-        assert name in inspect.getsource(method), name
+        tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        assert name in used, f"{method.__qualname__} does not run {name}"
         assert isinstance(getattr(hot_index, name), str)
     # no second spelling of the two statements only these methods run (``update_meta_if``
     # reads meta inside its own transaction and keeps its own SELECT). Each needle is the part
@@ -363,6 +368,7 @@ def test_the_hot_sql_is_defined_once_and_shared_with_the_store():
     needles = {
         "CLAIM_META_SQL": "ON CONFLICT(key) DO NOTHING",
         "INSERT_EVENT_SQL": "(session_id, at, kind, key, detail, agent)",
+        "SHOW_UPSERT_SQL": "shows = shows + 1, last_shown_at = excluded.last_shown_at",
     }
     for name, needle in needles.items():
         assert needle in getattr(hot_index, name)

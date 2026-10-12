@@ -1293,7 +1293,7 @@ wheels = [
 
 [[package]]
 name = "sidegraph"
-version = "0.11.1"
+version = "0.12.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
@@ -1315,8 +1315,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4" },
-    { name = "fastmcp", specifier = ">=3.4" },
-    { name = "mcp", specifier = ">=1.24" },
+    { name = "fastmcp", specifier = ">=3.4.2,<4" },
+    { name = "mcp", specifier = ">=1.24,<2" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "python-ulid", specifier = ">=3.0" },
 ]

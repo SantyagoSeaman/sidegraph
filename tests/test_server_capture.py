@@ -357,25 +357,31 @@ def test_add_decision_impl_no_reader_no_anchors_skipped(tmp_path):
 # asymmetry, and it's what makes the git-bindings join (task #23) trustworthy.
 
 
-def test_add_decision_impl_falls_back_to_telemetry_session_key_when_fresh(tmp_path):
+def test_add_decision_impl_falls_back_to_telemetry_session_key_when_fresh(
+    tmp_path, current_session
+):
     from datetime import UTC, datetime
 
-    from sidegraph.config import TELEMETRY_SESSION_KEY
+    from sidegraph.config import TELEMETRY_SESSION_STAMP_PREFIX
 
     store = Store(tmp_path / "t.db")
-    store.set_meta(TELEMETRY_SESSION_KEY, f"session-xyz|{datetime.now(UTC).isoformat()}")
+    current_session(session_id=None)
+    store.set_meta(
+        f"{TELEMETRY_SESSION_STAMP_PREFIX}session-xyz", f"{datetime.now(UTC).isoformat()}|claude"
+    )
 
     out = _add_decision_impl(store, None, "title", "adr", "ctx", "choice")
 
     assert store.get_decision(out["id"]).provenance.session_id == "session-xyz"
 
 
-def test_add_decision_impl_explicit_session_id_wins_over_fallback(tmp_path):
+def test_add_decision_impl_explicit_session_id_wins_over_fallback(tmp_path, current_session):
     from datetime import UTC, datetime
 
     from sidegraph.config import TELEMETRY_SESSION_KEY
 
     store = Store(tmp_path / "t.db")
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"marker-session|{datetime.now(UTC).isoformat()}")
 
     out = _add_decision_impl(
@@ -385,7 +391,7 @@ def test_add_decision_impl_explicit_session_id_wins_over_fallback(tmp_path):
     assert store.get_decision(out["id"]).provenance.session_id == "explicit-session"
 
 
-def test_add_decision_impl_ignores_stale_telemetry_session_marker(tmp_path):
+def test_add_decision_impl_ignores_stale_telemetry_session_marker(tmp_path, current_session):
     """Window-expired twin (declared exception): passes before AND after."""
     from datetime import UTC, datetime, timedelta
 
@@ -393,6 +399,7 @@ def test_add_decision_impl_ignores_stale_telemetry_session_marker(tmp_path):
 
     store = Store(tmp_path / "t.db")
     stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"stale-session|{stale}")
 
     out = _add_decision_impl(store, None, "title", "adr", "ctx", "choice")

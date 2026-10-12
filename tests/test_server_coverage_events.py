@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sidegraph.config import TELEMETRY_SESSION_KEY
+from sidegraph.config import TELEMETRY_SESSION_STAMP_PREFIX, UNATTRIBUTED_SESSION
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.schema import AnchorBinding, Decision, DecisionKind, Descriptor, Entity, Provenance
 from sidegraph.server import (
@@ -44,10 +44,11 @@ def _store_with_anchored_mistake(tmp_path):
     return store, reader, decision
 
 
-def _publish_key(store, session_id="sess-1", age=timedelta(0)):
+def _stamp(store, session_id="sess-1", family="claude", age=timedelta(0)):
+    """What `session_start` writes for a session: the per-session stamp."""
     store.set_meta(
-        TELEMETRY_SESSION_KEY,
-        f"{session_id}|{(datetime.now(UTC) - age).isoformat()}",
+        f"{TELEMETRY_SESSION_STAMP_PREFIX}{session_id}",
+        f"{(datetime.now(UTC) - age).isoformat()}|{family}",
     )
 
 
@@ -91,7 +92,7 @@ def _store_with_domain_decision(tmp_path):
     return store, decision
 
 
-def test_drill_down_domain_seed_writes_no_seed_event(tmp_path):
+def test_drill_down_domain_seed_writes_no_seed_event(tmp_path, current_session):
     """Spec §4 Storage, unexercised until now: "A seed with no file (`drill_down`'s
     `domain:<slug>`) writes no event." `tests/test_server_telemetry.py`'s own drill_down
     test never publishes a session key, so it never reaches the journal write at all --
@@ -100,7 +101,7 @@ def test_drill_down_domain_seed_writes_no_seed_event(tmp_path):
     the plain `seed` assertion so a writer that dropped every seed -- not just domain ones
     -- would also fail this test, not just pass it vacuously."""
     store, decision = _store_with_domain_decision(tmp_path)
-    _publish_key(store)
+    current_session()
 
     out = _drill_down_impl(store, None, "payments")
 
@@ -113,9 +114,9 @@ def test_drill_down_domain_seed_writes_no_seed_event(tmp_path):
     store.close()
 
 
-def test_a_retrieval_writes_seed_and_show_anchor_events(tmp_path):
+def test_a_retrieval_writes_seed_and_show_anchor_events(tmp_path, current_session):
     store, reader, decision = _store_with_anchored_mistake(tmp_path)
-    _publish_key(store)
+    current_session()
 
     _get_task_context_impl(store, reader, ["trader/exec.py"], None, 4000, 6000)
 
@@ -127,42 +128,56 @@ def test_a_retrieval_writes_seed_and_show_anchor_events(tmp_path):
     store.close()
 
 
-def test_no_key_writes_no_events_but_still_writes_the_counters(tmp_path):
-    """Paired (spec row 2): the absence half alone is green today. An event that can never
-    correlate is noise — but the aggregate counters must keep working regardless."""
+def test_an_unattributable_call_is_journaled_under_the_sentinel_and_still_counted(
+    tmp_path, current_session
+):
+    """Paired: the call is not dropped when no session can be named (it is journaled under
+    `UNATTRIBUTED_SESSION`), the aggregate counters keep working, and a call that does carry a
+    session lands under that session instead."""
     store, reader, decision = _store_with_anchored_mistake(tmp_path)
 
     _get_task_context_impl(store, reader, ["trader/exec.py"], None, 4000, 6000)
 
-    assert store.retrieval_events() == []
+    assert {e["session_id"] for e in store.retrieval_events()} == {UNATTRIBUTED_SESSION}
+    assert store.retrieval_events("sess-1") == []
     assert store.retrieval_shows().get(decision.id) == 1
 
-    _publish_key(store)
+    current_session()
     _get_task_context_impl(store, reader, ["trader/exec.py"], None, 4000, 6000)
     assert store.retrieval_events("sess-1") != []
     store.close()
 
 
-def test_a_stale_or_malformed_key_writes_no_events_while_a_fresh_one_does(tmp_path):
+def test_a_stale_or_unparseable_stamp_is_unattributed_while_a_fresh_one_names_the_session(
+    tmp_path, current_session
+):
+    """The family fallback (a hint with a family and no id): only a fresh stamp of that family
+    names the session; a stale, malformed or wrong-family one leaves the sentinel."""
     store, reader, _ = _store_with_anchored_mistake(tmp_path)
+    current_session(session_id=None)
 
-    _publish_key(store, age=timedelta(hours=13))
+    _stamp(store, age=timedelta(hours=13))
     _get_task_context_impl(store, reader, ["trader/exec.py"], None, 4000, 6000)
-    assert store.retrieval_events() == []
+    assert store.retrieval_events("sess-1") == []
 
-    store.set_meta(TELEMETRY_SESSION_KEY, "no-separator-and-no-timestamp")
+    store.set_meta(f"{TELEMETRY_SESSION_STAMP_PREFIX}sess-1", "no-timestamp|claude")
+    _stamp(store, "other", family="codex")
     _get_task_context_impl(store, reader, ["trader/exec.py"], None, 4000, 6000)
-    assert store.retrieval_events() == []
+    assert store.retrieval_events("sess-1") == []
+    assert {e["session_id"] for e in store.retrieval_events()} == {UNATTRIBUTED_SESSION}
 
-    _publish_key(store)
+    store.delete_meta(f"{TELEMETRY_SESSION_STAMP_PREFIX}other")
+    _stamp(store)
     _get_task_context_impl(store, reader, ["trader/exec.py"], None, 4000, 6000)
     assert store.retrieval_events("sess-1") != []
     store.close()
 
 
-def test_telemetry_off_writes_no_events_while_on_writes_them(tmp_path, monkeypatch):
+def test_telemetry_off_writes_no_events_while_on_writes_them(
+    tmp_path, monkeypatch, current_session
+):
     store, reader, _ = _store_with_anchored_mistake(tmp_path)
-    _publish_key(store)
+    current_session()
 
     monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "off")
     render = _get_task_context_impl(store, reader, ["trader/exec.py"], None, 4000, 6000)
@@ -175,14 +190,14 @@ def test_telemetry_off_writes_no_events_while_on_writes_them(tmp_path, monkeypat
     store.close()
 
 
-def test_an_absolute_seed_is_stored_repo_relative(tmp_path):
+def test_an_absolute_seed_is_stored_repo_relative(tmp_path, current_session):
     """The blocker a fresh reviewer caught after three rounds missed it. Seeds come from
     agent input verbatim; an agent that passes absolute paths writes absolute seed keys, the
     seed set stops matching any anchor, and §1's circularity defense fails — every seeded
     anchor touched later counts as a redirect, inflating the deliverable in the flattering
     direction."""
     store, reader, _ = _store_with_anchored_mistake(tmp_path)
-    _publish_key(store)
+    current_session()
     absolute = str(Path(store.path).parent / "trader" / "exec.py")
 
     _get_task_context_impl(store, reader, [absolute], None, 4000, 6000)
@@ -192,7 +207,7 @@ def test_an_absolute_seed_is_stored_repo_relative(tmp_path):
     store.close()
 
 
-def test_an_absolute_seed_normalizes_the_same_way_in_both_tables(tmp_path):
+def test_an_absolute_seed_normalizes_the_same_way_in_both_tables(tmp_path, current_session):
     """Fix-wave finding: `_record` wrote RAW seeds into the aggregate `retrieval_seeds`
     counter and NORMALIZED seeds into the `retrieval_events` journal from the SAME call --
     probed as `get_task_context(files=["/abs/.../trader/exec.py"])` producing
@@ -202,7 +217,7 @@ def test_an_absolute_seed_normalizes_the_same_way_in_both_tables(tmp_path):
     paths permanently read 0 "people asked there" for that file -- the counter is
     cumulative and never resets. Both tables must see the same normalized key."""
     store, reader, _ = _store_with_anchored_mistake(tmp_path)
-    _publish_key(store)
+    current_session()
     absolute = str(Path(store.path).parent / "trader" / "exec.py")
 
     _get_task_context_impl(store, reader, [absolute], None, 4000, 6000)
@@ -213,13 +228,15 @@ def test_an_absolute_seed_normalizes_the_same_way_in_both_tables(tmp_path):
     store.close()
 
 
-def test_an_out_of_root_seed_is_dropped_while_an_in_root_absolute_one_is_kept(tmp_path):
+def test_an_out_of_root_seed_is_dropped_while_an_in_root_absolute_one_is_kept(
+    tmp_path, current_session
+):
     """Direction matters and is OPPOSITE to the touch rule: dropping a touch only
     under-counts, but dropping a seed shrinks the seed set and OVER-counts redirects. So
     normalize seeds rather than discarding them; discard only what no anchor could ever
     equal in any form."""
     store, reader, _ = _store_with_anchored_mistake(tmp_path)
-    _publish_key(store)
+    current_session()
     root = Path(store.path).parent
     # `root` is `Path(store.path).parent`, i.e. `tmp_path` itself here (the store lives at
     # `tmp_path/"t.db"`, mirroring production's `<repo_root>/.sidegraph`) — so an "outside"
@@ -238,9 +255,9 @@ def test_an_out_of_root_seed_is_dropped_while_an_in_root_absolute_one_is_kept(tm
     store.close()
 
 
-def test_an_event_write_failure_does_not_fail_the_retrieval(tmp_path, monkeypatch):
+def test_an_event_write_failure_does_not_fail_the_retrieval(tmp_path, monkeypatch, current_session):
     store, reader, _ = _store_with_anchored_mistake(tmp_path)
-    _publish_key(store)
+    current_session()
 
     def boom(*args, **kwargs):
         raise RuntimeError("journal is on fire")

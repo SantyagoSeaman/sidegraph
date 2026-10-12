@@ -322,6 +322,71 @@ def _index_with_bindings(root: Path, rows: list[tuple[str, str, str]]) -> None:
     conn.close()
 
 
+def test_cold_index_withholds_binding_statuses_it_has_not_computed(tmp_path):
+    """A reload resets every binding to live and sets ``volatile_stale``; until a sync clears
+    it the statuses say nothing, so the check is skipped rather than reporting a false 0."""
+    from datetime import UTC as _UTC
+
+    from sidegraph.schema import (
+        AnchorBinding,
+        Decision,
+        DecisionKind,
+        DecisionStatus,
+        Descriptor,
+        Entity,
+        Provenance,
+    )
+    from sidegraph.store import VOLATILE_STALE_KEY, Store
+
+    store = Store(tmp_path)
+    d = store.add_decision(
+        Decision(
+            title="t",
+            kind=DecisionKind.ADR,
+            status=DecisionStatus.ACCEPTED,
+            context="c",
+            choice="ch",
+            valid_from=datetime.now(_UTC),
+            provenance=Provenance(source="manual"),
+        )
+    )
+    e = store.upsert_entity(
+        Entity(canonical_name="a", descriptor=Descriptor(name="a", file_path="a.py"))
+    )
+    store.add_binding(
+        AnchorBinding(record_id=d.id, entity_id=e.entity_id, tier=2, status="orphaned")
+    )
+    store.set_meta(VOLATILE_STALE_KEY, "0")
+    store.close()
+
+    # Guard (passes before and after the fix): a computed index reports the orphan.
+    settled = curate(tmp_path, now=NOW)
+    assert ORPHANED_BINDING in _codes(settled)
+    assert BINDING_STATUS_CHECK not in settled.skipped
+
+    conn = sqlite3.connect(tmp_path / "index.db")
+    conn.execute("UPDATE meta SET value = '1' WHERE key = ?", (VOLATILE_STALE_KEY,))
+    conn.commit()
+    conn.close()
+
+    cold = curate(tmp_path, now=NOW)
+    assert [c for c in _codes(cold) if c in (ORPHANED_BINDING, DEGRADED_BINDING)] == []
+    assert BINDING_STATUS_CHECK in cold.skipped
+
+
+def test_meta_table_that_cannot_be_read_skips_the_check_not_computed(tmp_path):
+    """Only an ABSENT ``meta`` table means computed. A ``meta`` table whose flag read errors is
+    an unusable index: the check is skipped, never run on possibly reset statuses."""
+    _index_with_bindings(tmp_path, [("R2", "E2", "orphaned")])
+    conn = sqlite3.connect(tmp_path / "index.db")
+    conn.execute("CREATE TABLE meta (key TEXT)")  # no ``value`` column: the flag read raises
+    conn.commit()
+    conn.close()
+    report = curate(tmp_path, now=NOW)
+    assert BINDING_STATUS_CHECK in report.skipped
+    assert ORPHANED_BINDING not in _codes(report)
+
+
 def test_missing_index_db_skips_binding_status_check(tmp_path):
     report = curate(tmp_path, now=NOW)
     assert report.skipped == [BINDING_STATUS_CHECK, NEVER_SURFACED_CHECK]

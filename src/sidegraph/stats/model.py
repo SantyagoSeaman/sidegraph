@@ -35,6 +35,7 @@ from urllib.parse import quote
 from pydantic import BaseModel, ValidationError
 
 from sidegraph import integrity
+from sidegraph.config import UNATTRIBUTED_SESSION
 from sidegraph.freshness import GraphFreshness
 from sidegraph.schema import (
     AnchorBinding,
@@ -78,10 +79,20 @@ class ActivationStats(BaseModel):
     sessions_with_retrieval: int
     sessions_asked_but_empty: int
     sessions_touch_only: int
+    # Retrieval calls journaled under `UNATTRIBUTED_SESSION`: distinct timestamps across the
+    # sentinel's seed/show rows and its render rows (`_record` stamps one call's rows alike).
+    # Never a session, and never in the session counts above, so a non-zero value makes
+    # "asked in X" a lower bound and "touch only" an upper bound; the renderer says so.
+    unattributed_calls: int = 0
     # One record, a decision or a fact, placed in one lookup's result, so one record shown in six
     # sessions is six here. `MemoryStats` counts distinct records; the two are different units
     # and are never a numerator and denominator.
     showings: int
+    # Records the PreToolUse hook handed over in the window, a file-read block or a subagent's
+    # brief (journal kinds `inject` / `inject_brief`), repeats counted. Not part of `showings`
+    # and never a lookup: the agent did not ask for these.
+    # see design/superpowers/specs/2026-10-11-hook-showings-journal-design.md (D7)
+    hook_showings: int = 0
     degraded: int
     dropped_for_budget: int
     renders_with_abandoned: int
@@ -125,9 +136,10 @@ class MemoryStats(BaseModel):
     facts: int
     domains: int
     historical: int
-    # Accepted decisions and facts with no showing in the cumulative counter. An absence of a
-    # record, not a measurement that the record was never shown: a showing while recording
-    # was off, or one lost to a swallowed writer error, is not in the counter.
+    # Accepted decisions and facts with no showing in the cumulative counter, which an MCP
+    # render and a PreToolUse hook delivery (a file-read block or a subagent brief) both feed.
+    # An absence of a record, not a measurement that the record was never shown: a showing
+    # while recording was off, or one lost to a swallowed writer error, is not in the counter.
     no_recorded_showing: int
     surfaceable: int
     accepted_in_window: int
@@ -274,8 +286,15 @@ def _index_is_stale(conn: sqlite3.Connection, store_dir: Path) -> bool:
 
 # The `intent` a `drill_down` render row is written under (server.DRILL_DOWN_INTENT; this module
 # imports nothing from the server, and a test pins the two together). Such a row says how many
-# records a drill-down delivered and nothing about a budget, because a drill-down applies none.
+# records a drill-down delivered and nothing about a budget: it applies no relevance budget.
 _DRILL_DOWN_INTENT = "drill_down"
+
+
+# The journal kinds the PreToolUse hook writes for what it handed over. Spelled here: stats
+# imports nothing from the hook (a test pins the literals to `hot_index`). They are neither
+# lookups nor activity, so they stay out of the session loop and of the retention queries.
+_HOOK_KINDS = ("inject", "inject_brief")
+_HOOK_KINDS_SQL = "('inject', 'inject_brief')"
 
 
 def _is_drill_down(row: sqlite3.Row) -> bool:
@@ -339,10 +358,21 @@ def build_report(
         conn.execute("BEGIN")
 
         sessions: dict[str, dict[str, set[str]]] = {}
+        hook_showings = 0
+        unattributed_at: set[str] = set()
         for row in conn.execute(
-            "SELECT session_id, kind, key, detail FROM retrieval_events WHERE at >= ?",
+            "SELECT session_id, kind, key, detail, at FROM retrieval_events WHERE at >= ?",
             (cutoff,),
         ):
+            if row["kind"] in _HOOK_KINDS:
+                # One record the hook printed. Counted before any session bucket exists: the
+                # agent did not ask, so the row makes no session and no retrieval.
+                hook_showings += 1
+                continue
+            if row["session_id"] == UNATTRIBUTED_SESSION:
+                # A call no session could be named for: counted as a call, never a session.
+                unattributed_at.add(row["at"])
+                continue
             b = sessions.setdefault(row["session_id"], _empty_bucket())
             if row["kind"] == "touch":
                 b["touch"].add(row["key"])
@@ -373,21 +403,25 @@ def build_report(
         # is still written (server.py). Without this fold that session is missing from the
         # denominator while its budget drops are still summed, and one that also touched a
         # file is reported as silence.
-        rendered = {r["session_id"] for r in renders}
+        unattributed_at.update(r["at"] for r in renders if r["session_id"] == UNATTRIBUTED_SESSION)
+        # Their budget figures still count (the render happened); they are no session's.
+        rendered = {r["session_id"] for r in renders} - {UNATTRIBUTED_SESSION}
         for sid in rendered:
             sessions.setdefault(sid, _empty_bucket())
         # Retention spans both journals for the same reason: a store whose sessions are
         # render-only would otherwise never clear the day floor.
         first_at = conn.execute(
             "SELECT min(at) AS a FROM ("
-            "SELECT at FROM retrieval_events WHERE at >= ?"
+            f"SELECT at FROM retrieval_events WHERE at >= ? AND kind NOT IN {_HOOK_KINDS_SQL}"
             + (" UNION ALL SELECT at FROM render_events WHERE at >= ?" if has_render_table else "")
             + ")",
             (cutoff, cutoff) if has_render_table else (cutoff,),
         ).fetchone()["a"]
         outside_window = (
             conn.execute(
-                "SELECT 1 FROM retrieval_events WHERE at < ? LIMIT 1", (cutoff,)
+                f"SELECT 1 FROM retrieval_events WHERE at < ? AND kind NOT IN {_HOOK_KINDS_SQL} "
+                "LIMIT 1",
+                (cutoff,),
             ).fetchone()
             is not None
             or has_render_table
@@ -475,8 +509,8 @@ def build_report(
             return emitted[session_id]
         return len(sessions[session_id]["show"])
 
-    # Rows a budget ran for. A drill-down row is a delivery with no budget behind it, so its
-    # zeros are not "the budget clipped nothing": they stay out of every budget figure, and a
+    # Rows a budget ran for. A drill-down row is a delivery with no relevance budget behind it,
+    # so its zeros are not "the budget clipped nothing": they stay out of every budget figure, and a
     # window holding only drill-downs has no budget recorded at all.
     budgeted = [r for r in renders if not _is_drill_down(r)]
     activation = ActivationStats(
@@ -484,7 +518,9 @@ def build_report(
         sessions_with_retrieval=len(asking),
         sessions_asked_but_empty=len(asking - fed),
         sessions_touch_only=len(sessions) - len(asking),
+        unattributed_calls=len(unattributed_at),
         showings=sum(showings_of(sid) for sid in sessions),
+        hook_showings=hook_showings,
         degraded=sum(r["degraded"] for r in budgeted),
         dropped_for_budget=sum(r["dropped_for_budget"] for r in budgeted),
         # A superseded record surfacing is "something already tried and abandoned" exactly as

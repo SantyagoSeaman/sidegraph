@@ -1,16 +1,15 @@
 ---
 name: stats
-description: Use when someone asks how much Sidegraph memory is actually being used — "sidegraph stats", "is the memory being used", "how often does memory get asked for", "which files carry decisions", "покажи статистику sidegraph". Also reachable directly as /sidegraph:stats. Runs the local, read-only sidegraph-stats command and shows its one-screen report verbatim — how often memory was asked for, how much of the code worked on has memory anchored to it, what the store holds, and anchor health. It states what was shown, asked and touched — never what was improved, prevented or saved.
+description: >-
+  Use when someone asks how much Sidegraph memory is actually being used — "sidegraph stats", "is the memory being used", "how often does memory get asked for", "which files carry decisions", "покажи статистику sidegraph". Also reachable directly as /sidegraph:stats. Runs the local, read-only sidegraph-stats command and shows its one-screen report verbatim — how often memory was asked for, how much of the code worked on has memory anchored to it, what the store holds, and anchor health. It states what was shown, asked and touched — never what was improved, prevented or saved.
 ---
 
 # Stats
 
-Run `sidegraph-stats` and show its output **verbatim** in a fenced block. Usage figures
+Run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stats` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin): skills run the CLIs at the session's version, never the copy on `PATH`) and show its output **verbatim** in a fenced block. Usage figures
 come from the local, gitignored index and graph figures from the optional read-only
 `graph.json`; the command also checks the canonical store files for index staleness.
-Nothing is sent anywhere. If the command is
-not on `PATH`, run it the way the other CLI skills do:
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stats`.
+Nothing is sent anywhere.
 
 Do not restate the numbers in prose, do not round them, do not reorder the blocks, and do
 not add a summary line. The report is written to be read as printed.

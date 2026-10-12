@@ -2619,7 +2619,8 @@ def test_explicit_outside_document_keeps_caller_ref(tmp_path, monkeypatch):
     outside = _write_md(tmp_path, "elsewhere/x.md", _adr("Out", decision="Calls `submit_order`."))
     # The file node is keyed `relpath(outside, cwd)`: the pre-existing lookup an outside
     # document keeps (absolute -> cwd-relative), which the file binding below depends on.
-    reader = _reader(repo, _graph_of(_SUBMIT_NODE, _file_node(os.path.relpath(outside, repo))))
+    node_key = Path(os.path.relpath(outside, repo)).as_posix()  # Graphify keys are POSIX
+    reader = _reader(repo, _graph_of(_SUBMIT_NODE, _file_node(node_key)))
     store = Store(tmp_path / "s.db")
     monkeypatch.chdir(repo)
 

@@ -52,10 +52,14 @@ def _add(
     consequences: str | None = None,
     hours_ago: float = 1,
     supersedes: str | None = None,
+    whole_seconds: bool = False,
 ) -> Decision:
     """One record, written through the real store. ``rejected`` status goes through the
     proposed -> dropped path, the only one that writes it."""
     wanted_rejected = status == "rejected"
+    stamp = datetime.now(UTC) - timedelta(hours=hours_ago)
+    if whole_seconds:  # T14: 100 records must fit the 40000-character ceiling
+        stamp = stamp.replace(microsecond=0)
     decision = Decision(
         title=title,
         kind=DecisionKind(kind),
@@ -64,7 +68,7 @@ def _add(
         choice=choice,
         rejected=rejected,
         consequences=consequences,
-        valid_from=datetime.now(UTC) - timedelta(hours=hours_ago),
+        valid_from=stamp,
         supersedes=supersedes,
         provenance=Provenance(source="manual"),
     )
@@ -443,11 +447,11 @@ SHAPES = {
 
 
 def _clamped(budget: int) -> int:
-    return max(4000, min(60000, budget))
+    return max(4000, min(40000, budget))
 
 
 @pytest.mark.parametrize("limit", [25, 100])
-@pytest.mark.parametrize("budget", [4000, 24000, 60000, 10**9])
+@pytest.mark.parametrize("budget", [4000, 24000, 40000, 10**9])
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 def test_t8_the_serialized_answer_stays_within_the_clamped_budget(big_store, shape, budget, limit):
     text = _decision_listing(
@@ -539,21 +543,21 @@ def test_t10_unratified_off_hides_a_proposed_record_everywhere(store, monkeypatc
 
 
 def test_t11_limit_is_clamped_to_one_through_a_hundred(big_store):
-    low = _ask(big_store, query="payload", limit=0, budget_chars=60000)
-    high = _ask(big_store, query="payload", limit=1000, budget_chars=60000)
+    low = _ask(big_store, query="payload", limit=0, budget_chars=40000)
+    high = _ask(big_store, query="payload", limit=1000, budget_chars=40000)
 
     assert low["returned"] == 1
     assert 1 < high["returned"] <= 100
 
 
-def test_t11_budget_is_clamped_to_four_thousand_through_sixty_thousand(big_store):
+def test_t11_budget_is_clamped_to_four_thousand_through_forty_thousand(big_store):
     tiny = _decision_listing(big_store, None, query="payload", budget_chars=1)
     floor = _decision_listing(big_store, None, query="payload", budget_chars=4000)
     huge = _decision_listing(big_store, None, query="payload", limit=100, budget_chars=10**9)
 
     assert tiny == floor
     assert 0 < json.loads(floor)["returned"] < json.loads(huge)["returned"]
-    assert len(huge) <= 60000
+    assert len(huge) <= 40000
     assert len(huge) > 24000  # the ceiling is a ceiling, not the default
 
 
@@ -561,7 +565,7 @@ def test_t11_budget_is_clamped_to_four_thousand_through_sixty_thousand(big_store
 
 
 def test_t14_a_count_cut_names_the_limit_and_not_the_budget(big_store):
-    answer = _ask(big_store, query="payload", limit=3, budget_chars=60000)
+    answer = _ask(big_store, query="payload", limit=3, budget_chars=40000)
 
     assert answer["returned"] == 3
     assert "limit" in answer["hint"]
@@ -574,16 +578,16 @@ def test_t14_a_size_cut_names_the_budget_and_not_the_limit(big_store):
 
     assert 0 < answer["returned"] < 100
     assert "character budget" in answer["hint"]
-    assert "raise budget_chars" in answer["hint"] and "max 60000" in answer["hint"]
+    assert "raise budget_chars" in answer["hint"] and "max 40000" in answer["hint"]
     assert "raise limit" not in answer["hint"]
 
 
 def test_t14_a_bound_at_its_maximum_is_not_offered(store, big_store):
     for i in range(120):
-        _add(store, f"tiny {i}", hours_ago=i + 1)
+        _add(store, f"t{i}", kind="adr", hours_ago=i + 1, whole_seconds=True)
 
-    by_count = _ask(store, status="accepted", limit=100, budget_chars=60000)  # 120 tiny: count cuts
-    by_size = _ask(big_store, query="payload", limit=100, budget_chars=60000)  # the size cuts
+    by_count = _ask(store, status="accepted", limit=100, budget_chars=40000)  # 120 tiny: count cuts
+    by_size = _ask(big_store, query="payload", limit=100, budget_chars=40000)  # the size cuts
 
     assert by_count["returned"] == 100 and by_size["returned"] < 100
     assert "limit" in by_count["hint"] and "raise" not in by_count["hint"]

@@ -1,23 +1,26 @@
 # Codex setup
 
-Happy-path wiring for Sidegraph in the [OpenAI Codex CLI](https://developers.openai.com/codex/cli).
+Connect Sidegraph to the [OpenAI Codex CLI](https://developers.openai.com/codex/cli).
 Codex CLI ships GA hooks with the same event vocabulary as Claude Code (including
 `additionalContext` on `SessionStart`), so the same Sidegraph entry points serve both hosts.
-Codex CLI's config/hooks surface is younger and more likely to move than Claude Code's, so
-verify the `config.toml`/hooks shapes below against the current Codex CLI docs before relying
-on them if some time has passed since mid-2026. For the deeper mechanics, including exactly
-what was verified live against a real Codex CLI install, see
+Check the version-specific configuration and hook requirements in
 [`integrations/codex.md`](../integrations/codex.md).
 
 Run these in the repo you want memory over (not the Sidegraph checkout). Two ways to get
 there: the **plugin** (one step, recommended) or **manual registration** (config.toml, hooks,
 and AGENTS.md registered separately, for fine control or a source checkout).
 
+**Windows:** read the [Windows setup notes](installation.md#windows) first. Both the
+plugin MCP wrapper and hooks require a POSIX shell, and the manual recipe below uses
+Bash. Run these recipes inside WSL with the host and toolchain installed there. Native
+core/stdio CI does not verify a complete Codex plugin session.
+
 ## Option A: plugin (recommended)
 
 From a terminal, in that repo:
 
-The commands below follow the current development branch. For durable environments, see
+The plugin follows the public repository's `main`, which advances at releases. To pin a
+version for reproducible environments, see
 [how to pin mutable development references](installation.md#mutable-development-references).
 
 ```bash
@@ -30,11 +33,18 @@ source takes `owner/repo[@ref]`, a local path or a Git URL.
 
 Installs the MCP server, the `SessionStart`/`Stop`/`SubagentStart` hooks, and all 12 skills in one step,
 pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by default.
-It builds straight from this repository, no PyPI publish needed: the MCP server and `SessionStart`
+It installs from the public Git repository: the MCP server and `SessionStart`
 run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main` under the hood, and
 `Stop` and `SubagentStart` start from the commit `SessionStart` resolved. See
 [the plugin install path](../integrations/codex.md#plugin-install-path) for exactly what
 gets registered and the cwd-pinning details, and what has and hasn't been verified live.
+
+The plugin needs no other install. The CLI on your `PATH`
+([`uv tool install sidegraph`](installation.md#option-a--the-cli-on-your-path-pypi)) is
+optional, for typing `sidegraph-*` commands yourself. It never updates itself: after every
+release run `uv tool install sidegraph@latest`. SessionStart says when it differs from the session's version
+([`path-skew`](../guides/troubleshooting.md#path-skew)), and the plugin's skills ignore it
+([running the CLIs beside the plugin](../reference/cli.md#running-the-clis-beside-the-plugin)).
 
 1. Trust the hooks: start an interactive `codex` session in the repo. Codex detects the new
    Sidegraph hook definitions (`SessionStart`, `Stop`, `SubagentStart`) and prompts you in the
@@ -101,7 +111,7 @@ Create `.codex/hooks.json` in the repo:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }

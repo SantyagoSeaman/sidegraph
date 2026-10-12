@@ -51,11 +51,29 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 
 from sidegraph.gitenv import GIT_LOCAL_ENV_VARS
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tool_admission_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test the production policy with a fresh process-sized burst."""
+    server = sys.modules.get("sidegraph.server")
+    if server is None:
+        return
+    from sidegraph.tool_rate_limit import ToolCallRateLimit
+
+    monkeypatch.setattr(
+        server.mcp,
+        "middleware",
+        [
+            ToolCallRateLimit() if isinstance(m, ToolCallRateLimit) else m
+            for m in server.mcp.middleware
+        ],
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +83,32 @@ def _hermetic_sidegraph_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for key in [k for k in os.environ if k.startswith("SIDEGRAPH_")]:
         monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_claude_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite often runs inside a real Claude Code session, whose id sits in the
+    environment; a test that announces ``claude-code`` must set it itself."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
+@pytest.fixture
+def current_session() -> Iterator[Callable[..., None]]:
+    """Set ``config.CURRENT_SESSION`` as the host entry's middleware would, undone on teardown.
+
+    ``current_session()`` is a Claude call with id ``sess-1``; pass ``session_id=None`` for a
+    call that names its family and no id, ``family=None`` for an unknown client.
+    """
+    from sidegraph.config import CURRENT_SESSION, SessionHint
+
+    tokens: list[object] = []
+
+    def _set(session_id: str | None = "sess-1", family: str | None = "claude") -> None:
+        tokens.append(CURRENT_SESSION.set(SessionHint(session_id, family)))
+
+    yield _set
+    for token in reversed(tokens):
+        CURRENT_SESSION.reset(token)  # type: ignore[arg-type]
 
 
 @pytest.fixture(autouse=True)
@@ -146,3 +190,15 @@ def _git_config_is_hermetic(
     empty.touch()
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+@pytest.fixture(autouse=True)
+def _path_probe_sees_no_foreign_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub SessionStart's ``path-skew`` probe so no session-start test depends on whichever
+    ``sidegraph-*`` the developer has on ``PATH`` (a stale one would add a line and a notice to
+    every real-registry run). The path-skew tests put the real probe back (``real_probe``).
+    # see design/superpowers/specs/2026-10-11-stale-path-sidegraph-design.md
+    """
+    from sidegraph.host import hooks
+
+    monkeypatch.setattr(hooks, "_path_install", lambda: None)

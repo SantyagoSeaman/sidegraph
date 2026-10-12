@@ -15,15 +15,14 @@ from __future__ import annotations
 
 import dataclasses
 import posixpath
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
+from . import worktree_seeds
 from .retrieval import (
-    _STANDING_SUPERSEDE_HINT,
     MEMORY_GUARD_LINE,
     Seed,
     TaskContext,
@@ -54,8 +53,6 @@ _REACHED = ("live", "degraded")
 _LINKED = "linked in the code graph"
 _SAME_DIRECTORY = "same directory"
 
-_HEADING_RE = re.compile(r"(?m)^## ")
-
 
 class _Reader(Protocol):
     """What this module asks of the engine reader (``GraphifyReader`` answers all three)."""
@@ -80,14 +77,34 @@ class Nearby:
 class Plan:
     """What the call says about the seeds that have no record of their own."""
 
-    sentences: list[str] = field(default_factory=list)  # one per seed, at most three
+    # One entry per seed, at most three: the path, its nearby anchored files, and the open
+    # records bound to the path that nothing shown so far delivers (only for a path the graph
+    # does not hold).
+    entries: list[tuple[str, list[Nearby], frozenset[str]]] = field(default_factory=list)
     more: int = 0  # seeds past the third that would have had a sentence
     files: list[str] = field(default_factory=list)  # the files the sentences name, once each
 
-    def lines(self) -> list[str]:
+    @property
+    def sentences(self) -> list[str]:
+        return self.lines_for(())
+
+    def lines_for(self, shown: Iterable[str], *, at_least: bool = False) -> list[str]:
+        """The sentences, leaving out of each bound-record count the records in ``shown`` (the
+        second retrieval's records are known only after the plan); a sentence left with nothing
+        to say is dropped. ``at_least`` says "at least N" for a path some of whose bound records
+        were taken off as ``shown``: that happened before the hard cap, which may cut some of
+        them from the text, so the count there can only be a floor."""
+        gone = set(shown)
+        out = [
+            _sentence(path, near, bound - gone, at_least=at_least and bool(bound & gone))
+            for path, near, bound in self.entries
+        ]
+        return [line for line in out if line]
+
+    def lines(self, shown: Iterable[str] = (), *, at_least: bool = False) -> list[str]:
         """The sentences, then a count of the seeds left out."""
         tail = [f"… and {self.more} more seeds with no anchored record"] if self.more else []
-        return [*self.sentences, *tail]
+        return [*self.lines_for(shown, at_least=at_least), *tail]
 
 
 def _is_open(store: Store, record_id: str) -> bool:
@@ -125,6 +142,35 @@ def anchored_files(store: Store, held: frozenset[str]) -> dict[str, int]:
             if open_cache[binding.record_id]:
                 per_file.setdefault(path, set()).add(binding.record_id)
     return {path: len(ids) for path, ids in per_file.items()}
+
+
+def bound_records(
+    store: Store, held: frozenset[str], paths: Iterable[str], skip: Iterable[str] = ()
+) -> dict[str, frozenset[str]]:
+    """``path -> open records`` bound, through a binding of any status, to an entity whose
+    descriptor names that path, for the ``paths`` the graph does not hold, leaving out the
+    records in ``skip`` (already shown). A file only a worktree holds has no graph node, so a
+    code-anchor read does not reach its records; ``retrieve_decisions(files=[...])`` matches them
+    by that descriptor path.
+    # see design/superpowers/specs/2026-10-11-worktree-only-seeds-design.md (D6)"""
+    wanted = {p for p in paths if p not in held}
+    if not wanted:
+        return {}
+    skipped = set(skip)
+    open_cache: dict[str, bool] = {}
+    per_path: dict[str, set[str]] = {}
+    for entity in store.iter_concrete_entities():
+        path = entity.descriptor.file_path if entity.descriptor is not None else None
+        if path not in wanted:
+            continue
+        for binding in store.bindings_for_entity(entity.entity_id):
+            if binding.record_id in skipped:
+                continue
+            if binding.record_id not in open_cache:
+                open_cache[binding.record_id] = _is_open(store, binding.record_id)
+            if open_cache[binding.record_id]:
+                per_path.setdefault(path, set()).add(binding.record_id)
+    return {path: frozenset(ids) for path, ids in per_path.items()}
 
 
 def _top(paths: set[str], anchored: dict[str, int]) -> list[str]:
@@ -181,7 +227,12 @@ def _is_repo_relative(p: str) -> bool:
     """Whether ``p`` is written the way the graph writes ``source_file``: relative, normalised
     and inside the repository. A path outside it has no neighbourhood here."""
     pure = PurePosixPath(p)
-    return not pure.is_absolute() and ".." not in pure.parts and posixpath.normpath(p) == p
+    return (
+        not pure.is_absolute()
+        and not worktree_seeds.has_drive(p)
+        and ".." not in pure.parts
+        and posixpath.normpath(p) == p
+    )
 
 
 def _file_paths(seeds: list[Seed], ladder: Ladder | None, held: frozenset[str]) -> list[str]:
@@ -203,9 +254,20 @@ def _count(n: int) -> str:
     return f"{n} record" if n == 1 else f"{n} records"
 
 
-def _sentence(path: str, near: list[Nearby]) -> str:
+def _sentence(
+    path: str, near: list[Nearby], bound: frozenset[str] = frozenset(), *, at_least: bool = False
+) -> str:
     named = ", ".join(f"`{n.path}` ({n.how}, {_count(n.records)})" for n in near)
-    return f"No current record is anchored to `{path}`. Nearest anchored: {named}."
+    if not bound:
+        return (
+            f"No current record is anchored to `{path}`. Nearest anchored: {named}." if near else ""
+        )
+    lead = (
+        f"`{path}` has {'at least ' if at_least else ''}{len(bound)} more record(s) bound to it "
+        "through anchors the graph "
+        f'cannot resolve: retrieve_decisions(files=["{path}"]) lists them.'
+    )
+    return f"{lead} Nearest anchored: {named}." if near else lead
 
 
 def _covered(store: Store, held: frozenset[str], shown_ids: Iterable[str]) -> set[str]:
@@ -247,20 +309,21 @@ def plan(
     if not paths:
         return Plan()
     anchored = anchored_files(store, held)
-    if not anchored:
+    bound = bound_records(store, held, paths, shown_ids)
+    if not anchored and not bound:
         return Plan()
-    said: list[tuple[str, list[Nearby]]] = []
+    said: list[tuple[str, list[Nearby], frozenset[str]]] = []
     for path in paths:
         if path in anchored:
             continue
-        near = nearest(path, anchored, reader, in_graph=path in held)
-        if near:
-            said.append((path, near))
+        near = nearest(path, anchored, reader, in_graph=path in held) if anchored else []
+        if near or path in bound:
+            said.append((path, near, bound.get(path, frozenset())))
     named = said[:_SENTENCES]
     return Plan(
-        sentences=[_sentence(path, near) for path, near in named],
+        entries=named,
         more=len(said) - len(named),
-        files=list(dict.fromkeys(n.path for _path, near in named for n in near)),
+        files=list(dict.fromkeys(n.path for _path, near, _b in named for n in near)),
     )
 
 
@@ -281,12 +344,10 @@ def records_block(ctx: TaskContext, *, guarded: bool) -> tuple[str, bool]:
     (an empty answer), the block brings it, so no record reaches the reader unlabelled."""
     if not has_memory(ctx):
         return "", False
-    text = ctx.render(include_structure=False)
+    body, legend, hint = ctx.render_parts(include_structure=False, heading="###")
+    text = "\n\n".join(part for part in (body, legend) if part)
     text = text.removeprefix(MEMORY_GUARD_LINE + "\n\n")
-    ids_shown = text.endswith("\n\n" + _STANDING_SUPERSEDE_HINT)
-    if ids_shown:
-        text = text.removesuffix("\n\n" + _STANDING_SUPERSEDE_HINT)
-    text = _HEADING_RE.sub("### ", text)
+    ids_shown = hint is not None
     lead = "" if guarded else MEMORY_GUARD_LINE + "\n\n"
     return f"{RECORDS_HEADING}\n{lead}{text}", ids_shown
 
@@ -297,9 +358,14 @@ def combine(first: TaskContext, second: TaskContext) -> TaskContext:
     return dataclasses.replace(
         first,
         shown_ids=[*first.shown_ids, *second.shown_ids],
+        line_ids={
+            key: [*first.line_ids.get(key, []), *second.line_ids.get(key, [])]
+            for key in (*first.line_ids, *(k for k in second.line_ids if k not in first.line_ids))
+        },
         selected=first.selected + second.selected,
         emitted=first.emitted + second.emitted,
         degraded=first.degraded + second.degraded,
+        degraded_ids=[*first.degraded_ids, *second.degraded_ids],
         dropped_for_budget=first.dropped_for_budget + second.dropped_for_budget,
         chars_used=first.chars_used + second.chars_used,
     )

@@ -1,6 +1,6 @@
 # Claude Code setup
 
-Happy-path wiring for Sidegraph in [Claude Code](https://docs.claude.com/en/docs/claude-code).
+Connect Sidegraph to [Claude Code](https://docs.claude.com/en/docs/claude-code).
 Two ways to get there: the **plugin** (one step, recommended) or **manual registration** (MCP
 server + hooks registered separately — for fine control, or a source checkout). For how these
 pieces work under the hood — what each hook injects, the plugin install path, env vars, cwd
@@ -9,11 +9,17 @@ caveats — see the deep dive at
 
 Run these in the repo you want memory over (not the Sidegraph checkout).
 
+**Windows:** read the [Windows setup notes](installation.md#windows) first. The supplied
+plugin MCP wrapper and hooks require a POSIX shell; native core/stdio CI does not verify
+the complete Claude Code plugin. Use the supplied recipes inside WSL, or configure
+MCP-only access separately as described there.
+
 ## Option A — plugin (recommended)
 
 Inside a Claude Code session, in that repo:
 
-The commands below follow the current development branch. For durable environments, see
+The plugin follows the public repository's `main`, which advances at releases. To pin a
+version for reproducible environments, see
 [how to pin mutable development references](installation.md#mutable-development-references).
 
 ```
@@ -23,12 +29,19 @@ The commands below follow the current development branch. For durable environmen
 
 Installs the MCP server and all four hooks (`SessionStart`, `Stop`, `PreToolUse`,
 `SubagentStart`) in one step, pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by
-default. It builds straight from this repository — no PyPI publish needed, works today: the MCP
+default. It installs from the public Git repository: the MCP
 server and `SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/
 sidegraph.git@main` under the hood, and `Stop`, `PreToolUse` and `SubagentStart` start from the
 commit `SessionStart` resolved. See
 [the plugin install path](../integrations/claude-code.md#plugin-install-path) for exactly
 what gets registered and the cwd-pinning details. Skip to [Verify](#verify) once installed.
+
+The plugin needs no other install. The CLI on your `PATH`
+([`uv tool install sidegraph`](installation.md#option-a--the-cli-on-your-path-pypi)) is
+optional, for typing `sidegraph-*` commands yourself. It never updates itself: after every
+release run `uv tool install sidegraph@latest`. SessionStart says when it differs from the session's version
+([`path-skew`](../guides/troubleshooting.md#path-skew)), and the plugin's skills ignore it
+([running the CLIs beside the plugin](../reference/cli.md#running-the-clis-beside-the-plugin)).
 
 **Scope.** `/plugin install` offers three scopes: user, local and project. From a terminal the
 flag is `claude plugin install sidegraph@sidegraph --scope user|project|local`, and the default
@@ -100,7 +113,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -226,9 +239,8 @@ The env vars are inlined into the command because Claude Code hook entries have 
   [`reference/hooks.md`](../reference/hooks.md#sidegraph-subagent-start).
 
 > **Don't also run `graphify claude install`.** It writes its own `PreToolUse` hooks into
-> `.claude/settings.json` that nudge toward `graphify query` on every read — redundant with
-> the Sidegraph hook above (and noisier). They coexist without breaking anything, but you
-> don't need both. See
+> `.claude/settings.json` that nudge toward `graphify query` on every qualifying read. These
+> overlap with Sidegraph's hook; the recommendation is to use Sidegraph's wiring alone. See
 > [why, and how to keep both cleanly if you want to](../integrations/graphify.md#graphify-claude-install-is-redundant-with-the-sidegraph-plugin--skip-it).
 
 ## Verify

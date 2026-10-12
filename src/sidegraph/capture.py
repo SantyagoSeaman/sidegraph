@@ -14,7 +14,7 @@ import re
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Self
@@ -29,7 +29,7 @@ from pydantic import (
 )
 
 from .anchoring import entity_summaries, orphan_reason, resolve_and_bind
-from .config import TELEMETRY_SESSION_KEY
+from .config import CURRENT_SESSION, TELEMETRY_SESSION_KEY, TELEMETRY_SESSION_STAMP_PREFIX
 from .engine.reader import GraphifyReader
 from .gitenv import git_env
 from .input_limits import MAX_DRAFTS, preflight_drafts
@@ -814,6 +814,7 @@ def _derive_initiative(store: Store) -> str | None:
                 ["git", "branch", "--show-current"],
                 cwd=cwd,
                 env=env,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
             )
@@ -895,46 +896,70 @@ def _capture_commit(store: Store) -> str | None:
         return None
 
 
-# Freshness window for the D7.3 session_id fallback (below) — a marker older than this is
-# worse than no attribution at all (a long-abandoned session's id leaking onto an
-# unrelated later capture).
-_SESSION_ID_FALLBACK_MAX_AGE_SECONDS = 24 * 60 * 60
+# Freshness windows for the stamp fallback (`resolve_session`): provenance reads 24 h, the
+# retrieval journal 12 h (server._SESSION_KEY_TTL). A marker older than its window is worse
+# than no attribution (a long-abandoned session's id leaking onto an unrelated later write).
+_SESSION_ID_FALLBACK_MAX_AGE = timedelta(hours=24)
 
 
-def _session_id_fallback(store: Store) -> str | None:
-    """Best-effort ``provenance.session_id`` source when the caller passed none (design
-    D7.3 — E8 measured ``author=None session=None`` on Stop-channel captures). Reads
-    ``TELEMETRY_SESSION_KEY`` (``config.py``), the same ``<session_id>|<iso-timestamp>``
-    marker ``host.hooks.session_start`` now stamps UNCONDITIONALLY (D7.3 generalized that
-    write off its old ``telemetry_enabled()`` gate specifically so this fallback always has
-    something to read) — used only when fresh (< :data:`_SESSION_ID_FALLBACK_MAX_AGE_SECONDS`
-    old); a stale marker from a long-abandoned session is worse than no attribution at all.
-    Never raises: an absent key, an unparseable value, a naive/malformed timestamp, or a
-    ``store.get_meta`` failure itself (NIT-5, code review — the read wasn't actually
-    guarded before, despite this docstring's own claim) all return ``None``, same as
-    passing no session_id at all — this is provenance, not security, and capture must
-    never fail the caller over a best-effort attribution guess.
-    """
-    try:
-        raw = store.get_meta(TELEMETRY_SESSION_KEY)
-    except Exception:
-        return None
-    if raw is None:
-        return None
-    session_id, _, stamp = raw.partition("|")
-    if not session_id:
-        return None
+def _fresh(stamp: str, now: datetime, ttl: timedelta) -> bool:
+    """True for an aware ISO timestamp no older than ``ttl`` and not ahead of the clock."""
     try:
         written = datetime.fromisoformat(stamp)
     except ValueError:
-        return None
+        return False
     if written.tzinfo is None:
-        return None  # schema requires aware timestamps; a naive one can't be compared safely
-    age = (datetime.now(UTC) - written).total_seconds()
-    # A negative age is a stamp ahead of the clock (a step back, a malformed value): not fresh.
-    if not 0 <= age < _SESSION_ID_FALLBACK_MAX_AGE_SECONDS:
+        return False  # schema requires aware timestamps; a naive one can't be compared safely
+    return timedelta(0) <= now - written < ttl
+
+
+def resolve_session(store: Store, ttl: timedelta) -> str | None:
+    """The session a write or a journal row belongs to, or ``None`` when none is trustworthy.
+
+    One helper for provenance (24 h) and the retrieval journal (12 h). Order:
+
+    1. ``CURRENT_SESSION`` unset (CLI, importer, ``python -m sidegraph.server``): ``None``.
+    2. The host entry announced an id: that id.
+    3. It announced a host family and no id: the only fresh per-session stamp of that SAME
+       family. Two or none: ``None`` (right or null, never a guess). The legacy
+       ``telemetry:session`` marker is a candidate only when no per-session stamp of any
+       family exists (a store whose hooks are all old).
+    4. Otherwise (unknown client): ``None``.
+
+    Never raises: this is provenance, not security, and a write must never fail over a
+    best-effort attribution guess.
+    see design/superpowers/specs/2026-10-11-session-attribution-design.md (D6)
+    """
+    hint = CURRENT_SESSION.get()
+    if hint is None:
         return None
-    return session_id
+    if hint.session_id:
+        return hint.session_id
+    if hint.family is None:
+        return None
+    now = datetime.now(UTC)
+    try:
+        stamps = store.meta_with_prefix(TELEMETRY_SESSION_STAMP_PREFIX)
+        candidates: set[str] = set()
+        for key, value in stamps.items():
+            stamp, _, family = value.partition("|")
+            if family == hint.family and _fresh(stamp, now, ttl):
+                candidates.add(key[len(TELEMETRY_SESSION_STAMP_PREFIX) :])
+        if not stamps:
+            raw = store.get_meta(TELEMETRY_SESSION_KEY)
+            if raw:
+                session_id, separator, stamp = raw.partition("|")
+                if session_id and separator and _fresh(stamp, now, ttl):
+                    candidates.add(session_id)
+    except Exception:
+        return None
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def _session_id_fallback(store: Store) -> str | None:
+    """``provenance.session_id`` when the caller passed none: :func:`resolve_session` at the
+    provenance window (24 h)."""
+    return resolve_session(store, _SESSION_ID_FALLBACK_MAX_AGE)
 
 
 def _bind_orphaned(

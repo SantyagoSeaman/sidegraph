@@ -225,13 +225,16 @@ def test_standalone_fact_without_a_graph_reports_its_orphaned_anchor(tmp_path):
 # defect table) landed session_id=None even with a fresh marker present.
 
 
-def test_standalone_fact_falls_back_to_telemetry_session_key_when_fresh(tmp_path):
+def test_standalone_fact_falls_back_to_telemetry_session_key_when_fresh(tmp_path, current_session):
     from datetime import UTC, datetime
 
-    from sidegraph.config import TELEMETRY_SESSION_KEY
+    from sidegraph.config import TELEMETRY_SESSION_STAMP_PREFIX
 
     store = Store(tmp_path / "s")
-    store.set_meta(TELEMETRY_SESSION_KEY, f"session-xyz|{datetime.now(UTC).isoformat()}")
+    current_session(session_id=None)
+    store.set_meta(
+        f"{TELEMETRY_SESSION_STAMP_PREFIX}session-xyz", f"{datetime.now(UTC).isoformat()}|claude"
+    )
 
     [ok] = propose_facts(
         [
@@ -248,12 +251,13 @@ def test_standalone_fact_falls_back_to_telemetry_session_key_when_fresh(tmp_path
     assert store.get_fact(ok.fact_id).provenance.session_id == "session-xyz"
 
 
-def test_standalone_fact_explicit_session_id_wins_over_fallback(tmp_path):
+def test_standalone_fact_explicit_session_id_wins_over_fallback(tmp_path, current_session):
     from datetime import UTC, datetime
 
     from sidegraph.config import TELEMETRY_SESSION_KEY
 
     store = Store(tmp_path / "s")
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"marker-session|{datetime.now(UTC).isoformat()}")
 
     [ok] = propose_facts(
@@ -271,7 +275,7 @@ def test_standalone_fact_explicit_session_id_wins_over_fallback(tmp_path):
     assert store.get_fact(ok.fact_id).provenance.session_id == "explicit-session"
 
 
-def test_standalone_fact_ignores_stale_telemetry_session_marker(tmp_path):
+def test_standalone_fact_ignores_stale_telemetry_session_marker(tmp_path, current_session):
     """Window-expired twin (declared exception, T-I2c-style): passes before AND after --
     guards over-reach the same way test_capture_propose.py's stale-marker test does."""
     from datetime import UTC, datetime, timedelta
@@ -280,6 +284,7 @@ def test_standalone_fact_ignores_stale_telemetry_session_marker(tmp_path):
 
     store = Store(tmp_path / "s")
     stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"stale-session|{stale}")
 
     [ok] = propose_facts(

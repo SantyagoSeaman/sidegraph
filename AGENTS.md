@@ -37,7 +37,8 @@ Python 3.13+; `uv`:
 - `uv run pre-commit run --all-files`: shared lint/format/type/secret-scanning gate (also
   runs `gitleaks`, `detect-private-key`, `zizmor`, `actionlint`, `check-toml`, and a
   `uv.lock`-in-sync check).
-- `uv run sidegraph-mcp`: stdio server; `uv build`: distributions.
+- `uv run sidegraph-mcp`: stdio server; `uv build`: distributions. `python -m sidegraph.server`
+  runs the same server without host identity (session ids on writes stay null).
 
 Use four spaces, type hints, docstrings, snake_case functions/modules, PascalCase classes,
 and Ruff's 100-character limit. End text files with a newline.

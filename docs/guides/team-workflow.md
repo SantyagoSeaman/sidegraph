@@ -1,18 +1,16 @@
 # Running Sidegraph in a team
 
-Sidegraph's core bet is that the decision store belongs in version control, next to the code
-and docs it's about — not in a separate service, and not in any one person's session history.
-The store is a **git-native log**: every `Decision`, `Domain`, `Entity`, and anchor set is a
-small, independent text file, so it merges the same way your code does. There is no
-binary-blob merge story to work around anymore — see [`reference/store-format.md`](../reference/store-format.md)
-for the full on-disk layout.
+Commit the decision store in version control alongside the code and docs it describes.
+Each `Decision`, `Fact`, `Domain`, durable `Entity`, and anchor set is a small text file,
+so changes can be reviewed and merged using the team's usual git workflow. See
+[`reference/store-format.md`](../reference/store-format.md) for the full on-disk layout.
 
 ## Commit the store
 
 The store lives at `.sidegraph/` (the `SIDEGRAPH_DIR` default — see
 [`reference/configuration.md`](../reference/configuration.md)), as a directory of small JSON
-files: one per decision, one per domain, one per tracked entity, one per decision's anchor
-set. Commit it like any other repo-owned artifact:
+files: one per decision, fact, domain, durable entity, and anchored record's binding set.
+Commit it like any other repo-owned artifact:
 
 ```bash
 git add .sidegraph/
@@ -180,16 +178,15 @@ the way it was before.
 
 ## The onboarding effect
 
-Because the store rides along with `git clone`, a new developer's very first Claude Code
-session in the repo gets the accumulated gotchas for free — `sidegraph-session-start` injects
-the global mistakes and communities map before they've touched a single file, and their first
-`get_task_context` call on whatever they're assigned surfaces every mistake/lesson/constraint
-anchored near it. There is no separate "read the wiki" onboarding step for this class of
-knowledge; it's already in the loop the agent runs every session.
+The store travels with `git clone`. With the host configured and a current graph available,
+`sidegraph-session-start` supplies a memory map, and `get_task_context` retrieves decisions
+for the files a new developer works on. Mistakes, lessons, and constraints on those files
+rank first, within the retrieval budget. Use the
+[verification checklist](verifying-your-setup.md) to check a new checkout's wiring.
 
 ## Handling disagreement: supersede, don't delete
 
-The store is append-only by design (see the invariants in the project's `CLAUDE.md`) — there
+The store is append-only by design (see the [write rules](../reference/store-format.md#append-only-write-rules)) — there
 is no operation that hard-deletes a `Decision`. When the team disagrees with a past decision,
 or a new decision reverses an old one:
 

@@ -134,11 +134,10 @@ def test_t24_each_seed_gets_the_advice_for_what_happened_to_it(tmp_path):
     existing, other = _block(out)
     assert existing.startswith("1 of 3 seed paths exists but is not in the code graph: pkg/n.py.")
     assert "Nope.py" not in existing and "pkg/," not in existing
-    assert other.startswith(
-        "1 of 3 seed paths is not a repo-relative path to a file in this repository: Nope.py."
-    )
+    assert other.startswith("1 of 3 seed paths is not a file in this checkout (")
+    assert "): Nope.py. The path is well-formed as read" in other
     assert "pkg/n.py" not in other and "pkg/" not in other
-    assert "repo-relative" in other and "not a directory" in other
+    assert "repo-relative" not in other and "or be a directory" in other
     assert "stale" not in other
 
 
@@ -220,11 +219,9 @@ def test_t26d_a_missing_or_dotted_repo_relative_path_keeps_its_wording(tmp_path)
     assert existing.startswith(
         "1 of 2 seed paths exists but is not in the code graph: pkg/v1..2.py."
     )
-    assert other.startswith(
-        "1 of 2 seed paths is not a repo-relative path to a file in this repository: "
-        "pkg/missing.py."
-    )
-    assert "Check the path" in other
+    assert other.startswith("1 of 2 seed paths is not a file in this checkout (")
+    assert "): pkg/missing.py. The path is well-formed as read" in other
+    assert "Check the path" not in other
 
 
 def test_t26b_the_same_file_written_repo_relative_gets_the_graph_state_advice(tmp_path):
@@ -272,9 +269,8 @@ def test_t24_a_directory_or_missing_path_alone_does_not_ask_for_the_graph_state(
     # `pkg/` holds a file the graph has, so the ladder reads it as a directory (spec D9).
     assert "- `pkg/` → a directory: read as the 1 file under it" in out
     (line,) = _block(out)
-    assert line.startswith(
-        "1 of 2 seed paths is not a repo-relative path to a file in this repository: Nope.py."
-    )
+    assert line.startswith("1 of 2 seed paths is not a file in this checkout (")
+    assert "): Nope.py. The path is well-formed as read" in line
     assert calls == []
 
 

@@ -15,7 +15,9 @@ import ast
 import inspect
 import io
 import json
+import os
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -244,6 +246,234 @@ def test_t2_the_session_hook_puts_the_skew_line_in_the_context_and_a_notice_for_
     out = json.loads(capsys.readouterr().out)
     assert "plugin is 0.10.0" in out["hookSpecificOutput"]["additionalContext"]
     assert "plugin is 0.10.0" in out["systemMessage"]
+
+
+# -- path-skew: a foreign `sidegraph-*` on PATH beside the plugin
+# see design/superpowers/specs/2026-10-11-stale-path-sidegraph-design.md
+
+PATH_SKEW = "path-skew"
+_REAL_PATH_INSTALL = hooks._path_install
+
+
+@pytest.fixture
+def real_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The conftest stubs the PATH probe (so no session-start test sees the developer's own
+    ``PATH``); the path-skew tests put the real one back."""
+    monkeypatch.setattr(hooks, "_path_install", _REAL_PATH_INSTALL)
+
+
+def _tool_env(root: Path, version: str | None, *, receipt: bool = True, name: str = "tool") -> Path:
+    """A ``uv tool``-shaped environment: ``<root>/<name>/bin/sidegraph-*``, its dist-info and
+    receipt. Returns the ``bin`` directory a person would have on ``PATH`` (symlinks into it)."""
+    venv = root / name
+    (venv / "bin").mkdir(parents=True)
+    for command in ("sidegraph-session-start", "sidegraph-mcp", "sidegraph-doctor"):
+        _write(venv / "bin" / command, "#!/bin/sh\n")
+        (venv / "bin" / command).chmod(0o755)
+    if version is not None:
+        _write(
+            venv
+            / "lib"
+            / "python3.13"
+            / "site-packages"
+            / f"sidegraph-{version}.dist-info"
+            / "METADATA"
+        )
+    if receipt:
+        _write(venv / "uv-receipt.toml")
+    link = root / f"{name}-link-bin"
+    link.mkdir()
+    for command in (venv / "bin").iterdir():
+        (link / command.name).symlink_to(command)
+    return link
+
+
+def _skew_on_path(monkeypatch, *path_dirs: Path, running: str = "0.11.1") -> integrity.RunResult:
+    monkeypatch.setattr(sidegraph, "__version__", running)
+    monkeypatch.setenv("PATH", os.pathsep.join(str(d) for d in path_dirs))
+    monkeypatch.setattr(hooks, "_own_bin_dirs", lambda: set())
+    return _run(Path(os.environ["REPO_FOR_PATH_SKEW"]), "session")
+
+
+@pytest.fixture
+def repo_dir(tmp_path: Path, monkeypatch) -> Path:
+    repo = _repo(tmp_path)
+    monkeypatch.setenv("REPO_FOR_PATH_SKEW", str(repo))
+    return repo
+
+
+def test_path_skew_older_path_install_is_reported(tmp_path, monkeypatch, repo_dir, real_probe):
+    link = _tool_env(tmp_path, "0.6.0")
+
+    result = _skew_on_path(monkeypatch, link)
+
+    problem = _problem(result, PATH_SKEW)
+    assert problem.severity == "advisory"
+    assert problem.line == problem.notice
+    assert problem.line == (
+        f"Sidegraph: `sidegraph-session-start` on PATH ({link}) is 0.6.0 but this session runs "
+        "0.11.1. Plugin skills and hooks use the session's version through uvx; your own shell "
+        "commands use the old one. Reinstall it with `uv tool install sidegraph@latest`, or "
+        "remove it with `uv tool uninstall sidegraph` if you only use the plugin."
+    )
+
+
+def test_path_skew_a_newer_path_install_is_reported_too(
+    tmp_path, monkeypatch, repo_dir, real_probe
+):
+    link = _tool_env(tmp_path, "0.12.0")
+
+    problem = _problem(_skew_on_path(monkeypatch, link), PATH_SKEW)
+
+    assert problem.line is not None
+    assert "is 0.12.0 but this session runs 0.11.1" in problem.line
+    assert "your own shell commands use the newer one." in problem.line
+
+
+def test_path_skew_without_a_uv_receipt_the_tail_is_generic(
+    tmp_path, monkeypatch, repo_dir, real_probe
+):
+    link = _tool_env(tmp_path, "0.6.0", receipt=False)
+
+    problem = _problem(_skew_on_path(monkeypatch, link), PATH_SKEW)
+
+    assert problem.line is not None
+    assert problem.line.endswith("Upgrade it, or remove it if you only use the plugin.")
+    assert "uv tool" not in problem.line
+
+
+def _pretend_running(monkeypatch, tmp_path: Path) -> None:
+    """Make ``<tmp>/running`` the running environment through the two inputs the real
+    ``_own_bin_dirs()`` reads, both reached by a symlink so that its ``realpath`` is exercised."""
+    prefix = tmp_path / "prefix-link"
+    prefix.symlink_to(tmp_path / "running")
+    scripts = tmp_path / "scripts-link"
+    scripts.symlink_to(tmp_path / "running" / "bin")
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    monkeypatch.setattr(hooks.sysconfig, "get_path", lambda name, *a, **k: str(scripts))
+
+
+def test_path_skew_skips_the_running_environments_own_bin(
+    tmp_path, monkeypatch, repo_dir, real_probe
+):
+    """uvx and `uv run` put their environment's bin first on PATH: the check must look past it
+    to the stale copy (review H1), not stop at its own binary and go clean."""
+    _tool_env(tmp_path, "0.11.1", name="running")
+    own = tmp_path / "running" / "bin"  # uvx / uv run put the venv's own bin on PATH
+    stale = _tool_env(tmp_path, "0.6.0", name="stale")
+    monkeypatch.setattr(sidegraph, "__version__", "0.11.1")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(own), str(stale)]))
+    _pretend_running(monkeypatch, tmp_path)
+
+    problem = _problem(_run(repo_dir, "session"), PATH_SKEW)
+
+    assert problem.line is not None
+    assert f"({stale})" in problem.line and "is 0.6.0" in problem.line
+
+
+def test_path_skew_the_running_environment_alone_is_not_run(
+    tmp_path, monkeypatch, repo_dir, real_probe
+):
+    _tool_env(tmp_path, "0.11.1", name="running")
+    own = tmp_path / "running" / "bin"
+    monkeypatch.setattr(sidegraph, "__version__", "0.11.1")
+    monkeypatch.setenv("PATH", str(own))
+    _pretend_running(monkeypatch, tmp_path)
+
+    result = _run(repo_dir, "session")
+
+    assert PATH_SKEW not in result.clean
+    assert all(p.check != PATH_SKEW for p in result.problems)
+
+
+def test_path_skew_equal_version_is_clean_and_ran(tmp_path, monkeypatch, repo_dir, real_probe):
+    link = _tool_env(tmp_path, "0.11.1")
+
+    result = _skew_on_path(monkeypatch, link)
+
+    assert PATH_SKEW in result.clean
+    assert all(p.check != PATH_SKEW for p in result.problems)
+
+
+@pytest.mark.parametrize(
+    "case", ["no-binary", "no-dist-info", "two-dist-infos", "non-numeric", "broken-symlink"]
+)
+def test_path_skew_without_evidence_is_not_run(tmp_path, monkeypatch, repo_dir, real_probe, case):
+    link = _tool_env(tmp_path, "0.6.0")
+    site = tmp_path / "tool" / "lib" / "python3.13" / "site-packages"
+    if case == "no-binary":
+        link = tmp_path / "empty"
+        link.mkdir()
+    elif case == "no-dist-info":
+        (site / "sidegraph-0.6.0.dist-info" / "METADATA").unlink()
+        (site / "sidegraph-0.6.0.dist-info").rmdir()
+    elif case == "two-dist-infos":
+        _write(site / "sidegraph-0.5.0.dist-info" / "METADATA")
+    elif case == "non-numeric":
+        (site / "sidegraph-0.6.0.dist-info" / "METADATA").unlink()
+        (site / "sidegraph-0.6.0.dist-info").rmdir()
+        _write(site / "sidegraph-dev.dist-info" / "METADATA")
+    elif case == "broken-symlink":
+        for command in list(link.iterdir()):
+            command.unlink()
+            command.symlink_to(tmp_path / "gone")
+
+    result = _skew_on_path(monkeypatch, link)
+
+    assert PATH_SKEW not in result.clean
+    assert all(p.check != PATH_SKEW for p in result.problems)
+
+
+def test_path_skew_reads_no_subprocess(tmp_path, monkeypatch, repo_dir, real_probe):
+    """The probe reads the install; running `<binary> --version` costs a second and no released
+    entry point answers it."""
+    link = _tool_env(tmp_path, "0.6.0")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the probe must not start a process")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    monkeypatch.setattr(os, "execv", boom)
+    monkeypatch.setattr(os, "execve", boom)
+
+    assert PATH_SKEW in {p.check for p in _skew_on_path(monkeypatch, link).problems}
+
+
+def test_path_skew_belongs_to_the_session_surface_only(tmp_path, monkeypatch, repo_dir, real_probe):
+    link = _tool_env(tmp_path, "0.6.0")
+    monkeypatch.setattr(hooks, "_own_bin_dirs", lambda: set())
+    monkeypatch.setenv("PATH", str(link))
+    monkeypatch.setattr(sidegraph, "__version__", "0.11.1")
+
+    assert all(p.check != PATH_SKEW for p in _run(repo_dir, "doctor").problems)
+
+
+def test_path_skew_session_hook_adds_the_line_and_the_notice_once(
+    tmp_path, monkeypatch, capsys, repo_dir, real_probe
+):
+    link = _tool_env(tmp_path, "0.6.0")
+    monkeypatch.setattr(sidegraph, "__version__", "0.11.1")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(link), os.environ["PATH"]]))
+    monkeypatch.setattr(hooks, "_own_bin_dirs", lambda: set())
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(repo_dir / ".sidegraph"))
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    hooks.session_start()
+    first = json.loads(capsys.readouterr().out)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    hooks.session_start()
+    second = json.loads(capsys.readouterr().out)
+
+    assert (
+        "is 0.6.0 but this session runs 0.11.1" in first["hookSpecificOutput"]["additionalContext"]
+    )
+    assert "is 0.6.0 but this session runs 0.11.1" in first["systemMessage"]
+    assert (
+        "is 0.6.0 but this session runs 0.11.1" in second["hookSpecificOutput"]["additionalContext"]
+    )
+    assert "systemMessage" not in second or "0.6.0" not in second["systemMessage"]
 
 
 # -- T3: plugin-off-in-subdirectories, the model -------------------------------------------

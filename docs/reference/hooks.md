@@ -81,6 +81,38 @@ there; on Codex each thread is now its own session instead of a day of work shar
 The workspace session, when it differs, is kept separately in the `telemetry:session_group`
 meta key: it is the only thing linking sibling threads.
 
+## Session attribution
+
+A hook knows its session from its payload. The MCP server does not get a payload, and the
+sessions of several hosts can share one repository, so each tool call is attributed on its own:
+
+- **The server asks its own host.** `sidegraph-mcp` is `sidegraph.host.mcp_entry:main`, which
+  adds a small middleware to the server. On **Claude Code** (`clientInfo.name` is
+  `claude-code`) the session is `CLAUDE_CODE_SESSION_ID` in the server's environment. That
+  needs Claude Code 2.1.154 or later; the id also stays stable across `--resume` only from
+  2.1.163 (on 2.1.154-2.1.162 a resumed session reads as two sessions in `sidegraph-stats`).
+  On **Codex** (`codex-mcp-client`) it is the request's `threadId`, matched to the
+  SessionStart stamp whose key ends in that id (each Codex subagent thread is its own
+  session, as everywhere on Codex), or the bare thread id when there is no stamp. Any other
+  client (Grok, a bare MCP client) is unattributed: an environment id is trusted only
+  together with the client name, because a child process inherits its parent's.
+- **Stamps.** Every SessionStart writes `telemetry:session:<session key>` =
+  `<iso time>|<family>` in `index.db` (the family comes from `SIDEGRAPH_HOST`, set in each
+  shipped hook command: `claude`, `codex`, else `unknown`). They are pruned after 25 hours,
+  and the older `telemetry:session` key is still written for one more minor.
+- **Fallback.** A client that names its host but no id (Claude Code before 2.1.154) gets the
+  one fresh stamp of its own family if there is exactly one, else nothing. A guess across
+  hosts is never made, so in a repository where several sessions of one host start within
+  a day most calls from such a client carry no session.
+- **When nothing can be attributed**, a write carries `session_id: null` and a retrieval is
+  still journaled, under the name `unattributed`. `python -m sidegraph.server` runs the same
+  server without the host entry, so it is always in this state; the CLI and importer never
+  attribute either. An explicit `session_id` argument always wins.
+
+Known limit: a Claude process that changes session id without restarting its MCP server
+(`/clear`, an in-session `/resume`) keeps the server's start-time id, so later rows can carry
+the old id.
+
 ## `sidegraph-session-start`
 
 Reads: `$SIDEGRAPH_DIR` (or the deprecated `$SIDEGRAPH_DB`; default `.sidegraph`, resolved via
@@ -265,7 +297,7 @@ raises costs only its own line.
    absolute path or by `$SIDEGRAPH_DB`. A per-package store you initialised on purpose shows
    this line until it holds a record; ignore it then.
 
-   Two more host checks sit beside it in the registry, both advisory, both with a notice, and
+   Three more host checks sit beside it in the registry, all advisory, all with a notice, and
    each a line of its own after the stray-store line:
 
    - **`version-skew`.** The hook compares the running package's version with the version in
@@ -279,6 +311,17 @@ raises costs only its own line.
      `SessionStart` resolves `@main` again, or remove the pinned install. The internal manifests
      are bumped with the package, so the check stays quiet with them; an old binary cannot
      report itself, so it catches a skew only once the binary that runs it is new enough.
+   - **`path-skew`.** A `sidegraph-*` command on `PATH` that is not the session's own package
+     is a second Sidegraph (typically a `uv tool install sidegraph` nobody updates). The hook
+     reads the install without running it: the first of `sidegraph-session-start`,
+     `sidegraph-mcp`, `sidegraph-doctor` found on `PATH` once the running environment's own `bin`
+     (which `uvx` and `uv run` put first) is skipped, its real path, and the one
+     `sidegraph-<version>.dist-info` in that environment. The line names the command, its
+     directory and both versions, and offers `uv tool install sidegraph@latest` or
+     `uv tool uninstall sidegraph` when the environment is a `uv tool` one, a generic "upgrade
+     or remove" otherwise. It fires for an older and for a newer copy. No binary on `PATH`, no
+     or two dist-infos, a non-numeric version or a Windows layout: the check does not run.
+     See [troubleshooting](../guides/troubleshooting.md#path-skew).
    - **`plugin-off-in-subdirectories`.** Claude sessions started below the repository root may
      run without the plugin; see [troubleshooting](../guides/troubleshooting.md#plugin-off-in-subdirectories)
      for the two cases and their lines. The line ends by telling the model to tell the user and
@@ -371,7 +414,7 @@ the output has the shape it always had.
 
 Which checks send notices: `store-unreadable` (always), `graph-stale`, `stray-store`,
 `store-files-skipped`, `refresh-hook-missing`, `store-uncommitted`, `version-skew`,
-`plugin-off-in-subdirectories` when a
+`path-skew`, `plugin-off-in-subdirectories` when a
 nested directory with its own `enabledPlugins` leaves the plugin off (case (b)),
 `orphaned-records` when degraded,
 `branch-only-records` when a branch holding records is more than a week old, and
@@ -727,6 +770,13 @@ this hook's own and differs from `get_task_context(files=[f])`, which orders per
 `More:` line promises the remaining records, not the same sequence. A record anchored to several
 files can reach one agent more than once, once per file.
 
+**Delivery is journaled.** The records a claimed file's block prints are written to the index in
+the same transaction as the claim, with no extra commit: one `inject` row per printed record (the
+printed top two or three, not every record on the file) and one `retrieval_shows` bump each, so
+`sidegraph-stats` and `sidegraph-doctor` count a record the hook printed as shown. A file whose
+claim loses prints nothing and journals nothing. No journal row or shows bump is written under
+`SIDEGRAPH_TELEMETRY=off`; delivery itself does not change.
+
 **Why per file and per agent, and why a cap.** A subagent's payload carries its parent's session
 id, so a key on the session alone let the main agent's delivery use up the one every subagent
 needed, and the subagents read anchored files blind. A subagent never receives the `SessionStart`
@@ -884,12 +934,18 @@ string, when the prompt already holds the opening marker line (a brief forwarded
 agent), when the index cannot be used (the cases above), when nothing the brief names has
 records, and on any failure. It claims none of the Read path's per-agent keys: the parent cannot
 see the block, so a claim would only stop the parent's own first read of the file from
-delivering. It records no touch event, since a spawn is not a touch.
+delivering. It records no touch event, since a spawn is not a touch. It does journal the records
+it appended: one `inject_brief` row per record, with a NULL `agent` (the recipient is unknown at
+spawn), and one `retrieval_shows` bump each. Nothing is journaled without a session id or under
+`SIDEGRAPH_TELEMETRY=off`.
 
 **Cost.** One index open, one scan of the anchored files, the path extraction, one read of up to
 64 KB for each text document the brief names, and one records query for each file the brief names
 that has anchored records, stopping at the sixth file that has any (each shown file costs at least
-one line). It loads nothing beyond the standard library, like the rest of this hook.
+one line), then one write transaction for the journal rows. This path used to be read-only: while
+another process holds the write lock, that write can wait out the one-second busy timeout before
+the spawn proceeds, and a failed write is swallowed (the brief is still delivered). It loads
+nothing beyond the standard library, like the rest of this hook.
 
 **Not tested.**
 

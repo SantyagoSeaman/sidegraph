@@ -1,9 +1,9 @@
 # Semantic docs layer
 
-Sidegraph's founding question is the mind map: **what is in this project and how is it
-connected?** — over source code *and* over the documentation that explains it. Graphify
-answers that question with two passes over the same corpus, and Sidegraph anchors decisions
-to whatever either pass produces.
+Graphify can index both source code and the documentation that explains it. Its structural
+and semantic passes produce different kinds of nodes; Sidegraph can anchor decisions to
+either. This guide covers when to build the semantic layer and when to import existing
+reasoning directly into the decision store.
 
 ## The story: structure, then meaning
 
@@ -75,15 +75,12 @@ node loses; you'll see `cross-chunk ID collision` warnings). Sidegraph degrades 
 (an anchor to a dropped code node orphans rather than mis-binding), but the graph gets
 poorer.
 
-**The right answer for decision-dense docs: import them as memory, don't extract them as
-structure.** A plan, spec, or ADR that names code line-by-line is already a *decision
-record*, not a structural artifact the graph needs to model — that's exactly what
-`sidegraph-import --docs <path>` is for (see
+**For supported decision-shaped docs, use direct import to capture their reasoning.**
+`sidegraph-import --docs <path>` parses qualifying ADRs and specs (see
 [the other importer](#the-other-importer---docs) below): it parses the document directly,
 with no LLM and no collision-prone extraction step, and writes it straight into the decision
-store, anchored via its own backtick-quoted mentions. Skip the semantic pass for this class of
-doc entirely — docstring rationale already comes free from the AST pass, and code-referencing
-prose adds mostly collisions with little upside.
+store, anchored via their backtick-quoted mentions. Direct import avoids the semantic
+extraction step for this task; docstring rationale is already available from the AST pass.
 
 For genuinely semantic folders that don't name code line-by-line (architecture overviews,
 design rationale, glossaries), the semantic pass is still the right tool — just scope it, per
@@ -184,8 +181,7 @@ graphify extract . --backend claude
 uv run sidegraph-import
 ```
 
-**Ratification.** Imported decisions land `accepted` by default — most teams don't want to
-gate hundreds of docstring-derived facts through manual review. Pass `--propose` if you want
+**Ratification.** Imported decisions land `accepted` by default. Pass `--propose` if you want
 them to land `proposed` instead, subject to the normal `sidegraph-ratify` gate — or
 auto-ratified at write time when eligible under a non-`manual` `SIDEGRAPH_RATIFY_POLICY` (see
 [`guides/capturing-decisions.md`](capturing-decisions.md#3-ratification)).

@@ -1,6 +1,7 @@
 ---
 name: record-fact
-description: Use when a session surfaces a hard-won empirical finding that isn't a choice — "запомни факт", "зафиксируй цифру/лимит/результат бенчмарка", "record a fact", "we learned that X", "оказалось, что", "note this benchmark result", "the API caps at N requests", "turns out httpx doesn't retry", or any trial-learned/observed/external-limit knowledge with no `choice` and no `rejected` attached. Also reachable directly as /sidegraph:record-fact. The authoring craft — pass the scope razor first, tell a fact apart from a decision, attach vs. stand alone, fill `source`, and pick the right write path: add_fact (human-asked, immediate) vs. propose_decisions's facts (agent-initiated, gated).
+description: >-
+  Use when a session surfaces a hard-won empirical finding that isn't a choice — "запомни факт", "зафиксируй цифру/лимит/результат бенчмарка", "record a fact", "we learned that X", "оказалось, что", "note this benchmark result", "the API caps at N requests", "turns out httpx doesn't retry", or any trial-learned/observed/external-limit knowledge with no `choice` and no `rejected` attached. Also reachable directly as /sidegraph:record-fact. The authoring craft — pass the scope razor first, tell a fact apart from a decision, attach vs. stand alone, fill `source`, and pick the right write path: add_fact (human-asked, immediate) vs. propose_decisions's facts (agent-initiated, gated).
 ---
 
 # Record a fact

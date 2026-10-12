@@ -1,6 +1,7 @@
 ---
 name: name-domains
-description: Use when the user wants domains named, organized, or onboarded for the first time — "name my domains", "set up domains", "give this project a table of contents", "make a mind map of this codebase", "organize the codebase into named areas". Also reachable directly as /sidegraph:name-domains. Turns the graph's raw Leiden communities into 2-3 human-picked, named domain sets via the list_domain_candidates MCP tool — the primary onboarding path (CLI bootstrap is the scripted/CI alternative).
+description: >-
+  Use when the user wants domains named, organized, or onboarded for the first time — "name my domains", "set up domains", "give this project a table of contents", "make a mind map of this codebase", "organize the codebase into named areas". Also reachable directly as /sidegraph:name-domains. Turns the graph's raw Leiden communities into 2-3 human-picked, named domain sets via the list_domain_candidates MCP tool — the primary onboarding path (CLI bootstrap is the scripted/CI alternative).
 ---
 
 # Name domains
@@ -117,10 +118,12 @@ gate: present and wait, never auto-write.
   naming what's still unclaimed.
 - A large `total_significant` (hundreds, on a big repo) is normal — that volume is exactly why
   you compose merged Coarse/Medium sets instead of proposing one domain per raw candidate.
-  `total_candidates` itself is capped by this skill's default call (`limit=100`), so it never
-  exceeds 100 in one response — a large `total_significant` with `truncated: true` means there
-  are more candidates beyond this response's top 100; narrow with `min_members`/`paths` or pass
-  a wider `limit` to see them.
+  `total_candidates` itself is capped by this skill's default call (`limit=100` and a
+  24,000-character budget, whichever cuts first), so it can be well under 100 — a large
+  `total_significant` with `truncated: true` means there are more candidates beyond this
+  response; the `note` says what cut. Narrow with `paths=[...]` (candidates run by path, so later
+  paths are the ones left out) or `min_members`, or raise `budget_chars` (max 40000). A wider
+  `limit` does not help once the budget cuts.
 - **On a large repo, prefer `seed_anchors` and avoid broad `path_prefixes`.** A whole-package
   path like `path_prefixes: ["src"]` or `["tests"]` on a monorepo can match a huge fraction of
   the graph; sync's overbroad-path guard then drops that path rule (your `seed_anchors` still
@@ -129,7 +132,8 @@ gate: present and wait, never auto-write.
   narrow prefixes (`src/tree`, `src/data`, `src/gbm`…) instead of one `src` domain.
 - `sidegraph-domains bootstrap` (CLI) does the same deterministic candidate selection but skips
   the curation step — it's the scripted/CI alternative, not the recommended path for a human in
-  a session. See [naming your domains](../../../../docs/guides/naming-your-domains.md).
+  a session. See [naming your domains](../../../../docs/guides/naming-your-domains.md). Run it as
+  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
 
 ## See also
 

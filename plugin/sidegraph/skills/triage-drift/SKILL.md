@@ -1,6 +1,7 @@
 ---
 name: triage-drift
-description: Use when SessionStart reports "N record(s) are anchored to code that changed after their capture", when retrieval output carries [drifted] tags, when sidegraph-doctor prints code-drift findings, or as periodic store maintenance — "разбери drifted записи", "triage the drifted records", "are these decisions still true". Also reachable directly as /sidegraph:triage-drift. Walks each drifted record against the code at HEAD and routes it to a verdict: still true (report, no write), content now wrong (propose a supersession), or code gone (hand to heal-anchors). The manual counterpart to a known limitation — drift detection sees code movement, not semantic invalidity; this skill is where the semantic judgment happens.
+description: >-
+  Use when SessionStart reports "N record(s) are anchored to code that changed after their capture", when retrieval output carries [drifted] tags, when sidegraph-doctor prints code-drift findings, or as periodic store maintenance — "разбери drifted записи", "triage the drifted records", "are these decisions still true". Also reachable directly as /sidegraph:triage-drift. Walks each drifted record against the code at HEAD and routes it to a verdict: still true (report, no write), content now wrong (propose a supersession), or code gone (hand to heal-anchors). The manual counterpart to a known limitation — drift detection sees code movement, not semantic invalidity; this skill is where the semantic judgment happens.
 ---
 
 # Triage drift
@@ -18,8 +19,10 @@ the question is whether what the record says survived what the code became.
 
 ## Get the list
 
+The CLI runs through uvx at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+
 ```bash
-sidegraph-doctor --json    # findings[] entries with "code": "code-drift"
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor --json    # findings[] entries with "code": "code-drift"
 ```
 
 Each finding names the record and which anchored file(s) changed since

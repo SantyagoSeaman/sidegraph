@@ -1,6 +1,7 @@
 ---
 name: setup
-description: Use when Sidegraph needs to be set up (or its setup finished/verified) in a repo — "set up sidegraph", "install sidegraph here", "get sidegraph working on this project", "настрой sidegraph", a fresh clone where memory should be turned on, or "why is my SessionStart map empty". Also reachable directly as /sidegraph:setup. The end-to-end first run: engine → graph → store → wiring check — then hands off to name-domains / import-adrs / record-decision for the first real memory.
+description: >-
+  Use when Sidegraph needs to be set up (or its setup finished/verified) in a repo — "set up sidegraph", "install sidegraph here", "get sidegraph working on this project", "настрой sidegraph", a fresh clone where memory should be turned on, or "why is my SessionStart map empty". Also reachable directly as /sidegraph:setup. The end-to-end first run: engine → graph → store → wiring check — then hands off to name-domains / import-adrs / record-decision for the first real memory.
 ---
 
 # Set up Sidegraph
@@ -40,6 +41,10 @@ folder too (sync falls back to a content-hash graph version — see
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
 ```
 
+Every Sidegraph CLI in this skill (`sidegraph-init --hooks`, `--no-hooks`, `--remove-hooks`,
+`sidegraph-doctor --json`) is run this way: put the `uvx --from ...@main` prefix above before the
+command name, so it runs at the session's version and never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+
 Creates `.sidegraph/` — the repo-committed, file-per-record sidecar, plus its own
 `.gitignore` keeping the derived `index.db` out of git — and reports the graph check.
 Expected: `created store: .sidegraph` (or `already initialized: .sidegraph exists.` —
@@ -60,8 +65,7 @@ on an empty store is expected, not broken. For the full four-case proof (host wi
 capture and retrieval, ratification, sync), point the human at
 [verifying your setup](../../../../docs/guides/verifying-your-setup.md).
 
-Then run `sidegraph-doctor --json` (a pure read; with no command on `PATH`, run it the way step 3
-runs `sidegraph-init`) and read the finding `plugin-off-in-subdirectories`. It says that Claude
+Then run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor --json` (a pure read) and read the finding `plugin-off-in-subdirectories`. It says that Claude
 sessions started below the repository root run without Sidegraph: the plugin is enabled only in
 the root's `.claude/settings.json`, which Claude Code reads for root launches alone, or a nested
 directory's own settings leave it off. The fix changes the human's settings, so put the options
@@ -77,8 +81,9 @@ A graph nobody rebuilds goes stale, and memory then cannot see or anchor to new 
 human whether to install the refresh hook: a marked block in `post-commit`, `post-merge` and
 `post-checkout` that rebuilds the **code** graph in the background, in the main checkout only
 (linked worktrees read its graph). It never replaces an existing hook, and
-`sidegraph-init --remove-hooks` takes it out. On a yes run `sidegraph-init --hooks`; on a no run
-`sidegraph-init --no-hooks`, which records the answer so that Sidegraph stops asking. Do not run
+`sidegraph-init --remove-hooks` takes it out. On a yes run
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --hooks`; on a no run
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --no-hooks`, which records the answer so that Sidegraph stops asking. Do not run
 either unasked, and do not run `graphify hook install` instead: Graphify's own hook also rebuilds
 in every linked worktree. (Doc/prose extraction still needs a manual `graphify update .` after
 doc changes.) Details:
@@ -107,8 +112,8 @@ start over. Source files are never touched. Sidegraph can also leave a few thing
 those two directories:
 
 - the graph refresh hook, if installed (`sidegraph-init --hooks`, or a yes to its question):
-  a helper and three hook blocks under `.git/hooks/`. Run `sidegraph-init --remove-hooks`
-  first, because deleting the directories leaves them behind.
+  a helper and three hook blocks under `.git/hooks/`. Run
+  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --remove-hooks` first, because deleting the directories leaves them behind.
 - the git config key `sidegraph.graphRefresh`, recorded by `sidegraph-init --no-hooks`.
   `--remove-hooks` clears it.
 - `SIDEGRAPH_RATIFY_POLICY` in `.claude/settings.json`, if `sidegraph-init` wrote it.

@@ -98,9 +98,9 @@ def test_a_locked_index_costs_the_hook_one_busy_wait_not_two(tmp_path, monkeypat
     claims: list[str] = []
     real_claim = HotIndex.claim_file
 
-    def spy(self, prefix, rel_path, value, cap):
+    def spy(self, prefix, rel_path, value, cap, **kwargs):
         claims.append(prefix + rel_path)
-        return real_claim(self, prefix, rel_path, value, cap)
+        return real_claim(self, prefix, rel_path, value, cap, **kwargs)
 
     monkeypatch.setattr(HotIndex, "claim_file", spy)
     payload = {

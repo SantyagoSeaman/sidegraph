@@ -2,15 +2,15 @@
 
 PreToolUse runs before every Read, Grep, Edit, Write and Bash read command and must cost close to
 nothing. It needs the records anchored to the files a call names, a per-agent claim on each file,
-and (for telemetry) one touch row. Constructing a ``Store`` for that paid for the package import
-and for a digest walk of every canonical file. ``HotIndex`` reads and writes the derived index
-directly and trusts it as the last full open (SessionStart, the MCP server, a CLI) left it: it
-never reloads, never heals and never creates anything.
+and (for telemetry) one touch row and a row per record it printed. Constructing a ``Store`` for
+that paid for the package import and for a digest walk of every canonical file. ``HotIndex``
+reads and writes the derived index directly and trusts it as the last full open (SessionStart,
+the MCP server, a CLI) left it: it never reloads, never heals and never creates anything.
 
 It returns ``None`` from :meth:`HotIndex.open` in every case where ``Store`` would have
 repaired the index (missing, symlinked, another schema version, an older layout, unreadable),
-so the hook does nothing and prints ``{}``. The hot SQL (claim, meta read, touch insert) lives
-here as module constants that ``Store`` runs too, so the two cannot drift.
+so the hook does nothing and prints ``{}``. The hot SQL (claim, meta read, event insert, shows
+upsert) lives here as module constants that ``Store`` runs too, so the two cannot drift.
 
 see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D2, D3) and
 design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1, D2, D5)
@@ -22,7 +22,7 @@ import contextlib
 import json
 import os
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -43,6 +43,18 @@ INSERT_EVENT_SQL = (
     "INSERT INTO retrieval_events (session_id, at, kind, key, detail, agent) "
     "VALUES (?, ?, ?, ?, ?, ?)"
 )
+# The cumulative per-record counter ``Store.record_retrieval`` bumps once per rendered record.
+# The PreToolUse hook runs the same statement once per record it prints.
+SHOW_UPSERT_SQL = (
+    "INSERT INTO retrieval_shows (record_id, shows, last_shown_at) "
+    "VALUES (?, 1, ?) ON CONFLICT(record_id) DO UPDATE SET "
+    "shows = shows + 1, last_shown_at = excluded.last_shown_at"
+)
+# Journal kinds the hook writes besides ``touch``: a record printed in a file-read block, and a
+# record appended to a spawned subagent's brief (``agent`` is NULL there: the recipient does not
+# exist yet at spawn). Stats pins the literals (it imports nothing from here).
+INJECT_KIND = "inject"
+INJECT_BRIEF_KIND = "inject_brief"
 
 # One agent's claim on one file, in one statement: insert the key only while the agent holds
 # fewer than ``cap`` keys under its prefix. The count is a range query over
@@ -83,6 +95,14 @@ class Record(NamedTuple):
 
     decision: dict
     proposed: bool
+
+
+class Shown(NamedTuple):
+    """The records one claimed file's block printed, journaled in the claim's transaction."""
+
+    session_id: str
+    agent: str | None
+    record_ids: Sequence[str]
 
 
 class HotIndex:
@@ -145,29 +165,79 @@ class HotIndex:
         row = self._conn.execute(GET_META_SQL, (key,)).fetchone()
         return row[0] if row else None
 
-    def _write(self, sql: str, params: tuple) -> sqlite3.Cursor:
-        """Run one write in its own transaction. An ``OperationalError`` (the busy timeout)
-        marks the handle as ``write_failed`` and propagates."""
+    def _in_transaction[T](self, work: Callable[[sqlite3.Connection], T]) -> T:
+        """Run ``work`` in one transaction. An ``OperationalError`` (the busy timeout) marks the
+        handle as ``write_failed`` and propagates; the transaction is rolled back."""
         try:
             with self._conn:
-                return self._conn.execute(sql, params)
+                return work(self._conn)
         except sqlite3.OperationalError:
             self.write_failed = True
             raise
+
+    def _write(self, sql: str, params: tuple) -> sqlite3.Cursor:
+        """Run one write in its own transaction (see :meth:`_in_transaction`)."""
+        return self._in_transaction(lambda conn: conn.execute(sql, params))
 
     def claim_meta(self, key: str, value: str) -> bool:
         """Set ``key`` only if absent; True iff this call set it. One statement, so two hooks
         claiming at once cannot both win. Same SQL as ``Store.claim_meta``."""
         return self._write(CLAIM_META_SQL, (key, value)).rowcount == 1
 
-    def claim_file(self, prefix: str, rel_path: str, value: str, cap: int) -> bool:
+    def claim_file(
+        self, prefix: str, rel_path: str, value: str, cap: int, *, shown: Shown | None = None
+    ) -> bool:
         """Claim ``prefix + rel_path`` if absent and if fewer than ``cap`` keys sit under
         ``prefix``; True iff this call inserted it. One statement, so the count and the insert
         cannot be split by another hook: two processes cannot both take the last slot, and
         two cannot both take one key.
-        # see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2)"""
+
+        When the claim inserted and ``shown`` is given, the records it printed are journaled in
+        the SAME transaction (one ``inject`` row each, and one ``retrieval_shows`` bump each):
+        a claim and its showing commit or vanish together, with no extra commit on the Read path.
+        # see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2)
+        # and design/superpowers/specs/2026-10-11-hook-showings-journal-design.md (D3)"""
         params = (prefix + rel_path, value, prefix, prefix + _KEY_RANGE_END, cap)
-        return self._write(CLAIM_FILE_SQL, params).rowcount == 1
+
+        def claim(conn: sqlite3.Connection) -> bool:
+            if conn.execute(CLAIM_FILE_SQL, params).rowcount != 1:
+                return False
+            if shown is not None:
+                self._journal_shows(
+                    conn,
+                    shown.session_id,
+                    INJECT_KIND,
+                    shown.agent,
+                    [(rel_path, rid) for rid in shown.record_ids],
+                )
+            return True
+
+        return self._in_transaction(claim)
+
+    @staticmethod
+    def _journal_shows(
+        conn: sqlite3.Connection,
+        session_id: str,
+        kind: str,
+        agent: str | None,
+        rows: Sequence[tuple[str, str]],
+    ) -> None:
+        """One journal row and one shows bump per ``(file, record id)`` row, on ``conn``."""
+        now = datetime.now(UTC).isoformat()
+        conn.executemany(
+            INSERT_EVENT_SQL, [(session_id, now, kind, rel, rid, agent) for rel, rid in rows]
+        )
+        conn.executemany(SHOW_UPSERT_SQL, [(rid, now) for _, rid in rows])
+
+    def record_shows(self, session_id: str, rows: Sequence[tuple[str, str]]) -> None:
+        """Journal the records a subagent's brief printed: one ``inject_brief`` row (``agent``
+        NULL, the recipient being unknown at spawn) and one shows bump per ``(file, record id)``
+        row, in one transaction of their own (the brief claims nothing to join).
+        # see design/superpowers/specs/2026-10-11-hook-showings-journal-design.md (D4)"""
+        if rows:
+            self._in_transaction(
+                lambda conn: self._journal_shows(conn, session_id, INJECT_BRIEF_KIND, None, rows)
+            )
 
     def record_touch(self, session_id: str, path: str, tool: str, agent: str | None = None) -> None:
         """Append one ``touch`` row; the same insert as ``Store.record_touch``."""

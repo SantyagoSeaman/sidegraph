@@ -63,7 +63,7 @@ check does not fall back, just as `sidegraph-init` installs nothing outside a re
 `--against` (`sidegraph-verify` and `sidegraph-doctor`) is the one exception: it diffs the
 history of the repository that physically holds the store's files.
 
-**One file per record**, not one JSONL event log, is the whole point of the wave: different
+**One file per record**, rather than one shared event log, keeps changes independent: different
 records land in different files, so two branches that ratify different decisions merge with
 zero conflict, a PR diff shows "added `decisions/01J....json` — one small file" instead of
 "binary file changed," and the rare case where two branches genuinely disagree about the same
@@ -81,7 +81,7 @@ an ordinary, human-readable git conflict in one small JSON file — not a corrup
 | `AnchorBinding` set per decision or fact — `entity_id`/`tier`/`relation`/`weight`, no `status`, EXCLUDING any binding whose entity is a `community:*` abstract entity | `toc_cache` (the `SessionStart` table-of-contents render) |
 | `Initiative` — full row | the per-session capture ledger (`capture_sessions`, dedup markers) |
 | `archive/*.jsonl` segments (once compaction has run) | `last_synced_graph_version` (the graph version plus the resolver revision, `<graph version>:r<N>`; raising the revision reruns the first sync after an upgrade), `pending_uncommitted_moves` (the entities a sync left as `moved_uncommitted`, with the git `HEAD` it saw, so the next sync after `HEAD` moves re-verifies them), `pending_tier1_reconcile` (the `(record, vacated community)` pairs whose Tier-1 reconcile failed, as JSON; every sync retries them first; a pair is cleared once its reconcile completes, and kept, silently, while a live or degraded Tier-2 anchor of the record has no recorded community), `schema_version`, the canonical-digest freshness stamp, `skipped_canonical_files` (the files the last reload left out; see [Digest integrity](#digest-integrity)) |
-| — | retrieval telemetry (`retrieval_shows`, `retrieval_seeds` — records that reached a render, areas that were asked about; see [Retrieval telemetry](#retrieval-telemetry) below) |
+| — | retrieval telemetry (`retrieval_shows`, `retrieval_seeds` — records that reached a render or that the PreToolUse hook printed, areas that were asked about; see [Retrieval telemetry](#retrieval-telemetry) below) |
 | — | `community:*` abstract `Entity` rows, and any Tier-1 `AnchorBinding` pointing at one — see [Community bindings are derived](#community-bindings-are-derived-not-committed) below |
 | — | `canonical_stat` (`subdir`, `stem`, `size`, `mtime_ns` per canonical file this index actually loaded — see [Digest integrity](#digest-integrity) below) |
 
@@ -348,7 +348,8 @@ Two more index-only tables, alongside `capture_sessions`: `retrieval_shows` (a r
 how many renders included it, and when it last did) and `retrieval_seeds` (a file path or
 other seed key → how many retrieval calls asked about it, and when last). Written by the
 retrieval path (`get_task_context`, `query_decisions`, `drill_down`) after a successful
-render, read by `sidegraph-doctor`'s `never-surfaced` check (see
+render (+1 per record per call), and by the PreToolUse hook for each record it prints (+1 each
+time it is printed: a record printed under two files, of one Bash line or of one brief, counts twice), read by `sidegraph-doctor`'s `never-surfaced` check (see
 [`docs/reference/cli.md`](cli.md)) to tell a decision nobody has needed yet from one that's
 anchored where people keep working and still never surfaces. `query_structure` records
 nothing at all — it returns no decision memory, so it never offers an opportunity for one to
@@ -365,15 +366,20 @@ variable list.
 ### `retrieval_events` (derived, index-only)
 
 An ordered, session-scoped journal of what memory surfaced and which files were touched
-afterwards. Three kinds: `seed` (a path a retrieval was asked about), `show_anchor` (a file
-anchored by a record that reached a render — `detail` holds the record id), and `touch` (a
-file the agent opened, edited or grepped — `detail` holds the tool name). `key` is always a
-repo-relative file path, which is the join axis.
+afterwards. Five kinds: `seed` (a path a retrieval was asked about), `show_anchor` (a file
+anchored by a record that reached a render — `detail` holds the record id), `touch` (a
+file the agent opened, edited or grepped — `detail` holds the tool name), `inject` (a record
+the PreToolUse hook printed in the block it handed an agent before a file was read or edited —
+`detail` holds the record id) and `inject_brief` (a record the hook appended to the brief of a
+subagent being spawned — `detail` holds the record id). `key` is always a repo-relative file
+path, which is the join axis. The two injection kinds are deliveries the agent did not ask
+for, so they are kept apart from `show_anchor`: they are not lookups.
 
-`agent` is a nullable text column, set only on a `touch` made by a Claude Code subagent: the
-host's own id for that subagent, opaque to the store. The row's `session_id` is still the
-parent session's, so counting sessions is unchanged, and `NULL` means the session's own agent
-(and every row written before the column existed). A fresh index has the column from its
+`agent` is a nullable text column, set on a `touch` or an `inject` made by a Claude Code
+subagent: the host's own id for that subagent, opaque to the store. The row's `session_id` is
+still the parent session's, so counting sessions is unchanged, and `NULL` means the session's
+own agent (and every row written before the column existed). On `inject_brief` it is always
+`NULL`, and there it means the recipient subagent, which is unknown at spawn. A fresh index has the column from its
 `CREATE TABLE`; an index built before it gains it with `ALTER TABLE retrieval_events ADD COLUMN
 agent TEXT` on its next open. An open that cannot run the `ALTER` (it lost a lock race, say)
 carries on without the column, and touches fail to record until a later open adds it; the hook
@@ -394,8 +400,11 @@ One row per lookup that delivered records — a `get_task_context`, `query_decis
 a shorter line), `dropped_for_budget` (did not fit at all), `chars_used`, whether the delivered
 set held a record with a non-empty `rejected` field (`had_rejected`) or a superseded one
 (`had_superseded`), and the optional `intent` label the caller passed. It holds no record
-text. A `drill_down` applies no budget, so its row carries the number of decisions it returned
-as `emitted` and `selected`, zeros for `degraded`, `dropped_for_budget` and `chars_used`, and
+text. Its `session_id` can likewise be `unattributed`, with the same meaning as in
+`retrieval_events`; both tables stamp one call's rows with the same `at`. A `drill_down` applies
+no relevance budget (its output is capped by `budget_chars`), so its row carries the number of
+decisions it showed as `emitted` and `selected`, zeros for `degraded`, `dropped_for_budget` and
+`chars_used`, and
 the reserved `intent` `drill_down`, which the statistics use to keep those zeros out of the
 budget figures. A caller of `get_task_context` or `query_decisions` cannot pass that label.
 
@@ -649,13 +658,24 @@ Concurrent writes **within one process** are lock-serialized (an instance-level
 `threading.RLock` around every store call) — ordinary mutual exclusion, nothing merge-related
 to reason about there. Concurrent writes **across processes on the same branch** (the MCP
 server, `sidegraph-sync`/`sidegraph-ratify`, and the Claude Code hooks may all open the same
-`.sidegraph/` independently) rely on each writer's own atomic file replace
-(tmp file + `os.replace`) — a reader never observes a half-written record. Every such write
+`.sidegraph/` independently) reserve the SQLite writer with `BEGIN IMMEDIATE` before
+mutation state checks and canonical publication. A waiting writer therefore observes the
+committed verdict, record ID, or live domain slug before deciding whether its write is valid.
+Server-side fact-support and domain-parent checks use the same reservation. Nested
+mutations participate in the outer transaction; they do not independently commit it.
+
+Publication still uses an atomic file replace (tmp file + `os.replace`) — a reader never
+observes a half-written record. Every such write
 uses a per-write-unique tmp name, not a fixed one, so two writers of the *same* target file
 can never share an inode and truncate each other's not-yet-replaced bytes.
 
-Two more cross-process windows, both distinct from an ordinary record write, are closed the
-same "make it atomic" way rather than with a lock:
+The reservation serializes cooperative Store writers; it does not make JSON replacement
+and SQLite COMMIT one atomic operation. A failure after replacement may leave canonical
+bytes published. Nor does it protect against an external editor or git changing files.
+An outermost busy/locked BEGIN fails before that mutation writes; a multi-step MCP call
+may already have committed earlier steps. Inspect canonical truth before retrying.
+
+Two other cross-process windows have their own protection:
 
 - **A full index reload** (see [Freshness](#freshness-absorbing-a-git-pull)) drops and
   recreates the six record tables inside one explicit transaction. A concurrent reader on a

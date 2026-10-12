@@ -1,15 +1,17 @@
 # Sidegraph
 
-> Durable, repo-committed decision memory for AI coding agents: an append-only file-per-record
-> sidecar store (committed JSON records, plus a derived local index) anchored to the Graphify
-> code-graph engine, exposed as an MCP server plus Claude Code hooks, with mistakes-first,
-> task-scoped retrieval.
+> Durable decisions and non-derivable facts for coding agents, stored as repo-committed
+> JSON records with a derived local index. Sidegraph reads Graphify's code/doc graph and
+> delivers mistakes-first, task-scoped memory through MCP and Claude Code/Codex hooks.
+
+Use [README.md](README.md) for task-oriented navigation. This index points to the guides
+and exact contracts; it does not replace their version-specific requirements.
 
 ## Getting started
 
 - [getting-started/installation.md](getting-started/installation.md) — installing Sidegraph and its Graphify dependency
 - [getting-started/quickstart.md](getting-started/quickstart.md) — one end-to-end path: graph, store, host plugin, anchored gotcha, retrieval, commit
-- [getting-started/bootstrap.md](getting-started/bootstrap.md) — preview-first onboarding from exactly six supported ADR/spec profiles, scan and review boundaries, recovery statuses, Claude Code/Codex completion matrix, local report privacy, and the four-stage demo-branch dogfood loop; the 10–15 minute launch target is unmeasured
+- [getting-started/bootstrap.md](getting-started/bootstrap.md) — preview, review, import, and prove retrieval from supported ADR/spec documents; host support and recovery
 - [getting-started/claude-code-setup.md](getting-started/claude-code-setup.md) — wiring the MCP server and hooks into Claude Code
 - [getting-started/codex-setup.md](getting-started/codex-setup.md) — wiring Sidegraph into Codex
 
@@ -29,27 +31,27 @@
 
 ## Guides
 
-- [guides/capturing-decisions.md](guides/capturing-decisions.md) — recording decisions mid-session, the propose/ratify capture loop, and facts (the evidence layer): attached vs. standalone, falsifying with supersede_fact
-- [guides/naming-your-domains.md](guides/naming-your-domains.md) — the sidegraph:name-domains skill as the primary onboarding path, bootstrap → ratify as the scripted alternative, tuning volume, membership guardrails, and recovery
-- [guides/retrieval-in-sessions.md](guides/retrieval-in-sessions.md) — reading SessionStart and get_task_context output, including accepted inline evidence, accepted standalone facts, and the final unratified block
+- [guides/capturing-decisions.md](guides/capturing-decisions.md) — human-requested capture, agent proposals, ratification policies, and attached or standalone facts
+- [guides/naming-your-domains.md](guides/naming-your-domains.md) — conversational and CLI paths for naming domains; membership guardrails and recovery
+- [guides/retrieval-in-sessions.md](guides/retrieval-in-sessions.md) — reading SessionStart and task-context output, evidence, and unratified proposals
 - [guides/surviving-refactors.md](guides/surviving-refactors.md) — rebuilding the graph, syncing anchors, healing stale decisions
-- [guides/troubleshooting.md](guides/troubleshooting.md) — the fourteen integrity checks Sidegraph runs at session start (store cannot open, pending proposals, code drift, borrowed, stale or missing graph, stray store, orphaned records, skipped store files, no refresh hook, uncommitted store files, records only on unmerged branches, version skew, plugin off in subdirectories): what each means, where it shows (model line, notice, doctor, stats HEALTH) and the fix; how often a notice repeats
-- [guides/team-workflow.md](guides/team-workflow.md) — the git-native store in a team: committing `.sidegraph/`, ratifying in PR review, branches merging silently vs. a same-record conflict, compaction as team hygiene, onboarding, disagreement
+- [guides/troubleshooting.md](guides/troubleshooting.md) — session integrity checks, notices, diagnostic commands, and fixes
+- [guides/team-workflow.md](guides/team-workflow.md) — committing the store, PR review, merge conflicts, compaction, and onboarding
 - [guides/semantic-docs.md](guides/semantic-docs.md) — the two-pass (AST + LLM) workflow over docs, concept/rationale anchoring, and the sidegraph-import bootstrap walkthrough
 - [guides/verifying-your-setup.md](guides/verifying-your-setup.md) — a four-case post-install checklist: host wiring, durable capture/retrieval, ratification with evidence, and sync/repository hygiene
-- [guides/ci-cd-maintenance.md](guides/ci-cd-maintenance.md) — three GitHub Actions recipes (anchor-health required check, store lint on PR, scheduled LLM triage) built on sidegraph-sync --check/sidegraph-verify/the heal-anchors playbook, plus the two hard rules (CI never ratifies; CI never auto-pushes canonical)
+- [guides/ci-cd-maintenance.md](guides/ci-cd-maintenance.md) — GitHub Actions recipes for anchor health, store lint, and scheduled triage; CI proposes and opens PRs without ratifying
 
 ## Reference
 
-- [reference/mcp-tools.md](reference/mcp-tools.md) — all 24 MCP tools (including add_fact/supersede_fact, list_facts, sync_anchors, verify_store, add_anchors): parameters, return shape, when they're called
-- [reference/cli.md](reference/cli.md) — all fourteen commands documented on the page: sidegraph-bootstrap, sidegraph-init, sidegraph-ratify, sidegraph-sync (including --json/--check), sidegraph-import (rationale nodes and `--docs` markdown, including the profile scope filter and --any-doc), sidegraph-domains, sidegraph-compact, sidegraph-verify (snapshot + --against transition layer), sidegraph-doctor, sidegraph-viz, sidegraph-export-okf, sidegraph-stats (local usage statistics, `--window`/`--json`), sidegraph-prepare-commit-msg, and sidegraph-blame: flags, output, exit codes
+- [reference/mcp-tools.md](reference/mcp-tools.md) — MCP tool parameters, return shapes, write guards, and retrieval behavior
+- [reference/cli.md](reference/cli.md) — command flags, output, exit codes, import profiles, verification, and local diagnostics
 - [reference/hooks.md](reference/hooks.md) — sidegraph-session-start, sidegraph-stop, sidegraph-pre-tool-use, and sidegraph-subagent-start: env, JSON I/O, guarantees
 - [reference/git-bindings.md](reference/git-bindings.md) — commit trailers (candidate rules, comment-char handling, fail-open bounded stages, installation) and sidegraph-blame (trailer + provenance joins and output caps)
-- [reference/configuration.md](reference/configuration.md) — every environment variable (SIDEGRAPH_DIR primary, SIDEGRAPH_DB deprecated), store path resolution, budget defaults, graph version semantics, the domain sync/TOC cache
-- [reference/stability.md](reference/stability.md) — what is committed, provisional, or not a contract at all: the store format and CLI are committed, MCP return shapes and flow profiles are provisional, rendered retrieval text and archive segments are not a contract; plus the behaviours (mistakes-first, quarantine, drift marking, no egress) that stay guaranteed even where their surface is not
+- [reference/configuration.md](reference/configuration.md) — environment variables, store/graph paths, retrieval budgets, and sync caches
+- [reference/stability.md](reference/stability.md) — committed and provisional surfaces, compatibility policy, and behavioral guarantees
 - [reference/operations.md](reference/operations.md) — what runs when, local writes and measured costs, the graph boundary, CI wiring, and unmeasured scale questions
-- [reference/store-format.md](reference/store-format.md) — the on-disk store contract: file-per-record canonical layout (including facts/), committed vs. derived, format marker, freshness/digest, archive segments, the schema 0.4.0→0.5.0→0.6.0 upgrades (community bindings now derived), append-only rules, merge semantics
-- [reference/releasing.md](reference/releasing.md) — how a release is cut: SemVer policy, every file that carries the version string, the pre-release checklist, the tag-driven publish.yml flow (test/build/publish jobs, the tag-to-version guard), the GitHub Release step, post-release checks, and the public-snapshot note
+- [reference/store-format.md](reference/store-format.md) — canonical JSON layout, derived state, migrations, archives, append-only writes, and merges
+- [reference/releasing.md](reference/releasing.md) — maintainer release preparation, public snapshots, tagging, publishing, and post-release checks
 
 ## Pilot kit
 
@@ -61,4 +63,4 @@
 
 ## Engineering whitepaper
 
-- [published whitepaper](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/whitepaper/index.md) — the decision paper generated in the public snapshot: what decision-provenance memory is, what the measurement programme established and failed to establish (including the corpus where memory cost +25.5% and answered worse), repository fit, a staged pilot with default stop conditions, and the exit story. Read this before installing.
+- [published whitepaper](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/whitepaper/index.md) — optional evidence and limits, including the corpus where memory cost +25.5% and answered worse; repository fit and staged adoption gates

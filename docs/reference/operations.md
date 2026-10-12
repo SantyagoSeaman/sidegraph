@@ -42,7 +42,9 @@ than a plain `Bash` matcher would start) or dropping the PreToolUse hook entirel
 SessionStart and the MCP tools, which costs you the point-of-read channel (measured for its
 earlier, request form in the whitepaper's §8.3) and nothing else. The `if` field exists from
 Claude Code 2.1.85, and matching on compound command lines is correct from 2.1.89, so use 2.1.89
-or later. A host older than 2.1.85 ignores `if` and runs the hook on every Bash call, at the
+or later. Exact per-session attribution of MCP writes and retrievals needs Claude Code 2.1.154
+or later (2.1.163 to keep one id across `--resume`); older hosts fall back to the one fresh
+stamp of their family or to `unattributed`, see [hooks](hooks.md#session-attribution). A host older than 2.1.85 ignores `if` and runs the hook on every Bash call, at the
 early-exit cost of about 26 ms from a source checkout (about 190 ms for the public `uvx` form).
 
 ## Disk
@@ -82,12 +84,13 @@ whitepaper's §8.5 — read that before assuming a saving.
 - run: uvx --from git+https://github.com/<org>/sidegraph@<sha> sidegraph-doctor    # advisory
 ```
 
-Pin a SHA or a tag, not a branch: the store format is the public contract, the CLI surface
-is provisional (see [`stability.md`](stability.md)).
+Pin a SHA or a tag, not a branch, so CI runs the version you reviewed. The store format and
+documented CLI surface are committed contracts; pre-1.0 minor releases may introduce
+breaking changes (see [`stability.md`](stability.md)).
 
 ## What this page does not tell you
 
-Reviewer-flagged gaps, honestly named: no measurements at monorepo scale (thousands of
+Unmeasured here: performance at monorepo scale (thousands of
 files, hundreds of domains); no multi-developer concurrency numbers; no fleet aggregation
 of the local diagnostics; no growth curve for stores an order of magnitude larger than
 this one. If you run a pilot, these are the numbers worth capturing — see the

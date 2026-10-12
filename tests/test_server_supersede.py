@@ -262,17 +262,20 @@ def test_supersede_stamps_human_provenance(tmp_path):
     assert store.get_decision(out["id"]).provenance.source == "human"
 
 
-def test_supersede_falls_back_to_telemetry_session_marker(tmp_path):
+def test_supersede_falls_back_to_telemetry_session_marker(tmp_path, current_session):
     """E9b measured `session_id: None` on supersede-path successors: the D7.3 marker
     fallback was wired into propose only. The supersede path reads the same
     TELEMETRY_SESSION_KEY marker when the caller passes no session_id."""
     from datetime import UTC, datetime
 
-    from sidegraph.config import TELEMETRY_SESSION_KEY
+    from sidegraph.config import TELEMETRY_SESSION_STAMP_PREFIX
 
     store = Store(tmp_path / "t.db")
     old = _add_decision_impl(store, None, title="t", kind="adr", context="c", choice="ch")
-    store.set_meta(TELEMETRY_SESSION_KEY, f"session-xyz|{datetime.now(UTC).isoformat()}")
+    current_session(session_id=None)
+    store.set_meta(
+        f"{TELEMETRY_SESSION_STAMP_PREFIX}session-xyz", f"{datetime.now(UTC).isoformat()}|claude"
+    )
 
     out = _supersede_decision_impl(
         store,
@@ -287,13 +290,14 @@ def test_supersede_falls_back_to_telemetry_session_marker(tmp_path):
     assert store.get_decision(out["id"]).provenance.session_id == "session-xyz"
 
 
-def test_supersede_explicit_session_id_wins_over_fallback(tmp_path):
+def test_supersede_explicit_session_id_wins_over_fallback(tmp_path, current_session):
     from datetime import UTC, datetime
 
     from sidegraph.config import TELEMETRY_SESSION_KEY
 
     store = Store(tmp_path / "t.db")
     old = _add_decision_impl(store, None, title="t", kind="adr", context="c", choice="ch")
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"marker-session|{datetime.now(UTC).isoformat()}")
 
     out = _supersede_decision_impl(

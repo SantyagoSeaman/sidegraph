@@ -26,8 +26,10 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
+import sysconfig
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -40,6 +42,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from ..config import (
     TELEMETRY_SESSION_GROUP_KEY,
     TELEMETRY_SESSION_KEY,
+    TELEMETRY_SESSION_STAMP_PREFIX,
     StoreLocation,
     _store_project_root,
     ancestor_store,
@@ -109,6 +112,19 @@ _SESSION_START_KEY = "session_start"
 _SESSION_START_DEDUPE_SECONDS = 60
 
 
+# The longest reader TTL (capture's 24 h provenance window) plus a one-hour margin.
+_SESSION_STAMP_RETENTION_HOURS = 25
+_HOST_FAMILIES = frozenset({"claude", "codex"})
+
+
+def _host_family() -> str:
+    """The host family this hook belongs to, from ``SIDEGRAPH_HOST`` (set in each manifest's
+    hook command), else ``unknown``. Not inferred from the payload: a Claude-shaped payload is
+    identical for Claude and for Grok, which runs the Claude plugin hooks."""
+    value = os.environ.get("SIDEGRAPH_HOST", "").strip().lower()
+    return value if value in _HOST_FAMILIES else "unknown"
+
+
 def _session_identity(payload: dict) -> tuple[str | None, str | None]:
     """The session this payload belongs to, and the workspace session above it.
 
@@ -137,8 +153,9 @@ def _session_identity(payload: dict) -> tuple[str | None, str | None]:
     raw_path = payload.get("transcript_path")
     stem = None
     if isinstance(raw_path, str) and raw_path:
-        # PurePosixPath, not Path: the stem of a host-written path, never touched on disk.
-        stem = PurePosixPath(raw_path).stem or None
+        # PurePosixPath, not Path: the stem of a host-written path, never touched on disk. A
+        # Windows host writes backslashes, which PurePosixPath would keep inside the stem.
+        stem = PurePosixPath(raw_path.replace("\\", "/")).stem or None
     key = stem or session_id
     group = session_id if session_id and session_id != key else None
     return key, group
@@ -267,6 +284,75 @@ _PLUGIN_NEWER = (
     "`@main`, or remove the pinned install (for example `uv tool uninstall sidegraph`)."
 )
 
+# `path-skew`: a `sidegraph-*` command on PATH that is not the running package's own. A persistent
+# `uv tool install sidegraph` never updates itself, and a released entry point cannot be asked its
+# version (none answers `--version`; an exec costs about a second), so the probe reads the install:
+# the real binary's venv holds one `sidegraph-<version>.dist-info`. `uvx` and `uv run` put their own
+# environment's `bin` first on the child's PATH, so that directory is skipped before the search,
+# or the probe would find the running package and go clean in every plugin session.
+# see design/superpowers/specs/2026-10-11-stale-path-sidegraph-design.md (D4)
+_PROBED_COMMANDS = ("sidegraph-session-start", "sidegraph-mcp", "sidegraph-doctor")
+
+
+class _PathInstall(NamedTuple):
+    """A foreign ``sidegraph-*`` install found on PATH: the probed command, the PATH directory it
+    was found in, its version, and whether its environment is a ``uv tool`` one."""
+
+    command: str
+    directory: str
+    version: str
+    uv_tool: bool
+
+
+def _own_bin_dirs() -> set[str]:
+    """The real paths of the running interpreter's scripts directory and ``sys.prefix/bin``: the
+    ``bin`` that ``uvx`` or ``uv run`` prepended to PATH."""
+    dirs = {os.path.join(sys.prefix, "bin")}
+    scripts = sysconfig.get_path("scripts")
+    if scripts:
+        dirs.add(scripts)
+    return {os.path.realpath(d) for d in dirs}
+
+
+def _path_install() -> _PathInstall | None:
+    """The first ``sidegraph-*`` command on PATH outside the running environment, read without
+    running it, or ``None`` when there is none or anything about it is unexpected (no dist-info,
+    two of them, a Windows layout, a broken link)."""
+    own = _own_bin_dirs()
+    search = os.pathsep.join(
+        d
+        for d in os.environ.get("PATH", "").split(os.pathsep)
+        if d and os.path.realpath(d) not in own
+    )
+    for command in _PROBED_COMMANDS:
+        found = shutil.which(command, path=search)
+        if found is None:
+            continue
+        venv = Path(os.path.realpath(found)).parent.parent
+        infos = sorted((venv / "lib").glob("python*/site-packages/sidegraph-*.dist-info"))
+        if len(infos) != 1:
+            return None
+        version = infos[0].name[len("sidegraph-") : -len(".dist-info")]
+        return _PathInstall(
+            command=command,
+            directory=os.path.dirname(found),
+            version=version,
+            uv_tool=(venv / "uv-receipt.toml").is_file(),
+        )
+    return None
+
+
+_PATH_SKEW = (
+    "Sidegraph: `{command}` on PATH ({directory}) is {path_version} but this session runs "
+    "{package}. Plugin skills and hooks use the session's version through uvx; your own shell "
+    "commands use the {which} one. {fix}"
+)
+_PATH_SKEW_FIX_UV = (
+    "Reinstall it with `uv tool install sidegraph@latest`, or remove it with "
+    "`uv tool uninstall sidegraph` if you only use the plugin."
+)
+_PATH_SKEW_FIX_OTHER = "Upgrade it, or remove it if you only use the plugin."
+
 # `plugin-off-in-subdirectories`: case (a) names the file to move the enabling out of, case (b)
 # the first nested directory that leaves the plugin off. The fix changes the person's settings, so
 # the model line ends by telling the model to say so and not to edit them (as `refresh-hook-missing`
@@ -289,13 +375,14 @@ _PLUGIN_OFF_NESTED = (
 
 def host_checks(location: StoreLocation) -> tuple[Check, ...]:
     """The integrity checks that need the host: ``stray-store``, a closure over this launch's
-    ``StoreLocation`` because the portable registry's ``Inputs`` stays host-free, and the two
-    host-wiring checks, ``version-skew`` and ``plugin-off-in-subdirectories``. The hook passes
-    ``CHECKS[:5] + host_checks(location) + CHECKS[5:]`` to keep the line order, and
+    ``StoreLocation`` because the portable registry's ``Inputs`` stays host-free, and the three
+    host-wiring checks, ``version-skew``, ``path-skew`` and ``plugin-off-in-subdirectories``.
+    The hook passes ``CHECKS[:5] + host_checks(location) + CHECKS[5:]`` to keep the line order, and
     ``sidegraph-doctor`` passes them to ``doctor.curate``, so ``doctor.py`` imports nothing
     from this seam.
     see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D1, D4 check 5)
     see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D2, D3)
+    see design/superpowers/specs/2026-10-11-stale-path-sidegraph-design.md (D4)
     """
     from .. import __version__
     from ..integrity import Check, Inputs, Problem, _NotRun
@@ -330,6 +417,33 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
             severity="advisory",
             summary="package and plugin versions differ",
             fix="update the plugin" if template is _PACKAGE_NEWER else "restart the session",
+            line=line,
+            notice=line,
+        )
+
+    def detect_path_skew(inputs: Inputs) -> Problem | None:
+        installed = _path_install()
+        if installed is None:
+            raise _NotRun
+        package_release = _numeric_version(__version__)
+        path_release = _numeric_version(installed.version)
+        if package_release is None or path_release is None:
+            raise _NotRun
+        if package_release == path_release:
+            return None
+        line = _PATH_SKEW.format(
+            command=installed.command,
+            directory=installed.directory,
+            path_version=installed.version,
+            package=__version__,
+            which="old" if path_release < package_release else "newer",
+            fix=_PATH_SKEW_FIX_UV if installed.uv_tool else _PATH_SKEW_FIX_OTHER,
+        )
+        return Problem(
+            check="path-skew",
+            severity="advisory",
+            summary="a sidegraph on PATH is a different version than the session",
+            fix="reinstall or remove the sidegraph on PATH",
             line=line,
             notice=line,
         )
@@ -374,6 +488,7 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
     return (
         Check("stray-store", frozenset({"session"}), detect_stray_store),
         Check("version-skew", frozenset({"session"}), detect_version_skew),
+        Check("path-skew", frozenset({"session"}), detect_path_skew),
         Check(
             "plugin-off-in-subdirectories",
             frozenset({"session", "doctor"}),
@@ -566,7 +681,7 @@ def _session_start_duplicate(store, session_id: str, now: datetime) -> bool:
     A NAIVE-but-parseable ``prev_stamp`` (schema requires aware timestamps, but the
     ledger is a bare string a hand edit or an older format could still leave naive) is
     explicitly treated as "not a duplicate" via the ``tzinfo is not None`` guard in
-    :func:`_is_recent_stamp` — the same guard ``capture._session_id_fallback`` already
+    :func:`_is_recent_stamp` — the same guard ``capture._fresh`` already
     applies for its own stamp comparison — rather than ever attempting ``now - prev_dt``
     (CORRECTION-6, code review): that subtraction raises ``TypeError`` on a naive/aware
     mismatch, which is NOT a ``ValueError`` the inner ``except`` catches, so it used to
@@ -948,13 +1063,19 @@ def session_start() -> None:
             if session_id:
                 # D7.3 (staleness-machinery wave, E8: author=None session=None on
                 # Stop-channel captures): this write is now UNCONDITIONAL — no longer
-                # gated on telemetry_enabled() — because capture._propose_one falls back
+                # gated on telemetry_enabled() — because the MCP server's capture path falls back
                 # to it for provenance.session_id when the caller passed none (best-effort
                 # attribution, not security; see that fallback's own docstring).
+                now_iso = datetime.now(UTC).isoformat()
+                # One stamp per session, tagged with the host family this hook belongs to, so
+                # an MCP server that cannot learn its own id can still tell hosts apart. The
+                # legacy single key stays for one minor (a still-running old server reads it).
+                # see design/superpowers/specs/2026-10-11-session-attribution-design.md (D5, D7)
                 store.set_meta(
-                    TELEMETRY_SESSION_KEY,
-                    f"{session_id}|{datetime.now(UTC).isoformat()}",
+                    f"{TELEMETRY_SESSION_STAMP_PREFIX}{session_id}",
+                    f"{now_iso}|{_host_family()}",
                 )
+                store.set_meta(TELEMETRY_SESSION_KEY, f"{session_id}|{now_iso}")
                 if session_group:
                     store.set_meta(TELEMETRY_SESSION_GROUP_KEY, session_group)
             # Pruning is deliberately NOT gated on telemetry_enabled() (practitioner
@@ -966,6 +1087,13 @@ def session_start() -> None:
             store.prune_telemetry_events()
         except Exception:
             pass
+        # Per-session stamps outlive the longest reader TTL (24 h) by an hour and no more:
+        # with telemetry off they are retained session ids, so they expire like the journals.
+        with contextlib.suppress(Exception):
+            store.prune_meta_prefixes(
+                (TELEMETRY_SESSION_STAMP_PREFIX,),
+                older_than=timedelta(hours=_SESSION_STAMP_RETENTION_HOURS),
+            )
         # The PreToolUse per-file keys are up to ten per agent (hundreds a day in a session that
         # spawns subagents), so they expire like the journals do; the two one-shot prefixes
         # older versions wrote are cleared too, and so are the Stop hook's per-session re-arm
@@ -1440,11 +1568,11 @@ def _touch_path(tool_input: object, root: str) -> str | None:
         rel = os.path.relpath(target, base)
     except (OSError, ValueError):
         return None
-    if rel == os.curdir or rel.startswith(os.pardir):
+    if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
         return None
     if os.path.isdir(target):
         return None
-    return rel
+    return Path(rel).as_posix()  # anchors and the hot index key on POSIX spelling, Windows too
 
 
 def _touch_root(location: StoreLocation) -> str:
@@ -1639,6 +1767,16 @@ def _record_line(record: Record) -> str:
     return f"- [{decision['kind']}] {title}{gist} (id {decision['id']})"
 
 
+def _shown_slice(records: Sequence[Record]) -> Sequence[Record]:
+    """The records a file's block prints: the top two, three when the first two are both
+    mistakes. One definition for the block and for the journal of what it printed."""
+    top_two_are_mistakes = len(records) >= 2 and all(
+        r.decision["kind"] in MISTAKE_KINDS for r in records[:2]
+    )
+    count = _RECORDS_SHOWN_WHEN_TWO_MISTAKES if top_two_are_mistakes else _RECORDS_SHOWN
+    return records[:count]
+
+
 def _records_block(rel: str, records: Sequence[Record]) -> str:
     """The block for one file: a header, the top two records (three when the first two are both
     mistakes), and a line naming the call that returns the rest when there is a rest.
@@ -1648,11 +1786,7 @@ def _records_block(rel: str, records: Sequence[Record]) -> str:
     last line promises the remaining records and not the same sequence.
     see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1)
     """
-    top_two_are_mistakes = len(records) >= 2 and all(
-        r.decision["kind"] in MISTAKE_KINDS for r in records[:2]
-    )
-    count = _RECORDS_SHOWN_WHEN_TWO_MISTAKES if top_two_are_mistakes else _RECORDS_SHOWN
-    shown = records[:count]
+    shown = _shown_slice(records)
     lines = [f"Recorded for {rel} ({len(shown)} of {len(records)}, mistakes first):"]
     lines += [_record_line(r) for r in shown]
     if len(records) > len(shown):
@@ -1679,6 +1813,13 @@ def _files_named(tool: object, payload: dict, tool_input: dict, root: str) -> li
         return read_paths(command, cwd if isinstance(cwd, str) and cwd else root, root)
     rel = _touch_path(tool_input, root)
     return [rel] if rel else []
+
+
+def _journals_showings() -> bool:
+    """Whether the hook journals what it hands over (``SIDEGRAPH_TELEMETRY`` is not ``off``)."""
+    from ..config import telemetry_enabled
+
+    return telemetry_enabled()
 
 
 def _delivery(payload: dict, hot: _HotOpener) -> str | None:
@@ -1728,15 +1869,26 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
             if len(chosen) == _FILES_PER_CALL:
                 break
 
-    prefix = f"{_PRETOOL_FILE_KEY_PREFIX}{session_id}:{_agent_identity(payload) or '-'}:"
+    agent_id = _agent_identity(payload)
+    prefix = f"{_PRETOOL_FILE_KEY_PREFIX}{session_id}:{agent_id or '-'}:"
     now = datetime.now(UTC).isoformat()
+    journal = _journals_showings()
+    from ..hot_index import Shown  # already loaded: the index above is a HotIndex
+
     blocks: list[str] = []
     for rel, records in chosen:
         # Claim BEFORE emitting, in one statement that also counts: a crash cannot deliver a
         # file twice, two parallel reads of one agent cannot both deliver it, and the agent's
-        # eleventh file is refused.
+        # eleventh file is refused. The records the block prints are journaled in the same
+        # transaction (the printed slice, not the file's records), so a claim and its showing
+        # commit together.
+        shown = (
+            Shown(session_id, agent_id, [r.decision["id"] for r in _shown_slice(records)])
+            if journal
+            else None
+        )
         try:
-            if index.claim_file(prefix, rel, now, _FILES_PER_AGENT):
+            if index.claim_file(prefix, rel, now, _FILES_PER_AGENT, shown=shown):
                 blocks.append(_records_block(rel, records))
         except sqlite3.OperationalError:
             break  # the busy timeout: deliver what is already claimed, claim no more
@@ -1745,45 +1897,81 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
     return "\n".join([MEMORY_GUARD_LINE, *blocks])
 
 
-def _brief_block(chosen: Sequence[tuple[str | None, str, Sequence[Record]]]) -> str | None:
-    """The block for a brief: the opening marker, the guard, one group per file (the file, labelled
-    with the document that named it when the brief did not, and its top two records), a line naming
-    the call that returns the rest, and the closing marker. ``chosen`` is in the order D2 fixes
-    (the brief's files, then the hop's) and each file has records.
+def _brief_plan(
+    chosen: Sequence[tuple[str | None, str, Sequence[Record]]],
+) -> list[tuple[str | None, str, Sequence[Record]]]:
+    """The groups a brief prints: ``(document that named the file or None, file, its top
+    records)``. The ONE place the caps are decided, so the printed block and the journal of what
+    it printed cannot drift. ``chosen`` is in the order D2 fixes (the brief's files, then the
+    hop's) and each file has records.
 
     Files are taken in order while the record lines stay within six and the whole block within
     3,000 characters. The first file that does not fit ends the list, with one exception: when
     only the line cap stops it and a line is left, its first record fills that line (a file whose
     second record is cut is still the top of its list, and the block shows no per-file counts).
-    A file the character cap stops is dropped whole. ``More:`` names exactly the files shown.
-    ``None`` when not even the first fits.
-    The record lines are the Read path's (``_record_line``); its ``_records_block`` layout is not
-    reused, because a brief covers several files.
+    A file the character cap stops is dropped whole.
     see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1, D3)
     """
-
-    def build(groups: list[list[str]], shown: list[str]) -> str:
-        more = f"More: get_task_context(files={json.dumps(shown, ensure_ascii=False)})."
-        return "\n".join(
-            [_BRIEF_OPEN, MEMORY_GUARD_LINE, *(ln for g in groups for ln in g), more, _BRIEF_CLOSE]
-        )
-
-    groups: list[list[str]] = []
-    shown: list[str] = []
+    plan: list[tuple[str | None, str, Sequence[Record]]] = []
     lines = 0
     for doc, rel, records in chosen:
         # the file's top records, cut to the lines left (the first record fills a last line)
         top = records[: min(_BRIEF_RECORDS_PER_FILE, _BRIEF_MAX_LINES - lines)]
         if not top:
             break
-        header = f"{rel}:" if doc is None else f"{rel} (named in {doc}):"
-        group = [header, *(_record_line(r) for r in top)]
-        if len(build([*groups, group], [*shown, rel])) > _BRIEF_MAX_CHARS:
+        if len(_render_brief([*plan, (doc, rel, top)])) > _BRIEF_MAX_CHARS:
             break
-        groups.append(group)
-        shown.append(rel)
+        plan.append((doc, rel, top))
         lines += len(top)
-    return build(groups, shown) if shown else None
+    return plan
+
+
+def _render_brief(plan: Sequence[tuple[str | None, str, Sequence[Record]]]) -> str:
+    """The text of a brief for ``plan`` (non-empty): the opening marker, the guard, one group per
+    file (the file, labelled with the document that named it when the brief did not, and its
+    records), a line naming the call that returns the rest, and the closing marker."""
+    shown = [rel for _, rel, _ in plan]
+    groups = [
+        [f"{rel}:" if doc is None else f"{rel} (named in {doc}):", *(_record_line(r) for r in top)]
+        for doc, rel, top in plan
+    ]
+    more = f"More: get_task_context(files={json.dumps(shown, ensure_ascii=False)})."
+    return "\n".join(
+        [_BRIEF_OPEN, MEMORY_GUARD_LINE, *(ln for g in groups for ln in g), more, _BRIEF_CLOSE]
+    )
+
+
+def _brief_block(plan: Sequence[tuple[str | None, str, Sequence[Record]]]) -> str | None:
+    """The block for a brief, rendered from :func:`_brief_plan`'s groups; ``None`` when the plan
+    is empty (not even the first file fits). ``More:`` names exactly the files shown.
+    The record lines are the Read path's (``_record_line``); its ``_records_block`` layout is not
+    reused, because a brief covers several files.
+    see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1, D3)
+    """
+    return _render_brief(plan) if plan else None
+
+
+def _journal_brief(
+    payload: dict,
+    index: HotIndex,
+    plan: Sequence[tuple[str | None, str, Sequence[Record]]],
+) -> None:
+    """Journal the records a brief printed (``inject_brief`` rows and shows bumps), from the same
+    plan that rendered it. Nothing without telemetry or a session id (the touch rule: a row that
+    cannot be attributed is not written). Never raises: a brief must not fail on a journal. This
+    makes the Agent path a writer: under a held lock it can wait out the busy timeout.
+    see design/superpowers/specs/2026-10-11-hook-showings-journal-design.md (D4)"""
+    try:
+        if not _journals_showings():
+            return
+        session_id, _ = _session_identity(payload)
+        if not session_id:
+            return
+        index.record_shows(
+            session_id, [(rel, r.decision["id"]) for _, rel, top in plan for r in top]
+        )
+    except Exception:
+        return
 
 
 def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
@@ -1830,9 +2018,11 @@ def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
             chosen.append((doc, rel, records))
             if len(chosen) == _BRIEF_MAX_LINES:  # every file shown costs a line at least
                 break
-    block = _brief_block(chosen)
+    plan = _brief_plan(chosen)
+    block = _brief_block(plan)
     if block is None:
         return None
+    _journal_brief(payload, index, plan)
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

@@ -198,10 +198,10 @@ class GraphifyReader:
     def _load(self, retries: int = 3) -> dict:
         last: Exception | None = None
         for _ in range(max(1, retries)):
-            text = self.path.read_text()
             try:
+                text = self.path.read_text(encoding="utf-8")
                 raw = json.loads(text)
-            except json.JSONDecodeError as e:  # graph.json write is non-atomic
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:  # non-atomic engine write
                 last = e
                 time.sleep(0.2)
                 continue
@@ -532,8 +532,8 @@ class GraphifyReader:
         if not label_path.exists():
             return {}
         try:
-            raw = json.loads(label_path.read_text())
-        except (OSError, json.JSONDecodeError):
+            raw = json.loads(label_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return {}
         if not isinstance(raw, dict):
             return {}
@@ -579,6 +579,7 @@ class GraphifyReader:
         try:
             out = subprocess.run(
                 ["git", "-C", str(repo), "diff", "--name-only", "HEAD~1", "HEAD"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
             )
@@ -606,6 +607,7 @@ class GraphifyReader:
                 ["git", "rev-parse", "--show-toplevel"],
                 cwd=self.path.parent,
                 env=git_env(),
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -658,6 +660,7 @@ class GraphifyReader:
                     ["git", *args],
                     cwd=self.path.parent,
                     env=git_env(),
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     timeout=left,
                 )

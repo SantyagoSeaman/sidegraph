@@ -10,8 +10,8 @@ exist at all, and [mind model](mind-model.md) for what `Domain` is *for*.
 
 ## `Entity` — durable identity vs. the engine's shifting node ids
 
-Graphify assigns each code/doc symbol a node id derived from its path, and that id shifts
-every time the graph is rebuilt. `Entity` is Sidegraph's own, stable identity that a
+Graphify assigns code/doc symbols engine-native node ids that can change after a move or
+graph rebuild. `Entity` is Sidegraph's own, stable identity that a
 `Decision` actually anchors to — `entity_id` never changes once minted; `last_seen_node_id`
 is just a cached pointer onto the engine's current graph, refreshed on each rebuild by the
 [sync job](anchoring.md#what-happens-on-rename-or-move).
@@ -28,6 +28,11 @@ is just a cached pointer onto the engine's current graph, refreshed on each rebu
 
 Entities are created **lazily** — only when a decision first references them — so the store
 stays bounded to what's actually been decided about, not a mirror of the whole graph.
+
+These tables describe the in-memory models. The `last_seen_*` fields, binding `status`,
+and domain `communities` are derived index state, excluded from canonical JSON. See
+[committed vs. derived](../reference/store-format.md#committed-vs-derived) for the on-disk
+contract; the examples below illustrate model values rather than exact committed files.
 
 ## `Decision` — the memory
 
@@ -57,6 +62,10 @@ gate), `agent` (`propose_decisions`, the agent-initiated draft pipeline), `impor
 are the corresponding values for `Domain` provenance instead — see
 [`Domain`](#domain--the-owned-abstraction) below), `ref`, `author`, `session_id`,
 `graph_version` — all optional except `source`, which records where the decision came from.
+`session_id` is best-effort attribution, not identity: it is the calling host's session when the
+server could tell, and `null` otherwise (always `null` for CLI writes). A wrong or missing value
+is not repaired in place; the store is append-only. See
+[session attribution](../reference/hooks.md#session-attribution).
 
 Invariants enforced on write (`store.add_decision`): `valid_to >= valid_from`; a decision that
 supersedes another closes the predecessor (`valid_to` set, `status` flipped to `superseded`)
@@ -137,8 +146,8 @@ independently anchored, and shareable across more than one decision.
 ```json
 {
   "id": "01J8Z3R1M2N3P4Q5R6S7T8U9V0",
-  "statement": "httpx has no built-in retry — a transient 5xx is not retried automatically.",
-  "source": "httpx docs, section 'Timeouts and retries'",
+  "statement": "HTTPX HTTPTransport retries connection establishment errors, not HTTP 5xx responses.",
+  "source": "https://www.python-httpx.org/advanced/transports/",
   "supports": ["01J8Z3QZ8N7K5V2X6R4T9W1B2C"],
   "status": "accepted",
   "valid_from": "2026-07-09T14:00:00Z",

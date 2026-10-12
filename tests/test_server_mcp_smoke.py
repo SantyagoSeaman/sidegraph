@@ -127,11 +127,14 @@ def test_mcp_drill_down_and_thin_tools_roundtrip(tmp_path, monkeypatch):
 
     found, missing, structure, decisions = asyncio.run(_run())
 
-    assert found.data["found"] is True
-    assert found.data["domain"]["slug"] == "payments"
-    assert missing.data["found"] is False
-    assert isinstance(structure.data, str)
-    assert isinstance(decisions.data, str)
+    found_json, missing_json = _wire_json(found), _wire_json(missing)
+    assert found_json["found"] is True
+    assert found_json["domain"]["slug"] == "payments"
+    assert missing_json["found"] is False
+    assert isinstance(structure.content[0].text, str)
+    assert structure.structured_content is None
+    assert isinstance(decisions.content[0].text, str)
+    assert decisions.structured_content is None
 
 
 def test_mcp_list_domain_candidates_roundtrip(tmp_path, monkeypatch):
@@ -145,13 +148,21 @@ def test_mcp_list_domain_candidates_roundtrip(tmp_path, monkeypatch):
         async with fastmcp.Client(server_module.mcp) as client:
             return await client.call_tool("list_domain_candidates", {})
 
-    result = asyncio.run(_run())
+    data = _wire_json(asyncio.run(_run()))
 
-    assert result.data["total_candidates"] == 0
-    assert result.data["already_claimed"] == 0
-    assert result.data["groups"] == []
-    assert result.data["ungrouped"] == []
-    assert "note" in result.data
+    assert data["total_candidates"] == 0
+    assert data["already_claimed"] == 0
+    assert data["groups"] == []
+    assert data["ungrouped"] == []
+    assert "note" in data
+
+
+def _wire_json(result) -> dict:
+    """A text-only tool's answer: one text block, no structured copy (design D1/L5)."""
+    assert len(result.content) == 1 and isinstance(result.content[0], mt.TextContent)
+    assert result.structured_content is None
+    assert result.data is None
+    return json.loads(result.content[0].text)
 
 
 def _many_communities_graph(n: int) -> dict:
@@ -185,20 +196,22 @@ def test_mcp_list_domain_candidates_default_limit_truncates(tmp_path, monkeypatc
         async with fastmcp.Client(server_module.mcp) as client:
             return await client.call_tool("list_domain_candidates", {})
 
-    result = asyncio.run(_run())
+    data = _wire_json(asyncio.run(_run()))
 
-    all_candidates = [c for g in result.data["groups"] for c in g["candidates"]] + result.data[
-        "ungrouped"
-    ]
-    assert len(all_candidates) == 100
-    assert result.data["total_candidates"] == 100
-    assert result.data["total_significant"] == 150
-    assert result.data["truncated"] is True
+    all_candidates = [c for g in data["groups"] for c in g["candidates"]] + data["ungrouped"]
+    # 100 candidates by count, but the 24000-character budget cuts first (design D5).
+    assert 0 < len(all_candidates) < 100
+    assert data["total_candidates"] == len(all_candidates)
+    assert data["total_significant"] == 150
+    assert data["truncated"] is True
+    assert "character budget" in data["note"] and "paths=" in data["note"]
 
 
-def test_mcp_list_domain_candidates_limit_zero_is_unlimited(tmp_path, monkeypatch):
-    """The "all" convention: `limit=0` is the public sentinel for "no limit" (translated to
-    the collector's own `None` internally)."""
+def test_mcp_list_domain_candidates_limit_zero_lifts_the_count_not_the_budget(
+    tmp_path, monkeypatch
+):
+    """`limit=0` is still the public sentinel for "no count limit" (translated to the
+    collector's own `None`), but the budget bounds the answer."""
     monkeypatch.setattr(server_module, "_store", Store(tmp_path / "mcp_smoke_unlimited.db"))
     graph_path = tmp_path / "graph.json"
     graph_path.write_text(json.dumps(_many_communities_graph(150)))
@@ -206,15 +219,16 @@ def test_mcp_list_domain_candidates_limit_zero_is_unlimited(tmp_path, monkeypatc
 
     async def _run():
         async with fastmcp.Client(server_module.mcp) as client:
-            return await client.call_tool("list_domain_candidates", {"limit": 0})
+            return await client.call_tool(
+                "list_domain_candidates", {"limit": 0, "budget_chars": 40000}
+            )
 
-    result = asyncio.run(_run())
+    data = _wire_json(asyncio.run(_run()))
 
-    all_candidates = [c for g in result.data["groups"] for c in g["candidates"]] + result.data[
-        "ungrouped"
-    ]
-    assert len(all_candidates) == 150
-    assert result.data["truncated"] is False
+    all_candidates = [c for g in data["groups"] for c in g["candidates"]] + data["ungrouped"]
+    assert 100 < len(all_candidates) < 150  # no count limit, but the budget cut it
+    assert data["truncated"] is True
+    assert "limit=0 lifts the count limit, not the budget" in data["note"]
 
 
 def test_mcp_list_domain_candidates_explicit_limit_override(tmp_path, monkeypatch):
@@ -227,13 +241,11 @@ def test_mcp_list_domain_candidates_explicit_limit_override(tmp_path, monkeypatc
         async with fastmcp.Client(server_module.mcp) as client:
             return await client.call_tool("list_domain_candidates", {"limit": 25})
 
-    result = asyncio.run(_run())
+    data = _wire_json(asyncio.run(_run()))
 
-    all_candidates = [c for g in result.data["groups"] for c in g["candidates"]] + result.data[
-        "ungrouped"
-    ]
+    all_candidates = [c for g in data["groups"] for c in g["candidates"]] + data["ungrouped"]
     assert len(all_candidates) == 25
-    assert result.data["truncated"] is True
+    assert data["truncated"] is True
 
 
 def test_mcp_supersede_decision_stamps_new_optional_params(tmp_path, monkeypatch):

@@ -162,6 +162,12 @@ class TaskContext:
     # group after every decision id — not interleaved with the render's actual
     # evidence-follows-its-decision layout. Not rendered.
     shown_ids: list[str] = field(default_factory=list)
+    # Each placed record line (whole, newlines inside included) -> the ids placed on it, in
+    # placement order. Lets the server tell which records survive a cut of the rendered text
+    # (the hard cap) without parsing ids back out of it. Not rendered.
+    line_ids: dict[str, list[str]] = field(default_factory=dict)
+    # The ids of the records that rendered only after falling back to the tight tier.
+    degraded_ids: list[str] = field(default_factory=list)
     # True when at least one placed line carries the ` [drifted]` marker (drift→supersede
     # D3) — `render()` keys the one legend line on it. Not rendered itself.
     drift_shown: bool = False
@@ -210,28 +216,39 @@ class TaskContext:
         ``query_decisions`` (``server.py``), which calls this same method — intended: the
         hint belongs to whichever surface rendered ids, not to one specific tool.
         """
+        body, legend, hint = self.render_parts(include_structure)
+        return "\n\n".join(part for part in (body, legend, hint) if part)
+
+    def render_parts(
+        self, include_structure: bool = True, *, heading: str = "##"
+    ) -> tuple[str, str | None, str | None]:
+        """:meth:`render` in three pieces: the body (guard line and sections), the drift legend
+        (``None`` when no kept line carries the marker) and the standing supersede hint. The
+        server's hard cap on the whole text cuts the body and keeps the other two. ``heading`` is
+        the Markdown marker of the section headings (``"###"`` for a block nested under another
+        section): the level is chosen here, so no text is rewritten afterwards.
+        # see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D1)
+        """
         blocks: list[str] = []
         if self.mistakes:
-            blocks.append("## ⚠ Known mistakes & gotchas\n" + "\n".join(self.mistakes))
+            blocks.append(f"{heading} ⚠ Known mistakes & gotchas\n" + "\n".join(self.mistakes))
         if self.decisions:
-            blocks.append("## Decisions\n" + "\n".join(self.decisions))
+            blocks.append(f"{heading} Decisions\n" + "\n".join(self.decisions))
         if self.facts:
-            blocks.append("## Known facts\n" + "\n".join(self.facts))
+            blocks.append(f"{heading} Known facts\n" + "\n".join(self.facts))
         if include_structure and self.structure:
-            blocks.append("## Structural map\n" + "\n".join(self.structure))
+            blocks.append(f"{heading} Structural map\n" + "\n".join(self.structure))
         if self.related:
-            blocks.append("## Related\n" + "\n".join(self.related))
+            blocks.append(f"{heading} Related\n" + "\n".join(self.related))
         if self.unratified:
-            blocks.append("## Unratified proposals\n" + "\n".join(self.unratified))
+            blocks.append(f"{heading} Unratified proposals\n" + "\n".join(self.unratified))
         text = MEMORY_GUARD_LINE + "\n\n" + "\n\n".join(blocks) if blocks else "No context found."
         # Legend before the standing hint: the legend explains the tag a line above just
         # used; the hint tells the reader what to DO about any invalidated record — the
         # action line stays last. Same fixed-cost exception as the hint (D3).
-        if self.drift_shown:
-            text += f"\n\n{_DRIFT_LEGEND}"
-        if self.mistakes or self.decisions:
-            text += f"\n\n{_STANDING_SUPERSEDE_HINT}"
-        return text
+        legend = _DRIFT_LEGEND if self.drift_shown else None
+        hint = _STANDING_SUPERSEDE_HINT if (self.mistakes or self.decisions) else None
+        return text, legend, hint
 
 
 @dataclass
@@ -721,6 +738,7 @@ def rank_decisions(
             return False
         rendered_fact_ids.add(fact.id)
         fact_order.append(fact.id)
+        ctx.line_ids.setdefault(line, []).append(fact.id)
         ctx.emitted += 1
         return True
 
@@ -779,10 +797,12 @@ def rank_decisions(
                 refused.add(d.id)
                 return False
             ctx.degraded += 1
+            ctx.degraded_ids.append(d.id)
         if drifted:
             ctx.drift_shown = True
         seen.add(d.id)
         ctx.shown_ids.append(d.id)
+        ctx.line_ids.setdefault(line, []).append(d.id)
         ctx.emitted += 1
         proposal_fact_bucket = direct_proposed_facts if detailed else related_proposed_facts
         for fact in _live_facts(store.facts_for_decision(d.id)):
@@ -1804,8 +1824,9 @@ def drill_down(
     rest = _by_recency([d for d in accepted if d.kind not in _MISTAKE_KINDS])
     proposed = _by_recency(proposed)
     ordered = mistakes + rest + proposed
-    # Detailed tier (review follow-up, Minor 2): drill_down is an explicit, unbudgeted
-    # "go deeper" call (unlike get_task_context's budgeted rank_decisions), so its
+    # Detailed tier (review follow-up, Minor 2): drill_down is an explicit "go deeper" call with
+    # no relevance budget (the server caps its output by budget_chars; unlike
+    # get_task_context's budgeted rank_decisions), so its
     # decision lines render at the same generous tier as a direct/seed-anchored entry —
     # rejected/consequences included — restoring the (rejected: ...) suffix a plain
     # `_fmt_decision(d)` call was silently omitting here.

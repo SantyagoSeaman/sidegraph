@@ -1,6 +1,7 @@
 ---
 name: heal-anchors
-description: Use when sync reports anchor damage after a refactor or graph rebuild — "orphaned", "possibly stale decisions", "ambiguous", "possibly empty domains", "slug conflicts", "path rule too broad", "domains that FAILED to refresh" — or when a decision stopped surfacing where it used to. Also reachable directly as /sidegraph:heal-anchors. Runs the sync_anchors MCP tool (or sidegraph-sync as a CLI fallback) and routes each finding to its correct heal: restore the name, supersede with fresh anchors, re-scope the domain, drop the loser, or fix-and-retry a failed domain refresh. Sidegraph never guesses a rebind — that judgment is this skill's job.
+description: >-
+  Use when sync reports anchor damage after a refactor or graph rebuild — "orphaned", "possibly stale decisions", "ambiguous", "possibly empty domains", "slug conflicts", "path rule too broad", "domains that FAILED to refresh" — or when a decision stopped surfacing where it used to. Also reachable directly as /sidegraph:heal-anchors. Runs the sync_anchors MCP tool (or sidegraph-sync as a CLI fallback) and routes each finding to its correct heal: restore the name, supersede with fresh anchors, re-scope the domain, drop the loser, or fix-and-retry a failed domain refresh. Sidegraph never guesses a rebind — that judgment is this skill's job.
 ---
 
 # Heal anchors
@@ -8,9 +9,8 @@ description: Use when sync reports anchor damage after a refactor or graph rebui
 Code and docs moved; the sync pass re-resolved every tracked entity and reported —
 honestly, never guessing — what it could no longer follow. Sidegraph auto-heals everything
 it can prove (`rebound`, `moved`, community re-pointing); everything else is routed to a
-human, and this skill is how you walk them through it. CLI invocations below use bare
-names; in a repo without a Sidegraph checkout, run them as
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <name>`.
+human, and this skill is how you walk them through it. CLI commands below run through
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>` at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 ## Get a current report
 
@@ -48,7 +48,7 @@ entities; the `force=True` call above already re-runs everything, so it makes th
 **CLI fallback** (outside a session, scripted/CI use, or reviewing as plain text):
 
 ```bash
-sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
 ```
 
 (Reads also self-heal lazily — `get_task_context`/`SessionStart` run `maybe_sync()` — so
@@ -72,7 +72,7 @@ store write or a source change: confirm before acting.
    or `retrieve_decisions(ids=[...])`, and look at the current code); then one of two heals:
    - **Restore the name** — the symbol/heading was renamed or dropped and the decision is
      still true of the code. Restoring it is a **source change**: propose the edit to the
-     human, never do it silently. Then `graphify update . && sidegraph-sync` — the anchor
+     human, never do it silently. Then `graphify update . && uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync` — the anchor
      heals back to `rebound`/`unchanged` on an exact match.
    - **Supersede** — the code it described is genuinely gone. `supersede_decision(...)`
      with **explicit fresh `anchors` pointing at the successor code**. Do NOT omit

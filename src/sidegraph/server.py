@@ -10,13 +10,14 @@ Run with ``uv run sidegraph-mcp`` (stdio transport).
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import posixpath
 import re
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
@@ -26,12 +27,12 @@ from typing import Literal, cast, get_args
 import anyio.to_thread
 import mcp.types as mt
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import FunctionTool, Tool, ToolResult
 from pydantic import ValidationError
 
-from . import nearest_anchored, seed_ladder
+from . import nearest_anchored, seed_ladder, worktree_seeds
 from .anchoring import entity_summaries as _entity_summaries
 from .anchoring import orphan_reason, resolve_and_bind
 from .capture import (
@@ -53,11 +54,12 @@ from .capture import (
     propose,
     propose_facts,
     redact,
+    resolve_session,
 )
 from .capture import propose_domains as _propose_domain_drafts
 from .config import (
     DEFAULT_GRAPH,
-    TELEMETRY_SESSION_KEY,
+    UNATTRIBUTED_SESSION,
     borrowed_graph_candidate,
     default_graph_path,
     main_checkout_root,
@@ -99,6 +101,7 @@ from .schema import (
 )
 from .store import VOLATILE_STALE_KEY, Store, skipped_refusal_text
 from .sync import activate_accepted_domain, maybe_sync, report_as_dict, sync
+from .tool_rate_limit import ToolCallRateLimit
 from .validation_errors import SafeWriteError
 from .verify import verify_snapshot
 from .write_boundary import CONFIGURATION_ERROR, is_safe_write, safe_write, validate_write_arguments
@@ -118,6 +121,7 @@ def _server_version() -> str:
 
 
 mcp = FastMCP("sidegraph", version=_server_version())
+mcp.add_middleware(ToolCallRateLimit())
 
 # What every tool tells a host about itself. A host with an auto-reviewer (Codex) reviews an MCP
 # call unless the tool is read-only, or non-destructive and closed-world: an unannotated tool
@@ -401,9 +405,13 @@ class _ArgumentNames(Middleware):
             raise ToolError(CONFIGURATION_ERROR)
         try:
             tool = await fastmcp_context.fastmcp.get_tool(context.message.name)
+        except NotFoundError:
+            tool = None
         except Exception:
             raise ToolError(CONFIGURATION_ERROR) from None
         if tool is None:
+            if context.message.name not in _REGISTERED_CALLABLES:
+                raise ToolError("Unknown tool. Call tools/list for available tools.")
             raise ToolError(CONFIGURATION_ERROR)
         write = _classify_tool(tool)
         sent = context.message.arguments or {}
@@ -418,10 +426,21 @@ class _ArgumentNames(Middleware):
             raise _unknown_argument_error(tool.name, unknown, parameters)
         if write:
             validate_write_arguments(tool, args)
-        if args is sent or args == sent:
-            return await call_next(context)
-        message = context.message.model_copy(update={"arguments": args})
-        return await call_next(context.copy(message=message))
+        if args is not sent and args != sent:
+            message = context.message.model_copy(update={"arguments": args})
+            context = context.copy(message=message)
+        result = await call_next(context)
+        payload = result.structured_content
+        if isinstance(payload, dict) and (
+            (
+                tool.name == "sync_anchors"
+                and payload.get("synced") is False
+                and isinstance(payload.get("error"), str)
+            )
+            or (tool.name == "add_anchors" and payload == {"error": "unknown record"})
+        ):
+            return result.model_copy(update={"is_error": True})
+        return result
 
 
 mcp.add_middleware(_ArgumentNames())
@@ -1099,50 +1118,51 @@ def _add_fact_impl(
     ``add_fact(..., supports=[<terminal id>])`` wrote one born flagged by doctor's tightened
     ``dangling-record`` check. ``_require_fact_reachability`` closes both.
     """
-    preflight_direct(statement, source, supports, anchors, author, session_id)
-    _validate_anchors(anchors)
-    _require_fact_reachability(store, anchors, supports or [])
-    # statement/source are both required (non-Optional) — redact directly, same reasoning
-    # as _add_decision_impl (keeps them typed `str`, not `_redact_fields`'s `str | None`).
-    statement, n1 = redact(statement)
-    source, n2 = redact(source)
-    redactions = n1 + n2
-    graph_version = reader.graph_version() if reader is not None else None
-    # I1 (R1 improvement wave §1): same "add" pair extension as _add_decision_impl's.
-    if session_id is None:
-        session_id = _session_id_fallback(store)
-    fact = Fact(
-        statement=statement,
-        source=source,
-        supports=supports or [],
-        status=DecisionStatus.ACCEPTED,
-        valid_from=datetime.now(UTC),
-        provenance=Provenance(
-            source="human",
-            author=author,
-            session_id=session_id,
-            graph_version=graph_version,
-            # П0 (git-bindings design, Blocker 1): same "add" pair extension as
-            # _add_decision_impl's.
-            commit=_capture_commit(store),
-        ),
-    )
-    store.add_fact(fact)
+    with store._mutation():
+        preflight_direct(statement, source, supports, anchors, author, session_id)
+        _validate_anchors(anchors)
+        _require_fact_reachability(store, anchors, supports or [])
+        # statement/source are both required (non-Optional) — redact directly, same reasoning
+        # as _add_decision_impl (keeps them typed `str`, not `_redact_fields`'s `str | None`).
+        statement, n1 = redact(statement)
+        source, n2 = redact(source)
+        redactions = n1 + n2
+        graph_version = reader.graph_version() if reader is not None else None
+        # I1 (R1 improvement wave §1): same "add" pair extension as _add_decision_impl's.
+        if session_id is None:
+            session_id = _session_id_fallback(store)
+        fact = Fact(
+            statement=statement,
+            source=source,
+            supports=supports or [],
+            status=DecisionStatus.ACCEPTED,
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(
+                source="human",
+                author=author,
+                session_id=session_id,
+                graph_version=graph_version,
+                # П0 (git-bindings design, Blocker 1): same "add" pair extension as
+                # _add_decision_impl's.
+                commit=_capture_commit(store),
+            ),
+        )
+        store.add_fact(fact)
 
-    anchors_skipped, anchors_orphaned = _bind_fact_anchors(fact.id, anchors, reader, store)
-    bindings = store.bindings_for_record(fact.id)
-    return _with_commit_hint(
-        store,
-        {
-            "id": fact.id,
-            "statement": fact.statement,
-            "status": fact.status.value,
-            "redactions": redactions,
-            "entities": _entity_summaries(store, bindings),
-            "anchors_skipped": anchors_skipped,
-            "anchors_orphaned": anchors_orphaned,
-        },
-    )
+        anchors_skipped, anchors_orphaned = _bind_fact_anchors(fact.id, anchors, reader, store)
+        bindings = store.bindings_for_record(fact.id)
+        return _with_commit_hint(
+            store,
+            {
+                "id": fact.id,
+                "statement": fact.statement,
+                "status": fact.status.value,
+                "redactions": redactions,
+                "entities": _entity_summaries(store, bindings),
+                "anchors_skipped": anchors_skipped,
+                "anchors_orphaned": anchors_orphaned,
+            },
+        )
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
@@ -1245,77 +1265,78 @@ def _supersede_fact_impl(
     residual note, but a predecessor's inherited BINDING is not a request — it is the same
     reachability the predecessor already had).
     """
-    preflight_direct(old_fact_id, statement, source, supports, anchors, session_id, author)
-    predecessor = store.get_fact(old_fact_id)
-    if predecessor is None:
-        raise ValueError(f"unknown fact {old_fact_id!r}")
-    _validate_anchors(anchors)
-    if not anchors and store.is_skipped("bindings", old_fact_id):
-        # Same as _supersede_decision_impl: inheriting from a skipped bindings file copies nothing.
-        raise ValueError(skipped_refusal_text("bindings", old_fact_id))
-    effective_supports = supports if supports is not None else predecessor.supports
-    if not anchors and not store.bindings_for_record(old_fact_id):
-        _require_fact_reachability(store, anchors, effective_supports)
-    # statement/source are both required (non-Optional) — redact directly, same reasoning
-    # as _add_decision_impl (keeps them typed `str`, not `_redact_fields`'s `str | None`).
-    statement, n1 = redact(statement)
-    source, n2 = redact(source)
-    redactions = n1 + n2
-    graph_version = reader.graph_version() if reader is not None else None
-    if session_id is None:
-        session_id = _session_id_fallback(store)
-    replacement = Fact(
-        statement=statement,
-        source=source,
-        supports=effective_supports,
-        status=DecisionStatus.ACCEPTED,
-        valid_from=datetime.now(UTC),
-        supersedes=old_fact_id,
-        provenance=Provenance(
-            source="human",
-            author=author,
-            session_id=session_id,
-            graph_version=graph_version,
-            # П0 (git-bindings design, Blocker 1): same best-effort HEAD stamp every
-            # other write path in the mirror now applies.
-            commit=_capture_commit(store),
-        ),
-    )
-    store.add_fact(replacement)
-
-    if anchors:
-        anchors_skipped, anchors_orphaned = _bind_fact_anchors(
-            replacement.id, anchors, reader, store
+    with store._mutation():
+        preflight_direct(old_fact_id, statement, source, supports, anchors, session_id, author)
+        predecessor = store.get_fact(old_fact_id)
+        if predecessor is None:
+            raise ValueError(f"unknown fact {old_fact_id!r}")
+        _validate_anchors(anchors)
+        if not anchors and store.is_skipped("bindings", old_fact_id):
+            # As in _supersede_decision_impl, skipped bindings cannot be inherited.
+            raise ValueError(skipped_refusal_text("bindings", old_fact_id))
+        effective_supports = supports if supports is not None else predecessor.supports
+        if not anchors and not store.bindings_for_record(old_fact_id):
+            _require_fact_reachability(store, anchors, effective_supports)
+        # statement/source are both required (non-Optional) — redact directly, same reasoning
+        # as _add_decision_impl (keeps them typed `str`, not `_redact_fields`'s `str | None`).
+        statement, n1 = redact(statement)
+        source, n2 = redact(source)
+        redactions = n1 + n2
+        graph_version = reader.graph_version() if reader is not None else None
+        if session_id is None:
+            session_id = _session_id_fallback(store)
+        replacement = Fact(
+            statement=statement,
+            source=source,
+            supports=effective_supports,
+            status=DecisionStatus.ACCEPTED,
+            valid_from=datetime.now(UTC),
+            supersedes=old_fact_id,
+            provenance=Provenance(
+                source="human",
+                author=author,
+                session_id=session_id,
+                graph_version=graph_version,
+                # П0 (git-bindings design, Blocker 1): same best-effort HEAD stamp every
+                # other write path in the mirror now applies.
+                commit=_capture_commit(store),
+            ),
         )
-    else:
-        # Inheritance resolves nothing — same reasoning as _supersede_decision_impl's.
-        anchors_skipped, anchors_orphaned = [], []
-        for b in store.bindings_for_record(old_fact_id):
-            store.add_binding(
-                AnchorBinding(
-                    record_id=replacement.id,
-                    entity_id=b.entity_id,
-                    tier=b.tier,
-                    weight=b.weight,
-                    status=b.status,
-                    relation=b.relation,
-                )
-            )
+        store.add_fact(replacement)
 
-    bindings = store.bindings_for_record(replacement.id)
-    return _with_commit_hint(
-        store,
-        {
-            "id": replacement.id,
-            "statement": replacement.statement,
-            "status": replacement.status.value,
-            "redactions": redactions,
-            "entities": _entity_summaries(store, bindings),
-            "anchors_skipped": anchors_skipped,
-            "anchors_orphaned": anchors_orphaned,
-            "supersedes": old_fact_id,
-        },
-    )
+        if anchors:
+            anchors_skipped, anchors_orphaned = _bind_fact_anchors(
+                replacement.id, anchors, reader, store
+            )
+        else:
+            # Inheritance resolves nothing — same reasoning as _supersede_decision_impl's.
+            anchors_skipped, anchors_orphaned = [], []
+            for b in store.bindings_for_record(old_fact_id):
+                store.add_binding(
+                    AnchorBinding(
+                        record_id=replacement.id,
+                        entity_id=b.entity_id,
+                        tier=b.tier,
+                        weight=b.weight,
+                        status=b.status,
+                        relation=b.relation,
+                    )
+                )
+
+        bindings = store.bindings_for_record(replacement.id)
+        return _with_commit_hint(
+            store,
+            {
+                "id": replacement.id,
+                "statement": replacement.statement,
+                "status": replacement.status.value,
+                "redactions": redactions,
+                "entities": _entity_summaries(store, bindings),
+                "anchors_skipped": anchors_skipped,
+                "anchors_orphaned": anchors_orphaned,
+                "supersedes": old_fact_id,
+            },
+        )
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
@@ -1393,7 +1414,11 @@ def _retrieve_decisions_impl(store, include_superseded: bool = False) -> list[di
 
 _LISTING_LIMIT_MAX = 100
 _LISTING_BUDGET_MIN = 4000
-_LISTING_BUDGET_MAX = 60000
+_LISTING_BUDGET_MAX = 40000
+# The last bound: no tool that renders text from accumulated memory returns more than this.
+# 20% under Claude Code's 50,000-character save-to-file threshold.
+# see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D1)
+_HARD_CAP = 40000
 # The statuses a listing hides unless it is asked for them (``include_superseded``, ``status``).
 _HISTORY = frozenset({DecisionStatus.SUPERSEDED.value, DecisionStatus.REJECTED.value})
 _ROW_KEYS = ("id", "kind", "status", "title", "valid_from")
@@ -1468,6 +1493,7 @@ def _listing_entities(
             or (reader.repo_root() if reader is not None else None)
         )
     )
+    worktrees_of = _worktrees_provider(root_of)
     found: set[str] = set()
     unresolved: list[dict] = []
     for entry in files:
@@ -1479,7 +1505,7 @@ def _listing_entities(
             # Own try/except, as in get_task_context: a ladder that fails leaves the seed as given.
             try:
                 if seed_ladder.needs_tolerance(read, reader):
-                    ladder = seed_ladder.tolerate(read, reader, root_of)
+                    ladder = seed_ladder.tolerate(read, reader, root_of, worktrees_of)
                     read, spelled = ladder.exact + ladder.guessed, ladder.unresolved
                     note = next(
                         (
@@ -1560,6 +1586,234 @@ def _clip(text: str) -> str:
         used += width
         kept += 1
     return text[:kept] + "…"
+
+
+# The sections of a rendered context, cheapest to lose first, with the name the cut note gives.
+# The nearest-anchored records (a second retrieval, up to the caller's memory budget) go first.
+_NEAREST_HEAD = "## Nearest anchored records"
+_CUT_ORDER = (
+    (_NEAREST_HEAD, "nearest records"),
+    ("## Structural map", "structure"),
+    ("## Related", "related decisions"),
+    ("## Unratified proposals", "unratified proposals"),
+    ("## Known facts", "known facts"),
+    ("## Decisions", "decisions"),
+    ("## ⚠ Known mistakes", "records"),
+)
+_DRIFT_MARK = " [drifted]"
+
+
+def _cut_note(lost_chars: int, lost_lines: int, sections: list[str], how: str) -> str:
+    names = f", from: {', '.join(sections)}" if sections else ""
+    return (
+        f"[output cut at {_HARD_CAP} characters: {lost_chars} characters ({lost_lines} lines) "
+        f"not shown{names}. {how}]"
+    )
+
+
+def _units(text: str, atoms: list[str]) -> list[str]:
+    """``text`` as lines, except that each occurrence of a multi-line ``atom`` (alone on its
+    lines) is one unit with its newlines inside."""
+    spans: list[tuple[int, int]] = []
+    for atom in atoms:
+        at = text.find(atom)
+        while at != -1:
+            end = at + len(atom)
+            alone = (at == 0 or text[at - 1] == "\n") and (end == len(text) or text[end] == "\n")
+            if alone and all(end <= a or at >= b for a, b in spans):
+                spans.append((at, end))
+            at = text.find(atom, end)
+    out: list[str] = []
+    pos = 0
+    for a, b in sorted(spans):
+        if a > pos:
+            out.extend(text[pos : a - 1].split("\n"))
+        out.append(text[a:b])
+        pos = b + 1
+    if pos <= len(text):
+        out.extend(text[pos:].split("\n"))
+    return out
+
+
+@dataclasses.dataclass
+class _CapReport:
+    """What :func:`_hard_cap` did, for the caller's telemetry: whether it cut, and the content
+    lines (body and nearest records) that survive in the returned text."""
+
+    cut: bool = False
+    kept: list[str] = dataclasses.field(default_factory=list)
+
+
+def _hard_cap(
+    body: str,
+    trailer: list[str],
+    how: str,
+    *,
+    legend: str | None = None,
+    near: str = "",
+    near_at: int = 0,
+    cap: int = _HARD_CAP,
+    atoms: Iterable[str] = (),
+    report: _CapReport | None = None,
+) -> str:
+    """``body``, the ``legend``, the ``trailer`` blocks and, at index ``near_at`` of the
+    trailer, the ``near`` block, joined by blank lines, never longer than ``cap``. An answer
+    that fits is returned as it is.
+
+    Otherwise the body and the ``near`` records are cut at line boundaries, section by section
+    in ``_CUT_ORDER`` (the nearest records first, then the structural map, the records last;
+    text under no known heading goes after them all), and a note naming the sections cut
+    follows the body. Only a heading in ``_CUT_ORDER`` starts a section: any other ``## `` line
+    (an H2 inside a record's text) belongs to the section it sits in. The trailer blocks (advice:
+    how the seeds were read, what is not in the graph, the supersede hint) are never cut, and the
+    legend stays whenever a kept line carries ``[drifted]``. A trailer that alone exceeds ``cap``
+    is cut from its front, the last lines kept, and the note says so.
+
+    ``atoms`` are rendered records that span several physical lines (a context with a newline
+    in it puts the id on a later line): each is cut whole or not at all, so a record never
+    loses its id line alone. ``report`` receives the kept units (a line, or an atom), for
+    telemetry on what was delivered.
+    # see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D1, D7)
+    # see design/superpowers/specs/2026-10-12-batch-panel-fixes.md (G1)
+    """
+    multi = sorted({a for a in atoms if "\n" in a}, key=len, reverse=True)
+    body_lines = _units(body, multi)
+    near_lines = _units(near, multi) if near else []
+    lines = body_lines + near_lines
+    split = len(body_lines)
+    owner: list[int | None] = []  # the _CUT_ORDER index of the section each line belongs to
+    current: int | None = None
+    for i, line in enumerate(lines):
+        if i == split:
+            current = 0  # the whole near block is one section
+        elif i < split and line.startswith("## "):
+            known = next(
+                (j for j, (head, _) in enumerate(_CUT_ORDER) if j and line.startswith(head)), None
+            )
+            if known is not None:
+                current = known
+        owner.append(current)
+    alive = [True] * len(lines)
+
+    def assemble(part: range) -> str:
+        """The kept lines of ``part``; runs of blank lines collapse, edges are trimmed."""
+        out: list[str] = []
+        for i in part:
+            if not alive[i]:
+                continue
+            for physical in lines[i].split("\n"):  # a record's own blank runs collapse too
+                if not physical.strip() and (not out or not out[-1].strip()):
+                    continue
+                out.append(physical)
+        while out and not out[-1].strip():
+            out.pop()
+        return "\n".join(out)
+
+    def join(note: str | None) -> str:
+        kept = assemble(range(split))
+        kept_near = assemble(range(split, len(lines)))
+        keep_legend = legend if legend and _DRIFT_MARK in kept + kept_near else None
+        items = list(trailer)
+        if kept_near:
+            items.insert(min(near_at, len(items)), kept_near)
+        return "\n\n".join(p for p in (kept, note, keep_legend, *items) if p)
+
+    def finish(text: str, *, cut: bool) -> str:
+        if report is not None:
+            report.cut = cut
+            report.kept = [ln for i, ln in enumerate(lines) if alive[i] and ln.strip()]
+        return text
+
+    full = join(None)
+    if len(full) <= cap:
+        return finish(full, cut=False)
+    cut_sections: list[str] = []
+    lost_chars = lost_lines = 0
+    fixed = sum(len(p) + 2 for p in (legend or "", *trailer)) + 4
+    kept_len = len(body) + (len(near) + 2 if near else 0)
+    done = False
+    # The known sections in cut order, then whatever sits under no known heading.
+    for index in [*range(len(_CUT_ORDER)), None]:
+        name = "text under no known heading" if index is None else _CUT_ORDER[index][1]
+        members = [i for i, o in enumerate(owner) if o == index]
+        # Content lines from the end first; the blank lines between sections stay.
+        for i in sorted(members, key=lambda m: (not lines[m].strip(), -m)):
+            note = _cut_note(lost_chars, lost_lines, cut_sections, how)
+            # An upper bound (legend counted, digits may grow): the result is checked below.
+            if kept_len + len(note) + fixed + 16 <= cap:
+                done = True
+                break
+            if name not in cut_sections:
+                cut_sections.append(name)
+            alive[i] = False
+            kept_len -= len(lines[i]) + 1
+            lost_chars += len(lines[i]) + 1
+            lost_lines += lines[i].count("\n") + 1
+        if done:
+            break
+    out = join(_cut_note(lost_chars, lost_lines, cut_sections, how))
+    if len(out) <= cap:
+        return finish(out, cut=True)
+    # Every line of the body is gone and the trailer alone is too long for the cap: keep its
+    # last lines (the supersede hint comes last) and say what was cut from its front.
+    text = "\n\n".join(trailer)
+    sections = [*cut_sections, "the start of the advice"]
+    room = cap - len(
+        _cut_note(lost_chars + len(text), lost_lines + text.count("\n"), sections, how)
+    )
+    room -= len("\n\n") + 16
+    tail = text[-room:] if room > 0 else ""
+    newline = tail.find("\n")
+    if newline != -1 and len(tail) < len(text):
+        tail = tail[newline + 1 :]  # a line boundary, not a half line
+    dropped = text[: len(text) - len(tail)]
+    note = _cut_note(lost_chars + len(dropped), lost_lines + dropped.count("\n"), sections, how)
+    return finish(f"{note}\n\n{tail}".strip()[:cap], cut=True)
+
+
+def _collapsed(unit: str) -> str:
+    """``unit`` as the hard cap's assembly delivers it: runs of blank lines collapse to the
+    first of them."""
+    out: list[str] = []
+    for physical in unit.split("\n"):
+        if not physical.strip() and out and not out[-1].strip():
+            continue
+        out.append(physical)
+    return "\n".join(out)
+
+
+def _delivered(ctx: TaskContext, report: _CapReport) -> TaskContext:
+    """``ctx`` as the answer delivers it. When the hard cap cut, only the records whose line
+    survives in the returned text count as shown, and the render counters follow (``emitted``
+    loses them, ``dropped_for_budget`` gains them, ``degraded`` drops the degraded ones). In
+    every case ``chars_used`` is the length of the record lines as delivered, blank runs
+    collapsed. A record with no line in ``ctx.line_ids`` (a hand-built context) is kept.
+    # see design/superpowers/specs/2026-10-12-batch-panel-fixes.md (C2, round 4)
+    """
+    if not ctx.line_ids:
+        return ctx
+    left = {key: list(ids) for key, ids in ctx.line_ids.items()}
+    kept_ids: set[str] = set()
+    for unit in report.kept:
+        ids = left.get(unit)
+        if ids:
+            kept_ids.add(ids.pop(0))
+    placed = {record_id for ids in ctx.line_ids.values() for record_id in ids}
+    removed = (
+        {i for i in ctx.shown_ids if i in placed and i not in kept_ids} if report.cut else set()
+    )
+    shown = [i for i in ctx.shown_ids if i not in removed]
+    chars = sum(
+        len(_collapsed(key)) for key, ids in ctx.line_ids.items() for i in ids if i not in removed
+    )
+    return dataclasses.replace(
+        ctx,
+        shown_ids=shown,
+        emitted=max(0, ctx.emitted - len(removed)),
+        degraded=max(0, ctx.degraded - len(removed & set(ctx.degraded_ids))),
+        dropped_for_budget=ctx.dropped_for_budget + len(removed),
+        chars_used=chars,
+    )
 
 
 def _listing_overview(
@@ -1729,7 +1983,6 @@ def _decision_listing(
     # Mistakes first, then newest first; the sort is stable, so the rank keeps the recency order.
     pool.sort(key=_newest_first, reverse=True)
     pool.sort(key=lambda d: _MISTAKE_RANK.get(d["kind"], 2))
-    matched = len(pool)
     echo = ", ".join(
         f"{name}={_clip(value)}"
         for name, value in (
@@ -1743,6 +1996,44 @@ def _decision_listing(
     )
     # Unreadable files are the whole story of an empty answer only when no file could be read.
     history_hint = history_hidden and not (wanted_files and len(unresolved) == len(wanted_files))
+    return _bounded_records(
+        pool,
+        key="decisions",
+        lead={"overview": False},
+        middle={},
+        limit=limit,
+        budget=budget,
+        echo=echo,
+        unresolved=unresolved,
+        files_given=bool(wanted_files),
+        has_query=bool(terms),
+        history_hint=history_hint,
+    )
+
+
+def _bounded_records(
+    pool: list[dict],
+    *,
+    key: str,
+    lead: dict,
+    middle: dict,
+    limit: int,
+    budget: int,
+    echo: str,
+    unresolved: list[dict],
+    files_given: bool,
+    has_query: bool,
+    history_hint: bool,
+) -> str:
+    """The filtered answer both record listings share: ``pool`` (already sorted) cut at ``limit``
+    or ``budget``, never mid-record, with the counts, the hint and the unresolved files. The
+    length never exceeds ``budget``: when the caller's own text leaves no room, the echo of the
+    filters goes first, then the unresolved entries, last one first. ``lead`` and ``middle`` are
+    extra envelope fields placed before ``matched`` and before the records.
+    see design/superpowers/specs/2026-10-04-bounded-decision-listing-design.md (D2-D5)
+    see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D2)
+    """
+    matched = len(pool)
     sizes: dict[int, int] = {}
 
     def size_of(i: int) -> int:
@@ -1762,13 +2053,14 @@ def _decision_listing(
 
         def answer(k: int, decisions: list[dict]) -> dict:
             out: dict = {
-                "overview": False,
+                **lead,
                 "matched": matched,
                 "returned": k,
                 "omitted": matched - k,
-                "decisions": decisions,
+                **middle,
+                key: decisions,
             }
-            if wanted_files:
+            if files_given:
                 out["unresolved_files"] = shown
                 out["unresolved_omitted"] = len(unresolved) - len(shown)
             out["hint"] = _listing_hint(
@@ -1780,7 +2072,7 @@ def _decision_listing(
                 unresolved=len(unresolved),
                 unlisted=len(unresolved) - len(shown),
                 echo=echo if echoed else None,
-                has_query=bool(terms),
+                has_query=has_query,
                 history_hint=history_hint,
             )
             return out
@@ -1816,7 +2108,7 @@ def retrieve_decisions(
     With no narrowing filter you get an overview: the total, counts by status and kind, and the
     newest records as compact rows. Pass a filter to get full records, gotchas and lessons
     first, then newest first, cut at ``limit`` (default 25, max 100) or ``budget_chars``
-    (default 24000, max 60000), whichever comes first; ``hint`` says what cut the list or why
+    (default 24000, max 40000), whichever comes first; ``hint`` says what cut the list or why
     it is empty.
 
     Filters combine with AND, and an empty one is ignored. ``status`` and ``kind`` take one
@@ -1867,19 +2159,123 @@ def _list_facts_impl(store, include_superseded: bool = False) -> list[dict]:
     return [f.model_dump(mode="json") for f in facts]
 
 
-@mcp.tool(annotations=_READ_ONLY)
-def list_facts(include_superseded: bool = False) -> list[dict]:
-    """Return facts from the store, newest first (the ``retrieve_decisions`` counterpart
-    for the facts layer -- Gap 1, previously only reachable via ``get_entity_history``,
-    which itself silently dropped facts until this same wave closed Gap 2).
-
-    The default listing excludes superseded and rejected (dropped) records; pass
-    ``include_superseded=True`` to see that history too. Facts have no ``kind`` (no
-    mistakes-first ranking, unlike ``retrieve_decisions``'s gotchas/lessons-first order)
-    -- sorted by ``valid_from`` descending, ``id`` descending as a deterministic tiebreak.
-    Full ``Fact`` model dumps.
+def _fact_listing(
+    store,
+    reader,
+    *,
+    include_superseded: bool = False,
+    status: str | list[str] | None = None,
+    files: list[str] | None = None,
+    query: str | None = None,
+    ids: list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+    borrowed_from: Path | None = None,
+) -> str:
+    """The text ``list_facts`` sends: the newest facts in full, cut at ``limit`` or
+    ``budget_chars`` (the length never exceeds the clamped budget), with the counts of every
+    fact the proposal policy lets through. Filters combine with AND; an empty value is an absent
+    one. ``reader`` is the code graph, ``None`` without one (``files`` then match by path alone).
+    see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D2)
     """
-    return _list_facts_impl(_get_store(), include_superseded=include_superseded)
+    limit = max(1, min(_LISTING_LIMIT_MAX, limit))
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
+    statuses = _listing_values(status, DecisionStatus, "status")
+    wanted_files = _listing_texts(files)
+    wanted_ids = _listing_texts(ids)
+    terms = (query or "").lower().split()
+    everything = _list_facts_impl(store, include_superseded=True)
+    counts: dict[str, int] = {}
+    for fact in everything:
+        counts[fact["status"]] = counts.get(fact["status"], 0) + 1
+    counts = dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    pool = everything
+    if wanted_ids:
+        id_set = set(wanted_ids)
+        pool = [f for f in pool if f["id"] in id_set]
+    history_hidden = not (statuses or wanted_ids or include_superseded)
+    if statuses:
+        pool = [f for f in pool if f["status"] in statuses]
+    elif history_hidden:
+        pool = [f for f in pool if f["status"] not in _HISTORY]
+    unresolved: list[dict] = []
+    if wanted_files:
+        entity_ids, unresolved = _listing_entities(store, reader, wanted_files, borrowed_from)
+        anchored = {b.record_id for e in entity_ids for b in store.bindings_for_entity(e)}
+        pool = [f for f in pool if f["id"] in anchored]
+    if terms:
+        pool = [
+            f
+            for f in pool
+            if all(term in f"{f['statement']}\n{f['source']}".lower() for term in terms)
+        ]
+    # `_list_facts_impl` returns newest first already (valid_from, id descending).
+    echo = ", ".join(
+        f"{name}={_clip(value)}"
+        for name, value in (
+            ("status", ",".join(sorted(statuses)) if statuses else ""),
+            ("files", f"[{', '.join(wanted_files)}]" if wanted_files else ""),
+            ("query", f'"{" ".join(terms)}"' if terms else ""),
+            ("ids", f"[{', '.join(wanted_ids)}]" if wanted_ids else ""),
+        )
+        if value
+    )
+    history_hint = history_hidden and not (wanted_files and len(unresolved) == len(wanted_files))
+    return _bounded_records(
+        pool,
+        key="facts",
+        lead={},
+        middle={"counts": {"status": counts}},
+        limit=limit,
+        budget=budget,
+        echo=echo,
+        unresolved=unresolved,
+        files_given=bool(wanted_files),
+        has_query=bool(terms),
+        history_hint=history_hint,
+    )
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def list_facts(
+    include_superseded: bool = False,
+    status: str | list[str] | None = None,
+    files: list[str] | None = None,
+    query: str | None = None,
+    ids: list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+) -> ToolResult:
+    """List facts from the store, bounded. The answer is one JSON object in one text block:
+    ``{"matched", "returned", "omitted", "counts": {"status": {...}}, "facts": [...], "hint"}``,
+    the newest facts in full (``valid_from`` descending), cut at ``limit`` (default 25, max 100)
+    or ``budget_chars`` (default 24000, max 40000), whichever comes first. ``hint`` says what
+    cut the list or why it is empty; ``counts`` covers every fact visible to the store's proposal
+    policy, history included.
+
+    The default hides superseded and rejected facts; ``include_superseded=True`` shows them, and
+    so does ``status`` (one value or a list: proposed, accepted, superseded, rejected,
+    deprecated). Filters combine with AND, and an empty one is ignored. ``files`` are
+    repo-relative paths, read the way ``get_task_context`` reads them; facts anchored to them
+    match, and ``unresolved_files`` says, for each path nothing could read, why. ``query`` words
+    must all occur in ``statement`` or ``source``. ``ids`` returns those facts exactly.
+    """
+    # Read-only: the graph is read without the lazy sync that `retrieve_decisions` runs.
+    reader = _load_reader() if _listing_texts(files) else None
+    text = _fact_listing(
+        _get_store(),
+        reader,
+        include_superseded=include_superseded,
+        status=status,
+        files=files,
+        query=query,
+        ids=ids,
+        limit=limit,
+        budget_chars=budget_chars,
+        borrowed_from=None,
+    )
+    return ToolResult(content=text)
 
 
 def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
@@ -1985,18 +2381,147 @@ def _get_entity_history_impl(store: Store, entity_id: str) -> list[dict]:
     return out
 
 
-@mcp.tool(annotations=_READ_ONLY)
-def get_entity_history(entity_id: str) -> list[dict]:
-    """Return every decision AND fact anchored to a given entity, newest first.
+def _history_row(record: dict) -> dict:
+    """A record in short form: enough to recognise it and to ask for it by id."""
+    return {
+        "id": record["id"],
+        "record_type": record["record_type"],
+        "kind": record.get("kind"),
+        "status": record["status"],
+        "valid_from": record["valid_from"],
+        "title": _clip(str(record.get("title") or record.get("statement") or "")),
+    }
 
-    Resolves every binding's record type in one read, then loads each record (a binding whose
-    record exists nowhere is skipped, as before). Every dict now carries
-    ``"record_type": "decision" | "fact"`` so a caller can tell them apart without
-    re-deriving it -- facts used to be silently
-    dropped here (this tool only ever called ``get_decision``; see ``list_facts`` for the
-    facts-only counterpart of ``retrieve_decisions``).
+
+def _entity_history_listing(
+    store: Store,
+    entity_id: str,
+    *,
+    status: str | list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+) -> str:
+    """The text ``get_entity_history`` sends: every record anchored to the entity, newest first.
+
+    Fill rule: full records up to half the budget (at least one, at most ``limit``), then a
+    short row for each other record, and the ids of those that do not fit as rows; the length
+    never exceeds the clamped budget. A record is never dropped, only shortened or named.
+    see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D3)
     """
-    return _get_entity_history_impl(_get_store(), entity_id)
+    limit = max(1, min(_LISTING_LIMIT_MAX, limit))
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
+    statuses = _listing_values(status, DecisionStatus, "status")
+    records = _get_entity_history_impl(store, entity_id)
+    if statuses:
+        records = [r for r in records if r["status"] in statuses]
+    matched = len(records)
+    shown_id = _clip(entity_id)
+
+    def build(k: int, rows: int, ids: int | None) -> dict:
+        rest = records[k:]
+        out: dict = {
+            "entity_id": shown_id,
+            "matched": matched,
+            "returned": k,
+            "omitted": matched - k,
+            "records": records[:k],
+        }
+        if rest:
+            out["omitted_records"] = [_history_row(r) for r in rest[:rows]]
+            tail = [r["id"] for r in rest[rows:]]
+            if tail:
+                listed = tail if ids is None else tail[:ids]
+                out["omitted_ids"] = listed
+                if len(listed) < len(tail):
+                    out["omitted_ids_unlisted"] = len(tail) - len(listed)
+            if not out["omitted_records"]:
+                del out["omitted_records"]
+            where = []
+            if "omitted_records" in out:
+                where.append("short rows in omitted_records")
+            if "omitted_ids" in out:
+                where.append("bare ids in omitted_ids")
+            hint = (
+                f"{len(rest)} more records are anchored to this entity: {', '.join(where)}. "
+                "Read a decision with retrieve_decisions(ids=[...]) and a fact with "
+                "list_facts(ids=[...]), or narrow with status=[...]."
+            )
+            if "omitted_ids_unlisted" in out:
+                hint += (
+                    f" {out['omitted_ids_unlisted']} ids are not listed "
+                    "(omitted_ids_unlisted): narrow with status=[...] to reach them."
+                )
+            out["hint"] = hint
+        elif matched == 0:
+            out["hint"] = (
+                "Nothing is anchored to this entity (or the status filter matched nothing). "
+                "find_entity(name) looks an entity_id up."
+            )
+        else:
+            out["hint"] = None
+        return out
+
+    # (1) Full records: up to half the budget, at least one, at most `limit`.
+    k = 0
+    used = 0
+    for record in records[:limit]:
+        size = len(_dump(record)) + (1 if k else 0)
+        if k and used + size > budget // 2:
+            break
+        used += size
+        k += 1
+    while k >= 0:
+        # (2) Rows for all the rest if they fit; else the most rows that fit, ids for the others.
+        rest_count = matched - k
+        if len(_dump(build(k, rest_count, None))) <= budget:
+            return _dump(build(k, rest_count, None))
+        lo, hi = 0, rest_count - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if len(_dump(build(k, mid, None))) <= budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        if len(_dump(build(k, lo, None))) <= budget:
+            return _dump(build(k, lo, None))
+        # (3) Not even the ids fit: list as many as do, count the rest.
+        lo2, hi2 = 0, rest_count
+        while lo2 < hi2:
+            mid = (lo2 + hi2 + 1) // 2
+            if len(_dump(build(k, 0, mid))) <= budget:
+                lo2 = mid
+            else:
+                hi2 = mid - 1
+        if len(_dump(build(k, 0, lo2))) <= budget:
+            return _dump(build(k, 0, lo2))
+        k -= 1  # the full records leave no room for the envelope: shorten the list
+    return _dump(build(0, 0, 0))
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def get_entity_history(
+    entity_id: str,
+    status: str | list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+) -> ToolResult:
+    """Every decision AND fact anchored to an entity, newest first, bounded. The answer is one
+    JSON object in one text block: ``{"entity_id", "matched", "returned", "omitted", "records",
+    "omitted_records", "omitted_ids", "hint"}``. Every record carries ``"record_type":
+    "decision" | "fact"``; superseded records are included (the "tried before" chain).
+
+    ``records`` holds the newest records in full, up to half of ``budget_chars`` (default 24000,
+    max 40000) and ``limit`` (default 25, max 100), at least one. Each other record is a short
+    row in ``omitted_records`` (``id``, ``record_type``, ``kind``, ``status``, ``valid_from``,
+    ``title``), and when even the rows overflow the budget, the rest are bare ids in
+    ``omitted_ids`` (``omitted_ids_unlisted`` counts ids cut as well). Read an omitted decision
+    with ``retrieve_decisions(ids=[...])`` and an omitted fact with ``list_facts(ids=[...])``;
+    ``status`` (one value or a list) narrows the history.
+    """
+    text = _entity_history_listing(
+        _get_store(), entity_id, status=status, limit=limit, budget_chars=budget_chars
+    )
+    return ToolResult(content=text)
 
 
 def _seeds_from_args(files: list[str] | None, entities: list[dict] | None) -> list[Seed]:
@@ -2011,9 +2536,21 @@ def _seeds_from_args(files: list[str] | None, entities: list[dict] | None) -> li
 _NOT_IN_GRAPH_LISTED = 10
 
 
+_PATH_ECHO_CHARS = 200
+
+
+def _echo_path(path: str) -> str:
+    """``path`` as the advice blocks echo it: a path longer than :data:`_PATH_ECHO_CHARS` keeps
+    its head and its tail (the file name) around a ``…``, so one absurd seed cannot fill the
+    cap that the advice itself must fit in."""
+    if len(path) <= _PATH_ECHO_CHARS:
+        return path
+    return f"{path[:120]}…{path[-70:]}"
+
+
 def _listed(paths: list[str]) -> str:
     """``a, b`` up to :data:`_NOT_IN_GRAPH_LISTED` paths, then ``…, and N more``."""
-    shown = ", ".join(paths[:_NOT_IN_GRAPH_LISTED])
+    shown = ", ".join(_echo_path(p) for p in paths[:_NOT_IN_GRAPH_LISTED])
     extra = len(paths) - _NOT_IN_GRAPH_LISTED
     return f"{shown}, and {extra} more" if extra > 0 else shown
 
@@ -2024,7 +2561,12 @@ def _is_repo_relative(p: str) -> bool:
     ``posixpath.normpath("./x") != "./x"`` are what ``root / p`` would silently accept, and
     ``normpath`` leaves a leading ``..`` alone, so ``../x`` needs its own check."""
     pure = PurePosixPath(p)
-    return not pure.is_absolute() and ".." not in pure.parts and posixpath.normpath(p) == p
+    return (
+        not pure.is_absolute()
+        and not worktree_seeds.has_drive(p)
+        and ".." not in pure.parts
+        and posixpath.normpath(p) == p
+    )
 
 
 def _not_in_graph_block(
@@ -2036,6 +2578,7 @@ def _not_in_graph_block(
     *,
     ladder: seed_ladder.Ladder | None = None,
     root_of: Callable[[], Path | None] | None = None,
+    worktrees_of: Callable[[], list[worktree_seeds.Worktree]] | None = None,
 ) -> str:
     """The "## Not in the code graph" block: what happened to each seed path the graph does
     not hold, or ``""`` when the graph holds every one (then neither ``freshness()`` nor
@@ -2046,8 +2589,9 @@ def _not_in_graph_block(
     cover that file); a directory, a path that does not exist, any path when graph.json is
     outside a git repository, and a path that is not written as a normalized repo-relative
     one (absolute, ``./x``, ``a/../b``, a trailing slash: ``root / p`` would accept them, but
-    the graph never holds them) gets "check the path". ``freshness()`` runs only when some
-    seed is an existing file.
+    the graph never holds them) gets "check the path". A well-formed path that is not a file
+    in this checkout is "only in another checkout" when ``worktrees_of`` finds it in one, else
+    "not here". ``freshness()`` runs only when some seed is an existing file.
 
     ``borrowed_from`` is the main checkout whose graph a linked worktree reads, and
     ``worktree_root`` that worktree: "exists" is then checked in the worktree, and a file there
@@ -2058,7 +2602,9 @@ def _not_in_graph_block(
     then its ``unresolved`` ones, in their normalised spelling, so ``./pkg/n.py`` gets the advice
     for ``pkg/n.py``; a seed the ladder read, or reported in its own block, is not named. The
     ``N`` of "N of M" stays the number of distinct paths as given. ``root_of`` is the one lookup
-    of the repository root the call shares with the ladder.
+    of the repository root the call shares with the ladder, ``worktrees_of`` the one listing of
+    the other checkouts.
+    # see design/superpowers/specs/2026-10-11-worktree-only-seeds-design.md (D1, D7)
     # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D5)
     # see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D3)
     # see design/superpowers/specs/2026-10-02-tolerant-seeds-design.md (D5)
@@ -2073,10 +2619,14 @@ def _not_in_graph_block(
     if not missing:
         return ""
     borrowed = borrowed_from is not None and worktree_root is not None
-    candidates = [p for p in missing if _is_repo_relative(p)]
+    candidates = [p for p in missing if _is_repo_relative(p) and p != "."]
     lookup = root_of if root_of is not None else reader.repo_root
     root = worktree_root if borrowed else (lookup() if candidates else None)
-    present = [p for p in candidates if root is not None and seed_ladder.is_file_exact(root, p)]
+    # Malformed is the ladder's own verdict (or no repository root): see the design, D1.
+    wellformed = candidates if root is not None else []
+    present = (
+        [p for p in wellformed if seed_ladder.is_file_exact(root, p)] if root is not None else []
+    )
     only_here = (
         [
             p
@@ -2086,8 +2636,32 @@ def _not_in_graph_block(
         if borrowed
         else []
     )
-    existing = [p for p in present if p not in set(only_here)]
-    other = [p for p in missing if p not in set(present)]
+    # The graph's own checkout comes first: a file that is only there is newer than the build.
+    on_main = (
+        [
+            p
+            for p in wellformed
+            if p not in set(present) and seed_ladder.is_file_exact(borrowed_from, p)
+        ]
+        if borrowed and borrowed_from is not None
+        else []
+    )
+    existing = [
+        p
+        for p in wellformed
+        if (p in set(present) or p in set(on_main)) and p not in set(only_here)
+    ]
+    left = [p for p in wellformed if p not in set(present) and p not in set(on_main)]
+    others: list[worktree_seeds.Worktree] = []
+    if left and worktrees_of is not None:
+        others = worktrees_of()
+    elsewhere: dict[str, list[worktree_seeds.Worktree]] = {}
+    for p in left:
+        found = worktree_seeds.locate(p, others, seed_ladder.is_file_exact)
+        if found:
+            elsewhere[p] = found
+    not_here = [p for p in left if p not in elsewhere]
+    other = [p for p in missing if p not in set(wellformed)]
     noun = "seed path" if len(seeds) == 1 else "seed paths"
     into = f" in {borrowed_from}" if borrowed else ""
     lines = ["## Not in the code graph"]
@@ -2121,6 +2695,32 @@ def _not_in_graph_block(
             f"{n} of {len(seeds)} {noun} {verb} not in the code graph: {_listed(only_here)}. "
             f"{_BORROWED_SENTENCE}"
         )
+    if elsewhere and root is not None:
+        n = len(elsewhere)
+        verb = "exists" if n == 1 else "exist"
+        graph_root = borrowed_from if borrowed and borrowed_from is not None else root
+        named = ", ".join(
+            f"{_echo_path(p)} ({_checkout_phrase(found, root)})"
+            for p, found in list(elsewhere.items())[:_NOT_IN_GRAPH_LISTED]
+        )
+        extra = n - _NOT_IN_GRAPH_LISTED
+        named += f", and {extra} more" if extra > 0 else ""
+        pron = "it" if n == 1 else "them"
+        lines.append(
+            f"{n} of {len(seeds)} {noun} {verb} only in another checkout of this repository, "
+            f"not in the one this server reads ({root}): {named}. The code graph this server "
+            f"reads (built from {graph_root}) does not hold {pron}."
+        )
+    if not_here and root is not None:
+        n = len(not_here)
+        verb = "is" if n == 1 else "are"
+        also = " or in any other checkout of this repository" if others else ""
+        lines.append(
+            f"{n} of {len(seeds)} {noun} {verb} not a file in this checkout ({root}){also}: "
+            f"{_listed(not_here)}. The path is well-formed as read, so it may be on a branch "
+            "that is not checked out anywhere, be misspelled, or be a directory: check the "
+            "branch and the spelling."
+        )
     if other:
         n = len(other)
         verb = (
@@ -2134,6 +2734,21 @@ def _not_in_graph_block(
             "without `./`, `..` or a trailing slash, and name a file, not a directory."
         )
     return "\n".join(lines)
+
+
+def _checkout_phrase(found: list[worktree_seeds.Worktree], root: Path) -> str:
+    """``worktree W, branch B`` for the first checkout holding a file, then how many others do.
+    ``W`` is relative to ``root`` when under it (compared on realpath), else absolute."""
+    first = found[0]
+    try:
+        rel = Path(os.path.realpath(first.path)).relative_to(os.path.realpath(root)).as_posix()
+    except ValueError:
+        rel = first.path.as_posix()
+    text = f"worktree {rel}, branch {first.branch or 'detached'}"
+    more = len(found) - 1
+    if more:
+        text += f", and {more} other checkout{'s' if more > 1 else ''}"
+    return text
 
 
 # What a linked worktree is told about a file that exists only on its branch: the main
@@ -2191,6 +2806,22 @@ def _once(fn: Callable[[], Path | None]) -> Callable[[], Path | None]:
     def call() -> Path | None:
         if not box:
             box.append(fn())
+        return box[0]
+
+    return call
+
+
+def _worktrees_provider(
+    root_of: Callable[[], Path | None],
+) -> Callable[[], list[worktree_seeds.Worktree]]:
+    """The other checkouts of the root's repository, listed on first use and once per call.
+    Looked up as ``worktree_seeds.linked_worktrees`` at call time, so a test can patch it."""
+    box: list[list[worktree_seeds.Worktree]] = []
+
+    def call() -> list[worktree_seeds.Worktree]:
+        if not box:
+            root = root_of()
+            box.append(worktree_seeds.linked_worktrees(root) if root is not None else [])
         return box[0]
 
     return call
@@ -2262,6 +2893,7 @@ def _get_task_context_impl(
         return worktree_of() or reader.repo_root()
 
     root_once = _once(root_of)
+    worktrees_once = _worktrees_provider(root_once)
     ladder: seed_ladder.Ladder | None = None
     exact: list[Seed] = seeds
     guessed: list[Seed] = []
@@ -2269,13 +2901,16 @@ def _get_task_context_impl(
         # Own try/except: a ladder that fails must leave the seeds exactly as they were.
         try:
             if seed_ladder.needs_tolerance(seeds, reader):
-                ladder = seed_ladder.tolerate(seeds, reader, root_once)
+                ladder = seed_ladder.tolerate(seeds, reader, root_once, worktrees_once)
                 exact, guessed = ladder.exact, ladder.guessed
         except Exception:
             ladder, exact, guessed = None, seeds, []
-    budget = RetrievalBudget(structure_budget, memory_budget)
+    budget = RetrievalBudget(
+        min(structure_budget, _LISTING_BUDGET_MAX), min(memory_budget, _LISTING_BUDGET_MAX)
+    )
     ctx = _retrieve(exact, store, reader, budget, guessed=guessed)
-    text = ctx.render()
+    body, legend, hint = ctx.render_parts()
+    text = "\n\n".join(part for part in (body, legend, hint) if part)
     # The nearest anchored files (spec D10-D12): a sentence per file seed that has no record of
     # its own, and, when the main answer has no memory at all, the records of those files. Each
     # step has its own try/except: advice must never cost the answer, nor each other.
@@ -2290,13 +2925,6 @@ def _get_task_context_impl(
             second = _retrieve([Seed(file_path=f) for f in near.files], store, reader, budget)
             merged = nearest_anchored.combine(ctx, second)
             near_ctx, recorded = second, merged
-    _record(
-        store,
-        recorded.shown_ids,
-        ladder.seed_paths if ladder is not None else [s.file_path for s in seeds if s.file_path],
-        ctx=recorded,
-        intent=_caller_intent(intent),
-    )
     # Each block has its own try/except: advice about the seeds must never cost the answer it
     # follows, nor each other.
     blocks: list[str] = []
@@ -2315,6 +2943,7 @@ def _get_task_context_impl(
                     worktree,
                     ladder=ladder,
                     root_of=root_once,
+                    worktrees_of=worktrees_once,
                 )
             )
         elif seeds:
@@ -2323,20 +2952,51 @@ def _get_task_context_impl(
         if not seeds and text == _NO_CONTEXT:
             blocks.append(_empty_block(store, graph_missing=reader is None))
     with contextlib.suppress(Exception):
-        if near.sentences:
+        # The records of the second retrieval are known only now: a bound record it shows is
+        # not "more".
+        shown_below = near_ctx.shown_ids if near_ctx is not None else ()
+        # With the second retrieval's records taken off the count, the hard cap may still cut
+        # some of them from the text, so the count is then a floor ("at least").
+        floor = near_ctx is not None
+        if near.lines_for(shown_below, at_least=floor):
             heading = _EMPTY_HEADING if text == _NO_CONTEXT else nearest_anchored.NEAREST_HEADING
-            blocks.append("\n".join([heading, *near.lines()]))
+            blocks.append("\n".join([heading, *near.lines(shown_below, at_least=floor)]))
     ids_shown = False
+    near_records = ""
     with contextlib.suppress(Exception):
         if near_ctx is not None:
-            records, ids_shown = nearest_anchored.records_block(
+            near_records, ids_shown = nearest_anchored.records_block(
                 near_ctx, guarded=MEMORY_GUARD_LINE in text
             )
-            blocks.append(records)
-    out = "\n\n".join([text, *(b for b in blocks if b)])
     # The records carried ids, so the reply ends with the line that says what to do about one
-    # that is wrong: once, at the very end, as the render puts it.
-    return f"{out}\n\n{_STANDING_SUPERSEDE_HINT}" if ids_shown else out
+    # that is wrong: once, at the very end, as the render puts it. The hard cap on the whole
+    # text cuts the body and keeps all of this advice.
+    # The nearest records are records, not advice: they are cut first, in place.
+    trailer = [*([hint] if hint else []), *(b for b in blocks if b)]
+    near_at = len(trailer)
+    if ids_shown:
+        trailer.append(_STANDING_SUPERSEDE_HINT)
+    report = _CapReport()
+    answer = _hard_cap(
+        body,
+        trailer,
+        _CONTEXT_CUT_ADVICE,
+        legend=legend,
+        near=near_records,
+        near_at=near_at,
+        atoms=recorded.line_ids,
+        report=report,
+    )
+    # Telemetry follows the text: a record the hard cap removed was never shown.
+    delivered = _delivered(recorded, report)
+    _record(
+        store,
+        delivered.shown_ids,
+        ladder.seed_paths if ladder is not None else [s.file_path for s in seeds if s.file_path],
+        ctx=delivered,
+        intent=_caller_intent(intent),
+    )
+    return answer
 
 
 def _synced_reader() -> tuple[GraphifyReader | None, Path | None]:
@@ -2386,6 +3046,10 @@ def _get_task_context_with_sync(
     )
 
 
+_CONTEXT_CUT_ADVICE = "Narrow with files=[...]; lower structure_budget/memory_budget."
+_BUDGET_CUT_ADVICE = "Narrow with files=[...]; lower budget_chars."
+
+
 def _query_structure_impl(
     store,
     reader,
@@ -2402,7 +3066,10 @@ def _query_structure_impl(
     could possibly have fired there (fix-wave review, spec correction over the original
     design's "record seeds to prove an area was visited").
     """
-    return _query_structure(_seeds_from_args(files, entities), store, reader, budget_chars)
+    text = _query_structure(
+        _seeds_from_args(files, entities), store, reader, min(budget_chars, _LISTING_BUDGET_MAX)
+    )
+    return _hard_cap(text, [], _BUDGET_CUT_ADVICE)
 
 
 def _query_decisions_impl(
@@ -2423,18 +3090,31 @@ def _query_decisions_impl(
     ``ctx.shown_ids`` for telemetry before rendering with ``include_structure=False``.
     """
     seeds = _seeds_from_args(files, entities)
-    ctx = _retrieve(seeds, store, reader, RetrievalBudget(memory_chars=budget_chars))
+    ctx = _retrieve(
+        seeds, store, reader, RetrievalBudget(memory_chars=min(budget_chars, _LISTING_BUDGET_MAX))
+    )
+    body, legend, hint = ctx.render_parts(include_structure=False)
+    report = _CapReport()
+    answer = _hard_cap(
+        body,
+        [hint] if hint else [],
+        _BUDGET_CUT_ADVICE,
+        legend=legend,
+        atoms=ctx.line_ids,
+        report=report,
+    )
+    delivered = _delivered(ctx, report)  # telemetry follows the text, not the render
     _record(
         store,
-        ctx.shown_ids,
+        delivered.shown_ids,
         [s.file_path for s in seeds if s.file_path],
-        ctx=ctx,
+        ctx=delivered,
         intent=_caller_intent(intent),
     )
-    return ctx.render(include_structure=False)
+    return answer
 
 
-@mcp.tool(annotations=_LOCAL_WRITE)
+@mcp.tool(annotations=_LOCAL_WRITE, output_schema=None)
 def get_task_context(
     files: list[str] | None = None,
     entities: list[dict] | None = None,
@@ -2455,11 +3135,15 @@ def get_task_context(
 
     ``intent``: optional label for what asked (e.g. a skill name). Recorded for local
     statistics only; never affects what is returned.
+
+    Each budget is capped at 40000 (no floor) and the whole text never exceeds 40000 characters:
+    over it, the nearest-anchored records, the structural map, related and then the records are
+    cut, a closing note names what was cut, and the advice blocks are kept.
     """
     return _get_task_context_with_sync(files, entities, structure_budget, memory_budget, intent)
 
 
-@mcp.tool(annotations=_LOCAL_WRITE)
+@mcp.tool(annotations=_LOCAL_WRITE, output_schema=None)
 def query_structure(
     files: list[str] | None = None,
     entities: list[dict] | None = None,
@@ -2470,13 +3154,14 @@ def query_structure(
 
     Same ``files``/``entities`` shape as ``get_task_context``, and the same ``paths`` and
     ``seeds`` aliases. Never crashes: with no Graphify graph present, returns an explanatory
-    note instead of a map.
+    note instead of a map. ``budget_chars`` is capped at 40000, and so is the whole text (a cut
+    says so in a closing note).
     """
     reader, _ = _synced_reader()
     return _query_structure_impl(_get_store(), reader, files, entities, budget_chars)
 
 
-@mcp.tool(annotations=_LOCAL_WRITE)
+@mcp.tool(annotations=_LOCAL_WRITE, output_schema=None)
 def query_decisions(
     files: list[str] | None = None,
     entities: list[dict] | None = None,
@@ -2496,6 +3181,9 @@ def query_decisions(
 
     ``intent``: optional label for what asked (e.g. a skill name). Recorded for local
     statistics only; never affects what is returned.
+
+    ``budget_chars`` is capped at 40000, and so is the whole text (a cut says so in a closing
+    note and keeps the supersede hint).
     """
     reader, _ = _synced_reader()
     return _query_decisions_impl(_get_store(), reader, files, entities, budget_chars, intent)
@@ -2541,35 +3229,19 @@ def _telemetry_enabled() -> bool:
     return telemetry_enabled()
 
 
-# D2: this process has no idea what the host calls the current session; SessionStart wrote
-# it into `meta` before any tool ran.
+# The retrieval journal's freshness window for the stamp fallback (capture.resolve_session).
 _SESSION_KEY_TTL = timedelta(hours=12)
 
 
 def _session_key(store: Store) -> str | None:
     """The current host session id, or None when there is no trustworthy one.
 
-    Absent, unparsable, or older than the TTL all mean the same thing: record nothing.
-    `meta` never expires on its own, so without the TTL check a key left behind by the last
-    session would silently attribute every later CLI or pytest retrieval to it — including
-    handing seed events to a dead session that had only touches.
+    The host entry's middleware names the caller's own session (``config.CURRENT_SESSION``);
+    without an id the only fresh same-family stamp is used, else None. `_record` journals a
+    None under ``UNATTRIBUTED_SESSION`` rather than dropping the call.
+    see design/superpowers/specs/2026-10-11-session-attribution-design.md (D6, D11)
     """
-    raw = store.get_meta(TELEMETRY_SESSION_KEY)
-    if not raw:
-        return None
-    session_id, separator, stamp = raw.partition("|")
-    if not session_id or not separator:
-        return None
-    try:
-        written = datetime.fromisoformat(stamp)
-    except ValueError:
-        return None
-    if written.tzinfo is None:
-        return None
-    # A stamp ahead of the clock (negative age) is not a live session either.
-    if not timedelta(0) <= datetime.now(UTC) - written <= _SESSION_KEY_TTL:
-        return None
-    return session_id
+    return resolve_session(store, _SESSION_KEY_TTL)
 
 
 def _anchor_paths(store: Store, record_id: str) -> list[str]:
@@ -2619,24 +3291,25 @@ def _normalized_seeds(store: Store, seeds: list[str]) -> list[str]:
             continue
         if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
             continue
-        out.append(rel)
+        out.append(Path(rel).as_posix())  # anchors key on POSIX spelling, Windows included
     return out
 
 
 # The `intent` a `drill_down` render row is written under (usage-stats design D5/D11). A
-# drill-down delivers records and applies no budget, so its row carries `emitted` and zeros for
-# every budget field, and the report reads this label to keep those zeros out of the budget
-# figures. `stats/model.py` mirrors the literal (it imports nothing from here) and a test pins
-# the two together.
+# drill-down delivers records and applies no relevance budget (its output is capped by
+# budget_chars), so its row carries `emitted` and zeros for every budget field, and the report
+# reads this label to keep those zeros out of the budget figures. `stats/model.py` mirrors the
+# literal (it imports nothing from here) and a test pins the two together.
 DRILL_DOWN_INTENT = "drill_down"
 
 
 def _caller_intent(intent: str | None) -> str | None:
     """The label a budgeted lookup's caller passed, with the reserved one removed.
 
-    ``DRILL_DOWN_INTENT`` tells the report a row applied no budget. A caller that passed it to
-    ``get_task_context`` would have that lookup's real budget counts read as no budget at all,
-    so the label is not recorded for a caller; every other label passes through unchanged.
+    ``DRILL_DOWN_INTENT`` tells the report a row applied no relevance budget. A caller that
+    passed it to ``get_task_context`` would have that lookup's real budget counts read as no
+    budget at all, so the label is not recorded for a caller; every other label passes through
+    unchanged.
     """
     if intent is not None and intent.strip() == DRILL_DOWN_INTENT:
         return None
@@ -2664,8 +3337,9 @@ def _record(
 
     Two independent writes after that. The aggregate counters answer "which memory is dead"
     and need no session; the journal answers "did memory arrive when it was for" and is
-    useless without one, so a missing session key skips the journal alone and never the
-    counters. The journal write additionally drops `domain:<slug>` seeds (drill_down's,
+    useless without one, so a call no session can be attributed to is journaled under
+    ``UNATTRIBUTED_SESSION`` and the counters never depend on a session at all.
+    The journal write additionally drops `domain:<slug>` seeds (drill_down's,
     spec §4: "a seed with no file writes no event") — the aggregate keeps them, since
     `retrieval_seeds` has always counted that key (see `retrieval_seed_queries`'s pinned
     `{"domain:payments": 1}`) and only the journal's storage contract excludes pathless keys.
@@ -2689,7 +3363,13 @@ def _record(
     with contextlib.suppress(Exception):
         session_id = _session_key(store)
     if session_id is None:
-        return
+        # Not a reason to drop the call: a row under the sentinel keeps "memory was asked" true
+        # and lets stats say how many calls could not be attributed instead of calling the
+        # session that made them silent.
+        session_id = UNATTRIBUTED_SESSION
+    # One timestamp for the whole call, shared by its show rows and its render row, so stats
+    # counts an unattributed call once however many rows it wrote.
+    at = datetime.now(UTC).isoformat()
     with contextlib.suppress(Exception):
         shows = [
             (record_id, path)
@@ -2697,7 +3377,7 @@ def _record(
             for path in _anchor_paths(store, record_id)
         ]
         journal_seeds = [s for s in normalized_seeds if not s.startswith("domain:")]
-        store.record_retrieval_events(session_id, journal_seeds, shows)
+        store.record_retrieval_events(session_id, journal_seeds, shows, at=at)
     # Render accounting (2026-09-18-usage-stats-design.md, D5). Its own suppress, after the
     # two writes above, so a failure here costs only this journal — and only when a
     # TaskContext was in hand, so a caller with no render to account for writes no row.
@@ -2715,6 +3395,7 @@ def _record(
                 had_superseded = True
         store.record_render_event(
             session_id,
+            at=at,
             intent=intent,
             selected=ctx.selected,
             emitted=ctx.emitted,
@@ -2858,29 +3539,97 @@ def _format_proposed_decision_block(store: Store, d: Decision) -> str:
     return "\n".join(lines)
 
 
-def _list_proposed_impl(store) -> str:
+def _list_proposed_impl(store, budget_chars: int | None = None) -> str:
     """Pending decisions, facts, AND domains (§2/§4 review PINNED I2; facts layer
     2026-07-10), sectioned like ``sidegraph-ratify``'s bare listing (``cli.ratify_main``):
     "Decisions:" (each block carries its still-proposed supporting facts nested as
     ``  evidence: ...`` lines) then "Facts:" (standalone proposed facts -- ones NOT nested
-    under any decision above) then "Domains:", each printed only when non-empty."""
+    under any decision above) then "Domains:", each printed only when non-empty.
+
+    ``budget_chars`` (``None`` = no cap) bounds the text. A queue that fits renders as always.
+    A longer one starts with a line that counts the whole queue and what is shown, fills the
+    sections in order with the blocks that fit (a block is never cut; one that does not fit is
+    skipped and the fill goes on), and ends with the ids of the rest, in the order of the
+    blocks, so any of them can still be ratified.
+    see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D6)
+    """
     proposals = list(store.iter_proposed())
     domains = list(store.iter_domains(status=DomainStatus.PROPOSED))
     nested = _nested_fact_ids(store, proposals)
     standalone_facts = [f for f in store.iter_proposed_facts() if f.id not in nested]
     if not proposals and not domains and not standalone_facts:
         return "No proposed decisions, facts, or domains pending ratification."
-    sections: list[str] = []
-    if proposals:
-        sections.append(
-            "Decisions:\n"
-            + "\n\n".join(_format_proposed_decision_block(store, d) for d in proposals)
-        )
-    if standalone_facts:
-        sections.append("Facts:\n" + "\n\n".join(format_fact_proposal(f) for f in standalone_facts))
-    if domains:
-        sections.append("Domains:\n" + "\n".join(_format_domain_proposal_line(d) for d in domains))
-    return "\n\n".join(sections)
+    # (section, block text, id, label for the tail)
+    entries: list[tuple[str, str, str, str]] = [
+        ("Decisions", _format_proposed_decision_block(store, d), d.id, d.title) for d in proposals
+    ]
+    entries += [("Facts", format_fact_proposal(f), f.id, f.statement) for f in standalone_facts]
+    entries += [("Domains", _format_domain_proposal_line(d), d.domain_id, d.title) for d in domains]
+    separators = {"Decisions": "\n\n", "Facts": "\n\n", "Domains": "\n"}
+
+    def render(shown: list[tuple[str, str, str, str]]) -> str:
+        sections: list[str] = []
+        for name in ("Decisions", "Facts", "Domains"):
+            blocks = [e[1] for e in shown if e[0] == name]
+            if blocks:
+                sections.append(f"{name}:\n" + separators[name].join(blocks))
+        return "\n\n".join(sections)
+
+    whole = render(entries)
+    if budget_chars is None or len(whole) <= budget_chars:
+        return whole
+
+    totals = {n: sum(1 for e in entries if e[0] == n) for n in ("Decisions", "Facts", "Domains")}
+
+    def counts(of: dict[str, int]) -> str:
+        return f"{of['Decisions']} decisions, {of['Facts']} facts, {of['Domains']} domains"
+
+    # Reserve room for the head line and the tail; fill the blocks into the rest.
+    reserve = max(900, budget_chars // 8)
+    head_cap = len(f"Pending: {counts(totals)}. Showing {counts(totals)}.") + 2
+    room = budget_chars - reserve - head_cap
+    shown: list[tuple[str, str, str, str]] = []
+    left: list[tuple[str, str, str, str]] = []
+    used = 0
+    for entry in entries:
+        # Today's join cost: a blank line between blocks, a newline between domain lines.
+        cost = len(entry[1]) + 2 + len(entry[0]) + 3
+        if used + cost <= room:
+            shown.append(entry)
+            used += cost
+        else:
+            left.append(entry)
+    shown_counts = {n: sum(1 for e in shown if e[0] == n) for n in totals}
+    left_counts = {n: totals[n] - shown_counts[n] for n in totals}
+    head = f"Pending: {counts(totals)}. Showing {counts(shown_counts)}."
+    body = render(shown)
+    raise_it = (
+        f", or raise budget_chars (max {_LISTING_BUDGET_MAX})"
+        if budget_chars < _LISTING_BUDGET_MAX
+        else ""
+    )
+    ending = (
+        "Read one with retrieve_decisions(ids=[...]), list_facts(ids=[...]) or "
+        'list_domains(status="proposed"). Ratify what is shown, then call list_proposed '
+        f"again{raise_it}."
+    )
+    prefix = f"Not shown ({counts(left_counts)}): "
+    available = budget_chars - len(head) - len(body) - len(prefix) - len(ending) - 8
+    names: list[str] = []
+    for i, (_, _, id_, label) in enumerate(left):
+        item = f"{id_} {_clip(label)[:40]}"
+        more = len(left) - i - 1
+        tail_cost = len(item) + 2 + (len(f", and {more} more ids") if more else 0)
+        if tail_cost > available:
+            break
+        names.append(item)
+        available -= len(item) + 2
+    rest = len(left) - len(names)
+    if rest:
+        names.append(f"and {rest} more ids")
+    tail = prefix + ", ".join(names) + ".\n" + ending
+    out = "\n\n".join(part for part in (head, body, tail) if part)
+    return out if len(out) <= budget_chars else out[:budget_chars]
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
@@ -2965,16 +3714,22 @@ def propose_decisions(
     )
 
 
-@mcp.tool(annotations=_READ_ONLY)
-def list_proposed() -> str:
+@mcp.tool(annotations=_READ_ONLY, output_schema=None)
+def list_proposed(budget_chars: int = 24000) -> str:
     """List decisions, facts, AND domains awaiting ratification, human-readably.
 
     Sectioned like ``sidegraph-ratify``'s bare listing: a "Decisions:" section (each
     decision's still-proposed supporting facts nested under it as ``  evidence: ...``
     lines), a "Facts:" section for standalone proposed facts, then a "Domains:" section --
     each printed only when non-empty (see ``_list_proposed_impl``).
+
+    The text is at most ``budget_chars`` long (default 24000, max 40000). A longer queue is
+    shown in part: the first line counts the whole queue and what is shown, and the end lists
+    the rest by id (``ratify`` accepts an id you have not read). Ratify what is shown, then
+    call again, or raise ``budget_chars``.
     """
-    return _list_proposed_impl(_get_store())
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
+    return _hard_cap(_list_proposed_impl(_get_store(), budget), [], "Raise budget_chars.")
 
 
 def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
@@ -3213,36 +3968,38 @@ def _add_domain_impl(
     """Testable core for add_domain (§4.3, manual path). Always lands `status=proposed` —
     manual authoring is not an exception to the ratification gate (§4: "one gate, no
     exceptions")."""
-    preflight_direct(
-        slug, title, summary, parent_slug, path_prefixes, communities, seed_anchors, author
-    )
-    parent_id = None
-    if parent_slug is not None:
-        parent = store.find_domain_by_slug(parent_slug)
-        if parent is None:
-            raise SafeWriteError("parent_slug")
-        parent_id = parent.domain_id
+    with store._mutation():
+        preflight_direct(
+            slug, title, summary, parent_slug, path_prefixes, communities, seed_anchors, author
+        )
+        parent_id = None
+        if parent_slug is not None:
+            parent = store.find_domain_by_slug(parent_slug)
+            if parent is None:
+                raise SafeWriteError("parent_slug")
+            parent_id = parent.domain_id
 
-    # Title and summary are prose in a repo-committed store: same gate as propose_domains.
-    # The slug is an identifier and stays as given (redacting it would break lookup).
-    title, n1 = redact(title)
-    summary, n2 = redact(summary)
-    graph_version = reader.graph_version() if reader is not None else None
-    domain = Domain(
-        slug=slug,
-        title=title,
-        summary=summary,
-        parent_id=parent_id,
-        communities=communities or [],
-        path_prefixes=path_prefixes or [],
-        # raw MCP JSON dicts -> Descriptor; pydantic validates/coerces each on construction.
-        seed_anchors=[Descriptor(**d) for d in seed_anchors] if seed_anchors else [],
-        provenance=Provenance(source="manual", author=author, graph_version=graph_version),
-    )
-    store.add_domain(domain)
-    return _with_commit_hint(
-        store, {"domain_id": domain.domain_id, "status": domain.status.value, "redactions": n1 + n2}
-    )
+        # Title and summary are prose in a repo-committed store: same gate as propose_domains.
+        # The slug is an identifier and stays as given (redacting it would break lookup).
+        title, n1 = redact(title)
+        summary, n2 = redact(summary)
+        graph_version = reader.graph_version() if reader is not None else None
+        domain = Domain(
+            slug=slug,
+            title=title,
+            summary=summary,
+            parent_id=parent_id,
+            communities=communities or [],
+            path_prefixes=path_prefixes or [],
+            # raw MCP JSON dicts -> Descriptor; pydantic validates/coerces each on construction.
+            seed_anchors=[Descriptor(**d) for d in seed_anchors] if seed_anchors else [],
+            provenance=Provenance(source="manual", author=author, graph_version=graph_version),
+        )
+        store.add_domain(domain)
+        return _with_commit_hint(
+            store,
+            {"domain_id": domain.domain_id, "status": domain.status.value, "redactions": n1 + n2},
+        )
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
@@ -3326,51 +4083,52 @@ def _supersede_domain_impl(
     (that's what "supersede" means), but the new name/scope still needs a human `ratify`
     before it's TOC-visible.
     """
-    preflight_direct(
-        old_slug_or_id,
-        new_slug,
-        new_title,
-        new_summary,
-        path_prefixes,
-        seed_anchors,
-        parent_slug,
-        author,
-    )
-    old = _resolve_domain_ref(store, old_slug_or_id)
-    if old is None:
-        raise SafeWriteError("old_slug_or_id")
+    with store._mutation():
+        preflight_direct(
+            old_slug_or_id,
+            new_slug,
+            new_title,
+            new_summary,
+            path_prefixes,
+            seed_anchors,
+            parent_slug,
+            author,
+        )
+        old = _resolve_domain_ref(store, old_slug_or_id)
+        if old is None:
+            raise SafeWriteError("old_slug_or_id")
 
-    parent_id = None
-    if parent_slug is not None:
-        parent = store.find_domain_by_slug(parent_slug)
-        if parent is None:
-            raise SafeWriteError("parent_slug")
-        parent_id = parent.domain_id
+        parent_id = None
+        if parent_slug is not None:
+            parent = store.find_domain_by_slug(parent_slug)
+            if parent is None:
+                raise SafeWriteError("parent_slug")
+            parent_id = parent.domain_id
 
-    new_title, n1 = redact(new_title)
-    new_summary, n2 = redact(new_summary)
-    graph_version = reader.graph_version() if reader is not None else None
-    new_domain = Domain(
-        slug=new_slug,
-        title=new_title,
-        summary=new_summary,
-        parent_id=parent_id,
-        path_prefixes=path_prefixes or [],
-        # raw MCP JSON dicts -> Descriptor; pydantic validates/coerces each on construction.
-        seed_anchors=[Descriptor(**d) for d in seed_anchors] if seed_anchors else [],
-        supersedes=old.domain_id,
-        provenance=Provenance(source="manual", author=author, graph_version=graph_version),
-    )
-    result = store.supersede_domain(old.domain_id, new_domain)
-    return _with_commit_hint(
-        store,
-        {
-            "domain_id": result.domain_id,
-            "status": result.status.value,
-            "supersedes": old.domain_id,
-            "redactions": n1 + n2,
-        },
-    )
+        new_title, n1 = redact(new_title)
+        new_summary, n2 = redact(new_summary)
+        graph_version = reader.graph_version() if reader is not None else None
+        new_domain = Domain(
+            slug=new_slug,
+            title=new_title,
+            summary=new_summary,
+            parent_id=parent_id,
+            path_prefixes=path_prefixes or [],
+            # raw MCP JSON dicts -> Descriptor; pydantic validates/coerces each on construction.
+            seed_anchors=[Descriptor(**d) for d in seed_anchors] if seed_anchors else [],
+            supersedes=old.domain_id,
+            provenance=Provenance(source="manual", author=author, graph_version=graph_version),
+        )
+        result = store.supersede_domain(old.domain_id, new_domain)
+        return _with_commit_hint(
+            store,
+            {
+                "domain_id": result.domain_id,
+                "status": result.status.value,
+                "supersedes": old.domain_id,
+                "redactions": n1 + n2,
+            },
+        )
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
@@ -3520,6 +4278,7 @@ def _list_domain_candidates_impl(
     min_members: int = 5,
     paths: list[str] | None = None,
     limit: int | None = None,
+    budget_chars: int | None = None,
 ) -> dict:
     """Testable core for list_domain_candidates (§1 design). Pure read: builds on
     ``collect_domain_candidates`` (the exact selection ``bootstrap_domains`` would write)
@@ -3531,6 +4290,12 @@ def _list_domain_candidates_impl(
     default (``DEFAULT_CANDIDATE_LIMIT``, finding B) are the outer ``list_domain_candidates``
     tool's job to apply/translate, so this "testable core" stays a thin, default-agnostic
     pass-through, same division of labor as ``collect_domain_candidates`` itself.
+
+    ``budget_chars`` (``None`` = no cap; the tool shell passes the clamped value) bounds the
+    serialized result: the candidates are kept in output order (groups by path, then
+    ``ungrouped``), the largest prefix that fits, never cutting one, and the totals are
+    recomputed over what is kept.
+    see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D5)
 
     Best-effort like every other MCP tool here: with no graph present, returns an
     all-empty shape (a ``"note"`` explains why) instead of erroring.
@@ -3579,7 +4344,7 @@ def _list_domain_candidates_impl(
     # finding B: `limit` truncates when it's set AND there were more significant
     # candidates than it let through -- independent of `already_claimed`, which only ever
     # narrows the (possibly already-limited) survivor set further, never the reverse.
-    truncated = limit is not None and stats.total_before_limit > limit
+    limit_cut = limit is not None and stats.total_before_limit > limit
     result = {
         "graph_version": reader.graph_version(),
         "total_candidates": stats.total,
@@ -3588,15 +4353,107 @@ def _list_domain_candidates_impl(
         "skipped": {"below_threshold": stats.below_threshold, "filtered": stats.filtered},
         "groups": groups_out,
         "ungrouped": ungrouped,
-        "truncated": truncated,
+        "truncated": limit_cut,
     }
-    if truncated:
-        result["note"] = (
-            f"showing the top {limit} of {stats.total_before_limit} significant candidates "
-            "(community-id order) -- widen with an explicit limit=N, limit=0 for the full "
-            "list, or narrow with min_members/paths"
+
+    def finish(out: dict, budget_cut: bool) -> dict:
+        """``out`` with the flags and the note that say which bound cut what."""
+        out["truncated"] = limit_cut or budget_cut
+        if budget_cut:
+            out["omitted_by_budget"] = stats.total - out["total_candidates"]
+        if limit_cut or budget_cut:
+            out["note"] = _candidates_note(
+                limit=limit,
+                limit_cut=limit_cut,
+                budget_cut=budget_cut,
+                significant=stats.total_before_limit,
+                after_limit=stats.total,
+                kept=out["total_candidates"],
+                at_max=budget_chars is not None and budget_chars >= _LISTING_BUDGET_MAX,
+            )
+        return out
+
+    if budget_chars is None:
+        return finish(result, False)
+    return _fit_candidates(result, budget_chars, finish)
+
+
+def _fit_candidates(result: dict, budget: int, finish) -> dict:
+    """``result`` cut to the largest prefix of its candidates (groups in order, then
+    ``ungrouped``) whose whole serialization, flags and note included (``finish`` adds them),
+    fits ``budget``. A candidate is never cut. ``total_candidates`` and each ``member_total``
+    are recomputed and empty groups dropped."""
+    groups = result["groups"]
+    flat = [("g", gi, c) for gi, g in enumerate(groups) for c in g["candidates"]]
+    flat += [("u", 0, c) for c in result["ungrouped"]]
+
+    def build(k: int) -> dict:
+        kept = flat[:k]
+        new_groups = []
+        for gi, g in enumerate(groups):
+            mine = [c for kind, i, c in kept if kind == "g" and i == gi]
+            if mine:
+                new_groups.append(
+                    {
+                        "path": g["path"],
+                        "member_total": sum(c["members"] for c in mine),
+                        "candidates": mine,
+                    }
+                )
+        out = dict(result)
+        out["groups"] = new_groups
+        out["ungrouped"] = [c for kind, _, c in kept if kind == "u"]
+        out["total_candidates"] = k
+        return finish(out, k < len(flat))
+
+    whole = build(len(flat))
+    if len(_dump(whole)) <= budget:
+        return whole
+    lo, hi = 0, len(flat) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len(_dump(build(mid))) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    return build(lo)
+
+
+def _candidates_note(
+    *,
+    limit: int | None,
+    limit_cut: bool,
+    budget_cut: bool,
+    significant: int,
+    after_limit: int,
+    kept: int,
+    at_max: bool,
+) -> str:
+    """The sentence that says which bound cut the candidates and how to narrow.
+    ``after_limit`` is what the limit left once the already-claimed communities are out."""
+    if limit_cut and budget_cut:
+        why = (
+            f"limit={limit} left {after_limit} unclaimed, the character budget kept {kept} of "
+            "those (they run by path, so later paths are the ones left out)"
         )
-    return result
+    elif budget_cut:
+        why = (
+            f"the character budget kept {kept} (they run by path, so later paths are the ones "
+            "left out)"
+        )
+    else:
+        why = f"limit={limit} cut the list (community-id order)"
+    text = (
+        f"showing {kept} of {significant} significant candidates: {why}. "
+        "Narrow with paths=[...] or min_members=..."
+    )
+    if budget_cut:
+        text += ", or raise budget_chars" if not at_max else ""
+        text += f" (max {_LISTING_BUDGET_MAX})" if not at_max else ""
+        text += ". limit=0 lifts the count limit, not the budget."
+    else:
+        text += ", or raise limit (limit=0 means all, still bounded by budget_chars)."
+    return text
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -3604,7 +4461,8 @@ def list_domain_candidates(
     min_members: int = 5,
     paths: list[str] | None = None,
     limit: int = DEFAULT_CANDIDATE_LIMIT,
-) -> dict:
+    budget_chars: int = 24000,
+) -> ToolResult:
     """Read-only projection of the bootstrap candidate machinery (§1 domain-onboarding
     design) — the machine half of the ``name-domains`` skill. WRITES NOTHING, EVER; safe to
     call repeatedly.
@@ -3621,19 +4479,20 @@ def list_domain_candidates(
     pre-narrow when wanted; the ``name-domains`` skill's default call omits both and lets
     the agent narrow in conversation instead.
 
+    The answer is one JSON object in one text block, bounded by ``budget_chars`` (default
+    24000, max 40000) as well as ``limit``: the candidates run by path, the largest prefix that
+    fits is kept, ``truncated`` is true and ``note`` says what cut and how to narrow
+    (``paths=[...]``, ``min_members``), ``omitted_by_budget`` counts what the budget left out.
+
     ``limit`` (finding B, scale-robustness hardening) defaults to 100 — the top 100
     significant communities, in deterministic community-id order, same ordering
     ``sidegraph-domains bootstrap`` applies its own ``--limit`` in. On a monorepo-scale
-    corpus the unbounded list is a ~276K-token dump (Airflow: 2,578 candidates); 100 is the
-    measured sweet spot (~10K tokens). Pass an explicit ``limit=N`` to widen it, or
-    ``limit=0`` for the full, unbounded list when you really want everything (the "all"
-    convention — mirrors ``sidegraph-domains bootstrap --limit 0``). When the effective
-    limit actually cuts candidates, the response's ``truncated`` is ``True`` and
-    ``total_significant`` names the FULL count so it's never mistaken for the whole graph
-    — narrow with ``min_members``/``paths`` instead, or widen ``limit``, rather than assume
-    this is everything. Note: re-running with the SAME default/explicit limit only ever
-    proposes the same community-id-sorted window (communities beyond it are never reached
-    until you widen).
+    corpus the unbounded list is a ~276K-token dump (Airflow: 2,578 candidates). Pass an
+    explicit ``limit=N`` for another count, or ``limit=0`` to lift the count limit (the "all"
+    convention — mirrors ``sidegraph-domains bootstrap --limit 0``); the budget still applies.
+    When the limit or the budget actually cuts candidates, the response's ``truncated`` is
+    ``True`` and ``total_significant`` names the FULL count so it's never mistaken for the
+    whole graph — narrow with ``min_members``/``paths`` rather than assume this is everything.
 
     Returns ``{"graph_version", "total_candidates", "total_significant", "truncated",
     "already_claimed", "skipped": {"below_threshold", "filtered"}, "groups": [{"path",
@@ -3661,9 +4520,15 @@ def list_domain_candidates(
     listed in ``groups``/``ungrouped``.
     """
     resolved_limit = None if limit == 0 else limit
-    return _list_domain_candidates_impl(
-        _get_store(), _load_reader(), min_members=min_members, paths=paths, limit=resolved_limit
+    result = _list_domain_candidates_impl(
+        _get_store(),
+        _load_reader(),
+        min_members=min_members,
+        paths=paths,
+        limit=resolved_limit,
+        budget_chars=max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars)),
     )
+    return ToolResult(content=_dump(result))
 
 
 def _list_domains_impl(store: Store, status: str | None = None) -> list[dict]:
@@ -3728,7 +4593,250 @@ def list_domains(status: str | None = None) -> list[dict]:
     return _list_domains_impl(_get_store(), status=status)
 
 
-def _drill_down_impl(store: Store, reader, domain_slug: str) -> dict:
+def _drill_hint(omitted: int, unlisted: int, *, limit: int, budget: int, k: int) -> str:
+    """Why a drill-down was cut and how to reach the rest: the bound that cut it is named, and
+    a bound already at its maximum is not offered."""
+    if k >= limit:
+        why = f"limit={limit} cut the list"
+        raise_it = (
+            f", or raise limit (max {_LISTING_LIMIT_MAX})" if limit < _LISTING_LIMIT_MAX else ""
+        )
+    else:
+        why = "the character budget cut the list"
+        raise_it = (
+            f", or raise budget_chars (max {_LISTING_BUDGET_MAX})"
+            if budget < _LISTING_BUDGET_MAX
+            else ""
+        )
+    text = (
+        f"{omitted} more decisions in this domain; {why}. Read them with "
+        f"retrieve_decisions(ids=[...]) (ids in omitted_ids), or narrow with "
+        f"retrieve_decisions(files=[...]){raise_it}."
+    )
+    if unlisted:
+        text += f" {unlisted} ids did not fit in omitted_ids: narrow with files=[...]."
+    return text
+
+
+_CLIP_MARK = "… [clipped: {n} more characters]"
+_IDENTITY_WIDTH = 200  # slug, title, and a subdomain's or member's text, as serialized
+
+
+def _width(text: str) -> int:
+    """The characters ``text`` takes inside a JSON string (quotes not counted)."""
+    return len(_dump(text)) - 2
+
+
+def _clip_to(text: str, width: int) -> tuple[str, int]:
+    """:func:`_clipped` and the number of characters of ``text`` it kept."""
+    if _width(text) <= width:
+        return text, len(text)
+    # The marker's own width does not depend on the count by more than its digits.
+    room = width - _width(_CLIP_MARK.format(n=len(text)))
+    used = kept = 0
+    for char in text:
+        w = _width(char)
+        if used + w > room:
+            break
+        used += w
+        kept += 1
+    return text[:kept] + _CLIP_MARK.format(n=len(text) - kept), kept
+
+
+def _clipped(text: str, width: int) -> str:
+    """``text`` cut so that it takes at most ``width`` characters once serialized, marker
+    included; the marker counts the characters left out. ``text`` itself when it fits."""
+    return _clip_to(text, width)[0]
+
+
+def _fit_prefix(sizes: list[int], room: int) -> int:
+    """How many leading items fit in ``room`` when item ``i`` takes ``sizes[i]`` (its
+    serialized size plus the comma): the longest prefix, from cumulative sizes."""
+    used = 0
+    for count, size in enumerate(sizes):
+        if used + size > room:
+            return count
+        used += size
+    return len(sizes)
+
+
+def _bound_fixed(result: dict, budget: int) -> str:
+    """Bound the part of a drill-down that is not decisions (domain, subdomains, members) so
+    that, serialized, it takes at most half of ``budget``, leaving the other half for the
+    decisions and their ids. Nothing changes when it already does. Otherwise, in order: the
+    identity fields (slug, title, subdomain and member text) are clipped to
+    :data:`_IDENTITY_WIDTH`, the summary to the room that is left, and what still does not fit
+    is listed from the front (the members first, then the subdomains), with
+    ``subdomains_omitted`` / ``members_omitted`` counts. Each clip carries a marker that counts
+    the characters left out. Returns the sentence for ``hint`` that says what was bounded, or
+    ``""``. Item sizes are measured once; no removal re-measures the answer.
+    # see design/superpowers/specs/2026-10-12-batch-panel-fixes.md (C1, round 2)
+    """
+    room = budget // 2
+
+    def size() -> int:
+        return len(_dump({k: v for k, v in result.items() if k not in ("decisions", "legend")}))
+
+    if size() <= room:
+        return ""
+    said: list[str] = []
+    domain, subs, members = result["domain"], result["subdomains"], result["members"]
+    for key in ("slug", "title", "parent_slug"):
+        value = domain.get(key)
+        if isinstance(value, str) and _width(value) > _IDENTITY_WIDTH:
+            domain[key] = _clipped(value, _IDENTITY_WIDTH)
+            said.append(f"the domain {key} was clipped")
+    for sub in subs:
+        for key in ("slug", "title", "summary"):
+            sub[key] = _clipped(sub[key], _IDENTITY_WIDTH)
+    members = result["members"] = [_clipped(m, _IDENTITY_WIDTH) for m in members]
+    summary = domain.get("summary") or ""
+    # What the answer takes without the summary, the subdomains and the members, plus a margin
+    # for the omission counts and the hint.
+    domain["summary"] = ""
+    result["subdomains"], result["members"] = [], []
+    base = size() + 700
+    result["subdomains"], result["members"] = subs, members
+    room_summary = max(300, room - base)
+    if _width(summary) > room_summary:
+        shown, kept = _clip_to(summary, room_summary)
+        said.append(
+            f"the domain summary was clipped ({len(summary) - kept} of "
+            f"{len(summary)} characters not shown)"
+        )
+        summary = shown
+    domain["summary"] = summary
+    left = room - base - _width(summary)
+    member_sizes = [len(_dump(m)) + 1 for m in members]
+    sub_sizes = [len(_dump(sub)) + 1 for sub in subs]
+    keep_members = _fit_prefix(member_sizes, left)
+    keep_subs = _fit_prefix(sub_sizes, left - sum(member_sizes[:keep_members]))
+    if keep_members < len(members):
+        result["members_omitted"] = len(members) - keep_members
+        said.append(f"{len(members) - keep_members} of {len(members)} members are not listed")
+    if keep_subs < len(subs):
+        result["subdomains_omitted"] = len(subs) - keep_subs
+        said.append(
+            f"{len(subs) - keep_subs} of {len(subs)} subdomains are not listed "
+            "(list_domains() names them)"
+        )
+    result["members"] = members[:keep_members]
+    result["subdomains"] = subs[:keep_subs]
+    if any(w.startswith("the domain ") and "clipped" in w for w in said):
+        said.insert(0, "the domain was shown truncated")
+    if not said:
+        said.append("long titles, summaries or member lines were clipped")
+    return "Bounded: " + "; ".join(said) + "."
+
+
+def _ensure_fits(result: dict, budget: int) -> None:
+    """The last check of a drill-down: when the serialized answer is still over ``budget``,
+    drop what is left in order of worth, saying so in ``hint``: the summary, the members, the
+    subdomains (the decisions are never dropped here). A no-op for an answer that fits."""
+    if len(_dump(result)) <= budget:
+        return
+    notes: list[str] = []
+
+    def over() -> bool:
+        return len(_dump(result)) + 200 > budget
+
+    if over() and result["domain"].get("summary"):
+        result["domain"]["summary"] = ""
+        notes.append("the domain summary was omitted")
+    if over() and result["members"]:
+        result["members_omitted"] = result.get("members_omitted", 0) + len(result["members"])
+        result["members"] = []
+        notes.append("the members were omitted")
+    if over() and result["subdomains"]:
+        result["subdomains_omitted"] = result.get("subdomains_omitted", 0) + len(
+            result["subdomains"]
+        )
+        result["subdomains"] = []
+        notes.append("the subdomains were omitted")
+    if notes:
+        old = result.get("hint")
+        text = "To fit budget_chars: " + "; ".join(notes) + "."
+        result["hint"] = f"{old} {text}" if old else text
+
+
+def _cut_drill_down(result: dict, decision_ids: list[str], limit: int, budget: int) -> list[str]:
+    """Cut ``result["decisions"]`` in place to what fits ``limit`` and ``budget`` and return the
+    ids of the decisions that stay (in lockstep with the lines). Nothing changes when all of
+    them fit. The fixed part (domain, members, subdomains, note) is charged against the budget
+    first, and bounded to half of it by :func:`_bound_fixed` when it is larger. A cut adds
+    ``decisions_total``, ``decisions_omitted``, ``omitted_ids`` (cut at the budget too, with
+    ``omitted_ids_unlisted``) and ``hint``, and keeps ``legend`` only if a shown line is
+    ``[drifted]``.
+    see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D4)
+    see design/superpowers/specs/2026-10-12-batch-panel-fixes.md (C1)
+    """
+    lines: list[str] = result["decisions"]
+    total = len(lines)
+    legend = result.get("legend")
+    bounded = _bound_fixed(result, budget)
+
+    def answer(k: int, listed: int | None = None) -> dict:
+        out = {key: v for key, v in result.items() if key not in ("decisions", "legend")}
+        out["decisions"] = []
+        if k < total:
+            ids = decision_ids[k:]
+            shown_ids = ids if listed is None else ids[:listed]
+            out["decisions_total"] = total
+            out["decisions_omitted"] = total - k
+            out["omitted_ids"] = shown_ids
+            if len(shown_ids) < len(ids):
+                out["omitted_ids_unlisted"] = len(ids) - len(shown_ids)
+            out["hint"] = _drill_hint(
+                total - k, len(ids) - len(shown_ids), limit=limit, budget=budget, k=k
+            )
+        if bounded:
+            out["hint"] = f"{out['hint']} {bounded}" if "hint" in out else bounded
+        if legend and any(_DRIFT_MARK in line for line in lines[:k]):
+            out["legend"] = legend
+        return out
+
+    taken = _take(
+        min(total, limit),
+        budget,
+        lambda i: len(_dump(lines[i])),
+        lambda k: len(_dump(answer(k))),
+    )
+    if taken >= total:
+        if bounded:
+            kept = answer(total)
+            kept["decisions"] = list(lines)
+            if legend and "legend" in kept:
+                kept["legend"] = legend
+            result.clear()
+            result.update(kept)
+            _ensure_fits(result, budget)
+        return list(decision_ids)
+    listed: int | None = None
+    if len(_dump(answer(taken))) > budget:
+        # Even with none of the decisions the ids do not fit: list as many as do.
+        lo, hi = 0, total - taken
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if len(_dump(answer(taken, mid))) <= budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        listed = lo
+    cut = answer(taken, listed)
+    cut["decisions"] = lines[:taken]
+    result.clear()
+    result.update(cut)
+    _ensure_fits(result, budget)
+    return list(decision_ids[:taken])
+
+
+def _drill_down_impl(
+    store: Store,
+    reader,
+    domain_slug: str,
+    limit: int | None = None,
+    budget_chars: int | None = None,
+) -> dict:
     """Testable core for drill_down (§5 Axis-1 operation).
 
     Records telemetry only on a found domain — an unknown slug renders no decision memory,
@@ -3739,15 +4847,21 @@ def _drill_down_impl(store: Store, reader, domain_slug: str) -> dict:
     The seed recorded is the domain itself (``domain:<slug>``, the same key convention
     ``domain:<slug>`` abstract entities already use elsewhere in this store) — a drill-down
     has no file/entity seeds the way get_task_context/query_decisions do.
+
+    With ``limit`` and ``budget_chars`` (the tool shell passes both) the decisions are cut
+    before anything is recorded, so the telemetry counts what was shown; without them the
+    answer is whole.
     """
     result = _drill_down(domain_slug, store, reader)
     decision_ids = result.pop("decision_ids", [])
     if result.get("found"):
+        if limit is not None and budget_chars is not None:
+            decision_ids = _cut_drill_down(result, decision_ids, limit, budget_chars)
         # A drill-down delivers records, so it writes a render row like any other lookup: the
         # report counts a session's showings from that journal, and a drill-down absent from
         # it would drop out of the count as soon as the session made an ordinary lookup too.
-        # It applies no budget, so the row carries the records returned and zeros elsewhere,
-        # under the reserved intent that keeps those zeros out of the budget figures.
+        # It applies no relevance budget, so the row carries the records shown and zeros
+        # elsewhere, under the reserved intent that keeps those zeros out of the budget figures.
         delivered = TaskContext(
             shown_ids=list(decision_ids), selected=len(decision_ids), emitted=len(decision_ids)
         )
@@ -3762,7 +4876,7 @@ def _drill_down_impl(store: Store, reader, domain_slug: str) -> dict:
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
-def drill_down(domain_slug: str) -> dict:
+def drill_down(domain_slug: str, limit: int = 25, budget_chars: int = 24000) -> ToolResult:
     """Walk one domain: its WHY-IT-EXISTS summary, its accepted subdomains (title +
     one-liner), a capped member sample (current communities ∪ path_prefixes), and its
     decisions (mistakes first) — the union, deduped, of decisions tagged to the
@@ -3771,6 +4885,16 @@ def drill_down(domain_slug: str) -> dict:
     imported ADR surfaces under the domain covering that doc's headings, even on a doc
     corpus where the file node hubs into a different community) — the Axis-1 counterpart to
     the flat SessionStart TOC (call this after spotting a domain there to go one level deeper).
+
+    The answer is one JSON object in one text block. ``decisions`` is cut at ``limit`` (default
+    25, max 100) or ``budget_chars`` (default 24000, max 40000), whichever comes first; the
+    rest of the domain (summary, subdomains, members) is kept whole while it takes up to half of
+    ``budget_chars``; a larger one is bounded: long text is clipped with a marker, then the
+    subdomains and members are listed from the front, with ``subdomains_omitted`` /
+    ``members_omitted`` counts and a ``hint``. When decisions are left out the result carries
+    ``decisions_total``, ``decisions_omitted``, ``omitted_ids`` (read them with
+    ``retrieve_decisions(ids=[...])``; ``omitted_ids_unlisted`` counts the ids that did not fit
+    even there) and a ``hint``.
 
     Returns ``{"found": True, "domain": {"slug", "title", "summary", "parent_slug",
     "status"}, "subdomains": [{"slug", "title", "summary"}, ...], "members": [rendered
@@ -3790,7 +4914,14 @@ def drill_down(domain_slug: str) -> dict:
     drift→supersede wave N3.)
     """
     reader, _ = _synced_reader()
-    return _drill_down_impl(_get_store(), reader, domain_slug)
+    result = _drill_down_impl(
+        _get_store(),
+        reader,
+        domain_slug,
+        limit=max(1, min(_LISTING_LIMIT_MAX, limit)),
+        budget_chars=max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars)),
+    )
+    return ToolResult(content=_dump(result))
 
 
 def _sync_anchors_impl(store: Store, reader: GraphifyReader | None, force: bool = False) -> dict:
@@ -4079,8 +5210,14 @@ _REGISTERED_CALLABLES = {
 }
 
 
-def main() -> None:
-    """Console-script entry point (``sidegraph-mcp``).
+def main(*, prepare: Callable[[FastMCP], None] | None = None) -> None:
+    """Host-neutral entry point (``python -m sidegraph.server``).
+
+    The ``sidegraph-mcp`` console script is ``sidegraph.host.mcp_entry:main``, which calls this
+    with a ``prepare`` that installs the session-binding middleware; run bare, no host
+    identity is known (session ids on writes stay null, journal rows say ``unattributed``).
+    ``prepare(mcp)`` is the one registration point and names no host.
+    see design/superpowers/specs/2026-10-11-session-attribution-design.md (D2)
 
     ``-h``/``--help`` prints the usage and exits before the server starts; the transport's
     stdin loop would otherwise wait on it. Other arguments are still ignored.
@@ -4093,6 +5230,8 @@ def main() -> None:
             "docs/reference/configuration.md.\n"
         )
         raise SystemExit(0)
+    if prepare is not None:
+        prepare(mcp)
     mcp.run()
 
 

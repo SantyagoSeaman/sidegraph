@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from pathlib import Path
 from time import monotonic as _monotonic
 from typing import TYPE_CHECKING, Any
@@ -136,8 +137,14 @@ def edit_candidate(
     fd, name = tempfile.mkstemp(prefix="sidegraph-bootstrap-", suffix=".json")
     path = Path(name)
     try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            with suppress(OSError):
+                os.close(fd)
+            raise
+        with handle:
+            os.fchmod(handle.fileno(), 0o600)
             if seed is not None:
                 handle.write(seed)
             else:

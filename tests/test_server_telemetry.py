@@ -141,7 +141,7 @@ def test_a_recording_failure_never_fails_the_retrieval(tmp_path, monkeypatch):
     assert "deadlock" in out
 
 
-def test_anchor_paths_counts_bindings_regardless_of_status(tmp_path):
+def test_anchor_paths_counts_bindings_regardless_of_status(tmp_path, current_session):
     """`_anchor_paths`'s own docstring pins that it must count every binding regardless of
     status: doctor's canonical resolution has no status field to filter on, so an
     implementation that filtered to live-only bindings would silently disagree with it
@@ -179,7 +179,7 @@ def test_anchor_paths_counts_bindings_regardless_of_status(tmp_path):
             record_id=d.id, entity_id=orphaned_entity.entity_id, tier=2, status="orphaned"
         )
     )
-    s.set_meta(TELEMETRY_SESSION_KEY, f"sess-orphan|{datetime.now(UTC).isoformat()}")
+    current_session("sess-orphan")
 
     out = _get_task_context_impl(s, r, ["trader/exec.py"], None, 4000, 6000)
 
@@ -188,11 +188,12 @@ def test_anchor_paths_counts_bindings_regardless_of_status(tmp_path):
     assert "trader/risk.py" in shown, "an orphaned binding's file must still be counted"
 
 
-def test_a_naive_session_key_timestamp_records_no_events(tmp_path):
+def test_a_naive_session_key_timestamp_records_no_events(tmp_path, current_session):
     """`_session_key`'s TTL check treats a naive (no-tzinfo) timestamp as untrustworthy —
     unexercised until now. Paired with the aware case below: only the aware key results in
     a journal entry for the same retrieval."""
     s, r, _d = _store_with_seed_mistake(tmp_path)
+    current_session(session_id=None)
     s.set_meta(TELEMETRY_SESSION_KEY, f"naive-sess|{datetime.now().isoformat()}")
 
     _get_task_context_impl(s, r, ["trader/exec.py"], None, 4000, 6000)
@@ -200,8 +201,9 @@ def test_a_naive_session_key_timestamp_records_no_events(tmp_path):
     assert s.retrieval_events("naive-sess") == []
 
 
-def test_an_aware_session_key_timestamp_records_events(tmp_path):
+def test_an_aware_session_key_timestamp_records_events(tmp_path, current_session):
     s, r, _d = _store_with_seed_mistake(tmp_path)
+    current_session(session_id=None)
     s.set_meta(TELEMETRY_SESSION_KEY, f"aware-sess|{datetime.now(UTC).isoformat()}")
 
     _get_task_context_impl(s, r, ["trader/exec.py"], None, 4000, 6000)
@@ -209,7 +211,7 @@ def test_an_aware_session_key_timestamp_records_events(tmp_path):
     assert s.retrieval_events("aware-sess") != []
 
 
-def test_a_future_session_key_timestamp_records_no_events(tmp_path):
+def test_a_future_session_key_timestamp_records_no_events(tmp_path, current_session):
     """A stamp ahead of the clock is not a live session: `_session_key` returns None and
     the retrieval journals nothing."""
     from datetime import timedelta
@@ -217,6 +219,7 @@ def test_a_future_session_key_timestamp_records_no_events(tmp_path):
     from sidegraph import server
 
     s, r, _d = _store_with_seed_mistake(tmp_path)
+    current_session(session_id=None)
     s.set_meta(
         TELEMETRY_SESSION_KEY, f"future-sess|{(datetime.now(UTC) + timedelta(hours=1)).isoformat()}"
     )

@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import os
 import sys
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -114,6 +116,41 @@ TELEMETRY_SESSION_KEY = "telemetry:session"
 # is the only link between sibling threads, which is what separates "how many tasks" from
 # "how many agents under one task" on that host.
 TELEMETRY_SESSION_GROUP_KEY = "telemetry:session_group"
+
+# One index-only row per session start: `telemetry:session:<session key>` = `<iso>|<family>`,
+# where family is `claude`, `codex` or `unknown` (host/hooks.py). The single legacy key above
+# cannot say which of several concurrent hosts wrote it; these rows can. The value starts with
+# the ISO timestamp so `Store.prune_meta_prefixes` expires them (it matches on that), which the
+# legacy `<id>|<iso>` value never satisfies.
+# see design/superpowers/specs/2026-10-11-session-attribution-design.md (D5)
+TELEMETRY_SESSION_STAMP_PREFIX = "telemetry:session:"
+
+# The journal key for a retrieval no session could be attributed to. A row kept under this
+# name is a call that happened; dropping it made `sidegraph-stats` call its session "touched
+# files without asking". Stats counts these rows as unattributed calls, never as a session.
+UNATTRIBUTED_SESSION = "unattributed"
+
+
+@dataclass(frozen=True)
+class SessionHint:
+    """What the host entry learned about the caller of the current MCP request.
+
+    ``session_id`` is the host's own id for the calling session (``None`` when the host did
+    not announce one); ``family`` is an opaque label of the host family the client named
+    (``None`` for a client Sidegraph does not know). Host-neutral on purpose: core reads this
+    and never imports ``sidegraph.host``.
+    see design/superpowers/specs/2026-10-11-session-attribution-design.md (D2)
+    """
+
+    session_id: str | None
+    family: str | None
+
+
+# Set by the host entry's middleware around each tool call; unset (``None``) for the CLI, the
+# importer and `python -m sidegraph.server`, which therefore write no session attribution.
+CURRENT_SESSION: ContextVar[SessionHint | None] = ContextVar(
+    "sidegraph_current_session", default=None
+)
 
 
 def telemetry_enabled() -> bool:

@@ -1,6 +1,7 @@
 ---
 name: import-adrs
-description: Use when a repo already has decision documents or recorded reasoning to seed the store from — "import our ADRs", "load the design docs into memory", "seed sidegraph from docs/adr", "импортируй наши ADR", or a fresh setup on a corpus with months of docstring rationale. Also reachable directly as /sidegraph:import-adrs. Drives sidegraph-import end to end: graph refresh first, dry-run first, triage the report with the human, gated real run, retrieval spot-check.
+description: >-
+  Use when a repo already has decision documents or recorded reasoning to seed the store from — "import our ADRs", "load the design docs into memory", "seed sidegraph from docs/adr", "импортируй наши ADR", or a fresh setup on a corpus with months of docstring rationale. Also reachable directly as /sidegraph:import-adrs. Drives sidegraph-import end to end: graph refresh first, dry-run first, triage the report with the human, gated real run, retrieval spot-check.
 ---
 
 # Import ADRs
@@ -8,9 +9,8 @@ description: Use when a repo already has decision documents or recorded reasonin
 Seed the decision store from what the team already wrote — a folder of ADR/spec/runbook
 markdown (`--docs` mode, a deterministic parser: no LLM, no API key) or the rationale
 nodes Graphify extracted from docstrings/comments (default mode) — instead of starting
-memory empty. CLI invocations below use bare names; in a repo without a Sidegraph
-checkout, run them as
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <name>`.
+memory empty. CLI commands below run through
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>` at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 ## Preflight (both modes)
 
@@ -23,7 +23,7 @@ checkout, run them as
 2. **Rebuild the graph right before importing:** `graphify update .`. A *missing* graph
    fails the whole run; a *stale* one (docs added since the last build) silently skips the
    new files as unanchorable.
-3. Initialize the store first if this repo was never set up (`sidegraph-init`; see
+3. Initialize the store first if this repo was never set up (`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init`; see
    `sidegraph:setup`) — import would otherwise create a fresh store at the default
    `.sidegraph` path, which may not be the one you meant.
 
@@ -44,8 +44,8 @@ checkout, run them as
 ## Always dry-run first
 
 ```bash
-sidegraph-import --docs docs/adr --dry-run     # docs mode
-sidegraph-import --dry-run                      # rationale mode
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-import --docs docs/adr --dry-run     # docs mode
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-import --dry-run                      # rationale mode
 ```
 
 Costs nothing, writes no records, and shows exactly what a real run would do. It does open

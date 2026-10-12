@@ -3,6 +3,12 @@
 These four checks prove the useful path without turning installation into a test project.
 Run them in the repository whose `.sidegraph/` you configured.
 
+Commands are written with the `uvx` prefix the plugin uses, so no Sidegraph install is needed
+(`@main` is a mutable ref: see
+[mutable development references](../getting-started/installation.md#mutable-development-references)).
+With the CLI installed ([Option A](../getting-started/installation.md#option-a--the-cli-on-your-path-pypi))
+you can drop the prefix and use the bare `sidegraph-*` names.
+
 ## Case 1 — Host wiring
 
 **Proves:** the MCP server and SessionStart hook point at this repository.
@@ -29,7 +35,7 @@ Ask the agent to record an accepted gotcha against a real file or symbol, then r
 context for the same anchor. Run:
 
 ```bash
-sidegraph-verify
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
 git status --short
 ```
 
@@ -63,8 +69,8 @@ record remains in the proposal block.
 
 ```bash
 graphify update .
-sidegraph-sync --check
-sidegraph-doctor
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync --check
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor
 git status --short
 ```
 

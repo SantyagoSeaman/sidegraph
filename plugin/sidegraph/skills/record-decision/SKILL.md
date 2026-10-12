@@ -1,6 +1,7 @@
 ---
 name: record-decision
-description: Use when something durable should be written into Sidegraph memory — "record a gotcha", "remember this decision", "note this lesson", "запиши это", "we should not forget this", or when the Stop-hook capture nudge fires at session end. Also reachable directly as /sidegraph:record-decision. The authoring craft — pick the right kind, fill rejected (the highest-value field), anchor to what the decision is actually about, and choose the right write path: add_decision (human-asked, immediate) vs propose_decisions (agent-initiated, gated). A pure fact with no choice made and no rejected — a benchmark, a limit, something trial-learned — belongs to sidegraph:record-fact instead; a decision backed by evidence stays here, with the evidence attached.
+description: >-
+  Use when something durable should be written into Sidegraph memory — "record a gotcha", "remember this decision", "note this lesson", "запиши это", "we should not forget this", or when the Stop-hook capture nudge fires at session end. Also reachable directly as /sidegraph:record-decision. The authoring craft — pick the right kind, fill rejected (the highest-value field), anchor to what the decision is actually about, and choose the right write path: add_decision (human-asked, immediate) vs propose_decisions (agent-initiated, gated). A pure fact with no choice made and no rejected — a benchmark, a limit, something trial-learned — belongs to sidegraph:record-fact instead; a decision backed by evidence stays here, with the evidence attached.
 ---
 
 # Record a decision
@@ -22,7 +23,7 @@ right write path, right `kind`, filled `rejected`, tight prose, on-target anchor
   accepted at write time when an opt-in `SIDEGRAPH_RATIFY_POLICY` admits it, the result's
   `ratified_by` then reading `auto:<policy>`, so don't tell the human it awaits review),
   tagged `[unratified]` in retrieval, for a human to accept later via
-  `sidegraph:ratify-decisions` / `sidegraph-ratify`.
+  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 **Never call `add_decision` on your own initiative.** Self-initiated writes always go
 through the proposal gate — the same gate every other Sidegraph write path follows (a human

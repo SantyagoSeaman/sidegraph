@@ -168,10 +168,11 @@ they intentionally do not.
 
 ## The public snapshot
 
-None of this runs against the GitHub repository you are reading this on, if you are reading
-it there. `sidegraph` on GitHub is a **published snapshot**, cut from a private development
-repository by an allowlist-only script. Every release replaces the snapshot's tree wholesale
-with exactly the paths that script names, nothing else. A `demo` branch carries the same
-snapshot plus a sample `.sidegraph/` decision store, so you can browse a real (if small)
-example of what the store looks like without running anything. See
+Release preparation happens in the private development repository; tagging and the publish
+workflow run in the public repository. `sidegraph` on GitHub is a **published snapshot**, cut
+from a private development repository by an allowlist-only script. Every release replaces
+the snapshot's tree wholesale
+with exactly the paths that script names, nothing else. When published, a `demo` branch carries
+the same snapshot plus a sample `.sidegraph/` decision store, so you can browse an
+example of the store without running anything. See
 [`CONTRIBUTING.md`](../../CONTRIBUTING.md) for what that means for a pull request here.

@@ -1,8 +1,12 @@
 # Quickstart
 
 This is one complete loop: build the graph, create the store, connect one host, record one
-anchored gotcha, and retrieve it in a new session. It assumes the package and Graphify are
-installed as described in [Installation](installation.md).
+anchored gotcha, and retrieve it in a new session. It assumes Graphify is installed as described in
+[Installation](installation.md). Commands are written with the `uvx` prefix the plugin uses, so
+no Sidegraph install is needed. With the optional CLI installed and kept updated
+([Option A](installation.md#option-a--the-cli-on-your-path-pypi)), the bare `sidegraph-*` names
+work too, and the text below uses them. (`@main` is a mutable ref; to pin it see
+[mutable development references](installation.md#mutable-development-references).)
 
 Run the shell commands from the repository that Sidegraph should remember.
 
@@ -10,7 +14,7 @@ Run the shell commands from the repository that Sidegraph should remember.
 
 ```bash
 graphify update .
-sidegraph-init
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
 ```
 
 `graphify update .` creates `graphify-out/graph.json`; Sidegraph reads it but never writes to
@@ -82,7 +86,7 @@ The agent should call `get_task_context` with that path or entity. The gotcha ap
 
 ```bash
 git status --short
-sidegraph-verify
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
 ```
 
 Commit the whole `.sidegraph/` directory (`git add .sidegraph`). Its own `.gitignore` already

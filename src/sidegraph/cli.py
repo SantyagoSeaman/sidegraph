@@ -2067,6 +2067,10 @@ def verify_main(argv: list[str] | None = None) -> int:
     return 2 if violations else 0
 
 
+# The skipped checks that read binding statuses, hence that a cold (not yet synced) index withholds.
+_STATUS_CHECKS = frozenset({"binding-status", "orphaned-records"})
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
     """``sidegraph-doctor`` — one-stop store health: strict verify + advisory curation.
 
@@ -2079,7 +2083,8 @@ def doctor_main(argv: list[str] | None = None) -> int:
       store outside any git repo is exit 1, never a violation).
     - **Advisory section**: ``doctor.curate`` — curation findings that never gate by
       default; ``--check`` escalates them to exit 2, mirroring ``sidegraph-sync
-      --check``. A skipped check (no usable index.db) affects neither exit code nor
+      --check``. A skipped check (no usable index.db, or binding statuses not yet computed
+      for the current graph) affects neither exit code nor
       cleanliness, even under ``--check``.
 
     ``--json`` prints ``{"clean", "violations", "findings", "skipped"}`` as one JSON
@@ -2207,7 +2212,11 @@ def doctor_main(argv: list[str] | None = None) -> int:
             index=index,
             host_checks=host_checks(StoreLocation(str(args.db), None)),
         )
-        statuses_known = index is not None and binding_statuses_computed(index)
+        try:
+            statuses_known = index is not None and binding_statuses_computed(index)
+        except sqlite3.Error:  # an unreadable index is a skipped check, never a crash
+            statuses_known = False
+        index_usable = index is not None
     finally:
         if index is not None:
             index.close()
@@ -2237,7 +2246,15 @@ def doctor_main(argv: list[str] | None = None) -> int:
         for f in report.findings:
             print(f"{f.code}  {f.path}  {f.detail}")
         for name in skipped:
-            print(f"{name} check skipped (no usable index.db — run sidegraph-sync)")
+            if index_usable and name in _STATUS_CHECKS:
+                # A status check skipped over a usable index can only be the cold case; the
+                # text names no cause (the flag has several setters).
+                print(
+                    f"{name} check skipped (binding statuses are not computed for the "
+                    "current graph — run sidegraph-sync)"
+                )
+            else:
+                print(f"{name} check skipped (no usable index.db — run sidegraph-sync)")
         # Informational lines (never findings, never the exit code, absent from --json):
         # time-to-ratify and the D5 auto-ratification audit. Computed in doctor.py; an
         # unusable record is skipped there, and any other error is a bug and propagates.

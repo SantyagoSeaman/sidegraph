@@ -1,7 +1,7 @@
 # Contributing
 
-Thanks for considering a contribution. The project is young and small — short, focused
-issues and patches land fastest.
+Contributions are welcome: bug reports, documentation improvements, tests, and code
+changes. For substantial changes, open an issue first to discuss the problem and scope.
 
 ## How this repository works
 
@@ -10,22 +10,21 @@ replaces its tree wholesale from the upstream working repo. That has one practic
 consequence for you:
 
 - **Issues are the best channel** — bug reports, feature requests and questions are read here.
-- **Pull requests are ported upstream, not merged here.** A merge commit on this repo would be
-  erased by the next release. Open the PR anyway if you have a patch: it will be reviewed here,
+- **Pull requests are ported upstream, not merged here.** A change applied only to this snapshot would not be
+  included in the next release tree. Open the PR anyway if you have a patch: it will be reviewed here,
   applied upstream with attribution, and it will arrive back in this repo with the next release.
 
 ## Development setup
 
 ```bash
 git clone https://github.com/SantyagoSeaman/sidegraph.git && cd sidegraph
-uv sync                        # runtime + dev dependencies (Python 3.13+)
+uv sync --locked               # runtime + dev dependencies (Python 3.13+)
 uv run pre-commit install      # once per clone — the lint gate runs before each commit
 uv run pytest tests/test_store.py -q -x --lf   # while editing: the touched file
 uv run pytest -m "not slow"   # broader pre-push check: skips subprocess-heavy tests, still takes minutes
 uv run pytest -q               # full suite: run before a commit or PR, must be green; CI runs it again
 uv run pre-commit run --all-files   # lint + format + types + staged secrets
 ```
-
 
 The Gitleaks commit hook scans staged content even when all changed paths are excluded from
 formatting, including `.sidegraph/`. `--all-files` does not turn it into a committed scan.
@@ -55,6 +54,18 @@ than relying on inheriting it.
 That gate also runs secret detection (`gitleaks`, `detect-private-key`), GitHub Actions
 security/correctness checks (`zizmor`, `actionlint`), and `check-toml`/a `uv.lock`-in-sync
 check, alongside the usual formatting and type checks.
+
+## Preparing a pull request
+
+Describe the problem, the resulting behavior, and the checks you ran. Link the related
+issue when there is one, keep the patch focused, and update affected documentation.
+Use an area-prefixed imperative commit subject, for example `store: preserve history`,
+and sign off each commit as described below.
+
+CI runs the full suite on Linux/Python 3.13 and 3.14 and a selected native Windows
+core/MCP suite on both versions; see [platform coverage](docs/getting-started/installation.md#platform-coverage).
+If your change touches paths, permissions,
+subprocesses, or shell commands, describe any additional platform checks you performed.
 
 ## Ground rules
 

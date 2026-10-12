@@ -15,6 +15,51 @@ session start and says what needs fixing, to the person as well as to the model.
 `sidegraph-doctor` lists the same problems record by record, and `sidegraph-stats` leads with a
 `HEALTH` line. Both read the store without writing to it.
 
+## Windows plugin launch
+
+If the package CLI works but the plugin's MCP server cannot start or no memory appears
+at session start, check the [Windows setup boundary](../getting-started/installation.md#windows).
+The bundled MCP launchers require `sh`; the hook commands require a POSIX shell and its
+tools. These requirements remain even if the agent host itself runs in PowerShell.
+
+The Codex hooks also need PowerShell 7 on Windows: Codex runs each hook in PowerShell
+(`pwsh` if installed, else Windows PowerShell 5.1), and 5.1 cannot parse the commands. The
+symptom is no Sidegraph context at Codex session start, a "could not start" hook message, or
+nothing at all. Install PowerShell 7 (`winget install Microsoft.PowerShell`) and restart Codex.
+
+From the Windows environment used to launch the host, inspect executable discovery:
+
+```powershell
+Get-Command sh, bash, git, uv, uvx -ErrorAction SilentlyContinue |
+    Select-Object Name, Source
+```
+
+Missing entries identify PATH gaps. Check the resolved paths too: a `bash` that points
+to the Windows WSL launcher selects a different environment from Git Bash. The host
+must be able to spawn `sh` directly for the plugin MCP wrapper; its Bash tool's separate
+shell setting does not establish that. After changing PATH, restart the agent host so
+its subprocesses inherit the new environment. A GUI host may inherit a different PATH
+from a newly opened terminal.
+
+Inside the actual POSIX shell configured for hooks, check again:
+
+```bash
+command -v sh git uv uvx
+```
+
+All four should resolve in that environment. Reproduce a failed hook there with the
+[SessionStart diagnostic command](../reference/hooks.md#if-you-see-this-message),
+including its stdin redirection. POSIX assignments and `</dev/null` are not PowerShell
+syntax. Do not replace a missing shell by changing only `command` to `powershell`;
+the arguments and hook recipes would still use POSIX syntax.
+
+If tools resolve but hooks stay silent, check the host guide's
+[Claude plugin scope](../getting-started/claude-code-setup.md#option-a--plugin-recommended)
+or [Codex hook trust](../getting-started/codex-setup.md#verify), and verify that the MCP
+server and hooks resolve the same repository's store. Native plugin integration is not
+established by core/installed-wheel CI; WSL with a single Linux toolchain is the supplied
+complete-workflow route.
+
 ## The checks
 
 | Check | Severity | What it means | Shows in | Fix |
@@ -32,14 +77,16 @@ session start and says what needs fixing, to the person as well as to the model.
 | `store-uncommitted` | degraded | Store files nobody committed for a day | session line and notice, doctor, stats | commit `.sidegraph/` in a pull request |
 | `branch-only-records` | advisory | Records that exist only on unmerged branches | session line; a notice when a branch is a week old | merge the branch |
 | `version-skew` | advisory | The running package and the plugin manifest are different versions | session line and notice | update the plugin, or restart the session |
+| `path-skew` | advisory | A `sidegraph-*` on `PATH` is a different version than the session | session line and notice | `uv tool install sidegraph@latest`, or `uv tool uninstall sidegraph` |
 | `plugin-off-in-subdirectories` | advisory | Claude sessions started below the repository root run without the plugin | session line, doctor; a notice only with case (b) | enable it in `.claude/settings.local.json` at the root, or in user settings |
 
 Severity decides who is told. **Broken** means memory does not work now. **Degraded** means it
 works worse than it should, so you get a notice and `sidegraph-stats` shows it. **Advisory**
-means something worth knowing, which the model's line and the commands above report. Five
+means something worth knowing, which the model's line and the commands above report. Six
 advisory checks also send a notice, because the fix is yours to decide: a proposal queue that
 has waited 30 days, a missing refresh hook, records on a branch that has not moved for a
-week, a plugin and a package of different versions, and a plugin that is off in a nested
+week, a plugin and a package of different versions, a second Sidegraph on `PATH` of another version,
+and a plugin that is off in a nested
 directory with settings of its own.
 
 ### store-unreadable
@@ -120,8 +167,8 @@ unmeasured beyond two points.
 
 The statuses live in the derived index and are recomputed by a sync. Right after a reload, such as
 a `git pull` that changed a record, every anchor reads live until the next sync, so the check does
-not run then and a recorded notice is kept. `sidegraph-doctor` lists `orphaned-records` among its
-skipped checks until then; `sidegraph-sync` recomputes the statuses.
+not run then and a recorded notice is kept. `sidegraph-doctor` lists `binding-status` and `orphaned-records`
+among its skipped checks until then; `sidegraph-sync` recomputes the statuses.
 
 ### store-files-skipped
 
@@ -245,6 +292,25 @@ too). It compares numeric parts, so `0.10.0` is above `0.9.0`, and ignores a loc
 - **Where it runs.** The session surface only, and not at all without a plugin root, a manifest,
   or a manifest named `sidegraph` with a version. A session's Bash tool has no plugin root, so
   the setup skill cannot run it.
+
+### path-skew
+
+A `sidegraph-*` command on `PATH` is a second Sidegraph beside the plugin, typically a
+`uv tool install sidegraph`. That is fine while it stays current, but a `uv tool` install never
+updates itself: after a release it keeps answering your own shell commands at the version it was
+installed at, while the plugin's hooks, MCP server and skills run the session's version through
+`uvx`. Old copies can also lack commands or flags (`sidegraph-init --hooks`, `sidegraph-stats`).
+
+The SessionStart line names the command, the `PATH` directory and both versions. It reads the
+install's `sidegraph-<version>.dist-info` and never runs the command.
+
+- **You use only the plugin.** Remove it: `uv tool uninstall sidegraph`.
+- **You use the CLI on purpose.** Update it: `uv tool install sidegraph@latest` (also for a
+  pinned install, where `uv tool upgrade sidegraph` says "Nothing to upgrade"). The line is
+  shown whenever the versions differ, so a deliberately pinned or newer copy shows it daily.
+- **Not a `uv tool` install** (pipx, pip). The line says "upgrade or remove" without a command.
+- **Where it runs.** The session surface only. It does not run when no foreign `sidegraph-*` is
+  on `PATH`, when the install has no or two dist-infos, or on a Windows layout.
 
 ### plugin-off-in-subdirectories
 

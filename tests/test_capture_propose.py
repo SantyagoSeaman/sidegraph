@@ -251,16 +251,19 @@ def test_propose_commit_none_when_store_is_outside_any_repo_even_if_cwd_has_one(
 # -- D7.3: session_id fallback via TELEMETRY_SESSION_KEY -----------------------------------
 
 
-def test_propose_falls_back_to_telemetry_session_key_when_fresh(tmp_path):
+def test_propose_falls_back_to_telemetry_session_key_when_fresh(tmp_path, current_session):
     """A caller that passes no session_id (E8: author=None session=None on Stop-channel
     captures) gets the marker host.hooks.session_start now stamps unconditionally
     (design D7.3), when it's fresh (< 24h)."""
     from datetime import UTC, datetime
 
-    from sidegraph.config import TELEMETRY_SESSION_KEY
+    from sidegraph.config import TELEMETRY_SESSION_STAMP_PREFIX
 
     store = Store(tmp_path / "t.db")
-    store.set_meta(TELEMETRY_SESSION_KEY, f"session-xyz|{datetime.now(UTC).isoformat()}")
+    current_session(session_id=None)
+    store.set_meta(
+        f"{TELEMETRY_SESSION_STAMP_PREFIX}session-xyz", f"{datetime.now(UTC).isoformat()}|claude"
+    )
 
     results = propose([_draft(anchors=[])], store, None)  # no session_id passed
     assert results[0].status == "written"
@@ -268,12 +271,13 @@ def test_propose_falls_back_to_telemetry_session_key_when_fresh(tmp_path):
     assert d.provenance.session_id == "session-xyz"
 
 
-def test_propose_explicit_session_id_always_wins_over_fallback(tmp_path):
+def test_propose_explicit_session_id_always_wins_over_fallback(tmp_path, current_session):
     from datetime import UTC, datetime
 
     from sidegraph.config import TELEMETRY_SESSION_KEY
 
     store = Store(tmp_path / "t.db")
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"marker-session|{datetime.now(UTC).isoformat()}")
 
     results = propose([_draft(anchors=[])], store, None, session_id="explicit-session")
@@ -282,7 +286,7 @@ def test_propose_explicit_session_id_always_wins_over_fallback(tmp_path):
     assert d.provenance.session_id == "explicit-session"
 
 
-def test_propose_ignores_stale_telemetry_session_marker(tmp_path):
+def test_propose_ignores_stale_telemetry_session_marker(tmp_path, current_session):
     """A marker older than 24h is worse than no attribution at all (design D7.3) -- the
     fallback returns None, same as no marker existing."""
     from datetime import UTC, datetime, timedelta
@@ -291,6 +295,7 @@ def test_propose_ignores_stale_telemetry_session_marker(tmp_path):
 
     store = Store(tmp_path / "t.db")
     stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"stale-session|{stale}")
 
     results = propose([_draft(anchors=[])], store, None)
@@ -299,7 +304,7 @@ def test_propose_ignores_stale_telemetry_session_marker(tmp_path):
     assert d.provenance.session_id is None
 
 
-def test_session_id_fallback_ignores_a_marker_stamped_in_the_future(tmp_path):
+def test_session_id_fallback_ignores_a_marker_stamped_in_the_future(tmp_path, current_session):
     """A negative age (clock stepped back, or a malformed stamp) is not fresh: the
     fallback returns None rather than attributing a stale session id."""
     from datetime import timedelta
@@ -308,6 +313,7 @@ def test_session_id_fallback_ignores_a_marker_stamped_in_the_future(tmp_path):
 
     store = Store(tmp_path / "t.db")
     future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"future-session|{future}")
 
     assert capture._session_id_fallback(store) is None
@@ -316,14 +322,15 @@ def test_session_id_fallback_ignores_a_marker_stamped_in_the_future(tmp_path):
     assert store.get_decision(results[0].decision_id).provenance.session_id is None
 
 
-def test_session_id_fallback_keeps_a_recent_marker(tmp_path):
+def test_session_id_fallback_keeps_a_recent_marker(tmp_path, current_session):
     from datetime import timedelta
 
-    from sidegraph.config import TELEMETRY_SESSION_KEY
+    from sidegraph.config import TELEMETRY_SESSION_STAMP_PREFIX
 
     store = Store(tmp_path / "t.db")
     recent = (datetime.now(UTC) - timedelta(seconds=10)).isoformat()
-    store.set_meta(TELEMETRY_SESSION_KEY, f"recent-session|{recent}")
+    current_session(session_id=None)
+    store.set_meta(f"{TELEMETRY_SESSION_STAMP_PREFIX}recent-session", f"{recent}|claude")
 
     assert capture._session_id_fallback(store) == "recent-session"
 
@@ -336,10 +343,11 @@ def test_propose_no_telemetry_marker_leaves_session_id_none(tmp_path):
     assert d.provenance.session_id is None
 
 
-def test_propose_malformed_telemetry_marker_never_raises(tmp_path):
+def test_propose_malformed_telemetry_marker_never_raises(tmp_path, current_session):
     from sidegraph.config import TELEMETRY_SESSION_KEY
 
     store = Store(tmp_path / "t.db")
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, "not-the-expected-shape")
 
     results = propose([_draft(anchors=[])], store, None)
@@ -348,16 +356,20 @@ def test_propose_malformed_telemetry_marker_never_raises(tmp_path):
     assert d.provenance.session_id is None
 
 
-def test_propose_survives_get_meta_failure_during_session_id_fallback(tmp_path, monkeypatch):
+def test_propose_survives_get_meta_failure_during_session_id_fallback(
+    tmp_path, monkeypatch, current_session
+):
     """NIT-5 (code review): _session_id_fallback's own store.get_meta read wasn't actually
     guarded, despite the docstring's "never raises" claim -- a broken/locked store would
     have crashed the whole propose call over a best-effort attribution guess."""
     store = Store(tmp_path / "t.db")
+    current_session(session_id=None)  # a family and no id: the only state that reads the store
 
-    def boom(self, key):
+    def boom(self, *args):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(Store, "get_meta", boom)
+    monkeypatch.setattr(Store, "meta_with_prefix", boom)
     results = propose([_draft(anchors=[])], store, None)
     assert results[0].status == "written"
     d = store.get_decision(results[0].decision_id)

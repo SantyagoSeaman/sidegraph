@@ -1,6 +1,7 @@
 ---
 name: explain-why
-description: Use when someone asks why code or a design is the way it is — "why is this like this", "почему тут так", "who decided this", "what did we try before", "history of this symbol/file", "this looks wrong/legacy, can we clean it up" — or when you are about to conclude that existing code is a mistake. Also reachable directly as /sidegraph:explain-why. Routes the question to the decision store before grep or git archaeology: resolve the entity, walk its history newest-first including superseded records (the "tried and abandoned" chain IS the answer), and report current truth separately from how it got that way.
+description: >-
+  Use when someone asks why code or a design is the way it is — "why is this like this", "почему тут так", "who decided this", "what did we try before", "history of this symbol/file", "this looks wrong/legacy, can we clean it up" — or when you are about to conclude that existing code is a mistake. Also reachable directly as /sidegraph:explain-why. Routes the question to the decision store before grep or git archaeology: resolve the entity, walk its history newest-first including superseded records (the "tried and abandoned" chain IS the answer), and report current truth separately from how it got that way.
 ---
 
 # Explain why
@@ -42,7 +43,10 @@ accepted it yet — present it as a proposal, not settled memory.
 
 ## Walk the chain, don't stop at the newest record
 
-`get_entity_history` returns superseded records too — that's the point. The answer to a
+`get_entity_history` returns superseded records too — that's the point. On a long-lived
+entity the newest records come in full and the rest as short rows (`omitted_records`) or bare
+ids (`omitted_ids`): read one with `retrieve_decisions(ids=[...])` / `list_facts(ids=[...])`, or
+narrow with `status=["superseded"]`. The answer to a
 why-question has two layers, and the reader deserves both, clearly separated:
 
 1. **Current truth** — the live (`accepted`) records: the standing decision, its

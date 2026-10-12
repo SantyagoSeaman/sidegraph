@@ -48,7 +48,7 @@ Project-scoped, at `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -214,7 +214,9 @@ codex plugin add sidegraph@sidegraph
    that moved `Stop` onto the commit `SessionStart` recorded (below) changed the command once
    more, so approve it again once; the command no longer changes between releases. The release
    that added `SubagentStart` adds a hook definition: approve it once the same way, or subagents
-   start without the memory brief while `SessionStart` and `Stop` keep working.
+   start without the memory brief while `SessionStart` and `Stop` keep working. The release that
+   wrapped `SessionStart` in `sh -c` (the native Windows fix below) changes its command too:
+   approve the changed `SessionStart` hook once in `/hooks`.
 
 **How the plugin launches.** The MCP server and `SessionStart` run `uvx --from
 git+https://github.com/SantyagoSeaman/sidegraph.git@main`, a mutable branch (see
@@ -224,9 +226,17 @@ recorded in `${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit`, falling b
 when there is no valid record. A plugin pinned to a tag or commit ignores the record and
 launches its own ref. The file is the one the Claude Code plugin uses, so a release
 reaches a running session at the next `SessionStart` on the machine, not at its next `Stop`.
-Codex runs a hook through `$SHELL -lc`, and a fish login shell cannot parse the POSIX prefix
-that reads the file, so the `Stop` and `SubagentStart` commands are each wrapped in `sh -c '…'`. See
-[Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file).
+Codex runs a hook with the session's detected shell and `-c` (`$SHELL -lc` is only a fallback),
+and a fish shell cannot parse the POSIX prefix that reads the file, so every command in the
+manifest is wrapped in `sh -c '…'`. See
+[Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file). The wrapper matters most on
+native Windows, where Codex runs a hook in PowerShell: `pwsh -NoProfile -Command` when PowerShell 7
+is installed, else Windows PowerShell 5.1. That shell cannot parse `VAR=value command` or `$(...)`,
+so it only has to start `sh` (which Git for Windows provides). The outer `|| printf …` guard is
+POSIX syntax, so it applies on POSIX hosts; on Windows it resolves only if Git's `usr\bin` is on
+`PATH`. Windows PowerShell 5.1 cannot parse `||`, so the Codex hooks need PowerShell 7 on Windows.
+The guard exists twice, inside the wrapper for a failed launch and after it for a wrapper that
+cannot start, and both print the same message.
 
 This is the same repo-committed manifest set the Claude Code plugin uses, in Codex's own
 shape: `.agents/plugins/marketplace.json` at the repo root, and

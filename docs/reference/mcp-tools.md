@@ -8,6 +8,88 @@ use — see [`configuration.md`](configuration.md#store-path-resolution)) and a 
 [`configuration.md`](configuration.md) for both. See
 [mind model](../concepts/mind-model.md) for what `Domain`/`drill_down`/the thin tools are for.
 `sidegraph-mcp --help` (or `-h`) prints a short usage text and exits without starting the server.
+When a write omits `session_id`, the server fills `provenance.session_id` from the calling host
+(else the one fresh stamp of the same host family, else null); see
+[session attribution](hooks.md#session-attribution). `python -m sidegraph.server` runs the same
+server without host identity: the session id stays null and retrievals are journaled as
+`unattributed`.
+
+## Transport and protocol compatibility
+
+`sidegraph-mcp` is a local **stdio** server started by an MCP client. Standard input and
+standard output carry protocol messages; diagnostics go to standard error. The console
+entry point does not provide an HTTP listener or an HTTP authorization configuration.
+Configure the working directory and `SIDEGRAPH_DIR` for the repository the server should
+use; see [configuration](configuration.md#path-resolution-semantics).
+
+Git commands for provenance, initiative, ratification identity and graph checks receive
+EOF on standard input, keeping subprocesses separate from the MCP protocol stream.
+
+The development lockfile selects FastMCP 3.4.2 and MCP Python SDK 1.28.1. Supported package
+dependencies are `fastmcp>=3.4.2,<4` and `mcp>=1.24,<2`. The locked stack
+uses the `initialize` / `notifications/initialized` lifecycle and negotiates protocol
+versions through **2025-11-25**. The server reports Sidegraph's package version in
+`serverInfo.version`; that is separate from the negotiated protocol version.
+
+The [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
+also describes a newer discovery lifecycle. The locked stack does not implement
+`server/discover`: a client must support the legacy initialization flow to use this
+release. A request for a newer version during `initialize` can receive `2025-11-25`;
+the client must check that it supports the returned version.
+
+Use `tools/list` to discover the live input schemas and annotations. Annotations are
+hints to clients, not authorization controls. Tools that can adopt confirmed file moves
+during lazy synchronization advertise write access, even when their primary purpose is
+retrieval. Other reads may still create or rebuild the derived local index; do not use
+an annotation as a promise that the filesystem stays untouched.
+
+### Results, failures, and retries
+
+Most tools return JSON data through FastMCP. `retrieve_decisions`, `list_facts`,
+`get_entity_history`, `drill_down` and `list_domain_candidates` return their bounded JSON
+object in one text block without a structured duplicate. `get_task_context`,
+`query_structure`, `query_decisions`, and `list_proposed` also return text content only,
+with no output schema or `structuredContent`. Tools with structured
+results may include both `content` and `structuredContent`; clients should avoid
+counting or rendering those as separate answers.
+
+**Every listing tool is bounded.** The host replaces an answer over its limit with a notice
+(Claude Code: a warning above 10,000 tokens, an "exceeds maximum allowed tokens" notice above
+25,000 tokens by default, and a result saved to a file above 50,000 characters). So
+`retrieve_decisions`, `list_facts`, `get_entity_history`, `drill_down`, `list_domain_candidates`
+and `list_proposed` take `budget_chars` (default 24,000, maximum 40,000), the first four also
+`limit` (default 25, maximum 100; `list_domain_candidates` keeps its own `limit`), and each
+says what it left out and how to narrow. `get_task_context`, `query_structure`,
+`query_decisions` and `list_proposed` never return more than 40,000 characters: a cut names
+the sections it removed in a closing note, and the advice at the end of the answer (how the
+seeds were read, what is not in the graph, the supersede hint, the drift legend) is kept.
+`list_domains`, `verify_store`, `sync_anchors` and `find_entity` are sized by the number of
+domains, findings or name candidates, not by accumulated memory, and stay unbounded. In Codex
+the host-side knob is `mcp_servers.<id>.tools.<tool>.output_token_limit` (its default is not
+documented).
+
+Check both the MCP `isError` flag and each tool's documented result. Complete failures
+from `add_anchors` (unknown record) and `sync_anchors` (unavailable/unreadable graph)
+set `isError=true` and retain their structured error payloads. Proposal and ratification
+batches keep a successful envelope with per-item outcomes, including rejections;
+absence of `isError` alone does not establish that every item succeeded.
+
+### Invocation admission
+
+Each server process has one token bucket for `tools/call`: up to 200 calls in an initial
+burst, refilling at 100 calls per second, capped at 200. Concurrent requests share the
+bucket. A refused call immediately returns `isError=true` with
+`Tool call rate exceeded; wait briefly and retry.` before Store refresh or tool execution.
+There is no queue or sleep. Initialization, ping, and tool discovery remain available.
+This generous local policy bounds accidental invocation loops; it does not provide HTTP
+authentication or isolate clients by identity.
+
+A timeout, cancellation, or disconnected client does not establish that a write was
+rolled back. Synchronous work dispatched to a worker thread may finish after the caller
+stops waiting. Before retrying a write, inspect the store in a fresh call or session
+using the returned record ID when available, `list_proposed`, or the record listings.
+Blind retries can create another record. See [safe write diagnostics](#safe-write-diagnostics)
+for recovery from an incomplete operation.
 
 ## Summary
 
@@ -18,20 +100,20 @@ use — see [`configuration.md`](configuration.md#store-path-resolution)) and a 
 | [`add_fact`](#add_fact) | Write one non-derivable fact directly, `status=accepted` | Mid-session, when a human asks to record a benchmark/limit/trial-learned fact now |
 | [`supersede_fact`](#supersede_fact) | Close an old fact, write its falsifying replacement | When a past fact is disproven or corrected |
 | [`retrieve_decisions`](#retrieve_decisions) | Filter decisions by status, kind, file, text or id (bounded) | Ad hoc "what's in memory" queries, audits |
-| [`list_facts`](#list_facts) | List all facts in the store, newest first | Ad hoc "what facts do we have" queries, audits |
+| [`list_facts`](#list_facts) | List facts, newest first (bounded, filterable) | Ad hoc "what facts do we have" queries, audits |
 | [`find_entity`](#find_entity) | Look up an entity_id by name (+ file_path) | Before `get_entity_history`, when you only have a name |
-| [`get_entity_history`](#get_entity_history) | List every decision *and* fact anchored to one entity | Following the history of one specific component |
+| [`get_entity_history`](#get_entity_history) | List every decision *and* fact anchored to one entity (bounded; the rest by short row or id) | Following the history of one specific component |
 | [`get_task_context`](#get_task_context) | Budgeted, task-scoped merge of memory + structure | Before/while editing specific files or entities (the main read path) |
 | [`query_structure`](#query_structure--query_decisions) | The structural-map half of `get_task_context`, alone | A cheap follow-up once you already have decision memory and just need the code map |
 | [`query_decisions`](#query_structure--query_decisions) | The decision-memory half of `get_task_context`, alone | A cheap follow-up once you already have the structural map |
-| [`drill_down`](#drill_down) | Walk one domain: summary, subdomains, members, decisions | After spotting a domain in the `SessionStart` TOC, to go one level deeper |
-| [`list_domain_candidates`](#list_domain_candidates) | Read-only, path-grouped naming candidates over unclaimed communities | The machine half of the `name-domains` skill, before proposing any domain |
+| [`drill_down`](#drill_down) | Walk one domain: summary, subdomains, members, decisions (bounded) | After spotting a domain in the `SessionStart` TOC, to go one level deeper |
+| [`list_domain_candidates`](#list_domain_candidates) | Read-only, path-grouped naming candidates over unclaimed communities (bounded) | The machine half of the `name-domains` skill, before proposing any domain |
 | [`list_domains`](#list_domains) | Full listing of every domain, any status, with lineage | "Show me all domains" — the `manage-domains` skill's general listing tool |
 | [`propose_decisions`](#propose_decisions) | Deterministic write pipeline for distilled drafts, plus attached/standalone facts | End of session, from the `Stop`-hook nudge |
 | [`propose_domains`](#propose_domains) | Deterministic write pipeline for domain drafts | End of session, when the agent recognized an unnamed area |
 | [`add_domain`](#add_domain) | Manually author a Domain | Naming an area directly, human- or agent-initiated |
 | [`supersede_domain`](#supersede_domain) | Close an old Domain, write its rename/re-scoped replacement | Renaming/re-scoping a domain, or freeing a mass-dropped community |
-| [`list_proposed`](#list_proposed) | Human-readable listing of pending decisions, facts, *and* domains | Before ratifying, in a session or in PR review |
+| [`list_proposed`](#list_proposed) | Human-readable listing of pending decisions, facts, *and* domains (bounded; the rest by id) | Before ratifying, in a session or in PR review |
 | [`ratify`](#ratify) | Accept/drop pending proposals of any kind (decisions, facts, domains) | Ratifying from within a session (CLI equivalent: `sidegraph-ratify`) |
 | [`ratify_decisions`](#ratify_decisions-deprecated) | Deprecated alias for `ratify` | Existing callers only — prefer `ratify` |
 | [`sync_anchors`](#sync_anchors) | Re-anchor the store against the current graph and report what happened | The diagnostic/heal path, after a `graphify update`; the `heal-anchors` skill's MCP-first path |
@@ -60,6 +142,10 @@ store and check `list_proposed` in the next session. Generic store exceptions, i
 `ValueError`, use this conservative remedy even when a particular refusal preceded a write:
 the error class alone cannot prove atomicity. Known controlled validation errors retain
 safe field/code help. A failure after a successful record write keeps its write-action status and reports a controlled stage/recovery message.
+
+A failed writer reservation reports that the Store is busy. An individual refused
+mutation has not written, but an earlier step of the same tool call may have committed.
+Inspect the store before retrying; busy is not a whole-call rollback guarantee.
 
 Write exception guards prevent raw validation/generic causes in framework WARNING/ERROR
 logs. FastMCP DEBUG argument tracing occurs before middleware and remains outside this
@@ -447,7 +533,7 @@ retrieve_decisions(
     query: str | None = None,                # every word must occur in the record's text
     ids: list[str] | None = None,            # exact record ids
     limit: int = 25,                         # clamped to 1..100
-    budget_chars: int = 24000,               # clamped to 4000..60000
+    budget_chars: int = 24000,               # clamped to 4000..40000
 ) -> ToolResult                              # one text block holding a JSON object
 ```
 
@@ -490,7 +576,7 @@ exists. `newest` holds up to `limit` compact rows (exactly the five keys above),
   "decisions": [{"…": "full Decision.model_dump(mode='json') dicts"}],
   "unresolved_files": [],
   "unresolved_omitted": 0,
-  "hint": "27 more matched; the character budget cut the list. Narrow with files=[...] or query=..., or raise budget_chars (max 60000)."
+  "hint": "27 more matched; the character budget cut the list. Narrow with files=[...] or query=..., or raise budget_chars (max 40000)."
 }
 ```
 
@@ -502,7 +588,7 @@ The filters combine with AND:
   `deprecated` is listed by default.
 - **`files`** are read the way [`get_task_context`](#get_task_context) reads file seeds, so a
   basename, a path suffix, a letter-case slip, a `./` prefix, an absolute path inside the
-  repository and a directory all work: a path the code graph does not hold goes through the
+  repository or any linked worktree and a directory all work: a path the code graph does not hold goes through the
   [seed ladder](#seeds-are-read-tolerantly), the seeds through the node mapping and the entity
   descriptors, and every entity whose stored `file_path` equals a path read is added, which
   reaches a file that has since left the graph. A record matches when any of its bindings, of
@@ -519,7 +605,7 @@ a rank newest `valid_from` first, `id` descending as the tie-break. Records are 
 order while the answer stays within `budget_chars` and the count within `limit`. A record is
 never cut in the middle: the first one that does not fit ends the list, and if even the first
 does not fit, `decisions` is empty and the hint says so. `limit` is clamped to 1..100 and
-`budget_chars` to 4,000..60,000, so no argument turns the call back into a dump.
+`budget_chars` to 4,000..40,000, so no argument turns the call back into a dump.
 
 **`unresolved_files` and `hint`.** When `files` was given, `unresolved_files` lists the entries
 nothing could read, at most ten, and `unresolved_omitted` counts the rest. Each entry says why:
@@ -565,19 +651,40 @@ the way rendered text does.
 ## `list_facts`
 
 ```python
-list_facts(include_superseded: bool = False) -> list[dict]
+list_facts(
+    include_superseded: bool = False,
+    status: str | list[str] | None = None,   # proposed | accepted | superseded | rejected | deprecated
+    files: list[str] | None = None,          # repo-relative paths, read as get_task_context reads them
+    query: str | None = None,                # every word must occur in statement or source
+    ids: list[str] | None = None,            # exact fact ids
+    limit: int = 25,                         # clamped to 1..100
+    budget_chars: int = 24000,               # clamped to 4000..40000
+) -> ToolResult                              # one text block holding a JSON object
 ```
 
-The `retrieve_decisions` counterpart for the facts layer — previously a fact was only
-reachable indirectly, via `get_entity_history` (which itself silently dropped facts until
-the same wave that added this tool closed that gap too — see below). By default excludes
-`status in {superseded, rejected}`; pass `include_superseded=True` to see that history too.
-Facts carry no `kind`, so there is no mistakes-first ranking analogue — results are ordered
-newest first (`valid_from` descending, `id` descending as a deterministic tiebreak).
+The `retrieve_decisions` counterpart for the facts layer, bounded. A store with a few hundred
+facts used to produce an answer of well over 100,000 characters that the host replaced with a
+notice; the answer is now one JSON object:
 
-**Returns:** a list of full `Fact.model_dump(mode="json")` dicts (all fields, including
-`status`). The proposal policy applies here as it does to `retrieve_decisions`: a proposed
-fact outside the surfacing window, or any proposed fact in regulated mode, is omitted.
+```json
+{"matched": 165, "returned": 25, "omitted": 140,
+ "counts": {"status": {"accepted": 155, "proposed": 10}},
+ "facts": ["<full Fact dicts, newest valid_from first, id descending>"],
+ "hint": "140 more matched; limit=25 cut the list. Narrow with files=[...] or query=..., or raise limit (max 100)."}
+```
+
+Facts come back in full, newest first (facts carry no `kind`, so there is no mistakes-first
+order), added while the count stays within `limit` and the text within `budget_chars`. A fact is
+never cut in the middle. `hint` names the bound that cut the list, or says why it is empty.
+`counts` covers every fact the proposal policy lets through, history included, whatever the
+filters say. The default hides `superseded` and `rejected` facts; `include_superseded=True`
+shows them, and so does `status`, which takes one value or a list and replaces the default
+exclusion. Filters combine with AND; an empty one is ignored. `files` match facts anchored to
+those paths (read the way `get_task_context` reads file seeds; the graph is read without a lazy
+sync, so the tool stays read-only), and `unresolved_files` says, for each path nothing could
+read, why. `query` words must all occur in `statement` or `source`. `ids` returns those facts.
+The proposal policy applies as it does to `retrieve_decisions`: a proposed fact outside the
+surfacing window, or any proposed fact in regulated mode, is omitted.
 
 ## `find_entity`
 
@@ -613,24 +720,41 @@ None}, ...]}`. On no match: `{"found": false}`.
 ## `get_entity_history`
 
 ```python
-get_entity_history(entity_id: str) -> list[dict]
+get_entity_history(
+    entity_id: str,
+    status: str | list[str] | None = None,   # narrows the history
+    limit: int = 25,                         # clamped to 1..100
+    budget_chars: int = 24000,               # clamped to 4000..40000
+) -> ToolResult                              # one text block holding a JSON object
 ```
 
 `entity_id` is the durable `Entity.entity_id` (a ULID) — **not** a decision id and not an
 entity's display name; get one from `add_decision`/`supersede_decision`'s `entities` field or
 from [`find_entity`](#find_entity). Returns every decision **and** fact with any binding to
 that entity, newest (`valid_from`) first, regardless of binding status or decision/fact
-status.
+status (superseded records are the "tried before" chain, so they are included).
 
 The tool resolves every binding's record type in one read of the index, then loads each
 record with the getter its type names. A binding whose record exists in neither table stays
-skipped, same as before (`find_entity` reports such a binding as `"unknown"`). Previously this tool only ever called `get_decision`, so
-a fact-only binding vanished from an entity's history with no trace — that gap is closed.
+skipped (`find_entity` reports such a binding as `"unknown"`).
 
-**Returns:** a list of full `Decision`/`Fact` dicts (`model_dump(mode="json")`, all fields,
-including `status`), each with one additive key: `"record_type": "decision" | "fact"`, so a caller can
-tell them apart without re-deriving it. Existing consumers keyed on the pre-existing fields
-are unaffected.
+**Returns:** one JSON object, `{"entity_id", "matched", "returned", "omitted", "records",
+"omitted_records", "omitted_ids", "omitted_ids_unlisted", "hint"}`. An entity can hold
+hundreds of records, so the answer fills in this order:
+
+1. `records`: full `Decision`/`Fact` dicts (`model_dump(mode="json")`, all fields, with
+   `"record_type": "decision" | "fact"`), newest first, up to `limit` and up to half of
+   `budget_chars`, and at least one.
+2. `omitted_records`: every other record as a short row `{id, record_type, kind (null for a
+   fact), status, valid_from, title}` (the title or statement clipped to 80 characters, about
+   225 characters a row), as many rows as the rest of the budget holds.
+3. `omitted_ids`: the ids of the records that did not fit even as rows, newest first;
+   `omitted_ids_unlisted` counts ids the budget cut as well.
+
+Nothing is dropped silently: a superseded record is at worst a short row or a bare id. Read an
+omitted decision with `retrieve_decisions(ids=[...])` and an omitted fact with
+`list_facts(ids=[...])`, or narrow with `status=[...]` (for example `["superseded"]`).
+`omitted_records` and `omitted_ids` appear only when something was left out.
 
 ## `get_task_context`
 
@@ -671,6 +795,18 @@ only (see [`sidegraph-stats`](cli.md#sidegraph-stats)) and never affects what is
 The label `drill_down` is reserved for the server's own `drill_down` records and is not
 recorded when passed here.
 
+`structure_budget` and `memory_budget` are capped at 40,000 each (no floor), and the whole
+text at 40,000 characters, which is under Claude Code's 50,000-character limit. A normal call
+(4,000 and 6,000) is far below it. Over the cap, the nearest-anchored records are cut first,
+then the structural map, related memory and the records, always at a line boundary; a closing
+note says how many characters were not shown and from which sections, and the advice blocks (how
+the seeds were read, what is not in the graph, the supersede hint, the drift legend when a kept
+line is `[drifted]`) are kept. Only the records left in the text count as shown in the usage
+statistics: a record the cap cut is not journaled and not counted. Should the advice blocks alone
+exceed the cap (a seed path of tens of thousands of characters), they are cut from their front,
+the last lines of them are kept, and the closing note says so; a seed path in those
+blocks is shown clipped to its head and its file name.
+
 **Returns:** a Markdown string, or the literal `"No context found."` if nothing resolves.
 When a seed path (from `files`, or an entity's `file_path`) is not a file the code graph holds,
 the string ends with a `## Not in the code graph` block that says what happened to each such
@@ -684,14 +820,20 @@ path instead of leaving a bare empty answer:
   `graphify update .`), sit under an excluded path, or be a file type Graphify skips;
 - the same when the comparison could not be made: the reason, and the rebuild command if the
   files are new;
-- a path that does not exist, one that names nothing the graph holds, and one that points outside
-  the repository (`../x`, `.`, an absolute path elsewhere): check the path. No rebuild would
-  help, and no graph comparison is made for it.
+- a well-formed path that is a file in **another checkout** of the repository (a sibling linked
+  worktree) but not in the one the server reads: the block names the worktree and its branch. Such a path is
+  never guessed to be a same-named file of the graph;
+- a well-formed path that is a file in no checkout (it may be on a branch that is not checked out
+  anywhere, be misspelled, or be a directory): check the branch and the spelling;
+- a path that is not well-formed or points outside the repository (`../x`, `.`, an absolute path
+  elsewhere, a drive-letter path no checkout holds): check the path. No rebuild would help, and no
+  graph comparison is made for it.
 
 The paths named are the ones [the seed ladder](#seeds-are-read-tolerantly) could not read, in
 their normalised spelling: `./pkg/n.py`, `pkg//n.py` and an absolute path under the repository
-root all name `pkg/n.py`, so a file that exists but is not in the graph gets the graph-state
-advice above whichever way it was written. The `N` of "N of M seed paths" stays the number of
+root, or under another checkout of the repository, all name `pkg/n.py`, so a file that exists but is not in the graph gets the graph-state
+advice above whichever way it was written (a path that is a file only in another checkout gets
+the other-checkout sentence instead). The `N` of "N of M seed paths" stays the number of
 distinct paths as you wrote them.
 
 Nothing is added when the graph holds every seed, and then no git call is made. The block belongs
@@ -732,9 +874,11 @@ For a file path (`files`, or an entity's `file_path`):
 
 1. **Normalised.** Surrounding whitespace, a trailing `:12` or `:12:3`, a leading `./`, doubled
    slashes, `a/../b` and an absolute path under the repository root all read as the repo-relative
-   path: `` `./pkg/n.py` → read as `pkg/n.py` (normalised) ``. A file that is itself named like a
+   path (an absolute path or a `.worktrees/...` path under another checkout of the repository
+   reads as the path inside that checkout): `` `./pkg/n.py` → read as `pkg/n.py` (normalised) ``. A file that is itself named like a
    location (`notes:12`) is tried as written before the location is stripped.
-2. **A file on disk is never swapped for another.** A path that is a file in the repository, with
+2. **A file on disk is never swapped for another.** A path that is a file in the repository (this
+   checkout or any other checkout of it), with
    exactly that letter case, but not in the graph is not guessed to be a different file with the
    same name. It goes to the not-in-graph block.
    Letter case is compared exactly, even on a case-insensitive filesystem; a path that differs
@@ -810,7 +954,15 @@ No current record is anchored to `core/a.py`. Nearest anchored: `net/c.py` (link
   current record (accepted, or proposed and inside the proposal window, and not past its
   `valid_to`) to an entity in a file the graph holds. An orphaned binding, a rejected or
   superseded record (a superseded one shows only as a "tried, reverted" line) and a record on a
-  file the graph lacks do not count.
+  file the graph lacks do not make a file anchored. A seed path the graph does not hold that has
+  open records bound to it (a binding of any status, for instance a file that exists only in a
+  worktree) says so instead of "No current record is anchored":
+  `` `pkg/new.py` has 1 more record(s) bound to it through anchors the graph cannot resolve: retrieve_decisions(files=["pkg/new.py"]) lists them.``
+  followed by `Nearest anchored: …` when there are anchored files near it. Records the answer
+  already shows (in the main answer or in the nearest anchored records) are not counted, and a
+  path with none left gets no such line. For a path some of whose bound
+  records are among the nearest anchored records shown, the number reads "at least N", because
+  the hard cap on the text may still cut some of those.
 - **Candidates**, in this order: the anchored files that hold a node next to a node of the seed in
   the graph, the two with the most records; then the anchored files under the nearest ancestor
   directory that has any (at any depth), the two with the most records. Ties go by path. An ancestor
@@ -818,7 +970,7 @@ No current record is anchored to `core/a.py`. Nearest anchored: `net/c.py` (link
   repository's hub and is skipped, and the repository root is never used. The two lists are merged without repeats and cut to three
   files. A directory label is `same directory` or ``under `dir` ``.
 - **One sentence per seed**, at most three, then `… and N more seeds with no anchored record`. A
-  seed with nothing anchored near it gets no sentence. When the answer is empty the sentences go
+  seed with nothing anchored near it and no records bound to it gets no sentence. When the answer is empty the sentences go
   under `## Why this is empty`; otherwise under `## Nearest anchored`, after the other blocks.
 
 When the main answer has **no decision memory** (no mistake, decision, fact, related or
@@ -872,12 +1024,20 @@ asked, recorded for local statistics only, never affecting what is returned.
 the blocks that explain why: no `## How your seeds were read`, no `## Not in the code graph`, no
 `## Nearest anchored`. When a path might be spelled loosely, call `get_task_context` first.
 
+`query_structure` and `query_decisions` take `budget_chars` (capped at 40,000, no floor) and share the
+40,000-character cap on the whole text; a cut says so in a closing note that names the
+section and the hint to lower `budget_chars`.
+
 **Returns:** a Markdown string (or the tool-specific "nothing found" message above).
 
 ## `drill_down`
 
 ```python
-drill_down(domain_slug: str) -> dict
+drill_down(
+    domain_slug: str,
+    limit: int = 25,                         # clamped to 1..100
+    budget_chars: int = 24000,               # clamped to 4000..40000
+) -> ToolResult                              # one text block holding a JSON object
 ```
 
 Walk one [`Domain`](../concepts/mind-model.md): its WHY-IT-EXISTS summary, its accepted
@@ -928,6 +1088,22 @@ domain's own status (`proposed`/`accepted`/`dropped`; `find_domain_by_slug` neve
 `decisions` are pre-rendered lines, mistakes-first for `decisions`. `members` is `[]` with a
 `"note"` key when no graph reader is present; everything else is store-derived and unaffected.
 
+**Bounded.** A large domain holds well over a hundred decision lines, so `decisions` is cut at
+`limit` or, with the rest of the answer counted first, `budget_chars`. The rest (`domain`,
+`subdomains`, `members` (at most 20), `note`) is kept whole while it takes up to half of
+`budget_chars`, measured as serialized JSON; a larger one is bounded: slug, title and member and
+subdomain text are clipped to 200 characters and the summary to the room that is left, each with a
+marker that counts the characters left out, and what still does not fit is listed from the front
+(members first, then subdomains), with `members_omitted` / `subdomains_omitted` counts. The `hint`
+says what was bounded, says so when the domain itself (its slug, title or summary) was shown
+truncated, and points to `list_domains` for the subdomains left out. A last check drops the
+summary, then members and subdomains, if the answer is still over `budget_chars`.
+When decisions are left out the result adds
+`decisions_total`, `decisions_omitted`, `omitted_ids` (read them with
+`retrieve_decisions(ids=[...])`; cut at the budget too, in which case `omitted_ids_unlisted`
+counts the ids that did not fit) and a `hint`. The `legend` key is kept only when a shown line
+carries `[drifted]`. The usage statistics count only the decisions shown.
+
 **Unknown `domain_slug`:** `{"found": false, "candidates": [str, ...]}` — up to 10
 currently-accepted slugs to retry with (never a guess).
 
@@ -937,8 +1113,9 @@ currently-accepted slugs to retry with (never a guess).
 list_domain_candidates(
     min_members: int = 5,
     paths: list[str] | None = None,
-    limit: int = 100,
-) -> dict
+    limit: int = 100,                        # 0 = no count limit
+    budget_chars: int = 24000,               # clamped to 4000..40000
+) -> ToolResult                              # one text block holding a JSON object
 ```
 
 Read-only projection of the bootstrap candidate machinery — the machine half of the
@@ -957,12 +1134,19 @@ skill's default call omits both and lets the agent narrow in conversation instea
 **`limit` defaults to 100** — the top 100 significant communities, in deterministic
 community-id order (same order `sidegraph-domains bootstrap --limit` applies its own cap in).
 On a monorepo-scale corpus the unbounded list is a ~276K-token dump (a real cross-project
-finding: Apache Airflow returns 2,578 candidates at default settings); 100 is the measured
-sweet spot (~10K tokens). Pass an explicit `limit=N` to widen it, or `limit=0` for the full,
-unbounded list — the **"all" convention**, mirroring `sidegraph-domains bootstrap --limit 0`.
-Re-running with the same default/explicit limit only ever proposes the same community-id-sorted
-window; communities past it are never reached until you widen `limit` or narrow with
-`min_members`/`paths`.
+finding: Apache Airflow returns 2,578 candidates at default settings). Pass an explicit
+`limit=N` for another count, or `limit=0` to lift the count limit — the **"all" convention**,
+mirroring `sidegraph-domains bootstrap --limit 0`. `limit` keeps this meaning here (it is not
+clamped to 100).
+
+**`budget_chars` bounds the answer as well.** The candidates run by path (groups sorted by path,
+then `ungrouped`); the largest prefix whose serialization fits the budget is kept and a
+candidate is never cut. So the default call can show fewer than 100 candidates (about 58 of 747
+on one real corpus), and `limit=0` lifts the count limit, not the budget. When either bound
+cut anything, `truncated` is `true`, `omitted_by_budget` counts what the budget left out, and
+`note` names every cause that applied and how to narrow: `paths=[...]` (later paths are the
+ones left out), `min_members`, or a larger `budget_chars` (max 40,000). `total_candidates`
+and each group's `member_total` count what is in the response; empty groups are dropped.
 
 **Returns:** `{"graph_version": str | None, "total_candidates": int, "total_significant": int,
 "truncated": bool, "already_claimed": int, "skipped": {"below_threshold": int, "filtered": int},
@@ -974,8 +1158,8 @@ candidates THIS response actually includes (post-`limit`, post-`already_claimed`
 `total_significant` is the full significant-community count before `limit` truncated it AND
 before the separate `already_claimed` skip — the two can differ even when `truncated` is
 `false` (some of what `limit` let through was already claimed), but `truncated` specifically
-means "the limit itself cut candidates you never even got to see," and a `"note"` key spells
-out the widen/narrow options whenever that's the case. `anchor` is the community's god-node
+means "the limit or the budget cut candidates you never even got to see," and a `"note"` key
+spells out the narrowing options whenever that's the case. `anchor` is the community's god-node
 resolved to a durable
 name+file_path Descriptor — feed it back as a `Domain.seed_anchors` entry (via
 `propose_domains`/`add_domain`) instead of the volatile `community` id, which does not
@@ -1228,11 +1412,12 @@ pass to reconsider.
 ## `list_proposed`
 
 ```python
-list_proposed() -> str
+list_proposed(budget_chars: int = 24000) -> str   # clamped to 4000..40000
 ```
 
-Renders every `status="proposed"` decision, fact, *and* domain human-readably, sectioned
-"Decisions:", then "Facts:", then "Domains:" (each printed only when non-empty):
+Renders the `status="proposed"` decisions, facts, *and* domains human-readably, sectioned
+"Decisions:", then "Facts:", then "Domains:" (each printed only when non-empty). A queue that
+fits `budget_chars` is shown whole; a longer one is shown in part (see below):
 
 - **"Decisions:"** — one block per decision via `format_proposal` (id, kind, title,
   what/why, rejected, learned, provenance) **plus one indented `  evidence: <statement>
@@ -1251,6 +1436,16 @@ Renders every `status="proposed"` decision, fact, *and* domain human-readably, s
 Returns the literal string `"No proposed decisions, facts, or domains pending
 ratification."` if nothing is pending. Same renderer/sectioning the `sidegraph-ratify` CLI
 uses with no flags.
+
+**A long queue.** The text never exceeds `budget_chars`, and a block is never cut in the middle.
+When the queue does not fit, the first line counts it (`Pending: 31 decisions, 4 facts, 2
+domains. Showing 18 decisions, 0 facts, 2 domains.`), the sections fill in order with the
+blocks that fit (a block that does not fit is skipped and the fill goes on), and the end lists
+what is missing, in the order of the blocks, as `<id> <title head>` entries (then `and N more
+ids`). `ratify` accepts an id you have not read, so nothing is out of reach. The end also says how to read
+an item that is not shown (`retrieve_decisions(ids=[...])`, `list_facts(ids=[...])`,
+`list_domains(status="proposed")`). Ratify what is shown, then call again, or raise
+`budget_chars`.
 
 **Returns:** a plain-text string.
 

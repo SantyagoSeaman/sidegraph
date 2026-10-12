@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Collection
+from pathlib import Path
 
 # The documents a brief's file is read as, and how much of one is read: 52 of 303 documents in
 # the field study were larger than 64 KB, and the cap changed the records for 3 of 117 subagents.
@@ -75,7 +76,8 @@ def _exact(token: str, root_real: str, base: str | None = None) -> str | None:
         return None
     if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
         return None
-    return rel if os.path.isfile(target) else None
+    # anchors key on POSIX spelling; ``relpath`` returns backslashes on Windows
+    return Path(rel).as_posix() if os.path.isfile(target) else None
 
 
 class _Suffixes:

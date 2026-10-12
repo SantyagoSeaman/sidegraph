@@ -63,13 +63,16 @@ def test_add_fact_validates_supports(tmp_path):
 # -- I1 (R1 improvement wave §1): _add_fact_impl gains the D7.3 session_id fallback --------
 
 
-def test_add_fact_impl_falls_back_to_telemetry_session_key_when_fresh(tmp_path):
+def test_add_fact_impl_falls_back_to_telemetry_session_key_when_fresh(tmp_path, current_session):
     from datetime import UTC, datetime
 
-    from sidegraph.config import TELEMETRY_SESSION_KEY
+    from sidegraph.config import TELEMETRY_SESSION_STAMP_PREFIX
 
     store = Store(tmp_path / "srv.db")
-    store.set_meta(TELEMETRY_SESSION_KEY, f"session-xyz|{datetime.now(UTC).isoformat()}")
+    current_session(session_id=None)
+    store.set_meta(
+        f"{TELEMETRY_SESSION_STAMP_PREFIX}session-xyz", f"{datetime.now(UTC).isoformat()}|claude"
+    )
 
     out = _add_fact_impl(
         store, None, statement="s", source="src", anchors=[{"name": "a.py", "file_path": "a.py"}]
@@ -78,12 +81,13 @@ def test_add_fact_impl_falls_back_to_telemetry_session_key_when_fresh(tmp_path):
     assert store.get_fact(out["id"]).provenance.session_id == "session-xyz"
 
 
-def test_add_fact_impl_explicit_session_id_wins_over_fallback(tmp_path):
+def test_add_fact_impl_explicit_session_id_wins_over_fallback(tmp_path, current_session):
     from datetime import UTC, datetime
 
     from sidegraph.config import TELEMETRY_SESSION_KEY
 
     store = Store(tmp_path / "srv.db")
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"marker-session|{datetime.now(UTC).isoformat()}")
 
     out = _add_fact_impl(
@@ -98,7 +102,7 @@ def test_add_fact_impl_explicit_session_id_wins_over_fallback(tmp_path):
     assert store.get_fact(out["id"]).provenance.session_id == "explicit-session"
 
 
-def test_add_fact_impl_ignores_stale_telemetry_session_marker(tmp_path):
+def test_add_fact_impl_ignores_stale_telemetry_session_marker(tmp_path, current_session):
     """Window-expired twin (declared exception): passes before AND after."""
     from datetime import UTC, datetime, timedelta
 
@@ -106,6 +110,7 @@ def test_add_fact_impl_ignores_stale_telemetry_session_marker(tmp_path):
 
     store = Store(tmp_path / "srv.db")
     stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"stale-session|{stale}")
 
     out = _add_fact_impl(
@@ -189,23 +194,28 @@ def test_supersede_fact_impl_accepts_session_id_and_author_params(tmp_path):
     assert replacement.provenance.author == "alex"
 
 
-def test_supersede_fact_impl_falls_back_to_telemetry_session_key_when_fresh(tmp_path):
+def test_supersede_fact_impl_falls_back_to_telemetry_session_key_when_fresh(
+    tmp_path, current_session
+):
     from datetime import UTC, datetime
 
-    from sidegraph.config import TELEMETRY_SESSION_KEY
+    from sidegraph.config import TELEMETRY_SESSION_STAMP_PREFIX
 
     store = Store(tmp_path / "srv.db")
     old = _add_fact_impl(
         store, None, statement="old", source="src", anchors=[{"name": "a.py", "file_path": "a.py"}]
     )
-    store.set_meta(TELEMETRY_SESSION_KEY, f"session-xyz|{datetime.now(UTC).isoformat()}")
+    current_session(session_id=None)
+    store.set_meta(
+        f"{TELEMETRY_SESSION_STAMP_PREFIX}session-xyz", f"{datetime.now(UTC).isoformat()}|claude"
+    )
 
     new = _supersede_fact_impl(store, None, old_fact_id=old["id"], statement="new", source="src2")
 
     assert store.get_fact(new["id"]).provenance.session_id == "session-xyz"
 
 
-def test_supersede_fact_impl_explicit_session_id_wins_over_fallback(tmp_path):
+def test_supersede_fact_impl_explicit_session_id_wins_over_fallback(tmp_path, current_session):
     from datetime import UTC, datetime
 
     from sidegraph.config import TELEMETRY_SESSION_KEY
@@ -214,6 +224,7 @@ def test_supersede_fact_impl_explicit_session_id_wins_over_fallback(tmp_path):
     old = _add_fact_impl(
         store, None, statement="old", source="src", anchors=[{"name": "a.py", "file_path": "a.py"}]
     )
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"marker-session|{datetime.now(UTC).isoformat()}")
 
     new = _supersede_fact_impl(
@@ -228,7 +239,7 @@ def test_supersede_fact_impl_explicit_session_id_wins_over_fallback(tmp_path):
     assert store.get_fact(new["id"]).provenance.session_id == "explicit-session"
 
 
-def test_supersede_fact_impl_ignores_stale_telemetry_session_marker(tmp_path):
+def test_supersede_fact_impl_ignores_stale_telemetry_session_marker(tmp_path, current_session):
     """Window-expired twin (declared exception): passes before AND after."""
     from datetime import UTC, datetime, timedelta
 
@@ -239,6 +250,7 @@ def test_supersede_fact_impl_ignores_stale_telemetry_session_marker(tmp_path):
         store, None, statement="old", source="src", anchors=[{"name": "a.py", "file_path": "a.py"}]
     )
     stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    current_session(session_id=None)
     store.set_meta(TELEMETRY_SESSION_KEY, f"stale-session|{stale}")
 
     new = _supersede_fact_impl(store, None, old_fact_id=old["id"], statement="new", source="src2")

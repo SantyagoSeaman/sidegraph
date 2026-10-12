@@ -7,6 +7,139 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-12
+
+### Fixed
+
+- The Codex plugin's `SessionStart` hook now starts on native Windows. Its command used POSIX
+  syntax (`VAR=value command`, `$(...)`) that the PowerShell Codex runs hooks in cannot parse, so
+  Windows sessions showed "the SessionStart hook could not start" although the entry point itself
+  worked when run directly. It is now wrapped in `sh -c`, like the `Stop` and `SubagentStart`
+  hooks, and keeps the same message if the launch fails. Codex records trust per hook definition,
+  so approve the changed `SessionStart` hook once in `/hooks`. On Windows the Codex hooks need
+  PowerShell 7: Codex runs hooks in PowerShell, and Windows PowerShell 5.1 cannot run them.
+- On native Windows, `sidegraph-import` now imports the documents a profile covers: their
+  repo-relative paths were built with backslashes, so every in-repo document was counted as
+  outside the profile and nothing was imported. Record keys, anchor lookups and `provenance.ref`
+  now use the POSIX path Graphify's `source_file` carries, so a later re-import on another
+  platform does not duplicate records going forward, and a symlink that resolves outside the
+  repository is refused there as on other platforms. A document on another drive than the
+  repository no longer crashes the import. A store that already holds backslash-keyed records
+  from an earlier Windows `--any-doc` import gets a second, POSIX-keyed record for the same
+  document on re-import; supersede the old ones.
+- On native Windows, records are now delivered before a Read, Edit, Write or Grep, and before a
+  Bash `cat`, `sed`, `grep` or `rg`, and a subagent brief's files find their records. These paths
+  were built with backslashes (`src\sample.py`) and never matched the POSIX paths anchors use.
+  Touch events and the usage statistics now record POSIX paths, and `query_decisions(files=…)`
+  without a graph finds the file's records. A root-level file whose name starts with `..` is no
+  longer mistaken for a path outside the repository. Hooks now key a Windows session by its
+  transcript file name, as on other platforms, instead of the whole `C:\…` path, so hook showings,
+  touch events and capture state join the session the MCP server attributes calls to.
+- The 40,000-character hard cap on `get_task_context` and `query_decisions` now keeps its advice
+  blocks (how the seeds were read, what is not in the graph, the supersede hint) when a record's
+  text contains a `## ` line or a seed path is absurdly long, and the closing note names what was
+  cut. Seed paths echoed in those blocks are clipped to their head and file name. The usage
+  statistics count only the records left in the text after the cap, nearest-anchored records
+  included, and a worktree seed written as an absolute or nested path is journaled as the
+  repo-relative path the answer shows. A record spanning several lines is cut whole, never
+  without its id line, and `degraded` and `chars_used` describe the delivered text too. The
+  bound-record count of the nearest-anchored block reads "at least N" for a path whose bound
+  records include some of the nearest records shown.
+- `drill_down` bounds the whole answer, not only the decisions: a domain summary, titles and member
+  lines too long for `budget_chars` (measured as serialized JSON, a slug included) are clipped with a
+  marker, and subdomains or members that do not fit are left out with `subdomains_omitted` /
+  `members_omitted` counts and a `hint`.
+- `sidegraph-doctor` no longer crashes on an `index.db` that has `anchor_bindings` but no `meta`
+  table: such an index counts as having its binding statuses computed, so the checks run. Only an
+  unreadable index is reported as skipped.
+- `sidegraph-doctor` no longer reports zero `degraded-binding`/`orphaned-binding` findings while
+  binding statuses are not computed for the current graph (after an index reload and before the
+  next `sidegraph-sync`). It lists `binding-status` among the skipped checks, and the text
+  line for it and `orphaned-records` no longer blames a missing `index.db`.
+- `get_task_context` no longer calls a real file of a sibling linked worktree "not a
+  repo-relative path", guesses it to be a same-named graph file, or reads a nested worktree path
+  as the main checkout's file. It names the worktree and branch; a well-formed path that is a file in no checkout is "not a
+  file in this checkout", and only malformed paths keep the old sentence. A path with records
+  bound to a file the graph lacks and not shown elsewhere in the answer says so in the
+  nearest-anchored block, and
+  `retrieve_decisions(files=[...])` reads such a path exactly.
+- Attribute each MCP call to its own session instead of the last `SessionStart` of any host
+  in the repository. A write that omits `session_id` and a retrieval-journal row now carry the
+  calling host's session: `CLAUDE_CODE_SESSION_ID` for Claude Code (2.1.154 or later for exact
+  attribution, 2.1.163 or later to keep one id across `--resume`) and the request `threadId`
+  for Codex. A client that names its host but no session falls back to the one fresh stamp of
+  the same host family, else to nothing; a retrieval that cannot be attributed is journaled as
+  `unattributed` and `sidegraph-stats` reports those calls instead of counting their sessions
+  as silent. The `sidegraph-mcp` console script moves to `sidegraph.host.mcp_entry:main`
+  (the command name is unchanged; `python -m sidegraph.server` still starts the server, without
+  host identity). Hook commands set the new `SIDEGRAPH_HOST` variable. Hand-written
+  SessionStart wiring should add `SIDEGRAPH_HOST=claude` or `SIDEGRAPH_HOST=codex`.
+- Serialize Store state checks and publication behind a SQLite writer reservation,
+  including pending verdicts and server-side domain/fact preconditions. Busy admission
+  reports conservative inspect-before-retry guidance; file and index commits remain
+  separate operations.
+- Read graph/label JSON and Claude settings as UTF-8 independently of the default locale;
+  retry incomplete graph encodings and close temporary descriptors on setup failures.
+- Isolate noninteractive Git subprocess stdin from the MCP protocol pipe, resolving
+  native Windows first-write stalls in the installed-wheel stdio checks.
+- Set MCP `isError` for complete anchor-operation failures while retaining structured
+  payloads and partial-batch outcomes. Unknown tool names receive bounded discovery advice.
+
+### Changed
+
+- The Quickstart no longer installs the CLI for plugin users: its commands run through `uvx`,
+  as the plugin does. `uv tool install sidegraph` is documented as optional beside a plugin
+  and the usual setup without one, and its install now includes a mandatory update after every
+  release, `uv tool install sidegraph@latest`. The plugin's skills run every
+  `sidegraph-*` command at the session's version through `uvx` and never the copy on `PATH`.
+- The PreToolUse hook records what it hands over as showings: each record printed in a
+  file-read block (`inject`) or appended to a subagent's brief (`inject_brief`) is journaled
+  and bumps `retrieval_shows`. `sidegraph-stats` gains a `record showings delivered by hooks`
+  line (`activation.hook_showings` in `--json`), and `no recorded showing` and the doctor's
+  `never-surfaced` check count a record the hook printed as shown. Upgrade `sidegraph-stats`
+  together with the plugin: an older CLI reads the new journal rows as memory lookups.
+  The Agent-brief path, read-only until now, writes one transaction (up to the one-second busy
+  timeout under a held lock; a failed write never costs the brief).
+- Bound the output of five listing tools. `list_facts`, `get_entity_history`, `drill_down`,
+  `list_domain_candidates` and `list_proposed` now take `budget_chars` (default 24000,
+  maximum 40000) and say what was left out and how to narrow; `list_facts` gains `status`,
+  `files`, `query`, `ids` and `limit`, and `get_entity_history` gains `status` and `limit`.
+  Before, a store with a few hundred facts or a long-lived entity produced answers (up to
+  170,000 characters) that Claude Code replaced with an "exceeds maximum allowed tokens"
+  notice. **Return shapes change:** `list_facts` and `get_entity_history` return a JSON
+  object instead of a list; `drill_down` and `list_domain_candidates` add
+  `hint`/`truncated`-style fields (`omitted_ids`, `omitted_by_budget`); the first four are sent
+  once, as text, with no `structuredContent` copy. `list_domain_candidates` shows fewer
+  candidates by default (the budget cuts first; narrow with `paths`; `limit=0` still lifts the
+  count limit). `retrieve_decisions`'s maximum `budget_chars` falls from 60000 to 40000, below
+  Claude Code's 50,000-character limit, and `get_task_context`, `query_structure`,
+  `query_decisions` and `list_proposed` never return more than 40,000 characters (a cut says
+  so in a closing note and keeps the advice blocks).
+- Text-only MCP tools `get_task_context`, `query_structure`, `query_decisions`, and
+  `list_proposed` no longer advertise an output schema or duplicate text in
+  `structuredContent`. Machine-oriented dictionary results retain their schemas.
+- Bound supported dependency majors to FastMCP 3 (`>=3.4.2`) and MCP Python SDK 1 (`>=1.24`).
+
+### Added
+
+- A SessionStart advisory, `path-skew`, on macOS and Linux, when a `sidegraph-*` command on
+  `PATH` (outside the session's own environment) is a different version than the session, such
+  as a forgotten `uv tool install sidegraph`. It reads the install's dist-info and runs nothing.
+- Per-process MCP tool admission: burst 200, refill 100 calls/second, immediate refusal
+  before tool work; initialization, ping, and discovery remain available.
+- Native Windows x64 CI for Python 3.13/3.14, covering selected core/MCP contracts and
+  an exact installed-wheel CLI/stdio probe outside the checkout.
+
+### Documentation
+
+- Reorganize the README around setup, usage, limits, and contribution paths; remove
+  unsupported comparisons and clarify the runtime versus host data boundary.
+- Document tested platform coverage, the locked MCP protocol range, result error
+  handling, and recovery after a cancelled write. Align guides and reference pages
+  with the current release and stability policies.
+- Explain Windows plugin shell/PATH requirements, WSL setup, native MCP-only limits,
+  and the distinction between core/wheel CI and full agent-plugin validation.
+
 ## [0.11.1] — 2026-10-10
 
 ### Fixed

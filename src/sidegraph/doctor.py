@@ -489,7 +489,10 @@ def _check_binding_statuses(store_dir: Path) -> tuple[list[Finding], list[str]]:
     """degraded-binding / orphaned-binding: binding rows whose last RECORDED status has
     decayed. Statuses live only in the derived ``index.db`` (canonical bindings files
     carry identity, no status; sync flips statuses; a reload resets them to live), so
-    this check reads the index — strictly read-only — and reports "as of last sync".
+    this check reads the index — strictly read-only — and reports "as of last sync". While the
+    statuses are not computed (``volatile_stale``: reloaded or accepted-domain, not yet synced)
+    the check is SKIPPED: after a reload every binding reads live, so it would report a false
+    zero (the other causes leave the statuses possibly out of date).
 
     ``mode=ro`` cannot write and, on this store's rollback journal (TRUNCATE for writers), creates
     no sidecar files.
@@ -506,6 +509,15 @@ def _check_binding_statuses(store_dir: Path) -> tuple[list[Finding], list[str]]:
     try:
         conn = sqlite3.connect(f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True)
         try:
+            # A reload resets every status to live (other causes leave them possibly out of
+            # date) and a sync recomputes them; until then the
+            # rows below say nothing, so the check is withheld. A missing ``meta`` table (a
+            # hand-built index) counts as computed; any other error reaches the ``except`` below.
+            has_meta = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+            ).fetchone()
+            if has_meta and not integrity.binding_statuses_computed(conn):
+                return [], [BINDING_STATUS_CHECK]
             rows = conn.execute("SELECT record_id, entity_id, data FROM anchor_bindings").fetchall()
         finally:
             conn.close()
@@ -537,7 +549,8 @@ def _check_binding_statuses(store_dir: Path) -> tuple[list[Finding], list[str]]:
 
 def _check_never_surfaced(store_dir: Path) -> tuple[list[Finding], list[str]]:
     """never-surfaced: decisions anchored where people repeatedly work that have never once
-    reached a render (spec D5).
+    reached a render or been printed by the PreToolUse hook (spec D5; the hook bumps the same
+    ``retrieval_shows`` counter per printed block, so a record it delivered is not reported).
 
     Reads the index — strictly read-only, same ``mode=ro`` contract as
     ``_check_binding_statuses`` — because show and query counts are derived state and live

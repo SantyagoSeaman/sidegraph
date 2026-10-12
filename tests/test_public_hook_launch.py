@@ -188,6 +188,89 @@ def test_t1_session_start_keeps_the_branch_ref_and_no_prefix(manifest: Path) -> 
     assert "launch-commit" not in command and '"$u"' not in command
 
 
+_CODEX_SESSION_MESSAGE = (
+    "Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); "
+    "run the hook command in a terminal to see the error"
+)
+_CODEX_SESSION_FALLBACK = json.dumps(
+    {"systemMessage": _CODEX_SESSION_MESSAGE}, separators=(",", ":")
+)
+_CODEX_PUBLIC = [
+    m for m in _MANIFESTS if _host(m) == "codex" and _URL in _commands(m)["SessionStart"]
+]
+
+
+def test_the_scan_found_the_public_codex_session_start() -> None:
+    assert _CODEX_PUBLIC, "no Codex manifest launches SessionStart from the public URL"
+
+
+@pytest.mark.parametrize("manifest", _CODEX_PUBLIC, ids=lambda m: m.name)
+def test_codex_session_start_is_wrapped_in_sh_c(manifest: Path) -> None:
+    """On native Windows Codex runs a hook in a shell that cannot parse ``VAR=value command``,
+    so a bare POSIX line failed there while the ``sh -c``-wrapped Stop and SubagentStart ran.
+    The wrapper keeps the env assignments inside ``sh``, the launch URL occurs once (the
+    release script rewrites that literal), and a guard follows both the launch and the
+    wrapper, each printing the same message."""
+    command = _commands(manifest)["SessionStart"]
+    assert command.startswith("sh -c '")
+    outer = f" || printf '%s\\n' '{_CODEX_SESSION_FALLBACK}'"
+    assert command.endswith("'" + outer)
+    script = command[len("sh -c '") : -len("'" + outer)]
+    assert "'" not in script, "a single quote would end the sh -c argument"
+    assert script.startswith(CODEX_CD + " && SIDEGRAPH_HOST=codex ")
+    assert f"{ENV} uvx --from {_URL}" in script
+    assert command.count(_URL) == 1
+    assert script.endswith(' || printf "%s\\n" ' + json.dumps(_CODEX_SESSION_FALLBACK))
+
+
+_WRAPPED = re.compile(r"^sh -c '[^']*' \|\| printf( '[^']*')+$")
+
+
+@pytest.mark.parametrize("manifest", _CODEX_PUBLIC, ids=lambda m: m.name)
+def test_every_codex_hook_command_is_wrapped_in_sh_c(manifest: Path) -> None:
+    """Codex runs hooks in PowerShell on native Windows, which cannot parse POSIX syntax, so
+    each command is one ``sh -c '...'`` script plus the outer ``|| printf`` fallback."""
+    for event, command in _commands(manifest).items():
+        assert _WRAPPED.match(command), (
+            f"{manifest.name}: {event} is not sh -c wrapped: {command!r}"
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell semantics")
+@pytest.mark.parametrize("manifest", _CODEX_PUBLIC, ids=lambda m: m.name)
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash"])
+def test_codex_session_start_runs_under_a_posix_shell(
+    manifest: Path, shell: str, tmp_path: Path
+) -> None:
+    """The hook's stdout reaches Codex when uvx works; the same message is printed, byte for
+    byte, when it fails and when ``sh`` itself cannot start."""
+    if not Path(shell).exists():
+        pytest.skip(f"{shell} is not installed")
+    command = _commands(manifest)["SessionStart"]
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"HOME": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "cache")}
+
+    def run(stubs: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        bin_dir = tmp_path / f"bin{len(list(tmp_path.glob('bin*')))}"
+        bin_dir.mkdir()
+        for name, body in stubs.items():
+            _stub(bin_dir / name, body)
+        return _run_in_group(
+            [shell, "-c", command],
+            cwd=repo,
+            env={**env, "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"},
+            timeout=30,
+        )
+
+    ok = run({"uvx": 'printf \'{"host":"%s","dir":"%s"}\\n\' "$SIDEGRAPH_HOST" "$SIDEGRAPH_DIR"'})
+    assert ok.stdout == '{"host":"codex","dir":".sidegraph"}\n', ok
+    failed = run({"uvx": "exit 3"})
+    assert failed.returncode == 0 and failed.stdout == _CODEX_SESSION_FALLBACK + "\n", failed
+    no_sh = run({"uvx": 'printf "unreachable\\n"', "sh": "exit 127"})
+    assert no_sh.returncode == 0 and no_sh.stdout == _CODEX_SESSION_FALLBACK + "\n", no_sh
+
+
 # --- T2: run them ------------------------------------------------------------------------
 
 _SHELLS = [pytest.param("/bin/sh", id="sh")] + [

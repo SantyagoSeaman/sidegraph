@@ -279,6 +279,8 @@ def _states() -> dict[str, StatsReport]:
             graph=_stale_graph(commits_behind=None, stale_files=1)
         ),
         "no-render-journal": _report(activation=_act(render_journal=False)),
+        "hook-showings": _report(activation=_act(hook_showings=36)),
+        "one-hook-showing": _report(activation=_act(hook_showings=1)),
         "drill-down-only": _report(activation=_act(budget_journal=False)),
         "all-zero": zeros,
         "all-asks-empty": _report(
@@ -543,7 +545,7 @@ def test_a_missing_render_journal_prints_no_number_it_never_recorded():
 
 
 def test_a_window_with_only_drill_downs_states_the_budget_as_unrecorded_and_keeps_the_rest():
-    """A drill-down applies no budget, so its zeros are not "0 dropped by it". Its
+    """A drill-down applies no relevance budget, so its zeros are not "0 dropped by it". Its
     tried-and-abandoned flags are real, so that count stays."""
     text = render_text(_report(activation=_act(budget_journal=False, renders_with_abandoned=2)))
     assert "shortened" not in text and "dropped by it" not in text
@@ -592,6 +594,26 @@ def test_asked_and_got_nothing_is_its_own_line_apart_from_silence():
     assert "3 of those got nothing back" in joined
     assert "36 sessions touched files without asking" in joined
     assert "39 sessions" not in joined, "the failure mode must not be folded into the silent count"
+
+
+def test_t11_unattributed_calls_qualify_both_session_lines_and_are_counted():
+    rep = _report(activation=_act(unattributed_calls=12))
+    lines = _block(render_text(rep), "ACTIVATION")
+    joined = "\n".join(lines)
+    assert "memory was asked in at least 24 of 60 sessions" in joined
+    assert "up to 36 sessions touched files without asking" in joined
+    assert "(12 retrieval calls could not be attributed to a session)" in joined
+    assert all(len(ln) <= 80 for ln in lines)
+
+
+def test_t11_one_unattributed_call_is_singular():
+    rep = _report(activation=_act(unattributed_calls=1))
+    assert "(1 retrieval call could not be attributed to a session)" in render_text(rep)
+
+
+def test_t11_no_unattributed_call_leaves_the_lines_exactly_as_they_were():
+    joined = "\n".join(_block(render_text(_report()), "ACTIVATION"))
+    assert "at least" not in joined and "up to" not in joined and "attributed" not in joined
 
 
 def test_when_every_asking_session_got_records_the_line_says_so_rather_than_a_zero():
@@ -1311,3 +1333,27 @@ def test_json_for_an_empty_journal_keeps_its_zero_retained():
 def test_json_is_valid_for_every_state_the_text_can_print():
     for name, rep in _states().items():
         assert _data(rep)["repo"] == "demo", name
+
+
+# --- hook showings -----------------------------------------------------------------------
+
+
+def test_stats_text_names_the_hook_source():
+    """The line says what was counted (record showings), who delivered them (hooks), and that a
+    repeat counts; singular for one; absent at zero and with recording off."""
+    states = _states()
+    many = _block(render_text(states["hook-showings"]), "ACTIVATION")
+    line = "36 record showings delivered by hooks (repeats counted)"
+    assert line in [ln.strip() for ln in many]
+    shown = next(i for i, ln in enumerate(many) if "397 showings" in ln)
+    assert many[shown + 1].strip() == line, "directly under the showings line"
+    one = render_text(states["one-hook-showing"])
+    assert "1 record showing delivered by a hook" in one
+    assert "delivered by hooks" not in render_text(_report())
+    assert "delivered by" not in render_text(_report(telemetry_enabled=False))
+
+
+def test_json_carries_hook_showings_and_nulls_it_with_recording_off():
+    assert _data(_report(activation=_act(hook_showings=36)))["activation"]["hook_showings"] == 36
+    assert _data(_report())["activation"]["hook_showings"] == 0
+    assert _data(_report(telemetry_enabled=False))["activation"] is None

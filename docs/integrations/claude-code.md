@@ -313,7 +313,7 @@ Two mitigations, both config-level (no source change needed to use them):
   kept alongside it as harmless belt-and-braces: if a future Claude Code version does start
   honoring it, that's a free bonus, not something the plugin depends on today.
 - **Hooks**: hook command entries have no `cwd`/`env` fields, so the public command carries a
-  `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from
+  `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from
   git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start`. This is
   the content of `plugin/sidegraph/hooks/hooks.public.json`; the release renames it to
   `hooks.json`. The `Stop`, `PreToolUse` and `SubagentStart` commands start with the `launch-commit` read

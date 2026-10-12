@@ -326,8 +326,8 @@ def test_drill_down_decisions_carry_id_suffix(tmp_path):
 
 
 def test_drill_down_decisions_render_detailed_with_rejected_and_consequences(tmp_path):
-    # Review follow-up (Minor 2): drill_down is an unbudgeted, explicit "go deeper" call —
-    # it should render its decision lines at the generous/detailed tier (rejected +
+    # Review follow-up (Minor 2): drill_down is an explicit "go deeper" call with no relevance
+    # budget — it should render its decision lines at the generous/detailed tier (rejected +
     # consequences included), not the tight related one-liner that silently dropped them.
     store = Store(tmp_path / "t.db")
     _accept(store, _domain(store, "payments"))

@@ -13,7 +13,7 @@ task-aware retrieval + decision memory riding on the engine's entity graph.
 continuing participant in the project. A core feature must preserve, organize, or deliver
 accumulated project understanding. Document search by itself is not the product.
 
-Sidegraph is pre-1.0 (v0.11.1) — the full loop (capture, ratification, mistakes-first
+Sidegraph is pre-1.0 (v0.12.0) — the full loop (capture, ratification, mistakes-first
 retrieval, refactor-surviving re-anchoring, semantic docs layer, mind-model domains, and the
 facts evidence layer) ships and is exercised end-to-end, but interfaces may still move before
 a stable release. See
@@ -60,6 +60,8 @@ src/sidegraph/
 │   └── reader.py    #   GraphifyReader: reads graph.json (read-only input; no MCP)
 └── host/            # ── HOST SEAM ── Claude Code integration (SessionStart/Stop/PreToolUse/SubagentStart)
     ├── hooks.py     #   host-specific; portable core never reaches in here
+    ├── mcp_entry.py #   `sidegraph-mcp` entry: server + session-binding middleware
+    ├── session_identity.py  #   Claude/Codex session id from clientInfo, env, _meta
     └── subagent.py  #   SubagentStart: the memory brief for a starting subagent
 ```
 
@@ -103,6 +105,7 @@ uv run pytest -m "not slow"         # broader pre-push check: skips subprocess-h
 uv run pytest                      # full suite: once before a commit or PR (CI runs it again)
 uv run pre-commit run --all-files  # lint + format + types, exactly what CI runs
 uv run sidegraph-mcp               # run the decision MCP server (stdio)
+                                   # (`python -m sidegraph.server`: same server, no host identity)
 ```
 
 ## Working agreements

@@ -187,8 +187,8 @@ entity on `resolved`/`unresolved`, never on `ambiguous` — see
 [anchoring](../concepts/anchoring.md#graceful-degradation-ladder-resolved---ambiguous---orphaned)),
 so its bare Tier-1 community binding has nothing for sync to re-derive from and does not come
 back after a clone. A decision anchored *only* that way effectively loses its anchor across a
-fresh clone until a new capture touches the same reference again. This is a spec-inherited
-residual, not something this wave attempted to close.
+fresh clone until a new capture touches the same reference again. This is a current
+limitation of leafless community bindings.
 
 ## Reading and healing `stale decisions` warnings
 

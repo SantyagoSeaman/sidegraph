@@ -189,12 +189,18 @@ def test_a_reloaded_index_skips_the_orphan_check_and_says_so(tmp_path, capsys, m
 
     assert doctor_main(["--db", str(store_dir), "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc["skipped"] == ["orphaned-records", "graph"]
+    assert doc["skipped"] == ["binding-status", "orphaned-records", "graph"]
     assert ORPHANED_RECORD not in [f["code"] for f in doc["findings"]]
 
     assert doctor_main(["--db", str(store_dir)]) == 0
     out = capsys.readouterr().out
-    assert "orphaned-records check skipped (no usable index.db — run sidegraph-sync)" in out
+    cold = (
+        "check skipped (binding statuses are not computed for the current graph "
+        "— run sidegraph-sync)"
+    )
+    assert f"orphaned-records {cold}" in out
+    assert f"binding-status {cold}" in out
+    assert "no usable index.db" not in out
 
 
 def test_a_synced_index_does_not_skip_the_orphan_check(tmp_path, capsys, monkeypatch):

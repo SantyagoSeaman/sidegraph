@@ -97,6 +97,177 @@ jobs:
       - name: Run tests
         run: uv run pytest -q
 
+  sdk-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [minimum, latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Validate supported SDK bounds against installed wheel
+        env:
+          SDK_PAIR: ${{ matrix.sdk }}
+        run: |
+          uv build
+          wheels=(dist/sidegraph-*.whl)
+          test "${#wheels[@]}" -eq 1
+          wheel="$(realpath "${wheels[0]}")"
+          probe="$(realpath tests/wheel_smoke.py)"
+          environment="$RUNNER_TEMP/sidegraph-sdk-env"
+          uv venv --python 3.13 "$environment"
+          interpreter="$environment/bin/python"
+          constraints=()
+          if [ "$SDK_PAIR" = minimum ]; then
+            constraints=(fastmcp==3.4.2 mcp==1.24.0)
+          fi
+          uv pip install --python "$interpreter" "$wheel" pytest "${constraints[@]}"
+          mkdir -p "$RUNNER_TEMP/sdk-check"
+          cp -R tests "$RUNNER_TEMP/sdk-check/tests"
+          cd "$RUNNER_TEMP/sdk-check"
+          "$interpreter" -I "$probe" --wheel "$wheel" --python "$interpreter"
+          "$interpreter" -I -m pytest -q tests/test_server_result_contract.py \
+            tests/test_server_argument_names.py tests/test_security_write_boundary.py \
+            tests/test_security_mcp_write_diagnostics.py tests/test_server_invocation_policy.py
+          "$interpreter" -I -m pytest -q tests/test_session_attribution.py \
+            -k "not t9 and not t14_every and not t14_the_manual and not console_script_is_the_host_entry"
+
+  windows-core:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # Native core selection; Unix host/editor integrations remain covered on Linux.
+      - name: Record native environment
+        shell: pwsh
+        run: |
+          uv run python -c "import json,platform,importlib.metadata as m; print(json.dumps({'os':platform.system(),'python':platform.python_version(),'fastmcp':m.version('fastmcp'),'mcp':m.version('mcp')}))" > "$env:RUNNER_TEMP/windows-environment.json"
+          exit $LASTEXITCODE
+
+      - name: Test portable core and MCP contracts
+        shell: pwsh
+        run: |
+          $privateTests = @()
+          if (Test-Path "tools/desktop_e2e_probe.py") {
+            $privateTests = @("tests/test_desktop_e2e_probe.py", "tests/test_desktop_e2e_session.py")
+            # Later modules' tests join only when present; the snapshot excludes all of them.
+            foreach ($name in "appserver", "lifecycle", "preflight", "aggregate", "codex", "receipt") {
+              if (Test-Path "tests/test_desktop_e2e_$name.py") {
+                $privateTests += "tests/test_desktop_e2e_$name.py"
+              }
+            }
+          }
+          uv run pytest -q --junitxml="$env:RUNNER_TEMP/windows-core.xml" `
+            tests/test_store_mutation_guard.py `
+            tests/test_store_mutation_immediate.py tests/test_store_cross_process_mutations.py `
+            tests/test_portable_json.py tests/test_bootstrap_descriptor_cleanup.py `
+            tests/test_server_result_contract.py tests/test_server_invocation_policy.py `
+            tests/test_verify_git_stdin.py tests/test_seed_paths_portable.py `
+            tests/test_repo_relative_paths_portable.py `
+            $privateTests `
+            tests/test_installed_wheel_smoke.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate installed wheel over native stdio
+        id: windows-wheel
+        shell: pwsh
+        env:
+          WHEEL_PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          uv build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheels = @(Get-ChildItem dist/sidegraph-*.whl)
+          if ($wheels.Count -ne 1) { throw "Expected one wheel artifact" }
+          $wheel = $wheels[0].FullName
+          $probe = (Resolve-Path tests/wheel_smoke.py).Path
+          $environment = Join-Path $env:RUNNER_TEMP "sidegraph-wheel-env"
+          uv venv --python "$env:WHEEL_PYTHON_VERSION" "$environment"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $interpreter = Join-Path $environment "Scripts/python.exe"
+          uv pip install --python "$interpreter" "$wheel"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location "$env:RUNNER_TEMP"
+          & "$interpreter" -I "$probe" --wheel "$wheel" --python "$interpreter" |
+            Tee-Object -FilePath "$env:RUNNER_TEMP/windows-wheel.json"
+          exit $LASTEXITCODE
+
+      # Preserve the primary failure. Instrumentation uses new no-graph/no-repo scratch.
+      - name: Diagnose first installed-wheel write
+        if: ${{ !cancelled() && steps.windows-wheel.outcome == 'failure' }}
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $wheels = @(Get-ChildItem dist/sidegraph-*.whl)
+          if ($wheels.Count -ne 1) { throw "Expected one wheel artifact" }
+          $wheel = $wheels[0].FullName
+          $probe = (Resolve-Path tests/wheel_smoke.py).Path
+          $interpreter = Join-Path $env:RUNNER_TEMP "sidegraph-wheel-env/Scripts/python.exe"
+          Set-Location "$env:RUNNER_TEMP"
+          & "$interpreter" -I "$probe" --wheel "$wheel" --python "$interpreter" `
+            --diagnose-first-write
+          exit $LASTEXITCODE
+
+      - name: Sanitize test report
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          @'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          report = Path(os.environ['RUNNER_TEMP']) / 'windows-core.xml'
+          if report.exists():
+              tree = ET.parse(report)
+              for element in tree.getroot().iter():
+                  if element.tag in {'failure', 'error', 'skipped', 'system-out', 'system-err'}:
+                      element.attrib.clear()
+                      element.text = 'Details omitted; see the CI step output.'
+                  element.attrib.pop('file', None)
+                  element.attrib.pop('hostname', None)
+              tree.write(report, encoding='utf-8', xml_declaration=True)
+          '@ | uv run python -
+          exit $LASTEXITCODE
+
+      - name: Upload bounded Windows evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: windows-core-${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/windows-core.xml
+            ${{ runner.temp }}/windows-environment.json
+            ${{ runner.temp }}/windows-wheel.json
+          if-no-files-found: warn
+          retention-days: 7
+
   # Recipe 2 (docs/guides/ci-cd-maintenance.md) on our own store: catch a hand-edited or
   # history-rewritten record no MCP tool would produce. Diffs against the PR's merge base
   # (never a moving branch name — see the recipe for why). Skips cleanly when the checkout

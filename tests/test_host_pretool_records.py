@@ -758,11 +758,11 @@ def test_a_lock_error_on_the_second_claim_still_delivers_the_first_file(
     real = HotIndex.claim_file
     calls: list[str] = []
 
-    def claim_then_lock(self, prefix, rel_path, value, cap):
+    def claim_then_lock(self, prefix, rel_path, value, cap, **kwargs):
         calls.append(rel_path)
         if len(calls) == 2:
             raise sqlite3.OperationalError("database is locked")
-        return real(self, prefix, rel_path, value, cap)
+        return real(self, prefix, rel_path, value, cap, **kwargs)
 
     monkeypatch.setattr(HotIndex, "claim_file", claim_then_lock)
     out = _run(monkeypatch, capsys, project, _payload("Bash", command="cat a.py b.py c.py"))

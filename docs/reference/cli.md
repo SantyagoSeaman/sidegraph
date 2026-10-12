@@ -39,6 +39,23 @@ store in a nested directory (`SIDEGRAPH_DIR=.config/sidegraph`) has `.config` as
 so pair it with an absolute `SIDEGRAPH_GRAPH` or `--graph` (the MCP server needs the absolute `SIDEGRAPH_GRAPH`). The MCP server's `sync_anchors` and lazy sync follow the same default rule (see [`configuration.md`](configuration.md#path-resolution-semantics)). `sidegraph-bootstrap` resolves
 both `--db` and `--graph` against its own `--root` instead.
 
+## Running the CLIs beside the plugin
+
+The plugin's MCP server and hooks run the Sidegraph at
+`git+https://github.com/SantyagoSeaman/sidegraph.git@main`. A plugin skill that runs a
+`sidegraph-*` command runs it the same way, `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, and never the copy on `PATH`: a
+persistent `uv tool install sidegraph` is frozen at the version it was installed at and can lack
+commands or flags the plugin's skills use. In a Sidegraph checkout (the session's working
+directory holds a `pyproject.toml` named `sidegraph`) run `uv run --project <checkout> <command>`
+instead. Installing the CLI beside the plugin is optional
+([the CLI on your PATH](../getting-started/installation.md#option-a--the-cli-on-your-path-pypi)).
+Whoever installs it must update it after every release with `uv tool install sidegraph@latest`,
+and SessionStart says when a `sidegraph-*` on `PATH` differs from the session's version
+(`path-skew`, see [troubleshooting](../guides/troubleshooting.md#path-skew)).
+
+Commands on the documentation pages are shown by name. (`@main` is a mutable ref: see [mutable development references](../getting-started/installation.md#mutable-development-references).) Without a CLI install, run them as
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, for example `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor`.
+
 ## `sidegraph-bootstrap`
 
 ```
@@ -903,8 +920,8 @@ for the full rationale.
 **Scale-aware default `--limit` (100):** on a monorepo-scale corpus, considering every
 significant community is expensive and the resulting batch is unreviewable (a real
 cross-project finding: Apache Airflow has 2,578 significant communities). `--limit` defaults
-to `100` — the same default the `list_domain_candidates` MCP tool applies, so the two never
-disagree about what "a normal run" proposes — capping both a real run's write and
+to `100` — the same count limit the `list_domain_candidates` MCP tool applies (the tool also
+bounds its answer by a character budget, which the CLI does not need) — capping both a real run's write and
 `--dry-run`'s listing to the top 100 communities in deterministic community-id order. Pass an
 explicit `--limit N` to widen it, or **`--limit 0` for the full, unbounded list** (the "all"
 convention). Re-running under the same default/explicit limit only ever reaches the same
@@ -1271,13 +1288,13 @@ plain-text line):
 | `unreferenced-entity` | a hot entity no committed anchor set references (structural `domain:*`/`community:*` entities are exempt) |
 | `expired-open-validity` | a decision's `valid_to` is strictly past but its status is still open (`proposed`/`accepted`) |
 | `code-drift` | a live (`proposed`/`accepted`) decision's anchored file(s) changed since the commit its `provenance.commit` was captured at; also carries the "N record(s) predate commit stamping — not checkable" and git-unavailable notes, in place, when either applies |
-| `never-surfaced` | an accepted decision has `0` shows against `N > 0` queries on its anchored file(s) — anchored where people repeatedly work, never once rendered |
+| `never-surfaced` | an accepted decision has `0` shows against `N > 0` queries on its anchored file(s) — anchored where people repeatedly work, never once rendered or injected by a hook |
 | `stale-instructions` | an auto-injected agent-instructions file beside the store (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`) still carries the distinctive wording of a **superseded** decision — that file reaches the agent at turn zero, before retrieval, so an abandoned rule surviving there outranks the store's correction by default. Verbatim-ish match on normalized text with length/word floors; superseded records only; no git call. Advisory: it reports a quotation, not a proven contradiction — the file may be narrating history |
 | `unratified-accept` | an **accepted** record whose provenance says `agent` and which carries no ratifier stamp — the signature `SIDEGRAPH_AUTO_ACCEPT=on` leaves in a shared store (one environment's setting bypassing the ratification gate for everyone). Scoped to records created at/after the EARLIER of the store's earliest ratifier stamp and its creation marker (`.sidegraph/stamping_live_since`, written once when a store is genuinely new — never backfilled onto an existing one), so a store predating both reports nothing rather than everything; a store that has never ratified anything but was created by a marker-writing version is still in scope from its own creation, closing the blind window an unratified store would otherwise sit in forever. A stamped record — including one stamped `auto:<policy>` by an auto-ratification policy — and a human-sourced one are never flagged. A **supersession successor** (`supersedes` set — `supersede_decision`/`supersede_fact`) is never flagged either: reversal has no ratification queue to bypass and lands accepted immediately by design, so it reproduces the signature with no relation to the env var this check hunts. Narrowed exception: a `supersedes`-bearing record IS still flagged if it carries a `layer`, a `provenance.ref`, or a tier-0 `tag:`/`initiative:` binding absent from its predecessor — neither `supersede_decision` nor `supersede_fact` can produce any of the three, so one present proves the `propose_decisions`/auto-accept path wrote it. (The fact half is defensive only: `supersede_fact` always stamps `source="human"`, so a fact successor never reaches this agent-sourced check, and no draft shape carries `supersedes` on a fact.) Only a MINIMAL superseding draft (none of the three) is indistinguishable from a legitimate successor by the record's own fields, and stays excluded — a known, accepted, narrower trade-off than treating every supersession alike. Advisory: the signature is not proof — verify before concluding |
 | `duplicate-entity` | two or more committed entity files share one logical identity (legal — see below — but ambiguous); reported once per group, at the winner's (lowest-`entity_id`) file, naming every id in the group and its binding count |
 | `graph-root-mismatch` | `graphify update` was likely run from a subdirectory instead of the repository root, so every recorded `source_file` is relative to that subdirectory instead — every anchor in the graph will look orphaned until it's rebuilt from the root. Detected from `--graph`: a sample of anchorable `source_file` values that mostly don't exist relative to the repo root, but DO all exist under one specific subdirectory (named in the finding). Silent on a legitimately partial graph (a doc-only corpus, an `--exclude`d build) and on too small a sample to judge safely; needs `--graph` to resolve (missing/unreadable simply skips it) |
 | `graph-stale` | the graph was built at a commit HEAD has moved past (graph.json's `built_at_commit`), and a file the graph should reflect changed since: one it holds was edited after the graph was last built (the later of `graph.json`'s and its sibling `manifest.json`'s modification times) or deleted, or a new file of a type it holds now exists (not under a dot-directory, which Graphify skips). Memory cannot see or anchor to code added after the build. The detail gives the build commit, how many commits behind HEAD (or "a commit outside HEAD's history" after a checkout of an older commit), how many files changed, and up to five example paths; the fix is `graphify update .` from the repository root, then `sidegraph-sync`. Silent when the build commit is HEAD, when only file types the graph does not hold changed (a `.yml` against a `.py`-only graph), and when a graph built from a dirty tree was committed afterwards, or a `graphify update .` found nothing to change and rewrote only `manifest.json` (the file is no newer than the build); also silent when the comparison cannot be made (no `built_at_commit`, one that is not a full commit id, a graph outside a git repository, a build commit the repository lacks, git unavailable or slower than 3 seconds). **`--check` exits `2` on it**, so a CI job that runs doctor should rebuild the graph first; one that does is unaffected. Needs `--graph` to resolve |
-| `orphaned-record` | an open (`proposed`/`accepted`) decision or fact whose every Tier-2 (leaf) anchor is `orphaned`, so retrieval reaches it only through its file or domain; one finding per record, at its canonical file, naming how many leaf anchors it has. Statuses come from `index.db` and read "as of last sync", so the check is skipped while the index has been reloaded and not yet synced (see *Skipped checks* below; run `sidegraph-sync`). It is the record-level view of `orphaned-binding` (any record it flags has orphaned bindings, which that code already reports), so it adds no new reason for `--check` to exit `2`. The fix is to rebuild a stale graph, then `sidegraph-sync`; otherwise re-anchor the record with `add_anchors` or the `heal-anchors` skill, or supersede it if the code is gone. Needs a usable `index.db` |
+| `orphaned-record` | an open (`proposed`/`accepted`) decision or fact whose every Tier-2 (leaf) anchor is `orphaned`, so retrieval reaches it only through its file or domain; one finding per record, at its canonical file, naming how many leaf anchors it has. Statuses come from `index.db` and read "as of last sync", so the check is skipped while the statuses are not computed for the current graph (see *Skipped checks* below; run `sidegraph-sync`). It is the record-level view of `orphaned-binding` (any record it flags has orphaned bindings, which that code already reports), so it adds no new reason for `--check` to exit `2`. The fix is to rebuild a stale graph, then `sidegraph-sync`; otherwise re-anchor the record with `add_anchors` or the `heal-anchors` skill, or supersede it if the code is gone. Needs a usable `index.db` |
 | `store-uncommitted` | store files nobody committed for at least 24 hours: records, bindings, entities, an archive segment or the root files (`format`, `.gitignore`, `stamping_live_since`) that `git status` shows as new, modified or deleted. One finding, at the store path, naming how many files there are, how old the oldest is and what kinds they are (a new `archive/` segment beside deleted records reads as "a compaction"). A new record or entity file is aged by its ULID name, which a `git stash` cannot rewrite; a modified file, or anything under `bindings/`, by its modification time; a deleted file by its subdirectory's, a lower bound. Entries fully staged in the index are not counted, so a `--check` run in a pre-commit hook does not block the commit that fixes the problem. **`--check` exits `2` on it.** The fix is to commit the store in a pull request. Silent, and not run, outside a git repository, with no `git`, or when git is slower than 2 seconds |
 | `plugin-off-in-subdirectories` | Claude Code sessions started below the repository root run without the Sidegraph plugin. Claude Code reads the project settings (`.claude/settings.json`) of the launch directory only, and the repository root's `.claude/settings.local.json` for every launch inside the repository; `enabledPlugins` merges key by key (user settings, then project, then local). Two problems, reported as up to two findings: (a) the plugin is enabled only in the root's `.claude/settings.json`, so every directory below the root without its own enabling settings runs without it (reported at that file); (b) nested directories with a `.claude/settings.json` or `.claude/settings.local.json` of their own that sets `enabledPlugins` and whose merge leaves the plugin off (reported at the first such directory, naming how many there are; a nested settings file without `enabledPlugins` cannot change the merge, so it is not counted). The walk covers every directory that holds a tracked file (one `git ls-files` over the index, a few tens of milliseconds on a large repository) and looks for the two settings files in each directly, so a repository that ignores `.claude/` is covered. User settings are read from `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set and non-empty, else from `~/.claude/settings.json`. Silent when the plugin is not enabled for a launch at the root at all, and not run outside a git repository, with no `git`, or when `git ls-files` takes longer than 5 seconds. **`--check` exits `2` on it**, like any finding; enabling the plugin at user scope or in the root's `.claude/settings.local.json` clears it |
 
@@ -1287,7 +1304,9 @@ not status; see [`reference/store-format.md`](store-format.md)) — so they read
 sync." When `index.db` is missing or unusable (a fresh clone before the first
 `sidegraph-sync`, or a corrupt index), that one check is **skipped**, not failed: its name
 (`binding-status`) is reported in `skipped` and it affects neither the exit code nor
-`clean`, even under `--check`.
+`clean`, even under `--check`. The same check is also skipped while the binding statuses are
+not computed for the current graph (see *Skipped checks* below): after a reload they read live
+until `sidegraph-sync` recomputes them, so reporting them would be a false all-clear.
 
 `never-surfaced` reads the same read-only `index.db` for two more derived, gitignored
 tables — `retrieval_shows`/`retrieval_seeds`, retrieval telemetry (see [Retrieval
@@ -1322,10 +1341,15 @@ still protects a decision from a false flag.
 **Skipped checks.** A check that cannot look says so and is never a finding: it affects neither
 the exit code nor `clean`, even under `--check`. Without a usable `index.db` the index checks
 (`binding-status`, `never-surfaced`, `orphaned-records`) are listed in `skipped` and printed as
-"... check skipped (no usable index.db — run sidegraph-sync)". `orphaned-records` is skipped the
-same way, under the same text, while the index has been reloaded and not yet synced (a new store,
-or a `git pull` that changed a record): every binding reads live until `sidegraph-sync`
-recomputes the statuses, so the check has nothing to say. Without a readable graph the
+"... check skipped (no usable index.db — run sidegraph-sync)". `binding-status` and
+`orphaned-records` are also skipped while the index is usable but its binding statuses are not
+computed for the current graph (a new store, a `git pull` that changed a record, an accepted
+domain that was not refreshed). After a reload every binding reads live; in the other cases the
+statuses may be out of date. Either way they stay unreliable until `sidegraph-sync` recomputes
+them, so the checks have nothing to say. They print "... check skipped (binding statuses are
+not computed for the current graph — run sidegraph-sync)". `--json` carries the withholding (the
+names in `skipped`) but not the reason. Both checks can also be withheld on a store that never
+syncs (no code graph), where they stay withheld. Without a readable graph the
 graph checks (`graph-root-mismatch`, `graph-stale`) are listed as `"graph"` in `skipped`, and the
 plain-text report prints one line just before its summary:
 ``graph checks skipped (no code graph at <path> — build it from the repository root with `graphify update .`)``.
@@ -1458,10 +1482,11 @@ there anyway", so no line of the report claims an effect.
   absences: where the text withholds a figure because its source is absent, the JSON carries
   `null` for it, never a zero. That is `activation` and `retained_days` with recording off (as
   are `reach.files_touched`, `files_touched_with_memory`, `busiest_seeds` and
-  `memory.no_recorded_showing`); `activation.degraded`, `dropped_for_budget`,
+  `memory.no_recorded_showing`; `activation.hook_showings` is inside `activation`);
+  `activation.degraded`, `dropped_for_budget`,
   `renders_with_abandoned` and `self_reported_intents` when the window holds no lookup at all;
   `activation.degraded` and `dropped_for_budget` also when the window holds only
-  `drill_down` lookups, which apply no budget; `retained_days` for a window that holds nothing of an older journal; and
+  `drill_down` lookups, which apply no relevance budget; `retained_days` for a window that holds nothing of an older journal; and
   `graph.nodes`, `files` and `communities` when there is no readable graph. A zero that was
   measured stays a zero: an empty journal, a built graph with no nodes. The graph's state against
   `HEAD` is four more fields under `graph`: `freshness` (`"fresh"`, `"stale"` or `"unknown"`),
@@ -1484,6 +1509,7 @@ ACTIVATION  memory was asked in 24 of 71 sessions
             every one of those got records back
             47 sessions touched files without asking
             226 showings (repeats counted), ~9 per session that got any
+            140 record showings delivered by hooks (repeats counted)
             budget and tried-and-abandoned counts: not recorded yet
 REACH       282 files touched, 38 with memory anchored to them (13%)
             asked about most, all time: src/sidegraph/store.py ×12 ·
@@ -1522,16 +1548,28 @@ activation follows, as the question the other blocks build on:
   `decisions and facts` figure in MEMORY. It comes from the lookups' own journal wherever a
   session has one; a session recorded before that journal existed is counted from the records
   it was shown against files, one each. In `--json` it is
-  `activation.showings`. `shortened to fit the budget` and `dropped by it` are kept apart
+  `activation.showings`. A **record showing delivered by hooks** is one record the PreToolUse
+  hook put in front of the agent without being asked, in the block before a file read or edit or
+  in a subagent's brief; the line is printed only when there is one, repeats are counted, and it
+  is kept apart from `showings` on purpose (those are lookups' results). In `--json` it is
+  `activation.hook_showings`. `shortened to fit the budget` and `dropped by it` are kept apart
   on purpose: a record that shrank to a shorter line and one that did not fit at all point at
   different fixes. `lookups included something already tried and abandoned` counts lookups
   whose result held at least one record with a non-empty `rejected` field or one that has been
-  superseded; a lookup with both counts once.
+  superseded; a lookup with both counts once. A lookup that no session could be named for (a
+  host that does not announce its session, with several sessions of its family live) is
+  journaled as `unattributed`. Those calls are in none of the session counts, so the screen
+  qualifies them: the first line reads `memory was asked in at least 24 of 71 sessions`, the
+  touch-only line reads `up to 47 sessions touched files without asking`, and a third line
+  gives the count, `(12 retrieval calls could not be attributed to a session)`. In `--json`
+  it is `activation.unattributed_calls`, `0` when every call was attributed (the lines then
+  read as in the sample above).
 - **REACH** — of the files touched in the window, how many have memory (a decision or a fact) anchored to them,
   which areas were asked about most, and which accepted domains have no record bound to
   them.
 - **MEMORY** — what the store holds. `no recorded showing` counts accepted decisions and facts
-  that the running showings counter has no entry for. That is an absence of a record, not a
+  that the running showings counter has no entry for; a record a lookup rendered and a record the
+  PreToolUse hook printed both count as shown. That is an absence of a record, not a
   finding that the record was never shown: a showing while `SIDEGRAPH_TELEMETRY=off`, or one
   lost to a recording error (the server swallows those rather than fail a lookup), is not in
   the count. The inventory counts accepted records only, and history
@@ -1569,7 +1607,7 @@ Lines the report will not invent:
   the window holds no render-journal record, the budget lines are replaced by the single line
   `budget and tried-and-abandoned counts: not recorded yet`. A zero there would read as a
   measurement, and nothing was measured. A window whose only lookups are `drill_down` calls
-  is a narrower case: a drill-down delivers records and applies no budget, so the screen
+  is a narrower case: a drill-down delivers records and applies no relevance budget, so the screen
   reads `budget counts: not recorded yet` and still prints how many lookups included something
   already tried and abandoned, which a drill-down does have.
 - **A narrowed window over an older journal.** `--window 7` over a journal whose only rows are

@@ -51,7 +51,7 @@ def test_immediate_nested_inside_a_read_only_outer_mutation_still_serializes(tmp
     nested call as a no-op. Gating on ``in_transaction`` instead means the nested immediate
     still takes the write lock for real -- red against a depth-gated implementation."""
     store = Store(tmp_path / "s")
-    with store._mutation():
+    with store._mutation(immediate=False):
         store.get_entity("does-not-exist")  # read-only: opens no transaction
         assert store._conn.in_transaction is False
         with store._mutation(immediate=True):
@@ -70,7 +70,7 @@ def test_immediate_inside_an_outer_mutation_that_already_wrote_does_not_double_b
     transaction raises ``OperationalError: cannot start a transaction within a
     transaction``."""
     store = Store(tmp_path / "s")
-    with store._mutation():
+    with store._mutation(immediate=False):
         store._conn.execute(
             "INSERT INTO meta (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -98,7 +98,7 @@ def test_the_outermost_scope_still_owns_commit_and_rollback_when_begin_happened_
 
     monkeypatch.setattr(Store, "_commit", _counting_commit)
 
-    with store._mutation():
+    with store._mutation(immediate=False):
         assert store._conn.in_transaction is False
         with store._mutation(immediate=True):
             assert store._conn.in_transaction is True
@@ -112,7 +112,7 @@ def test_the_outermost_scope_still_owns_commit_and_rollback_when_begin_happened_
     # Rollback side of the same contract: an exception raised in the outer scope AFTER the
     # depth-2 immediate returns must still roll back the whole thing, from the outermost
     # scope, not leak a transaction.
-    with pytest.raises(RuntimeError), store._mutation():
+    with pytest.raises(RuntimeError), store._mutation(immediate=False):
         with store._mutation(immediate=True):
             pass
         raise RuntimeError("boom")

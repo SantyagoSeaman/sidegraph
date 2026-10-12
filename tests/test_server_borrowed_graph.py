@@ -467,7 +467,7 @@ def test_a_seed_that_is_in_neither_tree_is_a_path_problem(main, worktree):
     )
 
     (line,) = _block(out, "## Not in the code graph")
-    assert "not a repo-relative path to a file in this repository" in line
+    assert "is not a file in this checkout (" in line
     assert "This worktree reads" not in line
 
 

@@ -1,6 +1,6 @@
 # Capturing decisions
 
-Two ways a decision enters the store: the agent writes it **directly** mid-session
+Two ways a decision enters the store: at your request, the agent writes it **directly** mid-session
 (`add_decision`), or the session gets **distilled and proposed** at the end and is ratified
 later, by a human (`propose_decisions` → `sidegraph-ratify`) or at write time by an
 [auto-ratification policy](#5-auto-ratification-policy-opt-in). The library default is
@@ -172,18 +172,20 @@ The write pipeline (`src/sidegraph/capture.py`) is deterministic — no LLM key 
 4. **Anchor** best-effort via the same multi-anchor resolution as `add_decision` (orphaned
    leaf if no graph is present).
 
-Proposed decisions are **not silently invisible**: they do surface in `get_task_context`,
+Proposed decisions can surface in `get_task_context` while the proposal policy permits it,
 where every rendered line is tagged `[unratified]`, and in `retrieve_decisions`, where every
 record carries its `status`, so you always know a draft hasn't been reviewed yet (see
-[`guides/retrieval-in-sessions.md`](retrieval-in-sessions.md)). Ratification is what removes
-that tag, not what makes the record appear.
+[`guides/retrieval-in-sessions.md`](retrieval-in-sessions.md)). Ratification removes the
+tag and admits the record to accepted memory. The
+[surfacing window and regulated mode](retrieval-in-sessions.md#why-an-unratified-draft-still-shows-up-and-what-the-tag-means)
+can withhold proposed content without removing it from the ratification queue.
 
 ## 3. Ratification
 
 Ratify without leaving the session. `SessionStart` tells you when something is waiting
 ("Sidegraph: N record(s) awaiting ratification …"), and saying "ratify" — or invoking the
 `sidegraph:ratify-decisions` skill — walks the queue conversationally. Under the hood that
-is two MCP tools: `list_proposed()` (human-readable render of everything pending) and
+is two MCP tools: `list_proposed()` (human-readable render of the pending queue; a long queue is shown in part, with the rest listed by id) and
 `ratify(accept=[...], drop=[...])` — the unified tool that ratifies decisions *and* domains
 through one gate (see [mind model](../concepts/mind-model.md#domain-lifecycle)).
 `ratify_decisions(accept=[...], drop=[...])` still works but is a **deprecated alias** (since

@@ -34,6 +34,7 @@ import os
 import stat
 import subprocess
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -114,7 +115,7 @@ def current_ratify_policy(repo_root: Path) -> RatifyPolicySettingsResult:
         )
 
     try:
-        data = json.loads(settings_path.read_text())
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return RatifyPolicySettingsResult(
             outcome="skipped", path=settings_path, skip_reason="invalid_json"
@@ -185,7 +186,7 @@ def ensure_ratify_policy_setting(
             # `"x"` is O_EXCL: it refuses a link at the final component instead of
             # following it (the parent is covered by the re-check above), and a file it
             # opened is ours, so a failed write may remove it.
-            with open(settings_path, "x") as fh:
+            with open(settings_path, "x", encoding="utf-8") as fh:
                 st = os.fstat(fh.fileno())
                 created = (st.st_dev, st.st_ino)
                 fh.write(json.dumps({"env": {RATIFY_POLICY_ENV_VAR: value}}, indent=2) + "\n")
@@ -209,7 +210,13 @@ def ensure_ratify_policy_setting(
             if settings_path.is_symlink():
                 return symlink
             raise
-        with os.fdopen(fd) as fh:
+        try:
+            fh = os.fdopen(fd, encoding="utf-8")
+        except BaseException:
+            with suppress(OSError):
+                os.close(fd)
+            raise
+        with fh:
             data = json.load(fh)
         # The file may have changed since the peek: classify the re-read the same way.
         reread = _classify(data, settings_path)
@@ -240,7 +247,13 @@ def _replace_atomically(path: Path, text: str) -> None:
     mode = stat.S_IMODE(path.stat().st_mode)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as fh:
+        try:
+            fh = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            with suppress(OSError):
+                os.close(fd)
+            raise
+        with fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())

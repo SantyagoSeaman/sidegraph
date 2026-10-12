@@ -8,12 +8,14 @@ You should get a first response within a few days.
 
 ## Data boundary — what this tool touches
 
-Sidegraph is a local-only tool. Its entire data surface:
+The Sidegraph runtime operates on local files and exposes tools to its MCP client.
+The client can pass tool results to its configured model provider; choose the host and
+provider according to your repository's data policy. The runtime data boundary is:
 
 - **Reads:** your repository's files and the graph engine's `graphify-out/graph.json`
   (strictly read-only — Sidegraph never writes into engine output).
-- **Writes:** confined to one store directory inside the target repository
-  (`.sidegraph/` by convention) — small, human-readable JSON record files meant to be
+- **Writes:** primarily to a configured store directory
+  (`.sidegraph/` inside the target repository by default) — small, human-readable JSON record files meant to be
   committed to your repo, a derived and gitignored `index.db` (a local SQLite index
   rebuilt from those files for fast queries, never itself committed), a committed format
   marker, and a `.gitignore` the store writes for itself. Opening a legacy single-file
@@ -40,12 +42,14 @@ Sidegraph is a local-only tool. Its entire data surface:
   install never writes it. Beyond those, the only filesystem writes are the standard config
   snippets you install yourself (`.mcp.json`, hook entries). See
   [`docs/reference/store-format.md`](docs/reference/store-format.md) for the full layout.
-- **Network:** none. No remote telemetry, no phone-home, nothing leaves your machine. Local
-  retrieval telemetry is recorded in the gitignored `index.db` by default (which records
+- **Network:** the Sidegraph runtime makes no outbound network calls and sends no remote
+  telemetry. Package installation, plugin installation, and updates download dependencies
+  from their configured registries or repositories. Your MCP client controls onward use of
+  tool results. Local retrieval telemetry is recorded in the gitignored `index.db` by default (which records
   were shown and which files were touched, never uploaded); set `SIDEGRAPH_TELEMETRY=off` to
-  stop new recording. The only
-  network-using feature is the *optional* semantic documentation pass, which is executed
-  by the separate Graphify CLI against the LLM provider you configure — not by Sidegraph.
+  stop new recording. The *optional* semantic documentation pass is executed by the
+  separate Graphify CLI against the LLM provider you configure. Review that provider's
+  data policy before using the pass on private documents.
 
 ## Secret hygiene
 
@@ -69,6 +73,11 @@ secret-bearing tag entities and Git history are not changed by this fix: review 
 and rotate any exposed credentials.
 
 ## Resource limits and redaction runtime
+
+MCP `tools/call` requests share a process-local bucket with capacity 200 and refill
+100 calls/second. Exhaustion refuses the call before Store refresh or execution;
+initialization, ping, and discovery stay available. This local admission policy does
+not authenticate clients. See [MCP invocation admission](docs/reference/mcp-tools.md#invocation-admission).
 
 Capture and direct add/supersede decision, fact and domain entrypoints inspect inputs before
 redaction, further model validation or canonical writes. Fixed limits cover every supplied

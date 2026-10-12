@@ -4,12 +4,14 @@
 then asks production retrieval to surface one accepted, live-anchored decision. It runs
 locally and does not require an account or model API.
 
+Commands use the `uvx` prefix the plugin uses; with the CLI installed ([Option A](installation.md#option-a--the-cli-on-your-path-pypi)) the bare names work too. (`@main` is a mutable ref: see [mutable development references](installation.md#mutable-development-references).)
+
 The 10–15 minute path is a launch target that has not yet been measured across first-user
 sessions.
 
 ```bash
 graphify update .
-sidegraph-bootstrap --host claude-code
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --host claude-code
 ```
 
 Bootstrap scans, previews, reviews, writes, verifies, checks the selected host, and proves
@@ -193,14 +195,14 @@ first-user cohort or task-benefit result. Inspect the report before sharing.
 
 ## Reproduce the dogfood path
 
-A `demo` branch will carry Sidegraph's own dogfood store. Once it ships, run the
-supported-document path against it:
+A release may include a `demo` branch with Sidegraph's own sample store. When that branch
+is available, run the supported-document path against it:
 
-> **The `demo` branch ships with a later release.** It does not exist yet, so the clone below
-> cannot run today. This is the intended reproduction path once it ships; there is no working
-> substitute before then.
+> **Check that the release includes `demo` before running this clone.** If it does not,
+> use a repository containing one of the supported document profiles for the same
+> bootstrap and retrieval loop.
 
-This command follows the current development branch. For durable environments, see
+This command installs from the public `main`, which advances at releases. To pin a version, see
 [how to pin mutable development references](installation.md#mutable-development-references).
 
 ```bash
@@ -222,7 +224,6 @@ Continue through the maintenance loop:
 4. Start a fresh session and call `get_task_context` for the proposal's anchored path; record
    whether the accepted record surfaces organically.
 
-The visual launch demo must show discovery and review, production proof, new-session capture
-and ratification, and later organic retrieval. An import-only recording does not satisfy the
-release package. The existing PreToolUse records block is part of normal delivery; its
-effect is measured separately and is not new Bootstrap functionality.
+This loop checks import, review, retrieval proof, new-session capture, and later retrieval
+as separate steps. Claude Code's existing PreToolUse delivery remains available alongside
+the explicit task-context calls.

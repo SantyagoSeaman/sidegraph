@@ -464,7 +464,13 @@ def binding_statuses_computed(index: sqlite3.Connection) -> bool:
     """Whether the index's binding statuses have been computed. A reload resets every binding to
     ``live`` and sets ``volatile_stale`` until a sync recomputes them, so until then no check
     that reads a status has anything to say. Shared by ``orphaned-records`` and by doctor's
-    skipped-checks list."""
+    skipped-checks list. An index with no ``meta`` table (a hand-built one) counts as computed,
+    the rule ``doctor._check_binding_statuses`` applies too."""
+    has_meta = index.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+    ).fetchone()
+    if not has_meta:
+        return True
     row = index.execute("SELECT value FROM meta WHERE key = ?", (VOLATILE_STALE_KEY,)).fetchone()
     return row is None or row[0] != "1"
 

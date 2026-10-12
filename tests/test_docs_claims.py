@@ -438,6 +438,11 @@ def test_every_relative_doc_link_and_anchor_resolves():
     most likely to rot when a skill is renamed."""
     docs = sorted((_ROOT / "docs").rglob("*.md"))
     assert docs, "found no markdown under docs/"
+    # The skills link into docs/ too (a skill's link to a heading that is later renamed lands on
+    # the top of the page, as above), so they are link sources as well.
+    docs += sorted((_ROOT / "plugin" / "sidegraph" / "skills").glob("*/SKILL.md"))
+    # README links into docs/ by anchor too, and it is the first page a reader opens.
+    docs.append(_ROOT / "README.md")
 
     anchors: dict[Path, set[str]] = {}
     for path in _ROOT.rglob("*.md"):
@@ -455,6 +460,11 @@ def test_every_relative_doc_link_and_anchor_resolves():
             where = f"{path.relative_to(_ROOT)}:{line}"
             file_part, _, fragment = target.partition("#")
             dest = (path.parent / file_part).resolve() if file_part else path.resolve()
+            # The release snapshot relocates the whitepaper draft (tools/check_shipped_links.py):
+            # the private tree has only the draft, the snapshot only the published page.
+            paper = (_ROOT / "docs" / "whitepaper" / "index.md").resolve()
+            if dest == paper and not paper.exists():
+                dest = (_ROOT / "design" / "whitepaper" / "draft.md").resolve()
             if not dest.exists():
                 broken.append(f"{where}: missing file -> {target}")
             elif fragment and dest.suffix == ".md" and fragment not in anchors.get(dest, set()):
@@ -866,11 +876,13 @@ def test_every_doc_quote_of_the_session_start_instruction_equals_the_constant() 
 
 
 def _task_context_render_headings() -> list[str]:
-    """Section headings, in source order, from ``TaskContext.render`` itself."""
+    """Section headings, in source order, from ``TaskContext.render_parts`` itself (which
+    writes them as ``{heading} Name``; the default marker is ``##``)."""
     source = (_ROOT / "src/sidegraph/retrieval.py").read_text(encoding="utf-8")
-    start = source.index("    def render(self, include_structure: bool = True) -> str:")
-    end = source.index("        return text", start)
-    return re.findall(r'blocks\.append\("(## [^"\n]+)\\n"', source[start:end])
+    start = source.index("    def render_parts(")
+    end = source.index("        text = MEMORY_GUARD_LINE", start)
+    names = re.findall(r'blocks\.append\(f"\{heading\} ([^"\n]+)\\n"', source[start:end])
+    return [f"## {name}" for name in names]
 
 
 def test_retrieval_guide_block_table_matches_task_context_render() -> None:
@@ -952,3 +964,111 @@ def test_readme_states_the_mechanism_and_promises_no_outcome():
     ]
     hits = [m.group(0) for pat in promises for m in re.finditer(pat, text, re.IGNORECASE)]
     assert hits == [], f"README promises an outcome instead of describing the mechanism: {hits}"
+
+
+# ---------------------------------------------------------------------------
+# 8. the plugin's skills run the CLIs through uvx, never from PATH; the Quickstart does not
+#    install a second Sidegraph beside the plugin
+#    see design/superpowers/specs/2026-10-11-stale-path-sidegraph-design.md (D1-D3)
+# ---------------------------------------------------------------------------
+
+_SKILLS = sorted((_ROOT / "plugin" / "sidegraph" / "skills").glob("*/SKILL.md"))
+_CLI_RULE_ANCHOR = "docs/reference/cli.md#running-the-clis-beside-the-plugin"
+_PATH_FIRST_PHRASES = (
+    re.compile(r"not on `?PATH`?,? run it", re.I),
+    re.compile(r"CLI invocations (below )?use bare names", re.I),
+    re.compile(r"with no command on `?PATH`?", re.I),
+)
+
+
+def _fenced_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            inside = not inside
+        elif inside:
+            lines.append(line.strip())
+    return lines
+
+
+def test_plugin_skills_do_not_prefer_path():
+    """A persistent ``uv tool install sidegraph`` is frozen at its install-time version and a
+    skill that prefers ``PATH`` runs it beside the plugin's current one. Every skill that names
+    a ``sidegraph-*`` command links the rule, none has the old fallback wording (checked on the
+    whole text, wrapped lines included), and no fenced line starts with a bare ``sidegraph-``.
+    ``setup/SKILL.md``'s Graphify ``uv tool`` PATH sentence is a different thing and stays."""
+    assert len(_SKILLS) >= 10
+    problems: list[str] = []
+    for path in _SKILLS:
+        text = path.read_text(encoding="utf-8")
+        name = path.parent.name
+        flat = " ".join(text.split())
+        for phrase in _PATH_FIRST_PHRASES:
+            if phrase.search(flat):
+                problems.append(f"{name}: still says `{phrase.pattern}`")
+        for line in _fenced_lines(text):
+            if re.match(r"sidegraph-[a-z]", line):
+                problems.append(f"{name}: fenced bare command `{line[:50]}`")
+        for inline in re.findall(r"\brun\s+`(sidegraph-[^`]*)`", text, re.I):
+            problems.append(f"{name}: inline bare run `{inline[:40]}`")
+        names_a_command = re.search(r"`[^`\n]*sidegraph-[a-z]+", text) is not None
+        if names_a_command and _CLI_RULE_ANCHOR not in text:
+            problems.append(f"{name}: names a CLI but does not link {_CLI_RULE_ANCHOR}")
+    assert not problems, "\n".join(problems)
+
+
+def test_cli_reference_has_the_rule_as_a_heading():
+    """A bold lead-in creates no anchor: the skills' links need a real heading."""
+    cli = (_ROOT / "docs" / "reference" / "cli.md").read_text(encoding="utf-8")
+    assert re.search(r"^## Running the CLIs beside the plugin$", cli, re.M)
+
+
+def test_quickstart_does_not_install_the_cli_for_plugin_users():
+    """The plugin runs Sidegraph through uvx; ``uv tool install sidegraph`` beside it is
+    optional and updated by hand. The first-run pages show no bare ``sidegraph-`` command line
+    (a plugin-first reader has none on PATH) and no ``uv tool install sidegraph`` (Graphify's
+    ``graphifyy`` pin is a different package)."""
+    pages = [
+        _ROOT / "README.md",
+        _ROOT / "docs" / "getting-started" / "quickstart.md",
+        _ROOT / "docs" / "guides" / "verifying-your-setup.md",
+        _ROOT / "docs" / "getting-started" / "bootstrap.md",
+    ]
+    problems: list[str] = []
+    for page in pages:
+        for line in _fenced_lines(page.read_text(encoding="utf-8")):
+            if re.match(r"uv tool install sidegraph(?!y)", line):
+                problems.append(f"{page.name}: `{line}`")
+            if re.match(r"sidegraph-[a-z]", line):
+                problems.append(f"{page.name}: bare `{line}`")
+    assert not problems, "\n".join(problems)
+    installation = (_ROOT / "docs" / "getting-started" / "installation.md").read_text(
+        encoding="utf-8"
+    )
+    assert "uv tool install sidegraph@latest" in installation
+    assert "### Option A — the CLI on your PATH (PyPI)" in installation
+    assert "**Keep it updated. This step is part of the install.**" in installation
+
+
+def test_pages_beside_the_plugin_offer_the_cli_with_its_update():
+    """The CLI on PATH is optional beside the plugin and its update is part of the install:
+    every page that mentions it beside the plugin links the install section and gives the
+    update command, and none tells the reader to skip it."""
+    pages = {
+        "docs/getting-started/claude-code-setup.md": "installation.md",
+        "docs/getting-started/codex-setup.md": "installation.md",
+        "docs/reference/cli.md": "../getting-started/installation.md",
+        "README.md": "docs/getting-started/installation.md",
+    }
+    problems: list[str] = []
+    for rel, prefix in pages.items():
+        flat = " ".join((_ROOT / rel).read_text(encoding="utf-8").split())
+        if f"({prefix}#option-a--the-cli-on-your-path-pypi)" not in flat:
+            problems.append(f"{rel}: no link to the CLI install section")
+        if "uv tool install sidegraph@latest" not in flat:
+            problems.append(f"{rel}: no update command")
+        for stale in ("You do not need `uv tool install sidegraph`", "With a plugin, skip it"):
+            if stale in flat:
+                problems.append(f"{rel}: still says `{stale}`")
+    assert not problems, "\n".join(problems)

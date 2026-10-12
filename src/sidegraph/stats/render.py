@@ -143,8 +143,12 @@ def _activation(report: StatsReport) -> list[str]:
             "too little to summarize yet — "
             f"{_count(a.sessions_total, 'session')} over {_count(report.retained_days, 'day')}"
         ]
+    # Calls the journal could not name a session for are in no count here, so "asked in" can only
+    # be too low and "touched without asking" too high: both lines say so, and one parenthetical
+    # (under the second) gives the number.
+    lower = "at least " if a.unattributed_calls else ""
     lines = [
-        f"memory was asked in {_n(a.sessions_with_retrieval)} of "
+        f"memory was asked in {lower}{_n(a.sessions_with_retrieval)} of "
         f"{_count(a.sessions_total, 'session')}"
     ]
     # Asked-and-got-nothing is a different failure from not asking (a query that matched
@@ -154,7 +158,16 @@ def _activation(report: StatsReport) -> list[str]:
             lines.append(f"{_n(a.sessions_asked_but_empty)} of those got nothing back")
         else:
             lines.append("every one of those got records back")
-    lines.append(f"{_count(a.sessions_touch_only, 'session')} touched files without asking")
+    if a.unattributed_calls:
+        lines.append(
+            f"up to {_count(a.sessions_touch_only, 'session')} touched files without asking"
+        )
+        lines.append(
+            f"({_count(a.unattributed_calls, 'retrieval call')} could not be attributed "
+            "to a session)"
+        )
+    else:
+        lines.append(f"{_count(a.sessions_touch_only, 'session')} touched files without asking")
     fed = a.sessions_with_retrieval - a.sessions_asked_but_empty
     # The unit is a showing: one record, a decision or a fact, placed in one lookup's result.
     # The same record in several sessions is several showings, while the MEMORY block counts
@@ -171,6 +184,16 @@ def _activation(report: StatsReport) -> list[str]:
         lines.append(f"{shown}, ~{_n(per_session)} per session that got any")
     else:
         lines.append(shown)
+    if a.hook_showings:
+        # What a hook put in front of the agent, which it did not ask for: a file-read block or
+        # a subagent's brief. Its own line, never folded into the showings above (those are
+        # lookups' results); the noun and the source are both on the line.
+        if a.hook_showings == 1:
+            lines.append("1 record showing delivered by a hook")
+        else:
+            lines.append(
+                f"{_n(a.hook_showings)} record showings delivered by hooks (repeats counted)"
+            )
     if not a.render_journal:
         # No render row in the window — the table is missing or empty. The three counts below
         # are zero because nothing was recorded, so none of them is printed (D7). Deliberately
@@ -180,8 +203,8 @@ def _activation(report: StatsReport) -> list[str]:
         lines.append(f"budget and tried-and-abandoned counts: not recorded {when}")
         return lines
     if not a.budget_journal:
-        # Rows exist, all of them drill-downs: they delivered records and applied no budget,
-        # so the two budget counts are unrecorded while the abandoned count is real.
+        # Rows exist, all of them drill-downs: they delivered records and applied no relevance
+        # budget, so the two budget counts are unrecorded while the abandoned count is real.
         when = "in this window" if a.outside_window else "yet"
         lines.append(f"budget counts: not recorded {when}")
         lines.append(_abandoned(a))
@@ -365,7 +388,7 @@ def render_json(report: StatsReport) -> str:
             data["activation"][key] = None
         data["activation"]["self_reported_intents"] = None
     elif not report.activation.budget_journal:
-        # Only drill-downs: they applied no budget, so its two counts are unrecorded. The
+        # Only drill-downs: they applied no relevance budget, so its two counts are unrecorded. The
         # abandoned count and the intent tally describe rows that exist and stand.
         for key in ("degraded", "dropped_for_budget"):
             data["activation"][key] = None

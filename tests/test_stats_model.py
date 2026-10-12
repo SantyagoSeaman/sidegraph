@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from sidegraph.config import UNATTRIBUTED_SESSION
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -103,6 +104,78 @@ def test_activation_counts_asking_and_silent_sessions(tmp_path):
     assert r.activation.dropped_for_budget == 6
     assert r.activation.renders_with_abandoned == 6
     assert r.activation.mature is True
+
+
+def _unattributed_call(store, at, *, rows=True, render=True):
+    """One call as `server._record` writes it: its seed/show rows and its render row share one
+    timestamp."""
+    if rows:
+        store.record_retrieval_events(
+            UNATTRIBUTED_SESSION, ["a.py"], [("r1", "a.py"), ("r2", "a.py")], at=at
+        )
+    if render:
+        store.record_render_event(
+            UNATTRIBUTED_SESSION,
+            at=at,
+            intent=None,
+            selected=1,
+            emitted=7,
+            degraded=0,
+            dropped_for_budget=0,
+            chars_used=10,
+            had_rejected=False,
+            had_superseded=False,
+        )
+
+
+def test_t11_unattributed_calls_are_counted_as_calls_and_are_no_session(tmp_path):
+    """A call counts once whatever it wrote: two calls with rows plus a render row each are 2,
+    a render-only call is 1, a call with rows and no render is 1. Sentinel rows are no
+    session's and no showings."""
+    store = Store(tmp_path / "s")
+    _seed_sessions(store, asking=5, touch_only=2)
+    _backdate(store, 5)
+    base = NOW - timedelta(days=5)
+    _unattributed_call(store, (base + timedelta(seconds=1)).isoformat())
+    _unattributed_call(store, (base + timedelta(seconds=2)).isoformat())
+    _unattributed_call(store, (base + timedelta(seconds=3)).isoformat(), rows=False)
+    _unattributed_call(store, (base + timedelta(seconds=4)).isoformat(), render=False)
+    store.close()
+
+    a = build_report(tmp_path / "s", None, window_days=30, now=NOW).activation
+
+    assert a.unattributed_calls == 4
+    assert a.sessions_total == 7
+    assert a.sessions_with_retrieval == 5
+    assert a.sessions_touch_only == 2
+    assert a.showings == 5, "the sentinel's emitted records are no session's showings"
+    _assert_partition_without_sentinel(tmp_path, a)
+
+
+def test_t11_no_unattributed_call_keeps_the_count_zero(tmp_path):
+    store = Store(tmp_path / "s")
+    _seed_sessions(store, asking=5, touch_only=1)
+    _backdate(store, 5)
+    store.close()
+
+    assert (
+        build_report(tmp_path / "s", None, window_days=30, now=NOW).activation.unattributed_calls
+        == 0
+    )
+
+
+def _assert_partition_without_sentinel(tmp_path, a):
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(tmp_path / "s" / "index.db")) as conn:
+        journal = {
+            row[0]
+            for row in conn.execute(
+                "SELECT session_id FROM retrieval_events UNION SELECT session_id FROM render_events"
+            )
+        } - {UNATTRIBUTED_SESSION}
+    assert a.sessions_total == len(journal)
 
 
 def test_showings_counts_records_not_anchor_paths(tmp_path):
@@ -1097,10 +1170,10 @@ def test_each_session_is_counted_from_its_own_best_journal(tmp_path):
 
 # --- drill_down writes a render event, and it is not a budget (fix wave 3) -------------------
 #
-# A drill-down delivers records and applies no budget. Its row carries the records returned as
-# `emitted` under the reserved intent, with zeros for every budget field. The zeros are the
-# absence of a budget, so they must not turn "the budget was never recorded" into "the budget
-# clipped nothing".
+# A drill-down delivers records and applies no relevance budget. Its row carries the records
+# returned as `emitted` under the reserved intent, with zeros for every budget field. The zeros
+# are the absence of a budget, so they must not turn "the budget was never recorded" into "the
+# budget clipped nothing".
 
 
 def _drill_down_store(tmp_path, monkeypatch, *, rejected="", sid="s1"):
@@ -1420,3 +1493,75 @@ def test_a_writer_landing_between_two_reads_cannot_split_the_report(tmp_path, mo
     assert figures in {(0, 0, 0), (1, 1, 1)}, (
         f"the report matches neither the state before the writer nor the one after: {figures}"
     )
+
+
+# -- hook showings: what the PreToolUse hook handed over, counted apart -------------------------
+
+
+def _inject(store, sid, kind, rid, rel="a.py", agent=None):
+    store._append_event(sid, kind, rel, rid, agent)
+
+
+def test_hook_showings_are_counted_apart_from_lookups(tmp_path):
+    """Two `inject` rows and one `inject_brief` row are hook showings; they are not lookups. A
+    session whose only rows are injections is neither asking nor a session of the report, and
+    the figures an MCP lookup feeds do not move. Red against unfixed code (no field) and against
+    a stats loop that counts the kinds as `show_anchor`."""
+    store = Store(tmp_path / "s")
+    _seed_sessions(store, asking=2, touch_only=1)
+    _backdate(store, 5)
+    for sid in ("inj-only", "ask-0"):
+        _inject(store, sid, "inject", "rec-x")
+        _inject(store, sid, "inject", "rec-y", agent="sub")
+    _inject(store, "brief-only", "inject_brief", "rec-z")
+    store.close()
+    r = build_report(tmp_path / "s", None, window_days=30, now=NOW)
+    a = r.activation
+    assert a.hook_showings == 5
+    assert a.showings == 2, "the two MCP lookups only"
+    assert a.sessions_with_retrieval == 2
+    assert a.sessions_total == 3, "injection-only sessions are not sessions of the report"
+
+
+def test_injection_rows_do_not_move_retention_or_the_window_edge(tmp_path):
+    """`first_at` and `outside_window` read every journal row; a window whose only rows are
+    injections must neither start the retention clock nor claim older rows exist."""
+    store = Store(tmp_path / "s")
+    _inject(store, "inj", "inject", "rec-x")
+    _inject(store, "inj", "inject_brief", "rec-y")
+    old = (NOW - timedelta(days=20)).isoformat()
+    with store._mutation():
+        store._conn.execute("UPDATE retrieval_events SET at = ?", (old,))
+    store.close()
+    r = build_report(tmp_path / "s", None, window_days=7, now=NOW)
+    assert r.activation.hook_showings == 0, "outside the 7-day window"
+    assert r.activation.outside_window is False
+    r30 = build_report(tmp_path / "s", None, window_days=30, now=NOW)
+    assert r30.activation.hook_showings == 2
+    assert r30.retained_days == 0
+
+
+def test_the_literal_kinds_match_what_the_hook_writes():
+    """Stats imports nothing from the hook, so it spells the kinds itself; this pins them."""
+    from sidegraph import hot_index
+
+    assert (hot_index.INJECT_KIND, hot_index.INJECT_BRIEF_KIND) == ("inject", "inject_brief")
+
+
+def test_t11_calls_written_by_the_server_share_one_timestamp_per_call(tmp_path, monkeypatch):
+    """Through `server._record`, as production writes them: two unattributed calls that each
+    wrote seed rows and a render row are 2 calls, not 4."""
+    from sidegraph import server
+    from sidegraph.retrieval import TaskContext
+
+    store = Store(tmp_path / "s")
+    monkeypatch.setattr(server, "_session_key", lambda _s: None)
+    for _ in range(2):
+        ctx = TaskContext()
+        ctx.shown_ids = []
+        server._record(store, [], ["a.py"], ctx=ctx, intent=None)
+    store.close()
+
+    a = build_report(tmp_path / "s", None, window_days=30, now=datetime.now(UTC)).activation
+
+    assert a.unattributed_calls == 2

@@ -1,6 +1,6 @@
 # Graphify integration
 
-Sidegraph **rents** [Graphify](https://github.com/safishamsi/graphify) for entity extraction
+Sidegraph uses [Graphify](https://github.com/safishamsi/graphify) for entity extraction
 and graph construction instead of building a second one. This page documents the engine
 relationship: what Sidegraph reads, how corpora and versions work, and how to keep the graph
 fresh.
@@ -142,8 +142,8 @@ corpus) as part of the release gate. Re-verify the same way after upgrading past
 `graphifyy[mcp]` adds Graphify's *own* MCP server — a deeper structure-query layer (`path`,
 `explain`, and friends) over the same `graph.json`. It's entirely optional and coexists
 cleanly with Sidegraph: both read `graph.json` read-only, and Sidegraph never needs Graphify's
-server to function — it only ever reads the file directly via `GraphifyReader`. One honest
-caveat if you do register both: Sidegraph's `PreToolUse` delivery of records only intercepts
+server to function — it only ever reads the file directly via `GraphifyReader`. If you
+register both, Sidegraph's `PreToolUse` delivery of records only intercepts
 Claude Code's own `Read`/`Grep`/`Edit`/`Write` calls and Bash `sed`/`grep`/`rg`/`cat` lines (see
 [`claude-code.md`](claude-code.md)), so a direct call to one of Graphify's own MCP tools bypasses
 it entirely — the records of the files that call touches are not handed over the way they are
@@ -174,17 +174,16 @@ against `graphifyy` 0.9.6). Keep it that way when you edit them. A `PreToolUse` 
 carries `SIDEGRAPH_GRAPH=graphify-out/graph.json` goes with the group, and Sidegraph then stops
 delivering records on Bash lines without a word.
 
-Redundant because the **Sidegraph plugin already fronts the graph for Claude Code**: its
+The **Sidegraph plugin already supplies graph context for Claude Code**: its
 `SessionStart` hook injects the graph-derived top-tier map, its `PreToolUse` hook already
 hands over the records of a file when it is read or edited (non-blocking, each file at most
 **once per agent**), and its MCP server exposes the query surface. Graphify's `Read|Glob` hook, by contrast, fires on
-**every** qualifying read and pushes toward the *code* graph (`graphify query`) rather than
-the *decision* memory — so on a plain read you get two nudges pulling different directions,
-and Graphify's is the noisier, unbounded one.
+**every** qualifying read and asks for `graphify query`. With both installed, a read can
+receive both the graph-query instruction and Sidegraph's decision-memory block.
 
 **Recommendation:** with the Sidegraph plugin installed, **don't run `graphify claude
-install`** — you already have the graph-orientation and read-nudge behaviour, done more
-conservatively. If you specifically want Graphify's own `graphify query` reflex on top, keep
+install`** — Sidegraph already supplies graph orientation and records when files are read.
+If you also want Graphify's `graphify query` instruction, keep
 its hooks but set `SIDEGRAPH_GREP_NUDGE=off` (see [`claude-code.md`](claude-code.md)) so the
 two don't double-nudge on reads. This is separate from the git hook that rebuilds `graph.json`: Sidegraph installs its own
 ([below](#keeping-the-graph-fresh-git-hooks)), which differs from Graphify's `graphify hook

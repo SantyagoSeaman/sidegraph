@@ -248,7 +248,9 @@ def test_a_wrong_case_path_is_not_reported_as_a_file_that_exists(tmp_path, monke
     out = _call(tmp_path, reader, files=["PKG/n.py"])
 
     (line,) = _section(out, NOT_IN_GRAPH)
-    assert line.startswith("1 of 1 seed path is not a repo-relative path to a file")
+    # `PKG/n.py` is well-formed as read: not malformed, just not a file here.
+    assert line.startswith("1 of 1 seed path is not a file in this checkout (")
+    assert "repo-relative" not in line
     assert "exists but is not in the code graph" not in out
 
 
