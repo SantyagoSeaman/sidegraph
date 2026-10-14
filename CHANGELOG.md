@@ -7,6 +7,48 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-14
+
+### Fixed
+
+- On Windows, hooks misread the payload the host sends when a path in it has a non-ASCII
+  character (an accented or Cyrillic user name or project folder). The Stop capture reminder
+  never fired, PreToolUse delivered no records, and for some names SessionStart and
+  SubagentStart printed nothing.
+- On Windows, a non-ASCII git user name, branch name or repository path was read back garbled:
+  a ratified record could carry a garbled name in its provenance, and `sidegraph-verify
+  --against` failed or reported false changes for records containing non-ASCII text.
+- A change to a file whose name has non-ASCII characters, spaces or quotes was missed by the
+  drift check and the commit-trailer candidates, because git escaped the name.
+- On Windows, a Codex hook started from a subdirectory of a repository whose path has non-ASCII
+  characters now runs from the repository root.
+- A default Git for Windows install no longer breaks the MCP server. Its installer puts only
+  `Git\cmd` on PATH, which has no `sh`, so the server, which started with `sh`, did not start.
+  The Codex hooks have a Windows command for the same reason (see Changed).
+- The project's ratify policy now applies under Codex. `sidegraph-init` commits it to
+  `.claude/settings.json`, which Codex does not read, so under Codex every agent proposal
+  waited for review whatever the team chose. The plugin's MCP server now reads the committed
+  value when its environment sets none; an explicit `SIDEGRAPH_RATIFY_POLICY` still wins.
+
+### Changed
+
+- The plugins launch without `sh` on PATH. Both MCP launchers start `uvx` (`uv` in the
+  development manifest) directly, and `sidegraph-mcp --repo-root` anchors the server to the
+  project: `CLAUDE_PROJECT_DIR`, else the git top-level, else the working directory. The Codex
+  hooks gain a PowerShell `commandWindows` that Windows PowerShell 5.1 parses. On native Windows
+  you need no PATH change and no PowerShell 7; Git for Windows at its default options is
+  enough. The Codex hooks need a Codex release that supports `commandWindows` (verified with
+  0.162.1). The Windows hook definition changes, so approve the changed hooks once in `/hooks`
+  on Windows; other platforms are unaffected.
+- The optional terminal CLI now installs from the same place as the plugin, the public
+  repository's `main` branch: `uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main`,
+  updated after each release with `uv tool upgrade sidegraph`. The docs no longer send you to
+  PyPI for it; PyPI still carries every release for pinning an exact version. The `path-skew`
+  SessionStart line now offers `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main`,
+  which moves an older install from PyPI, pinned or not, to the latest release.
+- README: the Quickstart is one numbered sequence with the plugin commands inline, a teammate
+  path, and the rarer options below it; "How it works" is a numbered list instead of a diagram.
+
 ## [0.12.0] — 2026-10-12
 
 ### Fixed

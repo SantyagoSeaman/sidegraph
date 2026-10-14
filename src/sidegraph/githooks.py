@@ -192,6 +192,8 @@ def _git(args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProc
             env=git_env(),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",  # paths round-trip through os.fsencode, never U+FFFD
             timeout=max(timeout, 0.05),
         )
     except (OSError, subprocess.SubprocessError, ValueError):

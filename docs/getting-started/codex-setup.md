@@ -10,10 +10,11 @@ Run these in the repo you want memory over (not the Sidegraph checkout). Two way
 there: the **plugin** (one step, recommended) or **manual registration** (config.toml, hooks,
 and AGENTS.md registered separately, for fine control or a source checkout).
 
-**Windows:** read the [Windows setup notes](installation.md#windows) first. Both the
-plugin MCP wrapper and hooks require a POSIX shell, and the manual recipe below uses
-Bash. Run these recipes inside WSL with the host and toolchain installed there. Native
-core/stdio CI does not verify a complete Codex plugin session.
+**Windows:** read the [Windows setup notes](installation.md#windows) first. The plugin
+(Option A) runs natively with uv and Git for Windows at its default options: no PATH change
+and no PowerShell 7. The manual recipes below (Option B) use Bash and stay POSIX/WSL only:
+run them inside WSL with the host and toolchain installed there. Native core/stdio CI does
+not verify a complete Codex plugin session.
 
 ## Option A: plugin (recommended)
 
@@ -40,9 +41,9 @@ run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main` under 
 gets registered and the cwd-pinning details, and what has and hasn't been verified live.
 
 The plugin needs no other install. The CLI on your `PATH`
-([`uv tool install sidegraph`](installation.md#option-a--the-cli-on-your-path-pypi)) is
+([`uv tool install` from `main`](installation.md#option-a--the-cli-on-your-path)) is
 optional, for typing `sidegraph-*` commands yourself. It never updates itself: after every
-release run `uv tool install sidegraph@latest`. SessionStart says when it differs from the session's version
+release run `uv tool upgrade sidegraph`. SessionStart says when it differs from the session's version
 ([`path-skew`](../guides/troubleshooting.md#path-skew)), and the plugin's skills ignore it
 ([running the CLIs beside the plugin](../reference/cli.md#running-the-clis-beside-the-plugin)).
 

@@ -25,21 +25,18 @@ The exact selection is in [the CI workflow](../../.github/workflows/ci.yml).
 
 Separately, each release candidate runs real Claude Code and Codex sessions with the
 installed plugin, in fresh host profiles, on Windows Server 2022 x64 and macOS 15 arm64,
-each with Python 3.13 and 3.14:
+each with Python 3.13 and 3.14. Each run is the full plugin session for both hosts: the
+plugin's MCP server, `SessionStart` context, records before a Read, a bundled skill, a
+subagent brief, the `Stop` capture prompt, capture and ratification, and recall in a fresh
+session. The project folder and host profile paths contain a non-ASCII character.
 
-- **macOS arm64:** the full plugin session, for both hosts: the plugin's MCP server,
-  `SessionStart` context, records before a Read, a bundled skill, a subagent brief, the
-  `Stop` capture prompt, capture and ratification, and recall in a fresh session.
-- **Windows x64:** plugin installation, capture and ratification through the plugin's MCP
-  server, and recall in a fresh session, for both hosts.
-
-**Last verified: 2026-10-12, the 0.12.0 release candidate,** with Claude Code 2.1.296 and
+**Last verified: 2026-10-14, the 0.13.0 release candidate,** with Claude Code 2.1.296 and
 Codex CLI 0.162.1. The README's blue platform badges summarize these checks, rather than
 live workflow status or support for every published version.
 
-On native Windows, supplied hook commands and bundled MCP launchers require a
-POSIX shell. The native checks run with Git for Windows' Bash; they do not
-establish support for Windows hosts without that toolchain. Graphify integration
+On native Windows, the Claude Code hooks run through Git Bash, which comes with Git for
+Windows; the MCP launchers and the Codex hooks need no POSIX shell. The native checks run
+with Git for Windows installed; they do not establish support for Windows hosts without it. Graphify integration
 remains outside these checks.
 See [Windows](#windows) before installing a host plugin.
 
@@ -50,8 +47,7 @@ versions within those bounds than the development lockfile.
 ### Windows
 
 The native checks above cover the tested release, not every published version. On
-Windows they cover plugin installation, the plugin's MCP tools, capture and
-fresh-session recall; WSL is not a separate CI target.
+Windows they cover the full plugin session; WSL is not a separate CI target.
 
 **Version requirement:** releases before 0.12.0 can stall a native Windows write: a Git
 child inherits the MCP stdin pipe and holds the write until the request times out (see
@@ -66,20 +62,30 @@ or mix `C:\...` and `/mnt/c/...` paths in one launch recipe. The host-specific W
 described by [Claude Code](https://code.claude.com/docs/en/setup#set-up-on-windows) and
 [Codex](https://learn.chatgpt.com/docs/windows/wsl).
 
-On native Windows, both bundled plugin MCP configurations explicitly launch `sh -c`.
-Their hook commands also use POSIX syntax, including environment assignments, command
-substitution and `printf`. Every Codex hook command is wrapped in `sh -c '…'`, and Codex's
-PowerShell 7 hook shell only has to start `sh`. Windows PowerShell 5.1 cannot run the Codex
-hooks, so install PowerShell 7. PowerShell and CMD cannot execute the recipes unwrapped. Git for Windows supplies a
-POSIX shell, but installing it or configuring the host's Bash tool alone does not prove
-that `sh`, `git` and `uvx` are visible to the plugin subprocesses. Native Git Bash plugin
-integration still needs an end-to-end check. See
+On native Windows, the plugins need Git for Windows at its default options, uv and the
+host, and nothing else: no change to PATH and no PowerShell 7.
+
+- Both MCP launchers start `uvx` (`uv` in the development manifest) directly with an
+  argument list, so no shell is involved. Their `--repo-root` argument anchors the server
+  to the project: `CLAUDE_PROJECT_DIR` when set, else the git top-level, else the working
+  directory.
+- Claude Code runs its hooks through Git Bash, which it finds itself.
+- Codex hooks carry a PowerShell `commandWindows` next to the POSIX command. Codex runs it
+  with `pwsh` when PowerShell 7 is installed and with Windows PowerShell 5.1 otherwise, and
+  the commands parse in both. Native Windows hooks need a Codex release that supports
+  `commandWindows` (verified with Codex CLI 0.162.1); if Sidegraph's Codex hooks fail to
+  start on Windows, update Codex.
+- Claude Code finds Git Bash itself; if it cannot, set `CLAUDE_CODE_GIT_BASH_PATH` to
+  `bash.exe`. Without Git Bash, Claude Code runs hooks in PowerShell, which cannot parse
+  Sidegraph's POSIX hook commands.
+
+The manual Codex hook recipes stay POSIX/WSL-only. If something still fails to start, see
 [Windows launch troubleshooting](../guides/troubleshooting.md#windows-plugin-launch).
 
 For MCP-only use with a client that can launch `uvx` directly, Claude Code's
-[manual MCP JSON recipe](claude-code-setup.md#1-register-the-mcp-server) avoids the plugin's
-shell wrapper. Set `SIDEGRAPH_DIR` and `SIDEGRAPH_GRAPH` to absolute paths for the intended
-repository, or set a working directory supported by your client. In JSON, use forward
+[manual MCP JSON recipe](claude-code-setup.md#1-register-the-mcp-server) starts `uvx`
+directly, as the plugin does. Set `SIDEGRAPH_DIR` and `SIDEGRAPH_GRAPH` to absolute paths for
+the intended repository, or set a working directory supported by your client. In JSON, use forward
 slashes (`C:/work/your repo/.sidegraph`) or escape each backslash
 (`C:\\work\\your repo\\.sidegraph`); keep paths with spaces as single argument values.
 If `uvx` is not on the host's PATH, use the full executable path in `command`.
@@ -102,7 +108,7 @@ that `main` only when it cuts a release. See
 
 ## Install Sidegraph
 
-### Option A — the CLI on your PATH (PyPI)
+### Option A — the CLI on your PATH
 
 This puts the `sidegraph-*` commands on your `PATH` under their bare names, for your own
 terminal, scripts and CI. Without a plugin it is the usual setup, though the `uvx` forms below
@@ -112,31 +118,29 @@ the Claude Code or Codex plugin
 plugin runs its own Sidegraph through `uvx` and its skills never use this copy, so install it only
 if you want to type the commands yourself.
 
-`sidegraph` is a pure-Python package on PyPI. For isolated command-line tools, use `uv`;
-with pip, install into a virtual environment:
+It installs from the same place as the plugin, the public repository's `main` branch, which
+changes only at releases:
 
 ```bash
-uv tool install sidegraph
-# Or, inside an activated virtual environment:
-# python -m pip install sidegraph
+uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main
 ```
 
 That puts `sidegraph-mcp` and every `sidegraph-*` CLI on your PATH, where the documentation's
 bare command names work.
 
 **Keep it updated. This step is part of the install.** A `uv tool` install never updates
-itself: it stays at the version you installed until you replace it. After every Sidegraph
+itself: it stays at the version you installed until you upgrade it. After every Sidegraph
 release (listed in the [CHANGELOG](../../CHANGELOG.md) and on
 [GitHub Releases](https://github.com/SantyagoSeaman/sidegraph/releases)), run:
 
 ```bash
-uv tool install sidegraph@latest
-# Or, inside the virtual environment:
-# python -m pip install --upgrade sidegraph
+uv tool upgrade sidegraph
 ```
 
-`@latest` also upgrades a pinned install, where `uv tool upgrade sidegraph` says "Nothing to
-upgrade".
+For an install from `main`, `uv tool upgrade` asks GitHub for the current `main` commit, so it
+moves to the latest release. An older install from PyPI, pinned or not, moves to the same
+source with the install command above. The releases are also published on PyPI as `sidegraph`;
+use that only to pin an exact version (see below).
 
 Beside a plugin, an old copy keeps answering your own shell while the code the plugin runs moves
 to each release, and it can lack commands or flags the documentation shows. On macOS and Linux,
@@ -181,7 +185,7 @@ or [Codex](../integrations/codex.md#plugin-install-path).
 
 **Terminal commands beside the plugin.** The plugin needs no other install. If you also want
 the bare `sidegraph-*` commands in your own terminal, install the CLI as in
-[Option A](#option-a--the-cli-on-your-path-pypi), together with its update step.
+[Option A](#option-a--the-cli-on-your-path), together with its update step.
 
 **Scope.** `/plugin install` offers three scopes: user, local and project. From a terminal the
 flag is `claude plugin install sidegraph@sidegraph --scope user|project|local`, and the default

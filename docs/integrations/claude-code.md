@@ -245,7 +245,11 @@ the recommended install path, and it works today, no PyPI publish required:
 > follows the public repository rather than the PyPI package. The unsuffixed files in this
 > development repository run the checkout the plugin was loaded from, with
 > `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.." --package
-> sidegraph --frozen --no-active`, in whatever project the session is in.
+> sidegraph --frozen --no-active`, in whatever project the session is in. The MCP entry of
+> both variants starts `uvx` or `uv` directly, with no `sh`; the Claude Code hooks run through
+> Git Bash on Windows. Git for Windows provides it and Claude Code finds it; if it cannot,
+> `CLAUDE_CODE_GIT_BASH_PATH` points it there. Without Git Bash, Claude Code runs hooks in
+> PowerShell, which cannot parse Sidegraph's POSIX hook commands.
 >
 > **What runs `@main` and what runs a commit.** The MCP server and `SessionStart` run `@main`,
 > once per session. `Stop`, `PreToolUse` and `SubagentStart` run many times a session, and `uv`
@@ -297,21 +301,19 @@ Two mitigations, both config-level (no source change needed to use them):
 
 - **MCP servers**: `.mcp.json` supports a `"cwd"` field per server, but it is **not** part of
   Claude Code's documented MCP server schema (documented fields are `command`/`args`/`env`
-  and a couple of transport-specific ones) — so the plugin doesn't actually rely on it to pin
-  the working directory. Instead, the published `.mcp.json` (sourced from
-  `plugin/sidegraph/.mcp.public.json`) wraps the real command in a shell that `cd`s into the
-  project root first (`env` omitted below for brevity):
+  and a couple of transport-specific ones), so the plugin does not rely on it. Instead the
+  published `.mcp.json` (sourced from `plugin/sidegraph/.mcp.public.json`) starts `uvx`
+  directly, with no shell, and ends its arguments with `--repo-root` (`env` omitted below for
+  brevity):
   ```json
   {
-    "command": "sh",
-    "args": ["-c", "cd \"${CLAUDE_PROJECT_DIR}\" && exec uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"],
-    "cwd": "${CLAUDE_PROJECT_DIR}"
+    "command": "uvx",
+    "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp", "--repo-root"]
   }
   ```
-  The `sh -c 'cd ... && exec ...'` wrapper is what actually pins cwd — `exec` replaces the
-  shell with the `uvx` process, so no extra process is left in between. The `"cwd"` field is
-  kept alongside it as harmless belt-and-braces: if a future Claude Code version does start
-  honoring it, that's a free bonus, not something the plugin depends on today.
+  `--repo-root` anchors the server to the project: `sidegraph-mcp` moves to
+  `CLAUDE_PROJECT_DIR` when it is set, else to the git top-level of its cwd, else stays in its
+  cwd. Because it needs no `sh`, the same entry starts on native Windows.
 - **Hooks**: hook command entries have no `cwd`/`env` fields, so the public command carries a
   `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from
   git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start`. This is
@@ -326,9 +328,9 @@ Two mitigations, both config-level (no source change needed to use them):
 
 Belt and braces: the hook entry points themselves also anchor a relative `SIDEGRAPH_DIR` to
 `CLAUDE_PROJECT_DIR` when Claude Code exports it, so even a hook invoked without the `cd` prefix
-resolves the store correctly; the graph then follows the store. The MCP server deliberately does
-not do this env-anchoring itself (the portable core stays host-agnostic) — it leans on the
-plugin's `sh -c` wrapper above to fix its cwd instead.
+resolves the store correctly; the graph then follows the store. The MCP server's portable core
+does not do this env-anchoring itself (it stays host-agnostic): the host-seam entry point
+`sidegraph-mcp` does it when the plugin passes `--repo-root`, as above.
 
 ### Launching in a subdirectory
 

@@ -312,12 +312,12 @@ raises costs only its own line.
      are bumped with the package, so the check stays quiet with them; an old binary cannot
      report itself, so it catches a skew only once the binary that runs it is new enough.
    - **`path-skew`.** A `sidegraph-*` command on `PATH` that is not the session's own package
-     is a second Sidegraph (typically a `uv tool install sidegraph` nobody updates). The hook
+     is a second Sidegraph (typically a `uv tool install` nobody updates). The hook
      reads the install without running it: the first of `sidegraph-session-start`,
      `sidegraph-mcp`, `sidegraph-doctor` found on `PATH` once the running environment's own `bin`
      (which `uvx` and `uv run` put first) is skipped, its real path, and the one
      `sidegraph-<version>.dist-info` in that environment. The line names the command, its
-     directory and both versions, and offers `uv tool install sidegraph@latest` or
+     directory and both versions, and offers `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main` or
      `uv tool uninstall sidegraph` when the environment is a `uv tool` one, a generic "upgrade
      or remove" otherwise. It fires for an older and for a newer copy. No binary on `PATH`, no
      or two dist-infos, a non-numeric version or a Windows layout: the check does not run.

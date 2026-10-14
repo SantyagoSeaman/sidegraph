@@ -488,6 +488,17 @@ def test_t14_every_session_start_command_sets_its_host_family(path):
     assert commands, path
     for command in commands:
         assert f"SIDEGRAPH_HOST={MANIFESTS[path]} " in command, (path, command)
+    if MANIFESTS[path] == "codex":
+        # Codex on native Windows runs `commandWindows` instead, in PowerShell.
+        windows = [
+            hook["commandWindows"]
+            for group in data["hooks"]["SessionStart"]
+            for hook in group["hooks"]
+            if "sidegraph-session-start" in hook["command"]
+        ]
+        assert windows, path
+        for command in windows:
+            assert "$env:SIDEGRAPH_HOST='codex'" in command, (path, command)
 
 
 @pytest.mark.parametrize(
@@ -528,6 +539,7 @@ def test_t15_main_runs_prepare_before_the_server_and_help_before_prepare(monkeyp
 def test_t15_the_host_entry_installs_the_middleware(monkeypatch):
     seen: list[object] = []
     monkeypatch.setattr(server, "main", lambda *, prepare=None: seen.append(prepare))
+    monkeypatch.setattr(sys, "argv", ["sidegraph-mcp"])
     mcp_entry.main()
     assert seen == [mcp_entry.install]
 

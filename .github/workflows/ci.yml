@@ -192,6 +192,9 @@ jobs:
             tests/test_server_result_contract.py tests/test_server_invocation_policy.py `
             tests/test_verify_git_stdin.py tests/test_seed_paths_portable.py `
             tests/test_repo_relative_paths_portable.py `
+            tests/test_command_windows.py `
+            tests/test_hook_payload_encoding.py `
+            tests/test_git_output_utf8.py `
             $privateTests `
             tests/test_installed_wheel_smoke.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

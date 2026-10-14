@@ -52,6 +52,12 @@ def test_t6_every_manifest_carries_the_subagent_start_entry(manifest: Path) -> N
     assert "sidegraph-subagent-start" in command
     assert command.endswith(_GUARD) and command.count(_GUARD) >= 1
     codex = manifest.parent.name == "codex"
+    if codex:  # native Windows runs `commandWindows` (PowerShell) instead of `command`
+        windows = hook["commandWindows"]
+        assert "sidegraph-subagent-start" in windows
+        assert windows.endswith("; if (-not $?) { '{}' }"), windows
+        assert "&&" not in windows and "||" not in windows, windows
+        assert ("launch-commit" in windows) == ("uvx" in command)
     if "uvx" not in command:  # a development manifest: the checkout the plugin was loaded from
         assert "uv run" in command and "launch-commit" not in command
         return

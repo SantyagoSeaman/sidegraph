@@ -1234,6 +1234,8 @@ def _run_git(
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=text,
+            encoding="utf-8" if text else None,
+            errors="surrogateescape" if text else None,  # lossless for paths (os.fsencode)
             timeout=timeout,
             env=git_env(),
         )
@@ -1352,11 +1354,13 @@ def _git_diff_name_status(repo_root: Path, ref: str, store_dir: Path) -> list[tu
 
 def _git_show_json(repo_root: Path, ref: str, repo_path: str) -> dict:
     """Read a record from the same validated full commit OID used by the diff."""
-    result = _run_git(["show", f"{ref}:{repo_path}"], cwd=repo_root)
+    result = _run_git(["show", f"{ref}:{repo_path}"], cwd=repo_root, text=False)
     if result.returncode != 0:
-        raise ValueError(f"git show {ref}:{repo_path} failed: {result.stderr.strip()}")
+        err = result.stderr.decode("utf-8", "replace").strip()
+        raise ValueError(f"git show {ref}:{repo_path} failed: {err}")
     try:
-        obj = json.loads(result.stdout)
+        # strict: the store writes UTF-8, and mojibake must not be compared as a record
+        obj = json.loads(result.stdout.decode("utf-8"))
     except (ValueError, RecursionError) as e:
         raise _UnparsableContent(str(e)) from e
     if not isinstance(obj, dict):

@@ -4,29 +4,44 @@ This is one complete loop: build the graph, create the store, connect one host, 
 anchored gotcha, and retrieve it in a new session. It assumes Graphify is installed as described in
 [Installation](installation.md). Commands are written with the `uvx` prefix the plugin uses, so
 no Sidegraph install is needed. With the optional CLI installed and kept updated
-([Option A](installation.md#option-a--the-cli-on-your-path-pypi)), the bare `sidegraph-*` names
+([Option A](installation.md#option-a--the-cli-on-your-path)), the bare `sidegraph-*` names
 work too, and the text below uses them. (`@main` is a mutable ref; to pin it see
 [mutable development references](installation.md#mutable-development-references).)
 
+On Windows, run them in PowerShell and use the line marked for it: in Windows PowerShell 5.1,
+`>>` writes UTF-16 and git would ignore the `.gitignore` entry.
 Run the shell commands from the repository that Sidegraph should remember.
 
 ## 1. Build the graph and store
 
 ```bash
 graphify update .
+echo "graphify-out/" >> .gitignore          # macOS, Linux
+Add-Content .gitignore "graphify-out/"      # Windows PowerShell: use this line instead, not >>
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
 ```
 
 `graphify update .` creates `graphify-out/graph.json`; Sidegraph reads it but never writes to
-it. `sidegraph-init` creates the repo-committed `.sidegraph/` record directories and a
-gitignored derived `index.db`. Both commands are safe to run again.
+it. The graph is rebuilt from your code, so keep `graphify-out/` out of git. `sidegraph-init`
+creates the repo-committed `.sidegraph/` record directories and a gitignored derived
+`index.db`. Both commands are safe to run again.
 
-In a terminal, `sidegraph-init` also asks whether to keep the code graph fresh. Yes installs a
-helper and a marked block in the `post-commit`, `post-merge` and `post-checkout` git hooks, which
-rebuild `graphify-out/graph.json` in the background. It never replaces a hook you already have.
-`sidegraph-init --hooks` answers yes without asking, `--no-hooks` answers no and stops the
-reminder, and `--remove-hooks` takes the hook out. Without a terminal it does not ask. See
-[keeping the graph fresh](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
+In a terminal, `sidegraph-init` asks two questions. Both default to yes, so pressing Enter twice
+accepts them.
+
+- *Keep the code graph fresh?* Yes installs a helper and a marked block in the `post-commit`,
+  `post-merge` and `post-checkout` git hooks, which rebuild `graphify-out/graph.json` in the
+  background. It never replaces a hook you already have. `sidegraph-init --hooks` answers yes
+  without asking, `--no-hooks` answers no and stops the reminder, and `--remove-hooks` takes the
+  hook out. See
+  [keeping the graph fresh](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
+- *Auto-ratify low-risk records?* Yes means the lessons, gotchas and facts the agent proposes
+  are accepted without review; ADRs, constraints and domains still wait for a person. The
+  answer is saved in `.claude/settings.json`, which you commit. The plugin applies it in Claude
+  Code and in Codex, so it covers the whole team. See
+  [`sidegraph-init`](../reference/cli.md#sidegraph-init).
+
+Without a terminal it asks neither question.
 
 If the repository already contains ADRs or supported flow specs, you can now switch to the
 [preview-first bootstrap](bootstrap.md). Otherwise continue here.
@@ -89,13 +104,18 @@ git status --short
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
 ```
 
-Commit the whole `.sidegraph/` directory (`git add .sidegraph`). Its own `.gitignore` already
+Commit the whole `.sidegraph/` directory (`git add .sidegraph`), the root `.gitignore`, and
+`.claude/settings.json` if step 1 created or changed it. The store's own `.gitignore` already
 leaves out `index.db` (the derived index, with its SQLite sidecar files) and `*.tmp` files, so what
 gets staged is what should travel: the `format` marker, `stamping_live_since`, `.gitignore` and the
 record directories. A store file left uncommitted for a day is reported by
 [`store-uncommitted`](../guides/troubleshooting.md#store-uncommitted).
 
-The loop is now working. Next, run the short
+The loop is now working. After cloning, each teammate builds the graph, runs `sidegraph-init`
+and installs the plugin. In a clone, `sidegraph-init` leaves the committed records and settings
+alone and only installs the graph hook.
+
+Next, run the short
 [verification checklist](../guides/verifying-your-setup.md), then
 [name domains](../guides/naming-your-domains.md) if you want a human-readable SessionStart
 table of contents.

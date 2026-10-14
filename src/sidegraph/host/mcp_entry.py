@@ -11,6 +11,8 @@ see design/superpowers/specs/2026-10-11-session-attribution-design.md (D2)
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -21,6 +23,7 @@ from fastmcp.tools import ToolResult
 
 from .. import server
 from ..config import CURRENT_SESSION, TELEMETRY_SESSION_STAMP_PREFIX, SessionHint
+from .claude_settings import RATIFY_POLICY_ENV_VAR, current_ratify_policy, repo_root_for_settings
 from .session_identity import hint_for, stamp_keys_of
 
 
@@ -76,8 +79,51 @@ def install(mcp: FastMCP) -> None:
     mcp.add_middleware(_BindSession())
 
 
+def apply_project_ratify_policy() -> None:
+    """Apply the project's committed ratify policy when the environment sets none.
+
+    `sidegraph-init` commits the policy to `.claude/settings.json`'s `env` block. Claude Code
+    applies that block to its MCP servers, Codex does not, so without this a Codex session
+    proposed every record whatever the team chose. An explicit, non-blank environment value
+    wins; the core keeps reading only the environment. A settings problem never stops the
+    server: anything but a readable committed value leaves the default.
+    """
+    if os.environ.get(RATIFY_POLICY_ENV_VAR, "").strip():
+        return
+    try:
+        state = current_ratify_policy(repo_root_for_settings())
+    except Exception:  # noqa: BLE001 - a settings problem must never stop the MCP server
+        return
+    if state.outcome == "already_set" and state.existing_value:
+        os.environ[RATIFY_POLICY_ENV_VAR] = state.existing_value
+
+
+REPO_ROOT_FLAG = "--repo-root"
+
+
+def anchor_to_project() -> None:
+    """Move the process to the project root; the plugin manifests ask for it with ``--repo-root``.
+
+    ``CLAUDE_PROJECT_DIR`` wins when it is set, non-blank and an existing directory (what the
+    old ``cd "${CLAUDE_PROJECT_DIR}"`` launcher did). Otherwise the git top-level of the cwd
+    applies (what the old Codex ``cd "$(git rev-parse --show-toplevel)"`` did), and outside a
+    repository nothing moves. Anchoring never raises: the server starts wherever it is.
+    see design/superpowers/specs/2026-10-13-sh-free-plugin-launch-design.md (D3)
+    """
+    project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    try:
+        target = Path(project) if project and Path(project).is_dir() else repo_root_for_settings()
+        os.chdir(target)
+    except Exception:  # noqa: BLE001 - anchoring must never stop the MCP server
+        return
+
+
 def main() -> None:
     """Console-script entry point (``sidegraph-mcp``)."""
+    if REPO_ROOT_FLAG in sys.argv[1:]:
+        sys.argv = [a for a in sys.argv if a != REPO_ROOT_FLAG]
+        anchor_to_project()
+    apply_project_ratify_policy()
     server.main(prepare=install)
 
 

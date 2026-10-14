@@ -48,7 +48,8 @@ def launch(command, **options):
     child = ("import sys; sys.stderr.buffer.write(repr(sys.stdin.buffer.read()).encode('ascii')); "
              + "sys.stdout.buffer.write(" + repr(output) + ")")
     result = real_run([sys.executable, '-I', '-c', child], **options)
-    stream_type = bytes if profile in ('verify_bytes', 'reader_freshness') else str
+    stream_type = (bytes if profile in ('verify_bytes', 'reader_freshness', 'reader_changed_files')
+                   else str)
     observed = result.stderr if isinstance(result.stderr, str) else result.stderr.decode('ascii')
     observations.append({{'input': observed,
                          'types_ok': isinstance(result.stdout, stream_type)

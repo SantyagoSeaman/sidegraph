@@ -215,8 +215,9 @@ codex plugin add sidegraph@sidegraph
    more, so approve it again once; the command no longer changes between releases. The release
    that added `SubagentStart` adds a hook definition: approve it once the same way, or subagents
    start without the memory brief while `SessionStart` and `Stop` keep working. The release that
-   wrapped `SessionStart` in `sh -c` (the native Windows fix below) changes its command too:
-   approve the changed `SessionStart` hook once in `/hooks`.
+   wrapped `SessionStart` in `sh -c` changes its command too: approve it once in `/hooks`. The
+   release that gave every hook a Windows command (below) changes only what Windows runs, and
+   Codex hashes the command selected for the OS, so only Windows users approve the hooks again.
 
 **How the plugin launches.** The MCP server and `SessionStart` run `uvx --from
 git+https://github.com/SantyagoSeaman/sidegraph.git@main`, a mutable branch (see
@@ -229,14 +230,21 @@ reaches a running session at the next `SessionStart` on the machine, not at its 
 Codex runs a hook with the session's detected shell and `-c` (`$SHELL -lc` is only a fallback),
 and a fish shell cannot parse the POSIX prefix that reads the file, so every command in the
 manifest is wrapped in `sh -c '…'`. See
-[Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file). The wrapper matters most on
-native Windows, where Codex runs a hook in PowerShell: `pwsh -NoProfile -Command` when PowerShell 7
-is installed, else Windows PowerShell 5.1. That shell cannot parse `VAR=value command` or `$(...)`,
-so it only has to start `sh` (which Git for Windows provides). The outer `|| printf …` guard is
-POSIX syntax, so it applies on POSIX hosts; on Windows it resolves only if Git's `usr\bin` is on
-`PATH`. Windows PowerShell 5.1 cannot parse `||`, so the Codex hooks need PowerShell 7 on Windows.
-The guard exists twice, inside the wrapper for a failed launch and after it for a wrapper that
-cannot start, and both print the same message.
+[Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file).
+
+**Native Windows.** The MCP server needs no shell: `codex/mcp.json` starts `uvx` (`uv` in the
+development manifest) directly with an argument list. Each hook carries a second key,
+`commandWindows`, a PowerShell command that does the same job as the POSIX one: `Stop` and
+`SubagentStart` read the launch-commit file; all of them move to the git top-level, set the
+environment variables, run `uvx`, and print the same fallback message when the launch fails.
+Codex picks the key on
+Windows, where it runs a hook with `pwsh` when PowerShell 7 is installed and with Windows
+PowerShell 5.1 otherwise; the commands are written so 5.1 parses them. So on native Windows the
+plugin needs only Codex, uv and Git for Windows with its default options: no `sh` on PATH and
+no PowerShell 7. Native Windows hooks need a Codex release that supports `commandWindows`
+(verified with Codex CLI 0.162.1); if Sidegraph's hooks fail to start on Windows, update Codex.
+The manual hook recipes on this page and in
+[Codex setup](../getting-started/codex-setup.md) stay POSIX/WSL-only.
 
 This is the same repo-committed manifest set the Claude Code plugin uses, in Codex's own
 shape: `.agents/plugins/marketplace.json` at the repo root, and
@@ -249,12 +257,14 @@ invoke it implicitly). No `PreToolUse` entry ships, for the reason given above.
 **The cwd risk this page used to defer on is resolved, not sidestepped.** Codex plugin MCP
 servers and hooks do not get a project-root variable. That was confirmed live with `codex mcp
 list --json` against a locally installed build of this plugin (codex-cli 0.154.0): the
-registered `sidegraph` server carries `"cwd": null`. So both `codex/mcp.json` and
-`codex/hooks.json` wrap their commands the same way the manual `.codex/hooks.json`
-recipe above does. They run `cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"` before
-anything else, instead of assuming an ambient project directory. That wrapper, not a
-plugin-provided variable, is what keeps `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` pointed at the right
-repo.
+registered `sidegraph` server carries `"cwd": null`. So the plugin pins the project itself.
+`codex/hooks.json` runs `cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"` (the
+`commandWindows` form does `git rev-parse` and `Set-Location`) before anything else, the same
+way the manual `.codex/hooks.json` recipe above does, instead of assuming an ambient project
+directory. `codex/mcp.json` passes `--repo-root` to `sidegraph-mcp`, which anchors the server
+to the project: `CLAUDE_PROJECT_DIR` when set, else the git top-level, else the cwd. That
+anchoring, not a plugin-provided variable, is what keeps `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH`
+pointed at the right repo.
 
 What was verified live on codex-cli 0.154.0, a throwaway `CODEX_HOME`, when the plugin's hooks
 were `SessionStart` and `Stop`: `codex plugin

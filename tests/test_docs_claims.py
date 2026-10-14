@@ -1038,7 +1038,10 @@ def test_quickstart_does_not_install_the_cli_for_plugin_users():
     problems: list[str] = []
     for page in pages:
         for line in _fenced_lines(page.read_text(encoding="utf-8")):
-            if re.match(r"uv tool install sidegraph(?!y)", line):
+            if re.match(
+                r"uv tool install (sidegraph(?!y)|git\+https://github\.com/SantyagoSeaman/sidegraph)",
+                line,
+            ):
                 problems.append(f"{page.name}: `{line}`")
             if re.match(r"sidegraph-[a-z]", line):
                 problems.append(f"{page.name}: bare `{line}`")
@@ -1046,8 +1049,11 @@ def test_quickstart_does_not_install_the_cli_for_plugin_users():
     installation = (_ROOT / "docs" / "getting-started" / "installation.md").read_text(
         encoding="utf-8"
     )
-    assert "uv tool install sidegraph@latest" in installation
-    assert "### Option A — the CLI on your PATH (PyPI)" in installation
+    assert (
+        "uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main" in installation
+    )
+    assert "uv tool upgrade sidegraph" in installation
+    assert "### Option A — the CLI on your PATH\n" in installation
     assert "**Keep it updated. This step is part of the install.**" in installation
 
 
@@ -1064,9 +1070,9 @@ def test_pages_beside_the_plugin_offer_the_cli_with_its_update():
     problems: list[str] = []
     for rel, prefix in pages.items():
         flat = " ".join((_ROOT / rel).read_text(encoding="utf-8").split())
-        if f"({prefix}#option-a--the-cli-on-your-path-pypi)" not in flat:
+        if f"({prefix}#option-a--the-cli-on-your-path)" not in flat:
             problems.append(f"{rel}: no link to the CLI install section")
-        if "uv tool install sidegraph@latest" not in flat:
+        if "uv tool upgrade sidegraph" not in flat:
             problems.append(f"{rel}: no update command")
         for stale in ("You do not need `uv tool install sidegraph`", "With a plugin, skip it"):
             if stale in flat:

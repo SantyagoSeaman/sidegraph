@@ -848,6 +848,8 @@ def _ratifier_identity(actor: str | None = None) -> str | None:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="strict",  # a wrong decode would be stamped into history: None instead
             timeout=5,
         )
         name = out.stdout.strip()

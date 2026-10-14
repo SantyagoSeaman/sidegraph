@@ -5224,10 +5224,13 @@ def main(*, prepare: Callable[[FastMCP], None] | None = None) -> None:
     """
     if any(a in ("-h", "--help") for a in sys.argv[1:]):
         sys.stdout.write(
-            "usage: sidegraph-mcp [-h]\n"
+            "usage: sidegraph-mcp [-h] [--repo-root]\n"
             "The Sidegraph decision MCP server, speaking MCP over stdio. An MCP client\n"
             "starts it, not you. Configuration is by environment variable; see\n"
             "docs/reference/configuration.md.\n"
+            "--repo-root  start in the project root: $CLAUDE_PROJECT_DIR when it is a\n"
+            "             directory, else the git top-level of the current directory.\n"
+            "             The plugin manifests pass it; other launches keep their directory.\n"
         )
         raise SystemExit(0)
     if prepare is not None:

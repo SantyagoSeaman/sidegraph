@@ -7,7 +7,10 @@ use — see [`configuration.md`](configuration.md#store-path-resolution)) and a 
 `GraphifyReader` loaded fresh per call from `SIDEGRAPH_GRAPH` — see
 [`configuration.md`](configuration.md) for both. See
 [mind model](../concepts/mind-model.md) for what `Domain`/`drill_down`/the thin tools are for.
-`sidegraph-mcp --help` (or `-h`) prints a short usage text and exits without starting the server.
+`sidegraph-mcp --help` (or `-h`) prints a short usage text and exits without starting the server. `sidegraph-mcp --repo-root`
+anchors the server to the project before it reads any relative path: `CLAUDE_PROJECT_DIR` when
+set, else the git top-level of the cwd, else the cwd. The plugins pass it; a manual launch
+that sets absolute paths does not need it.
 When a write omits `session_id`, the server fills `provenance.session_id` from the calling host
 (else the one fresh stamp of the same host family, else null); see
 [session attribution](hooks.md#session-attribution). `python -m sidegraph.server` runs the same

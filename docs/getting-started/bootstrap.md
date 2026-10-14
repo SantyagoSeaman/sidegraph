@@ -4,7 +4,7 @@
 then asks production retrieval to surface one accepted, live-anchored decision. It runs
 locally and does not require an account or model API.
 
-Commands use the `uvx` prefix the plugin uses; with the CLI installed ([Option A](installation.md#option-a--the-cli-on-your-path-pypi)) the bare names work too. (`@main` is a mutable ref: see [mutable development references](installation.md#mutable-development-references).)
+Commands use the `uvx` prefix the plugin uses; with the CLI installed ([Option A](installation.md#option-a--the-cli-on-your-path)) the bare names work too. (`@main` is a mutable ref: see [mutable development references](installation.md#mutable-development-references).)
 
 The 10–15 minute path is a launch target that has not yet been measured across first-user
 sessions.

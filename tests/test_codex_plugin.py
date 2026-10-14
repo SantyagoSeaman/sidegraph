@@ -112,21 +112,37 @@ def test_codex_mcp_config_parses_and_names_sidegraph() -> None:
 
 def test_codex_mcp_config_public_twin_uses_uvx_not_uv_run() -> None:
     """Same `.public.` convention `tools/release-public.sh` already applies to
-    `plugin/sidegraph/.mcp.public.json`: the dev variant runs the working tree via `uv run`,
-    the public variant installs straight from the public repo via `uvx --from git+...`.
+    `plugin/sidegraph/.mcp.public.json`: the dev variant runs the working tree with `uv run`,
+    the public variant installs straight from the public repo with `uvx --from git+...`.
+    Both start the program directly, with no `sh`, so a Windows host that has no `sh` on PATH
+    still launches it; and both pass `--repo-root`, which anchors the server to the project.
 
     In this repo both twins coexist, so compare them directly. In the public snapshot the
     release script has already renamed `mcp.public.json` onto `mcp.json` and removed the dev
     form, so there is nothing to compare `mcp.json` against — but the substitution itself
     guarantees `mcp.json` is the public form, and that is exactly what this asserts instead
     of skipping."""
-    base_command = " ".join(_load_json(_MCP)["sidegraph"]["args"])
+    base = _load_json(_MCP)["sidegraph"]
+
+    def _is_public(entry: dict) -> bool:
+        return (
+            entry["command"] == "uvx"
+            and entry["args"][0] == "--from"
+            and entry["args"][1].startswith("git+https://github.com/")
+            and entry["args"][-2:] == ["sidegraph-mcp", "--repo-root"]
+        )
+
     if _MCP_PUBLIC.is_file():
-        public_command = " ".join(_load_json(_MCP_PUBLIC)["sidegraph"]["args"])
-        assert "uv run" in base_command and "uvx" not in base_command
-        assert "uvx --from git+" in public_command and "uv run" not in public_command
+        public = _load_json(_MCP_PUBLIC)["sidegraph"]
+        assert base["command"] == "uv" and base["args"][0] == "run"
+        assert base["args"][-2:] == ["sidegraph-mcp", "--repo-root"]
+        assert _is_public(public)
+        assert "git+" not in json.dumps(base) and "uv run" not in json.dumps(public)
     else:
-        assert "uvx --from git+" in base_command and "uv run" not in base_command
+        assert _is_public(base)
+    for entry in (base, *([_load_json(_MCP_PUBLIC)["sidegraph"]] if _MCP_PUBLIC.is_file() else [])):
+        assert entry["command"] in ("uv", "uvx") and "sh" not in (entry["command"], *entry["args"])
+        assert "cwd" not in entry
 
 
 def test_codex_hooks_config_parses() -> None:
@@ -137,8 +153,9 @@ def test_codex_hooks_config_parses() -> None:
         hooks = _load_json(path)["hooks"]
         assert set(hooks.keys()) == {"SessionStart", "Stop", "SubagentStart"}
         for event_hooks in hooks.values():
-            command = event_hooks[0]["hooks"][0]["command"]
-            assert "git rev-parse --show-toplevel" in command
+            hook = event_hooks[0]["hooks"][0]
+            assert "git rev-parse --show-toplevel" in hook["command"]
+            assert "git rev-parse --show-cdup" in hook["commandWindows"]
 
 
 def test_every_skill_has_openai_yaml_naming_sidegraph_dependency() -> None:

@@ -9,10 +9,12 @@ caveats — see the deep dive at
 
 Run these in the repo you want memory over (not the Sidegraph checkout).
 
-**Windows:** read the [Windows setup notes](installation.md#windows) first. The supplied
-plugin MCP wrapper and hooks require a POSIX shell; native core/stdio CI does not verify
-the complete Claude Code plugin. Use the supplied recipes inside WSL, or configure
-MCP-only access separately as described there.
+**Windows:** read the [Windows setup notes](installation.md#windows) first. The plugin
+starts its MCP server through `uvx` directly and Claude Code runs the hooks through Git Bash,
+so natively you need only Claude Code, uv and Git for Windows with its default options: no
+PATH change. Claude Code finds Git Bash itself; if it cannot, set `CLAUDE_CODE_GIT_BASH_PATH`.
+Native core/stdio CI does not verify the complete Claude Code plugin; WSL with a single Linux
+toolchain is the other supported route.
 
 ## Option A — plugin (recommended)
 
@@ -37,9 +39,9 @@ commit `SessionStart` resolved. See
 what gets registered and the cwd-pinning details. Skip to [Verify](#verify) once installed.
 
 The plugin needs no other install. The CLI on your `PATH`
-([`uv tool install sidegraph`](installation.md#option-a--the-cli-on-your-path-pypi)) is
+([`uv tool install` from `main`](installation.md#option-a--the-cli-on-your-path)) is
 optional, for typing `sidegraph-*` commands yourself. It never updates itself: after every
-release run `uv tool install sidegraph@latest`. SessionStart says when it differs from the session's version
+release run `uv tool upgrade sidegraph`. SessionStart says when it differs from the session's version
 ([`path-skew`](../guides/troubleshooting.md#path-skew)), and the plugin's skills ignore it
 ([running the CLIs beside the plugin](../reference/cli.md#running-the-clis-beside-the-plugin)).
 

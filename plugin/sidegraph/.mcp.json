@@ -1,12 +1,13 @@
 {
   "mcpServers": {
     "sidegraph": {
-      "command": "sh",
+      "command": "uvx",
       "args": [
-        "-c",
-        "cd \"${CLAUDE_PROJECT_DIR}\" && exec uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
+        "--from",
+        "git+https://github.com/SantyagoSeaman/sidegraph.git@main",
+        "sidegraph-mcp",
+        "--repo-root"
       ],
-      "cwd": "${CLAUDE_PROJECT_DIR}",
       "env": {
         "SIDEGRAPH_DIR": ".sidegraph",
         "SIDEGRAPH_GRAPH": "graphify-out/graph.json"

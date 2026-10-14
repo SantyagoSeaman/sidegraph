@@ -675,11 +675,15 @@ def _git_diff_name_only(
     than letting it propagate. ``timeout`` (drift→supersede D1) bounds the subprocess; the
     curate()/CLI path passes none, exactly today's behavior."""
     result = _run_git(
-        ["diff", "--name-only", f"{commit}..HEAD", "--", *paths], cwd=repo_root, timeout=timeout
+        ["diff", "--name-only", "-z", f"{commit}..HEAD", "--", *paths],
+        cwd=repo_root,
+        timeout=timeout,
+        text=False,  # raw bytes: universal newlines would turn a "\r" in a name into "\n"
     )
     if result.returncode != 0:
-        raise ValueError(f"git diff {commit}..HEAD failed: {result.stderr.strip()}")
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        raise ValueError(f"git diff {commit}..HEAD failed: {os.fsdecode(result.stderr).strip()}")
+    # -z: no octal-quoted paths
+    return [os.fsdecode(name) for name in result.stdout.split(b"\0") if name]
 
 
 _CODE_DRIFT_GIT_NOTE = "code-drift: git unavailable — check skipped"

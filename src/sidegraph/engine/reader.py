@@ -578,13 +578,23 @@ class GraphifyReader:
         repo = self.path.parent.parent
         try:
             out = subprocess.run(
-                ["git", "-C", str(repo), "diff", "--name-only", "HEAD~1", "HEAD"],
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    "HEAD~1",
+                    "HEAD",
+                ],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
             )
-            return [p for p in out.stdout.split("\n") if p] if out.returncode == 0 else []
-        except (OSError, subprocess.SubprocessError):
+            if out.returncode != 0:
+                return []
+            return [os.fsdecode(p) for p in out.stdout.split(b"\0") if p]
+        except (OSError, subprocess.SubprocessError, ValueError):
             return []
 
     def repo_root(self, timeout: float = 5.0) -> Path | None:
@@ -610,9 +620,11 @@ class GraphifyReader:
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="strict",  # a garbled root is a wrong directory: None instead
                 timeout=timeout,
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, ValueError):
             return None
         if result.returncode != 0:
             return None

@@ -223,6 +223,69 @@ def test_codex_session_start_is_wrapped_in_sh_c(manifest: Path) -> None:
     assert script.endswith(' || printf "%s\\n" ' + json.dumps(_CODEX_SESSION_FALLBACK))
 
 
+def _windows_commands(manifest: Path) -> dict[str, str]:
+    """event -> its ``commandWindows``: what Codex runs on native Windows, instead of
+    ``command``, through ``powershell.exe -NoProfile -Command`` (no ``sh`` is assumed there)."""
+    hooks = json.loads(manifest.read_text(encoding="utf-8"))["hooks"]
+    return {
+        event: hook["commandWindows"]
+        for event, groups in hooks.items()
+        for group in groups
+        for hook in group["hooks"]
+    }
+
+
+# Syntax Windows PowerShell 5.1 cannot parse: pipeline chains, null-coalescing and null-conditional.
+_PS7_ONLY = ("&&", "||", "??", "?.", "?[")
+
+
+@pytest.mark.parametrize("manifest", _CODEX_PUBLIC, ids=lambda m: m.name)
+def test_every_codex_hook_has_a_powershell_command_windows(manifest: Path) -> None:
+    windows = _windows_commands(manifest)
+    assert set(windows) == set(_commands(manifest)) == {"SessionStart", "Stop", "SubagentStart"}
+    for event, command in windows.items():
+        assert not any(token in command for token in _PS7_ONLY), (event, command)
+        assert "sh -c" not in command and "printf" not in command, (event, command)
+        # The repo-root move, the same one the POSIX command makes.
+        assert (
+            "$r=git rev-parse --show-cdup 2>$null; if ($r) { Set-Location -LiteralPath $r }"
+            in command
+        )
+        assert "$env:SIDEGRAPH_DIR='.sidegraph'" in command, event
+        assert "$env:SIDEGRAPH_GRAPH='graphify-out/graph.json'" in command, event
+
+
+@pytest.mark.parametrize("manifest", _CODEX_PUBLIC, ids=lambda m: m.name)
+def test_codex_session_start_command_windows_names_the_url_once_and_guards_the_launch(
+    manifest: Path,
+) -> None:
+    """The release script rewrites the one literal URL, and the message after a failed launch
+    is the one the POSIX hook prints."""
+    command = _windows_commands(manifest)["SessionStart"]
+    assert command.count(_URL) == 1
+    assert "$env:SIDEGRAPH_HOST='codex'" in command
+    assert f"uvx --from {_URL}" in command
+    assert command.endswith(
+        f"sidegraph-session-start; if (-not $?) {{ '{_CODEX_SESSION_FALLBACK}' }}"
+    )
+
+
+@pytest.mark.parametrize("manifest", _CODEX_PUBLIC, ids=lambda m: m.name)
+@pytest.mark.parametrize("event", ["Stop", "SubagentStart"])
+def test_codex_hot_command_windows_pins_the_record_only_on_the_branch(
+    manifest: Path, event: str
+) -> None:
+    command = _windows_commands(manifest)[event]
+    ref = _ref(command)
+    assert command.count(_URL) == 1
+    assert command.startswith(f"$u='{_URL}{ref}'; ")
+    # The recorded commit takes over only a fallback that is the branch, never a pinned ref.
+    assert "-and $u.EndsWith('@main')" in command
+    assert "$u=$u.Substring(0, $u.LastIndexOf('@') + 1) + $c" in command
+    assert "-cmatch '^[0123456789abcdef]{40}$'" in command and "$i.Length -eq 40" in command
+    assert command.endswith(f"uvx --from $u {ENTRY[event]}; if (-not $?) {{ '{{}}' }}")
+
+
 _WRAPPED = re.compile(r"^sh -c '[^']*' \|\| printf( '[^']*')+$")
 
 

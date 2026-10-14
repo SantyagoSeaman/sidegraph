@@ -44,12 +44,12 @@ both `--db` and `--graph` against its own `--root` instead.
 The plugin's MCP server and hooks run the Sidegraph at
 `git+https://github.com/SantyagoSeaman/sidegraph.git@main`. A plugin skill that runs a
 `sidegraph-*` command runs it the same way, `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, and never the copy on `PATH`: a
-persistent `uv tool install sidegraph` is frozen at the version it was installed at and can lack
+persistent `uv tool install` is frozen at the version it was installed at and can lack
 commands or flags the plugin's skills use. In a Sidegraph checkout (the session's working
 directory holds a `pyproject.toml` named `sidegraph`) run `uv run --project <checkout> <command>`
 instead. Installing the CLI beside the plugin is optional
-([the CLI on your PATH](../getting-started/installation.md#option-a--the-cli-on-your-path-pypi)).
-Whoever installs it must update it after every release with `uv tool install sidegraph@latest`,
+([the CLI on your PATH](../getting-started/installation.md#option-a--the-cli-on-your-path)).
+Whoever installs it must update it after every release with `uv tool upgrade sidegraph`,
 and SessionStart says when a `sidegraph-*` on `PATH` differs from the session's version
 (`path-skew`, see [troubleshooting](../guides/troubleshooting.md#path-skew)).
 
@@ -221,9 +221,11 @@ the Sidegraph checkout):
    server started before `sidegraph-init` keeps proposing under the old policy until the
    session restarts.
 
-   Whatever happens above, a host without `.claude/settings.json` (Codex CLI, CI) gets the
-   equivalent as a plain `export SIDEGRAPH_RATIFY_POLICY=<value>` line. A settings-file
-   problem never fails the store creation in step 1.
+   Whatever happens above, the line after it also gives the equivalent
+   `export SIDEGRAPH_RATIFY_POLICY=<value>` for a shell or CI. The plugin's MCP server
+   (`sidegraph-mcp`) reads the committed value itself when its environment sets none, so the
+   policy also applies under Codex, which does not read `.claude/settings.json`; an explicit
+   environment value wins. A settings-file problem never fails the store creation in step 1.
 5. Prints the setup instructions: the plugin install path first (`/plugin marketplace add
    SantyagoSeaman/sidegraph` + `/plugin install sidegraph@sidegraph` — installs the MCP server
    and all four hooks automatically), then the no-plugin alternative (a single

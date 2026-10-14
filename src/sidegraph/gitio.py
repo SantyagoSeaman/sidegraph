@@ -76,7 +76,19 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | N
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _run_git_bytes(args: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes] | None:
+    """:func:`_run_git` for NUL-framed output: raw bytes, so no decoding touches a path."""
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, timeout=_GIT_TIMEOUT_SECONDS
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -110,15 +122,20 @@ def head_commit_time(cwd: Path) -> datetime | None:
 
 
 def staged_files(cwd: Path) -> list[str]:
-    """``git diff --cached --name-only`` -- repo-relative paths, deduped order-preserving."""
-    result = _run_git(["diff", "--cached", "--name-only"], cwd)
+    """``git diff --cached --name-only -z`` -- repo-relative paths, deduped order-preserving.
+
+    NUL-framed, so git never C-quotes a name (quotes, backslashes, tabs, non-ASCII) and a
+    leading or trailing space survives; each name is decoded as the filesystem does."""
+    result = _run_git_bytes(["diff", "--cached", "--name-only", "-z"], cwd)
     if result is None or result.returncode != 0:
         return []
     seen: dict[str, None] = {}
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if line:
-            seen.setdefault(line, None)
+    try:
+        for raw in result.stdout.split(b"\0"):
+            if raw:
+                seen.setdefault(os.fsdecode(raw), None)
+    except ValueError:
+        return []
     return list(seen)
 
 

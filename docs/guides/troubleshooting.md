@@ -19,46 +19,50 @@ session start and says what needs fixing, to the person as well as to the model.
 
 If the package CLI works but the plugin's MCP server cannot start or no memory appears
 at session start, check the [Windows setup boundary](../getting-started/installation.md#windows).
-The bundled MCP launchers require `sh`; the hook commands require a POSIX shell and its
-tools. These requirements remain even if the agent host itself runs in PowerShell.
-
-The Codex hooks also need PowerShell 7 on Windows: Codex runs each hook in PowerShell
-(`pwsh` if installed, else Windows PowerShell 5.1), and 5.1 cannot parse the commands. The
-symptom is no Sidegraph context at Codex session start, a "could not start" hook message, or
-nothing at all. Install PowerShell 7 (`winget install Microsoft.PowerShell`) and restart Codex.
+The bundled MCP launchers start `uvx` (or `uv`) directly, so they need `uv` on the PATH the
+host gives its subprocesses; Claude Code runs its hooks through Git Bash, so they need Git for
+Windows at its default options. Codex hooks use a PowerShell command on Windows, which parses
+in both Windows PowerShell 5.1 and PowerShell 7. None of this needs a PATH change or
+PowerShell 7, even if the agent host itself runs in PowerShell.
 
 From the Windows environment used to launch the host, inspect executable discovery:
 
 ```powershell
-Get-Command sh, bash, git, uv, uvx -ErrorAction SilentlyContinue |
+Get-Command git, uv, uvx -ErrorAction SilentlyContinue |
     Select-Object Name, Source
 ```
 
-Missing entries identify PATH gaps. Check the resolved paths too: a `bash` that points
-to the Windows WSL launcher selects a different environment from Git Bash. The host
-must be able to spawn `sh` directly for the plugin MCP wrapper; its Bash tool's separate
-shell setting does not establish that. After changing PATH, restart the agent host so
-its subprocesses inherit the new environment. A GUI host may inherit a different PATH
-from a newly opened terminal.
+Missing entries identify PATH gaps. After changing PATH, restart the agent host so its
+subprocesses inherit the new environment. A GUI host may inherit a different PATH from a
+newly opened terminal. If `claude mcp list` shows `sidegraph` as failed to connect, or Codex
+lists no `sidegraph` tools, run the launcher by hand to see the error (Ctrl+C stops it):
 
-Inside the actual POSIX shell configured for hooks, check again:
-
-```bash
-command -v sh git uv uvx
+```powershell
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp --repo-root
 ```
 
-All four should resolve in that environment. Reproduce a failed hook there with the
+For Codex, `codex mcp list` should show the `sidegraph` server, and `/hooks` should list its
+hooks as trusted. If the hooks fail to start on Windows, update Codex: they need a release that
+supports `commandWindows`.
+
+Inside the Git Bash that runs the Claude Code hooks, check again:
+
+```bash
+command -v git uv uvx
+```
+
+All three should resolve in that environment. Reproduce a failed hook there with the
 [SessionStart diagnostic command](../reference/hooks.md#if-you-see-this-message),
 including its stdin redirection. POSIX assignments and `</dev/null` are not PowerShell
-syntax. Do not replace a missing shell by changing only `command` to `powershell`;
-the arguments and hook recipes would still use POSIX syntax.
+syntax; the Codex hooks' PowerShell form is the `commandWindows` key of the plugin's
+`codex/hooks.json`.
 
 If tools resolve but hooks stay silent, check the host guide's
 [Claude plugin scope](../getting-started/claude-code-setup.md#option-a--plugin-recommended)
 or [Codex hook trust](../getting-started/codex-setup.md#verify), and verify that the MCP
 server and hooks resolve the same repository's store. Native plugin integration is not
-established by core/installed-wheel CI; WSL with a single Linux toolchain is the supplied
-complete-workflow route.
+established by core/installed-wheel CI; the native Windows route is verified with Claude Code
+2.1.296 and Codex CLI 0.162.1, and WSL with a single Linux toolchain is the other supported route.
 
 ## The checks
 
@@ -77,7 +81,7 @@ complete-workflow route.
 | `store-uncommitted` | degraded | Store files nobody committed for a day | session line and notice, doctor, stats | commit `.sidegraph/` in a pull request |
 | `branch-only-records` | advisory | Records that exist only on unmerged branches | session line; a notice when a branch is a week old | merge the branch |
 | `version-skew` | advisory | The running package and the plugin manifest are different versions | session line and notice | update the plugin, or restart the session |
-| `path-skew` | advisory | A `sidegraph-*` on `PATH` is a different version than the session | session line and notice | `uv tool install sidegraph@latest`, or `uv tool uninstall sidegraph` |
+| `path-skew` | advisory | A `sidegraph-*` on `PATH` is a different version than the session | session line and notice | `uv tool upgrade sidegraph`, or `uv tool uninstall sidegraph` |
 | `plugin-off-in-subdirectories` | advisory | Claude sessions started below the repository root run without the plugin | session line, doctor; a notice only with case (b) | enable it in `.claude/settings.local.json` at the root, or in user settings |
 
 Severity decides who is told. **Broken** means memory does not work now. **Degraded** means it
@@ -296,7 +300,7 @@ too). It compares numeric parts, so `0.10.0` is above `0.9.0`, and ignores a loc
 ### path-skew
 
 A `sidegraph-*` command on `PATH` is a second Sidegraph beside the plugin, typically a
-`uv tool install sidegraph`. That is fine while it stays current, but a `uv tool` install never
+`uv tool install`. That is fine while it stays current, but a `uv tool` install never
 updates itself: after a release it keeps answering your own shell commands at the version it was
 installed at, while the plugin's hooks, MCP server and skills run the session's version through
 `uvx`. Old copies can also lack commands or flags (`sidegraph-init --hooks`, `sidegraph-stats`).
@@ -305,9 +309,11 @@ The SessionStart line names the command, the `PATH` directory and both versions.
 install's `sidegraph-<version>.dist-info` and never runs the command.
 
 - **You use only the plugin.** Remove it: `uv tool uninstall sidegraph`.
-- **You use the CLI on purpose.** Update it: `uv tool install sidegraph@latest` (also for a
-  pinned install, where `uv tool upgrade sidegraph` says "Nothing to upgrade"). The line is
-  shown whenever the versions differ, so a deliberately pinned or newer copy shows it daily.
+- **You use the CLI on purpose.** Update it: `uv tool upgrade sidegraph` for an install from
+  `main`. An install from PyPI, pinned or not, moves to `main` with
+  `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main`, the command the line offers because it works for
+  either. The line is shown whenever the versions differ, so a deliberately pinned or newer copy
+  shows it daily.
 - **Not a `uv tool` install** (pipx, pip). The line says "upgrade or remove" without a command.
 - **Where it runs.** The session surface only. It does not run when no foreign `sidegraph-*` is
   on `PATH`, when the install has no or two dist-infos, or on a Windows layout.

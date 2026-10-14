@@ -6,7 +6,7 @@ Run them in the repository whose `.sidegraph/` you configured.
 Commands are written with the `uvx` prefix the plugin uses, so no Sidegraph install is needed
 (`@main` is a mutable ref: see
 [mutable development references](../getting-started/installation.md#mutable-development-references)).
-With the CLI installed ([Option A](../getting-started/installation.md#option-a--the-cli-on-your-path-pypi))
+With the CLI installed ([Option A](../getting-started/installation.md#option-a--the-cli-on-your-path))
 you can drop the prefix and use the bare `sidegraph-*` names.
 
 ## Case 1 — Host wiring

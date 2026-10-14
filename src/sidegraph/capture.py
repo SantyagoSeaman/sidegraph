@@ -817,6 +817,8 @@ def _derive_initiative(store: Store) -> str | None:
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="strict",  # a garbled branch name would be stored for good: None instead
             )
             if out.returncode == 0:
                 break
@@ -826,7 +828,7 @@ def _derive_initiative(store: Store) -> str | None:
         if not branch or branch in ("main", "master"):
             return None
         return branch.replace("/", "-")
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, ValueError):  # ValueError: undecodable bytes
         return None
 
 

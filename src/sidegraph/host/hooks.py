@@ -285,7 +285,7 @@ _PLUGIN_NEWER = (
 )
 
 # `path-skew`: a `sidegraph-*` command on PATH that is not the running package's own. A persistent
-# `uv tool install sidegraph` never updates itself, and a released entry point cannot be asked its
+# `uv tool install` never updates itself, and a released entry point cannot be asked its
 # version (none answers `--version`; an exec costs about a second), so the probe reads the install:
 # the real binary's venv holds one `sidegraph-<version>.dist-info`. `uvx` and `uv run` put their own
 # environment's `bin` first on the child's PATH, so that directory is skipped before the search,
@@ -348,7 +348,8 @@ _PATH_SKEW = (
     "commands use the {which} one. {fix}"
 )
 _PATH_SKEW_FIX_UV = (
-    "Reinstall it with `uv tool install sidegraph@latest`, or remove it with "
+    "Update it with `uv tool install --reinstall "
+    "git+https://github.com/SantyagoSeaman/sidegraph.git@main`, or remove it with "
     "`uv tool uninstall sidegraph` if you only use the plugin."
 )
 _PATH_SKEW_FIX_OTHER = "Upgrade it, or remove it if you only use the plugin."
@@ -1313,6 +1314,8 @@ def _commits_since(store_path: Path, since: datetime) -> int | None:
             env=gitenv.git_env(),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_REARM_GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
@@ -2124,5 +2127,8 @@ def refuse_arguments(prog: str, summary: str) -> None:
 
 
 def _read_payload() -> dict:
-    raw = sys.stdin.read()
+    # The hosts send UTF-8, but Windows decodes a piped stdin with the ANSI code page, which
+    # garbles non-ASCII paths. Decode the bytes ourselves; only test doubles lack a buffer.
+    buffer = getattr(sys.stdin, "buffer", None)
+    raw = buffer.read().decode("utf-8") if buffer is not None else sys.stdin.read()
     return json.loads(raw) if raw.strip() else {}
