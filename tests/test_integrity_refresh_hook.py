@@ -21,6 +21,7 @@ from sidegraph.integrity import CHECKS, Inputs
 from sidegraph.store import Store
 from tests import githooks_support
 from tests.githooks_support import HOOKS, git
+from tests.test_cli_init_hooks import init, init_main
 
 sandbox = githooks_support.sandbox  # the fixture, bound by name so that test arguments find it
 
@@ -294,3 +295,247 @@ def test_a_worktree_with_no_main_checkout_is_not_run(sandbox):
     own.write_text(json.dumps({"nodes": [], "links": []}))
     result = run_it(store_dir, own)
     assert result.problems == [] and CHECK not in result.clean
+
+
+OUTDATED = "refresh-helper-outdated"
+OUTDATED_LINE = (
+    "Sidegraph: the graph refresh hook in this repository runs Graphify without "
+    "GRAPHIFY_NO_AUTO_REFRESH=1, so Graphify 0.9.87 and later can rewrite the agent skills they "
+    "installed on the first rebuild after an upgrade. Ask the user to run `sidegraph-init`, "
+    "which refreshes the helper and keeps their recorded hook choice; do not run it unasked."
+)
+OUTDATED_NOTICE = (
+    "Sidegraph: the graph refresh hook's helper is out of date: it runs Graphify without "
+    "GRAPHIFY_NO_AUTO_REFRESH=1, so Graphify 0.9.87 and later can rewrite your agent skills "
+    "after an upgrade. Refresh it with `sidegraph-init`."
+)
+OUTDATED_DETAIL = (
+    "the installed graph refresh helper runs Graphify without GRAPHIFY_NO_AUTO_REFRESH=1; run "
+    "`sidegraph-init` to refresh it"
+)
+
+
+def outdated_detector():
+    return next(c for c in CHECKS if c.id == OUTDATED)
+
+
+def write_old_helper(sb, repo: Path) -> githooks.RepoInfo:
+    """The helper a 0.13.x ``sidegraph-init`` wrote: today's text without the variable."""
+    info = githooks.repo_info(repo)
+    assert info is not None
+    old = githooks.helper_script(str(sb.fake_bin / "graphify"))
+    info.helper.write_text(old.replace(f"{githooks.GRAPH_REBUILD_ENV} ", ""))
+    return info
+
+
+def test_the_outdated_check_runs_just_before_refresh_hook_missing_for_session_and_doctor():
+    ids = [c.id for c in CHECKS]
+    assert ids.index(OUTDATED) + 1 == ids.index(CHECK)
+    assert outdated_detector().surfaces == frozenset({"session", "doctor"})
+
+
+def test_an_older_helper_is_reported_and_sidegraph_init_clears_it(sandbox, monkeypatch, capsys):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = write_old_helper(sandbox, repo)
+    problem = outdated_detector().detect(inputs(store_dir, graph))
+    assert problem is not None
+    assert (problem.check, problem.severity, problem.fix) == (
+        OUTDATED,
+        "advisory",
+        "sidegraph-init",
+    )
+    assert (problem.line, problem.notice) == (OUTDATED_LINE, OUTDATED_NOTICE)
+    assert problem.findings == ((str(info.helper), OUTDATED_DETAIL),)
+    init(repo, monkeypatch, capsys)
+    assert outdated_detector().detect(inputs(store_dir, graph)) is None
+
+
+def test_sidegraph_init_refreshes_the_helper_and_keeps_a_recorded_decline(
+    sandbox, monkeypatch, capsys
+):
+    # a `--hooks` fix text would also reset the recorded choice; plain `sidegraph-init` must not
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    write_old_helper(sandbox, repo)
+    git(store_dir, "config", "--local", "sidegraph.graphRefresh", "false")
+    init(repo, monkeypatch, capsys)
+    assert outdated_detector().detect(inputs(store_dir, graph)) is None
+    assert git(store_dir, "config", "--local", "--get", "sidegraph.graphRefresh") == "false"
+
+
+def test_a_current_helper_is_clean_whatever_graphify_path_it_recorded(sandbox):
+    repo, store_dir, graph = project(sandbox)
+    info = githooks.repo_info(repo)
+    assert info is not None
+    githooks.install(info, graphify="/opt/elsewhere/graphify")
+    assert outdated_detector().detect(inputs(store_dir, graph)) is None
+
+
+def test_no_helper_means_not_run(sandbox):
+    _repo, store_dir, graph = project(sandbox)
+    result = integrity.run(inputs(store_dir, graph), "session", (outdated_detector(),))
+    assert result.problems == [] and OUTDATED not in result.clean
+
+
+def run_outdated(store_dir: Path, graph: Path | None) -> integrity.RunResult:
+    return integrity.run(inputs(store_dir, graph), "session", (outdated_detector(),))
+
+
+def reported(store_dir: Path, graph: Path | None) -> bool:
+    return [p.check for p in run_outdated(store_dir, graph).problems] == [OUTDATED]
+
+
+def choice_of(repo: Path) -> str:
+    return git(repo, "config", "--local", "--get-all", "sidegraph.graphRefresh", check=False)
+
+
+def test_a_helper_that_keeps_the_variable_is_current_whatever_else_it_says(sandbox):
+    """The feature is the variable on the line that runs Graphify, not the exact text: a helper
+    with an extra line, or one a newer Sidegraph wrote differently, is current."""
+    repo, _store_dir, _graph = project(sandbox)
+    install(sandbox, repo)
+    info = githooks.repo_info(repo)
+    assert info is not None
+    text = info.helper.read_text()
+    assert githooks.helper_is_current(info) is True
+    info.helper.write_text(text + "echo harmless >/dev/null\n")
+    assert githooks.helper_is_current(info) is True
+    info.helper.write_text(text.replace("PYTHONHASHSEED=0 ", ""))
+    assert githooks.helper_is_current(info) is True
+    info.helper.write_bytes(text.replace("\n", "\r\n").encode())
+    assert githooks.helper_is_current(info) is True
+
+
+def test_a_helper_whose_graphify_line_lacks_the_variable_is_not_current(sandbox):
+    repo, _store_dir, _graph = project(sandbox)
+    install(sandbox, repo)
+    info = write_old_helper(sandbox, repo)
+    assert githooks.helper_is_current(info) is False
+    # a comment that names the variable does not set it
+    info.helper.write_text(info.helper.read_text() + f"# {githooks.GRAPH_REBUILD_ENV}\n")
+    assert githooks.helper_is_current(info) is False
+
+
+def make_partial(repo: Path, info: githooks.RepoInfo, *removed: str) -> None:
+    for hook in removed:
+        (info.hooks_dir / hook).unlink()
+
+
+def test_one_hook_that_runs_the_old_helper_is_enough_even_with_a_recorded_decline(sandbox):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = write_old_helper(sandbox, repo)
+    make_partial(repo, info, "post-checkout", "post-merge")
+    assert not githooks.status(info).wired
+    git(store_dir, "config", "--local", "sidegraph.graphRefresh", "false")
+    assert reported(store_dir, graph)
+
+
+def test_a_helper_no_hook_runs_is_not_checked(sandbox):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = write_old_helper(sandbox, repo)
+    make_partial(repo, info, *githooks.HOOKS)
+    result = run_outdated(store_dir, graph)
+    assert result.problems == [] and OUTDATED not in result.clean
+
+
+def refuse_post_merge(info: githooks.RepoInfo) -> None:
+    """``githooks.install`` leaves a symlinked hook alone ("it is a symlink")."""
+    target = info.hooks_dir / "elsewhere"
+    target.write_text("#!/bin/sh\nexit 0\n")
+    target.chmod(0o755)
+    (info.hooks_dir / "post-merge").unlink()
+    (info.hooks_dir / "post-merge").symlink_to(target)
+
+
+def test_a_hook_install_refuses_does_not_hide_the_old_helper_the_others_run(sandbox):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = write_old_helper(sandbox, repo)
+    refuse_post_merge(info)
+    report = githooks.install(info, graphify=str(sandbox.fake_bin / "graphify"))
+    assert [r.action for r in report.hooks if r.hook == "post-merge"] == ["refused"]
+    write_old_helper(sandbox, repo)
+    assert not githooks.status(info).wired
+    assert reported(store_dir, graph)
+
+
+def init_clears(repo, store_dir, graph, monkeypatch, capsys, *argv) -> tuple[str, str]:
+    assert reported(store_dir, graph)
+    before = choice_of(repo)
+    out = init(repo, monkeypatch, capsys, *argv)
+    assert not reported(store_dir, graph)
+    assert OUTDATED not in [p.check for p in run_outdated(store_dir, graph).problems]
+    return out, before
+
+
+def test_init_refreshes_the_helper_of_a_partly_wired_repository_and_keeps_a_decline(
+    sandbox, monkeypatch, capsys
+):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = write_old_helper(sandbox, repo)
+    make_partial(repo, info, "post-checkout", "post-merge")
+    git(store_dir, "config", "--local", "sidegraph.graphRefresh", "false")
+    out, before = init_clears(repo, store_dir, graph, monkeypatch, capsys)
+    assert choice_of(repo) == before == "false"
+    assert out.count("refreshed the helper") == 1
+    assert not (info.hooks_dir / "post-merge").exists()  # no hook was written
+
+
+def test_init_refreshes_the_helper_when_a_hook_is_refused(sandbox, monkeypatch, capsys):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = write_old_helper(sandbox, repo)
+    refuse_post_merge(info)
+    out, before = init_clears(repo, store_dir, graph, monkeypatch, capsys)
+    assert choice_of(repo) == before
+    assert (info.hooks_dir / "post-merge").is_symlink()
+
+
+def test_init_refreshes_the_helper_of_a_worktree_that_has_its_own_graph(
+    sandbox, monkeypatch, capsys
+):
+    repo, _store_dir, _graph = project(sandbox)
+    install(sandbox, repo)
+    write_old_helper(sandbox, repo)
+    wt, wt_store = worktree_project(sandbox, repo)
+    own = wt / "graphify-out" / "graph.json"
+    own.parent.mkdir()
+    own.write_text(json.dumps({"nodes": [], "links": []}))
+    # the graph guard would skip the hook; the helper is per repository, so it is refreshed anyway
+    out, before = init_clears(wt, wt_store, own, monkeypatch, capsys)
+    assert choice_of(repo) == before
+
+
+def test_init_refreshes_the_helper_when_the_store_is_in_a_subdirectory(
+    sandbox, monkeypatch, capsys
+):
+    repo, _store_dir, _graph = project(sandbox)
+    install(sandbox, repo)
+    write_old_helper(sandbox, repo)
+    sub = repo / "pkg"
+    sub.mkdir()
+    sub_store = sub / ".sidegraph"
+    sub_store.mkdir()
+    before = choice_of(repo)
+    assert reported(sub_store, None)
+    monkeypatch.chdir(sub)
+    assert init_main(["--db", str(sub_store), "--no-settings"]) == 0
+    capsys.readouterr()
+    assert not reported(sub_store, None)
+    assert choice_of(repo) == before
+
+
+def test_no_hooks_refreshes_an_old_helper_and_records_only_the_decline(
+    sandbox, monkeypatch, capsys
+):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    write_old_helper(sandbox, repo)
+    assert reported(store_dir, graph)
+    init(repo, monkeypatch, capsys, "--no-hooks")
+    assert not reported(store_dir, graph)
+    assert choice_of(repo) == "false"

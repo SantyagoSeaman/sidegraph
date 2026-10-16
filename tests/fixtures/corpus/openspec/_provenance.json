@@ -6,6 +6,6 @@
     "src/commands/",
     "src/utils/"
   ],
-  "graphify_version": "graphify 0.9.6",
+  "graphify_version": "graphify 0.9.90",
   "visibility": "public"
 }

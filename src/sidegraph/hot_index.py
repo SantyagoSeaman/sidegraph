@@ -9,6 +9,7 @@ the MCP server, a CLI) left it: it never reloads, never heals and never creates 
 
 It returns ``None`` from :meth:`HotIndex.open` in every case where ``Store`` would have
 repaired the index (missing, symlinked, another schema version, an older layout, unreadable),
+or where its format marker refuses this version,
 so the hook does nothing and prints ``{}``. The hot SQL (claim, meta read, event insert, shows
 upsert) lives here as module constants that ``Store`` runs too, so the two cannot drift.
 
@@ -30,8 +31,10 @@ from urllib.parse import quote
 
 from .store_layout import (
     INDEX_JOURNAL_PRAGMA,
+    INDEX_STAMPS,
     MISTAKE_KINDS,
-    SCHEMA_VERSION,
+    VOLATILE_STALE_KEY,
+    check_store_requirement,
     proposal_surfaces,
     symlinked_internals,
 )
@@ -119,8 +122,9 @@ class HotIndex:
     def open(cls, store_path: str | os.PathLike[str]) -> HotIndex | None:
         """The handle for the store at ``store_path``, or ``None`` when ``Store`` would have
         healed something first: the index is missing, a store-owned entry is a symlink (a
-        symlinked ``index.db`` would send writes elsewhere), ``schema_version`` is not this
-        code's, ``retrieval_events`` has no ``agent`` column (an index from before per-agent
+        symlinked ``index.db`` would send writes elsewhere), ``schema_version`` is outside
+        this code's two accepted stamps, the format marker refuses this version,
+        ``retrieval_events`` has no ``agent`` column (an index from before per-agent
         hook state), or anything raises while opening. Never creates a file and never writes
         on open.
         # see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D2)"""
@@ -129,6 +133,7 @@ class HotIndex:
         try:
             if symlinked_internals(root):
                 return None
+            check_store_requirement(root)
             index = root / "index.db"
             if not index.is_file():
                 return None
@@ -137,7 +142,7 @@ class HotIndex:
             uri = f"file:{quote(os.fsencode(str(index)))}?mode=rw"
             conn = sqlite3.connect(uri, uri=True, timeout=BUSY_TIMEOUT_SECONDS)
             row = conn.execute(GET_META_SQL, ("schema_version",)).fetchone()
-            if row is None or row[0] != SCHEMA_VERSION:
+            if row is None or row[0] not in INDEX_STAMPS:
                 conn.close()
                 return None
             columns = {r[1] for r in conn.execute("PRAGMA table_info(retrieval_events)")}
@@ -258,6 +263,9 @@ class HotIndex:
         binding joins it to an entity whose descriptor names a file.
         ``files`` is the number of distinct files those bindings point at, and ``mistakes`` the
         records among them of a mistake kind. A row that fails to parse is skipped on its own.
+
+        A new store or canonical reload leaves placeholder statuses; withhold counts until
+        sync certifies them. The flag and binding rows share one statement snapshot.
         see design/superpowers/specs/2026-10-03-subagent-start-brief-design.md (D2)
         """
         now = datetime.now(UTC)
@@ -291,7 +299,9 @@ class HotIndex:
         records: set[str] = set()
         files: set[str] = set()
         for record_id, entity_id, data in self._conn.execute(
-            "SELECT record_id, entity_id, data FROM anchor_bindings"
+            "SELECT record_id, entity_id, data FROM anchor_bindings "
+            "WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key = ? AND value = '1')",
+            (VOLATILE_STALE_KEY,),
         ):
             if record_id not in surfacing or entity_id not in file_of:
                 continue
@@ -346,6 +356,7 @@ class HotIndex:
         an orphaned binding, does not appear. A row that fails to parse is skipped on its own.
         This is the order of the model layer's per-file list, which differs from
         ``get_task_context(files=[f])`` (that one orders per entity).
+        Withhold selection after canonical reload until sync certifies binding statuses.
         # see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1)
         """
         now = datetime.now(UTC)
@@ -379,10 +390,15 @@ class HotIndex:
 
     def _decisions_bound_to(self, entity_id: str, now: datetime) -> list[tuple[dict, datetime]]:
         """Live decisions bound to ``entity_id`` by a live or degraded binding, each with its
-        parsed ``valid_from``; ``Store.valid_decisions_for_entity`` on raw rows."""
+        parsed ``valid_from``. Computed-state parity: ``Store.valid_decisions_for_entity``.
+        Unlike that Store helper, reset statuses after reload select nothing until sync;
+        the status rows and their certification flag share one statement snapshot.
+        """
         out: list[tuple[dict, datetime]] = []
         bindings = self._conn.execute(
-            "SELECT data FROM anchor_bindings WHERE entity_id = ?", (entity_id,)
+            "SELECT data FROM anchor_bindings WHERE entity_id = ? "
+            "AND NOT EXISTS (SELECT 1 FROM meta WHERE key = ? AND value = '1')",
+            (entity_id, VOLATILE_STALE_KEY),
         ).fetchall()
         for (bdata,) in bindings:
             binding = json.loads(bdata)

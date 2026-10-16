@@ -125,7 +125,10 @@ def test_a_duplicate_start_does_not_wait_for_another_process_holding_the_write_l
     session the ledger already holds a fresh stamp for. The duplicate is decided from a read that
     takes no lock: it returns at once and emits nothing, not after the store's 5 s busy timeout
     (and then, on the timeout, a double emit)."""
+    from sidegraph.store import Store
+
     store_dir = tmp_path / "s"
+    Store(store_dir).close()
     first = _start_hook(monkeypatch, capsys, store_dir, "dup-locked")
     assert "hookSpecificOutput" in first  # the first start emits and stamps the ledger
 

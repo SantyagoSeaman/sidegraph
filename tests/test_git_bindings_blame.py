@@ -10,9 +10,11 @@ import json
 import subprocess
 from datetime import UTC, datetime
 
+from sidegraph import __version__
 from sidegraph.cli import blame_main
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Fact, Provenance
 from sidegraph.store import Store
+from tests.test_store_requirement import above_running, write_requirement_marker
 
 
 def _git(args: list[str], cwd) -> subprocess.CompletedProcess:
@@ -244,3 +246,27 @@ def test_unknown_file_is_a_clean_cli_error(tmp_path, monkeypatch):
     _commit_with_message(repo, "f.txt", "line1\n", "initial\n")
     rc, _ = _run(["does_not_exist.txt"], monkeypatch, repo)
     assert rc == 1
+
+
+def test_a_store_that_requires_a_newer_sidegraph_is_explained_and_joins_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """Red against code before this task: open_index_ro already refuses the store, so no record
+    is joined, but nothing says why, and the stderr assertion fails. Before the requirement
+    check existed, the record itself was joined."""
+    repo = _init_repo(tmp_path)
+    store = Store(repo / ".sidegraph")
+    d = _decision(store, "implemented by this commit")
+    store.close()
+    _commit_with_message(
+        repo, "f.txt", "line1\n", f"Implement thing\n\nSidegraph-Decision: {d.id}\n"
+    )
+    above = above_running()
+    write_requirement_marker(repo / ".sidegraph", above)
+    rc, out = _run(["f.txt"], monkeypatch, repo)
+    assert rc == 0
+    assert "implemented by this commit" not in out
+    assert (
+        f"This store requires Sidegraph >= {above}; this is {__version__}."
+        in capsys.readouterr().err
+    )

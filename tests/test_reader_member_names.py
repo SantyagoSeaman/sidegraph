@@ -272,10 +272,12 @@ def test_owner_generics_are_stripped(tmp_path):
         assert (res.status, res.node_id) == ("resolved", "p"), name
 
 
-def test_a_path_qualified_name_still_never_resolves():
-    # `src/sidegraph/engine/reader.py` splits into the member `py`, which no node carries.
+def test_a_path_qualified_name_resolves_to_its_file_node():
+    # The member rung still never splits a path (the owner `src/sidegraph/engine/reader` is no
+    # identifier); the path rung after it resolves a name that is its own file's path.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D2, intended change 2a)
     r = python().resolve(Descriptor(name="src/sidegraph/engine/reader.py", file_path=PY_FILE))
-    assert r.status == "unresolved"
+    assert (r.status, r.node_id) == ("resolved", "src_sidegraph_engine_reader")
 
 
 def test_a_degenerate_name_does_not_fall_back():

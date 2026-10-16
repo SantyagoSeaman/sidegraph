@@ -9,7 +9,7 @@ can surface it when an agent's task touches that entity. Implemented in
 
 An anchor reference is a `Descriptor`: a `name` (symbol name or, for docs, a heading text or
 the file name itself) and an optional `file_path`. This is deliberately minimal — current
-Graphify releases (verified through 0.9.8) emit no signatures, qualified names, or
+Graphify releases (verified on 0.9.6 and 0.9.90) emit no signatures, qualified names, or
 enclosing-module info, so `name` + `file_path` is all identity has to work with.
 `canonicalize()` normalizes both sides of a match
 (lowercase, strip a leading `.`, drop call-decoration like `()`), so `.foo()` in a decision's
@@ -28,8 +28,10 @@ node is `unresolved`, the orphaned, healable leaf a bare miss has always been, n
 `ambiguous`. So is a name with a case-only twin in the file (a struct `Message` beside a
 method `.message()`): the store dedups an anchor by its lowercased name, so the two spellings
 are one entity, and binding either node would put the other's record on it. Without a file the
-fallback never runs, and a path-qualified name (`src/pkg/mod.py`, which reads as the member
-`py`) still never resolves.
+member fallback never runs. A path-qualified name (`src/pkg/mod.py`) has its own rung after
+it: with the anchor's own `file_path` it resolves to that file's node, and it is stored under
+the basename. On newer Graphify, where a file with a shared basename is labelled by a path
+suffix (`pkg/mod.py`), that engine label also resolves without a file.
 
 ## Lazy `Entity` creation
 
@@ -119,6 +121,13 @@ once by the write path, `live`, whenever an initiative is named.
 
 An ambiguous match with candidates spanning different communities gets **no binding at all**
 beyond a possible initiative — Sidegraph would rather anchor nothing than anchor to a guess.
+
+Identical path-less external stubs count as one match. Newer Graphify emits one stub node per
+importing file for an imported name such as `BaseModel` or `Path`; when every match has no file,
+the same label (case kept) and the same node type, the anchor resolves as **resolved** and gets a
+group binding only when all the stubs share one community. A type and a module of one name
+(`FastMCP` and `fastmcp`), and any repository code with a file, still count as separate matches.
+Anchoring and sync collapse the stubs; what agents read keeps the ambiguous answer.
 
 ## Why multi-anchor matters for doc corpora
 

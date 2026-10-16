@@ -46,7 +46,7 @@ from sidegraph.schema import (
     Entity,
     Fact,
 )
-from sidegraph.store_layout import stat_entry
+from sidegraph.store_layout import check_store_requirement, stat_entry
 
 if TYPE_CHECKING:
     from sidegraph.engine.reader import GraphifyReader
@@ -324,6 +324,7 @@ def build_report(
 ) -> StatsReport:
     """One typed report over the index, its journals and the graph.
 
+    Raises ``StoreRequirementError`` when the marker refuses this version.
     ``now`` is injectable so tests can freeze the clock; production passes None.
     See design/superpowers/specs/2026-09-18-usage-stats-design.md, §4 and D8.
     """
@@ -335,6 +336,9 @@ def build_report(
     # Resolved so a relative `.sidegraph` still yields its repo's name: the default store path
     # is relative, and `Path('.sidegraph').parent.name` is "".
     store_dir = Path(store_dir).resolve()
+    # A store this version may not read (spec D6) is not read at all: StoreRequirementError
+    # propagates, and `sidegraph-stats` reports it.
+    check_store_requirement(store_dir)
 
     # The graph is opened and its freshness computed once, before the snapshot below: the git
     # comparison can take seconds, and a read transaction held across it would keep a writer's

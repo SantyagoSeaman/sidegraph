@@ -10,8 +10,10 @@ The 10–15 minute path is a launch target that has not yet been measured across
 sessions.
 
 ```bash
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --host claude-code
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-bootstrap --host claude-code
 ```
 
 Bootstrap scans, previews, reviews, writes, verifies, checks the selected host, and proves
@@ -68,8 +70,8 @@ consequences, warnings, and anchors; it does not enumerate the files read or the
 applied during the scan (those are tracked internally but not rendered).
 
 Planning parses, redacts, validates, deduplicates, and reports anchor intents without opening
-a writable store. A missing graph still permits preview, but Bootstrap prints the exact
-`graphify update .` and resume commands and stops before interactive review. Zero useful
+a writable store. A missing graph still permits preview, but Bootstrap prints the rebuild
+instruction (run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, in the project directory) and the resume commands, and stops before interactive review. Zero useful
 candidates is `diagnostic`: it exits safely without creating canonical memory and does not
 claim activation.
 
@@ -84,7 +86,7 @@ warning code is rendered beside the consequence of accepting it anyway:
 | `missing-rejected-alternatives` | no rejected alternatives were found; the most valuable field stays empty |
 | `unresolved-anchor` | the anchor does not resolve; the record would not surface for that code |
 | `ambiguous-anchor` | several entities match; Sidegraph never guesses, so the anchor stays degraded |
-| `no-anchor` | the document has no anchor in the graph, so apply writes no record without one: if a record with identical content is already stored for this source, it is ratified, or a rejected one is revived as a new record that inherits its bindings; otherwise the candidate is skipped and listed on an UNANCHORED line. Rebuild the graph (`graphify update .` for the default one) so the document has a node, or add a backticked mention of a real symbol, then rerun |
+| `no-anchor` | the document has no anchor in the graph, so apply writes no record without one: if a record with identical content is already stored for this source, it is ratified, or a rejected one is revived as a new record that inherits its bindings; otherwise the candidate is skipped and listed on an UNANCHORED line. Rebuild the graph (for the default one, run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set) so the document has a node, or add a backticked mention of a real symbol, then rerun |
 | `likely-current-state-summary` | this reads as a current-state summary, not a decision with a fork |
 | `duplicate-within-plan` | another candidate in this same plan carries identical content |
 | `duplicate-canonical-memory` | a record already exists for this source; accepting identical content leaves an accepted record unchanged, ratifies a pending proposal, or revives a rejected record — accepting changed content writes a replacement (closing any open record at this source), and edits made in an earlier review are not carried over |
@@ -163,7 +165,7 @@ the next run writes it. A record that was ratified in place or revived for such 
 whether production retrieval can still surface it from its own stored bindings. When the current
 graph no longer reaches it, the run exits 2 with an `ANCHORS` line that names the stored record
 and its source (``ANCHORS      incomplete: stored record <id> for <source> has no anchor in the
-current graph; run `graphify update .` and rerun``) and a `NEXT` line with that command, and
+current graph; run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set and rerun``) and a `NEXT` line with that command, and
 prints no `RESUME`, because a resume cannot change the graph. If the run also has a reason a
 resume can fix, such as a failed write or missing host wiring, the exact `RESUME` stays. With
 `--graph` pointing elsewhere, `ANCHORS` names that graph file to rebuild and there is no `NEXT`,
@@ -208,8 +210,10 @@ This command installs from the public `main`, which advances at releases. To pin
 ```bash
 git clone --branch demo https://github.com/SantyagoSeaman/sidegraph.git sidegraph-demo
 cd sidegraph-demo
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap \
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-bootstrap \
   --profile superpowers --host claude-code --report bootstrap-report.md
 ```
 

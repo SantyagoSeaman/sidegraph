@@ -24,11 +24,13 @@ from pathlib import Path
 import pytest
 
 import sidegraph.host.hooks as hooks
-from sidegraph import githooks, integrity
+from sidegraph import __version__, githooks, integrity
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
 from tests.test_graph_freshness import commit, stale_repo, write_graph
 from tests.test_integrity import add_record, settled
+from tests.test_store_requirement import above_running, write_requirement_marker
 
 NOTICE_KEY = "integrity_notice:"
 
@@ -217,6 +219,7 @@ def _busy_error(code: int) -> sqlite3.OperationalError:
 def test_t2_a_transient_lock_still_prints_nothing(tmp_path, monkeypatch, capsys, code):
     """A lock another process holds is not a broken store: the hook prints ``{}``, as before.
     Mutation M1 re-raises every ``OperationalError``, which is what the next test guards."""
+    Store(tmp_path / ".sidegraph").close()
 
     def locked(*args, **kwargs):
         raise _busy_error(code)
@@ -229,6 +232,7 @@ def test_t2_a_transient_lock_still_prints_nothing(tmp_path, monkeypatch, capsys,
 def test_t2_an_extended_busy_code_is_transient_too(tmp_path, monkeypatch, capsys):
     """``sqlite_errorcode`` carries the extended result code (BUSY_SNAPSHOT is 517): the low
     byte is the primary one."""
+    Store(tmp_path / ".sidegraph").close()
 
     def locked(*args, **kwargs):
         raise _busy_error(sqlite3.SQLITE_BUSY | (2 << 8))
@@ -286,6 +290,7 @@ def test_t2_an_incompatible_format_marker_gets_the_upgrade_fix(tmp_path, monkeyp
 
 
 def test_t3_no_graph_is_a_line_for_the_model_and_no_notice(tmp_path, monkeypatch, capsys):
+    Store(tmp_path / ".sidegraph").close()
     store_dir = tmp_path / ".sidegraph"
     graph = tmp_path / "graphify-out" / "graph.json"
 
@@ -294,11 +299,12 @@ def test_t3_no_graph_is_a_line_for_the_model_and_no_notice(tmp_path, monkeypatch
     assert "systemMessage" not in out
     assert (
         f"Sidegraph: no code graph at {graph}, so memory cannot match files to records or "
-        "anchor new ones. Build it from the repository root: `graphify update .`"
+        f"anchor new ones. Build it from the repository root by running {GRAPH_REBUILD}"
     ) in context(out)
 
 
 def test_t3_an_unreadable_graph_file_gets_its_own_wording(tmp_path, monkeypatch, capsys):
+    Store(tmp_path / ".sidegraph").close()
     graph = tmp_path / "graph.json"
     graph.write_text("{not json")
 
@@ -310,6 +316,7 @@ def test_t3_an_unreadable_graph_file_gets_its_own_wording(tmp_path, monkeypatch,
 
 def test_t4_a_stale_graph_is_a_notice_carrying_todays_text(tmp_path, monkeypatch, capsys):
     """Red against unfixed code: the stale line is for the model alone, no ``systemMessage``."""
+    Store(tmp_path / "store").close()
     fx = stale_repo(tmp_path)
 
     out = start(monkeypatch, capsys, tmp_path / "store", graph=fx.graph, project=fx.repo)
@@ -317,7 +324,7 @@ def test_t4_a_stale_graph_is_a_notice_carrying_todays_text(tmp_path, monkeypatch
     line = (
         f"Sidegraph: the code graph is stale (built at {fx.first[:7]}, 1 commit behind HEAD, "
         "1 file changed since), so memory cannot see or anchor to code added after the build. "
-        "Rebuild it from the repository root: `graphify update .`"
+        f"Rebuild it from the repository root by running {GRAPH_REBUILD}"
     )
     assert out["systemMessage"] == line
     assert line in context(out)
@@ -346,7 +353,7 @@ def test_t4_a_borrowed_stale_graph_names_the_main_checkout_in_the_notice(
     assert out["systemMessage"].startswith(
         f"Sidegraph: the main checkout's code graph ({main}) is stale (built at "
     )
-    assert out["systemMessage"].endswith("): rebuild it there with `graphify update .`")
+    assert out["systemMessage"].endswith(f"): rebuild it there by running {GRAPH_REBUILD}")
 
 
 def test_t6_skipped_store_files_are_a_line_and_a_notice_naming_the_first(
@@ -465,6 +472,7 @@ def test_t8_a_worse_severity_notifies_at_once(tmp_path, monkeypatch, capsys):
     """advisory then degraded inside the day: the notice returns. Mutation M6 removes the
     escalation rule. A stub check stands in: no real check changes severity while keeping its
     notice."""
+    Store(tmp_path / ".sidegraph").close()
     store_dir = tmp_path / ".sidegraph"
     severity = ["advisory"]
 
@@ -734,6 +742,7 @@ def test_t17_a_refresh_that_could_not_run_prints_no_drift_line_whatever_the_cach
 def test_the_drift_refresh_still_runs_when_the_nudge_is_off(tmp_path, monkeypatch, capsys):
     """``SIDEGRAPH_DRIFT_NUDGE=off`` gates the line, never the refresh that keeps the
     ``[drifted]`` markers' cache fresh."""
+    Store(tmp_path / ".sidegraph").close()
     import sidegraph.sync as sync_mod
 
     calls: list[object] = []
@@ -771,6 +780,7 @@ def test_a_failing_refresh_leaves_the_other_lines(tmp_path, monkeypatch, capsys)
 def test_t18_an_unknown_freshness_keeps_a_recorded_stale_notice(tmp_path, monkeypatch, capsys):
     """Git failed this time: that is not evidence the graph is current. Mutation M12 treats a
     check that did not run as clean and deletes the key, so the next stale start repeats it."""
+    Store(tmp_path / "store").close()
     fx = stale_repo(tmp_path)
     store_dir = tmp_path / "store"
     t0 = datetime.now(UTC)
@@ -1085,3 +1095,21 @@ def test_a_lock_on_the_first_delete_stops_the_remaining_deletes(tmp_path, monkey
 
     assert len(attempts) == 1
     assert "get_task_context" in context(out)
+
+
+def test_t2_a_store_that_requires_a_newer_sidegraph_names_the_version_to_upgrade_to(
+    tmp_path, monkeypatch, capsys
+):
+    """Red against unfixed code: the generic major message and the "different Sidegraph
+    version" fix, which names no version."""
+    store_dir = tmp_path / ".sidegraph"
+    Store(store_dir).close()
+    above = above_running()
+    write_requirement_marker(store_dir, above)
+    out = start(monkeypatch, capsys, store_dir)
+    assert (
+        f"(StoreRequirementError: This store requires Sidegraph >= {above}; this is {__version__}.)"
+    ) in out["systemMessage"]
+    assert out["systemMessage"].endswith(
+        f"Upgrade Sidegraph to >= {above}, then start a new session."
+    )

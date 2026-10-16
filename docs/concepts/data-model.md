@@ -247,12 +247,13 @@ for how this differs from a `Domain`.
 
 ## `schema_version` — a public contract
 
-`SCHEMA_VERSION` (currently `0.6.0`, defined in `store_layout.py` and re-exported by `schema.py`) is stamped into the store's `meta` table
-once, at creation, and checked for an **exact** match on the fast (digest-matches) freshness
-path — a mismatch there normally raises immediately rather than silently reading mismatched
-data. The one exception: a store stamped with a version in `_RELOADABLE_SCHEMA_VERSIONS`
-(currently `0.4.0` and `0.5.0`, whose canonical files are fully forward-compatible) gets a full
-index reload instead, re-stamping `schema_version` in the process. See
+`SCHEMA_VERSION` (currently `0.6.0`, defined in `store_layout.py` and re-exported by
+`schema.py`) names the record/table layout. The index's `meta.schema_version` is `0.6.0`
+without a minimum Sidegraph requirement, or `0.6.0+requires` with one. A full reload and an
+explicit requirement raise set the stamp from the marker. The fast freshness path checks
+that expected stamp: the other accepted stamp triggers a reload, and an unknown stamp is
+refused. `_RELOADABLE_SCHEMA_VERSIONS` (`0.4.0`, `0.5.0`, whose canonical files are fully
+forward-compatible) also trigger a reload and restamping. See
 [store format](../reference/store-format.md#schema_version-and-exact-match-policy) for the
 exact mechanics.
 

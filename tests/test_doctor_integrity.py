@@ -16,6 +16,7 @@ from pathlib import Path
 
 from sidegraph.cli import doctor_main
 from sidegraph.doctor import ORPHANED_RECORD, curate
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.store import VOLATILE_STALE_KEY, Store
 from tests.test_cli_doctor import _seed_healthy
 from tests.test_integrity import add_record, settled
@@ -123,7 +124,7 @@ def test_t12_doctor_without_a_graph_prints_one_skipped_line_before_the_summary(
     assert lines[-1] == "clean"
     assert lines[-2] == (
         f"graph checks skipped (no code graph at {graph} — build it from the repository root "
-        "with `graphify update .`)"
+        f"by running {GRAPH_REBUILD})"
     )
 
 

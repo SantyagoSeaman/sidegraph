@@ -300,45 +300,32 @@ def test_unknown_major_format_marker_hard_rejected(tmp_path):
         Store(tmp_path / "s")
 
 
-def test_format_marker_write_goes_through_atomic_replace(tmp_path, monkeypatch):
-    """Fold-in (review residual): the marker write must go through tmp + os.replace, not a
-    bare write_text -- a crash strictly between the two must leave NO marker at all on a
-    fresh store (never a truncated one that would then hard-reject every later open)."""
+def test_format_marker_first_write_is_atomic_and_exclusive(tmp_path, monkeypatch):
+    """A failure publishing the whole temporary file leaves no partial first marker."""
     import sidegraph.store as store_module
 
-    real_replace = store_module.os.replace
+    expected = f"sidegraph-store {SCHEMA_VERSION}\n"
+    attempts = []
+    real_link = store_module.os.link
 
-    def _boom(src, dst):
-        raise OSError("simulated crash between tmp write and replace")
+    def fail_publication(src, dst):
+        if Path(dst).name == "format":
+            attempts.append(Path(src))
+            assert Path(src).read_text(encoding="utf-8") == expected
+            raise OSError("simulated crash between tmp write and exclusive publication")
+        return real_link(src, dst)
 
-    monkeypatch.setattr(store_module.os, "replace", _boom)
-    with pytest.raises(OSError, match="simulated crash"):
-        Store(tmp_path / "s")
-    monkeypatch.setattr(store_module.os, "replace", real_replace)
-
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module.os, "link", fail_publication)
+        with pytest.raises(OSError, match="simulated crash"):
+            Store(tmp_path / "s")
     marker = tmp_path / "s" / "format"
-    # The tmp name is per-attempt-unique (`format.<pid>.<random>.tmp`, never a fixed
-    # `format.tmp` -- see _atomic_write_text_race_tolerant), so every attempt this crash
-    # simulation triggered leaves its OWN leftover; glob for them rather than one fixed name.
-    tmp_leftovers = list((tmp_path / "s").glob("format.*.tmp"))
-    assert not marker.exists()  # never swapped into place -- proves it wasn't a bare write
-    assert tmp_leftovers  # the tmp artifact IS there -- proves tmp+replace ran at all
-
-    # This fixture never actually simulated staleness -- only a stale-looking NAME -- and
-    # the sweep is now age-gated (design D4): a leftover only seconds old is indistinguishable
-    # from a live in-flight buffer and must survive. Age it past the gate so the recovery
-    # reopen's sweep is finally checking what this test's assertion claims.
-    for leftover in tmp_leftovers:
-        _age(leftover, 3600)
-
-    # A retry succeeds: the leftover .tmp(s) are swept, and the marker writes cleanly.
-    store = Store(tmp_path / "s")
-    try:
-        assert marker.is_file()
-        assert marker.read_text() == f"sidegraph-store {SCHEMA_VERSION}\n"
-        assert list((tmp_path / "s").glob("format.*.tmp")) == []
-    finally:
-        store.close()
+    assert len(attempts) == 1
+    assert attempts[0].name.startswith("format.") and attempts[0].suffix == ".tmp"
+    assert not marker.exists()
+    with Store(tmp_path / "s"):
+        assert marker.read_text(encoding="utf-8") == expected
+    assert list((tmp_path / "s").glob("format.*.tmp")) == []
 
 
 # -- concurrent first-open race tolerance (review Important-2a) --------------------------
@@ -383,29 +370,27 @@ def test_atomic_write_text_race_tolerant_reraises_when_target_missing(tmp_path, 
 
 
 def test_format_marker_write_tolerates_lost_concurrent_first_open_race(tmp_path, monkeypatch):
-    """End-to-end: Store(...)'s first-ever open must not crash when it loses this race --
-    the format marker write is the first os.replace call in __init__."""
+    """Another opener publishes while this opener's temporary file is swept."""
     import sidegraph.store as store_module
 
-    real_replace = store_module.os.replace
-    calls = {"n": 0}
+    real_link = store_module.os.link
+    raced = False
 
-    def _race_once(src, dst):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            Path(dst).write_text(Path(src).read_text())
+    def race_once(src, dst):
+        nonlocal raced
+        if Path(dst).name == "format" and not raced:
+            raced = True
+            Path(dst).write_text(Path(src).read_text(encoding="utf-8"), encoding="utf-8")
             Path(src).unlink()
-            raise FileNotFoundError(f"simulated: {src} already consumed by concurrent opener")
-        return real_replace(src, dst)
+            raise FileNotFoundError(f"simulated: {src} swept by concurrent opener")
+        return real_link(src, dst)
 
-    monkeypatch.setattr(store_module.os, "replace", _race_once)
-    store = Store(tmp_path / "s")  # must NOT raise
-    try:
-        marker = store.path / "format"
-        assert marker.is_file()
-        assert marker.read_text() == f"sidegraph-store {SCHEMA_VERSION}\n"
-    finally:
-        store.close()
+    monkeypatch.setattr(store_module.os, "link", race_once)
+    with Store(tmp_path / "s") as store:
+        assert raced
+        assert (store.path / "format").read_text(encoding="utf-8") == (
+            f"sidegraph-store {SCHEMA_VERSION}\n"
+        )
 
 
 def test_gitignore_write_tolerates_lost_concurrent_first_open_race(tmp_path, monkeypatch):
@@ -516,7 +501,7 @@ def test_stale_tmp_file_swept_on_open(tmp_path):
 def test_stale_tmp_file_in_store_root_swept_on_open(tmp_path):
     """The sweep covers the store ROOT too, not just the canonical record dirs -- the
     format marker and .gitignore are atomic-written there (see
-    test_format_marker_write_goes_through_atomic_replace). Uses a realistic per-attempt
+    test_format_marker_first_write_is_atomic_and_exclusive). Uses a realistic per-attempt
     unique tmp name (``format.<pid>.<random>.tmp``, matching what
     ``_atomic_write_text_race_tolerant`` actually produces), not the old fixed
     ``format.tmp``."""

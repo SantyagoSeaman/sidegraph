@@ -292,7 +292,7 @@ def resolve_seeds(
     if reader is not None:
         for s in seeds:
             if s.name:  # entity ref (name [+ file])
-                r = reader.resolve(Descriptor(name=s.name, file_path=s.file_path))
+                r = reader.resolve(Descriptor(name=s.name, file_path=s.file_path), collapse=False)
                 ids = [r.node_id] if r.node_id else r.candidates
                 nodes.extend(n for nid in ids if (n := reader.get_node(nid)) is not None)
             elif s.file_path:  # file seed
@@ -633,6 +633,7 @@ def rank_decisions(
     budget: RetrievalBudget,
     *,
     trailing_entities: Sequence[Entity] = (),
+    seed_node_ids: Sequence[str] = (),
 ) -> TaskContext:
     """Gather valid decisions and rank them mistakes-first under budget.memory_chars.
 
@@ -855,8 +856,12 @@ def rank_decisions(
     # store without ratified domains) -> byte-identical to before this existed (see
     # docs/concepts/mind-model.md; a prior review pinned this behavior).
     related_proposed: list[Decision] = []
+    covered: set[str] = set()
     for cid in seed_communities:
-        for domain in store.find_domains_by_community(cid):
+        # With concrete seeds, domain rows are authoritative. A retained community id may
+        # have been reused by this reader after a failed membership refresh.
+        for domain in () if seed_node_ids else store.find_domains_by_community(cid):
+            covered.add(domain.domain_id)
             de = store.find_abstract_entity(f"domain:{domain.slug}")
             if de is not None:
                 accepted, proposed = partition_by_trust(
@@ -871,6 +876,21 @@ def rank_decisions(
             for d in _by_recency(accepted):
                 add(ctx.related, d)
             related_proposed.extend(proposed)
+    # A seed node that a domain holds outside its listed communities (a snapshot domain's part
+    # of a community, or a node under a capped path rule) brings that domain too.
+    for nid in seed_node_ids:
+        for domain in store.find_domains_for_node(nid):
+            if domain.domain_id in covered:
+                continue
+            covered.add(domain.domain_id)
+            de = store.find_abstract_entity(f"domain:{domain.slug}")
+            if de is not None:
+                accepted, proposed = partition_by_trust(
+                    store.valid_decisions_for_entity(de.entity_id)
+                )
+                for d in _by_recency(accepted):
+                    add(ctx.related, d)
+                related_proposed.extend(proposed)
     for e in peripheral_entities:
         accepted, proposed = partition_by_trust(store.valid_decisions_for_entity(e.entity_id))
         for d in _by_recency(accepted):
@@ -1068,10 +1088,22 @@ def _structure_fallback_candidate_communities(
     return ids
 
 
-def _structure_fallback_lines(
-    community_ids: list[str], store: Store, remaining_budget: int
+def _structure_fallback_candidate_nodes(
+    overflow_nodes: list[NodeRef], seed_node_ids: Sequence[str], walk_saturated: bool
 ) -> list[str]:
-    """Map ``community_ids`` (see :func:`_structure_fallback_candidate_communities`) to
+    """The node-level twin of :func:`_structure_fallback_candidate_communities`: a domain that
+    holds a node outside its listed communities is found through the node."""
+    ids = [n.node_id for n in overflow_nodes]
+    if walk_saturated:
+        ids.extend(seed_node_ids)
+    return ids
+
+
+def _structure_fallback_lines(
+    community_ids: list[str], store: Store, remaining_budget: int, node_ids: Sequence[str] = ()
+) -> list[str]:
+    """Prefer published membership for ``node_ids``. With no node ids, map the legacy
+    ``community_ids`` (see :func:`_structure_fallback_candidate_communities`) to
     ACCEPTED domains via ``store.find_domains_by_community`` (plural — the SAME bucket-C
     union ``rank_decisions`` uses, not just the newest covering domain: two accepted
     domains can legitimately cover the same community at once, an "orphan window" between
@@ -1104,7 +1136,7 @@ def _structure_fallback_lines(
     seen_domains: set[str] = set()
     domains: list[Domain] = []
     for cid in community_ids:
-        for domain in store.find_domains_by_community(cid):
+        for domain in () if node_ids else store.find_domains_by_community(cid):
             if domain.domain_id in seen_domains:
                 continue
             seen_domains.add(domain.domain_id)
@@ -1113,6 +1145,17 @@ def _structure_fallback_lines(
                 break
         if len(domains) >= _STRUCTURE_DOMAIN_FALLBACK_CAP:
             break
+
+    for nid in node_ids:
+        if len(domains) >= _STRUCTURE_DOMAIN_FALLBACK_CAP:
+            break
+        for domain in store.find_domains_for_node(nid):
+            if domain.domain_id in seen_domains:
+                continue
+            seen_domains.add(domain.domain_id)
+            domains.append(domain)
+            if len(domains) >= _STRUCTURE_DOMAIN_FALLBACK_CAP:
+                break
 
     lines: list[str] = []
     used = 0
@@ -1190,8 +1233,13 @@ def _gather_structure(
         candidate_ids = _structure_fallback_candidate_communities(
             overflow_nodes, res.seed_communities, walk_saturated
         )
+        candidate_nodes = _structure_fallback_candidate_nodes(
+            overflow_nodes, res.seed_node_ids, walk_saturated
+        )
         structure.extend(
-            _structure_fallback_lines(candidate_ids, store, budget.structure_chars - used)
+            _structure_fallback_lines(
+                candidate_ids, store, budget.structure_chars - used, candidate_nodes
+            )
         )
     return structure, peripheral
 
@@ -1241,6 +1289,7 @@ def get_task_context(
         store,
         budget,
         trailing_entities=demoted,
+        seed_node_ids=res.seed_node_ids,
     )
     ctx.structure = structure
     return ctx
@@ -1281,7 +1330,14 @@ def query_decisions(
     budget = RetrievalBudget(memory_chars=budget_chars)
     res = resolve_seeds(seeds, reader, store)
     _structure, peripheral = _gather_structure(res, store, reader, budget)
-    ctx = rank_decisions(res.seed_entities, peripheral, res.seed_communities, store, budget)
+    ctx = rank_decisions(
+        res.seed_entities,
+        peripheral,
+        res.seed_communities,
+        store,
+        budget,
+        seed_node_ids=res.seed_node_ids,
+    )
     return ctx.render(include_structure=False)
 
 
@@ -1539,15 +1595,10 @@ _DRILL_DOWN_CANDIDATE_CAP = 10
 
 
 def _domain_member_nodes(
-    domain: Domain, reader: GraphifyReader, cap: int = _DRILL_DOWN_MEMBER_CAP
+    domain: Domain, reader: GraphifyReader, member_ids: set[str], cap: int = _DRILL_DOWN_MEMBER_CAP
 ) -> list[NodeRef]:
-    """Nodes belonging to ``domain`` right now: current communities (``domain.communities``,
-    refreshed by sync) UNION any anchorable node under one of ``domain.path_prefixes`` (the
-    stabilizer rule) — the same "communities ∪ path_prefixes" membership rule §3/§6 define,
-    via the one shared boundary-safe helper (``schema.matches_path_prefix`` — see its
-    docstring for why a bare ``str.startswith`` false-positives on sibling directories; the
-    same helper ``sync._recompute_domain_communities`` and ``domains._matches_any_prefix``
-    use, so all three membership checks can never drift apart on the boundary rule).
+    """Nodes belonging to ``domain`` right now: its published membership rows
+    (``Store.domain_member_ids``) and the nodes of ``domain.communities``.
 
     Pathless nodes (engine artifacts with no ``source_file`` — same truthiness convention
     ``_gather_structure`` uses for Graphify's ``source_file: ""``) are dropped outright
@@ -1561,7 +1612,7 @@ def _domain_member_nodes(
     ``reader.list_nodes()`` order (``sorted`` is stable, so ties keep that order). Capped and
     de-duplicated by node id, same cap as before.
     """
-    candidates = _domain_member_candidates(domain, reader)
+    candidates = _domain_member_candidates(domain, reader, member_ids)
     communities = set(domain.communities)
     god_node_ids = {
         c.god_node
@@ -1588,21 +1639,19 @@ def _domain_member_nodes(
     return ranked[:cap]
 
 
-def _node_in_domain(n: NodeRef, communities: set[str], path_prefixes: list[str]) -> bool:
-    """Whether ``n`` belongs to a domain with these ``communities`` and ``path_prefixes`` —
-    the one definition of "currently covers", shared by :func:`_domain_member_candidates` and
-    the document branch of :func:`_domain_decisions`, so the two cannot drift apart."""
-    if n.community is not None and n.community in communities:
-        return True
-    # n.file_path is None only for pathless engine artifacts (see _domain_member_nodes.on_path).
-    return n.file_path is not None and any(
-        matches_path_prefix(n.file_path, p) for p in path_prefixes
-    )
+def _node_in_domain(n: NodeRef, member_ids: set[str]) -> bool:
+    """Whether a node belongs to the last published membership. Community ids can be reused
+    by a newer reader, so expanding a retained community would admit unrelated nodes.
+    Shared by the member sample and whole-document joins.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)"""
+    return n.node_id in member_ids
 
 
-def _domain_member_candidates(domain: Domain, reader: GraphifyReader) -> dict[str, NodeRef]:
-    """Every anchorable node currently belonging to ``domain`` — current ``communities`` UNION
-    any node under one of ``domain.path_prefixes`` — UNCAPPED and node-id keyed. The shared
+def _domain_member_candidates(
+    domain: Domain, reader: GraphifyReader, member_ids: set[str]
+) -> dict[str, NodeRef]:
+    """Every anchorable node in the published membership index or current ``communities``
+    of ``domain`` — UNCAPPED and node-id keyed. The shared
     "what does this domain currently cover" query behind :func:`_domain_member_nodes` (a
     capped, ranked sample for the human-facing ``members`` field): capping this to the 20-node
     display sample would silently under-cover a domain whose true member count exceeds it,
@@ -1610,17 +1659,18 @@ def _domain_member_candidates(domain: Domain, reader: GraphifyReader) -> dict[st
     to close, and that branch asks the same membership question through
     :func:`_domain_covers_file`.
     """
-    communities = set(domain.communities)
     candidates: dict[str, NodeRef] = {}
     for n in reader.list_nodes():
         if n.node_id in candidates or n.file_type not in ANCHORABLE_FILE_TYPES or not n.file_path:
             continue
-        if _node_in_domain(n, communities, domain.path_prefixes):
+        if _node_in_domain(n, member_ids):
             candidates[n.node_id] = n
     return candidates
 
 
-def _domain_covers_file(domain: Domain, reader: GraphifyReader, file_path: str) -> bool:
+def _domain_covers_file(
+    domain: Domain, reader: GraphifyReader, file_path: str, member_ids: set[str]
+) -> bool:
     """Whether ``domain`` currently covers at least one node (typically a heading) drawn from
     ``file_path`` — the document branch of :func:`_domain_decisions`'s gate: a decision about
     a whole DOCUMENT (see :func:`_is_document_file_node`) surfaces under a domain when that
@@ -1629,10 +1679,8 @@ def _domain_covers_file(domain: Domain, reader: GraphifyReader, file_path: str) 
     the display cap. Asks the reader for that one file's nodes (its memoized per-file index)
     instead of walking every node of the graph once per domain.
     """
-    communities = set(domain.communities)
     return bool(file_path) and any(
-        _node_in_domain(n, communities, domain.path_prefixes)
-        for n in reader.nodes_in_file(file_path)
+        _node_in_domain(n, member_ids) for n in reader.nodes_in_file(file_path)
     )
 
 
@@ -1661,26 +1709,61 @@ def _is_document_file_node(entity: Entity, reader: GraphifyReader) -> bool:
 
 
 class _EntityPool(NamedTuple):
-    """The concrete entities, read once, for the per-domain joins of :func:`_domain_decisions`
-    (see there for why a caller with many domains passes one).
-
-    ``documents`` is the subset whose current graph node is a whole-FILE document (the only
-    entities the document branch can ever match, see :func:`_is_document_file_node`), so a
-    corpus with none skips that branch's scan of the whole graph for every domain.
-    """
+    """The concrete entities and document subset, read once for per-domain joins.
+    ``collapsed`` maps each path-less concrete entity whose
+    descriptor resolves to collapsed stubs (identical path-less stubs, D4) to every stub's node
+    id; ``None`` without a reader, when nothing can be re-resolved."""
 
     concrete: list[Entity]
     documents: list[Entity]
+    collapsed: dict[str, frozenset[str]] | None = None
 
 
 def _entity_pool(store: Store, reader: GraphifyReader | None) -> _EntityPool:
     concrete = list(store.iter_concrete_entities())
-    documents = (
-        []
-        if reader is None
-        else [e for e in concrete if e.descriptor is not None and _is_document_file_node(e, reader)]
-    )
-    return _EntityPool(concrete, documents)
+    if reader is None:
+        return _EntityPool(concrete, [], None)
+    documents = [
+        e for e in concrete if e.descriptor is not None and _is_document_file_node(e, reader)
+    ]
+    collapsed: dict[str, frozenset[str]] = {}
+    unreadable: set[str] = set()
+    for e in concrete:
+        if e.descriptor is not None and not e.descriptor.file_path:
+            try:
+                found = reader.resolve(e.descriptor)
+            except Exception:
+                # A failed probe cannot vouch for a whole collapsed set. Omit this entity
+                # from the join without breaking the other entities or the TOC refresh.
+                unreadable.add(e.entity_id)
+                continue
+            if found.collapsed:
+                collapsed[e.entity_id] = frozenset(found.candidates)
+    if unreadable:
+        concrete = [e for e in concrete if e.entity_id not in unreadable]
+    return _EntityPool(concrete, documents, collapsed)
+
+
+def _entity_in_domain(
+    e: Entity, communities: set[str], member_ids: set[str], pool: _EntityPool
+) -> bool:
+    """Branch (b) of :func:`_domain_decisions` for one concrete entity: its current node is a
+    member. Only an entity with no recorded node may fall back to its last-seen community.
+    An entity the reader resolves
+    to collapsed stubs is in the domain only when every stub is a member, and that test
+    governs the whole join, community included (a membership rebuild leaves the entity's
+    mapping alone, so its community may come from a graph where one stub stood alone). With no
+    reader to tell, a path-less entity joins by community only.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)"""
+    if e.descriptor is not None and not e.descriptor.file_path:
+        if pool.collapsed is None:
+            return e.last_seen_community in communities
+        stubs = pool.collapsed.get(e.entity_id)
+        if stubs is not None:
+            return stubs <= member_ids
+    if e.last_seen_node_id is not None:
+        return e.last_seen_node_id in member_ids
+    return e.last_seen_community in communities
 
 
 def _domain_decisions(
@@ -1694,9 +1777,10 @@ def _domain_decisions(
 
     (a) decisions Tier-1-bound to ``domain``'s paired ``domain:<slug>`` abstract entity
         (the original drill_down behavior — decisions tagged directly to the domain), AND
-    (b) decisions anchored to any concrete code/doc entity that currently lives in one of
-        ``domain.communities`` — the community-membership join. Imported (and most)
-        decisions anchor to a code/doc entity, not the domain entity, so without (b) a
+    (b) decisions anchored to a concrete entity whose recorded node is a domain member,
+        or, with no recorded node, whose last-seen community is in ``domain.communities``.
+        A collapsed stub entity needs every stub among the members, whatever its community. Imported
+        (and most) decisions anchor to a code/doc entity, not the domain entity, so without (b) a
         domain's own decisions never surface under it, AND
     (c) decisions anchored to a whole-DOCUMENT entity (see :func:`_is_document_file_node`)
         whose file_path is covered by one of ``domain``'s member nodes (see
@@ -1721,17 +1805,10 @@ def _domain_decisions(
     is what enforces this: a code entity's node is ``file_type == "code"`` regardless of file,
     so it never matches.
 
-    The community join (b) keys on each entity's ``last_seen_community`` (see
-    ``schema.Entity``), which is the SAME sync-refreshed engine mapping ``domain.communities``
-    itself is computed from (``sync._recompute_domain_communities`` and
-    ``sync._adopt``/``_repoint_off_path`` run in one pass) — so the two are always the same
-    community-id namespace and vintage, and the join needs no graph reader (drill_down's
-    ``decisions`` field stays store-derived, exactly like ``domain``/``subdomains``, when no
-    reader is available). Bounded by ``domain.communities``: only entities in the domain's own
-    communities are ever probed, never the whole graph, so a decision in a DIFFERENT domain's
-    community can't leak in. All three sources go through ``store.valid_decisions_for_entity``,
-    so the status/validity filters (superseded/rejected/expired decisions and orphaned
-    bindings excluded) are identical across the union.
+    The node join reads the last published membership even when its certification is stale;
+    readers do not create durable bindings. The community fallback uses sync's observed
+    mapping for unresolved entities. All sources share ``store.valid_decisions_for_entity``
+    and its status, validity and binding filters, including when no reader is available.
     """
     by_id: dict[str, Decision] = {}
     # ``pool`` is the one hoistable part of the join: ``build_toc`` asks this for every
@@ -1744,10 +1821,13 @@ def _domain_decisions(
         for d in store.valid_decisions_for_entity(entity.entity_id):
             by_id.setdefault(d.id, d)
 
+    member_ids = store.domain_member_ids(domain.domain_id)
     communities = set(domain.communities)
-    if communities:
+    if communities or member_ids:
         for e in pool.concrete:
-            if e.last_seen_community in communities:
+            # An entity with a current node joins through the index; an orphaned or ambiguous
+            # one keeps the community sync observed for its file.
+            if _entity_in_domain(e, communities, member_ids, pool):
                 for d in store.valid_decisions_for_entity(e.entity_id):
                     by_id.setdefault(d.id, d)
 
@@ -1755,7 +1835,7 @@ def _domain_decisions(
         for e in pool.documents:
             if e.descriptor is None or e.descriptor.file_path is None:
                 continue
-            if _domain_covers_file(domain, reader, e.descriptor.file_path):
+            if _domain_covers_file(domain, reader, e.descriptor.file_path, member_ids):
                 for d in store.valid_decisions_for_entity(e.entity_id):
                     by_id.setdefault(d.id, d)
 
@@ -1812,7 +1892,10 @@ def drill_down(
     if reader is None:
         note = "no graph reader available — members omitted"
     else:
-        members = [_fmt_node(n) for n in _domain_member_nodes(domain, reader)]
+        members = [
+            _fmt_node(n)
+            for n in _domain_member_nodes(domain, reader, store.domain_member_ids(domain.domain_id))
+        ]
 
     # A domain's decisions are the UNION of its `domain:<slug>`-tagged decisions, the
     # decisions anchored into its communities (finding I), and — when a reader is available —

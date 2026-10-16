@@ -38,7 +38,7 @@ newly opened terminal. If `claude mcp list` shows `sidegraph` as failed to conne
 lists no `sidegraph` tools, run the launcher by hand to see the error (Ctrl+C stops it):
 
 ```powershell
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp --repo-root
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-mcp --repo-root
 ```
 
 For Codex, `codex mcp list` should show the `sidegraph` server, and `/hooks` should list its
@@ -75,8 +75,10 @@ established by core/installed-wheel CI; the native Windows route is verified wit
 | `graph-stale` | degraded | The graph was built at a commit `HEAD` has moved past | session line and notice, doctor, stats | `graphify update .` |
 | `stray-store` | degraded | A subdirectory launch created a second, empty store | session line and notice | remove the empty store |
 | `graph-missing` | advisory | There is no graph, or it cannot be read | session line | `graphify update .` |
+| `engine-version` | advisory | The graph was built by an untested Graphify release, or has mention edges while the store has no minimum Sidegraph version | session line, doctor | pin a tested Graphify release, or follow the 0.14 migration guide |
 | `orphaned-records` | degraded or advisory | Open records whose every code anchor is orphaned | session line; notice and stats when degraded; doctor | `sidegraph-doctor` |
 | `store-files-skipped` | degraded | Store files the last reload could not index | session line and notice, stats | `sidegraph-verify` |
+| `refresh-helper-outdated` | advisory | The hook runs a helper an older Sidegraph wrote | session line and notice, doctor | `sidegraph-init` |
 | `refresh-hook-missing` | advisory | No git hook keeps the code graph fresh | session line and notice | `sidegraph-init --hooks`, or `--no-hooks` to stop the reminder |
 | `store-uncommitted` | degraded | Store files nobody committed for a day | session line and notice, doctor, stats | commit `.sidegraph/` in a pull request |
 | `branch-only-records` | advisory | Records that exist only on unmerged branches | session line; a notice when a branch is a week old | merge the branch |
@@ -106,6 +108,9 @@ that depends on the exception:
   `.sidegraph/index.db` and start a new session; it is rebuilt from the committed files. When
   there is no `index.db` to remove, or the database could not be opened at all (a read-only store
   directory, a `.sidegraph` that is a plain file), the advice is the generic one below instead.
+- A store that requires a newer Sidegraph (`This store requires Sidegraph >= X.Y.Z; this is
+  A.B.C.`): upgrade to at least that version and start a new session. A teammate raised it
+  with `sidegraph-require`.
 - A store written by a different Sidegraph version: upgrade Sidegraph, or use the version that
   wrote it. Migration tooling is deferred.
 - Anything else: `sidegraph-verify` gives the details.
@@ -137,7 +142,8 @@ want the graph to include the branch: build one in the worktree with `graphify u
 
 The graph's build commit is behind `HEAD`, and a file the graph should hold has changed or
 appeared since. Memory cannot see or anchor to code added after the build. Run
-`graphify update .` from the repository root. In a worktree that borrows the main checkout's
+`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set,
+from the repository root. In a worktree that borrows the main checkout's
 graph, rebuild it there. A graph that cannot be compared with `HEAD` (no recorded build commit, a
 graph outside a git repository, git unavailable) is not reported, and a recorded notice survives
 the start where it could not be compared.
@@ -152,9 +158,22 @@ the empty store, as the notice names it, to use the repository's.
 
 No code graph where Sidegraph looked, or one that could not be read. Memory still works from the
 store, but it cannot match files to records or anchor new ones. Build the graph from the
-repository root: `graphify update .`. This is advisory, because a corpus of documents only runs
+repository root by running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set. This is advisory, because a corpus of documents only runs
 without a graph. It is a model line only, and `sidegraph-doctor` reports it as a skipped check,
 never as a finding.
+
+### engine-version
+
+The code graph was built by a Graphify release this Sidegraph was not tested with, read from
+its `graphify_version` stamp. Anchors and domains may read differently from a tested build.
+Install a tested release listed under [Engine version pinning](../integrations/graphify.md#engine-version-pinning),
+then rebuild the graph. An absent stamp (a legacy graph or one written by
+`update --no-cluster`) counts as tested and does not produce this advisory. Doctor exits 0 by default and 2 under `--check` when this finding is present.
+
+The second case is a mention-edge graph (Graphify 0.9.62 or later) over a store without a
+minimum Sidegraph version, so the store has not been migrated. Follow the
+[0.14 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.14.md).
+Its domain snapshot also sets the minimum version, which clears this line.
 
 ### orphaned-records
 
@@ -195,6 +214,15 @@ as `add_anchors` on a record whose bindings file is the skipped one, fails with 
 file and leaves it as it is, so the conflicted content is still there to resolve. Also while an
 entity file is skipped, an anchor to the same name mints a second entity; once the file is fixed,
 `sidegraph-doctor`'s `duplicate-entity` check shows the pair.
+
+### refresh-helper-outdated
+
+A git hook runs a graph refresh helper that starts Graphify without `GRAPHIFY_NO_AUTO_REFRESH=1`
+(an older Sidegraph wrote it). Graphify 0.9.87 and later refresh the agent skills they installed,
+such as `~/.claude/skills/graphify/`, on the first run after a Graphify upgrade unless that
+variable is set. One hook that runs the helper is enough for the check to fire, and a recorded "no"
+does not silence it. Run `sidegraph-init` with no flag: it rewrites the helper and keeps your
+recorded hook choice. The helper lives in `.git/hooks`, so each clone needs this once. `sidegraph-init --hooks` would also reset a recorded "no".
 
 ### refresh-hook-missing
 
@@ -311,7 +339,7 @@ install's `sidegraph-<version>.dist-info` and never runs the command.
 - **You use only the plugin.** Remove it: `uv tool uninstall sidegraph`.
 - **You use the CLI on purpose.** Update it: `uv tool upgrade sidegraph` for an install from
   `main`. An install from PyPI, pinned or not, moves to `main` with
-  `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main`, the command the line offers because it works for
+  `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, the command the line offers because it works for
   either. The line is shown whenever the versions differ, so a deliberately pinned or newer copy
   shows it daily.
 - **Not a `uv tool` install** (pipx, pip). The line says "upgrade or remove" without a command.

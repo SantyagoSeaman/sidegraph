@@ -25,6 +25,8 @@ treat a `concept` exactly like a code symbol.
 
 ```bash
 # Fast path — every commit, free, no API key
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
 
 # Semantic pass — when docs/diagrams change, or periodically
@@ -90,6 +92,8 @@ the engine's own advice: extract only that subfolder and merge, e.g.
 To rebuild after a noisy extract, use Graphify's supported overwrite path:
 
 ```bash
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update . --force
 ```
 
@@ -177,6 +181,8 @@ after `graphify extract .`. Volume there tends to be far smaller — the referen
 produced **20** rationale nodes — so a full unfiltered import is usually fine:
 
 ```bash
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify extract . --backend claude
 uv run sidegraph-import
 ```
@@ -192,11 +198,11 @@ block in `get_task_context`/`SessionStart`. They still surface as ordinary task-
 context (ADRs on seeds) when a session touches the file or entity they're anchored to;
 override with `--kind` if you'd rather import as `lesson`/`constraint`/`gotcha`.
 
-**Re-running is safe.** Import is idempotent per rationale: a rerun after re-extraction only
-imports rationales that are actually new (a decision with the same canonicalized title, the
-same origin file, and `provenance.source="import"` is skipped). Identical rationale text in
-two different files still imports both — the idempotency key includes the file, not just the
-title.
+**Re-running is safe.** Import skips an earlier non-superseded import with the same
+canonicalized title and origin ref. An exact context preserving the same file and node identity
+after redaction can also match compatible observed labels, including tested engine-cut differences.
+A rationale matching neither key imports as a new decision. Identical rationale text in two
+different files remains two distinct memories and both can import.
 
 ### The other importer: `--docs`
 
@@ -220,6 +226,8 @@ decisions, one per qualifying document — the natural fit for an existing folde
 specs that were never going through Graphify's semantic pass at all.
 
 ```bash
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .                              # make sure the graph is current first
 uv run sidegraph-import --docs docs/adr --dry-run
 uv run sidegraph-import --docs docs/adr

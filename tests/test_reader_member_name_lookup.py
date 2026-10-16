@@ -187,7 +187,7 @@ def test_a_member_with_two_owner_edges_matches_when_one_of_them_is_the_named_typ
     assert r.resolve_member_name("B.run").node_id == "m"
 
 
-def test_the_resolver_revision_is_unchanged(tmp_path):
-    """Only retrieval calls the new method; ``resolve()`` and anchoring answer as before, so the
-    revision folded into ``sync_stamp`` does not move."""
-    assert RESOLVER_REVISION == 2
+def test_the_member_name_lookup_did_not_move_the_resolver_revision_alone(tmp_path):
+    """``resolve_member_name`` left the revision at 2; path names (D2 of the Graphify upgrade)
+    moved it to 3; the type-split moved it to 4."""
+    assert RESOLVER_REVISION == 4

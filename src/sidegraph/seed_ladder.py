@@ -68,7 +68,7 @@ class _Reader(Protocol):
 
     def source_files(self) -> frozenset[str]: ...
 
-    def resolve(self, desc: Descriptor) -> Any: ...
+    def resolve(self, desc: Descriptor, *, collapse: bool = True) -> Any: ...
 
     def resolve_member_name(self, name: str) -> Any: ...
 
@@ -493,7 +493,7 @@ def _entity_seed(seed: Seed, reader: _Reader, files: _Files, out: _Build) -> str
     name = seed.name or ""
     path = (seed.file_path or "").strip()
     given = f"{name} ({seed.file_path})" if path else name
-    found = reader.resolve(Descriptor(name=name, file_path=seed.file_path))
+    found = reader.resolve(Descriptor(name=name, file_path=seed.file_path), collapse=False)
     read: _FileRead | None = None
     spelled = seed.file_path  # the spelling telemetry stores; the normalised one once read
     if path:
@@ -521,11 +521,14 @@ def _entity_seed(seed: Seed, reader: _Reader, files: _Files, out: _Build) -> str
             return read.shown if read.remapped else seed.file_path
         if read.outcome in _SINGLE_FILE:
             target = read.paths[0]
-            if reader.resolve(Descriptor(name=name, file_path=target)).status != "unresolved":
+            if (
+                reader.resolve(Descriptor(name=name, file_path=target), collapse=False).status
+                != "unresolved"
+            ):
                 _rewritten(seed, target, read.outcome, given, out)
                 return target
         # Then by name alone, which is what a seed with no file always did.
-        found = reader.resolve(Descriptor(name=name))
+        found = reader.resolve(Descriptor(name=name), collapse=False)
     no_file = 0  # nodes that matched the name but have no file to offer
     if found.status == "resolved":
         if not path:
@@ -578,7 +581,7 @@ def needs_tolerance(seeds: list[Seed], reader: _Reader) -> bool:
     held = reader.source_files()
     for s in seeds:
         if s.name:
-            found = reader.resolve(Descriptor(name=s.name, file_path=s.file_path))
+            found = reader.resolve(Descriptor(name=s.name, file_path=s.file_path), collapse=False)
             path = (s.file_path or "").strip()
             if path:
                 if found.status == "unresolved":

@@ -16,6 +16,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from sidegraph import githooks
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.schema import AnchorBinding, Descriptor, Entity
 from sidegraph.store import Store
 from tests.test_graph_freshness import T_AFTER, head, stale_repo, write_graph
@@ -57,7 +58,7 @@ def test_t16_five_problems_are_said_once_each_with_a_fix_and_not_again_once_fixe
     assert len(notices) == 5, notices
     graph_stale, orphaned, skipped, pending, refresh = notices
     assert graph_stale.startswith("Sidegraph: the code graph is stale") and (
-        graph_stale.endswith("`graphify update .`")
+        graph_stale.endswith(GRAPH_REBUILD)
     )
     assert orphaned.startswith("Sidegraph: 3 of 3 open record(s) have every code anchor orphaned")
     assert "`sidegraph-doctor`" in orphaned

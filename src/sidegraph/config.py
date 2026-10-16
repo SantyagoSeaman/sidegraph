@@ -164,8 +164,9 @@ class StoreLocation(NamedTuple):
     """A resolved store path and the directory a relative value was anchored to.
 
     ``base`` is that directory AFTER the ancestor lookup (the ancestor the store was found
-    in, else the anchor), and ``None`` for an absolute value, an explicit path, or a relative
-    value whose anchor cannot be read. The hooks root their touch paths at it.
+    in or selected for first use, else the anchor), and ``None`` for an absolute value,
+    an explicit path, or a relative value whose anchor cannot be read. The hooks root their
+    touch paths at it.
     see design/superpowers/specs/2026-10-01-subdirectory-launch-design.md (D1, D2)
     """
 
@@ -273,6 +274,8 @@ def resolve_store_location(
     session started in ``R/sub`` anchors a relative store to ``R/sub``; where that path is
     absent, the lookup returns the first ``<ancestor>/<value>`` inside the repository
     (:func:`ancestor_store`) rather than the path a second, empty store would be created at.
+    If none exists, a missing eligible relative path is selected at the repository root.
+    Resolution itself never creates a store; callers decide whether first use is allowed.
     It applies to a relative ``$SIDEGRAPH_DIR`` or the default ``.sidegraph``, never to
     ``--db``, ``$SIDEGRAPH_DB`` or its ``.sidegraph`` fallback, and not when the anchored path
     exists by ``os.lstat`` (a symlink, even a dangling one, counts). The CLI leaves it off.
@@ -302,6 +305,10 @@ def resolve_store_location(
             found = ancestor_store(base, value)
             if found is not None:
                 return found
+            if not os.path.isabs(value) and ".." not in Path(value).parts:
+                boundary = _repository_boundary(os.path.abspath(base))
+                if boundary is not None and boundary != os.path.abspath(base):
+                    return StoreLocation(os.path.join(boundary, value), boundary)
         return StoreLocation(anchored, base)
 
     if explicit is not None:
@@ -329,6 +336,24 @@ def resolve_store_location(
             file=sys.stderr,
         )
     return default
+
+
+def missing_store_message(store_path: str | Path) -> str:
+    """Explain explicit setup without assuming the launch directory owns the store."""
+    destination = Path(os.path.abspath(store_path))
+    message = (
+        f"Sidegraph: no store at {destination}. Run sidegraph-init with --db set to "
+        f"{destination} to initialize it explicitly."
+    )
+    boundary = _repository_boundary(str(destination.parent))
+    if boundary is not None:
+        message += f" Repository root: {boundary}."
+        if os.environ.get("SIDEGRAPH_DB") and not os.environ.get("SIDEGRAPH_DIR"):
+            message += (
+                " For a root store, unset SIDEGRAPH_DB, set SIDEGRAPH_DIR to "
+                f"{Path(boundary) / DEFAULT_STORE_DIR}, and run sidegraph-init from {boundary}."
+            )
+    return message
 
 
 def resolve_store_path(

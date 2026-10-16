@@ -24,6 +24,7 @@ def _run_session_start(monkeypatch, capsys, payload, db):
 
 def test_session_start_publishes_the_key_with_a_timestamp(tmp_path, monkeypatch, capsys):
     db = tmp_path / "db"
+    Store(db).close()
     _run_session_start(monkeypatch, capsys, {"session_id": "abc-123"}, db)
 
     store = Store(db)
@@ -131,6 +132,7 @@ def test_a_prune_failure_does_not_cost_the_session_map(tmp_path, monkeypatch, ca
     """SessionStart's contract is that nothing it does may block a session
     ("Must never crash the session" — session_start's own docstring)."""
     db = tmp_path / "db"
+    Store(db).close()
 
     def boom(*args, **kwargs):
         raise RuntimeError("prune exploded")
@@ -173,6 +175,7 @@ def test_two_codex_threads_sharing_one_umbrella_id_are_two_sessions(tmp_path, mo
     same umbrella `session_id`, so every event from both was attributed to one session and
     the second thread's SessionStart was swallowed by the 60s double-injection dedupe."""
     db = tmp_path / "db"
+    Store(db).close()
     keys = []
     for rollout in (
         "rollout-2026-09-19T12-00-31-01a0b953-2d7c-76e3-9dac-7d375dad7954",
@@ -193,6 +196,7 @@ def test_the_umbrella_id_is_kept_so_codex_threads_can_be_grouped(tmp_path, monke
     """The workspace session is the only link between a Codex thread and its siblings, so it
     is recorded beside the key rather than discarded."""
     db = tmp_path / "db"
+    Store(db).close()
     _run_session_start(
         monkeypatch, capsys, _codex_payload("rollout-2026-09-19T12-16-06-01a0b961-7463"), db
     )
@@ -209,6 +213,7 @@ def test_claude_code_keeps_the_session_id_it_already_recorded(tmp_path, monkeypa
     the transcript stem IS the session id, so the recorded key does not move and no group
     key is written (there is no umbrella above a Claude Code session)."""
     db = tmp_path / "db"
+    Store(db).close()
     sid = "134960fe-2641-48d5-aaf7-223d9129df38"
     _run_session_start(
         monkeypatch,
@@ -230,6 +235,7 @@ def test_a_null_transcript_path_falls_back_to_the_session_id(tmp_path, monkeypat
     """`transcript_path` is nullable in Codex's own schema, so its absence must leave the
     previous behaviour exactly as it was rather than record nothing."""
     db = tmp_path / "db"
+    Store(db).close()
     _run_session_start(monkeypatch, capsys, {"session_id": "abc-123", "transcript_path": None}, db)
 
     store = Store(db)

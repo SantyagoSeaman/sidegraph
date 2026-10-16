@@ -1,9 +1,13 @@
 # Graphify integration
 
-Sidegraph uses [Graphify](https://github.com/safishamsi/graphify) for entity extraction
+Sidegraph uses [Graphify](https://github.com/Graphify-Labs/graphify) for entity extraction
 and graph construction instead of building a second one. This page documents the engine
 relationship: what Sidegraph reads, how corpora and versions work, and how to keep the graph
 fresh.
+
+For an existing store, follow the [Sidegraph 0.14 migration guide](../guides/migrating-to-0.14.md)
+before upgrading Graphify. It preserves accepted domain membership with a committed snapshot
+and coordinates the minimum client version across the team.
 
 ## graph.json is read-only input
 
@@ -23,8 +27,12 @@ anything or wedge the caller.
 
 ```bash
 cd /ABSOLUTE/PATH/TO/your-repo
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
 ```
+
+Graphify 0.9.87 and later refresh the agent skills they installed (such as `~/.claude/skills/graphify/`) on the first run after a Graphify upgrade, unless the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` is set; any Graphify command triggers it, `graphify --version` included, and a skill you edited by hand is kept as `SKILL.md.bak`. Set the variable persistently instead of per shell: add `export GRAPHIFY_NO_AUTO_REFRESH=1` to your shell profile, or run `setx GRAPHIFY_NO_AUTO_REFRESH 1` on Windows. The hook `sidegraph-init` installs and the CI recipes set it, and the rebuild instructions Sidegraph prints name it. Graphify 0.9.6 has no such refresh and ignores the variable.
 
 `graphify update` is the **LLM-free** build: no API key required. It works on **both**
 corpora Sidegraph anchors to:
@@ -128,14 +136,17 @@ folder you point Graphify at directly. Two things follow:
 Pin the Graphify version you build against, and re-verify after upgrading:
 
 ```bash
-uv tool install "graphifyy==0.9.6"   # pin to a known-good version
+uv tool install "graphifyy==0.9.90"   # pin to a known-good version
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify --version
 ```
 
-(`[mcp]` is an optional extra — see below — and pins the same way: `"graphifyy[mcp]==0.9.6"`.)
+(`[mcp]` is an optional extra — see below — and pins the same way: `"graphifyy[mcp]==0.9.90"`.)
 
-Known-good range: **0.9.6–0.9.8** — 0.9.8 was live-verified (build + sync + heal on a doc
-corpus) as part of the release gate. Re-verify the same way after upgrading past 0.9.8.
+Known-good: **0.9.6 and 0.9.90**. 0.9.90 was verified for the 0.14.0 release on this
+repository and on the openspec corpus (build, sync and domain snapshot). Re-verify after
+upgrading to another version.
 
 ### Graphify's own MCP server (`[mcp]` extra) is optional
 
@@ -170,8 +181,8 @@ with the plugin — but redundant.
 carries the word `graphify`. The commands in the
 [setup guide's snippet](../getting-started/claude-code-setup.md#2-add-the-hooks) do not: the hook
 reads no graph path, so `graphify claude install` and `uninstall` leave them alone (checked
-against `graphifyy` 0.9.6). Keep it that way when you edit them. A `PreToolUse` command that
-carries `SIDEGRAPH_GRAPH=graphify-out/graph.json` goes with the group, and Sidegraph then stops
+against `graphifyy` 0.9.6 and 0.9.90). Keep it that way when you edit them. A `PreToolUse`
+command that carries `SIDEGRAPH_GRAPH=graphify-out/graph.json` goes with the group, and Sidegraph then stops
 delivering records on Bash lines without a word.
 
 The **Sidegraph plugin already supplies graph context for Claude Code**: its
@@ -215,7 +226,7 @@ and is not re-run automatically: re-run `graphify update .` (or the `/graphify` 
 `--update` form) whenever the docs change.
 
 - **Which events.** After a commit, after a merge (a fast-forward `git pull` fires
-  `post-merge`, which Graphify's own hook does not cover) and after a branch switch. A file
+  `post-merge`) and after a branch switch. A file
   checkout (`git checkout -- file`) and a `git switch -c` that stays on the same commit do not
   rebuild.
 - **One graph.** The helper rebuilds `graphify-out/graph.json` at the main checkout's root, and
@@ -256,9 +267,9 @@ and is not re-run automatically: re-run `graphify update .` (or the `/graphify` 
   It stays quiet in a repository with no graph, and after `--no-hooks`.
 
 **Graphify's own hook** (`graphify hook install`) is not needed and is not what Sidegraph
-installs. It rebuilds in every linked worktree that commits, writes no `post-merge` hook, and
-appends its block after any existing content. If both are installed, the main checkout rebuilds
-twice on every commit (Graphify's lock serialises them), and linked worktrees rebuild too. Init
+installs. It rebuilds in every linked worktree that commits, also installs a `post-merge`
+hook since 0.9.90, and appends its block after any existing content. If both are installed,
+the main checkout rebuilds twice on every commit (Graphify's lock serialises them), and linked worktrees rebuild too. Init
 reports it when it finds one, and never touches it; `graphify hook uninstall` removes it and
 leaves Sidegraph's block as it was.
 

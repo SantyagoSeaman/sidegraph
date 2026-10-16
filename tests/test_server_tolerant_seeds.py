@@ -16,6 +16,7 @@ import pytest
 
 from sidegraph import seed_ladder
 from sidegraph.engine.reader import GraphifyReader
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.retrieval import RetrievalBudget
 from sidegraph.schema import (
     AnchorBinding,
@@ -383,7 +384,7 @@ def test_a14_with_no_seeds_and_no_graph_it_says_to_build_the_graph_first(tmp_pat
     (line,) = _section(out, EMPTY)
     assert line == (
         "No files or entities were given, so nothing could be matched. There is no code graph "
-        "to match against either: build it from the repository root with `graphify update .` "
+        f"to match against either: build it from the repository root by running {GRAPH_REBUILD} "
         "first. Pass files=[…] with the repo-relative paths you are working on."
     )
     assert "## No code graph" not in out  # that block is for a call that named a seed

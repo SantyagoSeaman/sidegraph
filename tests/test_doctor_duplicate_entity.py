@@ -16,7 +16,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sidegraph.doctor import DUPLICATE_ENTITY, curate
+from sidegraph.doctor import DUPLICATE_ENTITY, curate, spelling_twin_lines
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -181,3 +181,56 @@ def test_a_malformed_entity_file_does_not_abort_the_whole_doctor_pass(tmp_path):
 
     report = curate(db)  # must not raise
     assert not [f for f in report.findings if f.code == DUPLICATE_ENTITY]
+
+
+ONE_TWIN = (
+    "spelling twins: 1 entity is named by a path (full or partial) of its file whose basename "
+    "also names an entity; lookups and new anchors use the basename one and retrieval reaches both "
+    "(informational, nothing to fix)"
+)
+
+
+def _concrete(entity_id: str | None, name: str, path: str = "src/widget.py") -> Entity:
+    kwargs = {"entity_id": entity_id} if entity_id else {}
+    return Entity(
+        **kwargs,
+        canonical_name=name,
+        kind=EntityKind.CONCRETE,
+        descriptor=Descriptor(name=name, file_path=path),
+    )
+
+
+def test_a_full_path_twin_is_an_informational_line_not_a_finding(tmp_path: Path):
+    # red against unfixed code: ImportError, then no line
+    db = tmp_path / "store"
+    s = Store(db)
+    twin = s.upsert_entity(_concrete(_HAND_MADE_LOWER_ID, "src/widget.py"))
+    basename = s.upsert_entity(_concrete(None, "widget.py"))
+    s.add_binding(AnchorBinding(record_id=_decision(s).id, entity_id=basename.entity_id, tier=2))
+    s.close()
+    assert [f for f in curate(db).findings if f.code == DUPLICATE_ENTITY] == []
+    assert spelling_twin_lines(db) == [
+        ONE_TWIN,
+        f"  {twin.entity_id} 'src/widget.py' (0 binding(s)) → "
+        f"{basename.entity_id} 'widget.py' (1 binding(s))",
+    ]
+
+
+def test_a_duplicate_beside_a_spelling_twin_reports_each_once(tmp_path: Path):
+    # red against unfixed code; red against a folded key without the twin split (the twin would
+    # join duplicate-entity, a discarded design, declared)
+    db = tmp_path / "store"
+    s = Store(db)
+    twin = s.upsert_entity(_concrete(_HAND_MADE_LOWER_ID, "src/widget.py"))
+    first = s.upsert_entity(_concrete(_HAND_MADE_THIRD_ID, "widget.py"))
+    second = s.upsert_entity(_concrete(None, "widget.py"))
+    s.close()
+    (dup,) = [f for f in curate(db).findings if f.code == DUPLICATE_ENTITY]
+    assert dup.path == str(db / "entities" / f"{first.entity_id}.json")
+    assert dup.detail.startswith(
+        "2 entities share one logical identity; lookups resolve to the lowest id: "
+    )
+    assert second.entity_id in dup.detail and twin.entity_id not in dup.detail
+    lines = spelling_twin_lines(db)
+    assert len(lines) == 2 and lines[1].startswith(f"  {twin.entity_id} ")
+    assert f"→ {first.entity_id} " in lines[1]

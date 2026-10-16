@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 import sidegraph.host.hooks as hooks
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
+from sidegraph.store_layout import VOLATILE_STALE_KEY
 
 
 def _run(monkeypatch, capsys, payload, db, extra_env=None):
@@ -207,6 +208,8 @@ def _seed_anchored_decision(
         )
     )
     store.add_binding(AnchorBinding(record_id=d.id, entity_id=e.entity_id, tier=2, status="live"))
+    # This fixture supplies a computed binding rather than a reload placeholder.
+    store.set_meta(VOLATILE_STALE_KEY, "0")
 
 
 def test_the_block_names_what_memory_holds_about_this_path(tmp_path, monkeypatch, capsys):

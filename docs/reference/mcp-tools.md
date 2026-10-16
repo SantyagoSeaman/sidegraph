@@ -362,7 +362,7 @@ caller can chain straight into [`find_entity`](#find_entity) or
 [`get_entity_history`](#get_entity_history) without touching the store. `anchors_skipped` is
 `[{"name": str, "reason": "ambiguous", "candidates": list[str]}, ...]` — the anchors whose name
 matched more than one graph node (`candidates` capped at 5), so no precise Tier-2 leaf was
-created for them; empty when every anchor resolved cleanly or no graph reader is present. Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
+created for them; empty when every anchor resolved cleanly or no graph reader is present. Identical path-less external stubs (the per-file stubs newer Graphify emits for an imported name such as `BaseModel`) count as one match. Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 **`anchors_orphaned` is the one to act on.** It carries an entity summary plus a `reason`
 (`{"entity_id", "canonical_name", "tier": 2, "reason": str}`) for every anchor that resolved
@@ -374,7 +374,7 @@ fallback is created either, so the record has **no delivery path at all** throug
 
 | `reason` | What happened | Fix |
 |---|---|---|
-| `file-not-in-graph` | the graph carries no node for that `file_path` at all | usually a **stale graph**: run `graphify update .` and re-anchor. Also a typo'd path, or a file type the engine doesn't index |
+| `file-not-in-graph` | the graph carries no node for that `file_path` at all | usually a **stale graph**: run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor. Also a typo'd path, or a file type the engine doesn't index |
 | `name-not-in-file` | the graph has that file; it has no such name | fix the **name** — `find_entity`/`query_structure` will say what is really there |
 | `no-file-path` | a bare name that resolved to nothing | pass `file_path` |
 | `no-graph` | no graph reader present at all (propose path only) | expected in a graph-less run; the anchor heals on the next sync once a graph exists |
@@ -482,7 +482,7 @@ list[dict], "anchors_skipped": list[dict], "anchors_orphaned": list[dict]}` — 
 created; `anchors_skipped` is `[{"name": str, "reason": "ambiguous", "candidates":
 list[str]}, ...]` (candidates capped at 5) — populated only when a graph is present and an
 anchor's name matched more than one node, since there's nothing to be ambiguous against
-otherwise.
+otherwise. Identical path-less external stubs (the per-file stubs newer Graphify emits for an imported name such as `BaseModel`) count as one match.
 `anchors_orphaned` is `[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]` when a graph
 is present and the name resolved to nothing; with no graph every anchor lands there as
 `{"entity_id", "canonical_name", "tier": 2}` with no `reason` key, and heals on the next sync.
@@ -704,6 +704,10 @@ without reading the store directly. Tries an exact descriptor match (canonicaliz
 - Multiple name-only matches (the same name reused across files, with no `file_path` given
   to disambiguate): never guessed at — returned as `candidates` instead. Re-call with
   `file_path` set to one of them to resolve.
+- Spelling twins of one file (an entity named `src/sidegraph/store.py` beside one named
+  `store.py` at that path) answer as one entity, the one named by the basename. Two files
+  are never merged. [`get_entity_history`](#get_entity_history) lists the records bound to
+  any twin.
 
 **Returns**, on a match: `{"found": true, "entity_id": str, "canonical_name": str,
 "descriptor": {"name": str, "file_path": str | None} | None, "last_seen_node_id": str |
@@ -816,11 +820,11 @@ the string ends with a `## Not in the code graph` block that says what happened 
 path instead of leaving a bare empty answer:
 
 - a path that exists in the repository but is missing from a **stale** graph (built at a commit
-  `HEAD` has moved past): the block gives the build commit and the gap, and says to rebuild with
-  `graphify update .` from the repository root, then call again;
+  `HEAD` has moved past): the block gives the build commit and the gap, and says to rebuild
+  from the repository root by running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then call again;
 - the same from a graph that shows no committed change since the build: no commit explains the
-  gap, so the file may be newer than the build and not committed yet (rebuild with
-  `graphify update .`), sit under an excluded path, or be a file type Graphify skips;
+  gap, so the file may be newer than the build and not committed yet (rebuild by
+  running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set), sit under an excluded path, or be a file type Graphify skips;
 - the same when the comparison could not be made: the reason, and the rebuild command if the
   files are new;
 - a well-formed path that is a file in **another checkout** of the repository (a sibling linked
@@ -850,19 +854,19 @@ and syncs it index-only (no tracked file is rewritten). The `## Not in the code 
   which does not hold files that exist only on this branch." with no freshness check, because the
   graph was never built from that file;
 - a seed that also exists in the main checkout gets the stale or current verdict above, with the
-  advice to rebuild in the main checkout (`rebuild it in <main> with graphify update .`).
+  advice to rebuild in the main checkout (rebuild it in `<main>` by running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set).
 
 When no graph could be opened and the call named at least one seed, the string ends with:
 
 ```
 ## No code graph
 No code graph at <path>: memory anchored to code cannot be looked up. Build it from the
-repository root with `graphify update .`.
+repository root by running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set.
 ```
 
 `<path>` is the graph the server looked at: the store's own, or, in a linked worktree whose main
-checkout has none either, the main checkout's, with "Build it in the main checkout `<main>` with
-`graphify update .`." A graph that is there and cannot be read (permissions, a corrupt file) reads
+checkout has none either, the main checkout's, with "Build it in the main checkout `<main>` by running
+`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set." A graph that is there and cannot be read (permissions, a corrupt file) reads
 "The code graph at `<path>` is not readable" instead of "No code graph at". A call that has a reader
 is unchanged by this block.
 
@@ -933,7 +937,7 @@ Payments (payments).
 It names at most 12 accepted domains by title and slug (then `, and N more`), and stops at
 "working on." when the store has none. A seed with neither a name nor a path (`files=[""]`,
 `entities=[{}]`, blanks) counts as no seed. With no code graph the block also says to build it first
-(`graphify update .`). Every other empty answer already says why: a path the
+(`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set). Every other empty answer already says why: a path the
 graph lacks gets the not-in-graph block, a name that matches nothing gets its own line above, and
 a missing graph gets the `## No code graph` block above. An empty answer for a file seed that has
 anchored files near it adds [the nearest anchored records](#the-nearest-anchored-records) to this
@@ -1044,8 +1048,8 @@ drill_down(
 ```
 
 Walk one [`Domain`](../concepts/mind-model.md): its WHY-IT-EXISTS summary, its accepted
-subdomains (title + one-liner), a capped member sample (current `communities` ∪
-`path_prefixes`, up to 20, deduplicated), and the decisions about it (mistakes first) — the
+subdomains (title + one-liner), a capped member sample (the domain's members in the membership index each sync keeps,
+up to 20, deduplicated; path-prefix matches ranked first), and the decisions about it (mistakes first) — the
 Axis-1 counterpart to the flat `SessionStart` TOC. The member sample is **pathful-only and
 ranked**: a member with no `source_file` (an engine artifact with nothing to point a human at)
 is dropped outright, and survivors are ordered members matching `path_prefixes` first, then each
@@ -1053,14 +1057,16 @@ covered community's god node, then everything else in the reader's own node orde
 domain's sample favors its most informative members rather than whatever happens to sort first.
 
 `decisions` is the **union** of (a) decisions tagged directly to the domain (Tier-1-bound to its
-`domain:<slug>` entity), (b) decisions anchored to any code/doc entity that lives in one of the
-domain's `communities` — a community-membership join computed at call time, deduplicated by
+`domain:<slug>` entity), (b) decisions anchored to any code/doc entity whose current node is a member of the
+domain, or, with no recorded node, whose last-seen community is one of the domain's
+`communities` — a membership
+join computed at call time, deduplicated by
 decision id — and (c) decisions anchored to a whole **document** entity whose file_path is
 covered by one of the domain's member nodes. This is what makes `drill_down` answer *"the
 decisions about the code (or docs) in this area"*: imported (and most) decisions anchor to a
 code/doc entity, not the domain abstraction, so without (b) a domain's own decisions never
-surfaced under it. The join is bounded to the domain's own communities (a decision in a
-different domain's community never leaks in) and applies the same status/validity filters as
+surfaced under it. The join is bounded to the domain's own members and communities (a decision in a
+different domain's never leaks in) and applies the same status/validity filters as
 the tagged path (superseded/rejected/expired decisions and orphaned bindings are excluded); it
 is store-derived, so it needs no graph reader.
 
@@ -1189,9 +1195,8 @@ repeatedly.
 **Returns:** a list sorted by `slug`, one dict per domain: `{"id": str, "slug": str, "title":
 str, "summary": str, "status": str, "member_count": int, "path_prefixes": list[str],
 "seed_anchor_count": int, "parent_slug": str | None, "child_slugs": list[str]}`.
-`member_count` is `len(domain.communities)` — the current, engine-derived membership size (0
-until the next `ratify`/`sidegraph-sync` resolves `path_prefixes`/`seed_anchors`, for a freshly
-proposed domain). `parent_slug`/`child_slugs` reflect the FULL domain set regardless of the
+`member_count` is `len(domain.communities)`: the number of communities whose every node
+is in the domain (0 until `ratify`/`sidegraph-sync` resolves a freshly proposed domain). `parent_slug`/`child_slugs` reflect the FULL domain set regardless of the
 `status` filter, so a filtered call still reports accurate lineage.
 
 ## `propose_decisions`
@@ -1227,7 +1232,7 @@ None, "redactions": int, "anchors_skipped": list[dict], "anchors_orphaned": list
 `anchors_skipped` is `[{"name": str, "reason": "ambiguous", "candidates": list[str]}, ...]` —
 anchors whose name matched more than one graph node (`candidates` capped at 5), so no precise
 Tier-2 leaf was created for them; empty when every anchor resolved cleanly, there were no
-anchors, or no graph reader was present. `anchors_orphaned` is `[{"entity_id",
+anchors, or no graph reader was present. Identical path-less external stubs (the per-file stubs newer Graphify emits for an imported name such as `BaseModel`) count as one match. `anchors_orphaned` is `[{"entity_id",
 "canonical_name", "tier": 2, "reason": str}, ...]` for anchors that resolved to nothing —
 the leaf is still written, but dead on arrival for retrieval. `facts` is one
 `ProposeFactResult` dict per entry in that draft's own `facts` list (empty when the draft
@@ -1388,8 +1393,11 @@ primitive (previously reachable only via direct `Store` access, not any tool) as
 domain-authoring surface. `old_slug_or_id` resolves either a `domain_id` or a `slug` (tries the
 id lookup first, then `find_domain_by_slug`) — never a guess: one that resolves to nothing is a
 hard error. `parent_slug`, when given, must resolve like `add_domain`'s. `path_prefixes`/
-`seed_anchors` seed the SUCCESSOR's membership rule **from scratch** — nothing is inherited
-from the predecessor; pass its values back explicitly to carry them over.
+`seed_anchors` seed the SUCCESSOR's membership rule **from scratch** — no rule is inherited
+from the predecessor; pass its values back explicitly to carry them over. With a
+[domain snapshot](store-format.md#the-domain-snapshot), the predecessor's frozen membership
+does carry over, to the successor once it is accepted; the successor's own rules apply only
+after `sidegraph-domains snapshot --refresh --domain <slug>`.
 
 The predecessor is flipped to `superseded` immediately (append-only: the record stays, fully
 retrievable, never deleted) in the same transaction that writes the successor. The successor
@@ -1406,11 +1414,13 @@ check, so the successor may reuse the same slug). This is also the direct fix fo
 from a mass-drop](../guides/naming-your-domains.md#recovering-from-a-mass-drop): supersede a
 dropped domain with a successor that gets no matching `path_prefixes`/`seed_anchors`, and its
 `communities` stays empty — freeing the community for a future `sidegraph-domains bootstrap`
-pass to reconsider.
+pass to reconsider. With a domain snapshot, keep that placeholder `proposed`: an
+accepted successor takes over its predecessor's frozen membership.
 
 **Returns:** `{"domain_id": str, "status": str, "supersedes": str, "redactions": int}` — `status` is always
 `"proposed"`, `domain_id` is the successor's, `supersedes` is the predecessor's resolved
-`domain_id`. Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
+`domain_id`. `snapshot_note` (str) is present when the predecessor's membership is frozen
+in the domain snapshot. Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `list_proposed`
 
@@ -1584,6 +1594,7 @@ hides it: the move surfaces as `orphaned` after the next graph rebuild.
     "slug_conflicts": [{"slug": str, "domain_ids": list[str]}, ...],
     "domains_refreshed": int,
     "domain_failures": [{"slug": str, "title": str, "error": str}, ...],
+    "snapshot_splits": [{"slug": str, "domains": list[str]}, ...],
 }
 ```
 
@@ -1592,10 +1603,12 @@ hides it: the move surfaces as `orphaned` after the next graph rebuild.
 re-verify after `HEAD` moved, and no remembered Tier-1 community reconcile whose retry
 repaired the record or failed again (a retry that abstains reports nothing); with a
 `moved_uncommitted` entity, the narrow pass runs and `synced` is `True` with
-`outcomes` covering just those entities) — when skipped, **every other field is an empty
+`outcomes` covering just those entities; an uncertified membership index whose refresh
+failed, now or already for this identity, returns `synced: true` with domain fields) — when skipped, **every other field is an empty
 default** (`outcomes: []`,
 `counts: ""`, `repointed: 0`, `stale_decisions: []`, `empty_domains: []`,
-`overbroad_domains: []`, `slug_conflicts: []`, `domains_refreshed: 0`, `domain_failures: []`)
+`overbroad_domains: []`, `slug_conflicts: []`, `domains_refreshed: 0`, `domain_failures: []`,
+`snapshot_splits: []`)
 from a fresh, un-run report — never the prior (possibly stale) one. Don't read a skipped pass
 as "everything's clean"; pass `force=True` (or re-call after a real graph rebuild) to get an
 actual report.
@@ -1616,7 +1629,7 @@ printer applies; each non-`ok` outcome means:
   `moved`, but git's `HEAD` doesn't yet back it up (an uncommitted delete/rename/stash).
   Nothing is touched. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`) and re-sync.
 - **`ambiguous`** — the name now matches more than one graph node; the leaf is `degraded`,
-  not lost. Needs a human judgment call — see the `heal-anchors` skill.
+  not lost. Identical path-less external stubs (the per-file stubs newer Graphify emits for an imported name such as `BaseModel`) count as one match. Needs a human judgment call — see the `heal-anchors` skill.
 - **`orphaned`** — no match at all for this entity. Check `stale_decisions` for whether this
   orphan took a whole decision down with it (every one of its Tier-2 leaves orphaned).
 - **`error`** — the entity raised during rebind; `detail` carries the exception text. One bad
@@ -1629,9 +1642,20 @@ domain whose refresh itself raised (a malformed `seed_anchors` descriptor, a dom
 vanished mid-pass, a lock-contended write), isolated per domain so one broken domain never
 costs any other domain its heal. It counts as an attention finding for `--check`/
 `report_has_findings`, same as an `error` outcome — unlike `empty_domains`/`overbroad_domains`,
-which stay informational.
+which stay informational. Domain membership is not certified after a failed pass;
+later syncs report it without recomputing until the graph, snapshot or domain status
+changes, or `force=True` retries. A whole-pass rollback returns one entry with `slug: "*"`,
+`title: "every accepted domain"` and `busy`. A busy writer changes nothing, is not a finding,
+and the next pass retries. A non-busy whole failure is a finding and is recorded while its
+reservation survives. In either case a pass rolled back during this sync, full or skipped,
+reads nothing further: `stale_decisions` and `slug_conflicts` are empty because they were
+not read, not because there are none.
 
-`stale_decisions`/`empty_domains`/`overbroad_domains`/`slug_conflicts`/`domain_failures` mirror
+`snapshot_splits` is a list of `{"slug", "domains"}`: a covered domain with multiple accepted
+heirs. Neither holds its frozen membership until `sidegraph-domains snapshot --refresh`
+names each part with `--domain`. Informational; never a finding.
+
+`stale_decisions`/`empty_domains`/`overbroad_domains`/`slug_conflicts`/`domain_failures`/`snapshot_splits` mirror
 `sidegraph-sync`'s own report fields exactly (see [`cli.md`](cli.md#sidegraph-sync) for each
 one's precise meaning) — this tool is the same diagnostic, surfaced as data instead of
 stdout text.
@@ -1724,4 +1748,4 @@ list[dict]}` — `bound`/`orphaned` entries are `{"entity_id": str, "canonical_n
 bound with no graph present or that resolved to nothing (never dropped either way).
 `ambiguous` is `{"name": str, "reason": "ambiguous", "candidates": list[str]}` (capped at 5)
 for anchor names that matched more than one graph node — no leaf created, the same
-per-anchor feedback `add_decision`'s `anchors_skipped` gives. On success, inside a git repository, the result also carries a `commit_hint` ([Commit hint](#commit-hint)); the error dict has none.
+per-anchor feedback `add_decision`'s `anchors_skipped` gives. Identical path-less external stubs (the per-file stubs newer Graphify emits for an imported name such as `BaseModel`) count as one match. On success, inside a git repository, the result also carries a `commit_hint` ([Commit hint](#commit-hint)); the error dict has none.

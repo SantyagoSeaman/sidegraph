@@ -166,24 +166,32 @@ def test_curate_git_call_count_unchanged_by_refactor(git_repo, monkeypatch):
     assert len(diff_calls) == 1
 
 
-def test_curate_runs_two_read_only_git_calls_through_the_registry(git_repo, monkeypatch):
-    """GUARD: the ``store-uncommitted`` check is the only registry check on doctor's surface
-    that runs git, and it makes exactly a ``rev-parse`` and a ``status`` (through
-    ``integrity._git``, which ``_run_git``'s counter above does not see)."""
-    from sidegraph import integrity
+def test_curate_runs_three_read_only_git_calls_through_the_registry(git_repo, monkeypatch):
+    """GUARD: two registry checks on doctor's surface run git. ``store-uncommitted`` makes a
+    ``rev-parse`` and a ``status`` through ``integrity._git``; ``refresh-helper-outdated`` makes
+    one ``rev-parse`` through ``githooks._git``. Each counter sees only its own module's calls,
+    so both are patched."""
+    from sidegraph import githooks, integrity
 
     store_dir, _rid, _commit = _drifted_repo(git_repo)
     calls: list[list[str]] = []
-    real = integrity._git
+    hook_calls: list[list[str]] = []
+    real, real_hooks = integrity._git, githooks._git
 
     def counting(args, *rest, **kw):
         calls.append(args)
         return real(args, *rest, **kw)
 
+    def counting_hooks(args, *rest, **kw):
+        hook_calls.append(args)
+        return real_hooks(args, *rest, **kw)
+
     monkeypatch.setattr(integrity, "_git", counting)
+    monkeypatch.setattr(githooks, "_git", counting_hooks)
     curate(store_dir)
     verbs = [next(word for word in args if not word.startswith("--")) for args in calls]
     assert verbs == ["rev-parse", "status"]
+    assert [args[0] for args in hook_calls] == ["rev-parse"]
 
 
 def test_wrapper_makes_exactly_three_bounded_git_calls(git_repo, monkeypatch):

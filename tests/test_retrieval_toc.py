@@ -199,6 +199,7 @@ def test_build_toc_count_equals_the_accepted_mistakes_drill_down_serves(tmp_path
     store = Store(tmp_path / "t.db")
     trading = _domain(store, "trading", communities=["1"])
     docs = _domain(store, "adr-domain", communities=["5"])
+    store.replace_domain_members(docs.domain_id, [("adr_heading", "docs/ADR-005.md", "5")])
     quiet = _domain(store, "quiet", communities=["7"])
     assert {d.slug for d in (trading, docs, quiet)} == {
         d.slug for d in store.iter_domains(status=DomainStatus.ACCEPTED)

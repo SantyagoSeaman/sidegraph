@@ -7,6 +7,125 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-10-16
+
+### Graphify 0.9.90
+
+Migration steps: [migrate to Sidegraph 0.14](docs/guides/migrating-to-0.14.md).
+
+- Anchors to files with the same basename keep resolving after the engine upgrade.
+- External names resolve when Graphify emits several identical stub nodes.
+- Re-importing rationale does not duplicate compatible labels shortened by a newer engine.
+- `sidegraph-domains snapshot` preserves domain membership across engine regrouping.
+- A store can require a minimum Sidegraph version before clients read or write it.
+- Graphify leaves installed agent skills alone when Sidegraph runs it.
+
+### Changed
+
+- OpenCode V2 can install Sidegraph as a native Git package with shared skills and MCP
+  tools. Existing skill IDs and explicit MCP server settings take precedence. See the
+  [OpenCode installation guide](.opencode/INSTALL.md).
+- Muse has an experimental native plugin with shared skills and MCP tools. Launch Muse
+  from the intended project directory; lifecycle hooks are deferred. See the
+  [Muse installation guide](docs/integrations/muse.md).
+- A graph community that holds code and documents is split in two before domains are
+  computed. Graphify 0.9.62 and later link documents to the code they mention, which merged
+  them.
+- Domain membership is computed by each sync and kept per node. A path prefix now adds its
+  files at sync time, not when a domain is read. A decision anchored under a path rule that
+  the 20% cap kept off the communities now reaches that domain too.
+- A domain whose refresh fails keeps its previous membership whole and is reported again by
+  every later sync until its cause is fixed; `--force` retries it.
+- A domain-membership pass that cannot run because another process holds the store is
+  reported once, as `domain membership not refreshed: the store's writer was busy`, and the
+  next sync runs it; `--check` does not count it. A pass that fails as a whole is reported
+  as `*` (every accepted domain) until its cause is fixed.
+- The `supersede_domain` answer carries `snapshot_note` when the domain's membership is
+  frozen.
+
+### Fixed
+
+- SessionStart and Stop no longer create an absent store. Missing host-relative stores are
+  selected at the Git root; MCP first use requires explicit setup for nested or non-Git
+  destinations. Init distinguishes an empty scaffold from a store with authored content
+  and still prints setup guidance.
+- The MCP server applies the committed ratification policy from the selected store's
+  project when no policy is set in its environment, including cross-project and symlinked
+  stores. Missing settings keep the manual default.
+- Doctor excludes committed file deletions from code drift while binding statuses are
+  uncomputed, and qualifies remaining changes as having unknown binding status. Projects
+  without a graph still report changes to surviving anchored files.
+- Hot hooks withhold records and memory counts on a new store or after an index reload until
+  sync computes binding statuses, so placeholder `live` rows cannot revive orphaned anchors.
+- Community names from newer Graphify builds are read from curated labels, pending hub names,
+  then node names. Hub labels use the file's basename within their own community.
+- Graphify's post-merge hook marker is recognised alongside its other refresh-hook markers.
+- SessionStart and doctor advise when a graph's engine stamp is outside the tested releases.
+  The advisory adds no human notice; doctor's `--check` exits 2 when it is present.
+
+- `sidegraph-import` recognises compatible re-cut rationale labels by their exact file/node
+  context as well as the existing title/origin key, reducing duplicate imports after a
+  Graphify upgrade or rollback.
+
+- Every Graphify run Sidegraph starts or tells you to start now sets `GRAPHIFY_NO_AUTO_REFRESH=1`.
+  Graphify 0.9.87 and later refresh the agent skills they installed (such as
+  `~/.claude/skills/graphify/`) on the first run after a Graphify upgrade unless that variable is
+  set. The graph refresh hook's helper, the CI recipes, the copyable commands in the docs and the
+  setup skill set it, and the rebuild instructions Sidegraph prints name it. Graphify 0.9.6 does
+  not read the variable.
+- Anchors to files that share a basename keep resolving on newer Graphify. Graphify 0.9.87 and
+  later label such a file by a path suffix (`sidegraph/cli.py`) instead of its basename; Sidegraph
+  reads those nodes as basenames again, so an anchor `cli.py` in `src/sidegraph/cli.py` still
+  finds its node, and the engine's own label still resolves too.
+- A path-named anchor (`src/sidegraph/store.py` with its own `file_path`) now resolves to that
+  file's node on any Graphify version, and is stored under the basename. Entities an earlier
+  version named by the full path heal at the one-time resync that follows the upgrade.
+- `find_entity` reads the spelling twins of one file (an entity named by the file's path beside
+  one named by its basename) as one entity, and `get_entity_history` lists the records bound to
+  any twin. New anchors, lookups and duplicate detection compare names the same way.
+- An anchor `file_path` given as an absolute path under the repository, with backslashes on
+  Windows, or with a leading `./` is stored repo-relative with forward slashes and binds live
+  instead of orphaning, through the MCP write tools and through capture. When a store sits in a
+  subdirectory of its repository, the root whose path the graph holds is the one used.
+- An anchor naming an imported external type (`BaseModel`, `Path`) now binds even when Graphify
+  emits one stub node per importing file. The stubs count as one match when none has a file and
+  they share a label and a node type, and the anchor gets a group binding only when they share a
+  community. This applies on every Graphify version. A type and a module of one name (`FastMCP`
+  and `fastmcp`) and repository code are still told apart. Document mentions of such names do
+  not gain a precise leaf binding, and reading surfaces keep their earlier resolution answers.
+- Sync reports an anchor whose file disappeared and whose name now matches only external stubs
+  as orphaned. A resolved external anchor without a community no longer prevents other anchors'
+  previous community bindings from being retired. A formerly shared group also retires when
+  the stubs split. Ambiguous anchors and failed rebinds keep those bindings when their current
+  community is unknown.
+
+### Added
+
+- `sidegraph-domains snapshot` freezes every accepted domain's membership into
+  `.sidegraph/domain-snapshot.json`, so a Graphify upgrade that regroups communities does not
+  move domains. It raises the store's minimum Sidegraph version to 0.14.0. `--build-with
+  VERSION` takes the snapshot from `HEAD` rebuilt with an older Graphify; `--refresh`
+  re-freezes it; `--dry-run` prints the counts it would freeze and leaves committed files unchanged.
+- `sidegraph-verify` reports `bad-domain-snapshot` and `snapshot-without-requirement`;
+  `sidegraph-doctor` reports `snapshot-split`; `sidegraph-sync --json` and `sync_anchors`
+  carry `snapshot_splits`.
+
+
+- `sidegraph-require --sidegraph X.Y.Z` makes a store require at least that Sidegraph release:
+  the committed marker is raised atomically and never lowered. New clients check it before
+  using the store; verification reports malformed requirements and requirements above its version.
+
+- `sidegraph-doctor` prints informational `spelling twins` lines for an entity named by a path of
+  its file beside one named by the basename. They are not findings and do not change the exit
+  code. `duplicate-entity` no longer reports such a pair.
+
+- A new advisory check, `refresh-helper-outdated`, reports a graph refresh hook whose helper runs
+  Graphify without `GRAPHIFY_NO_AUTO_REFRESH=1` (the helper an earlier `sidegraph-init` wrote). It
+  shows as a SessionStart line and notice and as a `sidegraph-doctor` finding, and
+  `sidegraph-doctor --check` exits `2` on it. Run `sidegraph-init` with no flag: it rewrites the
+  helper and keeps your recorded hook choice. The helper lives in `.git/hooks`, so each clone
+  runs it once.
+
 ## [0.13.0] — 2026-10-14
 
 ### Fixed
@@ -41,10 +160,10 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
   0.162.1). The Windows hook definition changes, so approve the changed hooks once in `/hooks`
   on Windows; other platforms are unaffected.
 - The optional terminal CLI now installs from the same place as the plugin, the public
-  repository's `main` branch: `uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main`,
+  repository's `main` branch: `uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`,
   updated after each release with `uv tool upgrade sidegraph`. The docs no longer send you to
   PyPI for it; PyPI still carries every release for pinning an exact version. The `path-skew`
-  SessionStart line now offers `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main`,
+  SessionStart line now offers `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`,
   which moves an older install from PyPI, pinned or not, to the latest release.
 - README: the Quickstart is one numbered sequence with the plugin commands inline, a teammate
   path, and the rarer options below it; "How it works" is a numbered list instead of a diagram.
@@ -1746,7 +1865,7 @@ First public release.
   server and all three hooks in one step, functional today: it builds straight from this
   repository via `uvx --from git+...`, no PyPI publish required.
 - **Plugin-first install docs**: README and the getting-started guides now lead with the
-  plugin (or a bare `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main
+  plugin (or a bare `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1
   <entrypoint>` for manual/no-plugin wiring) as the primary install path; the source-checkout
   (`git clone` + `uv sync` + `uv run --project`) form moves to a "from source (contributors)"
   section. `graphifyy` installs without the `[mcp]` extra by default — `[mcp]` is documented

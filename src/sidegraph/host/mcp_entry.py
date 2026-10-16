@@ -22,7 +22,14 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from .. import server
-from ..config import CURRENT_SESSION, TELEMETRY_SESSION_STAMP_PREFIX, SessionHint
+from ..config import (
+    CURRENT_SESSION,
+    TELEMETRY_SESSION_STAMP_PREFIX,
+    SessionHint,
+    _store_project_root,
+    repository_root,
+    resolve_store_location,
+)
 from .claude_settings import RATIFY_POLICY_ENV_VAR, current_ratify_policy, repo_root_for_settings
 from .session_identity import hint_for, stamp_keys_of
 
@@ -80,7 +87,7 @@ def install(mcp: FastMCP) -> None:
 
 
 def apply_project_ratify_policy() -> None:
-    """Apply the project's committed ratify policy when the environment sets none.
+    """Apply the selected store project's committed policy when the environment sets none.
 
     `sidegraph-init` commits the policy to `.claude/settings.json`'s `env` block. Claude Code
     applies that block to its MCP servers, Codex does not, so without this a Codex session
@@ -91,7 +98,9 @@ def apply_project_ratify_policy() -> None:
     if os.environ.get(RATIFY_POLICY_ENV_VAR, "").strip():
         return
     try:
-        state = current_ratify_policy(repo_root_for_settings())
+        store_path = resolve_store_location(search_ancestors=True, warn_on_create=False).path
+        project_root = repository_root(store_path) or _store_project_root(store_path)
+        state = current_ratify_policy(project_root)
     except Exception:  # noqa: BLE001 - a settings problem must never stop the MCP server
         return
     if state.outcome == "already_set" and state.existing_value:

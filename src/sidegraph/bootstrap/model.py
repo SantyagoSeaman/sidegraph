@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.profiles import ProfileDetection as ProfileDetection
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Descriptor
 
@@ -70,7 +71,7 @@ WARNING_CONSEQUENCES: Mapping[WarningCode, str] = {
         "record with identical content is already stored for this source, it is ratified, or "
         "a rejected one is revived as a new record that inherits its bindings; otherwise the "
         "candidate is skipped and listed on an UNANCHORED line. Rebuild the graph "
-        "(`graphify update .` for the default one) so the document has a node, or add a "
+        f"(for the default one, run {GRAPH_REBUILD}) so the document has a node, or add a "
         "backticked mention of a real symbol, then rerun"
     ),
     WarningCode.CURRENT_STATE: (

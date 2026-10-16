@@ -56,6 +56,7 @@ from typing import Literal, NamedTuple, overload
 
 from pydantic import BaseModel, ValidationError
 
+from . import domain_snapshot
 from .config import _store_project_root
 from .gitenv import git_env
 from .schema import (
@@ -70,7 +71,6 @@ from .schema import (
 )
 from .store import (
     _FORMAT_MARKER_NAME,
-    _FORMAT_MARKER_PREFIX,
     _MIGRATABLE_SCHEMA_VERSIONS,
     _RELOADABLE_SCHEMA_VERSIONS,
     _TERMINAL_DECISION_STATUSES,
@@ -80,18 +80,30 @@ from .store import (
     symlinked_internals,
 )
 from .store_layout import (
+    DOMAIN_SNAPSHOT_NAME,
+    MAX_FORMAT_MARKER_BYTES,
     NOT_A_FILE_REASON,
+    REQUIREMENT_MARKER_VERSION,
+    StoreRequirementError,
     hot_matches_archive,
     is_regular_file,
+    parse_format_marker,
     require_listable_record_dirs,
+    requirement_met,
+    running_version,
     same_modulo_absent,
     stat_entry,
+    store_requirement,
 )
 
 # Violation codes — pinned constants (design ruling 2). The CLI's --json output and every
 # test assert against these exact strings, never a free-form message.
 PARSE_ERROR = "parse-error"
 UNKNOWN_SCHEMA_VERSION = "unknown-schema-version"
+MALFORMED_REQUIREMENT = "malformed-requirement"
+REQUIREMENT_ABOVE_VERIFIER = "requirement-above-verifier"
+BAD_DOMAIN_SNAPSHOT = "bad-domain-snapshot"
+SNAPSHOT_WITHOUT_REQUIREMENT = "snapshot-without-requirement"
 BAD_VALIDITY_WINDOW = "bad-validity-window"
 SUPERSEDED_WITHOUT_SUCCESSOR = "superseded-without-successor"
 DANGLING_SUPERSEDES = "dangling-supersedes"
@@ -116,15 +128,20 @@ VALID_TO_UNSET = "valid-to-unset"
 VALID_TO_CHANGED = "valid-to-changed"
 ILLEGAL_DELETION = "illegal-deletion"
 
-# A store's committed ``format`` marker (see ``store._ensure_format_marker``) is only ever
-# stamped with the running code's CURRENT ``SCHEMA_VERSION`` at write time — it is never
-# rewritten by a mere reload. A store this code can actually OPEN (see
+# A store's default committed ``format`` marker (see ``store._ensure_format_marker``)
+# carries the running code's CURRENT ``SCHEMA_VERSION`` at creation. An explicit requirement
+# uses REQUIREMENT_MARKER_VERSION instead; a mere reload rewrites neither marker.
+# A store this code can actually OPEN (see
 # ``store._RELOADABLE_SCHEMA_VERSIONS``/``_MIGRATABLE_SCHEMA_VERSIONS``) may therefore still
 # carry an older marker; all three sets together are exactly "known to this running code",
 # mirroring what ``Store.__init__`` itself tolerates without raising.
 _KNOWN_SCHEMA_VERSIONS = frozenset(
     {SCHEMA_VERSION} | _RELOADABLE_SCHEMA_VERSIONS | _MIGRATABLE_SCHEMA_VERSIONS
 )
+
+# A ``1.0.0`` marker carries a minimum Sidegraph version (D6 of
+# design/superpowers/specs/2026-10-14-graphify-upgrade-design.md).
+_KNOWN_MARKER_VERSIONS = _KNOWN_SCHEMA_VERSIONS | {REQUIREMENT_MARKER_VERSION}
 
 # Substring pydantic's wrapped ``ValueError`` carries for the ``Decision``/``Fact``
 # validity-window ``model_validator`` (see schema.py) — see ``_check_temporal_dir``.
@@ -517,9 +534,13 @@ def _check_archive_dir(dir_path: Path) -> _ArchiveIndex:
 
 
 def _check_format_marker(store_dir: Path) -> list[Violation]:
-    """``<store_dir>/format`` — a single committed line, ``sidegraph-store <version>`` (see
-    ``store._ensure_format_marker``). Missing, malformed, or an unrecognized version are all
-    reported the same way: :data:`UNKNOWN_SCHEMA_VERSION`."""
+    """``<store_dir>/format``: ``sidegraph-store <version>``, and on a ``1.0.0`` marker exactly
+    one ``requires-sidegraph >= X.Y.Z`` line (``store_layout.parse_format_marker``). Missing,
+    unreadable, unrecognised or an unknown version: :data:`UNKNOWN_SCHEMA_VERSION`. A
+    requirement line missing, unknown or unparsable: :data:`MALFORMED_REQUIREMENT`. A
+    requirement above the running verifier (a CI pin older than the store):
+    :data:`REQUIREMENT_ABOVE_VERIFIER`.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)"""
     marker = store_dir / _FORMAT_MARKER_NAME
     if marker.is_symlink():
         # Reported as ``symlinked-store-entry`` by the caller; reading it would echo the link
@@ -528,15 +549,75 @@ def _check_format_marker(store_dir: Path) -> list[Violation]:
     if not marker.is_file():
         return [_violation(UNKNOWN_SCHEMA_VERSION, marker, "format marker missing")]
     try:
-        text = marker.read_text(encoding="utf-8").strip()
+        with marker.open("rb") as stream:
+            raw = stream.read(MAX_FORMAT_MARKER_BYTES + 1)
     except OSError as e:
         return [_violation(UNKNOWN_SCHEMA_VERSION, marker, f"unreadable: {e}")]
-    if not text.startswith(_FORMAT_MARKER_PREFIX):
-        return [_violation(UNKNOWN_SCHEMA_VERSION, marker, f"unrecognized format marker {text!r}")]
-    version = text[len(_FORMAT_MARKER_PREFIX) :]
-    if version not in _KNOWN_SCHEMA_VERSIONS:
+    if len(raw) > MAX_FORMAT_MARKER_BYTES:
+        return [
+            _violation(
+                MALFORMED_REQUIREMENT,
+                marker,
+                f"format marker exceeds {MAX_FORMAT_MARKER_BYTES} bytes",
+            )
+        ]
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return [_violation(UNKNOWN_SCHEMA_VERSION, marker, "format marker is not UTF-8 text")]
+    try:
+        version, requirement = parse_format_marker(text, marker)
+    except StoreRequirementError as e:
+        code = MALFORMED_REQUIREMENT if e.kind == "malformed" else UNKNOWN_SCHEMA_VERSION
+        return [_violation(code, marker, str(e))]
+    if version not in _KNOWN_MARKER_VERSIONS:
         return [_violation(UNKNOWN_SCHEMA_VERSION, marker, f"unknown schema_version {version!r}")]
+    if requirement is not None and not requirement_met(requirement):
+        return [
+            _violation(
+                REQUIREMENT_ABOVE_VERIFIER,
+                marker,
+                f"the store requires Sidegraph >= {requirement}; this verifier is "
+                f"{running_version()}: move the CI pin to at least {requirement}",
+            )
+        ]
     return []
+
+
+def _check_domain_snapshot(store_dir: Path) -> list[Violation]:
+    """``<store_dir>/domain-snapshot.json``, when present: it validates as a format-1
+    snapshot, and the format marker requires at least the first Sidegraph that reads it (an
+    older one would open the store and show the domains the snapshot exists to keep). A
+    symlinked snapshot is reported as ``symlinked-store-entry``; a malformed marker by the
+    marker check.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.4)"""
+    path = store_dir / DOMAIN_SNAPSHOT_NAME
+    if path.is_symlink() or not path.exists():
+        return []
+    if not path.is_file():
+        return [_violation(BAD_DOMAIN_SNAPSHOT, path, NOT_A_FILE_REASON)]
+    out: list[Violation] = []
+    try:
+        domain_snapshot.parse_snapshot(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, domain_snapshot.SnapshotError) as e:
+        out.append(_violation(BAD_DOMAIN_SNAPSHOT, path, str(e)))
+    try:
+        required = store_requirement(store_dir)
+    except StoreRequirementError:
+        return out
+    floor = domain_snapshot.SNAPSHOT_MIN_SIDEGRAPH
+    # requirement_met(a, b) is "b >= a" by release.
+    if required is None or not requirement_met(floor, required):
+        out.append(
+            _violation(
+                SNAPSHOT_WITHOUT_REQUIREMENT,
+                path,
+                f"the format marker must require Sidegraph >= {floor} (it requires "
+                f"{required or 'nothing'}); run `sidegraph-require --sidegraph {floor}` and commit "
+                "the marker",
+            )
+        )
+    return out
 
 
 # -- cross-reference checks -----------------------------------------------------------------
@@ -789,6 +870,7 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
         # link lints foreign files (or the same files as the wrong type), and a pool that is
         # cut off makes every cross-reference into it dangle. Stop at the links.
         return violations
+    violations += _check_domain_snapshot(store_dir)
     require_listable_record_dirs(store_dir)
 
     decisions_raw, decision_paths, decision_all_paths, decisions_skipped, v = _check_temporal_dir(
@@ -1405,7 +1487,9 @@ def _classify_store_relative_path(store_relative: str) -> str | None:
     an already-published segment's bytes at all is illegal, full stop).
 
     ``None`` for anything else changed under the store dir this layer doesn't classify: the
-    ``format`` marker, the gitignored ``index.db``, or any unexpected nesting."""
+    ``format`` marker, the gitignored ``index.db``, or any unexpected nesting.
+    ``domain-snapshot.json`` is replaced whole by ``sidegraph-domains snapshot --refresh``
+    and validated by the snapshot layer."""
     parts = store_relative.split("/")
     if len(parts) == 2 and parts[0] == "archive" and parts[1].endswith(".jsonl"):
         return "archive"

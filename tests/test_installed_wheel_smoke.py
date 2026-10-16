@@ -411,6 +411,8 @@ def test_normal_stdio_keeps_the_unmodified_module_entrypoint(tmp_path, monkeypat
     commands = []
 
     def parameters(**kwargs):
+        assert (tmp_path / ".git" / "HEAD").is_file()
+        assert not (tmp_path / ".sidegraph").exists(), "first MCP write must stay cold"
         commands.append(kwargs["args"])
         return original(**kwargs)
 

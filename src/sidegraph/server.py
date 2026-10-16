@@ -32,9 +32,9 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import FunctionTool, Tool, ToolResult
 from pydantic import ValidationError
 
-from . import nearest_anchored, seed_ladder, worktree_seeds
+from . import domain_snapshot, nearest_anchored, seed_ladder, worktree_seeds
+from .anchoring import anchor_descriptor, anchor_roots, orphan_reason, resolve_and_bind
 from .anchoring import entity_summaries as _entity_summaries
-from .anchoring import orphan_reason, resolve_and_bind
 from .capture import (
     AnchorDraft,
     RatifyPolicy,
@@ -60,9 +60,12 @@ from .capture import propose_domains as _propose_domain_drafts
 from .config import (
     DEFAULT_GRAPH,
     UNATTRIBUTED_SESSION,
+    _present_by_lstat,
+    _repository_boundary,
     borrowed_graph_candidate,
     default_graph_path,
     main_checkout_root,
+    missing_store_message,
     path_is_file,
     path_state,
     repository_root,
@@ -71,6 +74,7 @@ from .config import (
 from .domains import DEFAULT_CANDIDATE_LIMIT, collect_domain_candidates, community_group_path
 from .engine.reader import GraphifyReader, open_borrowed_reader
 from .freshness import staleness_phrase
+from .githooks import GRAPH_REBUILD
 from .input_limits import MAX_DRAFTS, InputLimitError, preflight_direct, preflight_drafts
 from .retrieval import (
     _STANDING_SUPERSEDE_HINT,
@@ -98,13 +102,26 @@ from .schema import (
     Fact,
     Provenance,
     Relation,
+    file_anchor_descriptors,
 )
 from .store import VOLATILE_STALE_KEY, Store, skipped_refusal_text
-from .sync import activate_accepted_domain, maybe_sync, report_as_dict, sync
+from .sync import (
+    activate_accepted_domain,
+    ensure_domain_membership,
+    maybe_sync,
+    report_as_dict,
+    sync,
+)
 from .tool_rate_limit import ToolCallRateLimit
 from .validation_errors import SafeWriteError
 from .verify import verify_snapshot
-from .write_boundary import CONFIGURATION_ERROR, is_safe_write, safe_write, validate_write_arguments
+from .write_boundary import (
+    CONFIGURATION_ERROR,
+    WRITE_FAILURE,
+    is_safe_write,
+    safe_write,
+    validate_write_arguments,
+)
 
 
 def _server_version() -> str:
@@ -158,8 +175,20 @@ _store: Store | None = None
 _store_lock = threading.Lock()
 
 
+def _missing_store_setup(path: str) -> str | None:
+    """Refuse implicit creation below or outside the selected logical Git root."""
+    if not _present_by_lstat(path):
+        parent = os.path.dirname(os.path.abspath(path))
+        if _repository_boundary(parent) != parent:
+            return missing_store_message(path)
+    return None
+
+
 def _get_store() -> Store:
     """Lazily create and memoize the process-wide Store on first actual use.
+
+    A missing destination must sit directly in its logical Git root; otherwise explicit
+    CLI initialization is required. Existing non-Git stores remain usable.
 
     Double-checked locking: the lock is only taken on the (rare) cold-start race window:
     once `_store` is set, every later call reads it lock-free.
@@ -168,7 +197,11 @@ def _get_store() -> Store:
     if _store is None:
         with _store_lock:
             if _store is None:
-                _store = Store(resolve_store_location(search_ancestors=True).path)
+                location = resolve_store_location(search_ancestors=True, warn_on_create=False)
+                setup = _missing_store_setup(location.path)
+                if setup is not None:
+                    raise ValueError(setup)
+                _store = Store(location.path)
     return _store
 
 
@@ -426,6 +459,16 @@ class _ArgumentNames(Middleware):
             raise _unknown_argument_error(tool.name, unknown, parameters)
         if write:
             validate_write_arguments(tool, args)
+            if _store is None:
+                # Refuse before the body guard masks arbitrary exceptions. This check opens
+                # nothing; actual lazy creation stays in _get_store, after validation.
+                try:
+                    location = resolve_store_location(search_ancestors=True, warn_on_create=False)
+                    setup = _missing_store_setup(location.path)
+                except Exception:
+                    raise ToolError(WRITE_FAILURE) from None
+                if setup is not None:
+                    raise ToolError(setup)
         if args is not sent and args != sent:
             message = context.message.model_copy(update={"arguments": args})
             context = context.copy(message=message)
@@ -703,6 +746,24 @@ def _add_decision_impl(
     )
 
 
+def _anchor_dicts(anchors: list[dict], reader, store: Store) -> list[dict]:
+    """``anchors`` with each named anchor's ``name``/``file_path`` read the way the store keys
+    it (``anchoring.anchor_descriptor``), so lookups after the write find what the write bound.
+    Other keys pass through; an unnamed entry is left alone. Callers validate first."""
+    out: list[dict] = []
+    root = anchor_roots(store.path)
+    for raw in anchors:
+        name = raw.get("name")
+        if not name:
+            out.append(raw)
+            continue
+        ref = anchor_descriptor(
+            Descriptor(name=name, file_path=raw.get("file_path")), reader, store, root=root
+        )
+        out.append({**raw, "name": ref.name, "file_path": ref.file_path})
+    return out
+
+
 def _resolve_anchors(
     record_id: str,
     anchors: list[dict] | None,
@@ -737,6 +798,8 @@ def _resolve_anchors(
     """
     skipped: list[dict] = []
     orphaned: list[dict] = []
+    if anchors:
+        anchors = _anchor_dicts(anchors, reader, store)
     if anchors and reader is not None:
         for raw in anchors:
             name = raw.get("name")
@@ -825,7 +888,8 @@ def add_decision(
     to nothing (always ``[]`` when no graph is present).
     The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
     PreToolUse hook skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
-    stale graph (run ``graphify update .``, then re-anchor), ``name-not-in-file`` means the
+    stale graph (run `graphify update .` with the environment variable
+    `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor), ``name-not-in-file`` means the
     name is wrong (``find_entity`` says what is there), ``no-file-path`` means pass
     ``file_path``. Repair with ``add_anchors`` — no duplicate record, no content-free
     supersession.
@@ -1028,7 +1092,8 @@ def supersede_decision(
     to nothing (always ``[]`` when no graph is present).
     The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
     PreToolUse hook skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
-    stale graph (run ``graphify update .``, then re-anchor), ``name-not-in-file`` means the
+    stale graph (run `graphify update .` with the environment variable
+    `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor), ``name-not-in-file`` means the
     name is wrong (``find_entity`` says what is there), ``no-file-path`` means pass
     ``file_path``. Repair with ``add_anchors`` — no duplicate record, no content-free
     supersession.
@@ -1072,6 +1137,7 @@ def _bind_fact_anchors(
         return [], []
     if reader is not None:
         return _resolve_anchors(fact_id, anchors, reader, store)
+    anchors = _anchor_dicts(anchors, None, store)
     orphaned: list[dict] = []
     for raw in anchors:
         if not raw.get("name"):
@@ -1207,8 +1273,9 @@ def add_fact(
     next sync once a graph exists.
     The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
     PreToolUse hook skip it. When ``reason`` is present, read it first:
-    ``file-not-in-graph`` usually means a stale graph (run ``graphify update .``, then
-    re-anchor), ``name-not-in-file`` means the name is wrong (``find_entity`` says what is
+    ``file-not-in-graph`` usually means a stale graph (run `graphify update .` with the
+    environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor),
+    ``name-not-in-file`` means the name is wrong (``find_entity`` says what is
     there), ``no-file-path`` means pass
     ``file_path``. Repair with ``add_anchors`` — no duplicate record, no content-free
     supersession.
@@ -2282,11 +2349,13 @@ def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
     """Testable core: exact descriptor match first, then a name-only fallback scan.
 
     Never guesses: a name reused across files with no ``file_path`` to disambiguate comes
-    back as ``candidates`` rather than an arbitrary pick.
+    back as ``candidates`` rather than an arbitrary pick. Spelling twins of one file
+    (``src/sidegraph/store.py`` and ``store.py`` there) are one identity and answer as the
+    basename entity; two files stay ``candidates``.
     """
     entity = store.find_entity(name, file_path)
     if entity is None:
-        candidates = store.find_entities_by_name(name)
+        candidates = store.find_identities_by_name(name)
         if len(candidates) == 1:
             entity = candidates[0]
         elif len(candidates) > 1:
@@ -2359,7 +2428,13 @@ def _get_entity_history_impl(store: Store, entity_id: str) -> list[dict]:
     (additive -- existing consumers keyed on the pre-existing fields are unaffected); the
     merged list stays sorted ``valid_from`` desc, exactly as before.
     """
-    bindings = store.bindings_for_entity(entity_id)
+    entity = store.get_entity(entity_id)
+    ids = [m.entity_id for m in store.identity_members(entity)] if entity else [entity_id]
+    # A record bound to a spelling twin of the entity is part of its history (D2): union the
+    # members' bindings, one per record.
+    bindings = list(
+        {b.record_id: b for eid in ids for b in store.bindings_for_entity(eid)}.values()
+    )
     types = store.record_types(b.record_id for b in bindings)
     records: list[tuple[str, Decision | Fact]] = []
     for b in bindings:
@@ -2673,19 +2748,20 @@ def _not_in_graph_block(
         if state.state == "stale":
             sentence += (
                 f"The graph is stale ({staleness_phrase(state)}): rebuild it"
-                f"{into or ' from the repository root'} with `graphify update .`, then call again."
+                f"{into or ' from the repository root'} by running {GRAPH_REBUILD}, "
+                "then call again."
             )
         elif state.state == "fresh":
             sentence += (
                 "No committed change since the build explains it: the file may be newer than "
                 f"the build and not committed yet (rebuild{' it' + into if borrowed else ''} "
-                "with `graphify update .`), sit under an excluded path, or be a file type "
+                f"by running {GRAPH_REBUILD}), sit under an excluded path, or be a file type "
                 "Graphify skips."
             )
         else:
             sentence += (
                 f"Could not tell whether the graph is current ({state.reason}): rebuild it"
-                f"{into} with `graphify update .` if these files are new."
+                f"{into} by running {GRAPH_REBUILD} if these files are new."
             )
         lines.append(sentence)
     if only_here:
@@ -2775,17 +2851,18 @@ def _no_graph_block(store) -> str:
     if path_state(path) == "missing":
         lead = f"No code graph at {path}"
         build = (
-            f"Build it in the main checkout {main} with `graphify update .`."
+            f"Build it in the main checkout {main} by running {GRAPH_REBUILD}."
             if graph is not None
-            else "Build it from the repository root with `graphify update .`."
+            else f"Build it from the repository root by running {GRAPH_REBUILD}."
         )
     else:
         lead = f"The code graph at {path} is not readable"
         build = (
-            f"Make it readable, or rebuild it in the main checkout {main} with `graphify update .`."
+            f"Make it readable, or rebuild it in the main checkout {main} by running "
+            f"{GRAPH_REBUILD}."
             if graph is not None
-            else "Make it readable, or rebuild it from the repository root with "
-            "`graphify update .`."
+            else "Make it readable, or rebuild it from the repository root by running "
+            f"{GRAPH_REBUILD}."
         )
     return f"## No code graph\n{lead}: memory anchored to code cannot be looked up. {build}"
 
@@ -2840,7 +2917,7 @@ def _empty_block(store, *, graph_missing: bool = False) -> str:
     if graph_missing:
         text += (
             " There is no code graph to match against either: build it from the repository "
-            "root with `graphify update .` first."
+            f"root by running {GRAPH_REBUILD} first."
         )
     text += " Pass files=[…] with the repo-relative paths you are working on"
     if domains:
@@ -3875,6 +3952,8 @@ def _ratify_impl(
                         f"{activation.overbroad['matched']}/{activation.overbroad['total']} "
                         "communities — not applied; seed_anchors, if any, still applied)"
                     )
+                if activation.note:
+                    out[id_] += f" ({activation.note})"
             else:
                 # The domain vanished between _ratified_domain's check and here (can only
                 # happen under concurrent mutation) -- same unresolved-membership fallback
@@ -3890,7 +3969,13 @@ def _ratify_impl(
             out[f.id] = f"dropped (evidence of {id_})"
         domain_changed = domain_changed or _ratified_domain(store, id_, out[id_])
     if domain_changed:
-        store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store)))
+        if reader is not None:
+            # A status change uncertified the membership index (it can split a covered domain
+            # or end a split): rebuild it before the TOC reads it. Best-effort, like the
+            # activation above; capture and drill-down rebuild it too.
+            with contextlib.suppress(Exception):
+                ensure_domain_membership(store, reader)
+        store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store, reader)))
     return out
 
 
@@ -3992,7 +4077,9 @@ def _add_domain_impl(
             communities=communities or [],
             path_prefixes=path_prefixes or [],
             # raw MCP JSON dicts -> Descriptor; pydantic validates/coerces each on construction.
-            seed_anchors=[Descriptor(**d) for d in seed_anchors] if seed_anchors else [],
+            seed_anchors=file_anchor_descriptors(Descriptor(**d) for d in seed_anchors)
+            if seed_anchors
+            else [],
             provenance=Provenance(source="manual", author=author, graph_version=graph_version),
         )
         store.add_domain(domain)
@@ -4115,20 +4202,23 @@ def _supersede_domain_impl(
             parent_id=parent_id,
             path_prefixes=path_prefixes or [],
             # raw MCP JSON dicts -> Descriptor; pydantic validates/coerces each on construction.
-            seed_anchors=[Descriptor(**d) for d in seed_anchors] if seed_anchors else [],
+            seed_anchors=file_anchor_descriptors(Descriptor(**d) for d in seed_anchors)
+            if seed_anchors
+            else [],
             supersedes=old.domain_id,
             provenance=Provenance(source="manual", author=author, graph_version=graph_version),
         )
+        note = domain_snapshot.supersede_note(store.path, old, new_slug, store.get_domain)
         result = store.supersede_domain(old.domain_id, new_domain)
-        return _with_commit_hint(
-            store,
-            {
-                "domain_id": result.domain_id,
-                "status": result.status.value,
-                "supersedes": old.domain_id,
-                "redactions": n1 + n2,
-            },
-        )
+        answer = {
+            "domain_id": result.domain_id,
+            "status": result.status.value,
+            "supersedes": old.domain_id,
+            "redactions": n1 + n2,
+        }
+        if note:
+            answer["snapshot_note"] = note
+        return _with_commit_hint(store, answer)
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
@@ -4151,8 +4241,10 @@ def supersede_domain(
     first, then ``find_domain_by_slug``) — never a guess: an id/slug that resolves to
     nothing is a hard error. ``parent_slug``, when given, must resolve to an existing
     (non-superseded) domain, same as ``add_domain``'s. ``path_prefixes``/``seed_anchors``
-    seed the SUCCESSOR's membership rule from scratch (nothing is inherited from the
+    seed the SUCCESSOR's membership rule from scratch (no rule is inherited from the
     predecessor — pass the old domain's own values back if you want them carried over).
+    A snapshot's frozen membership carries over to the sole accepted successor; new rules
+    apply to covered files only after ``sidegraph-domains snapshot --refresh --domain <slug>``.
 
     The predecessor is flipped to ``superseded`` immediately (append-only: the record
     stays, fully retrievable, never deleted) in the same transaction that writes the
@@ -4171,7 +4263,8 @@ def supersede_domain(
     Returns ``{"domain_id": str, "status": str, "supersedes": str, "redactions": int}`` —
     ``status`` is always ``"proposed"``, ``domain_id`` is the successor's, ``supersedes`` is
     the predecessor's resolved ``domain_id``, ``redactions`` counts the secret replacements
-    made in the new title and summary.
+    made in the new title and summary. ``snapshot_note`` (str) is present when the predecessor
+    has frozen membership in the domain snapshot.
     """
     return _supersede_domain_impl(
         _get_store(),
@@ -4584,8 +4677,8 @@ def list_domains(status: str | None = None) -> list[dict]:
     Returns a list sorted by ``slug``, one dict per domain: ``{"id": str, "slug": str,
     "title": str, "summary": str, "status": str, "member_count": int, "path_prefixes":
     list[str], "seed_anchor_count": int, "parent_slug": str | None, "child_slugs":
-    list[str]}``. ``member_count`` is ``len(domain.communities)`` — the current, engine-
-    derived membership size (0 until the next `ratify`/`sidegraph-sync` resolves
+    list[str]}``. ``member_count`` is ``len(domain.communities)`` — the number of communities
+    whose every node belongs to the domain (0 until the next `ratify`/`sidegraph-sync` resolves
     `path_prefixes`/`seed_anchors`, for a freshly proposed domain). ``parent_slug``/
     ``child_slugs`` reflect the FULL domain set regardless of the ``status`` filter, so a
     filtered call still reports accurate lineage.
@@ -4852,6 +4945,11 @@ def _drill_down_impl(
     before anything is recorded, so the telemetry counts what was shown; without them the
     answer is whole.
     """
+    if reader is not None:
+        # A reload empties the membership index and drill_down does not sync: rebuild it first,
+        # best-effort like every lazy sync in this module.
+        with contextlib.suppress(Exception):
+            ensure_domain_membership(store, reader)
     result = _drill_down(domain_slug, store, reader)
     decision_ids = result.pop("decision_ids", [])
     if result.get("found"):
@@ -4878,11 +4976,11 @@ def _drill_down_impl(
 @mcp.tool(annotations=_LOCAL_WRITE)
 def drill_down(domain_slug: str, limit: int = 25, budget_chars: int = 24000) -> ToolResult:
     """Walk one domain: its WHY-IT-EXISTS summary, its accepted subdomains (title +
-    one-liner), a capped member sample (current communities ∪ path_prefixes), and its
+    one-liner), a capped member sample (the domain's published membership), and its
     decisions (mistakes first) — the union, deduped, of decisions tagged to the
-    ``domain:<slug>`` entity, decisions anchored to an entity in one of the domain's
-    communities, AND decisions anchored to a document whose file the domain covers (so an
-    imported ADR surfaces under the domain covering that doc's headings, even on a doc
+    ``domain:<slug>`` entity, decisions anchored to an entity whose node is a member or lies
+    in one of its communities, AND decisions anchored to a document whose file the domain
+    covers (so an imported ADR surfaces under the domain covering that doc's headings, even on a doc
     corpus where the file node hubs into a different community) — the Axis-1 counterpart to
     the flat SessionStart TOC (call this after spotting a domain there to go one level deeper).
 
@@ -4956,7 +5054,8 @@ def sync_anchors(force: bool = False) -> dict:
     lazy ``maybe_sync`` run -- every tracked entity's tier-2 leaf bindings transition
     (live/degraded/orphaned) per the deterministic resolve ladder, community (tier-1)
     bindings get re-pointed when Leiden renumbered, and every ACCEPTED domain's
-    ``communities`` are refreshed from its ``path_prefixes``/``seed_anchors``. The
+    membership (``communities`` and member nodes) is refreshed from its
+    ``path_prefixes``/``seed_anchors``, or its committed domain snapshot. The
     entity's own canonical DESCRIPTOR is rewritten ONLY on a "moved" rung (a unique
     name-only match after the exact match missed, AND the move independently confirmed by
     COMMITTED git history -- an unconfirmed dirty-tree hit reports "moved_uncommitted"
@@ -4987,14 +5086,16 @@ def sync_anchors(force: bool = False) -> dict:
     str, "repointed": int, "outcomes": [{"status", "canonical_name", "detail"}, ...],
     "stale_decisions": [...], "empty_domains": [...], "overbroad_domains": [...],
     "slug_conflicts": [...], "domains_refreshed": int, "domain_failures": [{"slug",
-    "title", "error"}, ...]}``. ``synced`` is ``False`` when the pass was skipped outright
+    "title", "error"}, ...], "snapshot_splits": [{"slug", "domains"}, ...]}``.
+    ``synced`` is ``False`` when the pass was skipped outright
     (``graph_version`` unchanged, no ``force``, no cold-reload flag pending, no
     remembered ``moved_uncommitted`` entity to re-verify after ``HEAD`` moved, and no
     remembered Tier-1 community reconcile whose retry repaired the record or failed again;
     a retry that abstains reports nothing) -- when skipped, every OTHER field is an EMPTY default
     (``outcomes: []``, ``counts: ""``,
     ``repointed: 0``, ``stale_decisions: []``, ``empty_domains: []``, ``overbroad_domains: []``,
-    ``slug_conflicts: []``, ``domains_refreshed: 0``, ``domain_failures: []``) from a
+    ``slug_conflicts: []``, ``domains_refreshed: 0``, ``domain_failures: []``,
+    ``snapshot_splits: []``) from a
     fresh, un-run ``SyncReport(skipped=True)`` -- NOT the prior (possibly stale) report --
     so a caller must never read a skipped pass as "everything's clean"; pass
     ``force=True`` (or wait for a real graph rebuild) to get an actual report. A third,
@@ -5014,6 +5115,21 @@ def sync_anchors(force: bool = False) -> dict:
     refresh itself raised, isolated so one broken domain never costs any other domain its
     heal; it is an attention finding for ``--check``/``report_has_findings``, unlike the
     informational ``empty_domains``/``overbroad_domains``.
+
+    A fourth, MEMBERSHIP kind reports an uncertified index's failed refresh, now or already
+    recorded for the same graph, snapshot and domains: ``synced`` is ``True`` with equal
+    versions and domain fields. A domain failure retains its last published membership;
+    it is reported without recomputing until the identity/status changes or ``force=True``.
+    A whole-pass rollback, in a full or skipped sync, returns one ``*`` domain failure with
+    ``title: "every accepted domain"`` and ``busy``. ``busy: true`` means another writer
+    held the store: nothing changed, the next pass retries, and it is not a finding.
+    ``busy: false`` is an attention finding, recorded while the failed reservation survives.
+    A pass rolled back during this sync performs no further store reads: ``stale_decisions``
+    and ``slug_conflicts`` are empty because they were not read, not because there are none.
+
+    ``snapshot_splits`` lists covered domains with multiple accepted heirs: neither holds
+    its frozen entries until ``sidegraph-domains snapshot --refresh`` names each part with
+    ``--domain``. Informational, never a finding.
 
     With no Graphify graph present, returns ``{"synced": False, "error": "graph not
     readable (<resolved path>)"}`` (the path is the store-anchored one; when the same
@@ -5132,6 +5248,7 @@ def _add_anchors_impl(
     if store.is_skipped("bindings", record_id):
         raise ValueError(skipped_refusal_text("bindings", record_id))
     _validate_anchors(anchors)
+    anchors = _anchor_dicts(anchors or [], reader, store)
 
     bound: list[dict] = []
     orphaned: list[dict] = []

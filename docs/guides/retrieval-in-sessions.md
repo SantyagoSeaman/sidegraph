@@ -157,7 +157,7 @@ If nothing resolves at all, the tool returns the literal string `No context foun
 by a block that says why. A seed that was read some other way than written gets a
 `## How your seeds were read` line (guessed, normalised, a directory, ambiguous, or a name that
 matches no symbol). If a file you passed is not in the code graph, a trailing
-`## Not in the code graph` block says why: the graph is stale and needs `graphify update .`, the
+`## Not in the code graph` block says why: the graph is stale and needs a rebuild (`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set), the
 file is newer than the build or one the engine skips, the file exists only in another
 checkout (a sibling worktree), or the path names no file in any checkout (see [`get_task_context`](../reference/mcp-tools.md#get_task_context)). A file seed
 that has no current record of its own, but has anchored files near it, gets a `## Nearest anchored`

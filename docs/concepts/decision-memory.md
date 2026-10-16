@@ -62,7 +62,7 @@ stick, instead of relearning that the hard way. See the full write-path rules in
 
 ## Own the memory, rent the graph
 
-Sidegraph uses [Graphify](https://github.com/safishamsi/graphify) for entity extraction and
+Sidegraph uses [Graphify](https://github.com/Graphify-Labs/graphify) for entity extraction and
 graph construction. Its own append-only store uses durable identities that remain stable
 when graph node ids or community labels change. Graphify's `graph.json` is read-only input
 to Sidegraph: the engine can regenerate it, so durable records live separately in the

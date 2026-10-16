@@ -6,7 +6,7 @@ description: >-
 
 # Stats
 
-Run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stats` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin): skills run the CLIs at the session's version, never the copy on `PATH`) and show its output **verbatim** in a fenced block. Usage figures
+Run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-stats` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin): skills run the CLIs at the session's version, never the copy on `PATH`) and show its output **verbatim** in a fenced block. Usage figures
 come from the local, gitignored index and graph figures from the optional read-only
 `graph.json`; the command also checks the canonical store files for index staleness.
 Nothing is sent anywhere.

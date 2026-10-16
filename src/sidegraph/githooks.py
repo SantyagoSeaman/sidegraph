@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -47,7 +48,23 @@ CREATED_HEADER = "#!/bin/sh\n# Created by sidegraph-init.\n"
 DAMAGED_MESSAGE = "Sidegraph's block markers are damaged; fix or remove them by hand"
 
 # Markers Graphify's own hooks carry (D6).
-GRAPHIFY_MARKERS = ("# graphify-hook-start", "# graphify-checkout-hook-start")
+GRAPHIFY_MARKERS = (
+    "# graphify-hook-start",
+    "# graphify-checkout-hook-start",
+    "# graphify-merge-hook-start",  # Graphify 0.9.90 post-merge hook.
+)
+
+#: What every Graphify run Sidegraph starts sets: without it, Graphify 0.9.87 and later refresh the
+#: agent skills they installed (``~/.claude/skills/graphify/`` among them) on the first run after
+#: a Graphify upgrade. 0.9.6 does not do that and ignores the variable.
+#: see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D7)
+GRAPH_REBUILD_ENV = "GRAPHIFY_NO_AUTO_REFRESH=1"
+#: The rebuild command alone, for a compact human render (the 80-column stats screen).
+GRAPH_REBUILD_COMMAND = "graphify update ."
+#: The rebuild every instruction Sidegraph shows names, shell-neutral: a POSIX ``VAR=1 cmd``
+#: prefix does not work in PowerShell or cmd. Text that cannot import it (an MCP tool docstring,
+#: a plugin skill) quotes it verbatim; tests/test_rebuild_instruction.py holds both to it.
+GRAPH_REBUILD = f"`{GRAPH_REBUILD_COMMAND}` with the environment variable `{GRAPH_REBUILD_ENV}` set"
 
 _BLOCK_DESCRIPTION = (
     "# Rebuilds the code graph in the background, main checkout only. "
@@ -64,7 +81,8 @@ _STALE_LOCK_SECONDS = 600
 # edited. One review amendment: a lock with no pid (its owner died, or could not write, between
 # ``mkdir`` and ``echo``) is broken once it is ten minutes old, the age checked again under the
 # gate; before, it blocked every rebuild for good. ``@GRAPHIFY@`` is the one substitution: the
-# path found at install time, quoted, or ''.
+# path found at install time, quoted, or ''. A second amendment sets ``GRAPHIFY_NO_AUTO_REFRESH=1``
+# on the rebuild line (design/superpowers/specs/2026-10-14-graphify-upgrade-design.md, D7).
 _HELPER_TEMPLATE = r"""#!/bin/sh
 # Installed by sidegraph-init: keeps graphify-out/graph.json current for Sidegraph.
 # Main checkout only: a linked worktree reads the main checkout's graph. The rebuild runs
@@ -102,7 +120,7 @@ log=$common/sidegraph-graph-refresh.log
   while :; do
     while [ -e "$want" ]; do
       rm -f "$want"
-      PYTHONHASHSEED=0 "$graphify" update . > "$log" 2>&1
+      GRAPHIFY_NO_AUTO_REFRESH=1 PYTHONHASHSEED=0 "$graphify" update . > "$log" 2>&1
     done
     rm -rf "$lock"; [ -e "$want" ] || break; take || break
   done
@@ -556,3 +574,33 @@ def status(info: RepoInfo) -> Status:
         hooks_path_set=info.hooks_path_set,
         graphify_hook=_has_graphify_hook(info),
     )
+
+
+# A helper line that runs Graphify: the quoted ``$graphify`` followed by an argument. The
+# ``[ -x "$graphify" ]`` test and the assignment that finds it are not runs.
+_GRAPHIFY_RUN = re.compile(r"\"?\$graphify\"?\s+[A-Za-z]")
+
+
+def helper_is_current(info: RepoInfo) -> bool | None:
+    """Whether the installed helper runs Graphify with ``GRAPH_REBUILD_ENV``: every non-comment
+    line that runs Graphify carries it. What counts is the variable, not the exact text, so a
+    helper edited by hand or written by a newer Sidegraph that keeps it is current. ``None`` when
+    there is no helper or it cannot be read.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D7)"""
+    try:
+        installed = _decode(info.helper.read_bytes())
+    except OSError:
+        return None
+    runs = [
+        line
+        for line in installed.splitlines()
+        if not line.lstrip(" \t").startswith("#") and _GRAPHIFY_RUN.search(line)
+    ]
+    return all(GRAPH_REBUILD_ENV in line for line in runs)
+
+
+def helper_in_use(info: RepoInfo) -> bool:
+    """Whether git would run the helper: it exists and at least one of the three hooks in
+    ``hooks_dir`` calls it (``_runs_helper``), so a partly wired repository counts. Read-only.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D7)"""
+    return info.helper.is_file() and any(_runs_helper(info.hooks_dir / hook) for hook in HOOKS)

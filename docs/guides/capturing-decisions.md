@@ -61,14 +61,15 @@ One anchor orphaning does not take the decision down with it — the other keeps
 [`guides/surviving-refactors.md`](surviving-refactors.md) for what happens to each anchor
 independently when the graph is rebuilt.
 
-Two name shapes need care, and a third resolves only with its file:
+One name shape never resolves, and one resolves only with its file:
 
 - **A bare module-level constant** (`MEMORY_GUARD_LINE`, `_SECRET_PATTERNS`): the engine's
   AST pass indexes functions, classes and files, **not constants** — such an anchor is born
   orphaned. Anchor the containing file (or enclosing function) and name the constant in the
   record's prose.
-- **A path-qualified name** (`src/sidegraph/store.py`): the graph labels files by basename,
-  so this never resolves (it reads as the member `py`). Write
+- **A path-qualified name** (`src/sidegraph/store.py`): with its own `file_path` it
+  resolves to that file's node and is stored under the basename; on newer Graphify an engine
+  path-suffix label (`sidegraph/cli.py`) also resolves without a file. Write
   `{"name": "store.py", "file_path": "src/sidegraph/store.py"}` — the `file_path` field, not
   the name, carries the path.
 - **A type-qualified member** (`Store._touch_digest`, `AudioPlayback.playClip`): the graph
@@ -404,6 +405,8 @@ skipped rather than imported. **Run `graphify update .` right before importing**
 you're about to seed can actually resolve:
 
 ```bash
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
 uv run sidegraph-import --docs docs/adr --dry-run
 ```

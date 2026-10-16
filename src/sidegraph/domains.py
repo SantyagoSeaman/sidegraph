@@ -18,6 +18,7 @@ import json
 
 from pydantic import BaseModel, Field
 
+from . import domain_snapshot
 from .capture import (
     AutoEligibility,
     RatifyPolicy,
@@ -527,12 +528,24 @@ def _community_sort_key(community_id: str) -> tuple[int, object]:
 def _claimed_communities(store: Store) -> set[str]:
     """Community ids already claimed by a non-superseded domain (proposed, accepted, OR
     dropped — matches ``find_domain_by_slug``'s "non-superseded" rule exactly, see
-    capture.py's ``_propose_domain_one``)."""
+    capture.py's ``_propose_domain_one``).
+
+    With a domain snapshot, a community a domain holding
+    snapshot entries holds only in part is claimed too: proposing it again would invite a
+    duplicate domain. A store without a snapshot keeps the rule above."""
     claimed: set[str] = set()
     for domain in store.iter_domains():
         if domain.status == DomainStatus.SUPERSEDED:
             continue
         claimed.update(domain.communities)
+    try:
+        snap = domain_snapshot.load_snapshot(store.path)
+    except (domain_snapshot.SnapshotError, OSError):
+        snap = None  # sync and verify report a broken snapshot
+    if snap is not None:
+        accepted = list(store.iter_domains(status=DomainStatus.ACCEPTED))
+        heirs, _splits = domain_snapshot.snapshot_heirs(snap, accepted, store.get_domain)
+        claimed.update(store.member_communities(heirs))
     return claimed
 
 
@@ -568,7 +581,7 @@ def _label_names_other_community(label: str, community_id: str, reader: Graphify
       ``test_bootstrap_labeled_community_uses_label_for_title_and_summary``): no evidence
       against it, kept.
     """
-    result = reader.resolve(Descriptor(name=label))
+    result = reader.resolve(Descriptor(name=label), collapse=False)
     if result.status == "unresolved":
         return False
     if result.status == "resolved":

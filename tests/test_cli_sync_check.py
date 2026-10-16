@@ -192,6 +192,7 @@ def test_sync_json_prints_tool_shape(clean_store_env, capsys):
         "slug_conflicts",
         "domains_refreshed",
         "domain_failures",
+        "snapshot_splits",
     }
 
 

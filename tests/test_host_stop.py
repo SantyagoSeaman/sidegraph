@@ -9,6 +9,7 @@ from typing import NamedTuple
 import pytest
 
 import sidegraph.host.hooks as hooks
+from tests.test_store_requirement import above_running, write_requirement_marker
 
 
 def _run(monkeypatch, capsys, payload, db):
@@ -20,6 +21,14 @@ def _run(monkeypatch, capsys, payload, db):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     hooks.stop()
     return json.loads(capsys.readouterr().out)
+
+
+def _existing_store(path):
+    """Prepare only controls whose capture behavior assumes an existing store."""
+    from sidegraph.store import Store
+
+    Store(path).close()
+    return path
 
 
 # -- transcript helpers (substance gate, E1) ------------------------------------------------
@@ -75,8 +84,58 @@ def _substantial(tmp_path, name="transcript.jsonl"):
     return _transcript(tmp_path, real_prompts=hooks._MIN_USER_PROMPTS, name=name)
 
 
+def test_missing_store_stop_does_not_create_or_read_transcript(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "absent-store"
+    transcript = _substantial(tmp_path)
+    parsed = []
+    opened = []
+    real_stats = hooks._transcript_stats
+
+    def observed_stats(path):
+        parsed.append(path)
+        return real_stats(path)
+
+    def forbidden_store(*args, **kwargs):
+        opened.append(args)
+        raise AssertionError("Stop must not construct a missing Store")
+
+    monkeypatch.setattr(hooks, "_transcript_stats", observed_stats)
+    monkeypatch.setattr("sidegraph.store.Store", forbidden_store)
+    result = _run(
+        monkeypatch,
+        capsys,
+        {"session_id": "setup", "transcript_path": transcript},
+        db,
+    )
+    assert parsed == []
+    assert opened == []
+    assert result == {}
+    assert not db.exists()
+
+
+def test_stop_reuses_the_store_selected_before_the_transcript(tmp_path, monkeypatch, capsys):
+    import sidegraph.config as config
+
+    selected = _existing_store(tmp_path / "selected")
+    other = tmp_path / "must-not-be-created"
+    transcript = _substantial(tmp_path)
+    calls = []
+
+    def changing_location(**kwargs):
+        calls.append(True)
+        return config.StoreLocation(str(selected if len(calls) == 1 else other), None)
+
+    monkeypatch.setattr(config, "resolve_store_location", changing_location)
+    result = _run(
+        monkeypatch, capsys, {"session_id": "same-store", "transcript_path": transcript}, selected
+    )
+    assert result["decision"] == "block"
+    assert calls == [True]
+    assert not other.exists()
+
+
 def test_first_stop_blocks_with_nudge_and_marks_ledger(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     # Named after the session, as both hosts do — the ledger key comes from this path.
     transcript = _substantial(tmp_path, name="s1.jsonl")
     out = _run(
@@ -95,7 +154,7 @@ def test_first_stop_blocks_with_nudge_and_marks_ledger(tmp_path, monkeypatch, ca
 def test_nudge_also_invites_domain_drafts(tmp_path, monkeypatch, capsys):
     """Extended for the mind-model layer (M2): the nudge mentions propose_domains too,
     without displacing the propose_decisions instruction it already had."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _substantial(tmp_path)
     out = _run(
         monkeypatch,
@@ -111,7 +170,7 @@ def test_nudge_text_is_the_one_liner(tmp_path, monkeypatch, capsys):
     """E3: the wall-of-text template was replaced with a compact, branded one-liner; the
     full What/Why/Where/Learned field guidance now lives solely in propose_decisions'
     docstring (server.py), not duplicated here."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _substantial(tmp_path)
     out = _run(
         monkeypatch,
@@ -133,7 +192,7 @@ def test_nudge_mentions_supersede_decision_within_length_bound(tmp_path, monkeyp
     re-arm sentence (a re-armed nudge with the drift clause is pinned by
     ``test_stop_rearm.py``). The first nudge itself stays far below it.
     see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D4, T9)"""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _substantial(tmp_path)
     out = _run(
         monkeypatch,
@@ -146,7 +205,7 @@ def test_nudge_mentions_supersede_decision_within_length_bound(tmp_path, monkeyp
 
 
 def test_block_response_sets_suppress_output(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _substantial(tmp_path)
     out = _run(
         monkeypatch,
@@ -158,7 +217,7 @@ def test_block_response_sets_suppress_output(tmp_path, monkeypatch, capsys):
 
 
 def test_second_stop_same_session_allows(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _substantial(tmp_path)
     payload = {"session_id": "s1", "stop_hook_active": False, "transcript_path": transcript}
     _run(monkeypatch, capsys, payload, db)
@@ -179,6 +238,8 @@ def test_missing_session_id_allows(tmp_path, monkeypatch, capsys):
 
 
 def test_stop_never_raises(tmp_path, monkeypatch, capsys):
+    _existing_store(tmp_path / "s.db")
+
     def boom(*a, **k):
         raise RuntimeError("boom")
 
@@ -197,7 +258,7 @@ def test_stop_never_raises(tmp_path, monkeypatch, capsys):
 
 
 def test_gate_suppresses_below_threshold_and_does_not_mark(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _transcript(tmp_path, real_prompts=hooks._MIN_USER_PROMPTS - 1)
     out = _run(
         monkeypatch,
@@ -212,7 +273,7 @@ def test_gate_suppresses_below_threshold_and_does_not_mark(tmp_path, monkeypatch
 
 
 def test_gate_passes_at_threshold(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _substantial(tmp_path)
     out = _run(
         monkeypatch,
@@ -226,7 +287,7 @@ def test_gate_passes_at_threshold(tmp_path, monkeypatch, capsys):
 def test_tool_results_do_not_count_toward_the_gate(tmp_path, monkeypatch, capsys):
     # One real prompt plus a pile of tool results -- still below threshold, since tool
     # results are not real user prompts.
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _transcript(tmp_path, real_prompts=1, tool_results=10)
     out = _run(
         monkeypatch,
@@ -276,7 +337,7 @@ def test_one_shot_session_with_tool_work_arms_the_gate(tmp_path, monkeypatch, ca
     """Spec D1 (E10 H-F0): an sdk-cli one-shot session — 1 real prompt, >= _MIN_TOOL_USES
     assistant tool_use blocks — must nudge and mark the ledger. Red against unfixed code:
     the prompt-only gate suppresses it."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
         [_user_prompt()] + [_assistant_tool_use() for _ in range(hooks._MIN_TOOL_USES)],
         "sdk-cli",
@@ -297,7 +358,7 @@ def test_one_shot_session_with_tool_work_arms_the_gate(tmp_path, monkeypatch, ca
 def test_one_shot_below_tool_threshold_stays_suppressed(tmp_path, monkeypatch, capsys):
     # Threshold-exactness guard (declared exception in the spec ledger: red against
     # nothing — it passes before and after; it exists so the fix cannot over-reach).
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
         [_user_prompt()] + [_assistant_tool_use() for _ in range(hooks._MIN_TOOL_USES - 1)],
         "sdk-cli",
@@ -321,7 +382,7 @@ def test_interactive_session_tool_use_does_not_arm_turn_one(tmp_path, monkeypatc
     the session's richer content existed. The branch is scoped to sdk-cli; a cli
     (interactive) session with heavy tool use at turn 1 must stay on the prompt gate.
     Red against the rev-1 unscoped design (discarded-design red, per the spec ledger)."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
         [_user_prompt()] + [_assistant_tool_use() for _ in range(20)],
         "cli",
@@ -342,7 +403,7 @@ def test_interactive_session_tool_use_does_not_arm_turn_one(tmp_path, monkeypatc
 def test_missing_entrypoint_degrades_to_the_prompt_gate(tmp_path, monkeypatch, capsys):
     # A host that stamps no `entrypoint` anywhere degrades to the old gate — never to
     # arming (spec D1). 1 prompt + many tools, no entrypoint field → suppressed.
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     entries = [_user_prompt()] + [_assistant_tool_use() for _ in range(20)]
     transcript = _write_transcript(tmp_path / "transcript.jsonl", entries)
     out = _run(
@@ -360,7 +421,7 @@ def test_entrypoint_reads_the_first_entry_not_the_last(tmp_path, monkeypatch, ca
     the prompt gate (the conservative choice D1 argues for); last-seen would arm the tool
     branch inside an interactive session, the exact F2 blast-radius shape. Red against a
     last-seen reading."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint([_user_prompt(), _assistant()], "cli") + _with_entrypoint(
         [_assistant_tool_use() for _ in range(20)], "sdk-cli"
     )
@@ -383,7 +444,7 @@ def test_tool_results_do_not_count_in_an_sdk_cli_session(tmp_path, monkeypatch, 
     scanned user entries) would arm sdk-cli sessions with no test noticing. 1 prompt +
     10 tool results, sdk-cli → still suppressed. Red against a counter that reads
     tool_result blocks or non-assistant entries."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
         [_user_prompt()] + [_tool_result(f"r{i}") for i in range(10)], "sdk-cli"
     )
@@ -404,7 +465,7 @@ def test_malformed_lines_do_not_crash_the_combined_counter(tmp_path, monkeypatch
     """Spec T5 (declared: no red exists against the generalized single-pass counter —
     the malformed-line skip is inherited by construction; this red applies only to the
     discarded sibling-counter variant). Kept as the cheap crash guard."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
         [_user_prompt()] + [_assistant_tool_use() for _ in range(hooks._MIN_TOOL_USES)],
         "sdk-cli",
@@ -427,7 +488,7 @@ def test_malformed_lines_do_not_crash_the_combined_counter(tmp_path, monkeypatch
 def test_hook_injected_meta_turns_do_not_count_toward_the_gate(tmp_path, monkeypatch, capsys):
     """4c-findings §2: one genuine prompt + one hook injection used to read as exactly
     `_MIN_USER_PROMPTS`, arming the nudge off a single real request."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     entries = [_user_prompt(), _assistant()]
     entries += [_meta_injection() for _ in range(hooks._MIN_USER_PROMPTS)]
     transcript = _write_transcript(tmp_path / "transcript.jsonl", entries)
@@ -447,7 +508,7 @@ def test_compact_summary_and_slash_command_turns_do_not_count(tmp_path, monkeypa
     """Slash-command wrapper turns (`<command-name>`/`<local-command-stdout>`) persist with
     NO distinguishing flag (measured 2026-07-30), so they are excluded by their host-emitted
     content prefix; compaction summaries carry `isCompactSummary`. Neither is a typed prompt."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     entries = [
         _user_prompt(),
         _assistant(),
@@ -500,8 +561,8 @@ _OTHER_HOST_INJECTED = {
 
 
 def _stop_on(tmp_path, monkeypatch, capsys, session, entries):
-    """Run the Stop hook over a transcript of `entries`; return its output and the db."""
-    db = tmp_path / "s.db"
+    """Run prompt-count controls against an existing store; return output and db."""
+    db = _existing_store(tmp_path / "s.db")
     transcript = _write_transcript(tmp_path / f"{session}.jsonl", entries)
     out = _run(
         monkeypatch,
@@ -606,7 +667,7 @@ def test_typed_slash_command_still_counts_as_a_prompt(tmp_path, monkeypatch, cap
 def test_gated_session_nudges_on_a_later_substantial_stop(tmp_path, monkeypatch, capsys):
     """A session gated at turn 1 (not yet substantial) must not be permanently suppressed:
     mark_captured must not have been written, so a later, substantial stop still nudges."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     thin = _transcript(tmp_path, real_prompts=1, name="thin.jsonl")
     out1 = _run(
         monkeypatch,
@@ -627,7 +688,7 @@ def test_gated_session_nudges_on_a_later_substantial_stop(tmp_path, monkeypatch,
 
 
 def test_substantial_from_start_nudges_once_and_never_again(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _substantial(tmp_path)
     payload = {"session_id": "g5", "stop_hook_active": False, "transcript_path": transcript}
     out1 = _run(monkeypatch, capsys, payload, db)
@@ -637,7 +698,7 @@ def test_substantial_from_start_nudges_once_and_never_again(tmp_path, monkeypatc
 
 
 def test_missing_transcript_path_allows_without_marking(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     out = _run(monkeypatch, capsys, {"session_id": "g6", "stop_hook_active": False}, db)
     assert out == {}
     from sidegraph.store import Store
@@ -646,7 +707,7 @@ def test_missing_transcript_path_allows_without_marking(tmp_path, monkeypatch, c
 
 
 def test_nonexistent_transcript_file_allows(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     out = _run(
         monkeypatch,
         capsys,
@@ -661,7 +722,7 @@ def test_nonexistent_transcript_file_allows(tmp_path, monkeypatch, capsys):
 
 
 def test_garbled_transcript_file_allows(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     garbled = tmp_path / "garbled.jsonl"
     garbled.write_text("not json\n{also not json\n")
     out = _run(
@@ -688,7 +749,7 @@ def test_non_string_transcript_path_allows_without_crashing(tmp_path):
     inert and this bug cannot be reproduced there -- only a real subprocess, where fd 1 IS
     the hook's actual stdout (exactly how Claude Code invokes it), exhibits the crash.
     """
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     payload = json.dumps({"session_id": "g11", "stop_hook_active": False, "transcript_path": 1})
     env = {**os.environ, "SIDEGRAPH_DIR": str(db)}
     result = subprocess.run(
@@ -706,7 +767,7 @@ def test_non_string_transcript_path_allows_without_crashing(tmp_path):
 
 
 def test_capture_nudge_off_switch_suppresses_without_marking(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _substantial(tmp_path)
     monkeypatch.setenv("SIDEGRAPH_CAPTURE_NUDGE", "off")
     out = _run(
@@ -722,7 +783,7 @@ def test_capture_nudge_off_switch_suppresses_without_marking(tmp_path, monkeypat
 
 
 def test_capture_nudge_off_switch_requires_exact_match(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     transcript = _substantial(tmp_path)
     monkeypatch.setenv("SIDEGRAPH_CAPTURE_NUDGE", "true")
     out = _run(
@@ -742,6 +803,7 @@ def test_stop_hook_opens_store_under_claude_project_dir_for_relative_path(
 ):
     project_dir = tmp_path / "project"
     project_dir.mkdir()
+    _existing_store(project_dir / "s.db")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.setenv("SIDEGRAPH_DIR", "s.db")
     transcript = _substantial(tmp_path)
@@ -761,7 +823,7 @@ def test_stop_hook_opens_store_under_claude_project_dir_for_relative_path(
 
 def test_stop_hook_absolute_db_unaffected_by_claude_project_dir(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "unrelated-root"))
-    db = tmp_path / "abs.db"
+    db = _existing_store(tmp_path / "abs.db")
     transcript = _substantial(tmp_path)
     out = _run(
         monkeypatch,
@@ -780,6 +842,7 @@ def test_stop_hook_relative_db_resolves_against_cwd_without_claude_project_dir(
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SIDEGRAPH_DIR", "rel.db")
+    _existing_store(tmp_path / "rel.db")
     transcript = _substantial(tmp_path)
     monkeypatch.setattr(
         "sys.stdin",
@@ -812,6 +875,7 @@ def test_stop_hook_honors_legacy_sidegraph_db_with_deprecation_notice(
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SIDEGRAPH_DB", ".sidegraph/decisions.db")
+    _existing_store(tmp_path / ".sidegraph")
     transcript = _substantial(tmp_path)
     monkeypatch.setattr(
         "sys.stdin",
@@ -1095,7 +1159,8 @@ def _codex_rollout(
 
 
 def _codex_stop(tmp_path, monkeypatch, capsys, name, **rollout):
-    """Run the Stop hook over a Codex rollout in a store of its own; return what it printed."""
+    """Run a Codex eligibility control in its own existing store; return what it printed."""
+    db = _existing_store(tmp_path / f"{name}.db")
     return _run(
         monkeypatch,
         capsys,
@@ -1104,7 +1169,7 @@ def _codex_stop(tmp_path, monkeypatch, capsys, name, **rollout):
             "stop_hook_active": False,
             "transcript_path": _codex_rollout(tmp_path, name, **rollout),
         },
-        tmp_path / f"{name}.db",
+        db,
     )
 
 
@@ -1114,7 +1179,7 @@ def test_each_codex_thread_earns_its_own_capture_nudge(tmp_path, monkeypatch, ca
     directly: the first thread to finish spent the nudge for all of them — a day of Codex
     threads got one capture prompt between them. Built from real rollouts (`_codex_rollout`),
     so it also fails while the gate cannot read a rollout at all."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     outs = []
     for thread in (
         "rollout-2026-09-19T12-00-31-01a0b953-2d7c",
@@ -1431,7 +1496,7 @@ def test_codex_mirrored_event_messages_are_not_counted_twice(tmp_path, monkeypat
         monkeypatch,
         capsys,
         {"session_id": _CODEX_UMBRELLA, "stop_hook_active": False, "transcript_path": path},
-        tmp_path / "t7.db",
+        _existing_store(tmp_path / "t7.db"),
     )
     assert out == {}, out
     out = _codex_stop(
@@ -1446,7 +1511,7 @@ def test_codex_mirrored_event_messages_are_not_counted_twice(tmp_path, monkeypat
         monkeypatch,
         capsys,
         {"session_id": _CODEX_UMBRELLA, "stop_hook_active": False, "transcript_path": path},
-        tmp_path / "t7i.db",
+        _existing_store(tmp_path / "t7i.db"),
     )
     assert out == {}, out
     out = _codex_stop(
@@ -1608,3 +1673,28 @@ def test_stop_peek_does_not_create_a_store(tmp_path, monkeypatch, capsys):
     assert json.loads(captured.out) == {}
     assert captured.err == ""
     assert not (tmp_path / ".sidegraph").exists()
+
+
+def test_a_store_that_requires_a_newer_sidegraph_ends_stop_before_any_work(
+    tmp_path, monkeypatch, capsys
+):
+    """Red against unfixed code: Stop peeked into the index and parsed the transcript before
+    `Store()` refused the store. The output was `{}` either way; the refusal must come first,
+    with neither read."""
+    from sidegraph.store import Store
+
+    db = tmp_path / "s.db"
+    Store(db).close()
+    write_requirement_marker(db, above_running())
+    parsed: list[str] = []
+    real = hooks._transcript_stats
+    monkeypatch.setattr(hooks, "_transcript_stats", lambda path: parsed.append(path) or real(path))
+    transcript = _substantial(tmp_path, name="s1.jsonl")
+    out = _run(
+        monkeypatch,
+        capsys,
+        {"session_id": "s1", "stop_hook_active": False, "transcript_path": transcript},
+        db,
+    )
+    assert out == {}
+    assert parsed == []

@@ -376,6 +376,7 @@ def test_t6_session_start_writes_a_per_session_stamp_and_the_legacy_key(
     tmp_path, monkeypatch, capsys, host, family
 ):
     db = tmp_path / "db"
+    Store(db).close()
     _session_start(monkeypatch, capsys, db, {"session_id": "abc-123"}, host)
 
     s = Store(db)

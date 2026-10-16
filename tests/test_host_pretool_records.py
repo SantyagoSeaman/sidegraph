@@ -36,7 +36,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
-from sidegraph.store_layout import MEMORY_GUARD_LINE
+from sidegraph.store_layout import MEMORY_GUARD_LINE, VOLATILE_STALE_KEY
 
 SESSION = "3f2a9c1e-5b7d-4e8a-9c0b-1d2e3f4a5b6c"
 GUARD = (
@@ -92,6 +92,8 @@ class Project:
         self.store.add_binding(
             AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2, status="live")
         )
+        # The fixture explicitly supplies the computed live status for this file.
+        self.store.set_meta(VOLATILE_STALE_KEY, "0")
         return decision
 
     def supersede(self, old: Decision, title: str) -> Decision:

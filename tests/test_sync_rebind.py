@@ -862,11 +862,11 @@ def _fail_the_reconcile_once(monkeypatch, times=1):
     real = sync_module._reconcile_tier1_communities
     calls = []
 
-    def flaky(record_id, vacated, store):
+    def flaky(record_id, vacated, store, graph_version):
         calls.append(record_id)
         if len(calls) <= times:
             raise RuntimeError("injected reconcile failure")
-        return real(record_id, vacated, store)
+        return real(record_id, vacated, store, graph_version)
 
     monkeypatch.setattr(sync_module, "_reconcile_tier1_communities", flaky)
     return calls
@@ -1265,7 +1265,7 @@ def _reconcile_that_cannot_read_entities(monkeypatch, key_seen):
     note what the pending key held when the reconcile started."""
     real = sync_module._reconcile_tier1_communities
 
-    def wrapper(record_id, gone, store):
+    def wrapper(record_id, gone, store, graph_version):
         key_seen.append(store.get_meta(_PENDING_KEY))
 
         def boom(*a, **k):
@@ -1273,7 +1273,7 @@ def _reconcile_that_cannot_read_entities(monkeypatch, key_seen):
 
         with monkeypatch.context() as m:
             m.setattr(store, "get_entity", boom)
-            real(record_id, gone, store)
+            real(record_id, gone, store, graph_version)
 
     monkeypatch.setattr(sync_module, "_reconcile_tier1_communities", wrapper)
 

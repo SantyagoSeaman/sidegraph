@@ -76,13 +76,13 @@ def test_t4_a_store_at_the_anchor_wins_over_the_repository_store(repo):
     assert location.base == str(repo / "pkg")
 
 
-def test_t5_no_store_anywhere_returns_the_anchor_and_warns(tmp_path, capsys):
+def test_t5_no_store_anywhere_returns_the_repository_root_and_warns(tmp_path, capsys):
     root = tmp_path / "R"
     (root / ".git").mkdir(parents=True)
     (root / "sub").mkdir()
     location = _location(root / "sub")
-    assert location.path == str(root / "sub" / ".sidegraph")
-    assert location.base == str(root / "sub")
+    assert location.path == str(root / ".sidegraph")
+    assert location.base == str(root)
     assert "creating new store" in capsys.readouterr().err
 
 
@@ -97,8 +97,8 @@ def test_t6_the_walk_stops_at_the_repository_boundary(tmp_path):
     (inner / ".git").mkdir(parents=True)
     (inner / "sub").mkdir()
     location = _location(inner / "sub", warn_on_create=False)
-    assert location.path == str(inner / "sub" / ".sidegraph")
-    assert location.base == str(inner / "sub")
+    assert location.path == str(inner / ".sidegraph")
+    assert location.base == str(inner)
 
 
 def test_t6b_an_anchor_that_is_the_boundary_visits_nothing_above(tmp_path):

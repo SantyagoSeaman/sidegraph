@@ -21,6 +21,7 @@ write by :mod:`sidegraph.store`.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Literal
 
@@ -57,6 +58,22 @@ def canonicalize(name: str) -> str:
     reference bare symbols. Canonicalizing both sides makes name matching robust.
     """
     return strip_decoration(name).lower()
+
+
+def file_anchor_name(name: str, file_path: str | None) -> str:
+    """``name`` as its file's basename when it is a ``/``-containing suffix of its own
+    ``file_path`` (``sidegraph/cli.py`` or ``src/sidegraph/cli.py`` for
+    ``src/sidegraph/cli.py``), else ``name`` unchanged. Applied on both sides of every entity
+    identity comparison, and when a new entity or a domain seed is written; a stored
+    ``canonical_name`` is never rewritten (``verify --against`` holds it immutable).
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D2)
+    """
+    stripped = name.strip()
+    if not file_path or "/" not in stripped:
+        return name
+    if file_path == stripped or file_path.endswith("/" + stripped):
+        return stripped.rsplit("/", 1)[-1]
+    return name
 
 
 _SLUGIFY_STRIP_RE = re.compile(r"[^a-z0-9-]")
@@ -132,8 +149,8 @@ Relation = Literal["creates", "modifies", "affects", "deprecates", "considered"]
 class Descriptor(BaseModel):
     """What :meth:`GraphifyReader.resolve` needs to find an entity's current node.
 
-    Graphify 0.9.6 emits no signatures/qual-names/enclosing-module, so identity is
-    ``name`` + optional ``file_path`` (see ``docs/integrations/graphify.md``).
+    Graphify (verified on 0.9.6 and 0.9.90) emits no signatures/qual-names/enclosing-module,
+    so identity is ``name`` + optional ``file_path`` (see ``docs/integrations/graphify.md``).
     """
 
     name: str
@@ -157,6 +174,18 @@ class Descriptor(BaseModel):
         if v is None:
             return None
         return v.strip() or None
+
+
+def file_anchor_descriptors(descriptors: Iterable[Descriptor]) -> list[Descriptor]:
+    """``descriptors`` with each name folded by :func:`file_anchor_name` against its own file:
+    what a domain's ``seed_anchors`` are stored as when the domain is authored. Committed seeds
+    are never rewritten (an ``illegal-field-change`` under ``verify --against``).
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D2)"""
+    out: list[Descriptor] = []
+    for d in descriptors:
+        name = file_anchor_name(d.name, d.file_path)
+        out.append(d if name == d.name else Descriptor(name=name, file_path=d.file_path))
+    return out
 
 
 _SAFE_RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")

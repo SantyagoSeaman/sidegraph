@@ -5,6 +5,6 @@
     "src/sidegraph/engine/",
     "src/sidegraph/host/"
   ],
-  "graphify_version": "graphify 0.9.6",
+  "graphify_version": "graphify 0.9.90",
   "visibility": "public"
 }

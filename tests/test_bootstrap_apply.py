@@ -915,3 +915,12 @@ def test_reconcile_failure_fallback_keeps_unanchorable_keys_out_of_pending(tmp_p
     report = apply_review(plan, review, store_dir=tmp_path / ".sidegraph", reader=reader)
     assert report.skipped_unanchorable_keys == (review.items[0].candidate.key,)
     assert report.pending_candidate_keys == (review.items[1].candidate.key,)
+
+
+def test_manifest_includes_the_domain_snapshot(tmp_path):
+    """Red against a manifest without it: a bootstrap's recovery evidence would miss a
+    committed file."""
+    store_dir = tmp_path / ".sidegraph"
+    Store(store_dir).close()
+    (store_dir / "domain-snapshot.json").write_text("{}\n", encoding="utf-8")
+    assert ".sidegraph/domain-snapshot.json" in canonical_manifest(store_dir)

@@ -17,6 +17,7 @@ from sidegraph.bootstrap.model import WARNING_CONSEQUENCES, WarningCode
 from sidegraph.bootstrap.planner import plan_sources
 from sidegraph.bootstrap.scan import scan_sources
 from sidegraph.engine.reader import GraphifyReader
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.profiles import get_profile
 from sidegraph.schema import DecisionStatus
 from sidegraph.store import Store
@@ -91,12 +92,12 @@ def assert_names_the_graph_rebuild(out: str, root: Path) -> None:
     (anchors,) = [line for line in out.splitlines() if line.startswith("ANCHORS")]
     assert re.fullmatch(
         r"ANCHORS      incomplete: stored record \S+ for docs/adr/001-retry\.md has no anchor "
-        r"in the current graph; run `graphify update \.` and rerun",
+        r"in the current graph; run " + re.escape(GRAPH_REBUILD) + " and rerun",
         anchors,
     ), anchors
     assert "unresolved or ambiguous" not in out
     assert "RESUME" not in out
-    assert f"NEXT         cd {root} && graphify update ." in out
+    assert f"NEXT         in {root}, run {GRAPH_REBUILD}" in out
     (proof,) = [line for line in out.splitlines() if line.startswith("PROOF")]
     assert "did not surface" not in proof and "see ANCHORS" in proof, proof
 
@@ -112,7 +113,7 @@ def test_anchorless_accept_converges_with_a_named_skip(
         (line,) = unanchored_lines(out)
         assert re.fullmatch(
             r"UNANCHORED   \S+ docs/adr/001-retry\.md \(no anchor in the graph, nothing written; "
-            r"run `graphify update \.` and rerun\)",
+            r"run " + re.escape(GRAPH_REBUILD) + r" and rerun\)",
             line,
         ), line
         assert "FAILED REF" not in out
@@ -489,7 +490,7 @@ def test_the_report_carries_the_remedy_for_an_unreachable_record(
     rc, out = stored_then_graph(tmp_path, monkeypatch, capsys, [], "--report", str(report))
     assert rc == 2, out
     text = report.read_text(encoding="utf-8")
-    assert "- stored record has no anchor in the current graph: run `graphify update .`" in text
+    assert f"- stored record has no anchor in the current graph: run {GRAPH_REBUILD}" in text
     assert "001-retry" not in text, "the report stays free of source names"
 
 
@@ -511,7 +512,7 @@ def test_a_mixed_run_names_the_unreachable_record_and_the_proof_keeps_a_reachabl
     (anchors,) = [line for line in out.splitlines() if line.startswith("ANCHORS")]
     assert "stored record" in anchors and "docs/adr/001-retry.md" in anchors, anchors
     assert "RESUME" not in out
-    assert "NEXT         cd " in out
+    assert "NEXT         in " in out
     (proof,) = [line for line in out.splitlines() if line.startswith("PROOF  ")]
     assert "see ANCHORS" in proof, proof
 

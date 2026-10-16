@@ -71,6 +71,7 @@ def test_drill_down_tool_triggers_lazy_sync(tmp_path, monkeypatch):
     from sidegraph.sync import LAST_SYNCED_KEY
 
     db = tmp_path / "t.db"
+    Store(db).close()
     # SIDEGRAPH_DIR (not the deprecated SIDEGRAPH_DB) so `db` is used LITERALLY -- no
     # legacy-dispatch redirection to its parent when it doesn't exist yet (see
     # config._dispatch_sidegraph_db); back-compat itself is covered by tests/test_config.py.

@@ -15,7 +15,7 @@ The commands below follow the current development branch. For durable environmen
   "mcpServers": {
     "sidegraph": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp"],
+      "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1", "sidegraph-mcp"],
       "env": { "SIDEGRAPH_DIR": ".sidegraph", "SIDEGRAPH_GRAPH": "graphify-out/graph.json" }
     }
   }
@@ -26,7 +26,7 @@ Or via the CLI — carry both env vars so this setup lands on the same store pat
 other setup path (manual, plugin, Codex):
 
 ```bash
-claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp
+claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-mcp
 ```
 
 **From a source checkout** (contributors — see
@@ -183,6 +183,11 @@ so a call costs a few tens of milliseconds, and in a project with no store it do
 creates nothing. Like the other hooks, it never crashes or blocks the tool call: any failure (or
 nothing to deliver) prints `{}`.
 
+After a new store or canonical index reload, record delivery and the `SubagentStart` brief
+wait until a successful sync computes binding statuses. `SessionStart` and memory retrieval
+attempt lazy sync; without a graph reader, these hot-hook outputs remain withheld until a
+reader and successful sync are available. Touch recording and file claims remain available.
+
 **Subagent briefs.** The third group, matcher `Agent|Task`, runs the same command when the agent
 spawns a subagent. The brief the parent writes is where the task is, so the hook reads the files
 it names (and, one hop away, the files named in a plan or notes document it names), and appends a
@@ -223,7 +228,9 @@ any exception inside `stop` prints `{}` (Claude Code proceeds to stop normally);
 inside `pre_tool_use` — or the nudge conditions simply not holding — also prints `{}` (the
 tool call proceeds through the normal permission flow); any exception inside `subagent_start`, or
 nothing anchored to code to describe, prints `{}` (the subagent starts with no brief). A missing
-graph degrades to file-path anchors and a shorter map. A missing store is not an error either:
+graph degrades to file-path anchors and a shorter map; after a new store or canonical index
+reload, hot-hook record delivery and briefs remain withheld until sync can run with a reader.
+A missing store is not an error either:
 `SessionStart` creates an empty one, so memory starts empty (the other hooks never create it). An
 env var that points at the wrong path gives an empty store there, so that session has no
 memory. None of these breaks the session.
@@ -241,7 +248,7 @@ the recommended install path, and it works today, no PyPI publish required:
 > **Public and development manifests differ.** The marketplace receives
 > `plugin/sidegraph/.mcp.public.json` and `plugin/sidegraph/hooks/hooks.public.json`, renamed
 > to the canonical filenames during the public release. Those variants run `uvx --from
-> git+https://github.com/SantyagoSeaman/sidegraph.git@main …`, so the plugin deliberately
+> git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 …`, so the plugin deliberately
 > follows the public repository rather than the PyPI package. The unsuffixed files in this
 > development repository run the checkout the plugin was loaded from, with
 > `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.." --package
@@ -261,6 +268,18 @@ the recommended install path, and it works today, no PyPI publish required:
 > ref. The record is one per machine, so a release reaches a running session at the
 > next `SessionStart` on the machine, in any project, not at its next hook call. See
 > [Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file).
+
+### Updating the installed plugin
+
+The marketplace and plugin retain the `sidegraph@sidegraph` identity, so existing installs
+need no layout migration. Follow [Update an existing plugin](../getting-started/claude-code-setup.md#update-an-existing-plugin)
+to refresh the marketplace, update the plugin at its installed scope, and start a new
+session or use `/reload-plugins`. Review the host's update summary and approval prompts before continuing.
+
+Updating the runtime from public `@main` and updating Claude Code's cached plugin files
+are separate operations. A running session keeps the skills and manifests it loaded;
+resolving a newer runtime commit does not replace them. Third-party marketplace auto-update
+is off by default, so enable it deliberately or use the explicit update commands.
 
 ## Environment variables
 
@@ -308,7 +327,7 @@ Two mitigations, both config-level (no source change needed to use them):
   ```json
   {
     "command": "uvx",
-    "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp", "--repo-root"]
+    "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1", "sidegraph-mcp", "--repo-root"]
   }
   ```
   `--repo-root` anchors the server to the project: `sidegraph-mcp` moves to
@@ -316,7 +335,7 @@ Two mitigations, both config-level (no source change needed to use them):
   cwd. Because it needs no `sh`, the same entry starts on native Windows.
 - **Hooks**: hook command entries have no `cwd`/`env` fields, so the public command carries a
   `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from
-  git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start`. This is
+  git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-session-start`. This is
   the content of `plugin/sidegraph/hooks/hooks.public.json`; the release renames it to
   `hooks.json`. The `Stop`, `PreToolUse` and `SubagentStart` commands start with the `launch-commit` read
   described in the note above and launch `uvx --from "$u"`. The development variant uses the same prefix and runs the checkout the plugin

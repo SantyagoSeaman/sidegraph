@@ -108,6 +108,7 @@ comments). Degrading to "write nothing" beats guessing.
 - the index is **never rebuilt** inside the hook — a missing or unreadable `index.db`
   degrades to "write nothing" rather than attempting a first-commit-after-clone rebuild;
   a commit is not the place for that;
+- a store whose format marker refuses this version is not read: the hook writes nothing;
 - candidate collection checks a 2-second deadline between stages and gives up without writing
   once it has expired. This is not a hard process deadline: an already-running git call (itself
   capped at one second) or SQLite lock wait (0.5 seconds) is allowed to return first.
@@ -146,8 +147,9 @@ listed as unresolved — never guessed at or silently dropped.
 
 Read-only over records here too: `sidegraph-blame` opens the store's index read-only and
 never a writable store; a missing or unreadable index degrades every hunk to unresolved
-records rather than failing the command outright (blame without a store is still useful
-blame). A git-level failure — not a repository, an unknown file or `--range`, git not
+records rather than failing the command outright. A store that requires a newer Sidegraph
+behaves the same way, and one stderr line says why. Blame without a store is still useful
+blame. A git-level failure — not a repository, an unknown file or `--range`, git not
 installed — is a genuine operational error and exits `1`.
 
 **Output cap**: 50 hunk rows or 6000 characters, whichever comes first. When the cap is

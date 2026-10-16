@@ -30,6 +30,7 @@ from sidegraph.schema import (
     Scope,
 )
 from sidegraph.store import Store
+from sidegraph.store_layout import VOLATILE_STALE_KEY
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
 
@@ -70,6 +71,8 @@ def _remember(store_path: Path, title: str, file_path: str | None = None) -> Non
             store.add_binding(
                 AnchorBinding(record_id=d.id, entity_id=e.entity_id, tier=2, status="live")
             )
+            # The fixture supplies a computed live binding for the launch-path assertion.
+            store.set_meta(VOLATILE_STALE_KEY, "0")
     finally:
         store.close()
 

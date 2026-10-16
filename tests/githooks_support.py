@@ -43,6 +43,7 @@ CREATED_HEADER = "#!/bin/sh\n# Created by sidegraph-init.\n"
 FAKE_GRAPHIFY = """#!/bin/sh
 printf 'start %s %s %s %s seed=%s\\n' "$$" "$(git rev-parse HEAD 2>/dev/null)" "$PWD" "$*" \\
   "$PYTHONHASHSEED" >> "$FAKE_GRAPHIFY_LOG"
+printf 'env %s noauto=%s\\n' "$$" "$GRAPHIFY_NO_AUTO_REFRESH" >> "$FAKE_GRAPHIFY_LOG"
 echo "fake graphify ran: $*"
 [ -z "$FAKE_GRAPHIFY_SLEEP" ] || sleep "$FAKE_GRAPHIFY_SLEEP"
 printf 'end %s\\n' "$$" >> "$FAKE_GRAPHIFY_LOG"
@@ -118,6 +119,7 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Sandbox:
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_GRAPHIFY_LOG", str(log))
     monkeypatch.delenv("FAKE_GRAPHIFY_SLEEP", raising=False)
+    monkeypatch.delenv("GRAPHIFY_NO_AUTO_REFRESH", raising=False)
     return Sandbox(root=work, log=log, fake_bin=fake_bin, home=home)
 
 

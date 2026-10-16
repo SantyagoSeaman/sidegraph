@@ -134,7 +134,7 @@ record that was never valid in the first place.
   Present the batch grouped, recommend a subset, let the human widen it.
 - **CLI parity:** `sidegraph-ratify` (no flags = the same pending listing;
   `--accept`/`--drop`/`--all`) is the terminal/PR-review equivalent. Run it as
-  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-ratify`, at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-ratify`, at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
   Point the human there when they'd rather review outside the session.
 - A proposed record is not hidden while it waits: by default it surfaces in retrieval tagged
   `[unratified]`, and ratification removes the tag without making the record appear. Two

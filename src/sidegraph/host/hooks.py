@@ -47,7 +47,13 @@ from ..config import (
     _store_project_root,
     ancestor_store,
 )
-from ..store_layout import MEMORY_GUARD_LINE, MISTAKE_KINDS, clip_line
+from ..store_layout import (
+    MEMORY_GUARD_LINE,
+    MISTAKE_KINDS,
+    StoreRequirementError,
+    check_store_requirement,
+    clip_line,
+)
 
 if TYPE_CHECKING:
     from ..hot_index import HotIndex, Record
@@ -349,7 +355,7 @@ _PATH_SKEW = (
 )
 _PATH_SKEW_FIX_UV = (
     "Update it with `uv tool install --reinstall "
-    "git+https://github.com/SantyagoSeaman/sidegraph.git@main`, or remove it with "
+    "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, or remove it with "
     "`uv tool uninstall sidegraph` if you only use the plugin."
 )
 _PATH_SKEW_FIX_OTHER = "Upgrade it, or remove it if you only use the plugin."
@@ -988,6 +994,9 @@ def _is_substantial(stats: _TranscriptStats) -> bool:
 def session_start() -> None:
     """SessionStart hook (Stage 4): inject the phase-1 top-tier map as additionalContext.
 
+    An absent store gets setup guidance without being created. Existing stores retain the
+    normal map, telemetry and failure behavior below.
+
     Reads $SIDEGRAPH_DIR (or legacy $SIDEGRAPH_DB) / $SIDEGRAPH_GRAPH (same env, same
     resolution, as the server and CLI — see ``config.resolve_store_location``). A relative
     store that does not exist under $CLAUDE_PROJECT_DIR is looked up in the ancestors, inside
@@ -1021,7 +1030,12 @@ def session_start() -> None:
 
         launch.record_launch_commit()
     try:
-        from ..config import default_graph_path, resolve_store_location
+        from ..config import (
+            _present_by_lstat,
+            default_graph_path,
+            missing_store_message,
+            resolve_store_location,
+        )
         from ..engine.reader import GraphifyReader, open_borrowed_reader
         from ..retrieval import (
             TOC_CACHE_KEY,
@@ -1034,8 +1048,13 @@ def session_start() -> None:
 
         payload = _read_payload()
         location = resolve_store_location(
-            root=os.environ.get("CLAUDE_PROJECT_DIR"), search_ancestors=True
+            root=os.environ.get("CLAUDE_PROJECT_DIR"),
+            search_ancestors=True,
+            warn_on_create=False,
         )
+        if not _present_by_lstat(location.path):
+            print(json.dumps({"systemMessage": missing_store_message(location.path)}))
+            return
         # A store that cannot open used to print `{}` and switch memory off with no word to
         # anyone. Only a lock another process holds keeps that: it passes by itself.
         # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D3)
@@ -1369,7 +1388,7 @@ def stop() -> None:
             print(json.dumps({}))
             return
 
-        from ..config import resolve_store_location
+        from ..config import _present_by_lstat, resolve_store_location
         from ..gitio import open_index_ro
 
         payload = _read_payload()
@@ -1394,6 +1413,18 @@ def stop() -> None:
                 search_ancestors=True,
             ).path
         )
+        if not _present_by_lstat(str(store_path)):
+            print(json.dumps({}))
+            return
+        # A store this version may not use (spec D6) ends the hook before the peek and the
+        # transcript parse: `Store()` below would refuse it anyway, after both.
+        try:
+            check_store_requirement(store_path)
+        except StoreRequirementError:
+            print(json.dumps({}))
+            return
+        except OSError:
+            pass  # an unreadable marker: `Store()` below meets it, as it always did
         peek = open_index_ro(store_path)
         ledger: tuple[str, str | None] | None = None
         if peek is not None:
@@ -1430,11 +1461,7 @@ def stop() -> None:
         # see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D6)
         from ..store import Store
 
-        store = Store(
-            resolve_store_location(
-                root=os.environ.get("CLAUDE_PROJECT_DIR"), search_ancestors=True
-            ).path
-        )
+        store = Store(store_path)
         rearm_key = _CAPTURE_REARM_KEY_PREFIX + session_id
         if ledger is None:
             if store.was_captured(session_id):

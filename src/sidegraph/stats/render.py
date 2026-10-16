@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from sidegraph.githooks import GRAPH_REBUILD_COMMAND
 from sidegraph.stats.model import ActivationStats, GraphStats, StatsReport
 
 _LABEL_WIDTH = 12
@@ -298,13 +299,13 @@ def _graph(report: StatsReport) -> list[str]:
     g = report.graph
     if g.unreadable:
         # `sidegraph-init` only tests that the file exists, so it would call this one found.
-        return ["found, but could not be read → graphify update ."]
+        return [f"found, but could not be read → {GRAPH_REBUILD_COMMAND}"]
     if not g.available:
         return ["not built yet → sidegraph-init"]
     if g.nodes == 0:
         # Built and readable but empty: three zeroes would read as a measurement. The usual
         # cause is an engine run from the wrong directory (doctor's graph-root advisory).
-        return ["built, but holds no nodes → graphify update . (from the repo root)"]
+        return [f"built, but holds no nodes → {GRAPH_REBUILD_COMMAND} (from the repo root)"]
     counts = (
         f"{_count(g.nodes, 'node')} · {_count(g.files, 'file')} "
         f"· {_count(g.communities, 'community', 'communities')}"
@@ -327,7 +328,7 @@ def _stale(g: GraphStats) -> list[str]:
     else:
         verb = "differs" if files == 1 else "differ"
         head = f"stale: built outside HEAD's history, {_count(files, 'file')} {verb}"
-    tail = "→ graphify update ."
+    tail = f"→ {GRAPH_REBUILD_COMMAND}"
     return [f"{head} {tail}"] if len(f"{head} {tail}") <= _BODY_WIDTH else [head, _HANG + tail]
 
 

@@ -56,7 +56,7 @@ def test_init_prints_wiring_snippets(tmp_path, capsys):
     assert "/plugin install sidegraph@sidegraph" in out
     # The no-plugin alternative is a single native command, project-scoped.
     assert "claude mcp add sidegraph -s project" in out
-    assert "uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main" in out
+    assert "uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1" in out
     assert "sidegraph-mcp" in out
     # Manual hook-by-hook setup lives in the docs, not in the init dump.
     assert "docs/getting-started/claude-code-setup.md" in out
@@ -74,8 +74,76 @@ def test_init_is_idempotent(tmp_path, capsys):
     capsys.readouterr()
     assert init_main(["--db", str(db), "--graph", str(graph)]) == 0
     out = capsys.readouterr().out
-    assert "already initialized" in out
+    assert "empty" in out
+    assert "already initialized" not in out
     assert str(db) in out
+    assert "/plugin marketplace add" in out
+
+
+@pytest.mark.parametrize(
+    "directory", ["decisions", "facts", "domains", "entities", "bindings", "initiatives", "archive"]
+)
+def test_init_keeps_raw_authored_entries_distinct_from_empty_setup(tmp_path, capsys, directory):
+    db = tmp_path / ".sidegraph"
+    Store(db).close()
+    target = db / directory / "preserve.not-json"
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes(b"malformed authored content must not look empty\n")
+
+    assert init_main(["--db", str(db), "--no-hooks", "--no-settings"]) == 0
+
+    out = capsys.readouterr().out
+    assert "already initialized" in out
+    assert "empty store:" not in out
+    assert target.read_bytes() == b"malformed authored content must not look empty\n"
+
+
+@pytest.mark.parametrize("directory", ["decisions", "archive"])
+@pytest.mark.parametrize("authored", [False, True])
+def test_init_distinguishes_empty_nested_directories_from_raw_content(
+    tmp_path, capsys, directory, authored
+):
+    db = tmp_path / ".sidegraph"
+    Store(db).close()
+    nested = db / directory / "unused" / "deeper"
+    nested.mkdir(parents=True)
+    target = nested / "preserve.not-json"
+    if authored:
+        target.write_bytes(b"nested malformed content\n")
+
+    assert init_main(["--db", str(db), "--no-hooks", "--no-settings"]) == 0
+
+    out = capsys.readouterr().out
+    assert ("empty store:" in out) is not authored
+    assert ("already initialized" in out) is authored
+    assert "/plugin marketplace add" in out
+    assert nested.is_dir()
+    if authored:
+        assert target.read_bytes() == b"nested malformed content\n"
+
+
+def test_init_empty_scaffold_with_telemetry_preserves_canonical_bytes(tmp_path, capsys):
+    db = tmp_path / ".sidegraph"
+    store = Store(db)
+    store.set_meta("telemetry:session", "synthetic-session")
+    store.close()
+    before = {
+        p.relative_to(db).as_posix(): p.read_bytes()
+        for p in db.rglob("*")
+        if p.is_file() and not p.name.startswith("index.db")
+    }
+
+    assert init_main(["--db", str(db), "--no-hooks", "--no-settings"]) == 0
+
+    out = capsys.readouterr().out
+    assert "empty store:" in out
+    assert "already initialized" not in out
+    assert "/plugin marketplace add" in out
+    assert {
+        p.relative_to(db).as_posix(): p.read_bytes()
+        for p in db.rglob("*")
+        if p.is_file() and not p.name.startswith("index.db")
+    } == before
 
 
 def test_init_default_db_is_sidegraph_dir(tmp_path, capsys, monkeypatch):

@@ -22,6 +22,8 @@ rebuild), two equivalent paths:
 - **CLI fallback**, for scripted/CI use or outside a session:
 
   ```bash
+  export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+  $env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
   graphify update .            # rebuild graphify-out/graph.json (LLM-free, incremental)
   uv run sidegraph-sync        # re-resolve every tracked entity; prints the report
   ```
@@ -59,8 +61,8 @@ deterministic ladder, one rung at a time, and the first rung that fires wins:
 | `rebound` | Exact `name`+`file_path` match, but the node id changed | Leaf binding stays/returns to `live`, mapping refreshed to the new node id. |
 | `moved` | No exact match, but a *unique* name-only match exists **with the same name** (decoration stripped, case kept) **in a file of the same suffix**, **the entity's old `file_path` is confirmed gone from disk**, that same move is **independently confirmed by committed git history** (old path absent, new path tracked — both at `HEAD`), AND git shows the new path **arriving with the old path's removal** | The entity's `descriptor.file_path` is updated to follow it; leaf binding heals to `live`. A same-name hit in a file of a *different* suffix (e.g. a vanished code symbol colliding with an unrelated doc heading) is treated as a collision, not a move, and falls through to orphaned instead — as does any hit whose old path is still on disk, a hit that is only a case-insensitive match (a deleted type `Priority` against an old member `.priority`), and a new path that was already there before the old one went (below). |
 | `moved_uncommitted` | Same disk-level evidence as `moved` (unique same-suffix hit of the same name, old path gone from disk), but git's committed history at `HEAD` does not yet confirm it — an uncommitted delete, rename, or stash on this one working tree — and the new path is not already in `HEAD` (one that is was there before the old path went, so no commit can make it a move: that is `orphaned`) | Nothing is touched — the binding, descriptor, and node mapping are all left exactly as they were. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`, see below). Sidegraph remembers the entity, and the first sync after `HEAD` moves re-verifies it even if the graph was not rebuilt. If the old path is back on disk (the rename was reverted or stashed) the leaf is left untouched, and the entity stays watched until a later `HEAD` change or a rebuild settles it. A new file that takes the old path before the move is committed and synced hides the move: it surfaces as `orphaned` after the next graph rebuild. |
-| `ambiguous` | More than one node now matches | Leaf binding flips to `degraded` (not deleted). If every candidate shares one community, that community is still used for re-pointing. |
-| `orphaned` | No match at all, exact or loose | Leaf binding flips to `orphaned`. If the entity's file still exists and its nodes agree on a single community, that community is used for re-pointing (see below) — Sidegraph is not guessing which node the entity *became*, only where its code still lives. |
+| `ambiguous` | More than one node now matches (identical path-less external stubs count as one match) | Leaf binding flips to `degraded` (not deleted). If every candidate shares one community, that community is still used for re-pointing. |
+| `orphaned` | No match, or only a name match that cannot be followed as a move (including identical path-less external stubs for an entity whose file disappeared) | Leaf binding flips to `orphaned`. If the entity's file still exists and its nodes agree on a single community, that community is used for re-pointing (see below) — Sidegraph is not guessing which node the entity *became*, only where its code still lives. |
 
 None of this ever deletes a binding — only its `status` changes (`live` / `degraded` /
 `orphaned`), which is why the ladder can run repeatedly without losing history.
@@ -140,14 +142,21 @@ and check each one against the rule above.
 
 Leiden community ids are **snapshot labels, not identities** — a rebuild can renumber every
 community (observed on a real repo: `149 → 19 → 256` across three successive rebuilds).
-So on every sync, for every entity whose *observed* community differs from its last-seen
+So on every sync, for every entity with an *observed* community that differs from its last-seen
 baseline, Sidegraph:
 
 1. Creates (or reuses) a Tier-1 abstract entity for the new `community:<id>`, and adds a
    `live` binding to it for every decision leaf-bound to that entity.
 2. Reconciles the old `community:<id>` per record, once the whole pass has run: its
-   binding flips to `orphaned` (never deleted) only when no other live leaf of that same
+   binding flips to `orphaned` (never deleted) only when no other live or degraded leaf of that same
    record still sits in that community. While a sibling leaf does, the old row stays `live`.
+
+An unknown community baseline on a live or degraded sibling makes reconcile leave the old row
+live. A live path-less leaf successfully mapped on the current graph with no community is known
+to hold none, so it does not block reconciliation. A degraded leaf or a mapping left from an
+earlier graph provides no such evidence. When stubs that once shared a community split, the
+resolved leaf vacates that group; its row is retired unless a sibling still holds it or an
+unknown baseline makes reconcile abstain.
 
 Both of those are **index-only**: the `community:<id>` entity and the Tier-1 binding pointing
 at it are derived state, not committed to a canonical file — old or new. Repointing a hundred
@@ -170,7 +179,7 @@ A fresh `git clone` of a repo with a committed `.sidegraph/` has no community st
 `community:*` bindings and entities were never written to a canonical file to begin with (see
 above), and `index.db` itself is gitignored, so it isn't cloned either; there is no
 `last_seen_community` baseline anywhere on disk. This is by design, not a gap to work around:
-the very first `graphify update . && sidegraph-sync` after the clone self-heals it. With no
+the very first graph rebuild (`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set) followed by `sidegraph-sync` after the clone self-heals it. With no
 baseline, every *tracked* entity's community comparison starts from `None`, so the ordinary
 rebind ladder above re-resolves each Tier-2 leaf against the live graph (typically landing on
 `rebound`, since the cold reload also resets `last_seen_node_id`) and re-derives that leaf's
@@ -204,8 +213,8 @@ Two ways to heal a flagged decision (the
 [`sidegraph:heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md) skill walks an
 agent through this triage, finding by finding):
 
-- **Restore the name** (undo the rename, or re-add the removed symbol/heading) and re-run
-  `graphify update . && sidegraph-sync` — the orphaned anchor heals back to `rebound` (or
+- **Restore the name** (undo the rename, or re-add the removed symbol/heading) and rebuild
+  the graph (`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set), then re-run `sidegraph-sync` — the orphaned anchor heals back to `rebound` (or
   `unchanged`) once an exact match exists again.
 - **Supersede the decision** (`supersede_decision`, or `supersedes` in a `propose_decisions`
   draft) if the code it described is genuinely gone for good — this appends a fresh record

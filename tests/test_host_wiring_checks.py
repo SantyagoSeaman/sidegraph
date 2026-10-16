@@ -237,6 +237,7 @@ def test_t2_the_session_hook_puts_the_skew_line_in_the_context_and_a_notice_for_
     monkeypatch.setattr(sidegraph, "__version__", "0.9.0")
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(_plugin_root(tmp_path, "0.10.0")))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+    Store(repo / ".sidegraph").close()
     monkeypatch.setenv("SIDEGRAPH_DIR", str(repo / ".sidegraph"))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
@@ -314,7 +315,7 @@ def test_path_skew_older_path_install_is_reported(tmp_path, monkeypatch, repo_di
         f"Sidegraph: `sidegraph-session-start` on PATH ({link}) is 0.6.0 but this session runs "
         "0.11.1. Plugin skills and hooks use the session's version through uvx; your own shell "
         "commands use the old one. Update it with `uv tool install --reinstall "
-        "git+https://github.com/SantyagoSeaman/sidegraph.git@main`, or "
+        "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, or "
         "remove it with `uv tool uninstall sidegraph` if you only use the plugin."
     )
 
@@ -457,6 +458,7 @@ def test_path_skew_session_hook_adds_the_line_and_the_notice_once(
     monkeypatch.setenv("PATH", os.pathsep.join([str(link), os.environ["PATH"]]))
     monkeypatch.setattr(hooks, "_own_bin_dirs", lambda: set())
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
+    Store(repo_dir / ".sidegraph").close()
     monkeypatch.setenv("SIDEGRAPH_DIR", str(repo_dir / ".sidegraph"))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))
 
@@ -809,6 +811,7 @@ def test_t3_it_belongs_to_the_session_and_doctor_surfaces_only(tmp_path):
 
 
 def _session_start_out(repo: Path, tmp_path: Path, monkeypatch, capsys) -> dict:
+    Store(repo / ".sidegraph").close()
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
     monkeypatch.setenv("SIDEGRAPH_DIR", str(repo / ".sidegraph"))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))

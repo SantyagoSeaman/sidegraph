@@ -21,6 +21,7 @@ from .capture import (
     auto_ratify_eligible,
     redact,
 )
+from .engine.rationale import rationale_labels_agree
 from .engine.reader import GraphifyReader, RationaleNode
 from .schema import (
     Decision,
@@ -36,6 +37,9 @@ from .store import Store
 # Cap per design decision 3: a well-connected rationale node must not fan out into an
 # unbounded number of bindings on a bulk import.
 _MAX_ANCHORS = 3
+
+_TitleKey = tuple[str, str | None]
+_ContextKey = tuple[str | None, str]
 
 
 class ImportReport(BaseModel):
@@ -86,8 +90,20 @@ def _make_title(text: str) -> str:
     return first[:120]
 
 
+def _existing_import_keys(store: Store) -> tuple[set[_TitleKey], dict[_ContextKey, list[str]]]:
+    """Read existing title/ref and exact-context/choice keys once for this import."""
+    title_keys: set[_TitleKey] = set()
+    context_choices: dict[_ContextKey, list[str]] = {}
+    for decision in store.decisions_by_source("import"):
+        title_keys.add((canonicalize(decision.title), decision.provenance.ref))
+        context_choices.setdefault((decision.provenance.ref, decision.context), []).append(
+            decision.choice
+        )
+    return title_keys, context_choices
+
+
 def _resolved(reader: GraphifyReader, ref: Descriptor) -> bool:
-    return reader.resolve(ref).status == "resolved"
+    return reader.resolve(ref, collapse=False).status == "resolved"
 
 
 def _select_anchors(node: RationaleNode, reader: GraphifyReader) -> list[Descriptor]:
@@ -144,11 +160,15 @@ def import_rationales(
     writes ``proposed`` (ratify gate) instead of the default ``accepted``. ``dry_run=True``
     runs the full selection (path filter -> limit -> idempotency -> anchor resolution) but
     writes nothing to the store; counts still reflect what WOULD happen, and
-    ``ImportReport.dry_run`` carries the listing. Idempotent: a rerun skips any rationale
-    whose canonicalized title, ``provenance.ref``, AND ``provenance.source == "import"`` all
-    match an existing non-superseded decision (``store.find_decision_by_title``) — title
-    alone over-dedups, so identical first lines in different files are distinct memories and
-    both import (S2 review; see design doc's "idempotency" bullet).
+    ``ImportReport.dry_run`` carries the listing. Idempotent: a rerun skips a rationale
+    held by a non-superseded ``import`` decision through either its canonicalized title
+    and ``provenance.ref``, or its exact reconstructed ``context`` and ``ref`` when
+    identity survives redaction, with compatible observed labels. The engine seam compares
+    already-redacted labels and receives explicit flags disabling length evidence when
+    redaction made it unreliable.
+    Compatibility describes observed labels, not every possible edit of the underlying
+    docstring. Identical first lines in different files remain distinct memories.
+    See design/superpowers/specs/2026-10-14-graphify-upgrade-design.md D3.
 
     ``ratify_policy`` (default ``RatifyPolicy.MANUAL``): the resolved
     ``SIDEGRAPH_RATIFY_POLICY`` value (design D1), sampled once by the CLI shell
@@ -162,8 +182,8 @@ def import_rationales(
     A dry run (``dry_run=True``) fires no transition, so ``auto_ratified`` stays 0; it runs the
     same ``auto_ratify_eligible`` verdict on the signal the write would produce and reports it
     in ``ImportReport.would_auto_ratify`` and, per item, ``"auto_ratify_eligible"``. A key
-    repeated within the run counts as ``skipped_existing`` the second time, as the real run's
-    idempotency lookup does once the first record is written.
+    repeated within the run counts as ``skipped_existing`` the second time in both modes:
+    each anchorable record adds its keys before the write or dry-run listing.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2/D3
     # see design/superpowers/specs/2026-10-04-import-dry-run-previews-auto-ratification-design.md
     """
@@ -188,10 +208,8 @@ def import_rationales(
     process = kept[:limit] if limit is not None else kept
 
     report = ImportReport(filtered=filtered)
-    # The idempotency keys a dry run has already counted. A real run writes the first record
-    # and `find_decision_by_title` then skips the second; a dry run writes nothing, so without
-    # this set a key repeated within the run would count twice.
-    seen_keys: set[tuple[str, str]] = set()
+    # One read of existing imports; each anchorable item adds keys before either run mode.
+    title_keys, context_choices = _existing_import_keys(store)
 
     for node in process:
         ref = node.file_path if node.file_path is not None else node.node_id
@@ -204,11 +222,25 @@ def import_rationales(
             context = f"imported from {node.file_path} ({node.node_id})"
         else:
             context = f"imported from {node.node_id}"
-        context, _ = redact(context)
+        context, context_redactions = redact(context)
+        # Redaction can erase the node id, or equal a literal marker in another id.
+        # Such a context supplies no identity evidence; the title/ref key still applies.
+        context_key: _ContextKey | None = (
+            (ref, context) if context_redactions == 0 and "[REDACTED]" not in context else None
+        )
 
         canonical_title = canonicalize(title)
-        if (canonical_title, ref) in seen_keys or (
-            store.find_decision_by_title(canonical_title, "import", ref) is not None
+        if (canonical_title, ref) in title_keys or (
+            context_key is not None
+            and any(
+                rationale_labels_agree(
+                    prior,
+                    choice,
+                    stored_length_reliable="[REDACTED]" not in prior,
+                    new_length_reliable="[REDACTED]" not in choice,
+                )
+                for prior in context_choices.get(context_key, ())
+            )
         ):
             report.skipped_existing += 1
             continue
@@ -217,6 +249,12 @@ def import_rationales(
         if not anchors:
             report.skipped_unanchorable += 1
             continue
+
+        # One update serves both real writes and dry-run listings. A prior unanchorable
+        # item never consumes either key.
+        title_keys.add((canonical_title, ref))
+        if context_key is not None:
+            context_choices.setdefault(context_key, []).append(choice)
 
         if dry_run:
             # The same verdict the post-write block below reaches, built from the inputs the
@@ -241,7 +279,6 @@ def import_rationales(
                     ratify_policy,
                 )
             )
-            seen_keys.add((canonical_title, ref))
             report.imported += 1
             if eligible:
                 report.would_auto_ratify += 1

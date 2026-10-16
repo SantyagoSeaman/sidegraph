@@ -16,6 +16,14 @@ import sidegraph.host.hooks as hooks
 import sidegraph.sync as sync_mod
 
 
+def _existing_store(path):
+    """Prepare an existing store so these tests exercise drift refresh, not setup."""
+    from sidegraph.store import Store
+
+    Store(path).close()
+    return path
+
+
 def _run_session_start(monkeypatch, capsys, db, payload=None):
     monkeypatch.setenv("SIDEGRAPH_DIR", str(db))
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload) if payload else ""))
@@ -69,7 +77,7 @@ def _fake_refresh(monkeypatch, n):
 
 def test_session_start_appends_drift_line(tmp_path, monkeypatch, capsys):
     calls = _fake_refresh(monkeypatch, 3)
-    out = _run_session_start(monkeypatch, capsys, tmp_path / ".sidegraph")
+    out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"))
     text = out["hookSpecificOutput"]["additionalContext"]
     assert "Sidegraph: 3 record(s) are anchored to code that changed after their capture" in text
     assert "[drifted] tag in retrieval" in text
@@ -80,7 +88,7 @@ def test_session_start_appends_drift_line(tmp_path, monkeypatch, capsys):
 def test_session_start_no_line_when_zero_or_none(tmp_path, monkeypatch, capsys):
     for n in (0, None):
         _fake_refresh(monkeypatch, n)
-        out = _run_session_start(monkeypatch, capsys, tmp_path / f".sidegraph-{n}")
+        out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / f".sidegraph-{n}"))
         text = out["hookSpecificOutput"]["additionalContext"]
         assert "anchored to code that changed" not in text
 
@@ -93,7 +101,7 @@ def test_session_start_kill_switch_suppresses_line_but_still_refreshes(
     rev-1 defect this rule exists to prevent."""
     monkeypatch.setenv("SIDEGRAPH_DRIFT_NUDGE", "off")
     calls = _fake_refresh(monkeypatch, 3)
-    out = _run_session_start(monkeypatch, capsys, tmp_path / ".sidegraph")
+    out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"))
     text = out["hookSpecificOutput"]["additionalContext"]
     assert "anchored to code that changed" not in text
     assert len(calls) == 1
@@ -105,9 +113,9 @@ def test_session_start_duplicate_call_makes_no_refresh(tmp_path, monkeypatch, ca
     session)."""
     calls = _fake_refresh(monkeypatch, 1)
     payload = {"session_id": "dup-1"}
-    _run_session_start(monkeypatch, capsys, tmp_path / ".sidegraph", payload)
+    _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"), payload)
     assert len(calls) == 1
-    out = _run_session_start(monkeypatch, capsys, tmp_path / ".sidegraph", payload)
+    out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"), payload)
     assert out == {}  # dedupe exit
     assert len(calls) == 1  # no second refresh
 
@@ -117,7 +125,7 @@ def test_session_start_survives_refresh_raising(tmp_path, monkeypatch, capsys):
         raise RuntimeError("refresh exploded")
 
     monkeypatch.setattr(sync_mod, "refresh_code_drift_cache", boom)
-    out = _run_session_start(monkeypatch, capsys, tmp_path / ".sidegraph")
+    out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"))
     # The map is this hook's deliverable — it must render regardless.
     assert "hookSpecificOutput" in out
 
@@ -135,7 +143,9 @@ def test_stop_appends_clause_within_bound(tmp_path, monkeypatch, capsys, n):
     records still fits (the clause only grows by digits of n; it breaks around a
     16-digit count, unreachable)."""
     _fake_refresh(monkeypatch, n)
-    out = _run_stop(monkeypatch, capsys, _stop_payload(tmp_path), tmp_path / ".sidegraph")
+    out = _run_stop(
+        monkeypatch, capsys, _stop_payload(tmp_path), _existing_store(tmp_path / ".sidegraph")
+    )
     assert out["decision"] == "block"
     assert out["reason"].startswith(hooks.CAPTURE_NUDGE)
     assert f"Also: {n} drifted record(s)" in out["reason"]
@@ -149,7 +159,10 @@ def test_stop_plain_nudge_when_no_drift(tmp_path, monkeypatch, capsys):
     for n in (0, None):
         _fake_refresh(monkeypatch, n)
         out = _run_stop(
-            monkeypatch, capsys, _stop_payload(tmp_path, session=f"s-{n}"), tmp_path / ".sg"
+            monkeypatch,
+            capsys,
+            _stop_payload(tmp_path, session=f"s-{n}"),
+            _existing_store(tmp_path / ".sg"),
         )
         assert out["decision"] == "block"
         assert out["reason"] == hooks.CAPTURE_NUDGE
@@ -158,7 +171,9 @@ def test_stop_plain_nudge_when_no_drift(tmp_path, monkeypatch, capsys):
 def test_stop_kill_switch_suppresses_clause_but_still_refreshes(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SIDEGRAPH_DRIFT_NUDGE", "off")
     calls = _fake_refresh(monkeypatch, 5)
-    out = _run_stop(monkeypatch, capsys, _stop_payload(tmp_path), tmp_path / ".sidegraph")
+    out = _run_stop(
+        monkeypatch, capsys, _stop_payload(tmp_path), _existing_store(tmp_path / ".sidegraph")
+    )
     assert out["reason"] == hooks.CAPTURE_NUDGE
     assert len(calls) == 1
 
@@ -168,7 +183,9 @@ def test_stop_refresh_failure_still_nudges(tmp_path, monkeypatch, capsys):
         raise RuntimeError("refresh exploded")
 
     monkeypatch.setattr(sync_mod, "refresh_code_drift_cache", boom)
-    out = _run_stop(monkeypatch, capsys, _stop_payload(tmp_path), tmp_path / ".sidegraph")
+    out = _run_stop(
+        monkeypatch, capsys, _stop_payload(tmp_path), _existing_store(tmp_path / ".sidegraph")
+    )
     assert out["decision"] == "block"
     assert out["reason"] == hooks.CAPTURE_NUDGE
 
@@ -179,11 +196,11 @@ def test_stop_refresh_runs_after_substance_gate_only(tmp_path, monkeypatch, caps
     The ≥1 half is the honest red half against unfixed code."""
     calls = _fake_refresh(monkeypatch, 1)
     gated = {"session_id": "s-gated", "transcript_path": _transcript(tmp_path, 1, "s-gated")}
-    out = _run_stop(monkeypatch, capsys, gated, tmp_path / ".sidegraph")
+    out = _run_stop(monkeypatch, capsys, gated, _existing_store(tmp_path / ".sidegraph"))
     assert out == {}
     assert len(calls) == 0
 
     substantial = {"session_id": "s-full", "transcript_path": _transcript(tmp_path, name="s-full")}
-    out = _run_stop(monkeypatch, capsys, substantial, tmp_path / ".sidegraph")
+    out = _run_stop(monkeypatch, capsys, substantial, _existing_store(tmp_path / ".sidegraph"))
     assert out["decision"] == "block"
     assert len(calls) == 1

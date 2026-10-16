@@ -35,7 +35,7 @@ Ask the agent to record an accepted gotcha against a real file or symbol, then r
 context for the same anchor. Run:
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-verify
 git status --short
 ```
 
@@ -68,9 +68,11 @@ record remains in the proposal block.
 **Proves:** the graph/store relationship is healthy and derived state stays local.
 
 ```bash
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync --check
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-sync --check
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-doctor
 git status --short
 ```
 

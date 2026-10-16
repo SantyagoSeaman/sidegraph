@@ -1,7 +1,7 @@
 # CLI reference
 
-19 console scripts are registered in `pyproject.toml` (`[project.scripts]`): fourteen
-commands documented on this page — thirteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
+20 console scripts are registered in `pyproject.toml` (`[project.scripts]`): fifteen
+commands documented on this page — fourteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
 (including `sidegraph-prepare-commit-msg`, which doubles as a git hook — see
 [`reference/git-bindings.md`](git-bindings.md) for its installation and mechanism) and the
 guided `sidegraph-bootstrap` in
@@ -42,8 +42,8 @@ both `--db` and `--graph` against its own `--root` instead.
 ## Running the CLIs beside the plugin
 
 The plugin's MCP server and hooks run the Sidegraph at
-`git+https://github.com/SantyagoSeaman/sidegraph.git@main`. A plugin skill that runs a
-`sidegraph-*` command runs it the same way, `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, and never the copy on `PATH`: a
+`git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`. A plugin skill that runs a
+`sidegraph-*` command runs it the same way, `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 <command>`, and never the copy on `PATH`: a
 persistent `uv tool install` is frozen at the version it was installed at and can lack
 commands or flags the plugin's skills use. In a Sidegraph checkout (the session's working
 directory holds a `pyproject.toml` named `sidegraph`) run `uv run --project <checkout> <command>`
@@ -54,7 +54,7 @@ and SessionStart says when a `sidegraph-*` on `PATH` differs from the session's 
 (`path-skew`, see [troubleshooting](../guides/troubleshooting.md#path-skew)).
 
 Commands on the documentation pages are shown by name. (`@main` is a mutable ref: see [mutable development references](../getting-started/installation.md#mutable-development-references).) Without a CLI install, run them as
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, for example `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor`.
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 <command>`, for example `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-doctor`.
 
 ## `sidegraph-bootstrap`
 
@@ -102,6 +102,8 @@ durably written (a post-write I/O failure is at worst `2`, never `1`); `2` for a
 launch target, not a measured CLI guarantee.
 
 ```bash
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
 sidegraph-bootstrap --profile generic-adr --host claude-code --report bootstrap-report.md
 sidegraph-bootstrap --resume --profile generic-adr --host claude-code
@@ -138,7 +140,7 @@ the Sidegraph checkout):
    "already initialized" message still applies since that's pre-existing data, not a fresh
    store.
 2. Checks whether `--graph` exists. Prints `found graph: <path>` if so, or `missing graph:
-   <path> — run \`graphify update .\`, then \`sidegraph-sync\`, to anchor decisions to code
+   <path> — run \`graphify update .\` with the environment variable \`GRAPHIFY_NO_AUTO_REFRESH=1\` set, then \`sidegraph-sync\`, to anchor decisions to code
    (optional; Sidegraph works without it).` if not. The graph is optional at init time —
    `sidegraph-init` typically runs before the first `graphify update .`.
 3. Settles the **graph refresh git hook**, in the store's own repository (not necessarily the
@@ -405,12 +407,18 @@ recomputes the `SessionStart` TOC cache.
 10. If any accepted domain's refresh itself raised (a malformed `seed_anchors` descriptor, a
     domain that vanished mid-pass, a lock-contended write): `domains that FAILED to refresh
     (fix, then re-run with --force):` followed by one `  <slug>  <title>  (<error>)` line per
-    domain. Isolated per domain — one broken domain never costs any other domain its heal.
-    A completed pass stamps `last_synced_graph_version` **and** clears the volatile-reload
-    flag regardless of whether this domain's own refresh succeeded, so the failure is
-    **not** auto-retried on the next ordinary pass — the gate closes again until the graph
-    version moves or you pass `--force`. Fix the underlying cause (the descriptor, the
-    domain, or the graph), then re-run with `--force` to confirm it cleared.
+    domain. Isolated per domain — one broken domain never costs any other domain its heal, and
+    a failed domain keeps its previous membership whole. Domain membership is not marked
+    current after such a pass, so every later pass, lazy or explicit, reports the failure
+    again. It is recomputed when the graph, the domain snapshot or a domain's status changes,
+    or with `--force`. Fix the underlying cause (the descriptor, the domain, or the graph),
+    then re-run with `--force` to confirm it cleared. When the whole pass failed (not for a
+    busy store), one line stands for every domain, `  *  every accepted domain  (<error>)`,
+    and it is reported again until the graph, the snapshot or a domain's status changes.
+    When another writer held the store, nothing failed: the line is `domain membership not
+    refreshed: the store's writer was busy; the next sync runs it`, and `--check` does not
+    count it. An invalid `.sidegraph/domain-snapshot.json` fails every accepted domain's
+    refresh with `SnapshotError: …` and keeps the previous membership.
 11. If any slug is held by more than one **live** (`proposed`/`accepted`) domain at once — the
     shape a cross-branch merge race leaves behind (see
     [`reference/store-format.md`](store-format.md#merge-semantics-git-resolves-it-not-the-store)):
@@ -427,13 +435,19 @@ the exact shape the `sync_anchors` MCP tool returns (see
 [`reference/mcp-tools.md#sync_anchors`](mcp-tools.md#sync_anchors) for every key): `{"synced",
 "from_version", "to_version", "counts", "repointed", "outcomes", "stale_decisions",
 "empty_domains", "overbroad_domains", "slug_conflicts", "domains_refreshed",
-"domain_failures"}`. `outcomes` is already filtered to
+"domain_failures", "snapshot_splits"}`. `outcomes` is already filtered to
 `moved`/`moved_uncommitted`/`orphaned`/`ambiguous`/`error`
 (never `unchanged`/`rebound`), same as the prose printer above. `domain_failures` is a list of
-`{"slug", "title", "error"}` — one entry per domain whose refresh raised (item 10 above).
+`{"slug", "title", "error"}` — one entry per domain whose refresh raised; a whole-pass
+rollback instead has one `*` entry with `busy` (item 10 above).
+
+`snapshot_splits` is a list of `{"slug", "domains"}`: a covered domain with multiple accepted
+heirs. Neither holds its frozen membership until `sidegraph-domains snapshot --refresh`
+names each part with `--domain`. Informational; never a finding.
 
 `--check` exits **2** when the report has an *attention finding* — an `error` outcome, a
-non-empty `stale_decisions`, a non-empty `slug_conflicts`, or a non-empty `domain_failures`
+non-empty `stale_decisions`, a non-empty `slug_conflicts`, or a `domain_failures` entry
+other than a busy `*` one
 (`sync.report_has_findings`). `orphaned`/`ambiguous`/`moved_uncommitted` outcomes and `empty_domains`/
 `overbroad_domains` are deliberately excluded — informational only, never fail the check on
 their own (they're still listed in
@@ -578,12 +592,21 @@ target and no resolvable file node) is skipped entirely and counted as unanchora
 
 ### Idempotency (rationale mode)
 
-Re-running (e.g. after re-extraction adds new rationales) skips a rationale when a
-non-superseded decision already exists with the same canonicalized `title`, the same
-`provenance.ref`, **and** `provenance.source == "import"`. All three must match: `ref` keys on
-the rationale's origin file (or node id), so identical rationale text recorded in *two
-different files* is treated as two distinct memories and both import — only a genuine rerun
-over the same file's same rationale is deduplicated.
+Re-running rationale import skips a rationale already held by a non-superseded `import`
+decision through either key:
+
+- the same canonicalized `title` and the same `provenance.ref`; or
+- the same origin ref and exact `context` preserving its file and node identity after
+  redaction, with compatible observed labels after whitespace normalization and engine-cut
+  comparison.
+
+The second key recognises compatible labels cut differently by the tested Graphify versions.
+The existing title key remains in effect. A rationale matching neither key imports as a new
+decision; rationale import does not automatically supersede earlier decisions. These are
+comparisons of the labels available in the graph and store, rather than complete source text.
+
+The origin ref uses the rationale's file, or its node id if it has no file. Identical rationale
+text in two different files remains two distinct memories and both can import.
 
 ### Output (rationale mode)
 
@@ -880,16 +903,18 @@ sidegraph-domains bootstrap [--db PATH] [--graph PATH] [--min-members N] [--path
                              [--limit N] [--dry-run]
 sidegraph-domains add [--db PATH] --slug SLUG --title TITLE --summary SUMMARY
                        [--parent SLUG] [--path PREFIX ...]
+sidegraph-domains snapshot [--db PATH] [--graph PATH | --build-with VERSION] [--accept-current-engine] [--refresh [--domain SLUG ...]] [--dry-run]
 ```
 
-Authors [`Domain`](../concepts/data-model.md#domain--the-owned-abstraction) proposals — see the
-[naming-your-domains guide](../guides/naming-your-domains.md) for the practical walkthrough.
-Two subcommands, the first two of the [three authoring paths](../concepts/mind-model.md#domain-lifecycle):
-`bootstrap` (from graph communities) and `add` (manual — the third path, `propose_domains`, is
-MCP-only, for in-session agent proposals). Both land `status=proposed`; `sidegraph-ratify` is
-the one gate for every authoring path, `sidegraph-domains` included — except that `bootstrap`
-under `SIDEGRAPH_RATIFY_POLICY=auto-all` ratifies an eligible candidate at write time (`add`
-never does).
+Manages [`Domain`](../concepts/data-model.md#domain--the-owned-abstraction) proposals and
+frozen membership; see the [naming guide](../guides/naming-your-domains.md).
+
+Three subcommands: `bootstrap` proposes from graph communities, `add` proposes manually,
+and `snapshot` freezes accepted domains' membership. The proposal commands are two of the
+[three authoring paths](../concepts/mind-model.md#domain-lifecycle); `propose_domains` is the
+MCP-only path for agent proposals. Both CLI proposal commands land `status=proposed`, with
+`sidegraph-ratify` as their gate, except eligible `bootstrap` candidates under
+`SIDEGRAPH_RATIFY_POLICY=auto-all` (`add` never auto-ratifies).
 
 ### `sidegraph-domains bootstrap`
 
@@ -904,7 +929,7 @@ never does).
 
 One `Domain` draft per community at or above `--min-members` (counting only anchorable
 members): slug/title/summary come from the engine's community label
-(`.graphify_labels.json` sidecar) when present, else the community's god-node name, else a
+(curated and pending Graphify label sidecars, then the name on each node) when present, else the community's god-node name, else a
 deterministic member digest. Redaction runs on the title/summary/slug regardless of origin.
 **Idempotent**: a community already claimed by any non-superseded domain (proposed, accepted,
 *or dropped* — see the [naming guide's caveat](../guides/naming-your-domains.md#why-selective-not---all))
@@ -999,6 +1024,46 @@ uv run sidegraph-domains add --slug order-lifecycle --parent risk-gate \
   --title "Order lifecycle" --summary "State machine from submit to fill/cancel."
 ```
 
+### `sidegraph-domains snapshot`
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--db` | as `bootstrap` | store directory |
+| `--graph` | as `bootstrap` | graph.json to take the membership from |
+| `--build-with VERSION` | none | build the graph of `HEAD` with Graphify `VERSION` (`uvx`, in a temporary directory, auto-refresh off) and take the membership from it; excludes `--graph` |
+| `--accept-current-engine` | off | take a first snapshot from a graph whose engine links documents to the code they mention |
+| `--refresh` | off | re-freeze an existing snapshot: every accepted domain's current membership, votes included |
+| `--domain SLUG` | none | with `--refresh`: re-derive this domain from its full rules (repeatable) |
+| `--dry-run` | off | print the per-domain file counts it would freeze; leave committed files unchanged |
+
+Writes `.sidegraph/domain-snapshot.json`: each accepted domain's members as the graph shows
+them now, per file, and the path-less nodes (external symbols) by name (see
+[store format](store-format.md#the-domain-snapshot)). Domain membership then stops following
+the graph's communities. A node keeps the domains it had. A file new since the snapshot takes
+the domains most of its community holds, plus those whose path prefixes cover it. A domain
+accepted later gets members by its rules, in new files only.
+
+The first run refuses a graph built by a Graphify release that links documents to the code
+they mention (0.9.62 and later), whose communities have already merged documents into code:
+pass `--build-with 0.9.6` to snapshot the old engine's view of `HEAD`, or
+`--accept-current-engine`. With `--build-with`, the archived tree is scoped to the store's
+project, including a project below the git root, so file paths match its ordinary graph.
+A file not committed at `HEAD` is not in the snapshot and takes its domains by vote.
+A second run needs `--refresh`.
+
+It raises the store's minimum Sidegraph version to 0.14.0, the first that reads a snapshot,
+and prints each domain's file count. `--dry-run` prints the same counts (`would freeze …`)
+for the snapshot a first run, or with a snapshot a `--refresh`, would write, and changes
+no committed file or requirement. It skips the engine and second-run guards, but refuses
+before opening a store that needs initialization or canonical backfill. An initialized
+store may still refresh its local index. Commit `.sidegraph/format` and
+`.sidegraph/domain-snapshot.json` in one change; teammates restart their sessions after
+pulling. After a snapshot, a rule change to a covered domain applies only after
+`--refresh --domain SLUG`. A rename keeps the entries; a domain split in two holds none until
+both parts are refreshed. A plain or partial `--refresh` refuses an unresolved split and
+lists the `--domain` flags needed for every part. The ratify and `supersede_domain` answers, `sidegraph-sync` and
+`sidegraph-doctor` say so.
+
 ## `sidegraph-compact`
 
 ```
@@ -1066,6 +1131,32 @@ uv run sidegraph-compact                            # pack every terminal record
 uv run sidegraph-compact --older-than 90             # only records terminal for 90+ days
 ```
 
+## `sidegraph-require`
+
+```
+sidegraph-require --sidegraph X.Y.Z [--db PATH]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--sidegraph X.Y.Z` | required | the lowest Sidegraph release that may use this store; at most this Sidegraph's own version |
+| `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated). The store is never created or migrated here |
+
+Makes the store refuse Sidegraph versions older than `X.Y.Z`. It rewrites `.sidegraph/format` as
+`sidegraph-store 1.0.0` followed by `requires-sidegraph >= X.Y.Z` (see
+[the format marker](store-format.md#the-format-marker)) in one atomic replace, under the same
+writer lock as every store write, and prints the `git add` and `git commit` command for it. The
+requirement reaches teammates when they pull the commit.
+
+It refuses, writing nothing, a version that is not `X.Y.Z`, a version above its own (a store may
+only require a version installed where the requirement is raised), and a version below the
+store's current requirement (a requirement is never lowered, even by two raises at once). Asking
+for the current requirement again changes nothing. Sync, SessionStart and the MCP server never
+raise the requirement.
+
+**Exit code:** `0` when the requirement is written or already in place; `1` when it is refused,
+or when there is no store (`run sidegraph-init first`).
+
 ## `sidegraph-verify`
 
 ```
@@ -1090,8 +1181,7 @@ on-disk layout this walks). Two layers, combined into one report:
   segment and the line, the same line the store's reload leaves out. A nonterminal archived
   decision or domain also reports `bad-archive-segment`, even though the reload keeps it;
   archived entries are also
-  cross-referenced (supersedes chains, parent chains, ULID uniqueness); the `format` marker's
-  `schema_version` is present and known; `valid_to >= valid_from` on every decision/fact; a
+  cross-referenced (supersedes chains, parent chains, ULID uniqueness); the `format` marker's `schema_version` is present and known, and a `1.0.0` marker's `requires-sidegraph` line is well formed and not above the running version; `valid_to >= valid_from` on every decision/fact; a
   `superseded` record's `supersedes` chain resolves to a real successor; every `supersedes`
   target exists; every binding references an existing entity; every fact's `supports`
   references an existing *decision* (never a fact — `Fact.supports` only ever holds decision
@@ -1128,7 +1218,9 @@ plain-text line):
 | Code | Layer | Meaning |
 |---|---|---|
 | `parse-error` | snapshot | a record file isn't valid UTF-8 or JSON (or is nested past the recursion limit), isn't an object, fails schema validation, or can't be serialised for the index, or is a directory, FIFO or other entry that is not a regular file (`unreadable: not a regular file`; never opened) (a `valid_to < valid_from` failure is reported as `bad-validity-window` instead — see below) |
-| `unknown-schema-version` | snapshot | the `format` marker is missing, unreadable, malformed, or names a `schema_version` this version of the code doesn't recognize |
+| `unknown-schema-version` | snapshot | the `format` marker is missing, unreadable, does not start with `sidegraph-store`, or names a version or major this code does not recognize |
+| `malformed-requirement` | snapshot | a `1.0.0` marker lacks exactly one `requires-sidegraph >= X.Y.Z` line, a `0.x` marker has a second line, or the marker exceeds 4 KiB |
+| `requirement-above-verifier` | snapshot | the store requires a newer Sidegraph than the running verifier; move the CI pin to at least the required version |
 | `bad-validity-window` | snapshot | `valid_to < valid_from` on a decision or fact |
 | `superseded-without-successor` | snapshot | a `status=superseded` record has no other record's `supersedes` pointing back at it (a successor held by a file skipped for its unsafe name still counts) |
 | `dangling-supersedes` | snapshot | a `supersedes` id doesn't resolve to any record, hot or archived (a file skipped for its unsafe name still counts as the record it holds, so renaming it back is the only heal) |
@@ -1251,6 +1343,8 @@ When any record carries the `ratified_at` stamp (2026-08-04+), the human output 
 
 Once any record, hot or archived, carries an `auto:` stamp, two more informational lines follow: `auto share: decisions A/B (P%), facts A/B (P%), domains A/B (P%) (E stamp-less record(s) after the first stamp excluded)` — records ever auto-ratified, whatever their status now, over all classified records of the kind — and `auto supersede rate: decisions+facts superseded n/d (p%) vs human n/d (p%); domains retired n/d (p%) vs human n/d (p%) (E stamp-less record(s) after the first stamp excluded)` — auto-ratified records later superseded (domains: dropped or superseded) beside the human-ratified baseline. A zero denominator prints `n/a`; percentages round down. An unstamped accepted or retired record counts as human baseline only if created before the store's earliest stamp; later ones are excluded and counted in the parenthetical. Both lines read hot files plus `archive/*.jsonl`, are never findings, never change the exit code, and never appear in `--json`.
 
+When an entity is named by a path, full or partial, of its file (`src/sidegraph/store.py`, `sidegraph/store.py`) beside one named by that file's basename (`store.py`), a `spelling twins: N …` line follows, then one line per such entity: `<id> '<path name>' (K binding(s)) → <id> '<basename>' (M binding(s))`. Lookups and new anchors use the basename entity, and retrieval reaches both, so there is nothing to fix. Like the lines above, these are never findings, never change the exit code, and never appear in `--json`.
+
 ```
 sidegraph-doctor [--db PATH] [--against GIT_REF] [--check] [--stale-days N] [--json] [--graph PATH]
 ```
@@ -1289,16 +1383,19 @@ plain-text line):
 | `stale-proposal` | a proposed decision/domain whose ULID timestamp is strictly older than `--stale-days` |
 | `unreferenced-entity` | a hot entity no committed anchor set references (structural `domain:*`/`community:*` entities are exempt) |
 | `expired-open-validity` | a decision's `valid_to` is strictly past but its status is still open (`proposed`/`accepted`) |
-| `code-drift` | a live (`proposed`/`accepted`) decision's anchored file(s) changed since the commit its `provenance.commit` was captured at; also carries the "N record(s) predate commit stamping — not checkable" and git-unavailable notes, in place, when either applies |
+| `code-drift` | an open (`proposed`/`accepted`) decision's anchored file(s) changed since the commit its `provenance.commit` was captured at; when binding statuses are uncomputed or unavailable, excludes committed deletions and says "binding status unknown"; also carries the "N record(s) predate commit stamping — not checkable" and git-unavailable notes, in place, when either applies |
 | `never-surfaced` | an accepted decision has `0` shows against `N > 0` queries on its anchored file(s) — anchored where people repeatedly work, never once rendered or injected by a hook |
 | `stale-instructions` | an auto-injected agent-instructions file beside the store (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`) still carries the distinctive wording of a **superseded** decision — that file reaches the agent at turn zero, before retrieval, so an abandoned rule surviving there outranks the store's correction by default. Verbatim-ish match on normalized text with length/word floors; superseded records only; no git call. Advisory: it reports a quotation, not a proven contradiction — the file may be narrating history |
 | `unratified-accept` | an **accepted** record whose provenance says `agent` and which carries no ratifier stamp — the signature `SIDEGRAPH_AUTO_ACCEPT=on` leaves in a shared store (one environment's setting bypassing the ratification gate for everyone). Scoped to records created at/after the EARLIER of the store's earliest ratifier stamp and its creation marker (`.sidegraph/stamping_live_since`, written once when a store is genuinely new — never backfilled onto an existing one), so a store predating both reports nothing rather than everything; a store that has never ratified anything but was created by a marker-writing version is still in scope from its own creation, closing the blind window an unratified store would otherwise sit in forever. A stamped record — including one stamped `auto:<policy>` by an auto-ratification policy — and a human-sourced one are never flagged. A **supersession successor** (`supersedes` set — `supersede_decision`/`supersede_fact`) is never flagged either: reversal has no ratification queue to bypass and lands accepted immediately by design, so it reproduces the signature with no relation to the env var this check hunts. Narrowed exception: a `supersedes`-bearing record IS still flagged if it carries a `layer`, a `provenance.ref`, or a tier-0 `tag:`/`initiative:` binding absent from its predecessor — neither `supersede_decision` nor `supersede_fact` can produce any of the three, so one present proves the `propose_decisions`/auto-accept path wrote it. (The fact half is defensive only: `supersede_fact` always stamps `source="human"`, so a fact successor never reaches this agent-sourced check, and no draft shape carries `supersedes` on a fact.) Only a MINIMAL superseding draft (none of the three) is indistinguishable from a legitimate successor by the record's own fields, and stays excluded — a known, accepted, narrower trade-off than treating every supersession alike. Advisory: the signature is not proof — verify before concluding |
-| `duplicate-entity` | two or more committed entity files share one logical identity (legal — see below — but ambiguous); reported once per group, at the winner's (lowest-`entity_id`) file, naming every id in the group and its binding count |
+| `duplicate-entity` | two or more committed entity files share one logical identity (legal — see below — but ambiguous); reported once per group, at the winner's (lowest-`entity_id`) file, naming every id in the group and its binding count; names are compared folded to their file's basename, and an entity named by a path (full or partial) of its file beside one named by the basename is not a duplicate — it is listed on the informational `spelling twins` lines |
 | `graph-root-mismatch` | `graphify update` was likely run from a subdirectory instead of the repository root, so every recorded `source_file` is relative to that subdirectory instead — every anchor in the graph will look orphaned until it's rebuilt from the root. Detected from `--graph`: a sample of anchorable `source_file` values that mostly don't exist relative to the repo root, but DO all exist under one specific subdirectory (named in the finding). Silent on a legitimately partial graph (a doc-only corpus, an `--exclude`d build) and on too small a sample to judge safely; needs `--graph` to resolve (missing/unreadable simply skips it) |
-| `graph-stale` | the graph was built at a commit HEAD has moved past (graph.json's `built_at_commit`), and a file the graph should reflect changed since: one it holds was edited after the graph was last built (the later of `graph.json`'s and its sibling `manifest.json`'s modification times) or deleted, or a new file of a type it holds now exists (not under a dot-directory, which Graphify skips). Memory cannot see or anchor to code added after the build. The detail gives the build commit, how many commits behind HEAD (or "a commit outside HEAD's history" after a checkout of an older commit), how many files changed, and up to five example paths; the fix is `graphify update .` from the repository root, then `sidegraph-sync`. Silent when the build commit is HEAD, when only file types the graph does not hold changed (a `.yml` against a `.py`-only graph), and when a graph built from a dirty tree was committed afterwards, or a `graphify update .` found nothing to change and rewrote only `manifest.json` (the file is no newer than the build); also silent when the comparison cannot be made (no `built_at_commit`, one that is not a full commit id, a graph outside a git repository, a build commit the repository lacks, git unavailable or slower than 3 seconds). **`--check` exits `2` on it**, so a CI job that runs doctor should rebuild the graph first; one that does is unaffected. Needs `--graph` to resolve |
+| `snapshot-split` | Two or more accepted domains descend from one covered snapshot domain, so neither holds its frozen membership. Refresh each part: `sidegraph-domains snapshot --refresh --domain <each part>` |
+| `graph-stale` | the graph was built at a commit HEAD has moved past (graph.json's `built_at_commit`), and a file the graph should reflect changed since: one it holds was edited after the graph was last built (the later of `graph.json`'s and its sibling `manifest.json`'s modification times) or deleted, or a new file of a type it holds now exists (not under a dot-directory, which Graphify skips). Memory cannot see or anchor to code added after the build. The detail gives the build commit, how many commits behind HEAD (or "a commit outside HEAD's history" after a checkout of an older commit), how many files changed, and up to five example paths; the fix is to rebuild from the repository root by running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then `sidegraph-sync`. Silent when the build commit is HEAD, when only file types the graph does not hold changed (a `.yml` against a `.py`-only graph), and when a graph built from a dirty tree was committed afterwards, or a `graphify update .` found nothing to change and rewrote only `manifest.json` (the file is no newer than the build); also silent when the comparison cannot be made (no `built_at_commit`, one that is not a full commit id, a graph outside a git repository, a build commit the repository lacks, git unavailable or slower than 3 seconds). **`--check` exits `2` on it**, so a CI job that runs doctor should rebuild the graph first; one that does is unaffected. Needs `--graph` to resolve |
 | `orphaned-record` | an open (`proposed`/`accepted`) decision or fact whose every Tier-2 (leaf) anchor is `orphaned`, so retrieval reaches it only through its file or domain; one finding per record, at its canonical file, naming how many leaf anchors it has. Statuses come from `index.db` and read "as of last sync", so the check is skipped while the statuses are not computed for the current graph (see *Skipped checks* below; run `sidegraph-sync`). It is the record-level view of `orphaned-binding` (any record it flags has orphaned bindings, which that code already reports), so it adds no new reason for `--check` to exit `2`. The fix is to rebuild a stale graph, then `sidegraph-sync`; otherwise re-anchor the record with `add_anchors` or the `heal-anchors` skill, or supersede it if the code is gone. Needs a usable `index.db` |
 | `store-uncommitted` | store files nobody committed for at least 24 hours: records, bindings, entities, an archive segment or the root files (`format`, `.gitignore`, `stamping_live_since`) that `git status` shows as new, modified or deleted. One finding, at the store path, naming how many files there are, how old the oldest is and what kinds they are (a new `archive/` segment beside deleted records reads as "a compaction"). A new record or entity file is aged by its ULID name, which a `git stash` cannot rewrite; a modified file, or anything under `bindings/`, by its modification time; a deleted file by its subdirectory's, a lower bound. Entries fully staged in the index are not counted, so a `--check` run in a pre-commit hook does not block the commit that fixes the problem. **`--check` exits `2` on it.** The fix is to commit the store in a pull request. Silent, and not run, outside a git repository, with no `git`, or when git is slower than 2 seconds |
 | `plugin-off-in-subdirectories` | Claude Code sessions started below the repository root run without the Sidegraph plugin. Claude Code reads the project settings (`.claude/settings.json`) of the launch directory only, and the repository root's `.claude/settings.local.json` for every launch inside the repository; `enabledPlugins` merges key by key (user settings, then project, then local). Two problems, reported as up to two findings: (a) the plugin is enabled only in the root's `.claude/settings.json`, so every directory below the root without its own enabling settings runs without it (reported at that file); (b) nested directories with a `.claude/settings.json` or `.claude/settings.local.json` of their own that sets `enabledPlugins` and whose merge leaves the plugin off (reported at the first such directory, naming how many there are; a nested settings file without `enabledPlugins` cannot change the merge, so it is not counted). The walk covers every directory that holds a tracked file (one `git ls-files` over the index, a few tens of milliseconds on a large repository) and looks for the two settings files in each directly, so a repository that ignores `.claude/` is covered. User settings are read from `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set and non-empty, else from `~/.claude/settings.json`. Silent when the plugin is not enabled for a launch at the root at all, and not run outside a git repository, with no `git`, or when `git ls-files` takes longer than 5 seconds. **`--check` exits `2` on it**, like any finding; enabling the plugin at user scope or in the root's `.claude/settings.local.json` clears it |
+| `refresh-helper-outdated` | a git hook runs a graph refresh helper whose Graphify line lacks `GRAPHIFY_NO_AUTO_REFRESH=1` (an older Sidegraph wrote it), so Graphify 0.9.87 and later can rewrite the agent skills they installed on the first rebuild after an upgrade. Advisory, per clone (the helper lives in `.git/hooks`); **`--check` exits `2` on it**, like any finding. One hook that runs the helper is enough, and a recorded decline does not silence it. The fix is `sidegraph-init` (no flag), which refreshes the helper and keeps a recorded hook choice. Silent outside a git repository, with no helper, or when no hook runs it |
+| `engine-version` | the graph was built by a Graphify release this Sidegraph was not tested with (its `graph.graphify_version` stamp is neither absent nor in the tested set), so anchors and domains may read differently. Advisory; **`--check` exits `2` on it**, like any finding. Pin Graphify to a tested release listed under [Engine version pinning](../integrations/graphify.md#engine-version-pinning), then rebuild the graph. It also fires for a mention-edge graph (Graphify 0.9.62 or later) over a store without a minimum Sidegraph version; follow the [0.14 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.14.md). A malformed marker leaves this second case silent. Silent without a readable graph |
 
 `degraded-binding`/`orphaned-binding` come from `index.db`, opened strictly read-only — it
 is the only source for binding status (canonical `bindings/*.json` files carry identity,
@@ -1309,6 +1406,18 @@ sync." When `index.db` is missing or unusable (a fresh clone before the first
 `clean`, even under `--check`. The same check is also skipped while the binding statuses are
 not computed for the current graph (see *Skipped checks* below): after a reload they read live
 until `sidegraph-sync` recomputes them, so reporting them would be a false all-clear.
+
+`code-drift` remains available while binding statuses are uncomputed or the index is
+unavailable, including in stores without a graph. It reads the status rows and their
+certification flag from one read-only SQLite snapshot. A recorded `orphaned` binding is
+always excluded. When other bindings have unknown status, the check excludes paths deleted
+between capture and Git `HEAD` and qualifies each changed-file finding with "binding status
+unknown; deleted paths excluded" in both text and JSON. A rename excludes the old path and
+can report the new path only if that path is itself anchored. An uncommitted deletion in
+the working copy does not hide a committed change. This fallback checks files, not symbol
+presence: it does not certify that an anchor in a surviving file still resolves. Computed
+statuses retain the usual orphan exclusion and Git diff behavior. A readable legacy index
+without the certification metadata keeps its existing computed-status interpretation.
 
 `never-surfaced` reads the same read-only `index.db` for two more derived, gitignored
 tables — `retrieval_shows`/`retrieval_seeds`, retrieval telemetry (see [Retrieval
@@ -1354,11 +1463,14 @@ names in `skipped`) but not the reason. Both checks can also be withheld on a st
 syncs (no code graph), where they stay withheld. Without a readable graph the
 graph checks (`graph-root-mismatch`, `graph-stale`) are listed as `"graph"` in `skipped`, and the
 plain-text report prints one line just before its summary:
-``graph checks skipped (no code graph at <path> — build it from the repository root with `graphify update .`)``.
+``graph checks skipped (no code graph at <path> — build it from the repository root by running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set)``.
 `--json` prints nothing extra. A store with symlinked entries skips every advisory check:
 `skipped` is then `["advisory-checks"]` alone and the text report prints
 `remaining checks skipped (the store has symlinked entries — remove the links and rerun)` instead
-of the lines above. A missing graph is deliberately not a finding: `--check` escalates
+of the lines above. A store whose format marker refuses this version also skips advisory
+checks: `remaining checks skipped (<the reason>)`, for example
+`remaining checks skipped (This store requires Sidegraph >= 0.15.0; this is 0.14.0.)`.
+A missing graph is deliberately not a finding: `--check` escalates
 every finding, so a CI job that runs doctor without building a graph would start exiting `2`.
 
 **Exit code:** `0` healthy — advisory findings alone stay `0` without `--check`. `1`
@@ -1631,7 +1743,9 @@ index at the resolved path (run `sidegraph-init` first — a fresh clone has the
 records but not the derived index, and `sidegraph-init` rebuilds it), an index SQLite cannot
 read, an index or store directory the process may not search (`cannot read the store index`,
 not "no store index"), a record directory it may not list or search (`cannot read the store`,
-naming that directory), or a record row in it that does not parse (the message names the index
+naming that directory), a store whose format marker refuses this version
+(`cannot read the store (<dir>): This store requires Sidegraph >= X.Y.Z; this is A.B.C.`),
+or a record row in it that does not parse (the message names the index
 file, the table and the record id). An index from before the render journal, and a graph that is missing or unreadable, are
 not errors.
 
@@ -1685,6 +1799,7 @@ sidegraph-blame <file> [--range A,B] [--db PATH] [--json]
 [`reference/git-bindings.md`](git-bindings.md) for the join mechanics (commit trailers +
 `provenance.commit`), the output cap, and a worked example. Read-only over records: opens
 the store's index read-only and never writes to it; a missing or unreadable store degrades
-every hunk to unresolved records rather than failing. Exit `0` on success (including when
+every hunk to unresolved records rather than failing. A store that requires a newer
+Sidegraph is not read either: one stderr line says so and no record is joined. Exit `0` on success (including when
 every hunk is unresolved), `1` on an operational git failure (not a git repo, unknown
 file/range, git not installed, or a malformed `--range`).

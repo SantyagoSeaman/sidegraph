@@ -23,8 +23,10 @@ import fastmcp
 import pytest
 
 import sidegraph.server as server_module
+from sidegraph import __version__
 from sidegraph.schema import AnchorBinding, Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
+from tests.test_store_requirement import above_running, running_release, write_requirement_marker
 
 GRAPH = Path(__file__).parent / "fixtures" / "mini_graph.json"
 ANCHOR = {"name": "Trader", "file_path": "trader/exec.py"}
@@ -74,6 +76,7 @@ def test_a_record_pulled_onto_disk_reaches_the_next_get_task_context(tmp_path, m
     until the process restarts. No hook runs between the two calls."""
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(GRAPH))
     local = tmp_path / "local" / ".sidegraph"
+    Store(local).close()
     monkeypatch.setenv("SIDEGRAPH_DIR", str(local))
     monkeypatch.setattr(server_module, "_store", None)
 
@@ -137,6 +140,7 @@ def _open_a_server_store(tmp_path: Path, monkeypatch) -> Path:
     """A server whose store is already open and holds one record on ``trader/exec.py``."""
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(GRAPH))
     local = tmp_path / "local" / ".sidegraph"
+    Store(local).close()
     monkeypatch.setenv("SIDEGRAPH_DIR", str(local))
     monkeypatch.setattr(server_module, "_store", None)
     added = _call(
@@ -206,3 +210,26 @@ def test_only_a_filesystem_error_is_answered_from_the_previous_index(tmp_path, m
     monkeypatch.setattr(Store, "_compute_canonical_digest", failing)
     result = _call("get_task_context", {"files": ["trader/exec.py"]})
     assert result.is_error
+
+
+def test_a_requirement_raised_mid_session_refuses_the_next_tool_call(tmp_path, monkeypatch):
+    """Red against unfixed code: the marker change moves the digest, the server reloads its
+    index from the new files and keeps serving a store it may no longer read."""
+    local = _open_a_server_store(tmp_path, monkeypatch)
+    above = above_running()
+    write_requirement_marker(local, above)
+    result = _call("get_task_context", {"files": ["trader/exec.py"]})
+    assert result.is_error
+    assert (
+        f"This store requires Sidegraph >= {above}; this is {__version__}."
+        in result.content[0].text
+    )
+
+
+def test_a_requirement_this_version_meets_keeps_the_server_serving(tmp_path, monkeypatch):
+    """Guard: red against a refusal on any marker change (discarded)."""
+    local = _open_a_server_store(tmp_path, monkeypatch)
+    write_requirement_marker(local, running_release())
+    result = _call("get_task_context", {"files": ["trader/exec.py"]})
+    assert not result.is_error, result
+    assert "FIRST never call foo twice" in result.content[0].text

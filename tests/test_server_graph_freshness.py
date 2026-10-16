@@ -11,6 +11,7 @@ import pytest
 
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.freshness import GraphFreshness
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.retrieval import RetrievalBudget
 from sidegraph.server import _get_task_context_impl, _retrieve, _seeds_from_args
 from sidegraph.store import Store
@@ -115,7 +116,9 @@ def test_t13_an_existing_file_missing_from_a_fresh_graph_says_the_graph_is_curre
 
     (line,) = _block(out)
     assert "No committed change since the build explains it" in line
-    assert "newer than the build and not committed yet (rebuild with `graphify update .`)" in line
+    assert (
+        f"newer than the build and not committed yet (rebuild by running {GRAPH_REBUILD})" in line
+    )
     assert "sit under an excluded path, or be a file type Graphify skips." in line
     assert "The graph is current" not in line and "does not index" not in line
     assert "stale" not in line
@@ -334,7 +337,7 @@ def test_t24_an_unknown_comparison_is_said_as_such(tmp_path, monkeypatch):
     (line,) = _block(out)
     assert (
         "Could not tell whether the graph is current (git timed out): "
-        "rebuild it with `graphify update .` if these files are new."
+        f"rebuild it by running {GRAPH_REBUILD} if these files are new."
     ) in line
 
 

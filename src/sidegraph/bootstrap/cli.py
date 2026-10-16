@@ -38,6 +38,7 @@ from sidegraph.capture import redact
 from sidegraph.config import resolve_store_path
 from sidegraph.domains import collect_domain_candidates
 from sidegraph.engine.reader import GraphifyReader
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.profiles import FlowProfile, detect_profile, get_profile
 from sidegraph.store import Store, refuse_symlinked_internals
 
@@ -308,7 +309,7 @@ def render_missing_graph(
 ) -> None:
     print(f"ACTIONABLE   graph not readable: {graph_path}")
     if graph_path == root / "graphify-out" / "graph.json":
-        print(f"NEXT         cd {shlex.quote(str(root))} && graphify update .")
+        print(f"NEXT         in {shlex.quote(str(root))}, run {GRAPH_REBUILD}")
     print(f"RESUME       {resume_command}")
 
 
@@ -479,7 +480,7 @@ class StoredAnchors:
 
     anchored: frozenset[str] = frozenset()
     unreachable: tuple[tuple[str, str, str], ...] = ()  # (candidate key, record id, source)
-    remedy: str = "run `graphify update .` and rerun"
+    remedy: str = f"run {GRAPH_REBUILD} and rerun"
 
     @property
     def unreachable_keys(self) -> frozenset[str]:
@@ -504,9 +505,10 @@ def _record_reaches_graph(store: Store, reader: GraphifyReader, record_id: str) 
 
 
 def _graph_remedy(root: Path, graph_path: Path) -> str:
-    """The rebuild step for the graph in use; ``graphify update .`` only rebuilds the default."""
+    """The rebuild step for the graph in use; the documented rebuild (``GRAPH_REBUILD``) only
+    rebuilds the default."""
     if graph_path == root / "graphify-out" / "graph.json":
-        return "run `graphify update .` and rerun"
+        return f"run {GRAPH_REBUILD} and rerun"
     return f"rebuild the graph at {_terminal_text(str(graph_path))} and rerun"
 
 
@@ -1031,7 +1033,7 @@ def _main(args: argparse.Namespace) -> int:
             )
         if stored.unreachable and graph_path == root / "graphify-out" / "graph.json":
             # A resume cannot change the graph: the only next step is rebuilding it.
-            print(f"NEXT         cd {shlex.quote(str(root))} && graphify update .")
+            print(f"NEXT         in {shlex.quote(str(root))}, run {GRAPH_REBUILD}")
     except BaseException as error:
         # Any exception here is post-durable-write and must resolve to
         # partial-recoverable, never escape to main()'s narrower catch-all and get

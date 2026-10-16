@@ -10,8 +10,9 @@ file- and domain-linked records without a graph; the complete workflow below ins
 - **Python 3.10+** for Graphify.
 - [`uv`](https://docs.astral.sh/uv/) — used to install and run both.
 - For automatic session integration: [Claude Code](claude-code-setup.md) or
-  [Codex](codex-setup.md). Other stdio MCP clients can call the tools directly; the CLI
-  also works without an agent host.
+  [Codex](codex-setup.md). [OpenCode V2](../../.opencode/INSTALL.md) and experimental
+  [Muse](../integrations/muse.md) provide MCP tools and shared skills without lifecycle hooks.
+  Other stdio MCP clients can call the tools directly; the CLI also works without a host.
 
 ### Platform coverage
 
@@ -106,6 +107,9 @@ exception: its public manifests intentionally track `main`, and the release proc
 that `main` only when it cuts a release. See
 [`reference/stability.md`](../reference/stability.md) for the promises made by each surface.
 
+For an existing store, follow the [0.14 migration guide](../guides/migrating-to-0.14.md)
+before upgrading Graphify, and update every Sidegraph client first.
+
 ## Install Sidegraph
 
 ### Option A — the CLI on your PATH
@@ -122,7 +126,7 @@ It installs from the same place as the plugin, the public repository's `main` br
 changes only at releases:
 
 ```bash
-uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main
+uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1
 ```
 
 That puts `sidegraph-mcp` and every `sidegraph-*` CLI on your PATH, where the documentation's
@@ -149,7 +153,7 @@ versions when the copy on `PATH` differs from the session's, and shows it to you
 day.
 
 To stop maintaining the copy, run `uv tool uninstall sidegraph`. The plugin keeps working, and
-any command still runs as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`.
+any command still runs as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 <command>`.
 
 For CI or a reproducible pilot, pin a version instead (`pip install 'sidegraph==X.Y.Z'`) and move
 the pin when you upgrade. For an ephemeral run without installing,
@@ -177,7 +181,7 @@ The Claude Code host installs the MCP server and all four hooks (`SessionStart`,
 `SubagentStart`, and the bundled skills;
 its tool surface has no equivalent target for the Claude-specific `PreToolUse` records block. The
 plugin's bundled config installs from the public repository, not PyPI: the MCP server and
-`SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`, and the
+`SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, and the
 `Stop`, `PreToolUse` and `SubagentStart` hooks start from the commit `SessionStart` resolved. Unlike the package
 install, the plugin deliberately follows the public repository's `main` branch. See
 the integration details for [Claude Code](../integrations/claude-code.md#plugin-install-path)
@@ -196,6 +200,15 @@ launch directory's own project settings and no parent's, so a plugin installed a
 root leaves sessions started below it without it. `sidegraph-doctor` reports the gap as
 [`plugin-off-in-subdirectories`](../guides/troubleshooting.md#plugin-off-in-subdirectories).
 
+For installation and updates across all four hosts, see the
+[README host recipes](../../README.md#claude-code). Existing Claude Code and Codex installs
+keep `sidegraph@sidegraph`; update cached assets with the host's native update commands,
+then start a new session and review any changed approvals. The runtime's `@main` does not
+refresh cached skills or manifests. OpenCode V2 uses the
+[canonical Git package guide](../../.opencode/INSTALL.md). Experimental
+[Muse](../integrations/muse.md) supplies MCP/skills only and must be restarted from the
+intended project when switching workspaces; expanded native acceptance is deferred.
+
 ### Option C — uvx directly from git
 
 Prefer manual wiring, or need an entry point outside Claude Code (e.g. `sidegraph-init` from
@@ -205,8 +218,8 @@ checkout. `@main` moves only when a release is cut. For reproducibility, pin a t
 (see "Mutable development references" above):
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --help
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-init
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-bootstrap --help
 ```
 
 Every Sidegraph entry-point name differs from the source location, so any `uvx` invocation
@@ -264,6 +277,7 @@ setup, scripted/CI use, and the two deliberately human-run jobs (`sidegraph-impo
 | `sidegraph-import` | CLI — bootstrap decisions from Graphify rationale nodes (code docstrings, or ADR/SAD prose after a semantic pass), or from existing ADR/spec markdown directly (`--docs`). |
 | `sidegraph-domains` | CLI — author Domain proposals: `bootstrap` from graph communities, or `add` manually. |
 | `sidegraph-compact` | CLI — pack terminal-status (superseded/rejected/dropped) decisions and domains into an immutable archive segment. |
+| `sidegraph-require` | CLI — make the store refuse Sidegraph versions older than `--sidegraph X.Y.Z`: rewrites `.sidegraph/format` and prints the commit command; never lowers a requirement. |
 | `sidegraph-verify` | CLI — lint the store's canonical files against its write-path invariants (schema, validity windows, referential integrity, ULID uniqueness); `--against <git-ref>` additionally checks that every store file changed vs that ref was mutated legally (CI mode). |
 | `sidegraph-doctor` | CLI — one-stop store health: composes `sidegraph-verify`'s strict lint with an advisory curation pass (stale proposals, dangling/degraded/orphaned records, never-surfaced decisions); `--check` also fails on advisory findings. |
 | `sidegraph-viz` | CLI — render an interactive HTML/JSON view of decisions, facts, entities, anchor status, supersession, and evidence links. |
@@ -282,23 +296,26 @@ exact rules.
 ## Install Graphify
 
 ```bash
-uv tool install "graphifyy==0.9.6"   # note the double-y package name; the CLI is `graphify`
+uv tool install "graphifyy==0.9.90"   # note the double-y package name; the CLI is `graphify`
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify --version                    # sanity check
 ```
 
 **Pin the version.** Graphify releases well ahead of Sidegraph's verified range, and the
-engine seam is the one place an engine release can break Sidegraph. Known-good is
-**0.9.6–0.9.8**; installing unpinned gets you whatever is current on PyPI, which is outside
-that range and unverified. See
+engine seam is the one place an engine release can break Sidegraph. Known-good:
+**0.9.6 and 0.9.90**. 0.9.90 was verified for the 0.14.0 release on this repository and on
+the openspec corpus (build, sync and domain snapshot). Installing unpinned may select a
+newer, unverified version. See
 [engine version pinning](../integrations/graphify.md#engine-version-pinning) for how to
 re-verify after an upgrade.
 
-Fallback if you don't use `uv`: `pip install 'graphifyy==0.9.6'`.
+Fallback if you don't use `uv`: `pip install 'graphifyy==0.9.90'`.
 
-`[mcp]` is an **optional** extra (`uv tool install "graphifyy[mcp]==0.9.6"`) that adds Graphify's
+`[mcp]` is an **optional** extra (`uv tool install "graphifyy[mcp]==0.9.90"`) that adds Graphify's
 *own* MCP server — a deeper structure-query layer over the same `graph.json`. It coexists
 fine with Sidegraph; Sidegraph only ever reads `graph.json` directly and doesn't need it. Add
-`[pdf]` if your corpus includes PDFs (extras compose: `"graphifyy[mcp,pdf]==0.9.6"`).
+`[pdf]` if your corpus includes PDFs (extras compose: `"graphifyy[mcp,pdf]==0.9.90"`).
 
 See [`integrations/graphify.md`](../integrations/graphify.md) for how Sidegraph reads
 Graphify's output, corpus types, and troubleshooting.

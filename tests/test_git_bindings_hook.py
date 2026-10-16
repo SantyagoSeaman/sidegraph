@@ -34,6 +34,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from tests.test_store_requirement import above_running, running_release, write_requirement_marker
 
 
 def _git(args: list[str], cwd) -> subprocess.CompletedProcess:
@@ -551,3 +552,24 @@ def test_raw_git_positionals_win_over_pre_commit_env(tmp_path, monkeypatch):
     monkeypatch.setenv("PRE_COMMIT_COMMIT_MSG_SOURCE", "message")
     assert prepare_commit_msg_main([msg, "template", "abc123"]) == 0
     assert "framework candidate" in Path(msg).read_text()
+
+
+def test_open_index_ro_refuses_a_store_this_version_may_not_read(tmp_path):
+    """Red against unfixed code: the read-only open never looked at the marker."""
+    store_dir = tmp_path / ".sidegraph"
+    Store(store_dir).close()
+    write_requirement_marker(store_dir, running_release())
+    conn = gitio.open_index_ro(store_dir)
+    assert conn is not None  # a requirement this version meets: read as before
+    conn.close()
+    write_requirement_marker(store_dir, above_running())
+    assert gitio.open_index_ro(store_dir) is None
+
+
+def test_the_hook_writes_nothing_for_a_store_that_requires_a_newer_sidegraph(tmp_path, monkeypatch):
+    """Red against unfixed code: the HEAD-stamped record was offered as a trailer."""
+    msg = _decision_repo(tmp_path, monkeypatch)
+    write_requirement_marker(tmp_path / "repo" / ".sidegraph", above_running())
+    before = Path(msg).read_bytes()
+    assert prepare_commit_msg_main([msg]) == 0
+    assert Path(msg).read_bytes() == before

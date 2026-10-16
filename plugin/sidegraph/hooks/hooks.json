@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from \"$u\" sidegraph-stop || printf '{}\\n'"
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from \"$u\" sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       },
@@ -36,22 +36,22 @@
           {
             "type": "command",
             "if": "Bash(sed *)",
-            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
           },
           {
             "type": "command",
             "if": "Bash(grep *)",
-            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
           },
           {
             "type": "command",
             "if": "Bash(rg *)",
-            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
           },
           {
             "type": "command",
             "if": "Bash(cat *)",
-            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       },
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       }
@@ -70,7 +70,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from \"$u\" sidegraph-subagent-start || printf '{}\\n'"
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from \"$u\" sidegraph-subagent-start || printf '{}\\n'"
           }
         ]
       }

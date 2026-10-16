@@ -5,7 +5,8 @@ The hook hot path (``hot_index.py``, ``host/hooks.py``) needs these before it ca
 and must not import the models to get them: the package import is most of what a PreToolUse
 run cost. Each value here has ONE definition; ``schema.py``, ``store.py`` and ``retrieval.py``
 import it under the names they have always exported, so nothing that reached for the old home
-breaks. Nothing here may import ``pydantic``, ``ulid`` or any other ``sidegraph`` module.
+breaks. Nothing here may import ``pydantic``, ``ulid`` or any other ``sidegraph`` module;
+the one exception is the package's own ``__version__``, a literal loaded with the package.
 
 see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D2)
 """
@@ -13,11 +14,13 @@ see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D2)
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import re
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 # The store format is a public contract from day one. Migration tooling is deferred beyond
 # one forward step; this field is not (see CLAUDE.md invariant #3). Bumped 0.2.0 -> 0.3.0 for
@@ -49,6 +52,10 @@ from pathlib import Path
 # committed file on that record's next legitimate (non-community) canonical rewrite.
 SCHEMA_VERSION = "0.6.0"
 
+# Set to "1" on canonical reload and cleared by a completed sync: binding statuses are
+# placeholders until then. Shared by Store and the dependency-light hook index.
+VOLATILE_STALE_KEY = "volatile_stale"
+
 # The canonical, git-committed record directories (relative to Store.path). Order matters
 # only for readability; digest/reload iterate them in this order.
 CANONICAL_SUBDIRS = ("decisions", "facts", "domains", "entities", "bindings", "initiatives")
@@ -75,6 +82,28 @@ ARCHIVE_SUBDIR = "archive"
 # The format marker: a one-line ``<path>/format`` file (see ``Store._ensure_format_marker``).
 FORMAT_MARKER_NAME = "format"
 
+# The marker's first line is ``FORMAT_MARKER_PREFIX + <version>``. A store that requires a
+# minimum Sidegraph version is stamped ``REQUIREMENT_MARKER_VERSION`` and carries exactly one
+# more line, ``REQUIREMENT_LINE_PREFIX + X.Y.Z``. Versions up to 0.13 compare the major only, so
+# they refuse it. see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)
+FORMAT_MARKER_PREFIX = "sidegraph-store "
+REQUIREMENT_MARKER_VERSION = "1.0.0"
+REQUIREMENT_LINE_PREFIX = "requires-sidegraph >= "
+READABLE_MARKER_MAJORS = frozenset({"0", "1"})
+MAX_FORMAT_MARKER_BYTES = 4096
+
+# The index stamp of a store whose marker carries a requirement. Records and tables are those of
+# SCHEMA_VERSION; only the stamp differs, so versions before 0.14, whose HotIndex.open accepts
+# SCHEMA_VERSION alone, deliver nothing from an index this version rebuilt for a raised store.
+# They never rebuild it from a cold start: their Store refuses the marker before it connects.
+# see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)
+REQUIRED_INDEX_STAMP = f"{SCHEMA_VERSION}+requires"
+INDEX_STAMPS = frozenset({SCHEMA_VERSION, REQUIRED_INDEX_STAMP})
+_RELEASE_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+_REQUIREMENT_LINE_RE = re.compile(r"requires-sidegraph >= (\d+\.\d+\.\d+)")
+
+RefusalKind = Literal["unrecognized", "major", "malformed", "below"]
+
 # The committed ``.gitignore`` beside the records (see ``Store._ensure_gitignore``).
 GITIGNORE_NAME = ".gitignore"
 
@@ -86,6 +115,11 @@ GITIGNORE_NAME = ".gitignore"
 # so that check has a trustworthy scope-start even when the store has never ratified
 # anything (see that check's docstring in doctor.py).
 STAMPING_MARKER_NAME = "stamping_live_since"
+
+# Committed, optional: the frozen domain membership ``sidegraph-domains snapshot`` writes (see
+# ``domain_snapshot.py``). Deliberately outside the canonical digest (an older Sidegraph's
+# digest must not change with it): ``snapshot_signature`` tracks it instead.
+DOMAIN_SNAPSHOT_NAME = "domain-snapshot.json"
 
 # Every connection that WRITES ``index.db`` runs this pragma (a rollback-mode choice is per
 # connection). The default DELETE mode creates and unlinks ``index.db-journal`` in every write
@@ -104,6 +138,7 @@ STORE_INTERNAL_NAMES = (
     ARCHIVE_SUBDIR,
     FORMAT_MARKER_NAME,
     STAMPING_MARKER_NAME,
+    DOMAIN_SNAPSHOT_NAME,
     "index.db",
     GITIGNORE_NAME,
     *SQLITE_SIDECAR_NAMES,
@@ -231,6 +266,173 @@ _LINE_CLIP_MARKER = "…"
 _WHITESPACE_RE = re.compile(r"\s")
 
 
+class StoreRequirementError(ValueError):
+    """The store's format marker refuses this Sidegraph (spec D6). ``kind`` says why: no
+    ``sidegraph-store`` first line (``"unrecognized"``), a major this version does not read
+    (``"major"``), a requirement line missing, unknown or unparsable (``"malformed"``), or this
+    version is below ``required`` (``"below"``). A ``ValueError``, so every caller that reported
+    a refused marker before reports this one the same way."""
+
+    def __init__(self, message: str, *, kind: RefusalKind, required: str | None = None) -> None:
+        super().__init__(message)
+        self.kind: RefusalKind = kind
+        self.required = required
+
+
+def release_tuple(version: str) -> tuple[int, int, int] | None:
+    """``(X, Y, Z)`` of a version that starts with ``X.Y.Z``, ignoring what follows, so
+    ``0.14.0.dev3+g1`` is ``(0, 14, 0)``: how a dev or local build compares against a
+    requirement. ``None`` when it does not start with three numbers."""
+    match = _RELEASE_RE.match(version.strip())
+    if match is None:
+        return None
+    return (int(match[1]), int(match[2]), int(match[3]))
+
+
+def is_release_version(version: str) -> bool:
+    """Whether ``version`` is exactly ``X.Y.Z``: the only form a requirement takes."""
+    return _RELEASE_RE.fullmatch(version) is not None
+
+
+def running_version(running: str | None = None) -> str:
+    """``running``, or this package's ``__version__`` (read at call time) when it is ``None``."""
+    if running is not None:
+        return running
+    from . import __version__  # a literal in __init__.py, loaded with the package
+
+    return __version__
+
+
+def requirement_met(required: str, running: str | None = None) -> bool:
+    """Whether the running Sidegraph's release is at least ``required``."""
+    have = release_tuple(running_version(running))
+    need = release_tuple(required)
+    return have is not None and need is not None and have >= need
+
+
+def _malformed(marker: Path, detail: str) -> StoreRequirementError:
+    return StoreRequirementError(
+        f"malformed store format marker at {marker}: {detail}", kind="malformed"
+    )
+
+
+def parse_format_marker(text: str, marker: Path) -> tuple[str, str | None]:
+    """``(version, requirement)`` of a format marker's text: the first line's version, and the
+    ``X.Y.Z`` of its ``requires-sidegraph`` line or ``None``. Blank lines and surrounding
+    whitespace are ignored (a CRLF checkout reads the same). Raises
+    :class:`StoreRequirementError` for an unrecognised first line, a major this version does
+    not read, and a malformed requirement: a ``1.x`` marker without exactly one well-formed
+    requirement line, or a ``0.x`` marker with any second line.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)"""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    first = lines[0] if lines else ""
+    if not first.startswith(FORMAT_MARKER_PREFIX):
+        raise StoreRequirementError(
+            f"unrecognized store format marker {first!r} at {marker}; "
+            "migration tooling is deferred — use a fresh store",
+            kind="unrecognized",
+        )
+    version = first[len(FORMAT_MARKER_PREFIX) :].strip()
+    major = version.split(".", 1)[0]
+    if major not in READABLE_MARKER_MAJORS:
+        raise StoreRequirementError(
+            f"store format marker {first!r} (major {major!r}) is not one this Sidegraph reads "
+            f"(majors {', '.join(sorted(READABLE_MARKER_MAJORS))}); "
+            "migration tooling is deferred — use a fresh store",
+            kind="major",
+        )
+    extra = lines[1:]
+    if major == "0":
+        if extra:
+            raise _malformed(
+                marker,
+                f"a {first!r} marker has one line; a requirement needs "
+                f"'{FORMAT_MARKER_PREFIX}{REQUIREMENT_MARKER_VERSION}'",
+            )
+        return version, None
+    if not is_release_version(version):
+        raise _malformed(marker, f"{first!r} is not '{FORMAT_MARKER_PREFIX}X.Y.Z'")
+    if len(extra) != 1:
+        raise _malformed(
+            marker,
+            f"a {first!r} marker needs exactly one '{REQUIREMENT_LINE_PREFIX}X.Y.Z' line after "
+            f"it, found {len(extra)}",
+        )
+    match = _REQUIREMENT_LINE_RE.fullmatch(extra[0])
+    if match is None:
+        raise _malformed(marker, f"{extra[0]!r} is not '{REQUIREMENT_LINE_PREFIX}X.Y.Z'")
+    return version, match.group(1)
+
+
+def store_requirement(store_dir: str | os.PathLike[str]) -> str | None:
+    """The ``X.Y.Z`` of the store's ``requires-sidegraph`` line, or ``None`` when it has none (a
+    one-line marker, no marker, or a store path that is a file). Compares nothing with the
+    running version; :func:`check_store_requirement` does. Raises :class:`StoreRequirementError`
+    for a marker that does not parse (not UTF-8, an unrecognised first line, a major this
+    version does not read, a malformed requirement); any other ``OSError`` reading it
+    propagates. Pydantic-free.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)"""
+    marker = Path(store_dir) / FORMAT_MARKER_NAME
+    try:
+        st = marker.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        raise _malformed(marker, "format marker must be a regular file, never a symlink")
+    if st.st_size > MAX_FORMAT_MARKER_BYTES:
+        raise _malformed(marker, f"format marker exceeds {MAX_FORMAT_MARKER_BYTES} bytes")
+    with marker.open("rb") as stream:
+        raw = stream.read(MAX_FORMAT_MARKER_BYTES + 1)
+    if len(raw) > MAX_FORMAT_MARKER_BYTES:
+        raise _malformed(marker, f"format marker exceeds {MAX_FORMAT_MARKER_BYTES} bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise StoreRequirementError(
+            f"unreadable store format marker at {marker}: not UTF-8 text", kind="unrecognized"
+        ) from e
+    return parse_format_marker(text, marker)[1]
+
+
+def check_store_requirement(
+    store_dir: str | os.PathLike[str], *, running: str | None = None
+) -> str | None:
+    """Raise :class:`StoreRequirementError` when ``<store_dir>/format`` refuses this Sidegraph;
+    otherwise return the store's requirement (``"X.Y.Z"``) or ``None``.
+
+    The one check every entry point runs before it reads the store: ``Store`` at open and when
+    the marker changes mid-session, ``HotIndex.open``, ``gitio.open_index_ro``, the Stop hook,
+    ``sidegraph-stats``, ``sidegraph-doctor`` and ``sidegraph-blame``. :func:`store_requirement`
+    reads and parses the marker; ``running`` (default: this package's ``__version__``) is
+    compared by its release, so a dev or local build of ``X.Y.Z`` meets ``>= X.Y.Z``.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)"""
+    required = store_requirement(store_dir)
+    if required is not None and not requirement_met(required, running):
+        raise StoreRequirementError(
+            f"This store requires Sidegraph >= {required}; this is {running_version(running)}.",
+            kind="below",
+            required=required,
+        )
+    return required
+
+
+def requirement_marker_text(version: str) -> str:
+    """The marker of a store that requires Sidegraph >= ``version`` (``X.Y.Z``)."""
+    if not is_release_version(version):
+        raise ValueError(f"a requirement must be a release version X.Y.Z, got {version!r}")
+    text = (
+        f"{FORMAT_MARKER_PREFIX}{REQUIREMENT_MARKER_VERSION}\n{REQUIREMENT_LINE_PREFIX}{version}\n"
+    )
+    if len(text.encode("utf-8")) > MAX_FORMAT_MARKER_BYTES:
+        raise ValueError(f"format marker exceeds {MAX_FORMAT_MARKER_BYTES} bytes")
+    return text
+
+
+def index_stamp(requirement: str | None) -> str:
+    """The ``schema_version`` stamp of the index of a store with this requirement (or none)."""
+    return SCHEMA_VERSION if requirement is None else REQUIRED_INDEX_STAMP
+
+
 def _last_whitespace_index(s: str) -> int:
     """Index of the LAST whitespace character (any of ``\\s`` — space, tab, newline, ...)
     in ``s``, or ``-1`` when none exists. Review follow-up (Minor 3): a plain
@@ -313,3 +515,71 @@ def hot_matches_archive(hot: object, archived: object) -> bool:
     if _absent_or_empty(hot) or _absent_or_empty(archived):
         return _absent_or_empty(hot) and _absent_or_empty(archived)
     return hot == archived
+
+
+def read_snapshot_bytes(store_dir: str | os.PathLike[str]) -> bytes | None:
+    """The store's domain snapshot, read once, or ``None`` when it has none. A reader that
+    certifies membership hashes and parses these same bytes."""
+    try:
+        return (Path(store_dir) / DOMAIN_SNAPSHOT_NAME).read_bytes()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def snapshot_signature_of(data: bytes | None) -> str:
+    """``"sha256:<hex>"`` of snapshot bytes, or ``"absent"``: the snapshot's part of the
+    identity domain membership is certified for. Content, not a stat, so the certification
+    names the very bytes a membership pass parsed, whatever a pull writes meanwhile.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)"""
+    return "absent" if data is None else "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def snapshot_signature(store_dir: str | os.PathLike[str]) -> str:
+    """The signature of the snapshot as it is on disk now (``"unreadable"`` when it cannot be
+    read): what ``Store``'s freshness check and ``sync.membership_stamp`` compare."""
+    try:
+        return snapshot_signature_of(read_snapshot_bytes(store_dir))
+    except OSError:
+        return "unreadable"
+
+
+def open_would_write(store_dir: str | os.PathLike[str]) -> str | None:
+    """Why opening ``store_dir`` as a ``Store`` would write a committed file, or ``None``:
+    ``Store.__init__`` creates a missing store, migrates a legacy single-file one (or a
+    ``decisions.db`` inside), resolves a migration sentinel, and backfills a missing canonical
+    subdirectory, format marker or ``.gitignore``, and writes ``stamping_live_since`` into a
+    store with neither that marker nor any record. For callers that promise to write nothing
+    (``sidegraph-domains snapshot --dry-run``)."""
+    root = Path(store_dir)
+    if root.is_file():
+        return f"{root} is a legacy single-file store, and opening it migrates it"
+    if root.name and root.absolute().with_name(root.name + ".migration-incomplete").exists():
+        return f"{root} has an unfinished migration"
+    if not root.is_dir():
+        return f"there is no store at {root}"
+    if (root / "decisions.db").is_file():
+        return f"{root} holds a legacy decisions.db, and opening it migrates it"
+    missing = [
+        n
+        for n in (*CANONICAL_SUBDIRS, FORMAT_MARKER_NAME, GITIGNORE_NAME)
+        if not (root / n).exists()
+    ]
+    if missing:
+        return f"{root} lacks {', '.join(missing)}, and opening it would create them"
+    if not (root / STAMPING_MARKER_NAME).is_file() and not store_has_any_records(root):
+        return f"{root} holds no record yet, and opening it would write {STAMPING_MARKER_NAME}"
+    return None
+
+
+def store_has_any_records(store_dir: str | os.PathLike[str]) -> bool:
+    """True iff the store holds a record of any kind: a ``*.json`` file under a canonical
+    subdirectory, or an archive segment (``*.jsonl``) under ``archive/``. ``Store`` writes its
+    creation marker only when this is false (moved here from ``store._store_has_any_records``,
+    which now delegates)."""
+    root = Path(store_dir)
+    for sub in CANONICAL_SUBDIRS:
+        d = root / sub
+        if d.is_dir() and any(d.glob("*.json")):
+            return True
+    archive = root / ARCHIVE_SUBDIR
+    return archive.is_dir() and any(archive.glob("*.jsonl"))

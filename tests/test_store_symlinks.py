@@ -16,7 +16,13 @@ from sidegraph.store import (
 )
 
 _SUBDIRS = (*_CANONICAL_SUBDIRS, _ARCHIVE_SUBDIR)
-_TOP_LEVEL_FILES = ("format", "stamping_live_since", "index.db", ".gitignore")
+_TOP_LEVEL_FILES = (
+    "format",
+    "stamping_live_since",
+    "index.db",
+    ".gitignore",
+    "domain-snapshot.json",
+)
 _SIDECARS = ("index.db-journal", "index.db-wal", "index.db-shm")
 
 

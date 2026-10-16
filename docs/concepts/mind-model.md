@@ -94,7 +94,8 @@ write below — the three raw authoring paths underneath it are:
 **Three authoring paths, one gate:**
 
 1. **Bootstrap** (`sidegraph-domains bootstrap`) — read the graph's own Leiden communities (and
-   an optional `.graphify_labels.json` sidecar when a labeling pass has been run) and propose
+   Graphify's curated `.graphify_labels.json` labels, then hub names from
+   `.graphify_labels.pending.json`, then the name on each node) and propose
    one `Domain` draft per community at or above a member-count threshold. Deterministic: a
    labeled community's slug/title/summary come from the label; an unlabeled one falls back to
    its god node's name, or a member digest ("N entities incl. a, b, c — around \<top file\>").
@@ -178,6 +179,15 @@ domain, the Tier-1 binding goes to the domain's `domain:<slug>` entity instead. 
 to the community before the domain existed are not migrated, but retrieval still surfaces them
 under the community fallback — see
 [retrieval](retrieval.md#bucket-c-domains-and-communities).
+
+**Membership is computed once per sync and kept per node.** Each pass writes every accepted domain's
+members into the local index, and everything that asks "is this in the domain" reads it: drill-down
+members, the decisions a domain gathers, the Tier-1 domain a new decision binds to, retrieval's
+related bucket. A domain's members are the nodes of its communities plus the nodes under its path
+prefixes. With a [domain snapshot](../reference/store-format.md#the-domain-snapshot), a covered
+domain's members come from the snapshot, and its rules change nothing until a refresh. Before all of
+this, a community that holds code and documents is split in two: Graphify 0.9.62 and later link a
+document to the code it mentions, which merges them.
 
 ## Tags vs. domains vs. initiatives
 

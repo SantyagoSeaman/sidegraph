@@ -40,6 +40,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from .store_layout import StoreRequirementError, check_store_requirement
+
 # Per-subprocess ceiling (several git calls run per hook/blame invocation) -- never the
 # unbounded default.
 _GIT_TIMEOUT_SECONDS = 1.0
@@ -163,10 +165,14 @@ def resolved_comment_char(cwd: Path) -> str | None:
 def open_index_ro(store_dir: Path) -> sqlite3.Connection | None:
     """Open ``<store_dir>/index.db`` strictly read-only, URI ``mode=ro&immutable=0``,
     with :data:`RO_OPEN_TIMEOUT_SECONDS` as the busy-timeout fallback (§0). ``None`` on
-    ANY failure -- index absent, ro-open denied, or a concurrent writer's lock not
+    ANY failure -- a refusing format marker, index absent, ro-open denied, or a writer's lock not
     released inside the timeout -- so every caller degrades to writing/resolving
     nothing rather than blocking or raising. Never rebuilds the index; never write-opens
     the store."""
+    try:
+        check_store_requirement(Path(store_dir))
+    except (StoreRequirementError, OSError):
+        return None  # a store this version may not read (spec D6), or an unreadable marker
     index_path = Path(store_dir) / "index.db"
     uri = f"file:{quote(os.fsencode(str(index_path)))}?mode=ro&immutable=0"
     try:

@@ -20,6 +20,9 @@ import inspect
 import re
 from pathlib import Path
 
+import pytest
+import yaml
+
 from sidegraph import doctor as doctor_module
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -1049,9 +1052,8 @@ def test_quickstart_does_not_install_the_cli_for_plugin_users():
     installation = (_ROOT / "docs" / "getting-started" / "installation.md").read_text(
         encoding="utf-8"
     )
-    assert (
-        "uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main" in installation
-    )
+    source_ref = "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1"
+    assert f"uv tool install {source_ref}" in installation
     assert "uv tool upgrade sidegraph" in installation
     assert "### Option A — the CLI on your PATH\n" in installation
     assert "**Keep it updated. This step is part of the install.**" in installation
@@ -1078,3 +1080,215 @@ def test_pages_beside_the_plugin_offer_the_cli_with_its_update():
             if stale in flat:
                 problems.append(f"{rel}: still says `{stale}`")
     assert not problems, "\n".join(problems)
+
+
+# -- Graphify must run with GRAPHIFY_NO_AUTO_REFRESH=1 (design spec 2026-10-14-graphify-upgrade, D7)
+
+_VARIABLE = "GRAPHIFY_NO_AUTO_REFRESH"
+# ``graphify`` as the command word: at the start of a line (after ``$ ``), after ``;`` ``&`` ``|``,
+# after ``uvx [--from X]`` or after a YAML ``run:``. ``graphify-out`` and ``graphifyy`` are not it.
+_GRAPHIFY_COMMAND = re.compile(
+    r"(?:^\s*(?:\$\s+)?|[;&|(]\s*|\buvx\s+(?:--from\s+\S+\s+)?|\brun:\s*[|>]?\s*)graphify\s"
+)
+# An assignment on a line of its own that is not a comment: POSIX, PowerShell or cmd.
+_ASSIGNMENT = re.compile(
+    rf"^\s*(?:export\s+|set\s+)?{_VARIABLE}=1\s*(?:#.*)?$"
+    rf"|^\s*\$env:{_VARIABLE}\s*=\s*[\"']1[\"']\s*(?:#.*)?$"
+)
+
+
+def _set_in_env(env: object) -> bool:
+    return isinstance(env, dict) and str(env.get(_VARIABLE)) == "1"
+
+
+def _unprotected_shell_lines(lines: list[str], *, env_set: bool = False) -> list[int]:
+    """Indexes of the lines that run Graphify before the variable is set: by an assignment prefix
+    on the same command, by an earlier assignment line, or by ``env_set`` (the step's env). A
+    comment or prose that merely names the variable does not count."""
+    armed, offenders = env_set, []
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        if _ASSIGNMENT.match(line):
+            armed = True
+            continue
+        found = _GRAPHIFY_COMMAND.search(line)
+        if found and not armed and f"{_VARIABLE}=1" not in line[: found.end()]:
+            offenders.append(index)
+    return offenders
+
+
+def _unprotected_workflow_steps(text: str) -> list[str]:
+    """The steps of a GitHub workflow that run Graphify without the variable in their effective
+    env (workflow, job and step levels merged) or set earlier in their own script."""
+    try:
+        workflow = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return ["(not parseable as YAML)"]
+    if not isinstance(workflow, dict):
+        return ["(not a workflow mapping)"]
+    offenders = []
+    jobs = workflow.get("jobs") or {}
+    for job_name, job in jobs.items():
+        for number, step in enumerate((job or {}).get("steps") or [], 1):
+            script = step.get("run") if isinstance(step, dict) else None
+            if not isinstance(script, str) or "graphify" not in script:
+                continue
+            env_set = any(_set_in_env(owner.get("env")) for owner in (workflow, job, step) if owner)
+            if _unprotected_shell_lines(script.splitlines(), env_set=env_set):
+                offenders.append(f"{job_name} step {number} ({step.get('name', 'unnamed')})")
+    return offenders
+
+
+def _fenced_blocks(path: Path):
+    """``(language, first line number, lines)`` for each fenced block of a Markdown file."""
+    block: tuple[str, int, list[str]] | None = None
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            if block is None:
+                block = (line.lstrip()[3:].strip().lower(), number + 1, [])
+            else:
+                yield block
+                block = None
+        elif block is not None:
+            block[2].append(line)
+
+
+def _copyable_markdown() -> list[Path]:
+    plugin = sorted((_ROOT / "plugin").rglob("*.md"))
+    named = [_ROOT / "README.md"]
+    for stem in ("AGENTS", "CLAUDE"):
+        twin = _ROOT / f"{stem}.public.md"
+        named.append(twin if twin.exists() else _ROOT / f"{stem}.md")
+    return [*sorted((_ROOT / "docs").rglob("*.md")), *named, *plugin]
+
+
+def _unprotected_markdown_blocks(paths: list[Path]) -> list[str]:
+    offenders = []
+    for path in paths:
+        for language, first, lines in _fenced_blocks(path):
+            if not any(_GRAPHIFY_COMMAND.search(line) for line in lines):
+                continue
+            where = path.relative_to(_ROOT)
+            if language in ("yaml", "yml"):
+                offenders += [
+                    f"{where}:{first} {step}"
+                    for step in _unprotected_workflow_steps("\n".join(lines))
+                ]
+            else:
+                offenders += [f"{where}:{first + i}" for i in _unprotected_shell_lines(lines)]
+    return offenders
+
+
+def test_every_copyable_graphify_run_sets_the_auto_refresh_variable():
+    """Any Graphify CLI run (``update``, ``extract``, even ``--version``) refreshes the agent
+    skills Graphify installed unless GRAPHIFY_NO_AUTO_REFRESH=1 is set, so a fenced block that
+    runs ``graphify`` sets the variable first: an assignment prefix on the command, an
+    assignment line earlier in the block, or, in a workflow, the variable in the step's, job's or
+    workflow's ``env``. A comment or a sentence that names the variable does not count."""
+    assert _unprotected_markdown_blocks(_copyable_markdown()) == []
+
+
+def test_every_ci_step_that_runs_graphify_has_the_variable_in_its_env():
+    workflows = sorted((_ROOT / ".github" / "workflows").glob("*.y*ml"))
+    assert workflows, "no workflow files found"
+    offenders = [
+        f"{path.name}: {step}"
+        for path in workflows
+        for step in _unprotected_workflow_steps(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "graphify" in ci, "the guard would pass on a workflow that no longer runs Graphify"
+
+
+def test_the_docs_guard_rejects_comments_and_bare_runs(tmp_path):
+    """The guard bites: a comment that names the variable, a bare ``uvx ... graphify`` and a
+    workflow step without the env are all offenders."""
+    page = tmp_path / "page.md"
+    page.write_text(
+        "```bash\n# export GRAPHIFY_NO_AUTO_REFRESH=1\ngraphify update .\n```\n"
+        "```bash\nuvx --from graphifyy==0.9.6 graphify update .\n```\n"
+        "```bash\nexport GRAPHIFY_NO_AUTO_REFRESH=1\ngraphify update .\n```\n"
+        "```bash\nGRAPHIFY_NO_AUTO_REFRESH=1 uvx --from graphifyy==0.9.6 graphify update .\n```\n"
+    )
+    flagged = []
+    for _language, first, lines in _fenced_blocks(page):
+        flagged += [first + i for i in _unprotected_shell_lines(lines)]
+    assert flagged == [3, 6]
+    bare = "jobs:\n  j:\n    steps:\n      - name: s\n        run: uvx graphify update .\n"
+    assert _unprotected_workflow_steps(bare) == ["j step 1 (s)"]
+    commented = bare.replace("run:", '# env: {GRAPHIFY_NO_AUTO_REFRESH: "1"}\n        run:')
+    assert _unprotected_workflow_steps(commented) == ["j step 1 (s)"]
+    job_env = bare.replace(
+        "    steps:", '    env:\n      GRAPHIFY_NO_AUTO_REFRESH: "1"\n    steps:'
+    )
+    assert _unprotected_workflow_steps(job_env) == []
+
+
+_README_HOST_RECIPES = (
+    (
+        "Claude Code",
+        (
+            "/plugin marketplace add SantyagoSeaman/sidegraph",
+            "/plugin install sidegraph@sidegraph",
+            "claude plugin marketplace update sidegraph",
+            "claude plugin update sidegraph@sidegraph",
+        ),
+        ("approval", "new", "session"),
+    ),
+    (
+        "Codex",
+        (
+            "codex plugin marketplace add SantyagoSeaman/sidegraph",
+            "codex plugin add sidegraph@sidegraph",
+            "codex plugin marketplace upgrade sidegraph",
+        ),
+        ("/hooks", "approve", "new", "session"),
+    ),
+    (
+        "Muse (experimental)",
+        (
+            "git clone -c core.autocrlf=false "
+            "https://github.com/SantyagoSeaman/sidegraph.git sidegraph-plugin",
+            "muse plugins install ./sidegraph-plugin/plugin/sidegraph",
+            "muse plugins inspect sidegraph",
+            "muse plugins approve sidegraph",
+            "git -C sidegraph-plugin pull --ff-only",
+            "muse plugins update sidegraph",
+        ),
+        ("Review", "restart", "project", "MCP"),
+    ),
+    (
+        "OpenCode V2",
+        (
+            "opencode plugin add 'git+https://github.com/SantyagoSeaman/sidegraph.git#main'",
+            "opencode plugin check 'git+https://github.com/SantyagoSeaman/sidegraph.git#main'",
+            "opencode plugin update 'git+https://github.com/SantyagoSeaman/sidegraph.git#main'",
+        ),
+        ("permissions", "restart", "@sidegraph-setup"),
+    ),
+)
+
+
+@pytest.mark.parametrize("host,commands,permission_tokens", _README_HOST_RECIPES)
+def test_readme_has_scoped_host_install_update_and_permissions(host, commands, permission_tokens):
+    text = (_ROOT / "README.md").read_text(encoding="utf-8")
+    section = re.search(rf"^#### {re.escape(host)}\n(.*?)(?=^#{{1,4}} |\Z)", text, re.M | re.S)
+    assert section and section[1].strip(), f"README has no nonempty {host} section"
+    body = section[1]
+    fenced = _fenced_lines(body)
+    assert all(command in fenced for command in commands), f"{host}: missing scoped command"
+    assert all(token in body for token in permission_tokens), (
+        f"{host}: missing approval/restart step"
+    )
+    assert not any("<" in line or ">" in line for line in fenced), (
+        f"{host}: placeholder or redirect"
+    )
+    if host == "Codex":
+        assert "codex plugin update sidegraph@sidegraph" not in body
+
+
+def test_readme_warns_existing_stores_before_graphify_upgrade():
+    text = (_ROOT / "README.md").read_text(encoding="utf-8")
+    assert text.index("docs/guides/migrating-to-0.14.md") < text.index('uv tool install "graphifyy')

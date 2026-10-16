@@ -55,6 +55,7 @@ def test_session_start_survives_sync_failure(tmp_path, monkeypatch, capsys):
 
 def test_get_task_context_tool_shell_syncs(tmp_path, monkeypatch):
     db = tmp_path / "t.db"
+    Store(db).close()
     # SIDEGRAPH_DIR (not the deprecated SIDEGRAPH_DB) so `db` is used LITERALLY -- no
     # legacy-dispatch redirection to its parent when it doesn't exist yet (see
     # config._dispatch_sidegraph_db); back-compat itself is covered by tests/test_config.py.

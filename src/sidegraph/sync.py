@@ -16,19 +16,14 @@ durable->engine mapping. Gated on
 read-path invocation is a cheap no-op in the common case. No LLM, no fuzzy matching
 (deferred). See docs/guides/surviving-refactors.md for the rebinding mechanics.
 
-Mind-model layer (see docs/concepts/mind-model.md): the same pass also refreshes each
-accepted ``Domain``'s ``communities`` mapping from BOTH its ``path_prefixes`` (a directory
-sweep) and its ``seed_anchors`` (durable entity anchors resolved via ``reader.resolve`` —
-§2a amendment, design/superpowers/specs/2026-07-08-domain-onboarding-design.md: a curated
-domain anchors to entities, not volatile Leiden community ids, so membership survives a
-fresh clone/rebuild), conservative and abstain-on-ambiguity throughout (same style as
-``_observed_community_for_orphan``), flags domains that recomputed to empty, caps and flags
-a claim that would newly cover more than 20% of all current communities rather than
-writing it (Gate-5 blocker — see
-``_DOMAIN_CLAIM_CAP``/``_recompute_domain_communities``), and precomputes the SessionStart
-TOC cache. ``refresh_domain_communities_now`` resolves a single domain immediately
-(ratify-time, bypassing the ``graph_version`` gate) so a newly-accepted domain's membership
-shows up without waiting for the next graph rebuild.
+Mind-model layer (see docs/concepts/mind-model.md): the same pass computes each accepted
+``Domain``'s effective per-node membership from its frozen domain snapshot, when present,
+or its ``path_prefixes`` and ``seed_anchors`` rules. It publishes ``domain_members`` and the
+communities wholly contained in that membership together under a writer reservation. The
+rules' community contribution keeps the 20% cap (``_DOMAIN_CLAIM_CAP``); every matching path
+node is still a member. Failed refreshes retain prior membership and are reported until
+retried. The pass also precomputes the SessionStart TOC cache.
+``refresh_domain_communities_now`` refreshes a domain immediately at ratify time.
 
 Index-only mode (``canonical_writes=False``, see ``sync``): a linked worktree reads the main
 checkout's graph and syncs it into its own cold index. The pass refreshes every derived thing as
@@ -44,14 +39,18 @@ the store's method, which recomputes live on every call (a single indexed query)
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
-from dataclasses import dataclass
+import sqlite3
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel
 
+from . import domain_snapshot
 from .doctor import scan_code_drift
 from .engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader, NodeRef
 from .retrieval import DRIFT_CACHE_KEY, TOC_CACHE_KEY, build_toc, drifted_record_ids
@@ -65,7 +64,15 @@ from .schema import (
     matches_path_prefix,
     strip_decoration,
 )
-from .store import VOLATILE_STALE_KEY, Store
+from .store import (
+    MEMBERSHIP_FAILED_KEY,
+    MEMBERSHIP_POPULATED_KEY,
+    MEMBERSHIP_STAMP_KEY,
+    VOLATILE_STALE_KEY,
+    Store,
+    StoreBusyError,
+)
+from .store_layout import snapshot_signature
 from .verify import _run_git
 
 LAST_SYNCED_KEY = "last_synced_graph_version"
@@ -163,7 +170,9 @@ def _repoint_communities(
     return repointed
 
 
-def _reconcile_tier1_communities(record_id: str, vacated: set[str], store: Store) -> bool:
+def _reconcile_tier1_communities(
+    record_id: str, vacated: set[str], store: Store, graph_version: str
+) -> bool:
     """Settle one record's Tier-1 ``community:*`` rows after every leaf has been rebound.
 
     Returns ``True`` when the record was settled (restored and orphaned as computed) and
@@ -174,10 +183,14 @@ def _reconcile_tier1_communities(record_id: str, vacated: set[str], store: Store
     for a held community that was orphaned goes live again. Orphan: a row for a community a
     leaf *vacated* in this pass and no leaf holds any more. Skipped when a live/degraded
     leaf has no baseline (its community is unknown, so the record's communities cannot be
-    told apart). Rows nothing vacated (an ambiguous anchor's Tier-1-only row, an orphan-rung
-    repoint, inherited rows) and ``domain:*`` rows are never orphaned here. Status-only,
-    append-only preserved. See design/superpowers/specs/2026-09-29-sync-pending-moves-and-
-    shared-communities-design.md D4.
+    told apart), except a live leaf on a path-less descriptor mapped on this graph version yet
+    holding no community: identical external stubs in split communities (resolved, collapsed)
+    hold none, so it neither joins *held* nor blocks the settle. A degraded leaf or an old mapping
+    left by a failed rebind does not establish that the current answer holds none. Rows nothing
+    vacated (an ambiguous anchor's Tier-1-only row, an orphan-rung repoint, inherited rows) and
+    ``domain:*`` rows are
+    never orphaned here. Status-only, append-only preserved. See design/superpowers/specs/
+    2026-09-29-sync-pending-moves-and-shared-communities-design.md D4.
     """
     held: set[str] = set()
     unknown_baseline = False
@@ -188,6 +201,14 @@ def _reconcile_tier1_communities(record_id: str, vacated: set[str], store: Store
         if leaf is None:
             continue
         if leaf.last_seen_community is None:
+            if (
+                b.status == "live"
+                and leaf.descriptor is not None
+                and leaf.descriptor.file_path is None
+                and leaf.last_seen_node_id is not None
+                and leaf.last_seen_graph_version == graph_version
+            ):
+                continue  # identical stubs in split communities: this leaf holds none
             unknown_baseline = True
         else:
             held.add(leaf.last_seen_community)
@@ -258,6 +279,18 @@ def _adopt(
     community: str | None,
     vacated: dict[str, set[str]] | None = None,
 ) -> int:
+    if (
+        community is None
+        and entity.last_seen_community is not None
+        and entity.descriptor is not None
+        and entity.descriptor.file_path is None
+        and vacated is not None
+    ):
+        # A resolved path-less leaf now holds none. Record its known departure before the
+        # old baseline is cleared; reconcile still respects siblings and unknown baselines.
+        for binding in store.bindings_for_entity(entity.entity_id):
+            if binding.tier == 2:
+                vacated.setdefault(binding.record_id, set()).add(entity.last_seen_community)
     repointed = _repoint_communities(entity, community, store, vacated)
     entity.last_seen_node_id = node_id
     entity.last_seen_graph_version = version
@@ -450,7 +483,7 @@ def rebind_entity(
     outcome = _rebind_ladder(entity, store, reader, repo_root, collector, canonical_writes)
     if vacated is None:
         for record_id, gone in collector.items():
-            _reconcile_tier1_communities(record_id, gone, store)
+            _reconcile_tier1_communities(record_id, gone, store, reader.graph_version())
     return outcome
 
 
@@ -769,61 +802,436 @@ def _recompute_domain_communities(
     return survivors, matched_count, None
 
 
-def _refresh_domains(
-    store: Store, reader: GraphifyReader
-) -> tuple[int, list[dict], list[dict], list[dict]]:
-    """Refresh ``communities`` on every ACCEPTED domain; return (refreshed count, empty
-    domains, overbroad domains, failures). A domain is flagged empty when its recomputed
-    set is empty AND its ``path_prefixes`` matched zero current nodes — a domain whose
-    stabilizer still points at live code is never flagged even if none of those nodes
-    carry a community label. A domain whose ``path_prefixes`` claim tripped the refresh
-    cap (see ``_recompute_domain_communities``/``_DOMAIN_CLAIM_CAP``) is always flagged
-    overbroad — "your path rule is too broad" — regardless of outcome: if
-    ``seed_anchors`` rescued the domain, its (anchor-only) communities are still written
-    and counted as refreshed; if nothing rescued it, its previous mapping was kept, not
-    zeroed, so it is never also flagged empty. Domains never orphan (they're owned); both
-    empty and overbroad are routed to a human via the report, status is never
-    auto-changed (never guess). A domain whose refresh raises is isolated (see the loop
-    below) and reported in ``failures`` instead of aborting the pass.
-    """
-    nodes = reader.list_nodes()
-    current_community_ids = {n.community for n in nodes if n.community is not None}
+@dataclass
+class MembershipRefresh:
+    """What one membership pass (``_refresh_domains``) did, or what ``ensure_domain_membership``
+    found recorded: the fields a ``SyncReport`` carries about domains, and ``failed_ids``, the
+    failed domains capture must not bind from. ``recomputed`` is ``False`` when the failures
+    are a recorded pass's, reported again for the same identity, and for a rolled-back pass.
+    ``rolled_back`` marks a pass of this call that could not take the writer reservation or
+    failed as a whole: nothing it computed was published.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)"""
 
-    refreshed = 0
-    empty: list[dict] = []
-    overbroad: list[dict] = []
-    failures: list[dict] = []
-    # `reader.list_nodes()` above stays outside any try on purpose: a reader that
-    # constructed has already parsed its graph, and list_nodes is a list copy.
-    for domain in store.iter_domains(status=DomainStatus.ACCEPTED):
-        # The try encloses the WRITE as well as the recompute. refresh_domain_communities
-        # raises ValueError if the domain vanished mid-pass (concurrent supersede — it
-        # re-fetches by id) and sqlite3.OperationalError under cross-process lock
-        # contention, which the widened gate makes ordinary: a SessionStart hook and the
-        # MCP server now both heal after the same pull. Wrapping only the recompute lets
-        # those escape, abort the pass, skip every remaining domain, and appear in no
-        # report — the exact invisibility this task exists to kill.
-        try:
-            communities, matched, cap_hit = _recompute_domain_communities(
-                domain, nodes, current_community_ids, reader
-            )
-            if cap_hit is not None:
-                overbroad.append({"slug": domain.slug, "title": domain.title, **cap_hit})
-            if communities != sorted(domain.communities):
-                store.refresh_domain_communities(domain.domain_id, communities)
-                refreshed += 1
-            if not communities and matched == 0:
-                empty.append({"slug": domain.slug, "title": domain.title})
-        except Exception as exc:  # one bad domain must not cost the others their heal
-            failures.append(
+    refreshed: int = 0
+    empty: list[dict] = field(default_factory=list)
+    overbroad: list[dict] = field(default_factory=list)
+    failures: list[dict] = field(default_factory=list)
+    splits: list[dict] = field(default_factory=list)
+    failed_ids: list[str] = field(default_factory=list)
+    recomputed: bool = True
+    rolled_back: bool = False
+
+    def fail(self, domain: Domain, exc: BaseException) -> None:
+        self.failures.append(
+            {"slug": domain.slug, "title": domain.title, "error": f"{type(exc).__name__}: {exc}"}
+        )
+        self.failed_ids.append(domain.domain_id)
+
+    @classmethod
+    def rolled_back_by(cls, exc: BaseException) -> MembershipRefresh:
+        """A pass that could not take the reservation (a busy writer) or failed as a whole. It
+        rolled back, so the previous rows and certification stand. One pass-level failure stands
+        for every accepted domain: listing them would read the store again, and a writer holding
+        an exclusive lock makes that read wait and fail too. ``busy`` says which it was."""
+        return cls(
+            failures=[
                 {
-                    "slug": domain.slug,
-                    "title": domain.title,
+                    "slug": "*",
+                    "title": "every accepted domain",
                     "error": f"{type(exc).__name__}: {exc}",
+                    "busy": _is_busy(exc),
                 }
+            ],
+            recomputed=False,
+            rolled_back=True,
+        )
+
+    @property
+    def busy(self) -> bool:
+        """The pass could not run because another writer held the store: nothing failed, and
+        the next pass runs it."""
+        return any(f.get("busy") for f in self.failures)
+
+    def report_fields(self) -> dict:
+        """The ``SyncReport`` fields this pass fills."""
+        return {
+            "domains_refreshed": self.refreshed,
+            "empty_domains": self.empty,
+            "overbroad_domains": self.overbroad,
+            "domain_failures": self.failures,
+            "snapshot_splits": self.splits,
+        }
+
+
+@dataclass(frozen=True)
+class DomainMembership:
+    """One accepted domain's effective membership over one graph: its member nodes, and
+    ``communities``, whose every anchorable node is a member (for a domain governed by its
+    rules, exactly the rule's claim).
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)"""
+
+    communities: list[str]
+    members: list[NodeRef]
+    cap_hit: dict[str, int] | None = None
+
+    def rows(self) -> list[tuple[str, str | None, str | None]]:
+        return [(n.node_id, n.file_path or None, n.community) for n in self.members]
+
+
+class _MembershipView:
+    """What one pass needs to compute every accepted domain's membership over one graph,
+    indexed once: the type-split communities and, when the store has a snapshot, each node's
+    recorded domains and which accepted domain holds each covered slug."""
+
+    def __init__(self, reader: GraphifyReader) -> None:
+        self.reader = reader
+        self.nodes = reader.list_nodes()
+        self.current = {n.community for n in self.nodes if n.community is not None}
+        self.anchorable = [n for n in self.nodes if n.file_type in ANCHORABLE_FILE_TYPES]
+        self.by_community: dict[str, list[NodeRef]] = {}
+        for n in self.anchorable:
+            if n.community is not None:
+                self.by_community.setdefault(n.community, []).append(n)
+        self.recorded: domain_snapshot.Recorded | None = None
+        self.heirs: dict[str, str] = {}
+        self.splits: dict[str, list[str]] = {}
+        self.rederive: frozenset[str] = frozenset()
+
+    @classmethod
+    def for_store(
+        cls,
+        store: Store,
+        reader: GraphifyReader,
+        snap: domain_snapshot.DomainSnapshot | None,
+        accepted: list[Domain],
+        *,
+        rederive: frozenset[str] = frozenset(),
+    ) -> _MembershipView:
+        """The view over ``snap`` (or none) and ``accepted``, which the caller read once, inside
+        the reservation it publishes from; lineage reads superseded records by id."""
+        view = cls(reader)
+        view.rederive = rederive
+        if snap is not None:
+            view.heirs, view.splits = domain_snapshot.snapshot_heirs(
+                snap, accepted, store.get_domain
             )
+            view.recorded = domain_snapshot.recorded_sets(view.anchorable, snap)
+        return view
+
+    def frozen_slug(self, domain: Domain) -> str | None:
+        """The covered slug whose entries ``domain`` holds, or ``None``: no snapshot, a domain
+        accepted after it, a part of a split, or one ``--refresh --domain`` re-derives."""
+        if self.recorded is None or domain.slug in self.rederive:
+            return None
+        return self.heirs.get(domain.domain_id)
+
+    def rule_members(self, domain: Domain, claimed: Iterable[str]) -> list[NodeRef]:
+        """Every anchorable node of the claimed communities (path-less ones too: capture can
+        resolve them), plus every anchorable node under one of ``domain.path_prefixes``,
+        whether or not the cap let the prefix claim a community: the read rule before the index."""
+        members = {n.node_id: n for c in claimed for n in self.by_community.get(c, [])}
+        if domain.path_prefixes:
+            for n in self.anchorable:
+                if n.file_path and any(
+                    matches_path_prefix(n.file_path, p) for p in domain.path_prefixes
+                ):
+                    members.setdefault(n.node_id, n)
+        return sorted(members.values(), key=lambda n: n.node_id)
+
+    def _wholly_inside(self, members: dict[str, NodeRef]) -> list[str]:
+        touched = {n.community for n in members.values() if n.community is not None}
+        return sorted(c for c in touched if all(n.node_id in members for n in self.by_community[c]))
+
+    def membership(self, domain: Domain) -> DomainMembership:
+        slug = self.frozen_slug(domain)
+        if slug is None:
+            communities, _matched, cap_hit = _recompute_domain_communities(
+                domain, self.nodes, self.current, self.reader
+            )
+            ruled = self.rule_members(domain, communities)
+            if self.recorded is None or domain.slug in self.rederive:
+                return DomainMembership(communities, ruled, cap_hit)
+            # Rule 4 (a domain accepted after the snapshot, or a part of a split): its rules
+            # reach only nodes in files the snapshot does not list, never a listed node.
+            listed = self.recorded.listed
+            kept = {n.node_id: n for n in ruled if n.file_path and n.node_id not in listed}
+            return DomainMembership(
+                self._wholly_inside(kept), sorted(kept.values(), key=lambda n: n.node_id), cap_hit
+            )
+        assert self.recorded is not None
+        sets, listed = self.recorded.sets, self.recorded.listed
+        members = {n.node_id: n for n in self.anchorable if slug in sets[n.node_id]}
+        # Rule 2: a node in a file the snapshot does not list also joins a domain whose prefix
+        # covers that file, as before the snapshot; a listed node never does.
+        if domain.path_prefixes:
+            for n in self.anchorable:
+                if (
+                    n.node_id not in listed
+                    and n.file_path
+                    and any(matches_path_prefix(n.file_path, p) for p in domain.path_prefixes)
+                ):
+                    members.setdefault(n.node_id, n)
+        return DomainMembership(
+            self._wholly_inside(members), sorted(members.values(), key=lambda n: n.node_id)
+        )
+
+
+def rule_members(
+    domain: Domain, communities: Iterable[str], reader: GraphifyReader
+) -> list[NodeRef]:
+    """``domain``'s members by its rules over ``reader``'s graph, given the communities its
+    rule claims (see ``_MembershipView.rule_members``)."""
+    return _MembershipView(reader).rule_members(domain, communities)
+
+
+def _store_membership(
+    store: Store, domain_id: str, m: DomainMembership, *, populated: bool
+) -> bool:
+    """Write ``m`` into the index, communities and rows in one transaction (the caller's
+    reservation and savepoint), compared with the domain as stored now, never with a copy the
+    caller read earlier. ``True`` when the membership readers see changed: the communities, or
+    the rows once the index is ``populated`` (``MEMBERSHIP_POPULATED_KEY``). Rows written while
+    the index is being populated (after the upgrade, or a reload) are not counted."""
+    with store._mutation():
+        stored = store.get_domain(domain_id)
+        if stored is None:
+            raise ValueError(f"domain {domain_id!r} vanished")
+        changed = False
+        if m.communities != sorted(stored.communities):
+            store.refresh_domain_communities(domain_id, m.communities)
+            changed = True
+        if store.replace_domain_members(domain_id, m.rows()) and populated:
+            changed = True
+    return changed
+
+
+def membership_stamp(store: Store, reader: GraphifyReader, signature: str | None = None) -> str:
+    """The identity the membership index is certified for: the graph and the resolver
+    (``reader.sync_stamp()``) and the domain snapshot's content (``signature``, the signature
+    of the very bytes a pass parsed; read from disk when not given)."""
+    if signature is None:
+        signature = snapshot_signature(store.path)
+    return f"{reader.sync_stamp()}|{signature}"
+
+
+def _recorded(store: Store, identity: str) -> dict | None:
+    """The failure a pass recorded for ``identity`` (``MEMBERSHIP_FAILED_KEY``), or ``None``."""
+    try:
+        data = json.loads(store.get_meta(MEMBERSHIP_FAILED_KEY) or "null")
+    except ValueError:
+        return None
+    if (
+        isinstance(data, dict)
+        and data.get("identity") == identity
+        and isinstance(data.get("failures"), list)
+        and isinstance(data.get("failed_ids"), list)
+    ):
+        return data
+    return None
+
+
+def _settled(store: Store, identity: str) -> tuple[bool, MembershipRefresh | None]:
+    """Whether a pass already settled ``identity``, and what it left: ``(True, None)`` when the
+    index is certified for it, ``(True, <the recorded failure>)`` when a pass for it failed,
+    ``(False, None)`` when none did. A recorded whole-pass failure outranks a certification for
+    the same identity (a forced pass that failed as a whole leaves the earlier one in place)."""
+    recorded = _recorded(store, identity)
+    certified = store.get_meta(MEMBERSHIP_STAMP_KEY) == identity
+    if recorded is None or (certified and not recorded.get("whole")):
+        return certified, None
+    return True, MembershipRefresh(
+        failures=recorded["failures"], failed_ids=recorded["failed_ids"], recomputed=False
+    )
+
+
+def _settle(store: Store, identity: str, out: MembershipRefresh) -> None:
+    """Inside the pass's reservation: certify ``identity``, or, when a domain failed, drop
+    whatever certification the index held and record the failure for ``identity``."""
+    if out.failures:
+        store.delete_meta(MEMBERSHIP_STAMP_KEY)
+        store.set_meta(
+            MEMBERSHIP_FAILED_KEY,
+            json.dumps(
+                {"identity": identity, "failures": out.failures, "failed_ids": out.failed_ids}
+            ),
+        )
+    else:
+        store.set_meta(MEMBERSHIP_STAMP_KEY, identity)
+        store.delete_meta(MEMBERSHIP_FAILED_KEY)
+
+
+def _is_busy(exc: BaseException) -> bool:
+    """Whether ``exc`` says another writer held the store: ``StoreBusyError``, or SQLite's BUSY
+    or LOCKED."""
+    if isinstance(exc, StoreBusyError):
+        return True
+    code = getattr(exc, "sqlite_errorcode", None)
+    return (
+        isinstance(exc, sqlite3.OperationalError)
+        and isinstance(code, int)
+        and code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    )
+
+
+def _record_whole_failure(store: Store, identity: str, out: MembershipRefresh) -> None:
+    """Record a pass that failed as a whole, for any reason but a busy writer, under the
+    ``identity`` it read. Only inside the failed pass's own transaction, after its savepoint
+    rolled the pass back, so no other writer can have changed what the pass read. When the
+    error ended that transaction (SQLite rolls some errors back whole), ``_savepoint`` refuses
+    and nothing is recorded: another writer may have changed the state meanwhile, and no
+    comparison can prove it did not. The next call recomputes. ``ensure`` then reports a
+    recorded failure without recomputing until the identity changes, and capture binds from
+    no row for it, whatever the certification says. The certification is left alone.
+    Best-effort: a record that cannot be written leaves the failure to be recomputed."""
+    record = json.dumps(
+        {"identity": identity, "failures": out.failures, "failed_ids": [], "whole": True}
+    )
+    with contextlib.suppress(Exception), store._savepoint():
+        store.set_meta(MEMBERSHIP_FAILED_KEY, record)
+
+
+def _apply(
+    store: Store,
+    view: _MembershipView,
+    accepted: list[Domain],
+    out: MembershipRefresh,
+    *,
+    populated: bool,
+) -> None:
+    """Compute and write each accepted domain's membership, each inside its own savepoint."""
+    for domain in accepted:
+        # The savepoint encloses the computation and the WRITE: refresh_domain_communities
+        # raises ValueError on a domain that vanished, and a failure after the community update
+        # must not leave that domain's communities ahead of its rows.
+        try:
+            with store._savepoint():
+                m = view.membership(domain)
+                if _store_membership(store, domain.domain_id, m, populated=populated):
+                    out.refreshed += 1
+        except Exception as exc:  # one bad domain must not cost the others their heal
+            if not store._conn.in_transaction:
+                raise  # the pass lost its reservation; never reacquire it to settle stale work
+            out.fail(domain, exc)
             continue
-    return refreshed, empty, overbroad, failures
+        if m.cap_hit is not None:
+            out.overbroad.append({"slug": domain.slug, "title": domain.title, **m.cap_hit})
+        if not m.communities and not m.members:
+            out.empty.append({"slug": domain.slug, "title": domain.title})
+
+
+def ensure_domain_membership(store: Store, reader: GraphifyReader) -> MembershipRefresh | None:
+    """Recompute every accepted domain's membership when the index is not certified for the
+    current identity (graph, snapshot): after a reload, a changed snapshot, a domain status
+    change, or on a graph the store has not synced. Domain membership only; the rebind ladder
+    waits for the next sync. ``None`` when the index was current. When a pass already failed
+    for this identity, the recorded failure comes back without a recompute
+    (``recomputed=False``); a new identity, a status change, or ``sync(force=True)``
+    recomputes. A skipped sync, capture's Tier-1 pick, ``drill_down`` and ratify call it.
+
+    The certification and a recorded failure are checked here without the reservation, then
+    again inside it (``only_if_stale``): a caller that waited for another's pass computes
+    nothing.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)"""
+    settled, found = _settled(store, membership_stamp(store, reader))
+    if settled:
+        return found
+    return _refresh_domains(store, reader, only_if_stale=True)
+
+
+def membership_exclusions(
+    store: Store, reader: GraphifyReader, identity: str | None = None
+) -> frozenset[str] | None:
+    """Which accepted domains' rows capture must not bind from for ``identity`` (the one the
+    caller checked; the identity on disk now when not given): none (the index is certified),
+    the failed domains (the last pass for this identity recorded failures; every other
+    domain's rows were written by it), or ``None``: no row is certified for this identity
+    (nothing is, or the pass for it failed as a whole, which outranks a certification). Only
+    capture asks, because a binding is durable; the reading surfaces show the last published
+    membership whatever this says. Read it inside the reservation that ran
+    ``ensure_domain_membership``."""
+    if identity is None:
+        identity = membership_stamp(store, reader)
+    recorded = _recorded(store, identity)
+    if recorded is not None and recorded.get("whole"):
+        return None
+    if store.get_meta(MEMBERSHIP_STAMP_KEY) == identity:
+        return frozenset()
+    return None if recorded is None else frozenset(recorded["failed_ids"])
+
+
+def _refresh_domains(
+    store: Store, reader: GraphifyReader, *, only_if_stale: bool = False
+) -> MembershipRefresh | None:
+    """Refresh every ACCEPTED domain's membership: its ``communities`` and its member rows (the
+    index retrieval and capture read). The whole pass runs inside ONE writer reservation: it
+    reads the accepted domains and the identity, computes and writes each domain inside its
+    own savepoint, and certifies that identity, or records the failures. A status change takes
+    the same reservation, so none lands between the reads and the certification. The first
+    pass over an empty index (after the upgrade, or a reload) marks it populated, when no
+    domain failed. The pass asks for a large page cache (``_mutation(large_cache=True)``), kept
+    until the owning transaction ends, so its writes do not spill and lock readers out.
+
+    ``only_if_stale`` (``ensure_domain_membership``): inside the reservation, an identity a pass
+    already settled returns ``None`` (certified) or the recorded failure, and nothing is
+    computed. A pass that cannot take the reservation, or fails as a whole, rolls back and
+    returns ``MembershipRefresh.rolled_back_by``; one that failed for any reason but a busy
+    writer is recorded inside its own reservation (``_record_whole_failure``). ``None`` comes
+    back only under ``only_if_stale``. A domain with no communities and no members is
+    reported empty; cap hits are reported without changing domain status. When transaction
+    loss also ends an owning caller's transaction, propagate through both handlers so the
+    caller cannot continue and commit partial work.
+
+    The snapshot is read inside the reservation, once: the identity
+    certified carries the hash of the very bytes applied, so a pull landing meanwhile leaves
+    the certification behind. An invalid snapshot fails every domain's refresh, keeps the
+    previous membership and says why (a finding for ``--check``), and never falls back to the
+    rules the snapshot replaced; the failure is recorded like any other, so it is reported
+    without recomputing until the file, the graph or a domain's status changes. A whole-pass
+    failure is recorded under the identity of the bytes read when it came after that read, and
+    under the identity on disk when it came before."""
+    out = MembershipRefresh()
+    try:
+        with store._mutation(large_cache=True):
+            identity: str | None = None
+            try:
+                with store._savepoint():
+                    identity = membership_stamp(store, reader)
+                    if only_if_stale:
+                        settled, found = _settled(store, identity)
+                        if settled:
+                            return found
+                    accepted = list(store.iter_domains(status=DomainStatus.ACCEPTED))
+                    try:
+                        snap, signature = domain_snapshot.read_snapshot(store.path)
+                    except domain_snapshot.SnapshotError as exc:
+                        for domain in accepted:
+                            out.fail(domain, exc)
+                        _settle(store, membership_stamp(store, reader, exc.signature), out)
+                        return out
+                    identity = membership_stamp(store, reader, signature)
+                    view = _MembershipView.for_store(store, reader, snap, accepted)
+                    by_id = {d.domain_id: d for d in accepted}
+                    out.splits = [
+                        {"slug": slug, "domains": sorted(by_id[i].slug for i in ids if i in by_id)}
+                        for slug, ids in sorted(view.splits.items())
+                    ]
+                    populated = store.get_meta(MEMBERSHIP_POPULATED_KEY) is not None
+                    _apply(store, view, accepted, out, populated=populated)
+                    if not populated and not out.failures:
+                        store.set_meta(MEMBERSHIP_POPULATED_KEY, "1")
+                    _settle(store, identity, out)
+            except Exception as exc:  # failed as a whole; recorded inside this reservation (T3)
+                if not store._conn.in_transaction and store._mutation_depth > 1:
+                    raise  # preserve loss of the caller's transaction through both handlers
+                failed = MembershipRefresh.rolled_back_by(exc)
+                if identity is not None and not failed.busy:
+                    _record_whole_failure(store, identity, failed)
+                return failed
+    except Exception as exc:  # no reservation (a busy writer), or its commit failed
+        if not store._conn.in_transaction and store._mutation_depth > 0:
+            raise  # the nested scope unwound, but its caller still owns the lost transaction
+        return MembershipRefresh.rolled_back_by(exc)
+    return out
 
 
 def refresh_domain_communities_now(
@@ -847,18 +1255,26 @@ def refresh_domain_communities_now(
     immediate path returns it too, so the caller who just accepted the domain can tell the
     author their path rule was rejected right away.
     """
-    nodes = reader.list_nodes()
-    current_community_ids = {n.community for n in nodes if n.community is not None}
-    communities, _matched, cap_hit = _recompute_domain_communities(
-        domain, nodes, current_community_ids, reader
-    )
+    with store._mutation(large_cache=True), store._savepoint():
+        current = store.get_domain(domain.domain_id)
+        if current is None:
+            raise ValueError(f"domain {domain.domain_id!r} vanished")
+        snap, signature = domain_snapshot.read_snapshot(store.path)
+        identity = membership_stamp(store, reader, signature)
+        populated = store.get_meta(MEMBERSHIP_POPULATED_KEY) is not None
+        m = _MembershipView.for_store(
+            store, reader, snap, list(store.iter_domains(status=DomainStatus.ACCEPTED))
+        ).membership(current)
+        _store_membership(store, current.domain_id, m, populated=populated)
+        # Rows for this identity now sit in the index. A certification for any other identity
+        # no longer holds; one for this identity does, because a pass for it computed the same
+        # rows from the same state (any status change since would have uncertified it).
+        if store.get_meta(MEMBERSHIP_STAMP_KEY) != identity:
+            store._uncertify_membership()
     overbroad = (
-        {"slug": domain.slug, "title": domain.title, **cap_hit} if cap_hit is not None else None
+        {"slug": domain.slug, "title": domain.title, **m.cap_hit} if m.cap_hit is not None else None
     )
-    if communities == sorted(domain.communities):
-        return sorted(domain.communities), overbroad
-    store.refresh_domain_communities(domain.domain_id, communities)
-    return communities, overbroad
+    return m.communities, overbroad
 
 
 @dataclass(frozen=True)
@@ -868,7 +1284,8 @@ class DomainActivation:
     never-fail-a-ratify heal flag (``VOLATILE_STALE_KEY``, already set by this function
     when it applies — a caller never needs to set it itself); ``overbroad`` is
     ``refresh_domain_communities_now``'s own cap-hit dict (or ``None``); ``error`` is the
-    exception text when the refresh raised, else ``None``. Deliberately renders NOTHING —
+    exception text when the refresh raised, else ``None``. ``note`` explains frozen or split
+    snapshot membership when applicable. Deliberately renders NOTHING —
     the "path rule too broad" sentence is a literal trigger phrase for the
     ``sidegraph:heal-anchors`` skill and stays in the two human callers (``server.py``,
     ``cli.py``), which build their own message from ``overbroad``.
@@ -877,6 +1294,32 @@ class DomainActivation:
     resolved: bool
     overbroad: dict | None
     error: str | None
+    note: str | None = None
+
+
+def _snapshot_note(domain: Domain, store: Store) -> str | None:
+    """The sentence a ratify answer adds when the store has a domain snapshot: the domain's
+    membership is frozen, or it is a part of a split. ``None`` otherwise."""
+    snap = domain_snapshot.load_snapshot(store.path)
+    if snap is None:
+        return None
+    accepted = list(store.iter_domains(status=DomainStatus.ACCEPTED))
+    heirs, splits = domain_snapshot.snapshot_heirs(snap, accepted, store.get_domain)
+    slug = heirs.get(domain.domain_id)
+    if slug is not None:
+        return (
+            f"membership frozen by the domain snapshot (as {slug}); a rule change applies "
+            f"only after `sidegraph-domains snapshot --refresh --domain {domain.slug}`"
+        )
+    for split_slug, ids in splits.items():
+        if domain.domain_id in ids:
+            parts = sorted(d.slug for d in accepted if d.domain_id in ids)
+            flags = " ".join(f"--domain {p}" for p in parts)
+            return (
+                f"split from snapshot domain {split_slug}: its frozen membership applies to "
+                f"no part until `sidegraph-domains snapshot --refresh {flags}`"
+            )
+    return None
 
 
 def activate_accepted_domain(
@@ -899,6 +1342,8 @@ def activate_accepted_domain(
     - never rebuilds the ``TOC_CACHE_KEY`` cache — the once-per-batch rebuild stays at the
       caller (``server.py``, ``cli.py``, and both auto callers rebuild once at the end of
       their own batch), so accepting N domains in one pass never pays N ``build_toc`` calls.
+    With a snapshot, success also schedules a full pass: a renamed or split heir can
+    change another domain's membership.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D2
     """
     if reader is None:
@@ -909,7 +1354,96 @@ def activate_accepted_domain(
     except Exception as e:  # never fail a ratify because membership could not be resolved
         store.set_meta(VOLATILE_STALE_KEY, "1")
         return DomainActivation(resolved=False, overbroad=None, error=str(e))
-    return DomainActivation(resolved=True, overbroad=overbroad, error=None)
+    note: str | None = None
+    if domain_snapshot.snapshot_path(store.path).is_file():
+        store.set_meta(VOLATILE_STALE_KEY, "1")
+        try:
+            note = _snapshot_note(domain, store)
+        except Exception:  # advice only: sync and verify report a broken snapshot
+            note = None
+    return DomainActivation(resolved=True, overbroad=overbroad, error=None, note=note)
+
+
+# A snapshot command's refusal when the file changed under it: git takes no lock, so a pull
+# can rewrite it at any moment.
+SNAPSHOT_CHANGED = "the domain snapshot changed while this command ran; run it again"
+
+
+def take_snapshot(
+    store: Store,
+    reader: GraphifyReader,
+    *,
+    refresh: bool,
+    rederive: frozenset[str] = frozenset(),
+    store_commit: str | None = None,
+    based_on: str | None = None,
+) -> domain_snapshot.DomainSnapshot:
+    """What ``sidegraph-domains snapshot`` writes: covered accepted domains' membership over
+    ``reader``'s graph (D5.4).
+
+    - First snapshot (``refresh=False``): every accepted domain, by its rules.
+    - ``refresh`` alone: every accepted domain's effective membership (frozen entries and
+      votes; new-file rule members for the others), all frozen now.
+    - ``refresh`` with ``rederive`` slugs: those domains by their full rules; every other
+      domain that holds entries keeps its effective membership; the rest stay out.
+
+    A graph that is not the one the store last synced (``--graph``, ``--build-with``) does not
+    lend a domain its previous communities: their ids belong to another graph.
+
+    Runs inside one writer reservation, the caller's when it publishes in the same one (the
+    snapshot command does): the accepted domains and the snapshot being refreshed are read
+    once there, so no status change or pull mixes two states into what it freezes. Raises
+    ``ValueError``: for a ``rederive`` slug that names no accepted domain, as read there;
+    an incomplete split refresh (every accepted part must be named by ``rederive``);
+    ``SNAPSHOT_CHANGED`` when the snapshot it reads is not the one whose signature the caller
+    read first (``based_on``); and ``domain_snapshot.SnapshotError`` for an invalid snapshot
+    under ``refresh``.
+    """
+    with store._mutation():
+        synced = store.get_meta(LAST_SYNCED_KEY)
+        same_graph = synced in (reader.sync_stamp(), f"index-only:{reader.sync_stamp()}")
+        accepted = list(store.iter_domains(status=DomainStatus.ACCEPTED))
+        unknown = sorted(rederive - {d.slug for d in accepted})
+        if unknown:
+            raise ValueError(f"--domain names no accepted domain: {', '.join(unknown)}")
+        try:
+            current, signature = domain_snapshot.read_snapshot(store.path)
+        except domain_snapshot.SnapshotError as exc:
+            if refresh and (based_on is None or exc.signature == based_on):
+                raise
+            current, signature = None, exc.signature
+        if based_on is not None and signature != based_on:
+            raise ValueError(SNAPSHOT_CHANGED)
+        if not refresh:
+            current = None
+        view = _MembershipView.for_store(store, reader, current, accepted, rederive=rederive)
+        if refresh:
+            for slug, part_ids in view.splits.items():
+                parts = sorted(d.slug for d in accepted if d.domain_id in part_ids)
+                if not set(parts) <= rederive:
+                    flags = " ".join(f"--domain {part}" for part in parts)
+                    raise ValueError(
+                        f"snapshot domain {slug!r} is split; refresh must name every part: {flags}"
+                    )
+        members: dict[str, list[str]] = {}
+        domain_ids: dict[str, str] = {}
+        for d in accepted:
+            if refresh and rederive and d.slug not in rederive and view.frozen_slug(d) is None:
+                continue
+            domain_ids[d.slug] = d.domain_id
+            if not same_graph:
+                d = d.model_copy(update={"communities": []})
+            members[d.slug] = [n.node_id for n in view.membership(d).members]
+    return domain_snapshot.build_snapshot(
+        view.anchorable,
+        members,
+        domain_ids,
+        taken_at=datetime.now(UTC),
+        engine_version=reader.engine_version(),
+        engine_generation=reader.engine_generation(),
+        graph_version=reader.graph_version(),
+        store_commit=store_commit,
+    )
 
 
 class SyncReport(BaseModel):
@@ -931,6 +1465,10 @@ class SyncReport(BaseModel):
     # raised. Isolated per domain so one malformed seed cannot cost every other domain its
     # heal, and reported because both lazy-sync callers suppress exceptions: a failure that
     # is not in this list is invisible, and the store silently never heals.
+
+    snapshot_splits: list[dict] = []  # {"slug", "domains"}: a covered domain two accepted
+    # domains descend from; neither holds its frozen entries until `snapshot --refresh` names
+    # them. Informational, like overbroad_domains.
 
     def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
@@ -998,7 +1536,7 @@ def _load_pending_moves(store: Store) -> tuple[str | None, list[str]] | None:
 
 
 def _reconcile_vacated(
-    vacated: dict[str, set[str]], store: Store, outcomes: list[RebindOutcome]
+    vacated: dict[str, set[str]], store: Store, outcomes: list[RebindOutcome], graph_version: str
 ) -> None:
     """Reconcile every record's Tier-1 community rows, one record at a time. A failure is
     isolated and reported as an ``error`` outcome (never silent: both lazy-sync callers
@@ -1007,7 +1545,7 @@ def _reconcile_vacated(
     failed: dict[str, set[str]] = {}
     for record_id, gone in vacated.items():
         try:
-            _reconcile_tier1_communities(record_id, gone, store)
+            _reconcile_tier1_communities(record_id, gone, store, graph_version)
         except Exception as e:  # the adopts have committed; do not lose the rest of the pass
             failed[record_id] = gone
             outcomes.append(_tier1_error(record_id, e))
@@ -1049,7 +1587,7 @@ def _save_pending_tier1(store: Store, pending: dict[str, set[str]]) -> None:
     store.set_meta(PENDING_TIER1_META, json.dumps({k: sorted(v) for k, v in pending.items()}))
 
 
-def _retry_pending_tier1(store: Store) -> list[RebindOutcome]:
+def _retry_pending_tier1(store: Store, graph_version: str) -> list[RebindOutcome]:
     """Re-run the Tier-1 reconcile for the pairs an earlier pass failed on. Runs at the
     start of every ``sync()``, gated or not. A pair that fails again stays in the key and is
     reported as an ``error`` outcome. A pair that now succeeds is cleared and reported as a
@@ -1065,7 +1603,7 @@ def _retry_pending_tier1(store: Store) -> list[RebindOutcome]:
     remaining: dict[str, set[str]] = {}
     for record_id, gone in pending.items():
         try:
-            settled = _reconcile_tier1_communities(record_id, gone, store)
+            settled = _reconcile_tier1_communities(record_id, gone, store, graph_version)
         except Exception as e:
             remaining[record_id] = gone
             outcomes.append(_tier1_error(record_id, e))
@@ -1160,7 +1698,7 @@ def _reverify_pending_moves(
     # The key first: it records what the adopts above did, so a reconcile failure cannot
     # leave an adopted entity remembered as pending.
     _record_pending_moves(store, head, outcomes, frozenset(watched))
-    _reconcile_vacated(vacated, store, outcomes)
+    _reconcile_vacated(vacated, store, outcomes, version)
     if next(store.iter_domains(status=DomainStatus.ACCEPTED), None) is not None:
         _rebuild_toc_cache(store, reader)
     return SyncReport(
@@ -1236,6 +1774,10 @@ def sync(
     pass still rewrites `toc_cache` when at least one accepted domain exists and the store
     changed since the cache was built, since that cache can go stale from content-only changes
     the graph never sees (see the gate's own comment below).
+    A skipped pass rebuilds uncertified membership. Refresh failures are reported again
+    for the same identity until a graph/snapshot/status change, or a forced recompute. A
+    whole-pass rollback returns the held outcomes and domain report without further store
+    reads or stamp writes; a busy writer is reported but is not a --check finding.
     """
     to_version = reader.graph_version()
     # What the gate stamps and compares is the graph version PLUS the resolver revision
@@ -1249,7 +1791,7 @@ def sync(
     last_stamp = store.get_meta(LAST_SYNCED_KEY)
     from_version = reader.without_revision(last_stamp)
     # An earlier pass's failed Tier-1 reconcile is retried first, whatever the gate says.
-    retried = _retry_pending_tier1(store)
+    retried = _retry_pending_tier1(store, to_version)
     # A canonical reload (pull, merge, branch switch, hand edit — even a bare touch, since
     # the digest hashes mtime_ns) resets every derived table but deliberately PRESERVES the
     # meta table, so graph_version alone cannot see that volatile state went cold. This is
@@ -1282,19 +1824,36 @@ def sync(
         # one accepted domain exists" to avoid a pointless write when there is nothing to
         # refresh.
         # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D2b)
-        if next(
-            store.iter_domains(status=DomainStatus.ACCEPTED), None
-        ) is not None and not _toc_cache_is_current(store):
+        # A reload, a snapshot or domain status change, or a graph the index was not computed
+        # for can leave domain membership uncertified while the graph stamp still matches:
+        # rebuild it, and the TOC rendered from it. A failure already recorded for this state
+        # comes back without a recompute, and is reported again below.
+        rebuilt = ensure_domain_membership(store, reader)
+        if rebuilt is not None and rebuilt.rolled_back:
+            # The pass could not take the reservation, or failed as a whole, and rolled back.
+            # Report it from what is in hand: another writer may hold the store exclusively,
+            # and any further read (stale decisions, slug conflicts, the TOC) would wait out
+            # the busy timeout and raise in place of this report. The next pass reads them.
+            return SyncReport(
+                from_version=to_version,
+                to_version=to_version,
+                outcomes=retried,
+                **rebuilt.report_fields(),
+            )
+        if next(store.iter_domains(status=DomainStatus.ACCEPTED), None) is not None and (
+            (rebuilt is not None and rebuilt.recomputed) or not _toc_cache_is_current(store)
+        ):
             _rebuild_toc_cache(store, reader)
-        if retried:
-            # The retry repaired a record or failed again: report it (a narrow-style report),
-            # not a silent skip.
+        if retried or (rebuilt is not None and rebuilt.failures):
+            # A retried Tier-1 reconcile, or a domain refresh that failed for this state: report
+            # it (a narrow report), not a silent skip.
             return SyncReport(
                 from_version=to_version,
                 to_version=to_version,
                 outcomes=retried,
                 stale_decisions=_stale_decisions(store),
                 slug_conflicts=store.domain_slug_conflicts(),
+                **(rebuilt.report_fields() if rebuilt is not None else {}),
             )
         return SyncReport(from_version=from_version, to_version=to_version, skipped=True)
 
@@ -1329,11 +1888,18 @@ def sync(
     # The pending key is recorded before the reconcile (see _reverify_pending_moves).
     if canonical_writes:
         _record_pending_moves(store, head_before, outcomes)
-    _reconcile_vacated(vacated, store, outcomes)
+    _reconcile_vacated(vacated, store, outcomes, to_version)
 
-    domains_refreshed, empty_domains, overbroad_domains, domain_failures = _refresh_domains(
-        store, reader
-    )
+    refresh = _refresh_domains(store, reader, only_if_stale=not force)
+    if refresh is None:
+        refresh = MembershipRefresh(recomputed=False)
+    if refresh.rolled_back:
+        return SyncReport(
+            from_version=from_version,
+            to_version=to_version,
+            outcomes=outcomes,
+            **refresh.report_fields(),
+        )
 
     stale = _stale_decisions(store)
 
@@ -1354,11 +1920,8 @@ def sync(
         to_version=to_version,
         outcomes=outcomes,
         stale_decisions=stale,
-        domains_refreshed=domains_refreshed,
-        empty_domains=empty_domains,
-        overbroad_domains=overbroad_domains,
+        **refresh.report_fields(),
         slug_conflicts=store.domain_slug_conflicts(),
-        domain_failures=domain_failures,
     )
 
 
@@ -1402,7 +1965,8 @@ def report_as_dict(report: SyncReport) -> dict:
     an EMPTY default (``outcomes:
     []``, ``counts: ""``, ``repointed: 0``, ``stale_decisions: []``, ``empty_domains:
     []``, ``overbroad_domains: []``, ``slug_conflicts: []``, ``domains_refreshed: 0``,
-    ``domain_failures: []``) from a fresh, un-run ``SyncReport(skipped=True)`` -- NOT a
+    ``domain_failures: []``, ``snapshot_splits: []``) from a fresh, un-run
+    ``SyncReport(skipped=True)`` -- NOT a
     prior (possibly stale) report --
     so a caller must never read a skipped pass as "everything's clean" on its own;
     ``report_has_findings`` below happens to still read a skipped dict as clean (nothing to
@@ -1414,6 +1978,17 @@ def report_as_dict(report: SyncReport) -> dict:
     ``slug_conflicts`` recomputed, and ``empty_domains``/``overbroad_domains``/
     ``domain_failures`` empty and ``domains_refreshed`` 0 because domain membership was not
     recomputed. ``--check`` implies force, so it never sees one.
+
+    A MEMBERSHIP report comes from a skipped gate whose domain membership is uncertified
+    and whose refresh failed, now or for the same graph/snapshot identity earlier. It has
+    ``synced: true``, equal versions, retried Tier-1 outcomes and domain fields. A pass that
+    rolled back during this sync, full or skipped, returns without further store reads:
+    stale decisions and slug conflicts are empty because they were not read. Its one ``*``
+    failure carries ``busy``; a busy writer is not a --check finding. A non-busy whole-pass
+    failure is recorded under the failed identity while its reservation survives.
+
+    ``snapshot_splits`` lists covered domains with multiple accepted heirs. Neither
+    heir holds the frozen entries until refresh names the parts; this is informational.
 
     ``outcomes`` carries only entities worth a human's attention -- moved/moved_uncommitted/
     orphaned/ambiguous/error (``moved`` also reports a repaired Tier-1 community reconcile,
@@ -1442,14 +2017,15 @@ def report_as_dict(report: SyncReport) -> dict:
         "slug_conflicts": report.slug_conflicts,
         "domains_refreshed": report.domains_refreshed,
         "domain_failures": report.domain_failures,
+        "snapshot_splits": report.snapshot_splits,
     }
 
 
 def report_has_findings(d: dict) -> bool:
     """True iff a ``report_as_dict`` dict has an attention finding -- design/superpowers/
     specs/2026-07-11-ci-live-findings-design.md ruling 1: an ``error`` outcome, OR a
-    non-empty ``stale_decisions``, OR a non-empty ``slug_conflicts``, OR a non-empty
-    ``domain_failures``. ``orphaned``/``ambiguous`` outcomes and ``empty_domains``/
+    non-empty ``stale_decisions``, OR a non-empty ``slug_conflicts``, OR a ``domain_failures``
+    entry other than a busy ``*`` one. ``orphaned``/``ambiguous`` outcomes and ``empty_domains``/
     ``overbroad_domains`` are deliberately excluded -- informational, never fail the check
     on their own. The orphaned/ambiguous exclusion is the live-experiment refinement: a
     legitimate rename+heal leaves the renamed-away entity's leaf orphaned for good (no
@@ -1466,15 +2042,19 @@ def report_has_findings(d: dict) -> bool:
     # domain_failures joins the finding set while orphaned/ambiguous stay out, and the
     # 2026-07-11 exclusion is the reason why: those leave PERMANENT residue in an
     # append-only store (a renamed-away leaf has no retirement path), so gating on them
-    # keeps CI red forever on a healthy repo. A domain_failure is the opposite shape — it
-    # exists only while a refresh actually raises. But unlike an ordinary per-entity retry,
-    # it does NOT reliably disappear once the seed/domain/graph is fixed: a completed pass
-    # (this one) clears VOLATILE_STALE_KEY and stamps last_synced regardless of whether this
-    # domain's own refresh succeeded, so the NEXT pass is gated on graph_version again and
-    # never re-attempts an unfixed domain until the graph version moves or a caller passes
-    # `--force`/`force=True`. Same class as an `error` outcome for `--check` purposes; fix
-    # the cause, then re-run with `--force` to confirm it cleared.
-    return bool(d["stale_decisions"] or d["slug_conflicts"] or d["domain_failures"])
+    # keeps CI red forever on a healthy repo. A domain_failure is the opposite shape: it
+    # exists only while a refresh actually raises. A pass in which a domain failed never
+    # certifies domain membership and records the failure (MEMBERSHIP_FAILED_KEY), so every
+    # later sync, lazy or explicit, reports it again; it recomputes once the graph, the
+    # snapshot or a domain's status changes, or under --force. Same class as an `error`
+    # outcome for `--check` purposes; fix the cause, then re-run with `--force` to confirm it
+    # cleared. The one exception is the `*` entry with `busy: true`: another writer held the
+    # store, nothing failed, and the next sync runs the pass, so it is no finding.
+    return bool(
+        d["stale_decisions"]
+        or d["slug_conflicts"]
+        or any(not f.get("busy") for f in d["domain_failures"])
+    )
 
 
 def maybe_sync(

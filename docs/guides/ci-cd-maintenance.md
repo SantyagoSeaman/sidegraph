@@ -62,7 +62,9 @@ jobs:
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
       - name: Rebuild the graph
-        run: uvx --from graphifyy==0.9.6 graphify update .
+        env:
+          GRAPHIFY_NO_AUTO_REFRESH: "1"
+        run: uvx --from graphifyy==0.9.90 graphify update .
 
       - name: sidegraph-sync --json --check
         id: sync
@@ -272,7 +274,9 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Rebuild the graph
-        run: uvx --from graphifyy==0.9.6 graphify update .
+        env:
+          GRAPHIFY_NO_AUTO_REFRESH: "1"
+        run: uvx --from graphifyy==0.9.90 graphify update .
 
       - name: Write the MCP config
         run: |

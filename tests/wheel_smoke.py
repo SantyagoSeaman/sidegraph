@@ -210,10 +210,26 @@ def run_bounded(
 async def probe_stdio(
     root: Path, *, timeout: float = 30, diagnose_first_write: bool = False
 ) -> str:
-    """Initialize and round-trip benign data through actual SDK stdio pipes."""
+    """Round-trip benign data through SDK stdio in an owned Git project.
+
+    Keep the first write cold: missing stores may be created at a Git root, whereas
+    a non-Git workspace requires explicit CLI initialization before an MCP call.
+    """
     _progress.start("stdio-start")
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
+
+    from sidegraph.gitenv import git_env
+
+    if not (root / ".git").exists():
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=root,
+            env=git_env(),
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
 
     environment = {k: v for k, v in os.environ.items() if not k.startswith("SIDEGRAPH_")}
     environment.update(

@@ -2875,7 +2875,7 @@ def test_domain_activation_keyboard_interrupt_propagates(store, tmp_path, monkey
 # Two rationale nodes with distinguishable first text lines (which become their titles)
 # and distinct `rationale_for` targets in distinct files -- the Q11 dedup-distinguishable
 # shape every N-record importer fixture needs (a shared first line would collapse the
-# second write into the first via `store.find_decision_by_title`, silently reducing N to
+# second write into the first via the importer's title key, silently reducing N to
 # 1 and making a "second record still processed" assertion vacuous).
 _IMPORTER_GRAPH: dict = {
     "built_at_commit": "v1",

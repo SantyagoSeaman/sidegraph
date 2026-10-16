@@ -97,7 +97,7 @@ def _orphaned_member_leaf(store: Store, reader: GraphifyReader):
     """What the pre-fix write path left behind: an orphaned tier-2 leaf on the member entity."""
 
     class _OldResolver:
-        def resolve(self, desc):
+        def resolve(self, desc, *, collapse=True):
             return ResolveResult(status="unresolved")
 
         def graph_version(self):

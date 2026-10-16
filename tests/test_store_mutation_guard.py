@@ -453,6 +453,12 @@ def _case_prune_telemetry_events(store: Store) -> tuple[str, object]:
     return "DELETE FROM render_events", lambda: store.prune_telemetry_events(older_than_days=0)
 
 
+def _case_raise_requirement(store: Store) -> tuple[str, object]:
+    # The only SQL inside raise_requirement's reservation is BEGIN IMMEDIATE itself: the failure
+    # lands after the reservation opens and before the marker is published.
+    return "BEGIN IMMEDIATE", lambda: store.raise_requirement("0.1.0", running="0.14.0")
+
+
 def _case_claim_meta(store: Store) -> tuple[str, object]:
     return "INSERT INTO meta", lambda: store.claim_meta("case-claim-key", "v1")
 
@@ -498,6 +504,19 @@ def _case_supersede_domain(store: Store) -> tuple[str, object]:
     return "INSERT INTO domains", lambda: store.supersede_domain(old.domain_id, new)
 
 
+def _case_replace_domain_members(store: Store) -> tuple[str, object]:
+    # The rows go in through executemany, which the marker patch does not intercept: fail on
+    # the DELETE that precedes them, once it has run.
+    domain = store.add_domain(_domain("case-replace-domain-members"))
+    return "DELETE FROM domain_members", lambda: store.replace_domain_members(
+        domain.domain_id, [("n1", "a.py", "1")]
+    )
+
+
+def _case_invalidate_membership(store: Store) -> tuple[str, object]:
+    return "INSERT INTO meta", lambda: store._invalidate_membership("sha256:case")
+
+
 # name -> (store) -> (sql_marker, zero-arg thunk to invoke under the marker patch). Setup
 # (creating any prerequisite decision/entity/domain) always happens BEFORE the caller installs
 # the patch, over the real connection -- only the returned thunk is meant to run under it.
@@ -524,10 +543,13 @@ _ROLLBACK_CASES = {
     "compact": _case_compact,
     "set_meta": _case_set_meta,
     "claim_meta": _case_claim_meta,
+    "raise_requirement": _case_raise_requirement,
     "update_meta_if": _case_update_meta_if,
     "prune_meta_prefixes": _case_prune_meta_prefixes,
     "delete_meta": _case_delete_meta,
     "supersede_domain": _case_supersede_domain,
+    "replace_domain_members": _case_replace_domain_members,
+    "_invalidate_membership": _case_invalidate_membership,
 }
 
 

@@ -3,7 +3,7 @@
     "command": "uvx",
     "args": [
       "--from",
-      "git+https://github.com/SantyagoSeaman/sidegraph.git@main",
+      "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1",
       "sidegraph-mcp",
       "--repo-root"
     ],

@@ -110,7 +110,7 @@ _DUPLICATE_KEY_GRAPH: dict = {
     "nodes": [
         # rat_a and rat_a2 share the first line AND the file: one identity key
         # (canonical title, provenance.ref), so the real run writes the first and skips the
-        # second through ``find_decision_by_title``.
+        # second through the run's own title-key set.
         {
             "id": "rat_a",
             "label": "Retries are idempotent to survive at-least-once delivery",

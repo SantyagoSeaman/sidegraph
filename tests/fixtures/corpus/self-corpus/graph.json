@@ -1,9 +1,13 @@
 {
   "built_at_commit": "3f8dfa534d05a027f1f0e14c811c222f0f5e0591",
   "directed": false,
-  "graph": {},
+  "graph": {
+    "graphify_version": "0.9.90",
+    "schema_version": 1
+  },
   "links": [
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -14,6 +18,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -24,6 +29,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -34,6 +40,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -44,6 +51,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -54,6 +62,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -64,6 +73,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -74,6 +84,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -84,6 +95,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -94,6 +106,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -104,6 +117,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -114,6 +128,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -124,6 +139,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -134,6 +150,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -144,6 +161,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -154,6 +172,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -164,6 +183,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -174,6 +194,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -184,6 +205,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -194,6 +216,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -204,6 +227,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -214,6 +238,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -224,6 +249,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -234,6 +260,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -244,6 +271,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -254,6 +282,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "method",
@@ -264,6 +293,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -275,17 +305,19 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
-      "context": "generic_arg",
-      "relation": "references",
+      "context": "call",
+      "relation": "calls",
       "source": "src_sidegraph_engine_reader_graphifyreader_communities",
       "source_file": "src/sidegraph/engine/reader.py",
-      "source_location": "L266",
+      "source_location": "L278",
       "target": "src_sidegraph_engine_reader_community",
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "generic_arg",
@@ -297,6 +329,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "return_type",
@@ -308,6 +341,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -319,6 +353,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -330,6 +365,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "generic_arg",
@@ -341,6 +377,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -352,6 +389,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "generic_arg",
@@ -363,6 +401,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -374,6 +413,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "generic_arg",
@@ -385,6 +425,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -396,17 +437,19 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
-      "context": "generic_arg",
-      "relation": "references",
+      "context": "call",
+      "relation": "calls",
       "source": "src_sidegraph_engine_reader_graphifyreader_rationale_nodes",
       "source_file": "src/sidegraph/engine/reader.py",
-      "source_location": "L232",
+      "source_location": "L252",
       "target": "src_sidegraph_engine_reader_rationalenode",
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -418,17 +461,19 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
-      "context": "return_type",
-      "relation": "references",
+      "context": "call",
+      "relation": "calls",
       "source": "src_sidegraph_engine_reader_graphifyreader_resolve",
       "source_file": "src/sidegraph/engine/reader.py",
-      "source_location": "L176",
+      "source_location": "L183",
       "target": "src_sidegraph_engine_reader_resolveresult",
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "generic_arg",
@@ -440,6 +485,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -451,17 +497,19 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
-      "context": "return_type",
-      "relation": "references",
+      "context": "call",
+      "relation": "calls",
       "source": "src_sidegraph_engine_reader_graphifyreader_subgraph",
       "source_file": "src/sidegraph/engine/reader.py",
-      "source_location": "L308",
+      "source_location": "L337",
       "target": "src_sidegraph_engine_reader_subgraph",
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -472,6 +520,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -482,6 +531,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -492,6 +542,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -502,6 +553,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -512,6 +564,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -522,6 +575,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -532,6 +586,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -542,6 +597,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -552,6 +608,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -562,17 +619,19 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
-      "context": "return_type",
-      "relation": "references",
+      "context": "call",
+      "relation": "calls",
       "source": "src_sidegraph_engine_reader_to_node",
       "source_file": "src/sidegraph/engine/reader.py",
-      "source_location": "L79",
+      "source_location": "L81",
       "target": "src_sidegraph_engine_reader_noderef",
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "import",
@@ -584,6 +643,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -594,6 +654,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -604,6 +665,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -614,6 +676,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -624,6 +687,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -634,6 +698,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -644,6 +709,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -654,6 +720,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "contains",
@@ -664,6 +731,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -675,6 +743,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -686,6 +755,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -697,6 +767,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -707,6 +778,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -717,6 +789,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -727,6 +800,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -737,6 +811,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -747,6 +822,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -757,6 +833,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -767,6 +844,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -777,6 +855,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -788,6 +867,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -799,6 +879,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -810,6 +891,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -821,6 +903,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
@@ -832,6 +915,7 @@
       "weight": 1.0
     },
     {
+      "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "relation": "rationale_for",
@@ -846,27 +930,30 @@
   "nodes": [
     {
       "_origin": "ast",
-      "community": 223,
+      "community": 178,
+      "community_name": "engine/__init__.py",
       "file_type": "code",
       "id": "src_sidegraph_engine_init",
-      "label": "__init__.py",
-      "norm_label": "__init__.py",
+      "label": "engine/__init__.py",
+      "norm_label": "engine/__init__.py",
       "source_file": "src/sidegraph/engine/__init__.py",
       "source_location": "L1"
     },
     {
       "_origin": "ast",
-      "community": 223,
+      "community": 178,
+      "community_name": "engine/__init__.py",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_init_rationale_1",
-      "label": "Engine seam — the ONLY package where Graphify specifics may live.  The portable",
-      "norm_label": "engine seam — the only package where graphify specifics may live.  the portable",
+      "label": "Engine seam — the ONLY package where Graphify specifics may live. The portable…",
+      "norm_label": "engine seam — the only package where graphify specifics may live. the portable...",
       "source_file": "src/sidegraph/engine/__init__.py",
       "source_location": "L1"
     },
     {
       "_origin": "ast",
-      "community": 1,
+      "community": 3,
+      "community_name": "store.py",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader",
       "label": "reader.py",
@@ -875,8 +962,11 @@
       "source_location": "L1"
     },
     {
+      "_callable": true,
+      "_callable_class": true,
       "_origin": "ast",
-      "community": 1,
+      "community": 28,
+      "community_name": "domains.py",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_community",
       "label": "Community",
@@ -885,8 +975,11 @@
       "source_location": "L53"
     },
     {
+      "_callable": true,
+      "_callable_class": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader",
       "label": "GraphifyReader",
@@ -895,8 +988,10 @@
       "source_location": "L92"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_adjacency_index",
       "label": "._adjacency_index()",
@@ -905,8 +1000,10 @@
       "source_location": "L197"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_changed_files",
       "label": ".changed_files()",
@@ -915,8 +1012,10 @@
       "source_location": "L339"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 67,
+      "community_name": ".communities",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_communities",
       "label": ".communities()",
@@ -925,8 +1024,10 @@
       "source_location": "L266"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 101,
+      "community_name": "test_reader_community_labels.py",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_community_labels",
       "label": ".community_labels()",
@@ -935,8 +1036,10 @@
       "source_location": "L281"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_containing",
       "label": ".containing()",
@@ -945,8 +1048,10 @@
       "source_location": "L262"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 210,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_file_index",
       "label": "._file_index()",
@@ -955,8 +1060,10 @@
       "source_location": "L150"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 28,
+      "community_name": "domains.py",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_get_node",
       "label": ".get_node()",
@@ -965,8 +1072,10 @@
       "source_location": "L147"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 81,
+      "community_name": ".graph_version",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_graph_version",
       "label": ".graph_version()",
@@ -975,8 +1084,10 @@
       "source_location": "L129"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 53,
+      "community_name": ".nodes_in_file",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_init",
       "label": ".__init__()",
@@ -985,8 +1096,10 @@
       "source_location": "L95"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_list_nodes",
       "label": ".list_nodes()",
@@ -995,8 +1108,10 @@
       "source_location": "L144"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 53,
+      "community_name": ".nodes_in_file",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_load",
       "label": "._load()",
@@ -1005,8 +1120,10 @@
       "source_location": "L115"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_neighbors",
       "label": ".neighbors()",
@@ -1015,8 +1132,10 @@
       "source_location": "L218"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 210,
+      "community": 53,
+      "community_name": ".nodes_in_file",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_nodes_in_file",
       "label": ".nodes_in_file()",
@@ -1025,8 +1144,10 @@
       "source_location": "L161"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_rationale_nodes",
       "label": ".rationale_nodes()",
@@ -1035,8 +1156,10 @@
       "source_location": "L232"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_relation",
       "label": "._relation()",
@@ -1045,8 +1168,10 @@
       "source_location": "L194"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 0,
+      "community": 16,
+      "community_name": "Descriptor",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_resolve",
       "label": ".resolve()",
@@ -1055,8 +1180,10 @@
       "source_location": "L176"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 24,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_resolve_index",
       "label": "._resolve_index()",
@@ -1065,8 +1192,10 @@
       "source_location": "L165"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_graphifyreader_subgraph",
       "label": ".subgraph()",
@@ -1075,8 +1204,11 @@
       "source_location": "L308"
     },
     {
+      "_callable": true,
+      "_callable_class": true,
       "_origin": "ast",
-      "community": 24,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_noderef",
       "label": "NodeRef",
@@ -1086,37 +1218,41 @@
     },
     {
       "_origin": "ast",
-      "community": 1,
+      "community": 3,
+      "community_name": "store.py",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_1",
-      "label": "``GraphifyReader`` — the engine seam: the ONLY module that parses Graphify's gra",
-      "norm_label": "``graphifyreader`` — the engine seam: the only module that parses graphify's gra",
+      "label": "``GraphifyReader`` — the engine seam: the ONLY module that parses Graphify's…",
+      "norm_label": "``graphifyreader`` — the engine seam: the only module that parses graphify's...",
       "source_file": "src/sidegraph/engine/reader.py",
       "source_location": "L1"
     },
     {
       "_origin": "ast",
-      "community": 22,
+      "community": 81,
+      "community_name": ".graph_version",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_130",
-      "label": "``f\"{commit}:{content_hash}\"`` when the engine stamped a ``built_at_commit``,",
-      "norm_label": "``f\"{commit}:{content_hash}\"`` when the engine stamped a ``built_at_commit``,",
+      "label": "``f\"{commit}:{content_hash}\"`` when the engine stamped a ``built_at_commit``,…",
+      "norm_label": "``f\"{commit}:{content_hash}\"`` when the engine stamped a ``built_at_commit``,...",
       "source_file": "src/sidegraph/engine/reader.py",
       "source_location": "L130"
     },
     {
       "_origin": "ast",
-      "community": 210,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_151",
-      "label": "``file_path -> anchorable nodes`` in that file, built once from a single pass",
-      "norm_label": "``file_path -> anchorable nodes`` in that file, built once from a single pass",
+      "label": "``file_path -> anchorable nodes`` in that file, built once from a single pass…",
+      "norm_label": "``file_path -> anchorable nodes`` in that file, built once from a single pass...",
       "source_file": "src/sidegraph/engine/reader.py",
       "source_location": "L151"
     },
     {
       "_origin": "ast",
-      "community": 210,
+      "community": 53,
+      "community_name": ".nodes_in_file",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_162",
       "label": "All anchorable nodes (code symbols / doc headings) whose source_file matches.",
@@ -1126,57 +1262,63 @@
     },
     {
       "_origin": "ast",
-      "community": 24,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_166",
-      "label": "``canonicalize(name) -> anchorable nodes`` with that canonical name, built once",
-      "norm_label": "``canonicalize(name) -> anchorable nodes`` with that canonical name, built once",
+      "label": "``canonicalize(name) -> anchorable nodes`` with that canonical name, built once…",
+      "norm_label": "``canonicalize(name) -> anchorable nodes`` with that canonical name, built once...",
       "source_file": "src/sidegraph/engine/reader.py",
       "source_location": "L166"
     },
     {
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_198",
-      "label": "``node_id -> [(other_node_id, relation), ...]`` across both edge endpoints,",
-      "norm_label": "``node_id -> [(other_node_id, relation), ...]`` across both edge endpoints,",
+      "label": "``node_id -> [(other_node_id, relation), ...]`` across both edge endpoints,…",
+      "norm_label": "``node_id -> [(other_node_id, relation), ...]`` across both edge endpoints,...",
       "source_file": "src/sidegraph/engine/reader.py",
       "source_location": "L198"
     },
     {
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_233",
-      "label": "All ``rationale`` nodes (recorded reasoning), with targets resolved.          Th",
-      "norm_label": "all ``rationale`` nodes (recorded reasoning), with targets resolved.          th",
+      "label": "All ``rationale`` nodes (recorded reasoning), with targets resolved. This is…",
+      "norm_label": "all ``rationale`` nodes (recorded reasoning), with targets resolved. this is...",
       "source_file": "src/sidegraph/engine/reader.py",
       "source_location": "L233"
     },
     {
       "_origin": "ast",
-      "community": 22,
+      "community": 101,
+      "community_name": "test_reader_community_labels.py",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_282",
-      "label": "Community id -> human label/summary, from the optional ``.graphify_labels.json``",
-      "norm_label": "community id -> human label/summary, from the optional ``.graphify_labels.json``",
+      "label": "Community id -> human label/summary, from the optional…",
+      "norm_label": "community id -> human label/summary, from the optional...",
       "source_file": "src/sidegraph/engine/reader.py",
       "source_location": "L282"
     },
     {
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_340",
-      "label": "Repo-relative paths changed in the last commit (git diff HEAD~1 HEAD).",
-      "norm_label": "repo-relative paths changed in the last commit (git diff head~1 head).",
+      "label": "Repo-relative paths changed in the last commit (git diff HEAD~1 HEAD). Uses the…",
+      "norm_label": "repo-relative paths changed in the last commit (git diff head~1 head). uses the...",
       "source_file": "src/sidegraph/engine/reader.py",
       "source_location": "L340"
     },
     {
       "_origin": "ast",
-      "community": 22,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "rationale",
       "id": "src_sidegraph_engine_reader_rationale_93",
       "label": "Reads ``graphify-out/graph.json`` read-only and answers graph queries locally.",
@@ -1185,8 +1327,11 @@
       "source_location": "L93"
     },
     {
+      "_callable": true,
+      "_callable_class": true,
       "_origin": "ast",
-      "community": 1,
+      "community": 3,
+      "community_name": "store.py",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_rationalenode",
       "label": "RationaleNode",
@@ -1195,8 +1340,11 @@
       "source_location": "L71"
     },
     {
+      "_callable": true,
+      "_callable_class": true,
       "_origin": "ast",
-      "community": 0,
+      "community": 16,
+      "community_name": "Descriptor",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_resolveresult",
       "label": "ResolveResult",
@@ -1205,8 +1353,11 @@
       "source_location": "L64"
     },
     {
+      "_callable": true,
+      "_callable_class": true,
       "_origin": "ast",
-      "community": 1,
+      "community": 14,
+      "community_name": "GraphifyReader",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_subgraph",
       "label": "Subgraph",
@@ -1215,8 +1366,10 @@
       "source_location": "L59"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 24,
+      "community": 53,
+      "community_name": ".nodes_in_file",
       "file_type": "code",
       "id": "src_sidegraph_engine_reader_to_node",
       "label": "_to_node()",
@@ -1226,7 +1379,8 @@
     },
     {
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "code",
       "id": "src_sidegraph_host_hooks",
       "label": "hooks.py",
@@ -1235,8 +1389,10 @@
       "source_location": "L1"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "code",
       "id": "src_sidegraph_host_hooks_count_real_user_prompts",
       "label": "_count_real_user_prompts()",
@@ -1245,8 +1401,10 @@
       "source_location": "L84"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 49,
+      "community": 164,
+      "community_name": "_env_path",
       "file_type": "code",
       "id": "src_sidegraph_host_hooks_env_path",
       "label": "_env_path()",
@@ -1255,8 +1413,10 @@
       "source_location": "L348"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "code",
       "id": "src_sidegraph_host_hooks_is_real_user_prompt",
       "label": "_is_real_user_prompt()",
@@ -1265,8 +1425,10 @@
       "source_location": "L59"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "code",
       "id": "src_sidegraph_host_hooks_looks_like_source_target",
       "label": "_looks_like_source_target()",
@@ -1275,8 +1437,10 @@
       "source_location": "L259"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "code",
       "id": "src_sidegraph_host_hooks_pre_tool_use",
       "label": "pre_tool_use()",
@@ -1286,87 +1450,97 @@
     },
     {
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "rationale",
       "id": "src_sidegraph_host_hooks_rationale_1",
-      "label": "Claude Code hook entry points (Stages 4–5, M6).  These are invoked by Claude Cod",
-      "norm_label": "claude code hook entry points (stages 4–5, m6).  these are invoked by claude cod",
+      "label": "Claude Code hook entry points (Stages 4–5, M6). These are invoked by Claude…",
+      "norm_label": "claude code hook entry points (stages 4–5, m6). these are invoked by claude...",
       "source_file": "src/sidegraph/host/hooks.py",
       "source_location": "L1"
     },
     {
       "_origin": "ast",
-      "community": 49,
+      "community": 48,
+      "community_name": "session_start",
       "file_type": "rationale",
       "id": "src_sidegraph_host_hooks_rationale_108",
-      "label": "SessionStart hook (Stage 4): inject the phase-1 top-tier map as additionalContex",
-      "norm_label": "sessionstart hook (stage 4): inject the phase-1 top-tier map as additionalcontex",
+      "label": "SessionStart hook (Stage 4): inject the phase-1 top-tier map as…",
+      "norm_label": "sessionstart hook (stage 4): inject the phase-1 top-tier map as...",
       "source_file": "src/sidegraph/host/hooks.py",
       "source_location": "L108"
     },
     {
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "rationale",
       "id": "src_sidegraph_host_hooks_rationale_191",
-      "label": "Stop hook (Stage 5): guarded block-to-distill.      Fires the distillation nudge",
-      "norm_label": "stop hook (stage 5): guarded block-to-distill.      fires the distillation nudge",
+      "label": "Stop hook (Stage 5): guarded block-to-distill. Fires the distillation nudge at…",
+      "norm_label": "stop hook (stage 5): guarded block-to-distill. fires the distillation nudge at...",
       "source_file": "src/sidegraph/host/hooks.py",
       "source_location": "L191"
     },
     {
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "rationale",
       "id": "src_sidegraph_host_hooks_rationale_260",
-      "label": "Permissive on purpose (§5 FR8.3: \"be permissive, any string arg\"): Read/Grep alw",
-      "norm_label": "permissive on purpose (§5 fr8.3: \"be permissive, any string arg\"): read/grep alw",
+      "label": "Permissive on purpose (§5 FR8.3: \"be permissive, any string arg\"): Read/Grep…",
+      "norm_label": "permissive on purpose (§5 fr8.3: \"be permissive, any string arg\"): read/grep...",
       "source_file": "src/sidegraph/host/hooks.py",
       "source_location": "L260"
     },
     {
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "rationale",
       "id": "src_sidegraph_host_hooks_rationale_273",
-      "label": "PreToolUse hook (M6, FR8.3): redirect blind Read/Grep toward retrieval.      Fir",
-      "norm_label": "pretooluse hook (m6, fr8.3): redirect blind read/grep toward retrieval.      fir",
+      "label": "PreToolUse hook (M6, FR8.3): redirect blind Read/Grep toward retrieval. Fires a…",
+      "norm_label": "pretooluse hook (m6, fr8.3): redirect blind read/grep toward retrieval. fires a...",
       "source_file": "src/sidegraph/host/hooks.py",
       "source_location": "L273"
     },
     {
       "_origin": "ast",
-      "community": 49,
+      "community": 164,
+      "community_name": "_env_path",
       "file_type": "rationale",
       "id": "src_sidegraph_host_hooks_rationale_349",
-      "label": "Resolve a host-configured path. Relative values anchor to $CLAUDE_PROJECT_DIR wh",
-      "norm_label": "resolve a host-configured path. relative values anchor to $claude_project_dir wh",
+      "label": "Resolve a host-configured path. Relative values anchor to $CLAUDE_PROJECT_DIR…",
+      "norm_label": "resolve a host-configured path. relative values anchor to $claude_project_dir...",
       "source_file": "src/sidegraph/host/hooks.py",
       "source_location": "L349"
     },
     {
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "rationale",
       "id": "src_sidegraph_host_hooks_rationale_60",
-      "label": "True for a transcript line that is an actual user-typed prompt, not a tool resul",
-      "norm_label": "true for a transcript line that is an actual user-typed prompt, not a tool resul",
+      "label": "True for a transcript line that is an actual user-typed prompt, not a tool…",
+      "norm_label": "true for a transcript line that is an actual user-typed prompt, not a tool...",
       "source_file": "src/sidegraph/host/hooks.py",
       "source_location": "L60"
     },
     {
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "rationale",
       "id": "src_sidegraph_host_hooks_rationale_85",
-      "label": "Count real user prompts (``_is_real_user_prompt``) in a transcript JSONL file.",
-      "norm_label": "count real user prompts (``_is_real_user_prompt``) in a transcript jsonl file.",
+      "label": "Count real user prompts (``_is_real_user_prompt``) in a transcript JSONL file.…",
+      "norm_label": "count real user prompts (``_is_real_user_prompt``) in a transcript jsonl file....",
       "source_file": "src/sidegraph/host/hooks.py",
       "source_location": "L85"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "code",
       "id": "src_sidegraph_host_hooks_read_payload",
       "label": "_read_payload()",
@@ -1375,8 +1549,10 @@
       "source_location": "L343"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 49,
+      "community": 48,
+      "community_name": "session_start",
       "file_type": "code",
       "id": "src_sidegraph_host_hooks_session_start",
       "label": "session_start()",
@@ -1385,8 +1561,10 @@
       "source_location": "L107"
     },
     {
+      "_callable": true,
       "_origin": "ast",
-      "community": 49,
+      "community": 70,
+      "community_name": "hooks.py",
       "file_type": "code",
       "id": "src_sidegraph_host_hooks_stop",
       "label": "stop()",
@@ -1396,21 +1574,23 @@
     },
     {
       "_origin": "ast",
-      "community": 224,
+      "community": 179,
+      "community_name": "host/__init__.py",
       "file_type": "code",
       "id": "src_sidegraph_host_init",
-      "label": "__init__.py",
-      "norm_label": "__init__.py",
+      "label": "host/__init__.py",
+      "norm_label": "host/__init__.py",
       "source_file": "src/sidegraph/host/__init__.py",
       "source_location": "L1"
     },
     {
       "_origin": "ast",
-      "community": 224,
+      "community": 179,
+      "community_name": "host/__init__.py",
       "file_type": "rationale",
       "id": "src_sidegraph_host_init_rationale_1",
-      "label": "Host seam — Claude Code integration, isolated from the portable core.  v1 ships",
-      "norm_label": "host seam — claude code integration, isolated from the portable core.  v1 ships",
+      "label": "Host seam — Claude Code integration, isolated from the portable core. v1 ships…",
+      "norm_label": "host seam — claude code integration, isolated from the portable core. v1 ships...",
       "source_file": "src/sidegraph/host/__init__.py",
       "source_location": "L1"
     }

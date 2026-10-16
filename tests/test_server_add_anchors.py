@@ -24,7 +24,7 @@ class FakeReader:
     def __init__(self, result: ResolveResult) -> None:
         self._result = result
 
-    def resolve(self, desc):
+    def resolve(self, desc, *, collapse=True):
         return self._result
 
     def graph_version(self):

@@ -41,18 +41,21 @@ docs/reference/cli.md#sidegraph-verify (verify).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import sys
+import tempfile
 import webbrowser
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import githooks, gitio
+from . import domain_snapshot, githooks, gitio
 from .capture import (
     RatifyPolicy,
     format_domain_proposal,
@@ -80,9 +83,9 @@ from .doc_import import (
     _glob_repo_root_info,
     import_docs,
 )
-from .doctor import curate, open_curation_index, ratification_info_lines
+from .doctor import curate, open_curation_index, ratification_info_lines, spelling_twin_lines
 from .domains import DEFAULT_CANDIDATE_LIMIT, bootstrap_domains, collect_domain_candidates
-from .engine.reader import GraphifyReader
+from .engine.reader import GraphBuildError, GraphifyReader, build_graph_at_head
 from .host.claude_settings import (
     RATIFY_POLICY_DEFAULT,
     RATIFY_POLICY_ENV_VAR,
@@ -102,15 +105,32 @@ from .schema import Decision, DecisionKind, DecisionStatus, Domain, DomainStatus
 from .stats.model import UnreadableRecordError, build_report
 from .stats.render import render_json, render_text
 from .store import VOLATILE_STALE_KEY, Store
-from .store_layout import require_listable_record_dirs, symlinked_internals
+from .store_layout import (
+    ARCHIVE_SUBDIR,
+    CANONICAL_SUBDIRS,
+    FORMAT_MARKER_NAME,
+    StoreRequirementError,
+    check_store_requirement,
+    is_release_version,
+    open_would_write,
+    require_listable_record_dirs,
+    requirement_met,
+    snapshot_signature,
+    store_requirement,
+    symlinked_internals,
+)
 from .sync import (
+    SNAPSHOT_CHANGED,
+    _current_head,
     activate_accepted_domain,
+    ensure_domain_membership,
     report_as_dict,
     report_has_findings,
     sync,
+    take_snapshot,
 )
 from .validation_errors import format_validation_error
-from .verify import SYMLINK_STOP_NOTE, verify_against, verify_snapshot
+from .verify import SYMLINK_STOP_NOTE, find_store_project_repo, verify_against, verify_snapshot
 from .viz.model import build_graph
 from .viz.render import to_html, to_json
 
@@ -166,6 +186,38 @@ def _looks_already_initialized(path: Path) -> bool:
     if path_exists(path / "format"):
         return True
     return path_is_file(path / "decisions.db")
+
+
+def _is_empty_store_for_init(path: Path) -> bool:
+    """A format-valid scaffold has no authored content; classify before opening it.
+
+    Inspect raw entries, never parsed records: malformed or retired data still counts.
+    Empty directory trees alone do not count. A listing failure is conservatively not
+    empty. Legacy data always remains existing.
+    This is init wording only; other commands still recognize a valid empty store.
+    """
+    if (
+        path_is_file(path)
+        or path_is_file(path / "decisions.db")
+        or not path_exists(path / FORMAT_MARKER_NAME)
+    ):
+        return False
+    pending = [path / name for name in (*CANONICAL_SUBDIRS, ARCHIVE_SUBDIR)]
+    while pending:
+        directory = pending.pop()
+        try:
+            if directory.is_symlink():
+                return False
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        return False
+                    pending.append(Path(entry.path))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+    return True
 
 
 def _report_ratify_policy_write(
@@ -350,6 +402,26 @@ def _hook_graph_problem(
     return f"the hook rebuilds {target}; this store reads {graph_path}"
 
 
+def _refresh_outdated_helper(info: githooks.RepoInfo) -> bool:
+    """Rewrite the helper alone when a hook runs it and it runs Graphify without
+    ``GRAPHIFY_NO_AUTO_REFRESH=1``; ``True`` when it did. The helper is per repository, so this
+    holds whatever graph the store reads; the recorded choice and the hook files are not touched.
+    see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D7)"""
+    if githooks.helper_is_current(info) is not False or not githooks.helper_in_use(info):
+        return False
+    graphify = shutil.which("graphify")
+    try:
+        githooks.install_helper(info, graphify=os.path.abspath(graphify) if graphify else None)
+    except OSError as e:
+        print(f"graph refresh hook: could not refresh the helper ({e})")
+        return False
+    print(
+        "graph refresh hook: refreshed the helper, which ran Graphify without "
+        f"{githooks.GRAPH_REBUILD_ENV}"
+    )
+    return True
+
+
 def _graph_refresh_hook(
     project: Path,
     *,
@@ -367,6 +439,7 @@ def _graph_refresh_hook(
     if info is None:
         print("graph refresh hook: skipped (not a git repository)")
         return True
+    refreshed = False if install else _refresh_outdated_helper(info)
     if decline:
         if not githooks.record_choice(project, declined=True):
             print("graph refresh hook: could not record the choice in the git config")
@@ -406,6 +479,12 @@ def _graph_refresh_hook(
             _install_graph_refresh_hook(info)
             return True
         if status.wired:  # every hook calls the helper, some by hand: nothing to ask or write
+            if refreshed:  # already rewritten, and said so, above
+                print(
+                    f"graph refresh hook: already wired ({', '.join(githooks.HOOKS)} call the "
+                    "helper)"
+                )
+                return True
             graphify = shutil.which("graphify")
             githooks.install_helper(info, graphify=os.path.abspath(graphify) if graphify else None)
             print(
@@ -484,7 +563,7 @@ def init_main(argv: list[str] | None = None) -> int:
 
     Idempotent: safe to re-run on an already-initialized repo (says so, exits 0). The graph
     is optional at init time — a missing ``graph.json`` is reported, not an error, since
-    ``sidegraph-init`` typically runs before the first ``graphify update .``.
+    ``sidegraph-init`` typically runs before the first graph build.
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-init",
@@ -564,6 +643,7 @@ def init_main(argv: list[str] | None = None) -> int:
 
     db_path = Path(args.db)
     already_initialized = _looks_already_initialized(db_path)
+    empty_store = _is_empty_store_for_init(db_path)
     # Before Store(): opening a legacy single-file --db migrates it into a directory, after
     # which the legacy-file rule no longer applies and init would report another graph than sync.
     graph_path = _resolve_cli_graph(args.graph, args.db)
@@ -573,7 +653,9 @@ def init_main(argv: list[str] | None = None) -> int:
         print(f"store not writable ({db_path}): {e}")
         return 1
 
-    if already_initialized:
+    if empty_store:
+        print(f"empty store: {db_path} exists; complete setup using the guidance below.")
+    elif already_initialized:
         print(f"already initialized: {db_path} exists.")
     else:
         print(f"created store: {db_path}")
@@ -582,7 +664,7 @@ def init_main(argv: list[str] | None = None) -> int:
         print(f"found graph: {graph_path}")
     else:
         print(
-            f"missing graph: {graph_path} — run `graphify update .`, then `sidegraph-sync`, "
+            f"missing graph: {graph_path} — run {githooks.GRAPH_REBUILD}, then `sidegraph-sync`, "
             "to anchor decisions to code (optional; Sidegraph works without it)."
         )
     _graph_hint(args.graph, graph_path)
@@ -656,7 +738,7 @@ def init_main(argv: list[str] | None = None) -> int:
     print(
         "  claude mcp add sidegraph -s project "
         "--env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json "
-        "-- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main "
+        "-- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 "
         "sidegraph-mcp"
     )
     print()
@@ -986,12 +1068,12 @@ def ratify_main(argv: list[str] | None = None) -> int:
         for f in cascaded:
             dropped[f.id] = f"dropped (evidence of {did})"
             print(f"dropped (evidence of {did}) {f.id}")
-    # Fix: lazy sync alone keeps last_synced_graph_version current without ever recomputing
-    # the TOC cache, so "bootstrap -> ratify -> SessionStart TOC comes alive" did nothing
-    # until the next real graph rebuild. Rebuild immediately whenever >= 1 domain id was
-    # actually accepted/dropped by this run; a decisions-only ratify leaves it untouched.
+    reader = None
     if domain_changed:
-        store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store)))
+        graph = _resolve_cli_graph(args.graph, args.db)
+        if domain_accepted:
+            _graph_hint(args.graph, graph)
+        reader = _ratify_reader(str(graph), args.db)
     if domain_accepted:
         # CLI/MCP ratify parity (v0.2-scope): resolve membership NOW, the way the MCP
         # `ratify` tool does, so the same accept through two doors leaves the same state —
@@ -1003,9 +1085,6 @@ def ratify_main(argv: list[str] | None = None) -> int:
         # belt-and-suspenders flag set below) and renders the "path rule too broad"
         # sentence, which the helper deliberately leaves to its callers (a literal trigger
         # phrase in the sidegraph:heal-anchors skill).
-        graph = _resolve_cli_graph(args.graph, args.db)
-        _graph_hint(args.graph, graph)
-        reader = _ratify_reader(str(graph), args.db)
         all_resolved = bool(accepted_domain_ids)
         for domain_id in accepted_domain_ids:
             domain = store.get_domain(domain_id)
@@ -1029,8 +1108,19 @@ def ratify_main(argv: list[str] | None = None) -> int:
                     f"{activation.overbroad['matched']}/{activation.overbroad['total']} "
                     "communities — not applied; seed_anchors, if any, still applied"
                 )
+            if activation.note:
+                print(f"  {activation.note}")
         if not all_resolved:
             store.set_meta(VOLATILE_STALE_KEY, "1")
+    # Fix: lazy sync alone keeps last_synced_graph_version current without ever recomputing
+    # the TOC cache, so "bootstrap -> ratify -> SessionStart TOC comes alive" did nothing
+    # until the next real graph rebuild. Rebuild immediately whenever >= 1 domain id was
+    # actually accepted/dropped by this run; a decisions-only ratify leaves it untouched.
+    if domain_changed:
+        if reader is not None:
+            with contextlib.suppress(Exception):
+                ensure_domain_membership(store, reader)
+        store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store, reader)))
     return 1 if had_error else 0
 
 
@@ -1144,10 +1234,27 @@ def sync_main(argv: list[str] | None = None) -> int:
                     f"  {dom['slug']}  {dom['title']}  "
                     f"({dom['matched']}/{dom['total']} communities)"
                 )
-        if report.domain_failures:
+        if report.snapshot_splits:
+            print(
+                "snapshot domains split between parts — neither part holds the frozen "
+                "membership until it is refreshed:"
+            )
+            for split in report.snapshot_splits:
+                flags = " ".join(f"--domain {d}" for d in split["domains"])
+                print(
+                    f"  {split['slug']} -> {', '.join(split['domains'])}: "
+                    f"sidegraph-domains snapshot --refresh {flags}"
+                )
+        if any(not dom.get("busy") for dom in report.domain_failures):
             print("domains that FAILED to refresh (fix, then re-run with --force):")
             for dom in report.domain_failures:
-                print(f"  {dom['slug']}  {dom['title']}  ({dom['error']})")
+                if not dom.get("busy"):
+                    print(f"  {dom['slug']}  {dom['title']}  ({dom['error']})")
+        if any(dom.get("busy") for dom in report.domain_failures):
+            print(
+                "domain membership not refreshed: the store's writer was busy; "
+                "the next sync runs it"
+            )
         if report.slug_conflicts:
             print("slug conflicts — drop one (sidegraph-ratify --drop <loser-id>):")
             for c in report.slug_conflicts:
@@ -1772,15 +1879,195 @@ def _domains_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def _snapshot_engine_refusal(reader: GraphifyReader) -> str | None:
+    """Why a FIRST snapshot of this graph is refused, or None (D5.4's guard)."""
+    generation = reader.engine_generation()
+    if generation == "mention-edges":
+        return (
+            "error: this graph was built by a Graphify release that links documents to the code "
+            f"they mention (engine {reader.engine_version() or 'unstamped'}), which merges "
+            "documents into code communities; a snapshot of it would freeze domains that "
+            "absorbed foreign files. Rebuild the old graph with --build-with 0.9.6, or pass "
+            "--accept-current-engine to snapshot it anyway"
+        )
+    if generation == "unknown":
+        return (
+            "error: cannot tell which Graphify release built this graph (its version stamp "
+            "does not parse); pass --build-with 0.9.6, or --accept-current-engine to snapshot "
+            "it anyway"
+        )
+    return None
+
+
+def _snapshot_summary(snap: domain_snapshot.DomainSnapshot, size: int, verb: str) -> list[str]:
+    """The lines a snapshot run prints about what it froze (``verb``: "froze", or "would freeze"
+    for ``--dry-run``): the totals, then one ``  <slug>: <n> file(s)`` line per covered domain."""
+    counts = domain_snapshot.file_counts(snap)
+    entries = sum(len(f.nodes) for f in snap.files.values())
+    lines = [
+        f"{verb} {len(snap.domains)} domain(s) over {len(snap.files)} file(s) "
+        f"({entries} node exception(s), {size} bytes)"
+    ]
+    lines += [f"  {slug}: {counts[slug]} file(s)" for slug in snap.covered_slugs()]
+    return lines
+
+
+def _domains_snapshot(args: argparse.Namespace) -> int:
+    """``sidegraph-domains snapshot``: freeze every accepted domain's membership into
+    ``.sidegraph/domain-snapshot.json`` and raise the store's minimum-Sidegraph requirement,
+    so an engine upgrade cannot move domains and an older Sidegraph refuses the store.
+    Lazy refresh never publishes a snapshot or raises its requirement. ``--dry-run`` prints what it
+    would freeze and leaves committed files unchanged.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.4)
+    """
+    if args.domain and not args.refresh:
+        print("error: --domain needs --refresh")
+        return 1
+    if args.build_with and args.refresh:
+        print("error: --build-with takes the first snapshot; --refresh reads the current graph")
+        return 1
+    args.db = resolve_store_path(args.db, warn_on_create=not args.dry_run)
+    if args.dry_run:
+        # Opening a Store creates or backfills committed files; a dry run writes none.
+        reason = open_would_write(args.db)
+        if reason is not None:
+            print(f"error: {reason}; --dry-run writes nothing, so it does not open it")
+            return 1
+    try:
+        store = Store(args.db)
+    except Exception as e:
+        print(f"store not readable ({args.db}): {e}")
+        return 1
+    with store:
+        return _take_domain_snapshot(args, store)
+
+
+def _take_domain_snapshot(args: argparse.Namespace, store: Store) -> int:
+    store_dir = Path(args.db)
+    path = domain_snapshot.snapshot_path(store_dir)
+    try:
+        existing, existing_signature = domain_snapshot.read_snapshot(store_dir)
+    except domain_snapshot.SnapshotError as e:
+        print(f"error: {path} is not a readable snapshot ({e}); fix it or restore it from git")
+        return 1
+    if existing is not None and not args.refresh and not args.dry_run:
+        print(
+            f"error: a domain snapshot already exists (taken {existing.taken_at.isoformat()}); "
+            "pass --refresh to re-freeze the current membership, or --refresh --domain SLUG "
+            "for one domain"
+        )
+        return 1
+    if existing is None and args.refresh:
+        print(
+            "error: there is no domain snapshot to refresh; run `sidegraph-domains snapshot` first"
+        )
+        return 1
+    accepted = {d.slug for d in store.iter_domains(status=DomainStatus.ACCEPTED)}
+    unknown = sorted(set(args.domain or ()) - accepted)
+    if unknown:
+        print(f"error: --domain names no accepted domain: {', '.join(unknown)}")
+        return 1
+    with tempfile.TemporaryDirectory(prefix="sidegraph-snapshot-") as tmp:
+        if args.build_with:
+            repo = find_store_project_repo(store_dir, timeout=10.0)
+            if repo is None:
+                print("error: --build-with needs the store inside a git repository")
+                return 1
+            print(
+                f"building the graph of HEAD with Graphify {args.build_with}; this can take "
+                "minutes",
+                file=sys.stderr,
+            )
+            try:
+                graph = build_graph_at_head(
+                    _store_project_root(store_dir), args.build_with, Path(tmp)
+                )
+            except GraphBuildError as e:
+                print(f"error: {e}")
+                return 1
+        else:
+            graph = _resolve_cli_graph(args.graph, args.db)
+            _graph_hint(args.graph, graph)
+        try:
+            reader = GraphifyReader(str(graph))
+        except Exception as e:
+            print(f"graph not readable ({graph}): {e}")
+            return 1
+        if existing is None and not args.accept_current_engine and not args.dry_run:
+            refusal = _snapshot_engine_refusal(reader)
+            if refusal is not None:
+                print(refusal)
+                return 1
+        head = _current_head(store_dir)
+        minimum = domain_snapshot.SNAPSHOT_MIN_SIDEGRAPH
+        raised = False
+        try:
+            # One writer reservation for read, compute, raise and publish: no status change,
+            # pull, concurrent snapshot or requirement change slips between them. The
+            # requirement goes first, so a refused raise leaves no snapshot an older Sidegraph
+            # would ignore. A dry run takes the same reservation and writes nothing in it.
+            with store._mutation():
+                # take_snapshot reads the snapshot once, and refuses one that is not the file
+                # read above (based_on), or a --domain no longer accepted.
+                snap = take_snapshot(
+                    store,
+                    reader,
+                    refresh=args.refresh or existing is not None,
+                    rederive=frozenset(args.domain or ()),
+                    store_commit=head,
+                    based_on=existing_signature,
+                )
+                if args.dry_run:
+                    size = len(domain_snapshot.snapshot_text(snap).encode("utf-8"))
+                else:
+                    # git takes no lock: a pull may have rewritten the file while the membership
+                    # was computed, and writing now would overwrite it.
+                    if snapshot_signature(store_dir) != existing_signature:
+                        raise ValueError(SNAPSHOT_CHANGED)
+                    current = store_requirement(store_dir)
+                    # requirement_met(a, b) is "b >= a" by release: the store already requires
+                    # enough.
+                    if current is None or not requirement_met(minimum, current):
+                        store.raise_requirement(minimum)
+                        raised = True
+                    size = domain_snapshot.write_snapshot(store_dir, snap)
+                    store.invalidate_domain_membership()
+        except ValueError as e:  # SnapshotError included
+            print(f"error: {e}")
+            return 1
+    if args.dry_run:
+        # What --refresh (with a snapshot) or a first run (without one) would freeze; nothing
+        # is written, no requirement is raised, and the guards above do not apply.
+        print("\n".join(_snapshot_summary(snap, size, "would freeze")))
+        return 0
+    summary = _snapshot_summary(snap, size, "froze")
+    summary[0] += f" in {path}"
+    print("\n".join(summary))
+    if args.build_with:
+        print(
+            "files not committed at HEAD are not in the snapshot; they take their domains by vote"
+        )
+    marker = store_dir / FORMAT_MARKER_NAME
+    if raised:
+        print(f"the store now requires Sidegraph >= {minimum} ({marker}); older versions refuse it")
+    else:
+        print(f"the store already requires Sidegraph >= {current}")
+    print(
+        f"commit both in one change: {marker} and {path}; teammates restart their sessions "
+        "after pulling"
+    )
+    return 0
+
+
 def domains_main(argv: list[str] | None = None) -> int:
     """``sidegraph-domains`` — author Domain proposals (mind-model layer; see
-    docs/concepts/mind-model.md). Two subcommands:
-    ``bootstrap`` (path 1, from graph communities) and ``add`` (path 3, manual). Both land
-    ``status=proposed`` — ``sidegraph-ratify`` is the one gate for every authoring path.
+    docs/concepts/mind-model.md). ``bootstrap`` (from graph communities) and ``add``
+    (manual) create proposals; ``sidegraph-ratify`` remains their one gate. ``snapshot``
+    freezes existing accepted domains' membership for an engine upgrade.
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-domains",
-        description="Author Domain proposals: bootstrap from graph communities, or add manually.",
+        description="Manage domains: propose from the graph or manually, or freeze membership.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1839,10 +2126,53 @@ def domains_main(argv: list[str] | None = None) -> int:
         help="path_prefixes stabilizer/bootstrap membership rule (repeatable)",
     )
 
+    snap = sub.add_parser(
+        "snapshot",
+        help="Freeze every accepted domain's membership into the store (domain-snapshot.json).",
+    )
+    snap.add_argument("--db", default=None, help=_DB_HELP)
+    source = snap.add_mutually_exclusive_group()
+    source.add_argument(
+        "--graph",
+        default=None,
+        help="graph.json to take the membership from (default: the store's own graph)",
+    )
+    source.add_argument(
+        "--build-with",
+        default=None,
+        metavar="VERSION",
+        help="build the graph of HEAD with this Graphify release in a temporary "
+        "directory and take the membership from it (e.g. 0.9.6)",
+    )
+    snap.add_argument(
+        "--accept-current-engine",
+        action="store_true",
+        help="take a first snapshot from a graph whose engine links documents to code",
+    )
+    snap.add_argument(
+        "--refresh",
+        action="store_true",
+        help="re-freeze the current membership of an existing snapshot",
+    )
+    snap.add_argument(
+        "--domain",
+        action="append",
+        default=None,
+        metavar="SLUG",
+        help="with --refresh: re-derive this domain from its full rules (repeatable)",
+    )
+    snap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the per-domain file counts; leave committed files unchanged",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "bootstrap":
         return _domains_bootstrap(args)
+    if args.command == "snapshot":
+        return _domains_snapshot(args)
     return _domains_add(args)
 
 
@@ -1968,6 +2298,64 @@ def compact_main(argv: list[str] | None = None) -> int:
             f"cleaned up {report.cleaned_up_hot_files} leftover hot file(s) from an "
             "interrupted prior compact run"
         )
+    return 0
+
+
+def require_main(argv: list[str] | None = None) -> int:
+    """``sidegraph-require`` — make the store refuse Sidegraph versions below ``--sidegraph``.
+
+    Rewrites ``<store>/format`` as ``sidegraph-store 1.0.0`` plus ``requires-sidegraph >=
+    <version>`` (``Store.raise_requirement``, under the store's writer reservation) and prints
+    the commit command. Refuses a version that is not ``X.Y.Z``, one above this Sidegraph's own
+    version, and one below the store's current requirement; asking for the current requirement
+    again changes nothing. Never creates or migrates a store: one without a ``format`` marker is
+    refused. Exit 0 on success (a no-op included), 1 when refused or when there is no store.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)
+    """
+    parser = argparse.ArgumentParser(
+        prog="sidegraph-require",
+        description="Make the store refuse Sidegraph versions older than --sidegraph. "
+        "Rewrites .sidegraph/format; commit it. Never lowers a requirement.",
+    )
+    parser.add_argument(
+        "--sidegraph",
+        required=True,
+        metavar="X.Y.Z",
+        help="the lowest Sidegraph release that may use this store (at most this one's version)",
+    )
+    parser.add_argument("--db", default=None, help=_INSPECT_DB_HELP)
+    args = parser.parse_args(argv)
+    # Reject before touching any path: a bad flag must not affect anything.
+    if not is_release_version(args.sidegraph):
+        print(
+            f"sidegraph-require: --sidegraph must be a release version X.Y.Z, got "
+            f"{args.sidegraph!r}",
+            file=sys.stderr,
+        )
+        return 1
+    db_path = Path(resolve_store_path(args.db, warn_on_create=False))
+    if not path_is_file(db_path / "format"):
+        print(
+            f"sidegraph-require: no store at {db_path} — run `sidegraph-init` first",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        with Store(db_path) as store:
+            change = store.raise_requirement(args.sidegraph)
+    except (ValueError, OSError, sqlite3.Error) as e:
+        print(f"sidegraph-require: {e}", file=sys.stderr)
+        return 1
+    if change.previous == change.required:
+        print(f"{change.marker} already requires Sidegraph >= {change.required}; nothing changed.")
+        return 0
+    before = change.previous or "no requirement"
+    print(f"{change.marker}: Sidegraph >= {change.required} is now required (before: {before}).")
+    print("Commit it. Teammates on an older Sidegraph update it, then restart their sessions:")
+    print(
+        f"  git add {shlex.quote(change.marker.as_posix())} && git commit -m "
+        f'"chore(sidegraph): require Sidegraph >= {change.required}"'
+    )
     return 0
 
 
@@ -2157,9 +2545,21 @@ def doctor_main(argv: list[str] | None = None) -> int:
             print(f"doctor --against {args.against!r} failed: {e}")
             return 1
 
+    stop_note: str | None = None
     if symlinked_internals(Path(args.db)):
         # Verify stopped at the links; the advisory checks read records and would read through
         # them too, so report the violations and say what was skipped (never a clean pass).
+        stop_note = SYMLINK_STOP_NOTE
+    else:
+        try:
+            check_store_requirement(Path(args.db))
+        except StoreRequirementError as e:
+            # A store this version may not read (spec D6): verify reported its marker code
+            # above, and the advisory checks read its index and records, so they do not run.
+            stop_note = f"remaining checks skipped ({e})"
+        except OSError:
+            pass  # an unreadable marker is verify's unknown-schema-version, listed above
+    if stop_note is not None:
         if args.json:
             print(
                 json.dumps(
@@ -2177,7 +2577,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
         else:
             for v in violations:
                 print(f"{v.code}  {v.path}  {v.detail}")
-            print(SYMLINK_STOP_NOTE)
+            print(stop_note)
             print(f"{len(violations)} violation(s), 0 finding(s)")
         return 2
 
@@ -2256,16 +2656,19 @@ def doctor_main(argv: list[str] | None = None) -> int:
             else:
                 print(f"{name} check skipped (no usable index.db — run sidegraph-sync)")
         # Informational lines (never findings, never the exit code, absent from --json):
-        # time-to-ratify and the D5 auto-ratification audit. Computed in doctor.py; an
-        # unusable record is skipped there, and any other error is a bug and propagates.
+        # time-to-ratify, the D5 auto-ratification audit, and spelling twins. Computed in
+        # doctor.py; an unusable record is skipped there, and any other error is a bug and
+        # propagates.
         for line in ratification_info_lines(args.db):
+            print(line)
+        for line in spelling_twin_lines(args.db):
             print(line)
         if reader is None:
             # Not the text above, which blames the index, and not a finding: see the comment
             # where the reader is opened. Last before the summary line.
             print(
                 f"graph checks skipped (no code graph at {graph or 'the default path'} — build "
-                "it from the repository root with `graphify update .`)"
+                f"it from the repository root by running {githooks.GRAPH_REBUILD})"
             )
         if violations or report.findings:
             print(f"{len(violations)} violation(s), {len(report.findings)} finding(s)")
@@ -2468,6 +2871,9 @@ def stats_main(argv: list[str] | None = None) -> int:
     except (sqlite3.Error, PermissionError) as e:
         print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
         return 2
+    except StoreRequirementError as e:
+        print(f"cannot read the store ({store_dir}): {e}", file=sys.stderr)
+        return 2
     except UnreadableRecordError as e:
         # Named by table and record id: the message is all the person has to go on.
         print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
@@ -2639,6 +3045,14 @@ def blame_main(argv: list[str] | None = None) -> int:
 
     cwd = Path.cwd()
     db_path = Path(resolve_store_path(args.db, warn_on_create=False))
+    try:
+        check_store_requirement(db_path)
+    except StoreRequirementError as e:
+        # Blame still runs; the index is not read (spec D6), and the person learns why no
+        # record is joined.
+        print(f"sidegraph-blame: {e} No records are joined.", file=sys.stderr)
+    except OSError:
+        pass  # an unreadable store degrades to unjoined records, as it always has
     hunks = gitio.blame_report(args.file, cwd, db_path, line_range)
     if hunks is None:
         print(

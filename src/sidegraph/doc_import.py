@@ -1416,7 +1416,7 @@ def _select_mention_anchors(
                 skipped.append({"name": token, "reason": "unresolved", "candidates": []})
         else:
             ref = Descriptor(name=token)
-            result = reader.resolve(ref)
+            result = reader.resolve(ref, collapse=False)
             if result.status == "resolved":
                 anchors.append(ref)
             else:
@@ -2315,7 +2315,7 @@ def _apply_doc_bindings(
 ) -> None:
     """Idempotently apply every binding requested for one document decision."""
     for anchor in request.anchors:
-        resolve_and_bind(decision_id, anchor, reader, store)
+        resolve_and_bind(decision_id, anchor, reader, store, collapse=False)
     for inherited in (
         store.bindings_for_record(inherit_bindings_from) if inherit_bindings_from else []
     ):

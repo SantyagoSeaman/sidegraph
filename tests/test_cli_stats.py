@@ -10,11 +10,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from sidegraph import __version__
 from sidegraph.cli import stats_main
 from sidegraph.schema import Decision, DecisionKind, Provenance
 from sidegraph.stats.model import build_report
 from sidegraph.stats.render import render_text
 from sidegraph.store import Store
+from sidegraph.store_layout import StoreRequirementError
+from tests.test_store_requirement import above_running, write_requirement_marker
 
 
 @pytest.fixture(autouse=True)
@@ -674,3 +677,23 @@ def test_stats_says_unreadable_not_missing_for_a_store_dir_it_cannot_search(tmp_
     assert "no store index" not in err
     assert err.startswith(f"cannot read the store index ({store_dir / 'index.db'}): ")
     assert "Permission denied" in err  # the real error, not a fixed phrase
+
+
+def test_a_store_that_requires_a_newer_sidegraph_is_explained_not_read(
+    tmp_path, capsys, monkeypatch
+):
+    """Red against code before this task: build_report reads the index of a store this version
+    may not read, and sidegraph-stats exits 0."""
+    store_dir = tmp_path / ".sidegraph"
+    store = Store(store_dir)
+    store.record_touch("s1", "a.py", "Read")
+    store.close()
+    above = above_running()
+    write_requirement_marker(store_dir, above)
+    with pytest.raises(StoreRequirementError):
+        build_report(store_dir, None)
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
+    assert stats_main([]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"This store requires Sidegraph >= {above}; this is {__version__}." in captured.err

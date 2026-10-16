@@ -20,9 +20,109 @@ import json
 
 import fastmcp
 import mcp.types as mt
+import pytest
 
 import sidegraph.server as server_module
 from sidegraph.store import Store
+
+
+def test_first_mcp_write_from_nested_directory_creates_only_git_root_store(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    monkeypatch.setattr(server_module, "_store", None)
+
+    async def run():
+        async with fastmcp.Client(server_module.mcp) as client:
+            return await client.call_tool(
+                "add_decision",
+                {"title": "Example", "kind": "adr", "context": "Example", "choice": "Example"},
+                raise_on_error=False,
+            )
+
+    try:
+        result = asyncio.run(run())
+        assert not result.is_error
+        assert result.data["id"]
+        assert (tmp_path / ".sidegraph" / "format").is_file()
+        assert not (nested / ".sidegraph").exists()
+        assert server_module._store is not None
+        assert server_module._store.get_decision(result.data["id"]) is not None
+    finally:
+        if server_module._store is not None:
+            server_module._store.close()
+        server_module._store = None
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("retrieve_decisions", {}),
+        (
+            "add_decision",
+            {"title": "Example", "kind": "adr", "context": "Example", "choice": "Example"},
+        ),
+    ],
+)
+def test_missing_non_git_store_returns_setup_guidance_over_mcp(
+    tmp_path, monkeypatch, name, arguments
+):
+    selected = tmp_path / ".sidegraph"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(selected))
+    monkeypatch.setattr(server_module, "_store", None)
+
+    async def run():
+        async with fastmcp.Client(server_module.mcp) as client:
+            return await client.call_tool(name, arguments, raise_on_error=False)
+
+    result = asyncio.run(run())
+    text = "\n".join(block.text for block in result.content if isinstance(block, mt.TextContent))
+    assert result.is_error
+    assert "sidegraph-init" in text
+    assert str(selected) in text
+    assert server_module._store is None
+    assert not selected.exists()
+
+
+@pytest.mark.parametrize("invalid_argument", [False, True])
+def test_first_write_setup_preserves_safe_error_and_argument_guards(
+    tmp_path, monkeypatch, capsys, caplog, invalid_argument
+):
+    from sidegraph.write_boundary import WRITE_FAILURE
+
+    selected = tmp_path / ".sidegraph"
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(selected))
+    monkeypatch.setattr(server_module, "_store", None)
+    calls = []
+    secret = "synthetic-private-error-payload"
+
+    def broken_location(**kwargs):
+        calls.append(True)
+        raise OSError(secret)
+
+    monkeypatch.setattr(server_module, "resolve_store_location", broken_location)
+    arguments = {"title": "Example", "kind": "adr", "context": "Example", "choice": "Example"}
+    if invalid_argument:
+        arguments["unexpected"] = secret
+
+    async def run():
+        async with fastmcp.Client(server_module.mcp) as client:
+            return await client.call_tool("add_decision", arguments, raise_on_error=False)
+
+    result = asyncio.run(run())
+    text = "\n".join(block.text for block in result.content if isinstance(block, mt.TextContent))
+    captured = capsys.readouterr()
+    assert result.is_error
+    assert secret not in text + captured.out + captured.err + caplog.text
+    assert calls == ([] if invalid_argument else [True])
+    if invalid_argument:
+        assert "Unknown write argument" in text
+    else:
+        assert text == WRITE_FAILURE
+    assert server_module._store is None
+    assert not selected.exists()
 
 
 def test_mcp_add_and_retrieve_decisions_roundtrip(tmp_path, monkeypatch):

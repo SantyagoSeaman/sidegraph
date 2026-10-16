@@ -74,7 +74,7 @@ class _FakeReader:
         self._result = result
         self._graph_version = graph_version
 
-    def resolve(self, desc):
+    def resolve(self, desc, *, collapse=True):
         return self._result
 
     def get_node(self, node_id):
@@ -92,7 +92,7 @@ class _NodeReader:
         self._node = node
         self._community = community
 
-    def resolve(self, desc):
+    def resolve(self, desc, *, collapse=True):
         return ResolveResult(
             status="resolved", node_id=self._node.node_id, community=self._community
         )

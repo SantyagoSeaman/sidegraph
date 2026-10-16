@@ -450,6 +450,15 @@ def test_each_of_the_three_hooks_rebuilds_in_the_main_checkout(sandbox):
     assert starts[-1].head == b3
 
 
+def test_the_rebuild_line_keeps_graphify_off_the_users_skills():
+    script = githooks.helper_script("/usr/bin/graphify")
+    update_lines = [line for line in script.splitlines() if '"$graphify" update .' in line]
+    assert update_lines == [
+        '      GRAPHIFY_NO_AUTO_REFRESH=1 PYTHONHASHSEED=0 "$graphify" update . > "$log" 2>&1'
+    ]
+    assert githooks.GRAPH_REBUILD_ENV == "GRAPHIFY_NO_AUTO_REFRESH=1"
+
+
 @pytest.mark.slow
 def test_the_rebuild_is_graphify_update_with_a_pinned_hash_seed_and_a_log(sandbox):
     main = sandbox.repo()
@@ -459,6 +468,7 @@ def test_the_rebuild_is_graphify_update_with_a_pinned_hash_seed_and_a_log(sandbo
     starts = await_rebuilds(sandbox, info.common)
     assert starts[0].args == "update ."
     assert "seed=0" in sandbox.log.read_text()
+    assert "noauto=1" in sandbox.log.read_text()
     log = (info.common / f"{HELPER_NAME}.log").read_text()
     assert log == "fake graphify ran: update .\n"
 
@@ -1030,3 +1040,11 @@ def test_the_installed_block_is_wired_and_a_real_line_after_a_comment_counts(san
 @pytest.mark.slow
 def test_repo_info_outside_a_repository_is_none(tmp_path):
     assert githooks.repo_info(tmp_path / "nowhere") is None
+
+
+@pytest.mark.slow
+def test_graphifys_merge_hook_marker_is_reported(sandbox):
+    # red against unfixed code: graphify_hook is False
+    repo = sandbox.repo()
+    write_hook(repo, "post-merge", "#!/bin/sh\n# graphify-merge-hook-start\necho graphify\n")
+    assert githooks.status(info_for(repo)).graphify_hook

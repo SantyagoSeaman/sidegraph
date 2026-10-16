@@ -8,6 +8,7 @@ repo, same convention as ``test_verify_transitions.py``'s git-backed integration
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -321,3 +322,327 @@ def test_code_drift_finding_appended_after_every_other_check(git_repo):
 
     report = curate(store_dir)
     assert report.findings[-1].code == CODE_DRIFT
+
+
+# -- uncomputed statuses: deleted anchors are not drift ------------------------------------
+
+
+def _set_status_flag(root: Path, value: str) -> None:
+    with sqlite3.connect(root / "index.db") as conn:
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO meta VALUES ('volatile_stale', ?)", (value,))
+
+
+def test_real_sync_orphan_deleted_then_reloaded_is_not_code_drift(git_repo, tmp_path):
+    """A canonical reload must not turn a synced orphan's deleted file into drift."""
+    from datetime import UTC, datetime
+
+    from sidegraph.doctor import scan_code_drift
+    from sidegraph.schema import (
+        AnchorBinding,
+        Decision,
+        DecisionKind,
+        DecisionStatus,
+        Descriptor,
+        Entity,
+        Provenance,
+    )
+    from sidegraph.store import Store
+    from sidegraph.sync import sync
+    from tests.graph_fixtures import node, reader_of
+
+    source = git_repo / "a.py"
+    source.write_text("def gone():\n    return 1\n")
+    _git(["add", "a.py"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "capture"], cwd=git_repo)
+    commit = _head(git_repo)
+    reader = reader_of(tmp_path, node("other", "Other", "other.py"))
+    graph_before = (tmp_path / "graph.json").read_bytes()
+    store_dir = git_repo / ".sidegraph"
+    with Store(store_dir) as store:
+        decision = store.add_decision(
+            Decision(
+                title="Deleted anchor",
+                kind=DecisionKind.GOTCHA,
+                status=DecisionStatus.ACCEPTED,
+                context="The captured symbol was removed",
+                choice="Keep decision history",
+                valid_from=datetime.now(UTC),
+                provenance=Provenance(source="manual", commit=commit),
+            )
+        )
+        entity = store.upsert_entity(
+            Entity(canonical_name="gone", descriptor=Descriptor(name="gone", file_path="a.py"))
+        )
+        store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2))
+        before_sync = {p: p.read_bytes() for p in store_dir.rglob("*.json")}
+        sync(store, reader, force=True)
+        assert {p: p.read_bytes() for p in before_sync} == before_sync
+        assert store.bindings_for_record(decision.id)[0].status == "orphaned"
+        assert store.get_meta("volatile_stale") == "0"
+
+    source.unlink()
+    _git(["add", "-u", "--", "a.py"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "delete anchor"], cwd=git_repo)
+    assert [e for b in scan_code_drift(store_dir).batches for e in b.entries] == []
+
+    path = store_dir / "decisions" / f"{decision.id}.json"
+    payload = json.loads(path.read_text())
+    payload["context"] = "External canonical update triggers index reload"
+    path.write_text(json.dumps(payload) + "\n")
+    with Store(store_dir) as store:
+        assert store.get_meta("volatile_stale") == "1"
+        assert store.bindings_for_record(decision.id)[0].status == "live"
+
+    before_scan = {p: p.read_bytes() for p in store_dir.rglob("*") if p.is_file()}
+    scan = scan_code_drift(store_dir)
+    assert {p: p.read_bytes() for p in store_dir.rglob("*") if p.is_file()} == before_scan
+    assert (tmp_path / "graph.json").read_bytes() == graph_before
+    assert [e for b in scan.batches for e in b.entries] == []
+
+
+def test_uncomputed_modified_file_is_reported_with_unknown_binding_status(git_repo):
+    """Graphless stores must retain real drift without implying computed-live bindings."""
+    from sidegraph.doctor import BINDING_STATUS_CHECK, scan_code_drift
+
+    source = git_repo / "a.py"
+    source.write_text("before\n")
+    _git(["add", "a.py"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "capture"], cwd=git_repo)
+    store_dir = git_repo / ".sidegraph"
+    rid, eid = _ulid(), _ulid()
+    _decision(store_dir, rid, commit=_head(git_repo))
+    _entity(store_dir, eid, "A", "a.py")
+    _bind(store_dir, rid, eid)
+    _index_with_bindings(store_dir, [(rid, eid, "live")])
+    _set_status_flag(store_dir, "1")
+    source.write_text("after\n")
+    _git(["add", "a.py"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "modify anchor"], cwd=git_repo)
+
+    report = curate(store_dir)
+    drift = [f for f in report.findings if f.code == CODE_DRIFT]
+    assert len(drift) == 1
+    assert drift[0].path == str(store_dir / "decisions" / f"{rid}.json")
+    assert "binding status unknown" in drift[0].detail
+    assert BINDING_STATUS_CHECK in report.skipped
+    scan = scan_code_drift(store_dir)
+    assert scan.binding_statuses_uncomputed
+    assert [e.files for b in scan.batches for e in b.entries] == [["a.py"]]
+
+
+def test_uncomputed_mixed_anchors_keep_modified_path_and_exclude_deleted_path(git_repo):
+    """Deletion filtering is per path, not a blanket skip of a partly orphaned record."""
+    from sidegraph.doctor import scan_code_drift
+
+    for name in ("deleted.py", "modified.py"):
+        (git_repo / name).write_text("before\n")
+    _git(["add", "deleted.py", "modified.py"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "capture"], cwd=git_repo)
+    store_dir = git_repo / ".sidegraph"
+    rid, deleted, modified = _ulid(), _ulid(), _ulid()
+    _decision(store_dir, rid, commit=_head(git_repo))
+    _entity(store_dir, deleted, "Deleted", "deleted.py")
+    _entity(store_dir, modified, "Modified", "modified.py")
+    _write(store_dir, f"bindings/{rid}.json", [{"entity_id": deleted}, {"entity_id": modified}])
+    _index_with_bindings(store_dir, [(rid, deleted, "live"), (rid, modified, "live")])
+    _set_status_flag(store_dir, "1")
+    (git_repo / "deleted.py").unlink()
+    (git_repo / "modified.py").write_text("after\n")
+    _git(["add", "-u"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "delete and modify anchors"], cwd=git_repo)
+
+    scan = scan_code_drift(store_dir)
+    entries = [e for b in scan.batches for e in b.entries]
+    assert [(e.record_id, e.record_path, e.files) for e in entries] == [
+        (rid, str(store_dir / "decisions" / f"{rid}.json"), ["modified.py"])
+    ]
+
+
+def test_binding_snapshot_blocks_writer_until_rows_fetched_but_releases_before_json(
+    tmp_path, monkeypatch
+):
+    """An autocommit read would allow a reload to commit between certification and rows."""
+    from sidegraph import doctor
+
+    _index_with_bindings(tmp_path, [("R", "E", "orphaned")])
+    _set_status_flag(tmp_path, "0")
+    connect, loads = sqlite3.connect, json.loads
+    events = []
+    with connect(tmp_path / "index.db", timeout=0) as writer:
+
+        def assert_writer_blocked(phase):
+            writer.execute("UPDATE meta SET value = '1'")
+            writer.execute('UPDATE anchor_bindings SET data = \'{"status":"live"}\'')
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                writer.commit()
+            events.append(phase)
+
+        class ObservedFlagCursor(sqlite3.Cursor):
+            def fetchone(self):
+                row = super().fetchone()
+                assert_writer_blocked("writer blocked after certification")
+                return row
+
+        class ObservedRowsCursor(sqlite3.Cursor):
+            def fetchall(self):
+                rows = super().fetchall()
+                assert_writer_blocked("writer blocked after rows")
+                return rows
+
+        class ObservedConnection(sqlite3.Connection):
+            def execute(self, sql, parameters=()):
+                if sql.startswith("SELECT record_id, entity_id, data FROM anchor_bindings"):
+                    return self.cursor(factory=ObservedRowsCursor).execute(sql, parameters)
+                if sql.startswith("SELECT value FROM meta WHERE key"):
+                    return self.cursor(factory=ObservedFlagCursor).execute(sql, parameters)
+                return super().execute(sql, parameters)
+
+        def reading_connect(*args, **kwargs):
+            return connect(*args, factory=ObservedConnection, **kwargs)
+
+        def parse_after_close(data, *args, **kwargs):
+            writer.commit()  # succeeds only after doctor's reader has released its snapshot
+            events.append("writer committed before parsing")
+            return loads(data, *args, **kwargs)
+
+        monkeypatch.setattr(doctor.sqlite3, "connect", reading_connect)
+        monkeypatch.setattr(doctor.json, "loads", parse_after_close)
+        assert doctor._binding_status_by_key(tmp_path) == {("R", "E"): "orphaned"}
+        assert events == [
+            "writer blocked after certification",
+            "writer blocked after rows",
+            "writer committed before parsing",
+        ]
+        assert writer.execute("SELECT value FROM meta").fetchone() == ("1",)
+
+
+@pytest.mark.parametrize(
+    ("index_state", "status", "want_files", "unknown"),
+    [
+        ("0", "live", ["deleted.py", "modified.py"], False),
+        ("0", "degraded", ["deleted.py", "modified.py"], False),
+        ("0", "orphaned", [], False),
+        ("1", "live", ["modified.py"], True),
+        ("1", "orphaned", [], True),
+        ("odd", "live", ["deleted.py", "modified.py"], False),
+        ("no-meta", "live", ["deleted.py", "modified.py"], False),
+        ("no-key", "live", ["deleted.py", "modified.py"], False),
+        ("missing", "live", ["modified.py"], True),
+        ("corrupt", "live", ["modified.py"], True),
+        ("no-bindings", "live", ["modified.py"], True),
+        ("bad-meta", "live", ["modified.py"], True),
+        pytest.param("bad-meta", "orphaned", [], True, id="unreadable-meta-keeps-readable-orphan"),
+    ],
+)
+def test_drift_certification_preserves_legacy_and_handles_unavailable_index(
+    git_repo, index_state, status, want_files, unknown
+):
+    """Compatibility guards plus unavailable-index fallback: no blanket graphless skip."""
+    from sidegraph.doctor import scan_code_drift
+
+    for name in ("deleted.py", "modified.py"):
+        (git_repo / name).write_text("before\n")
+    _git(["add", "deleted.py", "modified.py"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "capture"], cwd=git_repo)
+    store_dir = git_repo / ".sidegraph"
+    rid = _ulid()
+    _decision(store_dir, rid, commit=_head(git_repo))
+    eids = []
+    for name in ("deleted.py", "modified.py"):
+        eid = _ulid()
+        eids.append(eid)
+        _entity(store_dir, eid, name, name)
+    _write(store_dir, f"bindings/{rid}.json", [{"entity_id": eid} for eid in eids])
+    if index_state == "corrupt":
+        (store_dir / "index.db").write_bytes(b"unreadable SQLite index")
+    elif index_state != "missing":
+        _index_with_bindings(store_dir, [(rid, eid, status) for eid in eids])
+        if index_state == "bad-meta":
+            with sqlite3.connect(store_dir / "index.db") as conn:
+                conn.execute("CREATE TABLE meta (key TEXT)")
+        elif index_state == "no-bindings":
+            _set_status_flag(store_dir, "0")
+            with sqlite3.connect(store_dir / "index.db") as conn:
+                conn.execute("DROP TABLE anchor_bindings")
+        elif index_state != "no-meta":
+            _set_status_flag(store_dir, index_state)
+            if index_state == "no-key":
+                with sqlite3.connect(store_dir / "index.db") as conn:
+                    conn.execute("DELETE FROM meta")
+    (git_repo / "deleted.py").unlink()
+    (git_repo / "modified.py").write_text("after\n")
+    _git(["add", "-u"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "change anchors"], cwd=git_repo)
+
+    scan = scan_code_drift(store_dir)
+    assert [e.files for b in scan.batches for e in b.entries] == (
+        [want_files] if want_files else []
+    )
+    assert scan.binding_statuses_uncomputed is unknown
+    findings = [f for f in curate(store_dir).findings if f.code == CODE_DRIFT]
+    assert len(findings) == bool(want_files)
+    for finding in findings:
+        assert ("binding status unknown" in finding.detail) is unknown
+
+
+def test_uncomputed_rename_keeps_new_anchor_but_not_deleted_old_path(git_repo):
+    """Git rename detection must not transfer an old binding onto the renamed file."""
+    from sidegraph.doctor import scan_code_drift
+
+    (git_repo / "old.py").write_text("unchanged contents\n")
+    _git(["add", "old.py"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "capture"], cwd=git_repo)
+    store_dir = git_repo / ".sidegraph"
+    rid, old, new = _ulid(), _ulid(), _ulid()
+    _decision(store_dir, rid, commit=_head(git_repo))
+    _entity(store_dir, old, "Old", "old.py")
+    _entity(store_dir, new, "New", "new.py")
+    _write(store_dir, f"bindings/{rid}.json", [{"entity_id": old}, {"entity_id": new}])
+    _git(["mv", "old.py", "new.py"], cwd=git_repo)
+    _git(["commit", "-q", "-m", "rename anchor"], cwd=git_repo)
+
+    scan = scan_code_drift(store_dir)
+    assert [e.files for b in scan.batches for e in b.entries] == [["new.py"]]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "modified.py",
+        pytest.param(
+            "line\nbreak.py", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX filename")
+        ),
+    ],
+)
+def test_uncommitted_worktree_deletion_does_not_hide_committed_drift(git_repo, name):
+    """Only HEAD deletions are excluded; NUL parsing must preserve a newline filename."""
+    from sidegraph.doctor import scan_code_drift
+
+    source = git_repo / name
+    source.write_text("before\n")
+    _git(["add", "--", name], cwd=git_repo)
+    _git(["commit", "-q", "-m", "capture"], cwd=git_repo)
+    store_dir = git_repo / ".sidegraph"
+    rid, eid = _ulid(), _ulid()
+    _decision(store_dir, rid, commit=_head(git_repo))
+    _entity(store_dir, eid, name, name)
+    _bind(store_dir, rid, eid)
+    source.write_text("after\n")
+    _git(["add", "--", name], cwd=git_repo)
+    _git(["commit", "-q", "-m", "modify anchor"], cwd=git_repo)
+    source.unlink()
+
+    scan = scan_code_drift(store_dir)
+    assert [e.files for b in scan.batches for e in b.entries] == [[name]]
+
+
+@pytest.mark.parametrize("data", ["{", "null", "[]", '{"status": []}', "{}", None])
+def test_malformed_binding_rows_do_not_abort_drift_status_read(tmp_path, data):
+    """A malformed raw row must not hide the usable orphaned row beside it."""
+    from sidegraph.doctor import _binding_status_by_key
+
+    _index_with_bindings(tmp_path, [("R", "E", "orphaned")])
+    with sqlite3.connect(tmp_path / "index.db") as conn:
+        conn.execute("INSERT INTO anchor_bindings VALUES ('bad', 'bad', ?)", (data,))
+    assert _binding_status_by_key(tmp_path) == {("R", "E"): "orphaned"}

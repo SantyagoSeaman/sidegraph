@@ -140,3 +140,12 @@ def test_snapshot_carries_prose_from_docstrings_not_only_paths():
     why private corpora are never promoted in any derived form (leak-safety layer L0)."""
     kinds = {n.get("file_type") for n in _graph()["nodes"]}
     assert "rationale" in kinds
+
+
+def test_rebuilt_path_suffix_file_label_resolves_as_a_basename() -> None:
+    """The real engine fixture exercises the file-label normalization end to end."""
+    raw = _graph()
+    relabelled = [n for n in raw["nodes"] if n.get("label") == "engine/__init__.py"]
+    assert relabelled, "the fixture graph has no path-suffix file label"
+    node = GraphifyReader(_GRAPH).get_node(str(relabelled[0]["id"]))
+    assert node is not None and node.name == "__init__.py"

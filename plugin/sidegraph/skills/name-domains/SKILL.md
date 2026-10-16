@@ -71,7 +71,8 @@ gate: present and wait, never auto-write.
    clones the repo or the graph gets rebuilt (name/summary survive; precise membership
    evaporates). `seed_anchors` anchors to durable entities instead — the same mechanism a
    decision's own anchors use — so membership survives a fresh clone or rebuild; `ratify`
-   resolves `seed_anchors` into `communities` immediately.
+   resolves `seed_anchors` into members immediately (on a store that already has a domain
+   snapshot, only in files the snapshot does not list; see `sidegraph:manage-domains`).
 
    Use each group's shared `path` (and `ungrouped`) as your starting hint, but you're free to
    regroup, rename, split, or merge across group boundaries when the code says otherwise —
@@ -102,8 +103,10 @@ gate: present and wait, never auto-write.
    `auto-all` the rest are already accepted, and `ratify` would return `error: … is not
    proposed` for them) —
    turning the pick into an accepted, TOC-visible set in the same turn (ratify also resolves
-   each domain's `seed_anchors` into `communities` immediately, so `drill_down` shows real
-   membership right away, without waiting for a separate sync). Provenance
+   each domain's `seed_anchors` into members immediately, so `drill_down` shows real
+   membership right away, without waiting for a separate sync; on a store that already has a
+   domain snapshot, a domain named now gets members only in files the snapshot does not list,
+   see `sidegraph:manage-domains`). Provenance
    (`source="agent"` + session) makes the git diff show who named what.
 
 6. **If the human says "I'll choose myself"** — or wants to hand-pick, edit, or reject
@@ -133,7 +136,7 @@ gate: present and wait, never auto-write.
 - `sidegraph-domains bootstrap` (CLI) does the same deterministic candidate selection but skips
   the curation step — it's the scripted/CI alternative, not the recommended path for a human in
   a session. See [naming your domains](../../../../docs/guides/naming-your-domains.md). Run it as
-  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
+  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
 
 ## See also
 

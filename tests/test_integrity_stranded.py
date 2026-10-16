@@ -862,3 +862,12 @@ def test_an_implausible_ulid_name_is_aged_by_mtime(tmp_path, name):
     assert only_problem(UNCOMMITTED, store).line == uncommitted_line(
         store, 1, "30 hours", "1 decision file(s)"
     )
+
+
+def test_t1_an_old_uncommitted_domain_snapshot_is_a_stranded_store_write(tmp_path):
+    """Red against a layout without the snapshot: not a store write, no problem."""
+    _repo, store = project(tmp_path)
+    age_file(write(store / "domain-snapshot.json"), 25.5)
+    assert only_problem(UNCOMMITTED, store).line == uncommitted_line(
+        store, 1, "25 hours", "1 other"
+    )

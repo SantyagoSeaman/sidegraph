@@ -23,6 +23,7 @@ import sidegraph.host.subagent as subagent
 from sidegraph.host.hooks import STANDING_SEARCH_INSTRUCTION
 from sidegraph.schema import AnchorBinding, DecisionKind, DecisionStatus, Entity, EntityKind
 from sidegraph.store import Store
+from sidegraph.store_layout import VOLATILE_STALE_KEY
 from tests.test_hot_index import _REFUSED, FILE_A, _broken_project, _Seeder, _snapshot
 
 NOW = datetime.now(UTC)
@@ -103,6 +104,8 @@ def _seed(store_dir: Path) -> None:
     # get_task_context never returns a deprecated record, so it is on a file of its own too
     s.anchor(s.decision("Deprecated on i", G, DecisionStatus.DEPRECATED), "src/i.py")
     _tier0_only(store, s)
+    # These fixtures hand-author the status outcomes of a completed sync.
+    store.set_meta(VOLATILE_STALE_KEY, "0")
     store.close()
 
 
@@ -196,6 +199,7 @@ def test_t1_a_single_record_reads_in_the_singular(tmp_path, monkeypatch, capsys)
     store = Store(store_dir)
     s = _Seeder(store)
     s.anchor(s.decision("The only one", DecisionKind.GOTCHA), "src/only.py")
+    store.set_meta(VOLATILE_STALE_KEY, "0")
     store.close()
     text = _brief(_run(monkeypatch, capsys, root, store_dir, CLAUDE_PAYLOAD))
     assert "1 record anchored to code in 1 file, 1 of them recorded mistakes" in text
@@ -244,6 +248,7 @@ def test_t3_a_store_with_nothing_to_ask_about_prints_nothing(tmp_path, monkeypat
     store = Store(store_dir)
     if dead:
         _seed_dead(store, _Seeder(store))
+        store.set_meta(VOLATILE_STALE_KEY, "0")
     store.close()
     before = _snapshot(root)
     assert _run(monkeypatch, capsys, root, store_dir, CLAUDE_PAYLOAD) == {}

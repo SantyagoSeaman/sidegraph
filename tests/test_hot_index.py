@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import json
 import os
 import shutil
 import sqlite3
@@ -41,9 +42,226 @@ from sidegraph.schema import (
     Entity,
     Provenance,
 )
-from sidegraph.store import Store
+from sidegraph.store import VOLATILE_STALE_KEY, Store
+from tests.test_store_requirement import above_running, write_requirement_marker
 
 NOW = datetime.now(UTC)
+
+
+def _synced_hot_pair(project: Path):
+    """Real sync certifies one live anchor and one orphan before a canonical reload."""
+    from sidegraph.engine.reader import GraphifyReader
+    from sidegraph.sync import sync
+
+    (project / "live.py").write_text("def kept():\n    return 1\n", encoding="utf-8")
+    graph = project / "graphify-out" / "graph.json"
+    graph.parent.mkdir()
+    graph.write_text(
+        json.dumps(
+            {
+                "directed": True,
+                "multigraph": False,
+                "nodes": [
+                    {
+                        "id": "kept",
+                        "label": "kept",
+                        "norm_label": "kept",
+                        "file_type": "code",
+                        "source_file": "live.py",
+                        "source_location": "L1",
+                        "community": 1,
+                        "_origin": "ast",
+                    }
+                ],
+                "links": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    root = project / ".sidegraph"
+    store = Store(root)
+    try:
+        entities = []
+        records = []
+        for name, path, title in [
+            ("kept", "live.py", "Legitimate live memory"),
+            ("gone", "missing.py", "Orphan must stay silent"),
+        ]:
+            record = store.add_decision(
+                Decision(
+                    title=title,
+                    kind=DecisionKind.GOTCHA,
+                    status=DecisionStatus.ACCEPTED,
+                    context="Before canonical reload",
+                    choice="Respect computed binding status",
+                    valid_from=NOW,
+                    provenance=Provenance(source="manual"),
+                )
+            )
+            entity = store.upsert_entity(
+                Entity(canonical_name=name, descriptor=Descriptor(name=name, file_path=path))
+            )
+            store.add_binding(
+                AnchorBinding(record_id=record.id, entity_id=entity.entity_id, tier=2)
+            )
+            records.append(record)
+            entities.append(entity)
+        canonical = {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")}
+        graph_bytes = graph.read_bytes()
+        reader = GraphifyReader(graph)
+        sync(store, reader, force=True)
+        assert store.get_meta(VOLATILE_STALE_KEY) == "0"
+        assert [store.bindings_for_record(r.id)[0].status for r in records] == [
+            "live",
+            "orphaned",
+        ]
+        assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")} == canonical
+        assert graph.read_bytes() == graph_bytes
+        return root, reader, entities, root / "decisions" / f"{records[0].id}.json"
+    finally:
+        store.close()
+
+
+def _reload_hot_pair(root: Path, record_path: Path) -> None:
+    data = json.loads(record_path.read_text(encoding="utf-8"))
+    data["context"] = "External canonical edit resets derived statuses"
+    record_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    store = Store(root)
+    try:
+        assert store.get_meta(VOLATILE_STALE_KEY) == "1"
+    finally:
+        store.close()
+
+
+def test_reload_withholds_hot_records_until_sync(tmp_path):
+    root, reader, entities, record = _synced_hot_pair(tmp_path)
+    _reload_hot_pair(root, record)
+    index = HotIndex.open(root)
+    assert index is not None
+    try:
+        assert index.records_for([e.entity_id for e in entities]) == []
+        # Withholding selection does not disable the handle's independent telemetry.
+        index.record_touch("reload-session", "live.py", "Read")
+        assert index.claim_meta("reload-claim", "1")
+        assert index.get_meta("reload-claim") == "1"
+    finally:
+        index.close()
+
+    from sidegraph.sync import sync
+
+    store = Store(root)
+    try:
+        canonical = {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")}
+        sync(store, reader)
+        assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")} == canonical
+    finally:
+        store.close()
+    index = HotIndex.open(root)
+    assert index is not None
+    try:
+        assert [
+            r.decision["title"] for r in index.records_for([e.entity_id for e in entities])
+        ] == ["Legitimate live memory"]
+        assert index.memory_counts() == (1, 1, 1)
+    finally:
+        index.close()
+
+
+def test_reload_withholds_hot_memory_counts(tmp_path):
+    root, _reader, _entities, record = _synced_hot_pair(tmp_path)
+    _reload_hot_pair(root, record)
+    index = HotIndex.open(root)
+    assert index is not None
+    try:
+        assert index.memory_counts() == (0, 0, 0)
+    finally:
+        index.close()
+
+
+@pytest.mark.parametrize("event", ["PreToolUse", "SubagentStart"])
+@pytest.mark.parametrize("reload_index", [True, False], ids=["reload", "new-graphless-store"])
+def test_uncomputed_statuses_withhold_real_hook_delivery(
+    tmp_path, monkeypatch, capsys, event, reload_index
+):
+    from sidegraph.host import subagent
+
+    if reload_index:
+        root, _reader, _entities, record = _synced_hot_pair(tmp_path)
+        _reload_hot_pair(root, record)
+    else:
+        root = tmp_path / ".sidegraph"
+        store = Store(root)
+        seed = _Seeder(store)
+        seed.anchor(seed.decision("Uncomputed memory", DecisionKind.GOTCHA), "missing.py")
+        assert store.get_meta(VOLATILE_STALE_KEY) == "1"
+        store.close()
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(root))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    payload = {
+        "hook_event_name": event,
+        "session_id": "reload-hook-session",
+        "cwd": str(tmp_path),
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(tmp_path / "missing.py")},
+    }
+    monkeypatch.setattr(hooks, "_read_payload", lambda: payload)
+    monkeypatch.setattr(subagent, "_read_payload", lambda: payload)
+    canonical = {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")}
+    (hooks.pre_tool_use if event == "PreToolUse" else subagent.subagent_start)()
+    assert json.loads(capsys.readouterr().out) == {}
+    assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")} == canonical
+
+
+@pytest.mark.parametrize("surface", ["records", "counts"])
+def test_reload_between_hot_queries_cannot_expose_reset_statuses(tmp_path, surface):
+    root, _reader, entities, record = _synced_hot_pair(tmp_path)
+    index = HotIndex.open(root)
+    assert index is not None
+    conn = index._conn
+
+    class ReloadBeforeBindings:
+        reloaded = False
+
+        def execute(self, sql, parameters=()):
+            if "FROM anchor_bindings" in sql and not self.reloaded:
+                self.reloaded = True
+                _reload_hot_pair(root, record)
+            return conn.execute(sql, parameters)
+
+        def close(self):
+            conn.close()
+
+    interleaving = ReloadBeforeBindings()
+    index._conn = interleaving
+    try:
+        if surface == "records":
+            assert index.records_for([e.entity_id for e in entities]) == []
+        else:
+            assert index.memory_counts() == (0, 0, 0)
+        assert interleaving.reloaded
+    finally:
+        index.close()
+
+
+def test_missing_legacy_flag_preserves_computed_hot_selection(tmp_path):
+    root, _reader, entities, _record = _synced_hot_pair(tmp_path)
+    conn = sqlite3.connect(root / "index.db")
+    try:
+        conn.execute("DELETE FROM meta WHERE key = ?", (VOLATILE_STALE_KEY,))
+        conn.commit()
+    finally:
+        conn.close()
+    index = HotIndex.open(root)
+    assert index is not None
+    try:
+        assert [
+            r.decision["title"] for r in index.records_for([e.entity_id for e in entities])
+        ] == ["Legitimate live memory"]
+        assert index.memory_counts() == (1, 1, 1)
+    finally:
+        index.close()
+
 
 # -- the parity fixture ---------------------------------------------------------------------
 
@@ -109,6 +327,8 @@ def _fixture_store(path: Path) -> Store:
     store = Store(path)
     with store._mutation():  # one transaction for the whole fixture, not one per write
         _seed_fixture(store)
+        # This parity fixture hand-authors computed live/degraded/orphaned statuses.
+        store.set_meta(VOLATILE_STALE_KEY, "0")
     return store
 
 
@@ -319,6 +539,8 @@ def test_a_decision_whose_row_vanished_is_skipped_not_fatal(tmp_path):
 
 def test_each_moved_value_has_one_definition():
     assert store_layout.SCHEMA_VERSION == SCHEMA_VERSION
+    assert store_module.VOLATILE_STALE_KEY == store_layout.VOLATILE_STALE_KEY
+    assert hot_index.VOLATILE_STALE_KEY == store_layout.VOLATILE_STALE_KEY
     assert store_module.symlinked_internals is store_layout.symlinked_internals
     assert {DecisionKind(k) for k in store_layout.MISTAKE_KINDS} == retrieval._MISTAKE_KINDS
     assert frozenset({"gotcha", "constraint", "lesson"}) == store_layout.MISTAKE_KINDS
@@ -616,7 +838,35 @@ def _break_empty_file(store: Path, elsewhere: Path) -> None:
     (store / "index.db").write_bytes(b"")
 
 
+def _break_requirement_above_running(store: Path, elsewhere: Path) -> None:
+    write_requirement_marker(store, above_running())
+
+
+def _break_malformed_requirement(store: Path, elsewhere: Path) -> None:
+    (store / "format").write_text("sidegraph-store 1.0.0\n", encoding="utf-8")
+
+
+def _break_symlinked_marker(store: Path, elsewhere: Path) -> None:
+    marker = store / "format"
+    marker.rename(elsewhere / "format")
+    marker.symlink_to(elsewhere / "format")
+
+
+def _break_nonregular_marker(store: Path, elsewhere: Path) -> None:
+    (store / "format").unlink()
+    (store / "format").mkdir()
+
+
+def _break_oversized_marker(store: Path, elsewhere: Path) -> None:
+    (store / "format").write_bytes(b"x" * (store_layout.MAX_FORMAT_MARKER_BYTES + 1))
+
+
 _REFUSED = {
+    "requirement-above-running": _break_requirement_above_running,
+    "malformed-requirement": _break_malformed_requirement,
+    "symlinked-marker": _break_symlinked_marker,
+    "nonregular-marker": _break_nonregular_marker,
+    "oversized-marker": _break_oversized_marker,
     "missing-index": _break_missing,
     "symlinked-index": _break_symlinked_index,
     "symlinked-sidecar": _break_symlinked_sidecar,

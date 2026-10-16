@@ -174,7 +174,7 @@ def _mention_descriptors(text: str) -> tuple[Descriptor, ...]:
 
 
 def _anchor_plan(descriptor: Descriptor, reader: GraphifyReader) -> AnchorPlan:
-    result = reader.resolve(descriptor)
+    result = reader.resolve(descriptor, collapse=False)
     if result.status == "resolved":
         return AnchorPlan(descriptor=descriptor, status="resolved", tier=2)
     if result.status == "ambiguous":

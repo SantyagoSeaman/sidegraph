@@ -19,6 +19,7 @@ import pytest
 
 import sidegraph.host.hooks as hooks
 from sidegraph.engine.reader import GraphifyReader
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.retrieval import TOC_CACHE_KEY
 from sidegraph.schema import (
     Decision,
@@ -225,7 +226,7 @@ def test_t12b_a_stale_main_graph_names_the_main_checkout(main, monkeypatch, caps
     ctx = _session_start(worktree, monkeypatch, capsys)
 
     assert f"Sidegraph: the main checkout's code graph ({main}) is stale (built at " in ctx
-    assert "): rebuild it there with `graphify update .`" in ctx
+    assert f"): rebuild it there by running {GRAPH_REBUILD}" in ctx
     assert "Sidegraph: the code graph is stale" not in ctx
 
 

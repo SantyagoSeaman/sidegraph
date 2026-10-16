@@ -346,3 +346,44 @@ def test_doctor_cli_surfaces_graph_root_mismatch_via_graph_flag(tmp_path, capsys
     out = capsys.readouterr().out
     assert "graph-root-mismatch" in out
     assert "src" in out
+
+
+def test_spelling_twins_are_informational_and_never_fail_check(tmp_path, capsys):
+    # Red against unfixed code: no "spelling twins" line. Red against a spelling-twin finding
+    # (a discarded design, declared): --check would exit 2 on a twin nobody can remove.
+    db = _seed_healthy(tmp_path)
+    s = Store(db)
+    twin = s.upsert_entity(
+        Entity(
+            entity_id="00000000000000000000000000",
+            canonical_name="src/w.py",
+            descriptor=Descriptor(name="src/w.py", file_path="src/w.py"),
+        )
+    )
+    plain = s.upsert_entity(
+        Entity(canonical_name="w.py", descriptor=Descriptor(name="w.py", file_path="src/w.py"))
+    )
+    d = s.add_decision(
+        Decision(
+            title="twins",
+            kind=DecisionKind.ADR,
+            status=DecisionStatus.ACCEPTED,
+            context="c",
+            choice="ch",
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual"),
+        )
+    )
+    for e in (twin, plain):
+        s.add_binding(AnchorBinding(record_id=d.id, entity_id=e.entity_id, tier=2))
+    s.close()
+    assert doctor_main(["--db", str(db), "--check"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("spelling twins: 1 entity is named by a path (full or partial)") == 1
+    assert (
+        f"  {twin.entity_id} 'src/w.py' (1 binding(s)) → {plain.entity_id} 'w.py' (1 binding(s))"
+        in out
+    )
+    assert out.strip().splitlines()[-1] == "clean"
+    assert doctor_main(["--db", str(db), "--json"]) == 0
+    assert "spelling" not in capsys.readouterr().out

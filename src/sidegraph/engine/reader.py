@@ -8,9 +8,10 @@ mtime: it's the embedded ``built_at_commit`` field with a content hash always fo
 catches dirty-tree rebuilds that change graph.json without changing the commit. See
 ``docs/integrations/graphify.md``.
 
-``community_labels()`` additionally reads the engine's optional ``.graphify_labels.json``
-sidecar (written by Graphify's cluster-only/label commands, sibling to ``graph.json``) —
-this module is the ONLY place allowed to know that file's name/shape (see
+``community_labels()`` reads curated ``.graphify_labels.json``, then hub names from
+``.graphify_labels.pending.json`` next to ``graph.json``, then per-node ``community_name``.
+Communities are type-split before any caller sees them.
+This module is the ONLY place allowed to know those engine metadata shapes (see
 ``docs/concepts/mind-model.md#domain-lifecycle``).
 """
 
@@ -21,17 +22,21 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import tarfile
 import time
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from pydantic import BaseModel
 
 from ..config import borrowed_graph_path, main_checkout_root
 from ..freshness import GraphFreshness
 from ..gitenv import git_env
-from ..schema import Descriptor, canonicalize, strip_decoration
+from ..schema import Descriptor, canonicalize, file_anchor_name, strip_decoration
 
 # Node file types that can carry anchors. Concepts (LLM-extracted thematic entities) and
 # rationale nodes (recorded reasoning, code AST or LLM prose) anchor exactly like code
@@ -44,6 +49,8 @@ ANCHORABLE_FILE_TYPES = frozenset({"code", "document", "concept", "rationale"})
 # labeling pass (verified empirically: present on code/adr/doc corpora rebuilt with
 # `graphify update --cluster-only`/label commands, absent on a plain semantic-only build).
 _LABELS_FILENAME = ".graphify_labels.json"
+# Graphify 0.9.90 keeps generated hub-name fallbacks here, separate from curated names.
+_PENDING_LABELS_FILENAME = ".graphify_labels.pending.json"
 
 # detect_subdir_mismatch: minimum distinct anchorable source_file values before judging a
 # mismatch at all -- a graph with fewer is too small a corpus (a fixture, a tiny doc-only
@@ -61,6 +68,14 @@ _SUBDIR_MISMATCH_THRESHOLD = 0.9
 # read by git as an option, so it reads as "unknown" instead.
 _FULL_COMMIT_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
+# engine_generation(): the first release with doc->code mention edges, and the stamp's numeric
+# head (0.9.90, 0.9.90.dev3). Stamps exist since 0.9.78, so any parsable stamp has mention edges.
+_MENTION_EDGES_SINCE = (0, 9, 62)
+_ENGINE_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+#: Graphify releases this Sidegraph was tested against; an unstamped graph (0.9.6) counts too.
+TESTED_ENGINE_VERSIONS = frozenset({"0.9.90"})
+EngineGeneration = Literal["legacy", "mention-edges", "unknown"]
+
 # Sibling of graph.json that Graphify rewrites on every `update`, including one that finds the
 # topology unchanged and leaves graph.json itself untouched. Only freshness() reads it, for
 # its mtime; like the labels sidecar, this module is the one place that knows its name.
@@ -74,7 +89,11 @@ _FRESHNESS_SAMPLE = 5
 # Folded into :meth:`GraphifyReader.sync_stamp`, never into ``graph_version()`` (which is
 # provenance). 2: ``Type.member`` falls back to the member's own node.
 # see design/superpowers/specs/2026-10-01-member-anchor-names-design.md (D2)
-RESOLVER_REVISION = 2
+# 3: a name that is a path suffix of its own file resolves to the file's node, and relabelled file
+# nodes read as basenames (design/superpowers/specs/2026-10-14-graphify-upgrade-design.md, D2); and
+# identical path-less stubs resolve as one candidate for anchoring and sync (same spec, D4).
+# 4: communities holding code and documents are split before any consumer sees them.
+RESOLVER_REVISION = 4
 
 # A stamp's resolver-revision suffix (:meth:`GraphifyReader.sync_stamp`). The content hash is hex,
 # so an ``r`` after the last colon can only be the revision.
@@ -86,6 +105,10 @@ _OWNER_RELATIONS = frozenset({"method", "case_of"})
 
 # ``Type.member``, ``Type::member`` and ``Type#member`` are the three spellings of "member of".
 _MEMBER_SEPARATOR_RE = re.compile(r"::|[.#]")
+
+# A mixed community keeps its code id; documents and images get the suffixed id.
+_DOC_PART_FILE_TYPES = frozenset({"document", "image"})
+DOC_PART_SUFFIX = "~doc"
 
 
 class NodeRef(BaseModel):
@@ -114,6 +137,12 @@ class ResolveResult(BaseModel):
     node_id: str | None = None
     candidates: list[str] = []
     community: str | None = None
+    file_path: str | None = (
+        None  # the resolved node's file (D2); None when not resolved or path-less
+    )
+    collapsed: bool = (
+        False  # D4: the answer stands for identical path-less stubs, listed in candidates
+    )
 
 
 class _Unknown(Exception):
@@ -157,17 +186,167 @@ def _split_member(name: str) -> tuple[str, str] | None:
     return (owner, member) if owner and member else None
 
 
-def _to_node(raw: dict) -> NodeRef:
+# File types whose nodes Graphify labels by file name (``build._is_file_node_label``).
+_FILE_NODE_TYPES = frozenset({"code", "document"})
+
+
+def _colliding_file_basenames(raw_nodes: list) -> frozenset[str]:
+    """Basenames two or more distinct files share, counted the way Graphify decides to relabel:
+    over the nodes whose label is their own file's basename or a ``/``-suffix of its path."""
+    files: dict[str, set[str]] = {}
+    for raw in raw_nodes:
+        if not isinstance(raw, dict):
+            continue
+        label, source_file = raw.get("label"), raw.get("source_file")
+        if not isinstance(label, str) or not isinstance(source_file, str) or not source_file:
+            continue
+        basename = source_file.rsplit("/", 1)[-1]
+        if label == basename or (
+            "/" in label and (source_file == label or source_file.endswith("/" + label))
+        ):
+            files.setdefault(basename, set()).add(source_file)
+    return frozenset(b for b, paths in files.items() if len(paths) >= 2)
+
+
+def _relabelled_file_basename(raw: dict, colliding: frozenset[str]) -> str | None:
+    """The basename a file node stands for when Graphify gave it a path-suffix label
+    (``sidegraph/cli.py`` for ``src/sidegraph/cli.py``), else ``None``.
+
+    A ``code``/``document`` node whose label holds a ``/`` and is its own ``source_file`` or a
+    ``/``-suffix of it, and which is a file's own node: Graphify places that at line 1
+    (``source_location`` ``L1``), or, for an empty file with no line, its basename still collides
+    with another file's. A package specifier (``@inquirer/prompts``, its own ``source_file``) has
+    neither. The collision alone is not the test: an incremental update keeps a suffix label
+    after the colliding file is deleted.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D2)
+    """
+    if raw.get("file_type") not in _FILE_NODE_TYPES:
+        return None
+    label, source_file = raw.get("label"), raw.get("source_file")
+    if not isinstance(label, str) or not isinstance(source_file, str) or "/" not in label:
+        return None
+    if not (source_file == label or source_file.endswith("/" + label)):
+        return None
+    basename = source_file.rsplit("/", 1)[-1]
+    if not basename:
+        return None
+    return basename if raw.get("source_location") == "L1" or basename in colliding else None
+
+
+# Labels Graphify re-cuts between releases (a rationale: ``text[:80]`` in 0.9.6, a
+# word-boundary cut ending in ``…`` since 0.9.62). A node of these types is never matched by
+# its label, only by its id.
+UNSTABLE_LABEL_FILE_TYPES = frozenset({"rationale"})
+
+
+def is_file_node(node: NodeRef) -> bool:
+    """Whether ``node`` is its file's own node: a code or document node labelled with the
+    file's basename (relabelled file nodes already read as basenames, see above)."""
+    return (
+        node.file_type in _FILE_NODE_TYPES
+        and bool(node.file_path)
+        and node.name == (node.file_path or "").rsplit("/", 1)[-1]
+    )
+
+
+def _to_node(raw: dict, basename: str | None = None) -> NodeRef:
+    """``basename`` (D2) replaces a relabelled file node's path-suffix label, and the last segment
+    of its ``norm_label``, so every consumer sees the names a 0.9.6 graph had."""
     community = raw.get("community")
+    name = str(raw.get("label", ""))
+    norm_name = str(raw.get("norm_label", raw.get("label", "")))
+    if basename is not None:
+        name, norm_name = basename, norm_name.rsplit("/", 1)[-1]
     return NodeRef(
         node_id=str(raw.get("id")),
-        name=str(raw.get("label", "")),
-        norm_name=str(raw.get("norm_label", raw.get("label", ""))),
+        name=name,
+        norm_name=norm_name,
         file_type=str(raw.get("file_type", "")),
         file_path=raw.get("source_file"),
         line=raw.get("source_location"),
         community=None if community is None else str(community),
     )
+
+
+def _split_mixed_communities(nodes: list[NodeRef]) -> list[NodeRef]:
+    """``nodes`` with every community that holds a ``code`` node and a ``document`` or
+    ``image`` node split in two: its document and image nodes get ``<id>~doc``, the others
+    keep ``<id>``.
+
+    Since 0.9.62 Graphify turns each markdown code span that names a code node into a
+    ``references`` edge, and Leiden merges documents into the code they mention (159 mixed
+    communities on this repository at 0.9.87, 0 at 0.9.6). Only that shape is split: a
+    community of documents and concept nodes (semantic-docs corpora on 0.9.6) is not. A graph
+    with no mixed community, which is every 0.9.6 graph, comes back as the same list.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)
+    """
+    has_code: set[str] = set()
+    has_doc: set[str] = set()
+    for n in nodes:
+        if n.community is None:
+            continue
+        if n.file_type == "code":
+            has_code.add(n.community)
+        elif n.file_type in _DOC_PART_FILE_TYPES:
+            has_doc.add(n.community)
+    mixed = has_code & has_doc
+    if not mixed:
+        return nodes
+    return [
+        n.model_copy(update={"community": f"{n.community}{DOC_PART_SUFFIX}"})
+        if n.community in mixed and n.file_type in _DOC_PART_FILE_TYPES
+        else n
+        for n in nodes
+    ]
+
+
+def _resolved_at(node: NodeRef) -> ResolveResult:
+    """A ``resolved`` answer for ``node``, carrying its file (``None`` for a path-less node), so a
+    caller can give a path-less descriptor its path (``anchoring.anchor_descriptor``)."""
+    return ResolveResult(
+        status="resolved",
+        node_id=node.node_id,
+        community=node.community,
+        file_path=node.file_path or None,
+    )
+
+
+def _collapsed_stubs(matches: list[NodeRef]) -> ResolveResult | None:
+    """Several path-less nodes with the same raw label (case kept) and the same ``file_type`` are
+    one external name Graphify emits per importing file: one candidate, the smallest id, marked
+    ``collapsed`` with every stub in ``candidates`` (in graph match order). Its community only
+    when every match shares one, so no Tier-1 binding is guessed. A class and a module of one
+    name, or anything with a path, is not collapsed.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D4)"""
+    if any(m.file_path for m in matches):
+        return None
+    if len({m.name for m in matches}) != 1 or len({m.file_type for m in matches}) != 1:
+        return None
+    communities = {m.community for m in matches}
+    return ResolveResult(
+        status="resolved",
+        node_id=min(m.node_id for m in matches),
+        candidates=[m.node_id for m in matches],
+        community=next(iter(communities)) if len(communities) == 1 else None,
+        collapsed=True,
+    )
+
+
+def _read_labels(path: Path) -> dict[str, str]:
+    """One labels sidecar as ``{community id: label}``: ``{}`` when it is missing, unreadable or
+    not a JSON object; non-string or blank values, and Graphify's ``Community <id>`` placeholder
+    for its own id, are dropped."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(k): v
+        for k, v in raw.items()
+        if isinstance(v, str) and v.strip() and v != f"Community {k}"
+    }
 
 
 class GraphifyReader:
@@ -176,7 +355,19 @@ class GraphifyReader:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._raw = self._load()
-        self._nodes = [_to_node(n) for n in self._raw.get("nodes", [])]
+        raw_nodes = self._raw.get("nodes", [])
+        colliding = _colliding_file_basenames(raw_nodes)
+        # node_id -> the engine's own path-suffix label of a file node read as its basename (D2):
+        # a resolve alias, and the form hub names take in community_labels().
+        self._file_label_aliases: dict[str, str] = {}
+        self._nodes: list[NodeRef] = []
+        for raw in raw_nodes:
+            basename = _relabelled_file_basename(raw, colliding)
+            ref = _to_node(raw, basename)
+            if basename is not None:
+                self._file_label_aliases[ref.node_id] = str(raw.get("label", ""))
+            self._nodes.append(ref)
+        self._nodes = _split_mixed_communities(self._nodes)
         self._by_id = {n.node_id: n for n in self._nodes}
         self._links = self._raw.get("links", [])
         # Lazy, memoized indices — each is built at most once, from a single O(V)/O(E) pass,
@@ -194,6 +385,7 @@ class GraphifyReader:
         self._file_idx: dict[str, list[NodeRef]] | None = None
         self._owner_idx: dict[str, list[str]] | None = None
         self._source_files: frozenset[str] | None = None
+        self._engine_generation: EngineGeneration | None = None
 
     def _load(self, retries: int = 3) -> dict:
         last: Exception | None = None
@@ -251,6 +443,61 @@ class GraphifyReader:
         commit = self._raw.get("built_at_commit")
         return commit if isinstance(commit, str) and commit else None
 
+    def engine_version(self) -> str | None:
+        """``graph.graphify_version``, stripped: the release that last wrote graph.json
+        (stamped since 0.9.78). ``None`` when absent or not a non-blank string:
+        0.9.6, ``update --no-cluster``.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D1)"""
+        meta = self._raw.get("graph")
+        version = meta.get("graphify_version") if isinstance(meta, dict) else None
+        return version.strip() if isinstance(version, str) and version.strip() else None
+
+    def engine_generation(self) -> EngineGeneration:
+        """``mention-edges`` for a stamp at or above 0.9.62, or an unstamped graph with a mention
+        edge: ``references`` between a ``document`` and a ``code`` node that carries a string
+        ``context``. ``legacy`` otherwise; ``unknown`` for a stamp that does not start with a
+        version. ``node_kind`` is not a signal: 0.9.61 already writes it. Computed once per
+        reader. Feeds only the D1 advisories and the domain-snapshot guard; no resolve or
+        membership rule branches on it."""
+        if self._engine_generation is None:
+            self._engine_generation = self._compute_engine_generation()
+        return self._engine_generation
+
+    def _compute_engine_generation(self) -> EngineGeneration:
+        version = self.engine_version()
+        if version is not None:
+            head = _ENGINE_VERSION_RE.match(version.strip())
+            if head is None:
+                return "unknown"
+            try:
+                parsed = tuple(int(part) for part in head.groups())
+            except ValueError:  # Python limits decimal conversion of oversized numeric heads.
+                return "unknown"
+            return "mention-edges" if parsed >= _MENTION_EDGES_SINCE else "legacy"
+        if not isinstance(self._links, list):
+            return "legacy"
+        for link in self._links:
+            if not isinstance(link, dict):
+                continue
+            # A mention edge carries the code span it came from in `context` (every one of
+            # 6,469 on this repository at 0.9.90); an LLM `references` edge between a document
+            # and code, which 0.9.6's semantic pass can emit, has none.
+            if self._relation(link) != "references" or not isinstance(link.get("context"), str):
+                continue
+            ends = (
+                self._by_id.get(str(link.get("source"))),
+                self._by_id.get(str(link.get("target"))),
+            )
+            if all(ends) and {n.file_type for n in ends if n} == {"code", "document"}:
+                return "mention-edges"
+        return "legacy"
+
+    def engine_version_tested(self) -> bool:
+        """Whether this Sidegraph was tested against the release that built the graph: no
+        stamp (0.9.6) or one in :data:`TESTED_ENGINE_VERSIONS`."""
+        version = self.engine_version()
+        return version is None or version in TESTED_ENGINE_VERSIONS
+
     def source_files(self) -> frozenset[str]:
         """Every node's ``source_file``, of every file type (not only anchorable ones: an
         image or a config file the graph holds is still a file the graph holds), built once
@@ -290,19 +537,28 @@ class GraphifyReader:
             for n in self._nodes:
                 if n.file_type in ANCHORABLE_FILE_TYPES:
                     idx.setdefault(canonicalize(n.name), []).append(n)
+                    alias = self._file_label_aliases.get(n.node_id)
+                    if alias is not None:  # D2: the engine's own label keeps resolving
+                        idx.setdefault(canonicalize(alias), []).append(n)
             self._resolve_idx = idx
         return self._resolve_idx
 
-    def resolve(self, desc: Descriptor) -> ResolveResult:
+    def resolve(self, desc: Descriptor, *, collapse: bool = True) -> ResolveResult:
+        """``collapse=False`` skips the stub collapse (D4) and returns the ambiguous answer a
+        reading surface always got.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D4)"""
         target = canonicalize(desc.name)
         matches = list(self._resolve_index().get(target, []))
         if desc.file_path is not None:
             matches = [n for n in matches if n.file_path == desc.file_path]
         if len(matches) == 1:
-            m = matches[0]
-            return ResolveResult(status="resolved", node_id=m.node_id, community=m.community)
+            return _resolved_at(matches[0])
         if not matches:
-            return self._resolve_member(desc)
+            member = self._resolve_member(desc)
+            return member if member.status == "resolved" else self._resolve_path_name(desc)
+        collapsed = _collapsed_stubs(matches) if collapse else None
+        if collapsed is not None:
+            return collapsed
         comms = {m.community for m in matches if m.community is not None}
         shared = comms.pop() if len(comms) == 1 else None
         return ResolveResult(
@@ -373,9 +629,29 @@ class GraphifyReader:
         chosen = kept if len(kept) == 1 else tied
         if len(chosen) != 1:
             return unresolved
-        return ResolveResult(
-            status="resolved", node_id=chosen[0].node_id, community=chosen[0].community
-        )
+        return _resolved_at(chosen[0])
+
+    def _resolve_path_name(self, desc: Descriptor) -> ResolveResult:
+        """Last rung: a name that is a ``/``-containing suffix of its own ``file_path``, or the
+        full path, resolves to that file's own node (a ``code``/``document`` node in that file
+        whose name, folded the way the store folds it, is the folded query). Needs the file; not
+        exactly one such node is ``unresolved``. Folding both sides keeps a package specifier
+        (``@inquirer/core`` in its own file) and an empty file whose label kept its suffix
+        resolving to the identity the store gave them. Intended change 2a: the importer's file
+        fallback and a full-path anchor resolve on any graph.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D2)"""
+        unresolved = ResolveResult(status="unresolved")
+        if not desc.file_path:
+            return unresolved
+        target = file_anchor_name(desc.name, desc.file_path)
+        found = [
+            n
+            for n in self._file_index().get(desc.file_path, [])
+            if n.file_type in _FILE_NODE_TYPES and file_anchor_name(n.name, n.file_path) == target
+        ]
+        if len(found) != 1:
+            return unresolved
+        return _resolved_at(found[0])
 
     def resolve_member_name(self, name: str) -> ResolveResult:
         """``Type.member`` with no file: the member's own node(s), found through the owner edge.
@@ -415,9 +691,7 @@ class GraphifyReader:
         if not found:
             return unresolved
         if len(found) == 1:
-            return ResolveResult(
-                status="resolved", node_id=found[0].node_id, community=found[0].community
-            )
+            return _resolved_at(found[0])
         comms = {n.community for n in found if n.community is not None}
         return ResolveResult(
             status="ambiguous",
@@ -513,31 +787,40 @@ class GraphifyReader:
         return out
 
     def community_labels(self) -> dict[str, str]:
-        """Community id -> human label/summary, from the optional ``.graphify_labels.json``
-        sidecar next to ``graph.json`` (see module docstring). Purely additive: bootstrap
-        falls back to a god-node-derived name when a community has no entry here, or when
-        this method returns ``{}`` outright (no labeling pass run on this corpus).
+        """Community labels from curated, pending, then per-node names, first valid one wins.
 
-        Defensive by construction — a missing file, unreadable/malformed JSON, or a
-        non-dict payload all yield ``{}`` rather than raising, since this is best-effort
-        engine metadata, not a required input (unlike ``graph.json`` itself, whose read
-        failures ARE fatal in ``__init__``). Non-string values are dropped rather than
-        coerced, since a label is display text, not just anything JSON allows here.
-        Whitespace-only strings are dropped too: a blank label is worthless as a title
-        source and, left in, crashes a caller like ``bootstrap_domains`` downstream
-        (``Domain.title`` rejects blank text) — better every caller sees "no label here"
-        and falls back cleanly.
+        Missing, unreadable or malformed sidecars, blank/non-string names and each community's
+        own ``Community <id>`` placeholder supply no label. A file hub's path-suffix alias is
+        read in D2's basename form only within its own community. Bootstrap retains its god-node
+        fallback when no usable label remains. A split document part (``<id>~doc``) has no
+        label: the engine label names the code-side hub. Pure read; see the module docstring.
         """
-        label_path = self.path.parent / _LABELS_FILENAME
-        if not label_path.exists():
-            return {}
-        try:
-            raw = json.loads(label_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            return {}
-        if not isinstance(raw, dict):
-            return {}
-        return {str(k): v for k, v in raw.items() if isinstance(v, str) and v.strip()}
+        merged: dict[str, str] = {}
+        for source in (
+            _read_labels(self.path.parent / _LABELS_FILENAME),
+            _read_labels(self.path.parent / _PENDING_LABELS_FILENAME),
+            self._node_community_names(),
+        ):
+            for cid, label in source.items():
+                merged.setdefault(cid, label)
+        # Fold only an alias in this community, preserving the other-community title guard.
+        hubs = {
+            (self._by_id[nid].community, alias): self._by_id[nid].name
+            for nid, alias in self._file_label_aliases.items()
+        }
+        return {cid: hubs.get((cid, label), label) for cid, label in merged.items()}
+
+    def _node_community_names(self) -> dict[str, str]:
+        """The per-node ``community_name`` Graphify writes (0.9.87+), the first non-placeholder
+        name seen per community."""
+        names: dict[str, str] = {}
+        for raw in self._raw.get("nodes", []):
+            if not isinstance(raw, dict) or raw.get("community") is None:
+                continue
+            cid, name = str(raw["community"]), raw.get("community_name")
+            if isinstance(name, str) and name.strip() and name != f"Community {cid}":
+                names.setdefault(cid, name)
+        return names
 
     def subgraph(self, seed_ids: list[str], budget: int) -> Subgraph:
         adj: dict[str, list[tuple[str, str]]] = {}
@@ -768,7 +1051,7 @@ class GraphifyReader:
     def detect_subdir_mismatch(
         self, repo_root: Path | None = None, sample_size: int = 25
     ) -> dict | None:
-        """Best-effort diagnostic for the "ran `graphify update` from a subdirectory
+        """Best-effort diagnostic for the "rebuilt the graph from a subdirectory
         instead of the repo root" footgun: when every ``source_file`` Graphify recorded is
         relative to the directory it was invoked FROM rather than the repository root,
         every descriptor this reader resolves stops matching the real repo-relative
@@ -847,3 +1130,82 @@ def open_borrowed_reader(store_path: str | Path) -> tuple[GraphifyReader, Path] 
         return GraphifyReader(graph), main
     except Exception:
         return None
+
+
+# ``sidegraph-domains snapshot --build-with``: the graph of HEAD built by a chosen Graphify
+# release, away from the working tree. Graphify's package and CLI names live here, in the seam.
+GRAPHIFY_PACKAGE = "graphifyy"
+_RELEASE_RE = re.compile(r"\d+\.\d+\.\d+")
+# Graphify rewrites ~/.claude/skills/graphify/ on every CLI run unless told not to (D7); a
+# fixed hash seed keeps its clustering reproducible.
+_BUILD_ENV = {"GRAPHIFY_NO_AUTO_REFRESH": "1", "PYTHONHASHSEED": "0"}
+
+
+class GraphBuildError(RuntimeError):
+    """The graph could not be built; the message says why and what to do."""
+
+
+def graphify_build_command(version: str) -> list[str]:
+    if not _RELEASE_RE.fullmatch(version):
+        raise GraphBuildError(
+            f"--build-with takes a Graphify release such as 0.9.6, not {version!r}"
+        )
+    return ["uvx", "--from", f"{GRAPHIFY_PACKAGE}=={version}", "graphify", "update", "."]
+
+
+def build_graph_at_head(
+    repo_root: Path,
+    version: str,
+    workdir: Path,
+    *,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> Path:
+    """Build the graph of ``repo_root``'s HEAD with Graphify ``version`` inside ``workdir``
+    and return its ``graph.json``. The tree comes from ``git archive HEAD``: a file not
+    committed at HEAD is not in it. ``repo_root``'s working tree and its ``graphify-out/`` are
+    never touched. ``repo_root`` may be a project directory below the git top level:
+    ``git archive`` scopes the tree to that directory, preserving project-relative paths.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.4)"""
+    argv = graphify_build_command(version)
+    archive, tree = workdir / "head.tar", workdir / "tree"
+    done = run(
+        ["git", "archive", "--format=tar", "-o", str(archive), "HEAD"],
+        cwd=repo_root,
+        env=git_env(),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode != 0:
+        raise GraphBuildError(f"git archive HEAD failed: {done.stderr.strip()[-300:]}")
+    try:
+        tree.mkdir()
+        with tarfile.open(archive) as tar:
+            tar.extractall(tree, filter="data")
+        # update reconciles non-AST artifacts even during a full rebuild. Only this owned
+        # temporary archive is cleared, so the baseline comes from the requested engine.
+        inherited = tree / "graphify-out"
+        if inherited.is_symlink() or inherited.is_file():
+            inherited.unlink()
+        elif inherited.exists():
+            shutil.rmtree(inherited)
+    except (tarfile.TarError, OSError) as exc:
+        raise GraphBuildError(f"could not prepare HEAD's build tree: {exc}") from exc
+    try:
+        built = run(
+            argv,
+            cwd=tree,
+            env={**os.environ, **_BUILD_ENV},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        raise GraphBuildError(
+            "uvx was not found; install uv (https://docs.astral.sh/uv/) and rerun"
+        ) from None
+    graph = tree / "graphify-out" / "graph.json"
+    if built.returncode != 0 or not graph.is_file():
+        tail = (built.stderr or built.stdout).strip()[-500:]
+        raise GraphBuildError(f"graphify {version} could not build the graph: {tail}")
+    return graph

@@ -1,0 +1,6 @@
+{
+  "name": "sidegraph",
+  "version": "0.14.0",
+  "type": "module",
+  "exports": "./index.js"
+}

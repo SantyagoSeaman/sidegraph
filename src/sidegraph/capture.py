@@ -28,7 +28,13 @@ from pydantic import (
     model_validator,
 )
 
-from .anchoring import entity_summaries, orphan_reason, resolve_and_bind
+from .anchoring import (
+    anchor_descriptor,
+    anchor_roots,
+    entity_summaries,
+    orphan_reason,
+    resolve_and_bind,
+)
 from .config import CURRENT_SESSION, TELEMETRY_SESSION_KEY, TELEMETRY_SESSION_STAMP_PREFIX
 from .engine.reader import GraphifyReader
 from .gitenv import git_env
@@ -48,6 +54,7 @@ from .schema import (
     Provenance,
     Relation,
     canonicalize,
+    file_anchor_descriptors,
     matches_path_prefix,
     slugify,
 )
@@ -623,7 +630,9 @@ def _domain_anchored(
         return False
     if path_prefixes:
         return True
-    return any(reader.resolve(anchor).status == "resolved" for anchor in seed_anchors)
+    return any(
+        reader.resolve(anchor, collapse=False).status == "resolved" for anchor in seed_anchors
+    )
 
 
 class AnchorDraft(Descriptor):
@@ -1027,8 +1036,9 @@ def _live_neighbors(draft: DraftDecision, store: Store) -> list[Decision]:
         entity = store.resolve_descriptor(anchor.name, anchor.file_path)
         if entity is None:
             continue
-        for d in store.valid_decisions_for_entity(entity.entity_id):
-            by_id[d.id] = d
+        for member in store.identity_members(entity):  # spelling twins share their records
+            for d in store.valid_decisions_for_entity(member.entity_id):
+                by_id[d.id] = d
     return sorted(by_id.values(), key=lambda d: d.id, reverse=True)[:_NEIGHBORS_CAP]
 
 
@@ -1078,15 +1088,16 @@ def _is_duplicate_fact(
         entity = store.resolve_descriptor(anchor.name, anchor.file_path)
         if entity is None:
             continue
-        for b in store.bindings_for_entity(entity.entity_id):
-            existing = store.get_fact(b.record_id)
-            if existing is None or existing.status not in (
-                DecisionStatus.ACCEPTED,
-                DecisionStatus.PROPOSED,
-            ):
-                continue
-            if canonicalize(existing.statement) == canon:
-                return existing.id
+        for member in store.identity_members(entity):  # spelling twins share their records
+            for b in store.bindings_for_entity(member.entity_id):
+                existing = store.get_fact(b.record_id)
+                if existing is None or existing.status not in (
+                    DecisionStatus.ACCEPTED,
+                    DecisionStatus.PROPOSED,
+                ):
+                    continue
+                if canonicalize(existing.statement) == canon:
+                    return existing.id
     return None
 
 
@@ -1144,6 +1155,20 @@ def _internal_error_reason(exc: Exception) -> str:
     )
 
 
+def _normalise_draft_anchors(
+    anchors: Sequence[Descriptor], reader: GraphifyReader | None, store: Store
+) -> None:
+    """Rewrite each draft anchor, in place, to the descriptor the store keys it under
+    (``anchoring.anchor_descriptor``). Runs right after validation and BEFORE dedup:
+    ``_live_neighbors`` and ``_is_duplicate_fact`` look the draft's anchors up before anything
+    is bound, and must use the identity the bind will use."""
+    root = anchor_roots(store.path)
+    for anchor in anchors:
+        ref = anchor_descriptor(anchor, reader, store, root=root)
+        if ref is not anchor:
+            anchor.name, anchor.file_path = ref.name, ref.file_path
+
+
 def _propose_fact_one(
     raw: object,
     store: Store,
@@ -1198,6 +1223,7 @@ def _propose_fact_one(
         draft = DraftFact.model_validate(raw)
     except ValidationError as e:
         return ProposeFactResult(status="rejected", reason=format_validation_error(e))
+    _normalise_draft_anchors(draft.anchors, reader, store)
 
     # 2. Redact first — same gate as _propose_one's text fields; the scrubbed text is the
     # only text that proceeds to reachability/dedup/storage.
@@ -1424,6 +1450,7 @@ def _propose_one(
         draft = DraftDecision.model_validate(raw)
     except ValidationError as e:
         return ProposeResult(status="rejected", reason=format_validation_error(e))
+    _normalise_draft_anchors(draft.anchors, reader, store)
 
     # D7.3: best-effort session_id fallback when the caller passed none (E8 measured
     # author=None session=None on Stop-channel captures) — see _session_id_fallback's
@@ -1999,7 +2026,7 @@ def _propose_domain_one(
             title=title,
             summary=summary,
             parent_id=parent_id,
-            seed_anchors=draft.seed_anchors,
+            seed_anchors=file_anchor_descriptors(draft.seed_anchors),
             path_prefixes=draft.path_prefixes,
             provenance=Provenance(
                 source="agent", author=author, session_id=session_id, graph_version=graph_version

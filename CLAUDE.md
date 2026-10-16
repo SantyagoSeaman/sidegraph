@@ -5,7 +5,7 @@ that doesn't forget *why* things are the way they are as time passes and people 
 
 **Thesis: own the memory, rent the graph.** Sidegraph owns an append-only, repo-committed
 decision store and layers it as a **sidecar** over a mature code-graph engine
-([Graphify](https://github.com/safishamsi/graphify)) rather than re-building entity extraction
+([Graphify](https://github.com/Graphify-Labs/graphify)) rather than re-building entity extraction
 and graph construction. The edge over session-memory tools is durable anchoring + budgeted,
 task-aware retrieval + decision memory riding on the engine's entity graph.
 
@@ -13,7 +13,7 @@ task-aware retrieval + decision memory riding on the engine's entity graph.
 continuing participant in the project. A core feature must preserve, organize, or deliver
 accumulated project understanding. Document search by itself is not the product.
 
-Sidegraph is pre-1.0 (v0.13.0) — the full loop (capture, ratification, mistakes-first
+Sidegraph is pre-1.0 (v0.14.0) — the full loop (capture, ratification, mistakes-first
 retrieval, refactor-surviving re-anchoring, semantic docs layer, mind-model domains, and the
 facts evidence layer) ships and is exercised end-to-end, but interfaces may still move before
 a stable release. See
@@ -53,6 +53,7 @@ src/sidegraph/
 ├── schema.py        # Pydantic models: Entity, Decision, Fact, AnchorBinding, Domain, Initiative
 ├── store.py         # owned append-only store (file-per-record JSON); enforces invariants on write
 ├── retrieval.py     # multi-altitude, budget-bounded, task-aware read path (mistakes first)
+├── domain_snapshot.py  # committed domain-membership snapshot: format and matching rules
 ├── hot_index.py     # raw-sqlite handle on index.db for the hook hot path (no Store, no pydantic)
 ├── store_layout.py  # store constants and rules shared with the hot path (pydantic-free)
 ├── server.py        # FastMCP decision MCP — the tools agents call

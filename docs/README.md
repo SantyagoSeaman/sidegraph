@@ -9,7 +9,8 @@ agent.
 1. [Install Sidegraph and Graphify](getting-started/installation.md).
 2. Follow the [end-to-end quickstart](getting-started/quickstart.md).
 3. Use the recommended host path for [Claude Code](getting-started/claude-code-setup.md) or
-   [Codex](getting-started/codex-setup.md).
+   [Codex](getting-started/codex-setup.md), or the MCP/skills-only paths for
+   [OpenCode V2](../.opencode/INSTALL.md) and experimental [Muse](integrations/muse.md).
 4. Run the [four-case verification checklist](guides/verifying-your-setup.md).
 
 If the repository already has ADRs or specs, use the
@@ -24,6 +25,7 @@ If the repository already has ADRs or specs, use the
 
 ## Operate and maintain it
 
+- [Migrate an existing store to Sidegraph 0.14](guides/migrating-to-0.14.md).
 - [Survive refactors and heal anchors](guides/surviving-refactors.md).
 - [Read what Sidegraph tells you when it needs attention](guides/troubleshooting.md).
 - [Run CI and scheduled maintenance](guides/ci-cd-maintenance.md).
@@ -54,4 +56,5 @@ it is optional background on evidence, limits, and repository fit.
 - [Stability levels](reference/stability.md)
 - [Git bindings](reference/git-bindings.md)
 - Integrations: [Claude Code](integrations/claude-code.md),
-  [Codex](integrations/codex.md), [Graphify](integrations/graphify.md)
+  [Codex](integrations/codex.md), [OpenCode V2](integrations/opencode.md),
+  experimental [Muse](integrations/muse.md), [Graphify](integrations/graphify.md)

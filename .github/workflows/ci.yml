@@ -329,11 +329,15 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Rebuild graph and run sidegraph-sync --check
+        env:
+          GRAPHIFY_NO_AUTO_REFRESH: "1"
+          PYTHONHASHSEED: "0"
+          GRAPHIFY_MAX_WORKERS: "1"
         run: |
           if [ ! -d .sidegraph ]; then
             echo "no .sidegraph in this checkout — anchor health not applicable"
             exit 0
           fi
-          uvx --from graphifyy==0.9.6 graphify update .
+          uvx --from graphifyy==0.9.90 graphify update .
           uv sync --locked
           uv run sidegraph-sync --json --check

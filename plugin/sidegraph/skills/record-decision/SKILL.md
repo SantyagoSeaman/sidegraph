@@ -23,7 +23,7 @@ right write path, right `kind`, filled `rejected`, tight prose, on-target anchor
   accepted at write time when an opt-in `SIDEGRAPH_RATIFY_POLICY` admits it, the result's
   `ratified_by` then reading `auto:<policy>`, so don't tell the human it awaits review),
   tagged `[unratified]` in retrieval, for a human to accept later via
-  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 **Never call `add_decision` on your own initiative.** Self-initiated writes always go
 through the proposal gate — the same gate every other Sidegraph write path follows (a human
@@ -84,8 +84,10 @@ anchors resurface as noise in someone else's task context later.
 - **Two name shapes need care.** A bare module-level constant
   (`MEMORY_GUARD_LINE`) never resolves — the engine indexes functions/classes/files, not
   constants; anchor the containing file or function and name the constant in prose. A
-  path-qualified name (`src/sidegraph/store.py`) never resolves either — the graph labels
-  files by basename; the `file_path` field carries the path, the `name` stays `store.py`.
+  path-qualified name (`src/sidegraph/store.py`) resolves to its file's node when the anchor
+  also carries that `file_path`, and is stored under the basename; write the `name` as
+  `store.py` and let the `file_path` field carry the path. On newer Graphify an engine label
+  such as `sidegraph/cli.py` also resolves without a `file_path`.
   A type-qualified member (`Store._touch_digest`) resolves to the member **with its
   `file_path`**, but the bare name with its file stays preferred (`_touch_digest`): it keeps
   resolving if the type is renamed. Without a `file_path` the qualified form never resolves,
@@ -95,7 +97,9 @@ anchors resurface as noise in someone else's task context later.
   foreign path in prose. An ephemeral process artifact (task brief, run report) — if the
   lesson outlives the wave, anchor what outlives the wave: the code or doc it is about.
 - **Check `anchors_skipped` in the result.** An entry means that name matched more than
-  one graph node (`candidates` lists up to 5) and no precise leaf was created. Fix an
+  one graph node (`candidates` lists up to 5) and no precise leaf was created. Identical
+  path-less external stubs (what newer Graphify emits for an imported name such as
+  `BaseModel`) count as one match. Fix an
   already-written record with `supersede_decision` carrying precise `{"name", "file_path"}`
   anchors — a repeat `add_decision` call would mint a duplicate record; for a
   still-proposed draft, drop it and re-propose corrected. Don't leave a decision
@@ -105,7 +109,7 @@ anchors resurface as noise in someone else's task context later.
   binding is skipped by retrieval, by `drill_down` and by the PreToolUse records block — the record
   has no delivery path through that anchor. It will never surface. **Read the `reason`
   before fixing anything — the causes need opposite actions:** `file-not-in-graph` usually
-  means your graph is stale (run `graphify update .`, then re-anchor — the name was probably
+  means your graph is stale (run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor — the name was probably
   fine); `name-not-in-file` means the name is wrong (`find_entity`/`query_structure` will say
   what is really there); `no-file-path` means pass one. Repair with `add_anchors`
   (bindings-only, no duplicate record, no content-free supersession). Anchor to real symbols

@@ -11,8 +11,9 @@ that govern writing to it. Implemented in
 
 ```
 .sidegraph/
-├── format                  # committed marker: "sidegraph-store 0.6.0"
+├── format                  # committed marker: "sidegraph-store 0.6.0", or 1.0.0 plus a requires-sidegraph line
 ├── stamping_live_since      # committed, ONLY on a genuinely new store: an aware UTC ISO-8601 timestamp
+├── domain-snapshot.json     # committed, optional: frozen domain membership (sidegraph-domains snapshot)
 ├── .gitignore               # committed, written by the store: ignores index.db* and *.tmp
 ├── decisions/<ulid>.json    # one file per Decision — full row, status/valid_to included
 ├── facts/<ulid>.json        # one file per Fact — full row, status/valid_to included (non-derivable knowledge)
@@ -39,7 +40,8 @@ different from its filename is not a record at all: see
 
 **Symlinks inside the store are refused.** A `Store` will not open a directory any of whose
 subdirectories (`decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`, `initiatives/`,
-`archive/`) or store files (`format`, `stamping_live_since`, `.gitignore`, `index.db`, and
+`archive/`) or store files (`format`, `stamping_live_since`, `domain-snapshot.json`,
+`.gitignore`, `index.db`, and
 SQLite's `index.db-journal`, `-wal` and `-shm`) is a symlink, live or dangling: a linked
 `decisions/` would send every record write to the link's target, and a linked `index.db` would
 make SQLite write there. The error names the entry (`… inside the store is a symlink`);
@@ -81,6 +83,7 @@ an ordinary, human-readable git conflict in one small JSON file — not a corrup
 | `AnchorBinding` set per decision or fact — `entity_id`/`tier`/`relation`/`weight`, no `status`, EXCLUDING any binding whose entity is a `community:*` abstract entity | `toc_cache` (the `SessionStart` table-of-contents render) |
 | `Initiative` — full row | the per-session capture ledger (`capture_sessions`, dedup markers) |
 | `archive/*.jsonl` segments (once compaction has run) | `last_synced_graph_version` (the graph version plus the resolver revision, `<graph version>:r<N>`; raising the revision reruns the first sync after an upgrade), `pending_uncommitted_moves` (the entities a sync left as `moved_uncommitted`, with the git `HEAD` it saw, so the next sync after `HEAD` moves re-verifies them), `pending_tier1_reconcile` (the `(record, vacated community)` pairs whose Tier-1 reconcile failed, as JSON; every sync retries them first; a pair is cleared once its reconcile completes, and kept, silently, while a live or degraded Tier-2 anchor of the record has no recorded community), `schema_version`, the canonical-digest freshness stamp, `skipped_canonical_files` (the files the last reload left out; see [Digest integrity](#digest-integrity)) |
+| `domain-snapshot.json` (once `sidegraph-domains snapshot` has run) | `domain_members` (each accepted domain's effective membership: node id, file, community), with `domain_membership_stamp`, `domain_membership_failed`, `domain_membership_populated` and `domain_snapshot_signature` in `meta` |
 | — | retrieval telemetry (`retrieval_shows`, `retrieval_seeds` — records that reached a render or that the PreToolUse hook printed, areas that were asked about; see [Retrieval telemetry](#retrieval-telemetry) below) |
 | — | `community:*` abstract `Entity` rows, and any Tier-1 `AnchorBinding` pointing at one — see [Community bindings are derived](#community-bindings-are-derived-not-committed) below |
 | — | `canonical_stat` (`subdir`, `stem`, `size`, `mtime_ns` per canonical file this index actually loaded — see [Digest integrity](#digest-integrity) below) |
@@ -166,14 +169,53 @@ out to matter in practice.
 
 ## The format marker
 
-`.sidegraph/format` is a single committed line, `sidegraph-store 0.6.0`, written the first time
-a `Store` creates the layout and never rewritten after that. It exists **outside** the
-gitignored `index.db` specifically so a teammate on an incompatible store format is rejected
-the moment they open the repo's `.sidegraph/`, not just when their own local index happens to
-disagree. An existing layout from before this marker existed gets one backfilled silently on
-next open, never rejected for its absence. A stamped major version that doesn't match the
-running code's major version is a hard `ValueError` on open — there is no migration path
-beyond the one legacy step described below; the fix is a fresh store, not a coerced read.
+`.sidegraph/format` is a committed marker, written the first time a `Store` creates the layout.
+On most stores it is one line, `sidegraph-store 0.6.0`, and nothing rewrites it. It exists
+**outside** the gitignored `index.db` specifically so a teammate on an incompatible store format
+is rejected the moment they open the repo's `.sidegraph/`, not just when their own local index
+happens to disagree. An existing layout from before this marker existed gets one backfilled
+silently on next open, never rejected for its absence.
+
+**A minimum Sidegraph version.** `sidegraph-require --sidegraph X.Y.Z` rewrites the marker as:
+
+```
+sidegraph-store 1.0.0
+requires-sidegraph >= X.Y.Z
+```
+
+Only explicit commands rewrite the marker, `sidegraph-require` among them, and none of them
+lowers a requirement; sync, SessionStart and the MCP server never raise the requirement.
+From 0.14.0, every entry point checks the marker before it reads the store: opening a `Store`, the MCP server
+before each tool call once the file changed, the PreToolUse, SubagentStart and Stop hooks,
+`sidegraph-stats`, `sidegraph-doctor`, `sidegraph-blame` and the commit-message hook. Each
+refuses a store that requires a newer version (`This store requires Sidegraph >= X.Y.Z; this is
+A.B.C.`). A dev or local build counts as its release, so `0.14.0.dev1` meets `>= 0.14.0`. A
+`1.0.0` marker without exactly one such line, or a `0.x` marker with a second line, is malformed
+and refused too. The marker must be a real regular file, never a symlink, and at most
+4 KiB; reading it is bounded, and an explicit raise cannot write a marker over that limit.
+
+Versions before 0.14.0 compare only the marker's major, so they refuse a `1.0.0` marker whenever
+they open the store: at SessionStart (which says to upgrade), in a newly started MCP server and
+in CLI commands that open a `Store`; their `sidegraph-verify` reports `unknown-schema-version`.
+Their PreToolUse
+and SubagentStart hooks read `index.db` without reading the marker. On a machine where only such
+a version runs, they keep serving the index as it was before the pull, because a version that
+refuses the store cannot rebuild its index. On a machine where a newer version also runs, it
+stamps its rebuilt index `0.6.0+requires`,
+and those hot hooks then deliver nothing. Old `sidegraph-blame`, `sidegraph-stats` and the
+commit-message hook do not read the stamp and still read that index. An old MCP server that
+was already running can rebuild once if it reaches the new files first, then keeps serving.
+After a newer version stamps the index, the old server's next and later tool calls fail with
+a `schema_version` error until its session restarts. After pulling a raised marker, update every
+installation and restart running sessions; move CI pins first.
+
+A major other than 0 or 1 is a hard `ValueError` on open — there is no migration path beyond the
+one legacy step described below; the fix is a fresh store, not a coerced read.
+
+The requirement marker is canonical; its index stamp commits with the outermost SQLite
+transaction. If a composed operation raises the requirement and then fails, the marker stays
+raised while the stamp rolls back. The next open or refresh repairs that stamp. Older hot
+hooks can still read the prior index until then.
 
 ## The creation marker
 
@@ -200,6 +242,41 @@ git conflict `format`'s byte-identical content never causes. Resolve it by keepi
 EARLIER timestamp — that is the correct answer regardless of which branch you're resolving
 from, since an earlier creation instant is always the more accurate one.
 
+## The domain snapshot
+
+`.sidegraph/domain-snapshot.json` is optional. `sidegraph-domains snapshot` writes it; sync,
+SessionStart and the MCP server never do. It freezes which accepted domains each node of the
+code graph belonged to, so an engine upgrade that regroups communities does not move domain
+membership.
+
+- `domains` lists the covered domains, each with the id of the record that held it. Entries
+  belong to that record and its successors (`supersedes`): a rename keeps them, and a new
+  domain that only reuses a slug does not. When two accepted domains descend from one covered
+  domain, neither holds its entries until `--refresh` names both.
+- `files` lists every file that had an anchorable node: its default set (the file node's,
+  else the most common) and, under `nodes`, an entry for each node whose set differs. An entry
+  names the node by the engine's node id and by its label. The id is tried first, then the
+  label when it is unique in the file and among the file's entries (call decoration ignored,
+  never for a rationale node), then the file default.
+- `stubs` lists the anchorable nodes with no file (external symbols the engine records once
+  per importing file), keyed by lower-cased name and node type: one set for all of them under
+  `domains` (an empty list means they had none), or, when they differ, each node's set by
+  node id under `nodes`.
+- A node in a file the snapshot does not list, or with no file and no recorded set, takes the
+  domains held by more than half of the listed-file nodes in its community, plus the domains
+  whose path prefixes cover its file.
+- A domain without entries (accepted later, or a part of a split) gets members by its rules,
+  in files the snapshot does not list only.
+
+Sync writes the result, or, for a store without a snapshot, the rules' result, into the
+derived `domain_members` table, and every read of domain membership uses it. The snapshot is
+not part of the freshness digest: its own signature, a hash of its content, is tracked in
+`meta`, and a pull that changes it rebuilds membership (not the index) on the next tool call
+or sync. So does any change of a domain's status. Taking one raises the store's minimum Sidegraph version to
+0.14.0. `sidegraph-verify` reports `bad-domain-snapshot` for a file that does not validate,
+and `snapshot-without-requirement` for a store whose marker does not require 0.14.0.
+`--against` does not classify the file, which `--refresh` replaces whole.
+
 ## `.gitignore`
 
 The store writes `.sidegraph/.gitignore` itself, containing:
@@ -224,8 +301,9 @@ every committed record file (plus the format marker and any archive segments). O
 the server keeps one `Store` open for the life of the process):
 
 - **Digest matches** the stamped value → fast path, index used as-is (after one guard: the
-  index's own stamped `schema_version` must still agree with the running code, in case it was
-  hand-corrupted).
+  index's `schema_version` must match the stamp expected from the marker: `0.6.0` without a
+  requirement, `0.6.0+requires` with one. The other accepted stamp triggers a reload; an
+  unknown stamp is refused).
 - **Digest missing or stale** (a fresh store, an index that was deleted, or — the common case —
   a `git pull` that brought new/changed/removed record files) → a full reload: every committed
   file is re-read into the index, and every volatile field resets to its cold default
@@ -295,6 +373,8 @@ lazy, no `--force` needed — rebuilds every derived field from the graph and cl
 mark. Until that pass runs, domain membership is empty, entity engine-mappings are unset,
 and every binding reads `live`; the committed files are untouched throughout, which is why
 none of this produces a git diff.
+Those reset statuses are placeholders: hot-hook record selection and memory counts are
+withheld until sync clears the mark, while the index remains usable for touches and claims.
 
 ## Digest integrity
 
@@ -518,9 +598,12 @@ happen on open when such a store's stamp is merely older than the running code's
 ## `SCHEMA_VERSION` and exact-match policy
 
 `SCHEMA_VERSION` (defined in `store_layout.py`, re-exported by `schema.py`) is currently `0.6.0`. The format-marker check (above) gates
-on the *major* component only; the index's own stamped `schema_version` inside `meta` is
-checked for an **exact** match on the fast (digest-matches) freshness path — a mismatch there
-normally raises immediately. The one exception is `_RELOADABLE_SCHEMA_VERSIONS` (currently
+on the major component and on any `requires-sidegraph` line. The index's `schema_version`
+inside `meta` is checked against the marker's expected stamp on the fast (digest-matches)
+freshness path: `0.6.0` without a requirement, `0.6.0+requires` with one. The record/table
+layout is unchanged, and this version understands both stamps. A mismatch between those two
+triggers a full reload; an unknown stamp normally raises immediately. The other reloadable
+versions are `_RELOADABLE_SCHEMA_VERSIONS` (currently
 `{0.4.0, 0.5.0}`): both a 0.4.0 and a 0.5.0 store's canonical files are fully forward-compatible
 with 0.6.0 — the 0.4.0 → 0.5.0 step only added a record type and renamed `AnchorBinding`'s
 foreign key, and the 0.5.0 → 0.6.0 step ([derived community bindings](#community-bindings-are-derived-not-committed))
@@ -620,6 +703,7 @@ engine-coupling state — specifically, community labels — could still touch g
 ## What tools may and may not do to this store
 
 **May:**
+- Write `.sidegraph/domain-snapshot.json`: only `sidegraph-domains snapshot`.
 - Append new `decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`, `initiatives/`
   files.
 - Flip `Decision.status`/`Fact.status` (and, index-only, `AnchorBinding.status`) through the
@@ -644,7 +728,12 @@ engine-coupling state — specifically, community labels — could still touch g
   falsification is `supersede_fact` (close + link a successor), never an edit in place.
 - Rewrite a `Domain`'s substantive fields (`title`, `summary`, `parent_id`, `path_prefixes`)
   after creation — only `communities` is ever refreshed, and only index-only, by sync.
-- Overwrite `.sidegraph/format` or the index's `schema_version` once stamped.
+- Overwrite `.sidegraph/format` once stamped, except to raise the store's minimum Sidegraph
+  version through an explicit command such as `sidegraph-require`; a requirement is never
+  lowered.
+- Set the index's `schema_version` stamp other than from the code's version and the marker: a
+  full reload sets it, and so may the command that raises a requirement; `set_meta("schema_version",
+  ...)` raises.
 - Write `.sidegraph/stamping_live_since` onto a store that already held a record (hot or
   archived) the first time a marker-writing version opened it.
 - Rewrite an already-archived segment, for any reason.

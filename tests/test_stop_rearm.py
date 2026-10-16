@@ -84,6 +84,7 @@ def _world(tmp_path: Path) -> World:
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
     _commit(repo, author=180)
+    Store(repo / ".sidegraph").close()
     return World(repo, repo / ".sidegraph", _substantial(tmp_path, name=f"{SESSION}.jsonl"))
 
 

@@ -3,13 +3,14 @@
 The deep dive on how Sidegraph wires into the OpenAI Codex CLI. For the copy-paste happy
 path, see [`getting-started/codex-setup.md`](../getting-started/codex-setup.md).
 
-Codex support is newer and less iterated than the Claude Code integration. It reuses the same
-MCP server and hook entry points — no Codex-specific code exists in Sidegraph — because Codex
-CLI (as documented mid-2026, when this page was last verified) ships **GA hooks with the same
-event vocabulary as Claude Code** (including `additionalContext` on `SessionStart`) and its own
-MCP server support. Codex CLI's config/hooks surface is younger and more likely to move than
-Claude Code's — **verify the `config.toml`/hooks shapes below against the current Codex CLI
-docs** before relying on them if some time has passed since mid-2026.
+Codex uses the same MCP server and hook entry points as Claude Code, with host-specific
+handling kept in Sidegraph's host layer. Its hooks support `additionalContext` on
+`SessionStart`. Plugin installation, update and hash-based trust metadata were checked on
+Codex CLI 0.162.1 on macOS ARM on 2026-10-15.
+The version-specific primary references are the
+[plugin contract](https://developers.openai.com/plugins/build/plugins),
+[CLI reference](https://learn.chatgpt.com/docs/cli/reference) and
+[hooks documentation](https://learn.chatgpt.com/docs/hooks).
 
 ## `config.toml` reference
 
@@ -137,7 +138,7 @@ No `PreToolUse` entry is offered above. Codex can invoke the event for local fun
 (including shell, patch, and MCP calls), but it has no stable `Read`/`Grep` pair equivalent to
 Claude Code's, and the records block the `sidegraph-pre-tool-use` hook hands over for a file (see
 [`claude-code.md`](claude-code.md#pretooluse--sidegraph-pre-tool-use)) needs a tool call that
-names the file. Delivery there is deferred. Re-check the current [Codex hooks documentation](https://learn.chatgpt.com/codex/hooks)
+names the file. Delivery there is deferred. Re-check the current [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks)
 before adding one; hosted tools are outside the hook surface.
 
 ### Headless runs
@@ -201,26 +202,30 @@ codex plugin marketplace add SantyagoSeaman/sidegraph
 codex plugin add sidegraph@sidegraph
 ```
 
-1. Trust the hooks: start an interactive `codex` session in the repo. Codex detects the new
-   Sidegraph hook definitions (`SessionStart`, `Stop`, `SubagentStart`) and prompts you in the
-   terminal to trust them. Approve to complete it. Skip or decline and the MCP tools still work, but
-   retrieval at session start, the capture reminder at session end and the memory brief a
-   subagent gets at its start stay silent (see why below). A hook definition change in a later
-   release needs a fresh approval. Review or re-approve anytime with `/hooks`. The release that added the start guard described under
-   [Hooks](#hooks-ga) is such a change: Codex's trust hash covers the command, so after updating
-   the plugin the two hooks stay inactive until you approve them again, once, in `/hooks` or at
-   the next interactive session's trust prompt. If you wired the hooks by hand instead, append the
-   guard to the commands in your own `.codex/hooks.json`, as the recipe above shows. The release
-   that moved `Stop` onto the commit `SessionStart` recorded (below) changed the command once
-   more, so approve it again once; the command no longer changes between releases. The release
-   that added `SubagentStart` adds a hook definition: approve it once the same way, or subagents
-   start without the memory brief while `SessionStart` and `Stop` keep working. The release that
-   wrapped `SessionStart` in `sh -c` changes its command too: approve it once in `/hooks`. The
-   release that gave every hook a Windows command (below) changes only what Windows runs, and
-   Codex hashes the command selected for the OS, so only Windows users approve the hooks again.
+Start an interactive `codex` session in the repo and review the Sidegraph definitions
+(`SessionStart`, `Stop`, `SubagentStart`) through the startup warning or `/hooks`. Approve
+only definitions you have reviewed. Installation does not grant trust. Declining leaves
+those hooks inactive while the MCP registration remains available. Trust is per definition
+hash and covers the command selected for the host OS: a Windows-only command change needs
+review on Windows, without changing the POSIX approval.
+
+**Updating an existing install.** After each Sidegraph release, run this in a terminal:
+
+```bash
+codex plugin marketplace upgrade sidegraph
+```
+
+Then start a new Codex session. On 0.162.1 the native upgrade updates the installed plugin
+without uninstalling; unchanged definitions keep their trust even when the cache root
+moves. A never-approved definition (observed at first install) is `untrusted`; a previously
+approved definition whose command changed is `modified` and needs review again through
+`/hooks`. Those status names are the
+observed 0.162.1 metadata. Updating never grants approval to a changed command. The runtime
+launcher's `@main` does not update cached skills, manifests or hook definitions, so this
+marketplace update remains necessary. Update Codex itself if this command is unavailable.
 
 **How the plugin launches.** The MCP server and `SessionStart` run `uvx --from
-git+https://github.com/SantyagoSeaman/sidegraph.git@main`, a mutable branch (see
+git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, a mutable branch (see
 [Mutable development references](../getting-started/installation.md#mutable-development-references)).
 `Stop` and `SubagentStart` run many times a session and `uv` re-resolves a branch reference on every call, so they launch from the commit `SessionStart`
 recorded in `${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit`, falling back to `@main`
@@ -266,45 +271,33 @@ to the project: `CLAUDE_PROJECT_DIR` when set, else the git top-level, else the 
 anchoring, not a plugin-provided variable, is what keeps `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH`
 pointed at the right repo.
 
-What was verified live on codex-cli 0.154.0, a throwaway `CODEX_HOME`, when the plugin's hooks
-were `SessionStart` and `Stop`: `codex plugin
-marketplace add SantyagoSeaman/sidegraph` fetches the published repository by the
-`owner/repo` shorthand, parses `.agents/plugins/marketplace.json` and resolves the plugin at
-`./plugin/sidegraph`. `codex plugin add sidegraph@sidegraph` installs it, copying
-`.codex-plugin/plugin.json`, `codex/mcp.json`, `codex/hooks.json`, and every skill's
-`agents/openai.yaml` into the plugin cache unchanged. `codex mcp list --json` shows the
-`sidegraph` server registered with the exact command from `codex/mcp.json`, and a
-non-interactive `codex exec` session with that server registered called the Sidegraph tools
-(`retrieve_decisions`, `list_proposed`, `query_decisions`, `find_entity`) and got real
-records back. The hooks did not fire in that session, and that is expected, not a bug. Codex
-gates hooks with two independent checks. Project trust (`trust_level` in
-`config.toml`) is one. Hook trust is separate and hash-based: Codex records trust against a
-hook definition's current hash and refuses to run a hook it has not seen approved at that
-hash. Installing or enabling a plugin does not grant hook trust. Per the [Codex hooks
-docs](https://learn.chatgpt.com/codex/hooks), Codex skips plugin-bundled hooks until the user
-reviews and trusts the current hook definition. Observed on a real machine running codex-cli
-0.154.0, not documented as a guarantee: after `codex plugin add sidegraph@sidegraph`, the
-first interactive `codex` session detected the new hook definitions and prompted in the
-terminal to trust them, and answering yes completed the approval. No `/hooks` visit was needed
-for that normal path. The plugin now registers three hooks, `SessionStart`, `Stop` and
-`SubagentStart`, and trust is per definition, so a hook added by a later release is a new
-definition to approve; that was not re-observed on a later Codex. A non-interactive `codex exec` session never shows the prompt at all,
-which is exactly why automation needs the bypass below. `/hooks` is the surface for reviewing
-what is trusted and for re-approving after a hook definition changes, since trust is recorded
-per-hash. There is no config-file way to pre-approve it. The only bypass is `codex exec
---dangerously-bypass-hook-trust`, which the docs themselves flag as dangerous and intended for
-automation that already vets its hook sources, not as the normal path. So after `codex plugin
-add sidegraph@sidegraph`, the MCP server works immediately but `SessionStart`, `Stop` and
-`SubagentStart` stay silent until that approval. What was verified without
-a live, trusted Codex session: the hook entry points themselves honor the Codex JSON contract.
-Fed Codex-shaped payloads on stdin, `sidegraph-session-start` wrote the session telemetry row
-and returned `hookSpecificOutput.additionalContext`; `sidegraph-stop`, given a real rollout
-of an earlier interactive session as the transcript, wrote a `capture_sessions` row and
-returned its reminder, and wrote nothing for a rollout with fewer than two real prompts, for
-a subagent's or the automatic reviewer's thread, and for a headless `codex exec` run. Also
-unverified against the
-published docs: the top-level `mcpServers`/`hooks` fields in `.codex-plugin/plugin.json` are
-not documented on `developers.openai.com/plugins/build/plugins` as of this writing, which
-instead sketches an `extensions.com.openai` nesting. The live install above is the evidence
-they work, not the published schema. Re-verify both if the Codex CLI you're on behaves
-differently.
+**Current native verification (0.162.1, macOS ARM, 2026-10-15).** A fresh owned
+`CODEX_HOME` installed the public-form Sidegraph from a Git marketplace. All 30 installed
+plugin files matched committed source after the four public substitutions. The native
+registries contained 12 skills, the expected enabled `sidegraph` MCP command/arguments/
+environment, and exactly three initially untrusted hooks. The existing native gate's
+`config/batchWrite` approval path wrote only their current hashes; all three then reported
+trusted. No project-trust write was needed for this plugin registry check.
+
+A local fixture upgrade changed the version and one skill body while keeping MCP/hook
+bytes unchanged. It updated the installed cache root without uninstalling and preserved
+all three hook hashes and trust without new writes. With the origin unavailable, upgrade
+exited 1 and retained the old version, installed bytes, enabled registration and trust.
+After the origin was restored, a fixture changing only Stop's selected command made that
+hook `modified`, with a new hash; the other two remained trusted. This is evidence of
+source-unavailable retention, not a guarantee of atomic recovery from every interrupted
+filesystem write. Fixture versions were synthetic; the committed package was not bumped.
+
+That check used an owned reserved HTTPS-shaped Git URL rewritten to a local bare origin.
+It did not repeat a public GitHub fetch, use a model, execute hooks or call MCP tools.
+The earlier 0.154.0 check verified the GitHub `owner/repo` shorthand and real MCP calls;
+those are historical observations, not fresh authenticated evidence for 0.162.1. Full
+native acceptance of the exact release candidate remains a separate Windows/macOS gate.
+
+Project trust and hook trust are separate. Project trust controls project-local settings;
+installing or enabling a plugin does not approve its hook hashes. A non-interactive
+`codex exec` run does not show the interactive approval prompt, so automation must arrange
+reviewed approval explicitly, as the native gate does in its own profile. User installation
+should use the startup warning or `/hooks`, without a trust bypass. The unchanged nested
+compatibility manifest works with 0.162.1; the current plugin contract also documents that
+compatibility form. Recheck the primary host documentation when using another Codex version.

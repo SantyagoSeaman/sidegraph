@@ -13,7 +13,8 @@ renders the verdict in its own way:
 - ``run`` calls the checks listed for a surface and **never raises**.
 
 Portable core: this module imports nothing from ``engine/`` or ``host/``. The graph reader is
-duck-typed (``.path``, ``.freshness()``), as ``doctor`` always did. Host-specific checks (the
+duck-typed (``.path``, ``.freshness()``, ``.engine_version()``,
+``.engine_version_tested()``), as ``doctor`` always did. Host-specific checks (the
 stray-store line) are built by ``host/hooks.py`` and passed to ``run``.
 
 **Detectors are pure reads**, because doctor and stats are pure reads by contract and cannot
@@ -61,6 +62,7 @@ from .store import (
     parse_skip_list,
     skipped_segment_text,
 )
+from .store_layout import StoreRequirementError, store_requirement
 
 Severity = Literal["broken", "degraded", "advisory"]
 Surface = Literal["session", "notice", "doctor", "stats"]
@@ -81,7 +83,7 @@ _ORPHANED_RECENT_DAYS = 14
 _ORPHANED_RECENT_COUNT = 3
 
 _MODEL_CLAUSE = "Sidegraph memory tools will fail until it is fixed."
-_GRAPH_FIX = "graphify update ."
+_GRAPH_FIX = githooks.GRAPH_REBUILD_COMMAND
 
 # `refresh-hook-missing` runs a few read-only git commands (one `rev-parse`, one `config`, about
 # 5.5 ms each); this is their shared budget, in seconds.
@@ -109,7 +111,7 @@ _BRANCHES_NAMED = 3
 _HOT_RECORD_DIRS = ("decisions", "facts", "domains")
 _STORE_DIRS = (*_HOT_RECORD_DIRS, "initiatives", "bindings", "entities", "archive")
 _ULID_NAMED_DIRS = (*_HOT_RECORD_DIRS, "initiatives", "entities")  # named by the id minted at write
-_ROOT_FILES = ("format", ".gitignore", "stamping_live_since")
+_ROOT_FILES = ("format", ".gitignore", "stamping_live_since", "domain-snapshot.json")
 
 # A record is stranded unless it is terminal: a decision or fact superseded, rejected or
 # deprecated, or a domain superseded or dropped.
@@ -206,6 +208,8 @@ def _first_line(error: BaseException) -> str:
 def _open_error_fix(error: BaseException, store_dir: Path) -> str:
     """The sentence that tells the human what to do about a store that would not open. The first
     match wins, and the order matters: ``json.JSONDecodeError`` is a ``ValueError``."""
+    if isinstance(error, StoreRequirementError) and error.required is not None:
+        return f"Upgrade Sidegraph to >= {error.required}, then start a new session."
     if isinstance(error, json.JSONDecodeError | ValidationError):
         return (
             "Run `sidegraph-verify` from the repository root to find the file; a merge conflict "
@@ -359,13 +363,13 @@ def _detect_graph_stale(inputs: Inputs) -> Problem | None:
     if inputs.borrowed_from is not None:
         line = (
             f"Sidegraph: the main checkout's code graph ({inputs.borrowed_from}) is "
-            f"stale ({phrase}): rebuild it there with `graphify update .`"
+            f"stale ({phrase}): rebuild it there by running {githooks.GRAPH_REBUILD}"
         )
     else:
         line = (
             f"Sidegraph: the code graph is stale ({phrase}), "
             "so memory cannot see or anchor to code added after the build. "
-            "Rebuild it from the repository root: `graphify update .`"
+            f"Rebuild it from the repository root by running {githooks.GRAPH_REBUILD}"
         )
     findings: tuple[tuple[str, str], ...] = ()
     if inputs.reader is not None:
@@ -377,7 +381,7 @@ def _detect_graph_stale(inputs: Inputs) -> Problem | None:
                 str(inputs.reader.path),
                 f"the code graph is stale: {phrase} (e.g. {examples}); "
                 "memory cannot see or anchor to code added after the build — rebuild from the "
-                "repository root with `graphify update .`, then run `sidegraph-sync`",
+                f"repository root by running {githooks.GRAPH_REBUILD}, then run `sidegraph-sync`",
             ),
         )
     return Problem(
@@ -410,15 +414,15 @@ def _detect_graph_missing(inputs: Inputs) -> Problem | None:
     if state == "present":
         line = (
             f"Sidegraph: the code graph at {graph_path} could not be read, so memory cannot "
-            "match files to records or anchor new ones. Rebuild it from the repository root: "
-            "`graphify update .`"
+            "match files to records or anchor new ones. Rebuild it from the repository root "
+            f"by running {githooks.GRAPH_REBUILD}"
         )
         summary = "code graph unreadable"
     else:
         line = (
             f"Sidegraph: no code graph at {graph_path}, so memory cannot match files to "
-            "records or anchor new ones. Build it from the repository root: "
-            "`graphify update .`"
+            "records or anchor new ones. Build it from the repository root "
+            f"by running {githooks.GRAPH_REBUILD}"
         )
         summary = "code graph missing"
     return Problem(
@@ -428,6 +432,85 @@ def _detect_graph_missing(inputs: Inputs) -> Problem | None:
         fix=_GRAPH_FIX,
         line=line,
         notice=None,
+    )
+
+
+# -- 6b engine-version ----------------------------------------------------------------------
+
+#: The engine-version advisory's first case, the stamp substituted: one definition for the
+#: SessionStart line, the doctor finding and the store-behind-the-engine case that joins it.
+_ENGINE_UNTESTED = (
+    "the code graph was built by Graphify {version}, a release this Sidegraph was not tested "
+    "with, so anchors and domains may read differently; pin Graphify to a tested release, "
+    'listed under "Engine version pinning" in Sidegraph\'s Graphify integration guide'
+)
+
+
+def _engine_untested_sentence(version: str | None) -> str:
+    """The engine-version sentence for a graph built by Graphify ``version``, untested here.
+    ``None`` cannot reach case 1 (an unstamped graph counts as tested); it renders as "an
+    unknown release" so the type matches ``engine_version()``."""
+    display = " ".join(version.split()) if version else "an unknown release"
+    return _ENGINE_UNTESTED.format(version=display)
+
+
+# Graphify's first release with doc-to-code mention edges. The reader decides the generation
+# (engine/reader.py, _MENTION_EDGES_SINCE); this copy is only the number the line names.
+_MENTION_EDGES_RELEASE = "0.9.62"
+# The public migration guide for 0.14, in the URL form README.md uses for user-facing pointers.
+_MIGRATION_GUIDE_URL = (
+    "https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.14.md"
+)
+_ENGINE_BEHIND_TEXT = (
+    "the graph comes from a Graphify release that adds doc-to-code mention edges "
+    f"({_MENTION_EDGES_RELEASE} or later) and this store has not been migrated (no minimum "
+    f"Sidegraph version); follow the migration guide for 0.14: {_MIGRATION_GUIDE_URL}"
+)
+
+
+def _detect_engine_version(inputs: Inputs) -> Problem | None:
+    """The graph comes from a Graphify release this Sidegraph was not tested with, so anchors and
+    domains may read differently. Advisory: a model line and a doctor finding, no notice. Not
+    run without a reader; the stamp and the tested set are engine facts the seam answers
+    (``engine_version``, ``engine_version_tested``), so this module stays engine-free.
+    A mention-edge graph over a store without a minimum requirement also points to the
+    migration guide. A malformed marker leaves that case silent; case 1 still runs.
+    see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D1, D6)"""
+    reader = inputs.reader
+    if reader is None:
+        raise _NotRun
+    sentences: list[str] = []
+    if not reader.engine_version_tested():
+        sentences.append(_engine_untested_sentence(reader.engine_version()))
+    # Case 2: a graph with doc-to-code mention edges over a store that was not migrated (no
+    # minimum Sidegraph version). A marker that does not parse is refused by every entry point
+    # that reads the store, so this case says nothing about it, and case 1 still runs.
+    if reader.engine_generation() == "mention-edges":
+        try:
+            behind = store_requirement(inputs.store_dir) is None
+        except (StoreRequirementError, OSError):
+            behind = False
+        if behind:
+            sentences.append(_ENGINE_BEHIND_TEXT)
+    if not sentences:
+        return None
+    text = "; ".join(sentences) + "."
+    return Problem(
+        check="engine-version",
+        severity="advisory",
+        summary=(
+            "code graph built by an untested Graphify release"
+            if not reader.engine_version_tested()
+            else "store not migrated for the code graph's Graphify release"
+        ),
+        fix=(
+            "pin a tested Graphify release"
+            if not reader.engine_version_tested()
+            else "follow the migration guide for 0.14"
+        ),
+        line=f"Sidegraph: {text}",
+        notice=None,
+        findings=((str(reader.path), text),),
     )
 
 
@@ -572,6 +655,55 @@ def _detect_store_files_skipped(inputs: Inputs) -> Problem | None:
         fix="sidegraph-verify",
         line=text,
         notice=text,
+    )
+
+
+# -- 8b refresh-helper-outdated ------------------------------------------------------------
+
+
+def _detect_refresh_helper_outdated(inputs: Inputs) -> Problem | None:
+    """A hook git runs calls a helper that runs Graphify without ``GRAPHIFY_NO_AUTO_REFRESH=1``
+    (an earlier ``sidegraph-init`` wrote it). Not run outside a git repository, with no helper, or
+    when no hook calls it (``refresh-hook-missing`` says that); one hook that calls it is enough,
+    so a partly wired repository and a recorded decline do not hide it. The fix is plain
+    ``sidegraph-init``: it refreshes a helper any hook runs without touching a recorded decline,
+    which ``--hooks`` would reset. Same read-only git rule and budget as
+    ``refresh-hook-missing``.
+    see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D7)"""
+    deadline = time.monotonic() + _REFRESH_HOOK_BUDGET
+    project = _store_project_root(inputs.store_dir)
+    info = githooks.repo_info(project, timeout=deadline - time.monotonic())
+    if info is None:
+        raise _NotRun
+    current = githooks.helper_is_current(info)
+    if current is None or not githooks.helper_in_use(info):
+        raise _NotRun
+    if current:
+        return None
+    return Problem(
+        check="refresh-helper-outdated",
+        severity="advisory",
+        summary="graph refresh helper is out of date",
+        fix="sidegraph-init",
+        line=(
+            "Sidegraph: the graph refresh hook in this repository runs Graphify without "
+            "GRAPHIFY_NO_AUTO_REFRESH=1, so Graphify 0.9.87 and later can rewrite the agent "
+            "skills they installed on the first rebuild after an upgrade. Ask the user to run "
+            "`sidegraph-init`, which refreshes the helper and keeps their recorded hook choice; "
+            "do not run it unasked."
+        ),
+        notice=(
+            "Sidegraph: the graph refresh hook's helper is out of date: it runs Graphify without "
+            "GRAPHIFY_NO_AUTO_REFRESH=1, so Graphify 0.9.87 and later can rewrite your agent "
+            "skills after an upgrade. Refresh it with `sidegraph-init`."
+        ),
+        findings=(
+            (
+                str(info.helper),
+                "the installed graph refresh helper runs Graphify without "
+                "GRAPHIFY_NO_AUTO_REFRESH=1; run `sidegraph-init` to refresh it",
+            ),
+        ),
     )
 
 
@@ -1079,8 +1211,14 @@ CHECKS: tuple[Check, ...] = (
     Check("graph-borrowed", frozenset({"session"}), _detect_graph_borrowed),
     Check("graph-stale", frozenset({"session", "doctor", "stats"}), _detect_graph_stale),
     Check("graph-missing", frozenset({"session"}), _detect_graph_missing),
+    Check("engine-version", frozenset({"session", "doctor"}), _detect_engine_version),
     Check("orphaned-records", frozenset({"session", "doctor", "stats"}), _detect_orphaned_records),
     Check("store-files-skipped", frozenset({"session", "stats"}), _detect_store_files_skipped),
+    Check(
+        "refresh-helper-outdated",
+        frozenset({"session", "doctor"}),
+        _detect_refresh_helper_outdated,
+    ),
     Check("refresh-hook-missing", frozenset({"session"}), _detect_refresh_hook_missing),
     Check(
         "store-uncommitted", frozenset({"session", "doctor", "stats"}), _detect_store_uncommitted

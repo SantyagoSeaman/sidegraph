@@ -18,7 +18,8 @@ import pytest
 from pydantic import ValidationError
 from ulid import ULID
 
-from sidegraph import integrity
+from sidegraph import __version__, integrity
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.gitio import open_index_ro
 from sidegraph.integrity import CHECKS, Check, Inputs, Problem, run
 from sidegraph.schema import (
@@ -32,6 +33,8 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import SKIPPED_CANONICAL_KEY, VOLATILE_STALE_KEY, Store
+from sidegraph.store_layout import StoreRequirementError
+from tests.test_store_requirement import above_running
 
 NOW = datetime.now(UTC)
 
@@ -195,8 +198,10 @@ def test_registry_order_is_the_sessionstart_line_order():
         "graph-borrowed",
         "graph-stale",
         "graph-missing",
+        "engine-version",
         "orphaned-records",
         "store-files-skipped",
+        "refresh-helper-outdated",
         "refresh-hook-missing",
         "store-uncommitted",
         "branch-only-records",
@@ -240,6 +245,14 @@ def _validation_error() -> ValidationError:
             ),
             "This store was written by a different Sidegraph version: upgrade Sidegraph (or use "
             "the version that wrote it).",
+        ),
+        (
+            StoreRequirementError(
+                f"This store requires Sidegraph >= {above_running()}; this is {__version__}.",
+                kind="below",
+                required=above_running(),
+            ),
+            f"Upgrade Sidegraph to >= {above_running()}, then start a new session.",
         ),
         (
             ValueError("something else"),
@@ -427,7 +440,7 @@ def test_drift_zero_is_clean_and_none_is_not_run(tmp_path, monkeypatch):
 
 
 class _Reader:
-    """The slice of ``GraphifyReader`` the registry touches."""
+    """The reader slice used by the borrowed-graph and freshness checks below."""
 
     def __init__(self, path: Path, freshness=None):
         self.path = path
@@ -477,7 +490,8 @@ def test_stale_graph_texts_own_and_borrowed(tmp_path):
     assert own.severity == "degraded"
     assert own.line == (
         f"Sidegraph: the code graph is stale ({phrase}), so memory cannot see or anchor to "
-        "code added after the build. Rebuild it from the repository root: `graphify update .`"
+        "code added after the build. Rebuild it from the repository root by running "
+        f"{GRAPH_REBUILD}"
     )
     assert own.notice == own.line
     assert (own.summary, own.fix) == ("code graph stale", "graphify update .")
@@ -485,8 +499,8 @@ def test_stale_graph_texts_own_and_borrowed(tmp_path):
         (
             str(reader.path),
             f"the code graph is stale: {phrase} (e.g. pkg/m.py, pkg/n.py); memory cannot see or "
-            "anchor to code added after the build — rebuild from the repository root with "
-            "`graphify update .`, then run `sidegraph-sync`",
+            "anchor to code added after the build — rebuild from the repository root by running "
+            f"{GRAPH_REBUILD}, then run `sidegraph-sync`",
         ),
     )
     main = tmp_path / "main"
@@ -495,7 +509,7 @@ def test_stale_graph_texts_own_and_borrowed(tmp_path):
     )
     assert borrowed.line == (
         f"Sidegraph: the main checkout's code graph ({main}) is stale ({phrase}): rebuild it "
-        "there with `graphify update .`"
+        f"there by running {GRAPH_REBUILD}"
     )
     assert borrowed.notice == borrowed.line
 
@@ -538,7 +552,7 @@ def test_t3_missing_graph_names_the_path_and_the_build_command(tmp_path):
     assert problem.severity == "advisory"
     assert problem.line == (
         f"Sidegraph: no code graph at {path}, so memory cannot match files to records or "
-        "anchor new ones. Build it from the repository root: `graphify update .`"
+        f"anchor new ones. Build it from the repository root by running {GRAPH_REBUILD}"
     )
     assert problem.notice is None
     assert (problem.summary, problem.fix) == ("code graph missing", "graphify update .")
@@ -550,7 +564,8 @@ def test_an_unreadable_graph_file_gets_the_could_not_be_read_variant(tmp_path):
     problem = detect("graph-missing", Inputs(store_dir=tmp_path, now=NOW, graph_path=path))
     assert problem.line == (
         f"Sidegraph: the code graph at {path} could not be read, so memory cannot match files "
-        "to records or anchor new ones. Rebuild it from the repository root: `graphify update .`"
+        "to records or anchor new ones. Rebuild it from the repository root by running "
+        f"{GRAPH_REBUILD}"
     )
     assert problem.summary == "code graph unreadable"
 

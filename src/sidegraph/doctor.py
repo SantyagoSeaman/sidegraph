@@ -34,9 +34,10 @@ from urllib.parse import quote
 
 from ulid import ULID
 
-from . import integrity
+from . import domain_snapshot, integrity
 from .engine.reader import GraphifyReader
-from .schema import DecisionStatus, canonicalize
+from .githooks import GRAPH_REBUILD
+from .schema import DecisionStatus, Domain, DomainStatus, canonicalize, file_anchor_name
 from .store import (
     _STAMPING_MARKER_NAME,
     _TERMINAL_DECISION_STATUSES,
@@ -65,9 +66,11 @@ STALE_INSTRUCTIONS = "stale-instructions"
 UNRATIFIED_ACCEPT = "unratified-accept"
 GRAPH_ROOT_MISMATCH = "graph-root-mismatch"
 GRAPH_STALE = "graph-stale"
+ENGINE_VERSION = "engine-version"
 ORPHANED_RECORD = "orphaned-record"
 STORE_UNCOMMITTED = "store-uncommitted"
 PLUGIN_OFF_IN_SUBDIRECTORIES = "plugin-off-in-subdirectories"
+REFRESH_HELPER_OUTDATED = "refresh-helper-outdated"
 
 # The registry's check id -> the finding code doctor prints. They differ where one check yields
 # findings of one record each: check ``orphaned-records`` is one problem, code ``orphaned-record``
@@ -78,9 +81,11 @@ PLUGIN_OFF_IN_SUBDIRECTORIES = "plugin-off-in-subdirectories"
 # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
 _FINDING_CODE = {
     "graph-stale": GRAPH_STALE,
+    "engine-version": ENGINE_VERSION,
     "orphaned-records": ORPHANED_RECORD,
     "store-uncommitted": STORE_UNCOMMITTED,
     "plugin-off-in-subdirectories": PLUGIN_OFF_IN_SUBDIRECTORIES,
+    "refresh-helper-outdated": REFRESH_HELPER_OUTDATED,
 }
 
 # Name reported in ``CurationReport.skipped`` when index.db is absent or unusable — the
@@ -360,7 +365,8 @@ def _entity_identity_key(ent: dict) -> tuple[str, str, str | None] | None:
     of writing): ``canonicalize(descriptor.name if descriptor else canonical_name)`` paired
     with ``descriptor.file_path if descriptor else None`` — not a looser
     ``canonicalize(canonical_name)``, or this check and the lookup it describes would
-    disagree about what a duplicate even is (design D5).
+    disagree about what a duplicate even is (design D5). Names are folded by
+    ``schema.file_anchor_name``, as ``Store.find_entity`` folds them.
 
     Abstract identity is ``kind`` + ``canonical_name`` (mirrors ``find_abstract_entity``).
     One edge accepted rather than redesigned (design §3's own note): ``find_entity`` itself
@@ -389,7 +395,59 @@ def _entity_identity_key(ent: dict) -> tuple[str, str, str | None] | None:
     # review, Low-1). ``verify`` reports the malformed file itself; this check stays quiet.
     if not isinstance(name, str) or not isinstance(file_path, str | None):
         return None
-    return ("concrete", canonicalize(name), file_path)
+    return ("concrete", canonicalize(file_anchor_name(name, file_path)), file_path)
+
+
+def _entity_spelling(ent: dict) -> tuple[str, bool]:
+    """``(stored name, whether it is a path of its own file)`` for a raw entity file — the
+    spelling ``Store._lookup_preference`` ranks after the basename. A shape whose name cannot be
+    read counts as plainly spelled (the identity key already skipped anything malformed)."""
+    descriptor = ent.get("descriptor")
+    if isinstance(descriptor, dict):
+        name, file_path = (
+            descriptor.get("name", ent.get("canonical_name")),
+            descriptor.get("file_path"),
+        )
+    else:
+        name, file_path = ent.get("canonical_name"), None
+    if not isinstance(name, str) or not isinstance(file_path, str | None):
+        return str(name), False
+    return name, file_anchor_name(name, file_path) != name
+
+
+def _identity_groups(entities: list[tuple[Path, dict]]) -> list[list[tuple[Path, dict]]]:
+    """Entity files grouped by ``_entity_identity_key``, only groups of two or more."""
+    groups: dict[tuple[str, str, str | None], list[tuple[Path, dict]]] = {}
+    for path, ent in entities:
+        if not isinstance(ent.get("entity_id"), str):
+            continue
+        key = _entity_identity_key(ent)
+        if key is None:
+            continue
+        groups.setdefault(key, []).append((path, ent))
+    return [members for members in groups.values() if len(members) >= 2]
+
+
+def _spelling_split(
+    members: list[tuple[Path, dict]],
+) -> tuple[list[tuple[Path, dict]], list[tuple[Path, dict]]]:
+    """``(preferred, twins)`` of one identity group, each in lookup order (lowest id first).
+    The preferred members are spelled as the basename; a path-spelled member beside one is a
+    spelling twin. With no basename-spelled member, every member is preferred."""
+    ordered = sorted(members, key=lambda pair: (_entity_spelling(pair[1])[1], pair[1]["entity_id"]))
+    plain = [pair for pair in ordered if not _entity_spelling(pair[1])[1]]
+    return (plain, ordered[len(plain) :]) if plain else (ordered, [])
+
+
+def _binding_counts(bindings: dict[str, list[dict]]) -> dict[str, int]:
+    """entity id -> how many committed anchor entries name it."""
+    counts: dict[str, int] = {}
+    for entries in bindings.values():
+        for entry in entries:
+            eid = entry.get("entity_id")
+            if isinstance(eid, str):
+                counts[eid] = counts.get(eid, 0) + 1
+    return counts
 
 
 def _check_duplicate_entities(
@@ -410,28 +468,14 @@ def _check_duplicate_entities(
     entries — see ``_binding_entries``), not by entity id, so counting "how many bindings
     does this entity have" means flattening every record's entries first (same precondition
     ``_check_unreferenced_entities`` computes for its own ``referenced`` set)."""
-    binding_count_by_entity: dict[str, int] = {}
-    for entries in bindings.values():
-        for entry in entries:
-            eid = entry.get("entity_id")
-            if isinstance(eid, str):
-                binding_count_by_entity[eid] = binding_count_by_entity.get(eid, 0) + 1
-
-    groups: dict[tuple[str, str, str | None], list[tuple[Path, dict]]] = {}
-    for path, ent in entities:
-        eid = ent.get("entity_id")
-        if not isinstance(eid, str):
-            continue
-        key = _entity_identity_key(ent)
-        if key is None:
-            continue
-        groups.setdefault(key, []).append((path, ent))
-
+    binding_count_by_entity = _binding_counts(bindings)
     findings: list[Finding] = []
-    for members in groups.values():
-        if len(members) < 2:
+    for members in _identity_groups(entities):
+        # A full-path spelling twin is not ambiguity: lookups prefer the basename spelling, and
+        # spelling_twin_lines reports it as information.
+        members_sorted, _twins = _spelling_split(members)
+        if len(members_sorted) < 2:
             continue
-        members_sorted = sorted(members, key=lambda pair: pair[1]["entity_id"])
         winner_path, _winner = members_sorted[0]
         detail_ids = ", ".join(
             f"{e['entity_id']} ({binding_count_by_entity.get(e['entity_id'], 0)} bindings)"
@@ -632,28 +676,40 @@ def _file_by_entity(entities: list[tuple[Path, dict]]) -> dict[str, str]:
     return out
 
 
-def _binding_status_by_key(store_dir: Path) -> dict[tuple[str, str], str]:
-    """(record_id, entity_id) -> last-recorded binding status, read from index.db —
-    read-only, same ``mode=ro`` contract as ``_check_binding_statuses`` (design D5: "copy
-    the _check_binding_statuses precedent", doctor.py:405 at spec-writing time). Binding
-    status has no canonical form (store-format) so this is the only place it can be read
-    from. Returns ``{}`` when index.db is absent/unusable — code-drift's orphaned-binding
-    exclusion simply doesn't filter anything in that case; a missing/corrupt index does NOT
-    by itself skip the code-drift check (git availability is what gates that, see
-    ``_check_code_drift``), so no separate ``skipped`` entry is added here."""
+class _BindingStatusSnapshot(NamedTuple):
+    statuses: dict[tuple[str, str], str]
+    uncomputed: bool
+
+
+def _binding_status_snapshot(store_dir: Path) -> _BindingStatusSnapshot:
+    """Read statuses and their certification in one short, read-only SQLite snapshot.
+
+    An unavailable index cannot certify statuses; readable legacy rows without meta can.
+    Fetch all rows before closing the transaction, and parse JSON only after releasing it.
+    The scan never holds a database read lock while running Git.
+    """
     index_path = store_dir / "index.db"
     if not index_path.is_file():
-        return {}
+        return _BindingStatusSnapshot({}, True)
     try:
         conn = sqlite3.connect(f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True)
         try:
+            conn.execute("BEGIN")
+            try:
+                uncomputed = not integrity.binding_statuses_computed(conn)
+            except sqlite3.Error:
+                # An unreadable flag cannot certify statuses, but readable orphan rows
+                # still exclude their anchors. Only a failed row read discards the map.
+                uncomputed = True
             rows = conn.execute("SELECT record_id, entity_id, data FROM anchor_bindings").fetchall()
         finally:
             conn.close()
     except sqlite3.Error:
-        return {}
+        return _BindingStatusSnapshot({}, True)
     out: dict[tuple[str, str], str] = {}
     for record_id, entity_id, data in rows:
+        if not isinstance(record_id, str) or not isinstance(entity_id, str):
+            continue
         try:
             payload = json.loads(data)
         except (json.JSONDecodeError, TypeError):
@@ -661,11 +717,21 @@ def _binding_status_by_key(store_dir: Path) -> dict[tuple[str, str], str]:
         status = payload.get("status") if isinstance(payload, dict) else None
         if isinstance(status, str):
             out[(record_id, entity_id)] = status
-    return out
+    return _BindingStatusSnapshot(out, uncomputed)
+
+
+def _binding_status_by_key(store_dir: Path) -> dict[tuple[str, str], str]:
+    """Last-recorded binding statuses; an absent/unusable index yields an empty map."""
+    return _binding_status_snapshot(store_dir).statuses
 
 
 def _git_diff_name_only(
-    repo_root: Path, commit: str, paths: list[str], *, timeout: float | None = None
+    repo_root: Path,
+    commit: str,
+    paths: list[str],
+    *,
+    timeout: float | None = None,
+    exclude_deletions: bool = False,
 ) -> list[str]:
     """``git diff --name-only <commit>..HEAD -- <paths>``, from ``repo_root`` (design D5).
     Raises ``ValueError`` on a non-zero exit -- mirrors ``verify._git_diff_name_status``'s
@@ -673,9 +739,12 @@ def _git_diff_name_only(
     module's callers wrap ITS git helpers; ``_scan_code_drift`` is the one caller here, and
     it turns any failure into a failed batch (rendered as a skipped-note finding) rather
     than letting it propagate. ``timeout`` (drift→supersede D1) bounds the subprocess; the
-    curate()/CLI path passes none, exactly today's behavior."""
+    curate()/CLI path passes none, exactly today's behavior. With uncomputed binding
+    statuses, ``exclude_deletions`` drops committed deletions and treats renames as separate
+    deletion/addition paths, without confusing an old anchor with the new file."""
+    options = ["--no-renames", "--diff-filter=d"] if exclude_deletions else []
     result = _run_git(
-        ["diff", "--name-only", "-z", f"{commit}..HEAD", "--", *paths],
+        ["diff", "--name-only", "-z", *options, f"{commit}..HEAD", "--", *paths],
         cwd=repo_root,
         timeout=timeout,
         text=False,  # raw bytes: universal newlines would turn a "\r" in a name into "\n"
@@ -690,9 +759,10 @@ _CODE_DRIFT_GIT_NOTE = "code-drift: git unavailable — check skipped"
 
 
 class DriftEntry(NamedTuple):
-    """One live, commit-stamped decision whose anchored file(s) changed since capture —
+    """One open, commit-stamped decision whose anchored file(s) changed since capture —
     the fields ``_check_code_drift`` needs to render today's finding exactly, plus the
     ``record_id`` the drift cache (sync.refresh_code_drift_cache) keys on.
+    A changed file does not certify that its binding is live or its symbol still exists.
     # see design/superpowers/specs/2026-07-30-drift-supersede-affordance-design.md (D1)
     """
 
@@ -724,6 +794,7 @@ class CodeDriftScan(NamedTuple):
     active: bool
     repo_root_failed: bool
     head: str | None
+    binding_statuses_uncomputed: bool = False
 
 
 def _scan_code_drift(
@@ -752,7 +823,7 @@ def _scan_code_drift(
     its anchored code lives.
     # see design/superpowers/specs/2026-10-02-store-git-root-symlink-design.md (D3)"""
     file_by_entity = _file_by_entity(entities)
-    status_by_key = _binding_status_by_key(store_dir)
+    snapshot = _binding_status_snapshot(store_dir)
 
     unstamped = 0
     by_commit: dict[str, list[tuple[Path, str, set[str]]]] = {}
@@ -772,7 +843,7 @@ def _scan_code_drift(
             eid = entry.get("entity_id")
             if not isinstance(eid, str):
                 continue
-            if status_by_key.get((rid, eid)) == "orphaned":
+            if snapshot.statuses.get((rid, eid)) == "orphaned":
                 continue
             fp = file_by_entity.get(eid)
             if fp:
@@ -781,7 +852,7 @@ def _scan_code_drift(
             by_commit.setdefault(commit, []).append((path, rid, paths))
 
     if not by_commit:
-        return CodeDriftScan([], unstamped, False, False, None)
+        return CodeDriftScan([], unstamped, False, False, None, snapshot.uncomputed)
 
     started = time.monotonic()
 
@@ -795,7 +866,7 @@ def _scan_code_drift(
         # the project that holds the link, the repository capture stamped its commit from.
         repo_root = find_store_project_repo(store_dir, timeout=_remaining())
         if repo_root is None:
-            return CodeDriftScan([], unstamped, True, True, None)
+            return CodeDriftScan([], unstamped, True, True, None, snapshot.uncomputed)
 
     batches: list[DriftBatch] = []
     for commit, items in by_commit.items():
@@ -805,7 +876,15 @@ def _scan_code_drift(
             continue
         all_paths = sorted({p for _path, _rid, paths in items for p in paths})
         try:
-            changed = set(_git_diff_name_only(repo_root, commit, all_paths, timeout=remaining))
+            changed = set(
+                _git_diff_name_only(
+                    repo_root,
+                    commit,
+                    all_paths,
+                    timeout=remaining,
+                    exclude_deletions=snapshot.uncomputed,
+                )
+            )
         except (ValueError, OSError, subprocess.TimeoutExpired):
             batches.append(DriftBatch(commit, True, []))
             continue
@@ -826,7 +905,7 @@ def _scan_code_drift(
                     head = result.stdout.strip() or None
             except (ValueError, OSError, subprocess.TimeoutExpired):
                 head = None
-    return CodeDriftScan(batches, unstamped, True, False, head)
+    return CodeDriftScan(batches, unstamped, True, False, head, snapshot.uncomputed)
 
 
 def scan_code_drift(
@@ -866,9 +945,12 @@ def _check_code_drift(
     decision is historical, not a drift target). For each live decision whose
     ``provenance.commit`` is set, this resolves record -> committed bindings -> entities ->
     ``descriptor.file_path`` (a pure in-memory join over already-loaded canonical JSON),
-    excluding any binding index.db records as ``orphaned`` (:func:`_binding_status_by_key`
+    excluding any binding index.db records as ``orphaned`` (:func:`_binding_status_snapshot`
     -- a degraded binding is still included, same as ``valid_decisions_for_entity``'s own
-    live/degraded-vs-orphaned split). Records with NO commit (every pre-wave record, by
+    live/degraded-vs-orphaned split). If statuses are uncomputed or unavailable, committed
+    deletions are excluded and findings explicitly qualify binding status as unknown;
+    existing-file changes remain checkable even without a graph. Records with NO commit (every
+    pre-wave record, by
     design -- commits are never backfilled) are counted once, not silently dropped:
     ``"N record(s) predate commit stamping — not checkable"``.
 
@@ -920,7 +1002,12 @@ def _check_code_drift(
                     CODE_DRIFT,
                     entry.record_path,
                     f"anchored file(s) changed since capture (commit {batch.commit[:8]}): "
-                    + ", ".join(entry.files),
+                    + ", ".join(entry.files)
+                    + (
+                        " (binding status unknown; deleted paths excluded)"
+                        if scan.binding_statuses_uncomputed
+                        else ""
+                    ),
                 )
             )
     return findings
@@ -1007,7 +1094,7 @@ def _check_stale_instructions(
 def _check_graph_root_mismatch(
     reader: GraphifyReader | None, repo_root: Path | None
 ) -> list[Finding]:
-    """graph-root-mismatch (defect fixed 2026-09-18): ``graphify update`` run from a
+    """graph-root-mismatch (defect fixed 2026-09-18): a graph rebuild run from a
     subdirectory instead of the repository root leaves every recorded ``source_file``
     relative to that subdirectory, so every anchor descriptor stops matching and
     ``sidegraph-sync`` mass-orphans the whole store with nothing pointing at the real
@@ -1033,10 +1120,47 @@ def _check_graph_root_mismatch(
             f"{mismatch['missing']}/{mismatch['sampled']} sampled source_file paths don't "
             f"exist relative to the repo root, but DO exist under '{mismatch['likely_run_from']}/' "
             "— graphify was likely run from that subdirectory instead of the repository "
-            "root; rerun `graphify update` from the repository root and re-sync, or every "
-            "anchor in this graph will look orphaned",
+            f"root; rebuild from the repository root by running {GRAPH_REBUILD} and re-sync, "
+            "or every anchor in this graph will look orphaned",
         )
     ]
+
+
+def _check_snapshot_splits(
+    root: Path, domains: list[tuple[Path, dict]], archived_domains: dict[str, dict]
+) -> list[Finding]:
+    """snapshot-split: two or more accepted domains descend from one domain the snapshot
+    covers, so neither holds its frozen membership until `sidegraph-domains snapshot
+    --refresh` names them. Pure read, like every check here; a broken snapshot is verify's.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.2)"""
+    try:
+        snap = domain_snapshot.load_snapshot(root)
+    except (domain_snapshot.SnapshotError, OSError):
+        return []
+    if snap is None:
+        return []
+    models: dict[str, Domain] = {}
+    for payload in [*archived_domains.values(), *(d for _path, d in domains)]:
+        try:
+            dom = Domain.model_validate(payload)
+        except ValueError:
+            continue
+        models[dom.domain_id] = dom
+    accepted = [d for d in models.values() if d.status == DomainStatus.ACCEPTED]
+    _heirs, splits = domain_snapshot.snapshot_heirs(snap, accepted, models.get)
+    out: list[Finding] = []
+    for slug, ids in sorted(splits.items()):
+        parts = sorted(models[i].slug for i in ids)
+        flags = " ".join(f"--domain {p}" for p in parts)
+        out.append(
+            Finding(
+                "snapshot-split",
+                str(domain_snapshot.snapshot_path(root)),
+                f"{slug}'s frozen membership is split between {', '.join(parts)}; neither holds it "
+                f"until `sidegraph-domains snapshot --refresh {flags}`",
+            )
+        )
+    return out
 
 
 def _registry_findings(
@@ -1057,8 +1181,9 @@ def _registry_findings(
     by ``test_curate_git_call_count_unchanged_by_refactor`` is untouched), and ``index`` is the
     caller's ``mode=ro`` connection. Without either, the checks that need it are not run.
     ``store-uncommitted`` needs neither: it always runs two read-only git calls (``rev-parse``
-    and ``status``) through ``integrity._git``, which that count does not see and
-    ``test_curate_runs_two_read_only_git_calls_through_the_registry`` pins.
+    and ``status``) through ``integrity._git``, and ``refresh-helper-outdated`` one ``rev-parse``
+    through ``githooks._git``. That count does not see them;
+    ``test_curate_runs_three_read_only_git_calls_through_the_registry`` pins them.
 
     ``host_checks`` are the checks that need the host seam (``plugin-off-in-subdirectories``),
     built by the caller: this module imports nothing from ``host/``. They run after the
@@ -1592,6 +1717,40 @@ def ratification_info_lines(store_dir: str | Path) -> list[str]:
     return [*ratification_latency_lines(store_dir), *_auto_share_lines(store_dir)]
 
 
+def spelling_twin_lines(store_dir: str | Path) -> list[str]:
+    """The informational ``spelling twins`` lines ``sidegraph-doctor`` prints: one header, then
+    one line per entity named by a path (full or partial) of its file whose basename also
+    names an entity,
+    with the entity lookups and new anchors use instead and both binding counts. Never findings,
+    never the exit code, absent from ``--json``: a twin cannot be removed (append-only store,
+    immutable ``canonical_name``), and retrieval reaches both through the node they map to.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D2, "Twins")"""
+    root = Path(store_dir)
+    counts = _binding_counts(_binding_entries(root))
+    rows: list[str] = []
+    for members in _identity_groups(_iter_records(root, "entities")):
+        plain, twins = _spelling_split(members)
+        if not twins:
+            continue
+        winner = plain[0][1]
+        for _path, twin in twins:
+            rows.append(
+                f"  {twin['entity_id']} {_entity_spelling(twin)[0]!r} "
+                f"({counts.get(twin['entity_id'], 0)} binding(s)) → {winner['entity_id']} "
+                f"{_entity_spelling(winner)[0]!r} ({counts.get(winner['entity_id'], 0)} binding(s))"
+            )
+    if not rows:
+        return []
+    many = len(rows) != 1
+    return [
+        f"spelling twins: {len(rows)} {'entities are' if many else 'entity is'} named by a "
+        "path (full or partial) of its file whose basename also names an entity; lookups and "
+        "new anchors use the basename one and retrieval reaches both "
+        "(informational, nothing to fix)",
+        *sorted(rows),
+    ]
+
+
 def curate(
     store_dir: str | Path,
     *,
@@ -1618,7 +1777,7 @@ def curate(
 
     ``reader`` (additive, defect fixed 2026-09-18): an optional :class:`GraphifyReader`
     over the corpus's ``graph.json``, used ONLY by the ``graph-root-mismatch`` check
-    (a person running `graphify update` from a subdirectory instead of the repo root).
+    (a person rebuilding the graph from a subdirectory instead of the repo root).
     ``None`` (no graph configured, or unreadable -- ``sidegraph-doctor`` never fails to
     load a graph the way it never fails to load a git ref) simply skips that one check,
     same "advisory, best-effort" contract as every other curation check here. The same reader
@@ -1699,4 +1858,5 @@ def curate(
     # unchanged: the graph never caught up with HEAD (``graph-stale``, where this module's own
     # check used to be), and records whose every code anchor is orphaned (``orphaned-record``).
     findings += _registry_findings(root, now, reader, index, host_checks)
+    findings += _check_snapshot_splits(root, domains, archived.domains)
     return CurationReport(findings=findings, skipped=skipped)

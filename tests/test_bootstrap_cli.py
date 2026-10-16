@@ -29,6 +29,7 @@ from sidegraph.bootstrap.model import (
 from sidegraph.bootstrap.planner import plan_sources
 from sidegraph.bootstrap.scan import scan_sources
 from sidegraph.engine.reader import GraphifyReader
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.profiles import get_profile
 from sidegraph.retrieval import TaskContext
 from sidegraph.schema import (
@@ -87,7 +88,7 @@ def write_graph(root: Path, *, domain_candidate: bool = False) -> Path:
                 "source_file": f"lib/retry_{number}.py",
                 "community": "1",
             }
-            for number in range(1, 5)
+            for number in range(1, 6)
         )
     graph = root / "graphify-out" / "graph.json"
     write(
@@ -227,7 +228,7 @@ def test_missing_graph_previews_without_starting_review(
     assert "anchor: -" in out
     assert "bootstrap-private-value" not in out
     assert "graph not readable" in out
-    assert f"cd {shlex.quote(str(tmp_path.resolve()))} && graphify update ." in out
+    assert f"in {shlex.quote(str(tmp_path.resolve()))}, run {GRAPH_REBUILD}" in out
     assert not (tmp_path / ".sidegraph").exists()
 
 

@@ -18,6 +18,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from sidegraph.sync import refresh_domain_communities_now
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
 
@@ -33,9 +34,20 @@ def _domain(store: Store, slug: str, **overrides) -> Domain:
     return store.add_domain(Domain(**base))
 
 
-def _accept(store: Store, domain: Domain) -> Domain:
+def _accept(store: Store, domain: Domain, *, reader: GraphifyReader | None = None) -> Domain:
     store.ratify_domains(accept=[domain.domain_id])
-    return store.get_domain(domain.domain_id)
+    accepted = store.get_domain(domain.domain_id)
+    if reader is not None:
+        # Publish membership as sync does; bare community ids are not a member index.
+        store.replace_domain_members(
+            accepted.domain_id,
+            [
+                (n.node_id, n.file_path, n.community)
+                for n in reader.list_nodes()
+                if n.community in accepted.communities
+            ],
+        )
+    return accepted
 
 
 def _decision(store: Store, kind: DecisionKind, **overrides) -> Decision:
@@ -202,7 +214,7 @@ def test_drill_down_reader_none_members_empty_with_note(tmp_path):
 def test_drill_down_members_via_current_communities(tmp_path):
     store = Store(tmp_path / "t.db")
     reader = GraphifyReader(FIXTURE)
-    _accept(store, _domain(store, "trading", communities=["1"]))
+    _accept(store, _domain(store, "trading", communities=["1"]), reader=reader)
 
     out = drill_down("trading", store, reader)
     assert any("Trader" in m for m in out["members"])
@@ -214,7 +226,10 @@ def test_drill_down_members_via_current_communities(tmp_path):
 def test_drill_down_members_via_path_prefixes(tmp_path):
     store = Store(tmp_path / "t.db")
     reader = GraphifyReader(FIXTURE)
-    _accept(store, _domain(store, "trading", communities=[], path_prefixes=["trader"]))
+    domain = _accept(
+        store, _domain(store, "trading", communities=[], path_prefixes=["trader"]), reader=reader
+    )
+    refresh_domain_communities_now(domain, store, reader)  # a real ratify activates membership
 
     out = drill_down("trading", store, reader)
     assert any("Trader" in m for m in out["members"])
@@ -258,7 +273,9 @@ def test_drill_down_members_excludes_pathless_and_ranks_path_prefix_first(tmp_pa
     reader = GraphifyReader(graph_path)
 
     store = Store(tmp_path / "t.db")
-    _accept(store, _domain(store, "trading", communities=["5"], path_prefixes=["trader"]))
+    _accept(
+        store, _domain(store, "trading", communities=["5"], path_prefixes=["trader"]), reader=reader
+    )
 
     out = drill_down("trading", store, reader)
     members = out["members"]
@@ -289,7 +306,7 @@ def test_drill_down_members_capped(tmp_path):
     reader = GraphifyReader(graph_path)
 
     store = Store(tmp_path / "t.db")
-    _accept(store, _domain(store, "bigdomain", communities=["5"]))
+    _accept(store, _domain(store, "bigdomain", communities=["5"]), reader=reader)
 
     out = drill_down("bigdomain", store, reader)
     assert len(out["members"]) == 20
@@ -557,7 +574,7 @@ def test_drill_down_surfaces_document_decision_via_file_coverage(tmp_path):
     from that same file (community "5") — the document-coverage join."""
     reader = _write_graph(tmp_path, _doc_corpus_nodes())
     store = Store(tmp_path / "t.db")
-    _accept(store, _domain(store, "adr-domain", communities=["5"]))
+    _accept(store, _domain(store, "adr-domain", communities=["5"]), reader=reader)
     ent = _entity_with_node(store, "ADR-005.md", "docs/ADR-005.md", "adr_file", community="9")
     d = _decision(store, DecisionKind.ADR, title="doc decision content")
     _bind_entity(store, d.id, ent.entity_id)
@@ -593,7 +610,7 @@ def test_drill_down_document_branch_does_not_over_surface_on_code_corpus(tmp_pat
     ]
     reader = _write_graph(tmp_path, nodes)
     store = Store(tmp_path / "t.db")
-    _accept(store, _domain(store, "trading-code", communities=["1"]))
+    _accept(store, _domain(store, "trading-code", communities=["1"]), reader=reader)
     ent = _entity_with_node(store, "fn_y", "code/a.py", "fn_y", community="2")
     d = _decision(store, DecisionKind.ADR, title="fn_y only decision")
     _bind_entity(store, d.id, ent.entity_id)
@@ -607,7 +624,7 @@ def test_drill_down_document_branch_deduped_with_domain_tag(tmp_path):
     appears exactly once."""
     reader = _write_graph(tmp_path, _doc_corpus_nodes())
     store = Store(tmp_path / "t.db")
-    _accept(store, _domain(store, "adr-domain", communities=["5"]))
+    _accept(store, _domain(store, "adr-domain", communities=["5"]), reader=reader)
     d = _decision(store, DecisionKind.ADR, title="tagged and doc-covered")
     _bind_domain(store, d.id, "adr-domain")
     ent = _entity_with_node(store, "ADR-005.md", "docs/ADR-005.md", "adr_file", community="9")
@@ -623,7 +640,7 @@ def test_drill_down_document_branch_excludes_superseded(tmp_path):
     not surface (its successor does)."""
     reader = _write_graph(tmp_path, _doc_corpus_nodes())
     store = Store(tmp_path / "t.db")
-    _accept(store, _domain(store, "adr-domain", communities=["5"]))
+    _accept(store, _domain(store, "adr-domain", communities=["5"]), reader=reader)
     ent = _entity_with_node(store, "ADR-005.md", "docs/ADR-005.md", "adr_file", community="9")
     old = _decision(store, DecisionKind.ADR, title="old adr text")
     _bind_entity(store, old.id, ent.entity_id)
@@ -640,7 +657,7 @@ def test_drill_down_document_branch_excludes_orphaned_binding(tmp_path):
     paths' orphaned-binding exclusion."""
     reader = _write_graph(tmp_path, _doc_corpus_nodes())
     store = Store(tmp_path / "t.db")
-    _accept(store, _domain(store, "adr-domain", communities=["5"]))
+    _accept(store, _domain(store, "adr-domain", communities=["5"]), reader=reader)
     ent = _entity_with_node(store, "ADR-005.md", "docs/ADR-005.md", "adr_file", community="9")
     d = _decision(store, DecisionKind.GOTCHA, title="orphaned doc gotcha")
     _bind_entity(store, d.id, ent.entity_id, status="orphaned")

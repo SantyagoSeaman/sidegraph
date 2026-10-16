@@ -76,6 +76,10 @@ def main():
         json.dump(record, out)
     sys.stdout.write("STUB-OUT\\n")
     sys.stdout.flush()
+    if os.environ.get("STUB_STDERR"):
+        sys.stderr.write(os.environ["STUB_STDERR"] + "\\n")
+        sys.stderr.flush()
+    sys.exit(int(os.environ.get("STUB_EXIT", "0")))
 """
 
 _STUB_PYPROJECT = """\
@@ -279,6 +283,48 @@ def test_runs_from_the_repo_root_with_the_environment_and_the_payload(
     assert seen["env"]["UV_PROJECT_ENVIRONMENT"] == (".venv" if kind == "dev" else None)
     assert bytes.fromhex(seen["stdin"]) == _PAYLOAD
     assert seen["argv"] == _expected_argv(kind, event, command)
+
+
+@windows_only
+@pytest.mark.parametrize("shell", _SHELLS)
+@pytest.mark.parametrize(("kind", "event", "command"), _CASES)
+def test_a_launch_that_logs_to_stderr_and_exits_0_prints_no_fallback(
+    kind: str, event: str, command: str, shell: str, repo: Path, stub_dir: Path, tmp_path: Path
+) -> None:
+    """uv and uvx write their install log to stderr on success. Windows PowerShell 5.1 sets
+    ``$?`` to false after a native program writes to a redirected stderr, whatever its exit
+    code, so a ``$?`` guard would append the fallback to a working hook's output."""
+    result, record = _run(
+        shell,
+        command,
+        cwd=repo,
+        path=_path(stub=stub_dir),
+        tmp_path=tmp_path,
+        stub_env={"STUB_STDERR": "Installed 1 package in 5ms"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.decode().strip() == "STUB-OUT"
+    _read(record)
+
+
+@windows_only
+@pytest.mark.parametrize("shell", _SHELLS)
+@pytest.mark.parametrize(("kind", "event", "command"), _CASES)
+def test_a_launch_that_exits_non_zero_prints_the_fallback(
+    kind: str, event: str, command: str, shell: str, repo: Path, stub_dir: Path, tmp_path: Path
+) -> None:
+    result, _record = _run(
+        shell,
+        command,
+        cwd=repo,
+        path=_path(stub=stub_dir),
+        tmp_path=tmp_path,
+        stub_env={"STUB_EXIT": "2"},
+    )
+    lines = result.stdout.decode().strip().splitlines()
+    assert lines[0] == "STUB-OUT"
+    expected = {"systemMessage": _SESSION_MESSAGE} if event == "SessionStart" else {}
+    assert json.loads(lines[-1]) == expected
 
 
 @windows_only

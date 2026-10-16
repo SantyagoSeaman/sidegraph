@@ -26,15 +26,24 @@ restate it in prose or carry it in a manifest field.
 | `CHANGELOG.md` | see below, the `[Unreleased]` heading becomes the release heading |
 | `plugin/sidegraph/.claude-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
 | `plugin/sidegraph/.codex-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
+| `plugin/sidegraph/.muse-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
+| `package.json` | OpenCode Git package's `version`, kept in lockstep with `pyproject.toml` |
+| `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | Update any `plugins[]` entry's `version` if that optional field is present; leave it omitted otherwise |
 
 `README.md` is deliberately absent from this table. Its Status section carries no version
 string — only a PyPI badge that reads the live index — so there is nothing there to bump and
 nothing that can go stale between releases. It used to carry a `vX.Y.Z, on PyPI as ...` line;
 that line was removed in 0.3.0, and this note replaces its row.
 
-`tests/test_codex_plugin.py` enforces that the two plugin manifests and
-`src/sidegraph/__init__.py` all agree with `pyproject.toml`; a release with a stale copy
-fails the test suite rather than shipping silently. Use `rg '<old-version>'` to find other
+The public tests in `tests/test_codex_plugin.py`, `tests/test_muse_plugin.py` and
+`tests/test_opencode_plugin.py` compare the host manifest/package versions with
+`pyproject.toml`; the Codex test also checks `src/sidegraph/__init__.py`. The internal
+`tools/preflight_release.py` checks all four manifests, detects an undeclared direct
+`.*-plugin/plugin.json` or root `package.json`, and checks optional versions in the two
+catalogs. Its tests and the real four-host snapshot inventory check in
+`tests/test_release_snapshot.py` stay internal; they are excluded from the public tree.
+Malformed version metadata blocks release; unreadable version inputs make the preflight
+exit 2. Use `rg '<old-version>'` to find other
 mentions, then distinguish current-version claims from historical changelog, design, and
 schema-fixture references.
 
@@ -45,8 +54,12 @@ Prepare the release on internal `main`, then run the clean-tree preflight:
 1. Update `CHANGELOG.md`: keep a fresh empty `## [Unreleased]` first and add
    `## [X.Y.Z] — YYYY-MM-DD` beneath it. Group changes using Keep a Changelog headings.
 2. Update every file in the version table above and any affected `docs/` page.
+   Keep all four manifest/package versions together and update optional catalog entry
+   versions already present. Do not add version fields to otherwise unversioned entries.
    Run `uv lock` so the root package version in `uv.lock` agrees with `pyproject.toml`;
    inspect the diff to ensure no unrelated dependency versions changed.
+   Run the host version tests and, in the internal checkout,
+   `uv run python tools/preflight_release.py` before the slower release checks.
 3. `uv run pytest -q`. Full suite green.
 4. `uv run pre-commit run --all-files`. Lint, format, types, and staged secret scanning
    clean, including store-only changes; also zizmor, actionlint, and the shipped-surface/

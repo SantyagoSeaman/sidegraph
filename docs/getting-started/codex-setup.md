@@ -7,7 +7,7 @@ Check the version-specific configuration and hook requirements in
 [`integrations/codex.md`](../integrations/codex.md).
 
 Run these in the repo you want memory over (not the Sidegraph checkout). Two ways to get
-there: the **plugin** (one step, recommended) or **manual registration** (config.toml, hooks,
+there: the **plugin** (recommended) or **manual registration** (config.toml, hooks,
 and AGENTS.md registered separately, for fine control or a source checkout).
 
 **Windows:** read the [Windows setup notes](installation.md#windows) first. The plugin
@@ -35,7 +35,7 @@ source takes `owner/repo[@ref]`, a local path or a Git URL.
 Installs the MCP server, the `SessionStart`/`Stop`/`SubagentStart` hooks, and all 12 skills in one step,
 pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by default.
 It installs from the public Git repository: the MCP server and `SessionStart`
-run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main` under the hood, and
+run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1` under the hood, and
 `Stop` and `SubagentStart` start from the commit `SessionStart` resolved. See
 [the plugin install path](../integrations/codex.md#plugin-install-path) for exactly what
 gets registered and the cwd-pinning details, and what has and hasn't been verified live.
@@ -47,15 +47,31 @@ release run `uv tool upgrade sidegraph`. SessionStart says when it differs from 
 ([`path-skew`](../guides/troubleshooting.md#path-skew)), and the plugin's skills ignore it
 ([running the CLIs beside the plugin](../reference/cli.md#running-the-clis-beside-the-plugin)).
 
-1. Trust the hooks: start an interactive `codex` session in the repo. Codex detects the new
-   Sidegraph hook definitions (`SessionStart`, `Stop`, `SubagentStart`) and prompts you in the
-   terminal to trust them. Approve to complete it. Skip or decline and the MCP tools still work,
-   but retrieval at session start, the capture reminder at session end and the memory brief a
-   subagent gets at its start stay silent. A hook
-   definition change in a later release needs a fresh approval. Review or re-approve anytime
-   with `/hooks`.
+Trust the hooks: start an interactive `codex` session in the repo. Review the new Sidegraph
+definitions (`SessionStart`, `Stop`, `SubagentStart`) through Codex's startup warning or
+`/hooks`, then approve them. Installation alone does not grant trust. Skip or decline and
+the MCP registration remains available, but automatic context, the capture reminder and
+the subagent brief stay silent. A new or changed hook definition needs a fresh review.
 
 Skip to [Verify](#verify) once installed.
+
+### Keep the plugin updated
+
+After each Sidegraph release, run this in a terminal, then start a new Codex session:
+
+```bash
+codex plugin marketplace upgrade sidegraph
+```
+
+On Codex CLI 0.162.1 this refreshes the marketplace and the installed plugin without an
+uninstall/reinstall. Unchanged hook definitions keep their approval even when the cache path
+changes. Review new or changed definitions through the startup warning or `/hooks`; updating
+does not approve them for you. If your Codex version lacks this command, update Codex first.
+
+The runtime's `@main` reference does not refresh cached skills, hook definitions or manifests.
+Keep the optional CLI on your `PATH` updated separately as described above. See the
+[integration details](../integrations/codex.md#plugin-install-path) for tested behavior
+and its limits.
 
 ## Option B: manual registration
 

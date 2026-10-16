@@ -115,7 +115,8 @@ it never adds to it.
 
 - **Check `anchors_skipped` in the result** — same discipline as `record-decision`. An
   entry means that anchor's name matched more than one graph node (`candidates` capped at
-  5) and no precise leaf was created. Fix an already-**accepted** fact with `supersede_fact`
+  5) and no precise leaf was created. Identical path-less external stubs (what newer
+  Graphify emits for an imported name such as `BaseModel`) count as one match. Fix an already-**accepted** fact with `supersede_fact`
   carrying precise anchors — a repeat `add_fact` call would mint a duplicate record. For a
   **still-proposed** draft, don't use `supersede_fact`: it writes `status=accepted`/
   `provenance.source=human`, which would silently turn an ungated agent proposal into
@@ -128,7 +129,7 @@ it never adds to it.
   surface. (The PreToolUse hook hands an agent decisions only, so a fact never arrives through it,
   whatever its anchors.) Repair with `add_anchors` (bindings-only, no duplicate
   record, and it works on a proposed record without touching its status). **Read the
-  `reason` first:** `file-not-in-graph` usually means a stale graph (run `graphify update .`
+  `reason` first:** `file-not-in-graph` usually means a stale graph (run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set,
   and re-anchor — the name was probably fine), `name-not-in-file` means the name is wrong
   (`find_entity`/`query_structure` will say what is really there), `no-file-path` means pass
   one. With no graph at all, an `add_fact`/`supersede_fact` entry carries **no** `reason`

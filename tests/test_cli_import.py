@@ -470,7 +470,7 @@ def _canonical_doc_state(store):
                     "accepted",
                     "docs/a.md",
                     False,
-                    ("a.md", "community:1", "submit_order", "tag:payments"),
+                    ("a.md", "community:1", "community:1~doc", "submit_order", "tag:payments"),
                 )
             ],
         ),

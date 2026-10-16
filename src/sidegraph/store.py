@@ -59,7 +59,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -79,12 +79,17 @@ from .schema import (
     Initiative,
     Scope,
     canonicalize,
+    file_anchor_name,
     is_safe_record_id,
 )
 from .store_layout import (
     INDEX_JOURNAL_PRAGMA,
+    INDEX_STAMPS,
     NOT_A_FILE_REASON,
+    VOLATILE_STALE_KEY,
+    check_store_requirement,
     hot_matches_archive,
+    index_stamp,
     is_regular_file,
     stat_entry,
     symlinked_internals,
@@ -190,6 +195,18 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
 )""",
     """CREATE INDEX IF NOT EXISTS idx_render_events_session
     ON render_events (session_id)""",
+    # Each accepted domain's effective membership over the graph sync last read: derived like
+    # Domain.communities, dropped by every reload and recomputed (sync, or
+    # sync.ensure_domain_membership). Keyed by domain; capture and retrieval look up by node.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)
+    """CREATE TABLE IF NOT EXISTS domain_members (
+    domain_id TEXT NOT NULL,
+    node_id   TEXT NOT NULL,
+    file_path TEXT,
+    community TEXT,
+    PRIMARY KEY (domain_id, node_id)
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_domain_members_node ON domain_members (node_id)",
 )
 
 _SCHEMA_SQL = ";\n".join(_SCHEMA_STATEMENTS) + ";\n"
@@ -217,6 +234,7 @@ _ARCHIVE_SUBDIR = store_layout.ARCHIVE_SUBDIR
 _FORMAT_MARKER_NAME = store_layout.FORMAT_MARKER_NAME
 _GITIGNORE_NAME = store_layout.GITIGNORE_NAME
 _STAMPING_MARKER_NAME = store_layout.STAMPING_MARKER_NAME
+_DOMAIN_SNAPSHOT_NAME = store_layout.DOMAIN_SNAPSHOT_NAME
 
 # Terminal = a status after which append-only rules guarantee the record can never change
 # again (see CLAUDE.md invariant #2 and design §7). PROPOSED/ACCEPTED decisions can still be
@@ -230,10 +248,9 @@ _TERMINAL_DECISION_STATUSES = frozenset(
 )
 _TERMINAL_DOMAIN_STATUSES = frozenset({DomainStatus.SUPERSEDED, DomainStatus.DROPPED})
 
-# Committed format marker: a one-line ``<path>/format`` file (``sidegraph-store <version>``)
-# written at layout creation and migration, checked on every open — see
-# ``Store._ensure_format_marker``.
-_FORMAT_MARKER_PREFIX = "sidegraph-store "
+# Committed format marker: a layout version, plus the minimum Sidegraph release when raised.
+# Grammar and refusal live in store_layout; Store owns exclusive creation and explicit raises.
+_FORMAT_MARKER_PREFIX = store_layout.FORMAT_MARKER_PREFIX
 
 # Committed layout convenience (design §1/§5): ``<path>/.gitignore`` ignoring the derived
 # index (its always-present 0-byte rollback ``-journal`` and any WAL/SHM sidecars, all via the
@@ -256,6 +273,7 @@ _ROOT_TMP_GLOB_PATTERNS = (
     f"{_FORMAT_MARKER_NAME}.*.tmp",
     f"{_GITIGNORE_NAME}.*.tmp",
     f"{_STAMPING_MARKER_NAME}.*.tmp",
+    f"{_DOMAIN_SNAPSHOT_NAME}.*.tmp",
 )
 
 # Attempts _atomic_write_text_race_tolerant makes before giving up and re-raising. Each
@@ -286,10 +304,24 @@ _LIVE_MIGRATION_SECONDS = 60.0
 # can therefore collide with a DIFFERENT racer, not just re-attempt against one winner.
 _ARCHIVE_SEGMENT_PUBLISH_ATTEMPTS = 10
 
-# Meta key: set to "1" whenever __init__ reloads the index from canonical files (missing
-# index, digest mismatch, or a fresh migration) and cleared by a completed `sidegraph-sync`
-# pass (see sync.py) — see design §3.
-VOLATILE_STALE_KEY = "volatile_stale"
+# Meta key: the identity the membership index (``domain_members``) is certified for:
+# ``"<sync stamp>|<snapshot signature>"`` (``sync.membership_stamp``). A membership pass with no
+# failed domain writes it; ``_uncertify_membership`` deletes it; a reader that does not sync
+# rebuilds the index when it differs (``sync.ensure_domain_membership``).
+MEMBERSHIP_STAMP_KEY = "domain_membership_stamp"
+
+# The last observed snapshot content, tracked independently of the canonical digest.
+SNAPSHOT_SIGNATURE_KEY = "domain_snapshot_signature"
+# Meta key: ``{"identity", "failures", "failed_ids"}`` of the last membership pass in which a
+# domain failed: it is reported again without recomputing until the identity changes, and
+# capture binds from every other domain's rows for that identity.
+MEMBERSHIP_FAILED_KEY = "domain_membership_failed"
+# Meta key: set by the first membership pass that fills ``domain_members``; only the reload
+# (which drops the rows) deletes it. Until it is set a pass is populating the index, and a
+# domain whose rows it writes for the first time is not reported as refreshed.
+MEMBERSHIP_POPULATED_KEY = "domain_membership_populated"
+
+_LARGE_PAGE_CACHE_KIB = 65536
 
 _CANONICAL_DIGEST_KEY = "canonical_digest"
 
@@ -324,9 +356,9 @@ def _atomic_write_text(path: Path, text: str) -> os.stat_result:
     """Write ``text`` to ``path`` atomically (tmp + ``os.replace``, same directory so the
     replace is same-filesystem). A crash strictly between the tmp write and the replace
     leaves the ORIGINAL file (or its absence) intact — see design §2/§Testing. Writes the
-    canonical records (via ``_atomic_write_json`` below); the format marker and
-    ``.gitignore`` do NOT come through here — they use
-    ``_atomic_write_text_race_tolerant``, which has its own tmp+replace implementation.
+    canonical records (via ``_atomic_write_json`` below) and explicit requirement rewrites.
+    A missing format marker uses exclusive creation instead; ``.gitignore`` uses
+    ``_atomic_write_text_race_tolerant`` for its identical-content first-open writers.
 
     The tmp name is per-call UNIQUE (``<name>.<pid>.<random>.tmp``), matching
     ``_atomic_write_text_race_tolerant`` (design D5): a FIXED ``<name>.tmp`` means two
@@ -353,6 +385,14 @@ def _atomic_write_text(path: Path, text: str) -> os.stat_result:
     st = tmp.stat()
     os.replace(tmp, path)
     return st
+
+
+def write_domain_snapshot_file(store_dir: str | Path, text: str) -> int:
+    """Publish ``<store_dir>/domain-snapshot.json`` atomically (tmp + replace): the one writer
+    of that committed file, kept here beside every other canonical writer. Its size in bytes.
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.4)"""
+    _atomic_write_text(Path(store_dir) / store_layout.DOMAIN_SNAPSHOT_NAME, text)
+    return len(text.encode("utf-8"))
 
 
 def _record_file(root: Path, subdir: str, record_id: str) -> Path:
@@ -454,12 +494,12 @@ def _atomic_write_json(path: Path, obj: object) -> os.stat_result:
 
 def _atomic_write_text_race_tolerant(path: Path, text: str) -> None:
     """Like ``_atomic_write_text``, but safe for the specific way ``Store``'s FIRST-OPEN
-    writes (the format marker, ``.gitignore``) can race across THREADS (fastmcp's
+    writes (``.gitignore``) can race across THREADS (fastmcp's
     worker-thread dispatch) or genuinely separate PROCESSES (a hook racing a long-lived
     MCP server, or two CLI invocations opening the same fresh directory at once) — review
     Important-2a plus a residual finding a cross-process stress probe surfaced on top of
-    it. Both writers always produce IDENTICAL content (the same running
-    ``SCHEMA_VERSION`` / the same fixed ``.gitignore`` body), so there is never a real
+    it. Both writers always produce IDENTICAL content (the same fixed
+    ``.gitignore`` body), so there is never a real
     disagreement to resolve — only races over WHO gets to write it.
 
     Unlike ``_atomic_write_text``, each attempt here writes to a per-attempt UNIQUE tmp
@@ -517,6 +557,55 @@ def refuse_symlinked_internals(store_path: Path) -> None:
         )
 
 
+def _format_marker_signature(store_path: Path) -> tuple[int, int, int, int] | None:
+    """Identity, size and mtime of the marker, without following a symlink."""
+    try:
+        st = os.lstat(store_path / _FORMAT_MARKER_NAME)
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+class RequirementChange(NamedTuple):
+    """What :meth:`Store.raise_requirement` did: ``previous`` is the requirement before
+    (``None`` when the store had none), ``required`` the one now; equal when nothing was
+    written."""
+
+    marker: Path
+    previous: str | None
+    required: str
+
+
+def _create_format_marker(path: Path, text: str) -> None:
+    """Publish a missing marker without replacing another opener's marker or explicit raise.
+
+    A unique temporary file makes the winning publication whole. A concurrent first-open
+    sweep can remove that temporary file; retry the same bounded way as layout convenience
+    writes. Every winner is validated by the caller, including one that already requires a
+    newer version. This correctness gate propagates publication errors.
+    """
+    last_error: FileNotFoundError | None = None
+    for _ in range(_RACE_TOLERANT_ATTEMPTS):
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        try:
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                return
+            except FileNotFoundError as exc:
+                last_error = exc
+                if os.path.lexists(path):
+                    return
+            else:
+                return
+        finally:
+            with suppress(OSError):
+                tmp.unlink(missing_ok=True)
+    assert last_error is not None
+    raise last_error
+
+
 def _store_has_any_records(path: Path) -> bool:
     """True iff the store rooted at ``path`` holds a record of ANY kind — the complete
     inventory of places one can live, per this module's own docstring layout: a hot file
@@ -527,12 +616,7 @@ def _store_has_any_records(path: Path) -> bool:
     new; only ``archive/`` still proves it. Used solely to decide whether
     ``Store._ensure_stamping_marker`` may write its creation marker: that marker must
     never appear on a store that already had a record, by any route, before this open."""
-    for sub in _CANONICAL_SUBDIRS:
-        d = path / sub
-        if d.is_dir() and any(d.glob("*.json")):
-            return True
-    archive_dir = path / _ARCHIVE_SUBDIR
-    return archive_dir.is_dir() and any(archive_dir.glob("*.jsonl"))
+    return store_layout.store_has_any_records(path)
 
 
 def _entity_identity_payload(entity: Entity) -> dict:
@@ -867,6 +951,28 @@ def _sentinel_age_seconds(sentinel: Path) -> float:
         return float("inf")
 
 
+def _descriptor_name_and_path(e: Entity) -> tuple[str, str | None]:
+    if e.descriptor is not None:
+        return e.descriptor.name, e.descriptor.file_path
+    return e.canonical_name, None
+
+
+def _identity_name(e: Entity) -> str:
+    """The canonical name an entity is matched under: its descriptor name, a path suffix of its
+    own file folded to the basename (``schema.file_anchor_name``)."""
+    name, file_path = _descriptor_name_and_path(e)
+    return canonicalize(file_anchor_name(name, file_path))
+
+
+def _lookup_preference(e: Entity) -> tuple[bool, str]:
+    """Which of several entities sharing one identity a lookup returns: a name already in the
+    basename form first (``store.py`` over an older ``src/sidegraph/store.py`` twin), then the
+    lowest ``entity_id`` (design D4 of the entity-identity spec).
+    # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D2)"""
+    name, file_path = _descriptor_name_and_path(e)
+    return (file_anchor_name(name, file_path) != name, e.entity_id)
+
+
 class StoreBusyError(sqlite3.OperationalError):
     """The outermost mutation could not reserve SQLite before running its body."""
 
@@ -889,12 +995,18 @@ class Store:
         # commits or rolls back -- see that method's docstring. Lives beside `_lock` since
         # the two are set up together and only ever mutate together.
         self._mutation_depth = 0
+        self._cache_restore: int | None = None
+        self._savepoint_seq = 0
+        self._requirement: str | None = None
+        self._marker_signature: tuple[int, int, int, int] | None = None
         self.path = raw
 
         # Before the legacy dispatch: `_migrate_legacy` would otherwise move records through
         # a symlinked subdirectory before anything refused it.
         if raw.is_dir():
             refuse_symlinked_internals(raw)
+            # Refuse before migration, directory creation or debris cleanup uses this store.
+            self._check_requirement(force=True)
 
         # A bare-file migration (``Store("old.db")``) that was interrupted after its point of
         # no return leaves a sentinel beside the legacy file (design D10). A nameless path
@@ -1116,39 +1228,31 @@ class Store:
             for f in archive_dir.glob("*.tmp"):
                 self._unlink_if_stale(f)
 
-    def _ensure_format_marker(self) -> None:
-        """Committed, git-visible format marker (``<path>/format``, one line:
-        ``sidegraph-store <version>``) — a correctness gate that lives OUTSIDE the
-        gitignored ``index.db``, so a teammate on an incompatible store format is rejected
-        the moment they open it, not just when their local index happens to agree with
-        their code. Missing marker on an existing layout (N1-era stores predate this file)
-        is backfilled, never rejected. An unknown MAJOR component IS a hard rejection, same
-        spirit as the ``schema_version`` gate in ``_refresh_freshness``.
+    def _check_requirement(self, *, force: bool = False) -> str | None:
+        """Cache only an observation taken before its requirement was validated.
 
-        Written atomically (tmp + ``os.replace``, via ``_atomic_write_text_race_tolerant``):
-        a crash mid-write must never leave a truncated marker behind — that would
-        hard-reject every subsequent open of an otherwise-healthy store. Race-tolerant
-        because two openers can reach this on a store's first-ever open — see
-        ``_atomic_write_text_race_tolerant``'s docstring."""
+        A later replacement stays visible on the next refresh. A post-check stat could
+        instead certify a different, refusing marker indefinitely.
+        """
+        signature = _format_marker_signature(self.path)
+        if force or signature != self._marker_signature:
+            required = check_store_requirement(self.path)
+            self._requirement = required
+            self._marker_signature = signature
+        return self._requirement
+
+    def _ensure_format_marker(self) -> str | None:
+        """Create a missing committed marker, then validate the marker that actually won.
+
+        Missing markers retain legacy compatibility. Exclusive creation cannot overwrite
+        another opener's explicit requirement. Existing markers go through the shared
+        requirement check, refusing unknown majors, malformed markers and requirements
+        above this Sidegraph. Returns the requirement, or ``None``.
+        """
         marker = self.path / _FORMAT_MARKER_NAME
-        if not marker.is_file():
-            _atomic_write_text_race_tolerant(marker, f"{_FORMAT_MARKER_PREFIX}{SCHEMA_VERSION}\n")
-            return
-        text = marker.read_text(encoding="utf-8").strip()
-        if not text.startswith(_FORMAT_MARKER_PREFIX):
-            raise ValueError(
-                f"unrecognized store format marker {text!r} at {marker}; "
-                "migration tooling is deferred — use a fresh store"
-            )
-        stamped_version = text[len(_FORMAT_MARKER_PREFIX) :]
-        stamped_major = stamped_version.split(".", 1)[0]
-        current_major = SCHEMA_VERSION.split(".", 1)[0]
-        if stamped_major != current_major:
-            raise ValueError(
-                f"store format marker {text!r} (major {stamped_major!r}) is incompatible "
-                f"with code's {SCHEMA_VERSION!r} (major {current_major!r}); "
-                "migration tooling is deferred — use a fresh store"
-            )
+        if _format_marker_signature(self.path) is None:
+            _create_format_marker(marker, f"{_FORMAT_MARKER_PREFIX}{SCHEMA_VERSION}\n")
+        return self._check_requirement(force=True)
 
     def _ensure_stamping_marker(self) -> None:
         """Committed, git-visible creation marker (``<path>/stamping_live_since``, one
@@ -1195,7 +1299,7 @@ class Store:
         Published KEEP-FIRST, not via ``_atomic_write_text_race_tolerant`` (review round 2,
         Minor 1 — a real bug, not a nit): two openers (worker threads, or two genuinely
         separate processes) can reach a store's first-ever open at once, and unlike the
-        format marker/``.gitignore`` (where every racer writes IDENTICAL content, so
+        ``.gitignore`` (where every racer writes IDENTICAL content, so
         whoever's ``os.replace`` lands last is harmless), each racer here stamps its OWN
         ``datetime.now(UTC)``. ``_atomic_write_text_race_tolerant``'s ``os.replace`` is
         LAST-WRITER-WINS: forced interleaving (measured) shows opener A can pass the
@@ -1665,9 +1769,8 @@ class Store:
     def _compute_canonical_digest(self) -> tuple[str, dict[tuple[str, str], tuple[int, int]]]:
         """sha256 over sorted (relpath, size, mtime_ns) of every canonical record file, plus
         the format marker — cheap enough to run on every open (hundreds/thousands of small
-        JSONs). The marker is included like any other committed file, but since it never
-        changes within a version (``_ensure_format_marker`` writes it once and never again),
-        its presence here never causes spurious digest churn.
+        JSONs). The marker is included like any other committed file. Layout creation
+        writes it once; an explicit requirement raise rewrites it, changing this digest.
 
         Also covers ``archive/*.jsonl`` segments (design §7): a segment is write-once and
         never rewritten in place, but it is still new committed content the first time it
@@ -1678,8 +1781,8 @@ class Store:
 
         Returns ``(digest, stats)`` where ``stats`` maps every walked file's
         ``(subdir, stem)`` — every ``_CANONICAL_SUBDIRS`` entry plus ``archive/*.jsonl``
-        segments, NOT the format marker (write-once, never rewritten, so it never needs a
-        ``canonical_stat`` row to prove freshness against) — to its ``(size, mtime_ns)``,
+        segments, NOT the format marker (tracked by the requirement check and this digest
+        rather than a ``canonical_stat`` row) — to its ``(size, mtime_ns)``,
         accumulated in this SAME walk (digest-integrity design, Task 3): the walk already
         stats every file for the digest itself, so this is free. ``_touch_digest`` compares
         ``stats`` against ``canonical_stat`` before stamping."""
@@ -1774,7 +1877,8 @@ class Store:
         claim of freshness is only trustworthy if its declared version agrees with the
         running code) — UNLESS the stamped version is a known-reloadable one
         (``_RELOADABLE_SCHEMA_VERSIONS``), in which case a full reload re-stamps it instead
-        of hard-failing (see ``_RELOADABLE_SCHEMA_VERSIONS``)."""
+        of hard-failing (see ``_RELOADABLE_SCHEMA_VERSIONS``). The expected stamp follows
+        the marker requirement (``store_layout.index_stamp``)."""
         with self._lock:
             stored = self._conn.execute(
                 "SELECT value FROM meta WHERE key = ?", (_CANONICAL_DIGEST_KEY,)
@@ -1787,17 +1891,28 @@ class Store:
                     "SELECT value FROM meta WHERE key = 'schema_version'"
                 ).fetchone()
                 stamped_value = stamped["value"] if stamped else None
-                if stamped_value != SCHEMA_VERSION:
-                    if stamped_value in _RELOADABLE_SCHEMA_VERSIONS:
+                expected = index_stamp(self._requirement)
+                if stamped_value != expected:
+                    # The other stamp of the pair is this layout's own index, stamped for the
+                    # other marker state (an already-running older MCP server reloads a raised
+                    # store and writes SCHEMA_VERSION): a reload re-stamps it.
+                    if (
+                        stamped_value in _RELOADABLE_SCHEMA_VERSIONS
+                        or stamped_value in INDEX_STAMPS
+                    ):
                         self._reload_index_from_canonical(current)
                     else:
                         raise ValueError(
                             f"store schema_version {stamped_value!r} != code "
-                            f"{SCHEMA_VERSION!r}; migration tooling is deferred — use a "
+                            f"{expected!r}; migration tooling is deferred — use a "
                             "fresh store"
                         )
-            # No commit here: the rebuild owns its transaction (design D1/D9) and the fast
-            # path is SELECT-only, which opens none. This commit used to be the only thing
+
+            self._check_snapshot_signature()
+
+            # No commit here: the rebuild owns its transaction (design D1/D9), as does a
+            # changed snapshot's invalidation. The unchanged fast path opens no transaction.
+            # This commit used to be the only thing
             # that closed the rebuild's implicit transaction; leaving it now would invite
             # removing the rebuild's own commit, which would silently restore mechanism 1.
 
@@ -1809,11 +1924,102 @@ class Store:
         write would stay invisible until a restart. A holder calls this before each unit of work.
         No change costs one digest walk (about 8 ms on a store of 1,500 files); a change costs a
         full rebuild (about 90 ms). It runs under the store's lock, so it cannot interleave with
-        a read or a write on another thread.
+        a read or a write on another thread. A changed format-marker observation is checked
+        first, including an atomic replacement that preserves size and mtime. A refused
+        requirement leaves the index intact and is checked again on every later call.
+        A changed domain snapshot is noticed separately by ``_check_snapshot_signature``.
         see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D4)
+        see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)
         """
         with self._lock:
+            self._check_requirement()
             self._refresh_freshness()
+
+    def _check_snapshot_signature(self) -> None:
+        """Mark domain membership stale when ``domain-snapshot.json`` changed since this index
+        last saw it: uncertify membership (``_uncertify_membership``: the next capture or
+        drill-down rebuilds the index; a certification already names the old file's hash, so
+        it would not match anyway) and set ``volatile_stale`` (the next sync runs a full pass
+        and rebuilds the TOC). Nothing is reloaded. The snapshot stays out of the canonical
+        digest because an older Sidegraph would never agree with a digest that includes it.
+        Called under ``self._lock``.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)"""
+        signature = store_layout.snapshot_signature(self.path)
+        row = self._conn.execute(GET_META_SQL, (SNAPSHOT_SIGNATURE_KEY,)).fetchone()
+        # A store that never had a snapshot has no row and reads as "absent", so an open of it
+        # writes nothing (the hooks open stores constantly, and an open must not fail on a
+        # write it does not need).
+        seen = row["value"] if row is not None else "absent"
+        if seen != signature:
+            self._invalidate_membership(signature)
+
+    def _invalidate_membership(self, signature: str) -> None:
+        with self._mutation():
+            self._uncertify_membership()
+            for key, value in ((SNAPSHOT_SIGNATURE_KEY, signature), (VOLATILE_STALE_KEY, "1")):
+                self._conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, value),
+                )
+
+    def invalidate_domain_membership(self) -> None:
+        """What ``sidegraph-domains snapshot`` calls after it writes the file: the same
+        invalidation a later open would make, now."""
+        with self._lock:
+            self._invalidate_membership(store_layout.snapshot_signature(self.path))
+
+    def raise_requirement(self, version: str, *, running: str | None = None) -> RequirementChange:
+        """Make this store refuse Sidegraph versions below ``version``: rewrite ``format`` as
+        ``sidegraph-store 1.0.0`` plus ``requires-sidegraph >= <version>`` (spec D6).
+
+        The read of the current requirement and the publish run under the writer reservation
+        (``_mutation``), so two raises at once serialize: the second reads the first's
+        requirement and never lowers it. Inside an outer ``_mutation()`` scope it joins that
+        scope (one reservation, one commit), which is how a caller composes "validate, raise,
+        publish". The marker is published with ``_atomic_write_text``; like every canonical
+        publication it cannot be rolled back, so a caller raises before it publishes anything
+        that depends on the requirement.
+
+        Raises ``ValueError``, writing nothing, when ``version`` is not ``X.Y.Z``, when it is
+        above ``running`` (default: this package's ``__version__``, compared by release), or
+        when it is below the store's current requirement. A marker this version refuses raises
+        its ``StoreRequirementError``. Asking for the current requirement again writes nothing.
+        Sync, SessionStart and the MCP server never call it.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)"""
+        if not store_layout.is_release_version(version):
+            raise ValueError(f"a requirement must be a release version X.Y.Z, got {version!r}")
+        marker_text = store_layout.requirement_marker_text(version)
+        marker = self.path / _FORMAT_MARKER_NAME
+        with self._mutation():
+            previous = check_store_requirement(self.path, running=running)
+            if not store_layout.requirement_met(version, running):
+                raise ValueError(
+                    f"cannot require Sidegraph >= {version}: this is "
+                    f"{store_layout.running_version(running)}, and a store may only require a "
+                    "version that is already installed where the requirement is raised; "
+                    "upgrade first"
+                )
+            if previous is not None:
+                wanted = store_layout.release_tuple(version)
+                held = store_layout.release_tuple(previous)
+                assert wanted is not None and held is not None  # both matched X.Y.Z
+                if wanted < held:
+                    raise ValueError(
+                        f"the store already requires Sidegraph >= {previous}; a requirement is "
+                        f"never lowered (asked for {version})"
+                    )
+                if wanted == held:
+                    return RequirementChange(marker, previous, previous)
+            st = _atomic_write_text(marker, marker_text)
+            self._marker_signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            self._requirement = version
+            # Published with the outermost commit. A later rollback leaves the canonical
+            # marker raised; the next open or refresh then repairs the index stamp.
+            self._conn.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'", (index_stamp(version),)
+            )
+        return RequirementChange(marker, previous, version)
 
     def _warn_skipped_files(self) -> None:
         """Repeat the skip warning from meta on every open while the list is non-empty
@@ -1901,12 +2107,14 @@ class Store:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
                 try:
+                    self._check_requirement()
                     self._conn.execute("DROP TABLE IF EXISTS entities")
                     self._conn.execute("DROP TABLE IF EXISTS decisions")
                     self._conn.execute("DROP TABLE IF EXISTS facts")
                     self._conn.execute("DROP TABLE IF EXISTS anchor_bindings")
                     self._conn.execute("DROP TABLE IF EXISTS domains")
                     self._conn.execute("DROP TABLE IF EXISTS initiatives")
+                    self._conn.execute("DROP TABLE IF EXISTS domain_members")
                     # canonical_stat is DROPped with the record tables, not upserted over:
                     # a row for a file that is ABSENT during this reload must not survive it.
                     # Left in place, a file returning later with an identical (size, mtime_ns)
@@ -2088,7 +2296,7 @@ class Store:
                         _warn_domain_slug_conflict(conflict["slug"], conflict["domain_ids"])
 
                     for key, value in (
-                        ("schema_version", SCHEMA_VERSION),
+                        ("schema_version", index_stamp(self._requirement)),
                         (_CANONICAL_DIGEST_KEY, digest),
                         (VOLATILE_STALE_KEY, "1"),
                     ):
@@ -2097,6 +2305,10 @@ class Store:
                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                             (key, value),
                         )
+                    self._uncertify_membership()
+                    self._conn.execute(
+                        "DELETE FROM meta WHERE key = ?", (MEMBERSHIP_POPULATED_KEY,)
+                    )
                     # In the reload's own transaction (design D4): the list is exactly as
                     # current as the tables it explains.
                     if skipped:
@@ -2167,7 +2379,7 @@ class Store:
         self._conn.commit()
 
     @contextmanager
-    def _mutation(self, *, immediate: bool = True) -> Iterator[None]:
+    def _mutation(self, *, immediate: bool = True, large_cache: bool = False) -> Iterator[None]:
         """Reserve the writer before state checks; only the outermost scope commits.
 
         SQLite's BEGIN IMMEDIATE serializes separate Store connections before canonical
@@ -2181,10 +2393,18 @@ class Store:
         COMMIT stays inside the try, and BaseException rollback releases the connection
         even on interruption. Explicit immediate=False is for deferred composition only;
         public canonical writers use the immediate default.
+
+        ``large_cache=True`` raises the page cache to 64 MB until the owning transaction
+        commits or rolls back, including when a nested membership pass requested it. This
+        prevents dirty-page spills from taking the exclusive lock before the commit.
+        See the Graphify upgrade spec D5.3.
         """
         with self._lock:
             self._mutation_depth += 1
             try:
+                if large_cache and self._cache_restore is None:
+                    self._cache_restore = int(self._conn.execute("PRAGMA cache_size").fetchone()[0])
+                    self._conn.execute(f"PRAGMA cache_size = {-_LARGE_PAGE_CACHE_KIB}")
                 if immediate and not self._conn.in_transaction:
                     try:
                         self._conn.execute("BEGIN IMMEDIATE")
@@ -2208,7 +2428,34 @@ class Store:
                     self._conn.rollback()
                 raise
             finally:
+                if self._mutation_depth == 1 and self._cache_restore is not None:
+                    previous, self._cache_restore = self._cache_restore, None
+                    with contextlib.suppress(sqlite3.Error):
+                        self._conn.execute(f"PRAGMA cache_size = {previous}")
                 self._mutation_depth -= 1
+
+    @contextmanager
+    def _savepoint(self) -> Iterator[None]:
+        """A rollback-able scope inside an open ``_mutation()``: an exception undoes only the
+        writes made inside it, and the outer transaction goes on (SQLite ``SAVEPOINT``). A
+        nested ``_mutation()`` inside it joins the outer transaction, as everywhere.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)"""
+        with self._lock:
+            if not self._conn.in_transaction:
+                raise RuntimeError("_savepoint needs an open _mutation()")
+            self._savepoint_seq += 1
+            name = f"sg_{self._savepoint_seq}"
+            self._conn.execute(f"SAVEPOINT {name}")
+            try:
+                yield
+            except BaseException:
+                # An error SQLite answers by rolling the whole transaction back leaves nothing
+                # to roll back to; the caller sees the original error either way.
+                if self._conn.in_transaction:
+                    self._conn.execute(f"ROLLBACK TO {name}")
+                    self._conn.execute(f"RELEASE {name}")
+                raise
+            self._conn.execute(f"RELEASE {name}")
 
     # -- index writers (derived; index.db only) ------------------------------
 
@@ -2257,6 +2504,24 @@ class Store:
                 domain.supersedes,
                 domain.model_dump_json(),
             ),
+        )
+
+        if domain.status != DomainStatus.ACCEPTED:
+            # Only an accepted domain has members: a drop or a supersede ends them here, in the
+            # status change's own transaction.
+            self._conn.execute(
+                "DELETE FROM domain_members WHERE domain_id = ?", (domain.domain_id,)
+            )
+
+    def _uncertify_membership(self) -> None:
+        """Uncertify the membership index: delete its certification and any recorded failure.
+        Called inside the caller's own transaction (a domain status change's ``_mutation()``,
+        the reload), so it commits or rolls back with it. Accepted domains' memberships depend
+        on one another (a covered domain's snapshot entries go to its one accepted heir; two
+        heirs hold none), so any status change uncertifies every domain.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)"""
+        self._conn.execute(
+            "DELETE FROM meta WHERE key IN (?, ?)", (MEMBERSHIP_STAMP_KEY, MEMBERSHIP_FAILED_KEY)
         )
 
     def _index_write_binding(self, binding: AnchorBinding) -> None:
@@ -2329,18 +2594,20 @@ class Store:
         an accident of insertion order, not a rule — see
         ``tests/test_entity_duplicate_resolution.py``'s inversion construction, which pins
         exactly that. Still a full Python scan (real, and a separate change — see spec §5);
-        not this wave's subject."""
-        target = canonicalize(name)
+        not this wave's subject.
+
+        Both sides are folded by ``schema.file_anchor_name``; under several matches the
+        basename spelling wins, then the lowest id."""
+        target = canonicalize(file_anchor_name(name, file_path))
         with self._lock:
             rows = self._conn.execute("SELECT data FROM entities").fetchall()
         matches: list[Entity] = []
         for row in rows:
             e = Entity.model_validate_json(row["data"])
             desc_file = e.descriptor.file_path if e.descriptor else None
-            e_name = e.descriptor.name if e.descriptor else e.canonical_name
-            if canonicalize(e_name) == target and desc_file == file_path:
+            if desc_file == file_path and _identity_name(e) == target:
                 matches.append(e)
-        return min(matches, key=lambda e: e.entity_id) if matches else None
+        return min(matches, key=_lookup_preference) if matches else None
 
     def get_or_create_entity(self, descriptor: Descriptor) -> Entity:
         """Atomic get-or-create for a CONCRETE entity (design D3).
@@ -2368,6 +2635,9 @@ class Store:
             existing = self.resolve_descriptor(descriptor.name, descriptor.file_path)
             if existing is not None:
                 return existing
+            name = file_anchor_name(descriptor.name, descriptor.file_path)
+            if name != descriptor.name:
+                descriptor = Descriptor(name=name, file_path=descriptor.file_path)
             return self.upsert_entity(Entity(canonical_name=descriptor.name, descriptor=descriptor))
 
     def resolve_descriptor(self, name: str, file_path: str | None) -> Entity | None:
@@ -2410,7 +2680,7 @@ class Store:
         exact = [
             e for e in candidates if (e.descriptor.file_path if e.descriptor else None) is None
         ]
-        return min(exact, key=lambda e: e.entity_id) if exact else None
+        return min(exact, key=_lookup_preference) if exact else None
 
     def _adopt_path_carrying_entity(self, candidates: list[Entity]) -> Entity | None:
         """The CONCRETE entity a path-less descriptor should adopt, out of ``candidates``
@@ -2423,23 +2693,53 @@ class Store:
         ]
         if len({e.descriptor.file_path for e in concrete if e.descriptor}) != 1:
             return None
-        return min(concrete, key=lambda e: e.entity_id)
+        return min(concrete, key=_lookup_preference)
 
     def find_entities_by_name(self, name: str) -> list[Entity]:
         """Name-only scan across all entities, ignoring ``file_path`` — the fallback
         ``find_entity`` (the MCP tool) uses when no exact descriptor match exists. May
         return more than one entity when a name is reused across files; the caller decides
         whether that's ambiguous (never guess which one the query meant)."""
-        target = canonicalize(name)
         with self._lock:
             rows = self._conn.execute("SELECT data FROM entities").fetchall()
         out: list[Entity] = []
         for row in rows:
             e = Entity.model_validate_json(row["data"])
-            e_name = e.descriptor.name if e.descriptor else e.canonical_name
-            if canonicalize(e_name) == target:
+            _name, e_file = _descriptor_name_and_path(e)
+            # The query is folded against each candidate's own file: a path-less
+            # ``sidegraph/cli.py`` names ``cli.py`` only in a file whose path ends with it.
+            if canonicalize(file_anchor_name(name, e_file)) == _identity_name(e):
                 out.append(e)
         return out
+
+    def identity_members(self, entity: Entity) -> list[Entity]:
+        """``entity`` and its spelling twins: the entities of the same kind with the same folded
+        name and the same file, ``entity`` itself included (lowest preference first). A record
+        bound to a losing twin is reached through any member.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D2)"""
+        key = (entity.kind, _identity_name(entity), _descriptor_name_and_path(entity)[1])
+        with self._lock:
+            rows = self._conn.execute("SELECT data FROM entities").fetchall()
+        members = [Entity.model_validate_json(row["data"]) for row in rows]
+        out = [
+            e
+            for e in members
+            if (e.kind, _identity_name(e), _descriptor_name_and_path(e)[1]) == key
+        ]
+        if not any(e.entity_id == entity.entity_id for e in out):
+            out.append(entity)
+        return sorted(out, key=_lookup_preference)
+
+    def find_identities_by_name(self, name: str) -> list[Entity]:
+        """``find_entities_by_name`` with spelling twins read as one identity: one entity per
+        kind, folded name and file, the one lookups prefer (``_lookup_preference``). Two entries
+        are two files (or two kinds), which a caller must not choose between.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D2)"""
+        best: dict[tuple[EntityKind, str, str | None], Entity] = {}
+        for e in sorted(self.find_entities_by_name(name), key=_lookup_preference):
+            _name, file_path = _descriptor_name_and_path(e)
+            best.setdefault((e.kind, _identity_name(e), file_path), e)
+        return list(best.values())
 
     def get_or_create_abstract_entity(self, canonical_name: str) -> Entity:
         """Get-or-create an abstract Entity (community / domain / tag / initiative anchor).
@@ -2583,39 +2883,32 @@ class Store:
         for row in rows:
             yield Decision.model_validate_json(row["data"])
 
-    def find_decision_by_title(
-        self, canonical_title: str, source: str, ref: str | None
-    ) -> Decision | None:
-        """Idempotency lookup for bulk importers (see importer.py): the first non-superseded
-        decision whose canonicalized title matches ``canonical_title``, whose
-        ``provenance.source`` equals ``source``, AND whose ``provenance.ref`` equals ``ref``.
-        ``ref`` keys on the rationale's origin (its ``file_path``, falling back to
-        ``node_id`` when the rationale has none) — title alone over-dedups: identical first
-        lines in different files are distinct memories and must both import (S2 review).
-        Full-table scan — acceptable at import volume (hundreds, not a hot retrieval path)."""
+    def decisions_by_source(self, source: str) -> list[Decision]:
+        """Every non-superseded decision of one provenance source, in one scan.
+
+        The rationale importer reads its two idempotency keys once per run. Rejected and
+        deprecated imports remain keys, as do accepted records and pending proposals.
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT data FROM decisions WHERE status != ?",
                 (DecisionStatus.SUPERSEDED.value,),
             ).fetchall()
+        out: list[Decision] = []
         for row in rows:
-            d = Decision.model_validate_json(row["data"])
-            if (
-                d.provenance.source == source
-                and d.provenance.ref == ref
-                and canonicalize(d.title) == canonical_title
-            ):
-                return d
-        return None
+            decision = Decision.model_validate_json(row["data"])
+            if decision.provenance.source == source:
+                out.append(decision)
+        return out
 
     def find_decisions_by_ref(
         self, source: str, ref: str, *, statuses: tuple[DecisionStatus, ...] | None = None
     ) -> list[Decision]:
         """Idempotency lookup for doc-import (see doc_import.py): EVERY OPEN (status
         ``accepted`` or ``proposed``) decision whose ``provenance.source`` equals
-        ``source`` and whose ``provenance.ref`` equals ``ref`` — title-AGNOSTIC, unlike
-        ``find_decision_by_title``. Importer #1 never supersedes, so it needs an exact
-        title match too (a changed title there just means "a different rationale");
+        ``source`` and whose ``provenance.ref`` equals ``ref`` — title-AGNOSTIC.
+        The rationale importer never supersedes and uses its title/ref key or exact
+        context plus an engine-label comparison (``decisions_by_source``);
         doc-import must find every CURRENTLY-OPEN record for a given doc path, even when
         titles differ (the doc was edited) or a proposal is still awaiting ratification.
 
@@ -2642,7 +2935,7 @@ class Store:
         report line said "0 existing").
 
         Deterministic order: sorted by ``id`` ascending (a ULID, so this is also creation
-        order — oldest first). Full-table scan, like ``find_decision_by_title``; same
+        order — oldest first). Full-table scan, like ``decisions_by_source``; same
         volume rationale.
         """
         wanted = statuses or (DecisionStatus.ACCEPTED, DecisionStatus.PROPOSED)
@@ -2760,7 +3053,7 @@ class Store:
     def facts_for_decision(self, decision_id: str) -> list[Fact]:
         """Live + proposed facts (status ACCEPTED/PROPOSED, any validity) whose
         ``supports`` contains ``decision_id`` — filtered in Python; volumes are small (same
-        rationale as ``find_decision_by_title``'s full-table scan)."""
+        rationale as ``decisions_by_source``'s full-table scan)."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT data FROM facts WHERE status IN (?, ?)",
@@ -2937,6 +3230,8 @@ class Store:
                 raise ValueError(f"domain {domain.domain_id} already exists — use supersede_domain")
             self._validate_domain_write(domain)
             self._write_domain(domain)
+            if domain.status == DomainStatus.ACCEPTED:
+                self._uncertify_membership()
         return domain
 
     def supersede_domain(self, old_id: str, new_domain: Domain) -> Domain:
@@ -2978,6 +3273,7 @@ class Store:
             self._write_domain(new_domain)
             old.status = DomainStatus.SUPERSEDED
             self._write_domain(old)
+            self._uncertify_membership()
         return new_domain
 
     def _validate_domain_write(self, domain: Domain, *, exclude_id: str | None = None) -> None:
@@ -3050,7 +3346,7 @@ class Store:
 
     def find_domain_by_slug(self, slug: str) -> Domain | None:
         """Best non-superseded domain with this slug (mirrors the "non-superseded"
-        convention used for decisions, e.g. find_decision_by_title: only SUPERSEDED is
+        convention used for decisions, e.g. decisions_by_source: only SUPERSEDED is
         excluded, so a dropped domain is still findable by slug).
 
         Deterministic preference among candidates: accepted > proposed > dropped, and
@@ -3110,6 +3406,83 @@ class Store:
         """
         domains = self.find_domains_by_community(community_id)
         return domains[0] if domains else None
+
+    def replace_domain_members(
+        self, domain_id: str, members: Iterable[tuple[str, str | None, str | None]]
+    ) -> bool:
+        """Set ``domain_id``'s effective membership: one ``(node_id, file_path, community)``
+        per member node of the current graph. Index-only, like
+        ``refresh_domain_communities``. ``False``, and no write, when the rows are unchanged.
+        # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.3)
+        """
+        rows = sorted(
+            {n: (domain_id, n, f or None, c) for n, f, c in members}.values(), key=lambda r: r[1]
+        )
+        with self._mutation():
+            current = sorted(
+                (
+                    (r["domain_id"], r["node_id"], r["file_path"], r["community"])
+                    for r in self._conn.execute(
+                        "SELECT domain_id, node_id, file_path, community FROM domain_members "
+                        "WHERE domain_id = ?",
+                        (domain_id,),
+                    )
+                ),
+                key=lambda r: r[1],
+            )
+            if current == rows:
+                return False
+            self._conn.execute("DELETE FROM domain_members WHERE domain_id = ?", (domain_id,))
+            self._conn.executemany(
+                "INSERT INTO domain_members (domain_id, node_id, file_path, community) "
+                "VALUES (?, ?, ?, ?)",
+                rows,
+            )
+        return True
+
+    def domain_member_ids(self, domain_id: str) -> set[str]:
+        """The node ids of ``domain_id``'s effective membership."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT node_id FROM domain_members WHERE domain_id = ?", (domain_id,)
+            ).fetchall()
+        return {r["node_id"] for r in rows}
+
+    def domain_member_files(self, domain_id: str) -> set[str]:
+        """The files of ``domain_id``'s member nodes (a path-less node has none)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT file_path FROM domain_members "
+                "WHERE domain_id = ? AND file_path IS NOT NULL",
+                (domain_id,),
+            ).fetchall()
+        return {r["file_path"] for r in rows}
+
+    def find_domains_for_node(self, node_id: str) -> list[Domain]:
+        """ALL ACCEPTED domains whose effective membership holds ``node_id``, newest first:
+        the node-level counterpart of ``find_domains_by_community``."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT d.data FROM domain_members m JOIN domains d ON d.domain_id = m.domain_id "
+                "WHERE m.node_id = ? AND d.status = ? ORDER BY d.domain_id DESC",
+                (node_id, DomainStatus.ACCEPTED.value),
+            ).fetchall()
+        return [Domain.model_validate_json(r["data"]) for r in rows]
+
+    def member_communities(self, domain_ids: Iterable[str]) -> set[str]:
+        """Every community holding a member node of one of ``domain_ids``."""
+        out: set[str] = set()
+        with self._lock:
+            for domain_id in domain_ids:
+                out.update(
+                    r["community"]
+                    for r in self._conn.execute(
+                        "SELECT DISTINCT community FROM domain_members "
+                        "WHERE domain_id = ? AND community IS NOT NULL",
+                        (domain_id,),
+                    )
+                )
+        return out
 
     def refresh_domain_communities(self, domain_id: str, communities: list[str]) -> Domain:
         """Sanctioned mutable-field update for ``Domain.communities`` — the domain analog
@@ -3209,6 +3582,7 @@ class Store:
                         d.ratified_by = _ratifier_identity(actor)
                         self._write_domain(d)
                         self.get_or_create_abstract_entity(f"domain:{d.slug}")
+                        self._uncertify_membership()
                     out[domain_id] = "accepted"
                 except ValueError as e:
                     out[domain_id] = f"error: {e}"
@@ -3226,6 +3600,7 @@ class Store:
                             raise ValueError(f"domain {domain_id!r} is not proposed or accepted")
                         d.status = DomainStatus.DROPPED
                         self._write_domain(d)
+                        self._uncertify_membership()
                     out[domain_id] = "dropped"
                 except ValueError as e:
                     out[domain_id] = f"error: {e}"

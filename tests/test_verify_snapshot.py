@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from sidegraph import __version__
 from sidegraph.cli import doctor_main, verify_main
 from sidegraph.schema import (
     AnchorBinding,
@@ -42,14 +43,17 @@ from sidegraph.verify import (
     DANGLING_SUPERSEDES,
     DUPLICATE_ULID,
     FILENAME_ID_MISMATCH,
+    MALFORMED_REQUIREMENT,
     PARENT_CYCLE,
     PARSE_ERROR,
+    REQUIREMENT_ABOVE_VERIFIER,
     SUPERSEDED_WITHOUT_SUCCESSOR,
     SYMLINKED_STORE_ENTRY,
     UNKNOWN_SCHEMA_VERSION,
     Violation,
     verify_snapshot,
 )
+from tests.test_store_requirement import above_running, running_release, write_requirement_marker
 
 
 def _decision(**overrides) -> Decision:
@@ -1690,3 +1694,58 @@ def test_nonterminal_archive_record_is_a_bad_segment(store: Store, kind, status)
     findings = verify_snapshot(store.path)
     assert _codes(findings) == [BAD_ARCHIVE_SEGMENT]
     assert findings[0].path == str(segment)
+
+
+def test_a_well_formed_requirement_marker_is_clean(store: Store):
+    """Red against unfixed code: unknown-schema-version."""
+    write_requirement_marker(store.path, running_release())
+    assert verify_snapshot(store.path) == []
+
+
+def test_a_requirement_marker_without_its_line_is_malformed_requirement(store: Store):
+    """Red against unfixed code: unknown-schema-version."""
+    marker = store.path / "format"
+    marker.write_text("sidegraph-store 1.0.0\n", encoding="utf-8")
+    violations = verify_snapshot(store.path)
+    assert _codes(violations) == [MALFORMED_REQUIREMENT]
+    assert violations[0].path == str(marker)
+
+
+def test_a_requirement_above_the_verifier_is_reported(store: Store):
+    """Red against unfixed code: unknown-schema-version. A CI pin older than the store."""
+    above = above_running()
+    write_requirement_marker(store.path, above)
+    violations = verify_snapshot(store.path)
+    assert _codes(violations) == [REQUIREMENT_ABOVE_VERIFIER]
+    assert f">= {above}" in violations[0].detail and __version__ in violations[0].detail
+    assert verify_main(["--db", str(store.path)]) == 2
+
+
+@pytest.mark.parametrize(
+    "raw,code", [(b"\xff", UNKNOWN_SCHEMA_VERSION), (b"x" * 4097, MALFORMED_REQUIREMENT)]
+)
+def test_a_bad_marker_read_is_a_violation(store: Store, raw, code):
+    marker = store.path / "format"
+    marker.write_bytes(raw)
+    violations = verify_snapshot(store.path)
+    assert _codes(violations) == [code]
+    assert violations[0].path == str(marker)
+
+
+def test_doctor_stops_after_the_strict_section_for_a_store_it_may_not_read(store: Store, capsys):
+    """Red against code before this task: verify reports requirement-above-verifier, then
+    every advisory check reads the store's index and records; no 'remaining checks skipped'
+    line."""
+    above = above_running()
+    write_requirement_marker(store.path, above)
+    assert doctor_main(["--db", str(store.path)]) == 2
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith(f"{REQUIREMENT_ABOVE_VERIFIER}  ")
+    assert (
+        f"remaining checks skipped (This store requires Sidegraph >= {above}; this is "
+        f"{__version__}.)"
+    ) in out
+    assert out.rstrip().endswith("1 violation(s), 0 finding(s)")
+    assert doctor_main(["--db", str(store.path), "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert (payload["skipped"], payload["findings"]) == (["advisory-checks"], [])

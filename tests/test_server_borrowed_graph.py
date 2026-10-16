@@ -22,6 +22,7 @@ import pytest
 
 from sidegraph import server
 from sidegraph.engine.reader import GraphifyReader
+from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.retrieval import RetrievalBudget
 from sidegraph.schema import (
     AnchorBinding,
@@ -443,7 +444,7 @@ def test_t9b_a_file_in_the_main_checkout_missing_from_its_stale_graph_names_the_
     (line,) = _block(out, "## Not in the code graph")
     assert line.startswith("1 of 1 seed path exists but is not in the code graph: pkg/extra.py. ")
     assert "The graph is stale (built at" in line
-    assert f"rebuild it in {repo} with `graphify update .`" in line
+    assert f"rebuild it in {repo} by running {GRAPH_REBUILD}" in line
     assert "This worktree reads" not in line
 
 
@@ -458,7 +459,7 @@ def test_t9b_a_current_main_graph_names_the_main_checkout_in_its_advice(main, wo
 
     (line,) = _block(out, "## Not in the code graph")
     assert "No committed change since the build explains it" in line
-    assert f"rebuild it in {main} with `graphify update .`" in line
+    assert f"rebuild it in {main} by running {GRAPH_REBUILD}" in line
 
 
 def test_a_seed_that_is_in_neither_tree_is_a_path_problem(main, worktree):
@@ -516,7 +517,9 @@ def test_without_borrowed_from_the_block_keeps_its_original_wording(main):
         store.close()
 
     (line,) = _block(out, "## Not in the code graph")
-    assert "rebuild it from the repository root with `graphify update .`, then call again." in line
+    assert (
+        f"rebuild it from the repository root by running {GRAPH_REBUILD}, then call again." in line
+    )
     assert "rebuild it in" not in line and "This worktree reads" not in line
 
 
@@ -539,7 +542,7 @@ def test_t10_no_graph_anywhere_is_said_with_the_path_looked_at(tmp_path, main, m
     graph = clone / GRAPH
     assert out.endswith(
         f"{NO_GRAPH}\nNo code graph at {graph}: memory anchored to code cannot be looked up. "
-        "Build it from the repository root with `graphify update .`."
+        f"Build it from the repository root by running {GRAPH_REBUILD}."
     )
 
 
@@ -559,7 +562,7 @@ def test_t10b_a_worktree_whose_main_checkout_has_no_graph_names_the_main_checkou
 
     assert out.endswith(
         f"{NO_GRAPH}\nNo code graph at {main / GRAPH}: memory anchored to code cannot be "
-        f"looked up. Build it in the main checkout {main} with `graphify update .`."
+        f"looked up. Build it in the main checkout {main} by running {GRAPH_REBUILD}."
     )
     assert str(worktree / GRAPH) not in out
 

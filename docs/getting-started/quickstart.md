@@ -12,19 +12,29 @@ On Windows, run them in PowerShell and use the line marked for it: in Windows Po
 `>>` writes UTF-16 and git would ignore the `.gitignore` entry.
 Run the shell commands from the repository that Sidegraph should remember.
 
+For an existing store, follow the [0.14 migration guide](../guides/migrating-to-0.14.md)
+before upgrading Graphify; update every Sidegraph client first.
+
 ## 1. Build the graph and store
 
 ```bash
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
 echo "graphify-out/" >> .gitignore          # macOS, Linux
 Add-Content .gitignore "graphify-out/"      # Windows PowerShell: use this line instead, not >>
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-init
 ```
 
 `graphify update .` creates `graphify-out/graph.json`; Sidegraph reads it but never writes to
 it. The graph is rebuilt from your code, so keep `graphify-out/` out of git. `sidegraph-init`
 creates the repo-committed `.sidegraph/` record directories and a gitignored derived
 `index.db`. Both commands are safe to run again.
+
+Run `sidegraph-init` from the repository root before starting your host session. On Claude Code and Codex, without a
+store, SessionStart shows setup guidance and Stop stays silent; neither creates one.
+OpenCode and Muse use explicit MCP calls instead of lifecycle hooks. If an
+older hook already left an empty store, init identifies it as empty and prints setup guidance.
 
 In a terminal, `sidegraph-init` asks two questions. Both default to yes, so pressing Enter twice
 accepts them.
@@ -37,8 +47,8 @@ accepts them.
   [keeping the graph fresh](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
 - *Auto-ratify low-risk records?* Yes means the lessons, gotchas and facts the agent proposes
   are accepted without review; ADRs, constraints and domains still wait for a person. The
-  answer is saved in `.claude/settings.json`, which you commit. The plugin applies it in Claude
-  Code and in Codex, so it covers the whole team. See
+  answer is saved in `.claude/settings.json`, which you commit. Sidegraph applies it in all four MCP integrations unless an explicit
+  `SIDEGRAPH_RATIFY_POLICY` overrides it, so teammates use the same project policy. See
   [`sidegraph-init`](../reference/cli.md#sidegraph-init).
 
 Without a terminal it asks neither question.
@@ -62,7 +72,11 @@ codex plugin marketplace add SantyagoSeaman/sidegraph
 codex plugin add sidegraph@sidegraph
 ```
 
-Start a new interactive session in the repository and approve the hook trust prompt. For a
+Start a new interactive session in the repository and review its approval prompts; Codex
+hooks require explicit trust through the startup warning or `/hooks`. For OpenCode V2, use
+the [native Git installation guide](../../.opencode/INSTALL.md); for experimental MCP/skills-only
+Muse, use the [Muse guide](../integrations/muse.md) and start its process in this project.
+The [README host recipes](../../README.md#claude-code) describe installation and updates. For a
 manual or source-checkout setup, use the host-specific page:
 [Claude Code](claude-code-setup.md) or [Codex](codex-setup.md).
 
@@ -101,7 +115,7 @@ The agent should call `get_task_context` with that path or entity. The gotcha ap
 
 ```bash
 git status --short
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-verify
 ```
 
 Commit the whole `.sidegraph/` directory (`git add .sidegraph`), the root `.gitignore`, and
@@ -117,5 +131,5 @@ alone and only installs the graph hook.
 
 Next, run the short
 [verification checklist](../guides/verifying-your-setup.md), then
-[name domains](../guides/naming-your-domains.md) if you want a human-readable SessionStart
-table of contents.
+[name domains](../guides/naming-your-domains.md) if you want a table of contents of your memory. Claude Code and Codex also inject it at
+SessionStart; OpenCode and Muse retrieve it explicitly through MCP.

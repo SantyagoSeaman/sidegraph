@@ -86,7 +86,7 @@ Domain acceptance is the special case refreshed in the ratify operation itself.
 
 One level deeper than the TOC: `drill_down` returns a domain's full summary, its accepted
 subdomains (title + one-line summary), a capped sample (20) of the code/doc entities currently
-in it (`communities` ∪ `path_prefixes`, deduplicated), and the decisions bound to it —
+in it (its members in the membership index each sync keeps, deduplicated), and the decisions bound to it —
 mistakes first, same ranking convention as everything else. The decisions are cut at 25 (or
 `limit`) and at `budget_chars` (default 24,000), and the cut ones come back as `omitted_ids`.
 Works on a not-yet-ratified
@@ -154,6 +154,9 @@ all sources in the same bucket.
 | D | **Related** | `scope: global` decisions |
 
 ### Bucket C: domains and communities
+
+It also takes every accepted domain that holds one of the seed nodes, so a domain holding
+only part of a community still contributes.
 
 Bucket C does not choose *either* the domain *or* the community — it gathers both, and it
 gathers **every** accepted domain that covers the seed community, not just one. For each seed

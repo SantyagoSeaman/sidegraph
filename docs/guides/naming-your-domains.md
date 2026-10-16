@@ -78,6 +78,8 @@ The one-time cost is the agent's reasoning over the candidate list (~10–15k to
 
 ```bash
 cd /path/to/your/repo
+export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
 ```
 
@@ -236,6 +238,10 @@ only `superseded` domains, and an empty `communities` list contributes nothing t
 regardless of the successor's own status. This is the one place where being selective about
 `--accept` up front is cheaper than fixing it after the fact — prefer listing candidates and
 picking real ones over `--all` on a large auto-proposed batch.
+
+With a [domain snapshot](../reference/store-format.md#the-domain-snapshot), keep that
+placeholder `proposed`. An accepted successor of a domain the snapshot covers takes over its
+frozen membership, and with it the communities that membership holds.
 
 ## 4. Watch the TOC come alive
 

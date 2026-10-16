@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "name": "sidegraph",
+  "version": "0.14.0",
+  "description": "Durable decisions, facts and lessons over your code graph.",
+  "compat": {
+    "source": "native",
+    "manifestDir": ".muse-plugin"
+  },
+  "capabilities": {
+    "skills": [
+      {
+        "id": "check-plan",
+        "path": "skills/check-plan/SKILL.md"
+      },
+      {
+        "id": "explain-why",
+        "path": "skills/explain-why/SKILL.md"
+      },
+      {
+        "id": "heal-anchors",
+        "path": "skills/heal-anchors/SKILL.md"
+      },
+      {
+        "id": "import-adrs",
+        "path": "skills/import-adrs/SKILL.md"
+      },
+      {
+        "id": "manage-domains",
+        "path": "skills/manage-domains/SKILL.md"
+      },
+      {
+        "id": "name-domains",
+        "path": "skills/name-domains/SKILL.md"
+      },
+      {
+        "id": "ratify-decisions",
+        "path": "skills/ratify-decisions/SKILL.md"
+      },
+      {
+        "id": "record-decision",
+        "path": "skills/record-decision/SKILL.md"
+      },
+      {
+        "id": "record-fact",
+        "path": "skills/record-fact/SKILL.md"
+      },
+      {
+        "id": "setup",
+        "path": "skills/setup/SKILL.md"
+      },
+      {
+        "id": "stats",
+        "path": "skills/stats/SKILL.md"
+      },
+      {
+        "id": "triage-drift",
+        "path": "skills/triage-drift/SKILL.md"
+      }
+    ],
+    "mcpServers": [
+      {
+        "id": "sidegraph",
+        "command": [
+          "uvx",
+          "--from=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1",
+          "sidegraph-mcp",
+          "--repo-root"
+        ],
+        "env": {
+          "SIDEGRAPH_DIR": ".sidegraph",
+          "SIDEGRAPH_GRAPH": "graphify-out/graph.json"
+        }
+      }
+    ]
+  }
+}

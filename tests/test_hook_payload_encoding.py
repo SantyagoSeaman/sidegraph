@@ -63,10 +63,13 @@ def test_read_payload_round_trips_non_ascii_paths(encoding):
 
 @pytest.mark.parametrize("encoding", ENCODINGS)
 def test_stop_opens_a_transcript_under_a_non_ascii_directory(tmp_path, encoding):
+    from sidegraph.store import Store
+
     directory = tmp_path / NON_ASCII_DIR
     directory.mkdir()
     transcript = _substantial(directory, name="s1.jsonl")
     payload = {"session_id": "s1", "stop_hook_active": False, "transcript_path": transcript}
+    Store(tmp_path / "s.db").close()
     env = _child_env(encoding, SIDEGRAPH_DIR=str(tmp_path / "s.db"))
     out = _run_child("from sidegraph.host.hooks import stop; stop()", payload, env)
     assert json.loads(out)["decision"] == "block"

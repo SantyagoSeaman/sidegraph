@@ -52,9 +52,11 @@ narrow. This is the tool for "show me all domains" — prefer it over the narrow
    [...]}])` for a session-drafted proposal. Use `path_prefixes` instead of/alongside
    `seed_anchors` when the domain has one clean shared path.
 3. `ratify(accept=[<domain_id>])` to make it live — this also resolves `seed_anchors`/
-   `path_prefixes` into `communities` immediately, so `drill_down` shows real membership
-   without a separate sync — or leave it `proposed` for a human to accept later via
-   `list_proposed` (or the `sidegraph-ratify` CLI; see the CLI note under Related).
+   `path_prefixes` into members immediately, so `drill_down` shows real membership without a
+   separate sync — or leave it `proposed` for a human to accept later via `list_proposed` (or
+   the `sidegraph-ratify` CLI; see the CLI note under Related). On a store with a domain
+   snapshot, a domain added now gets members by its rules only in files the snapshot does not
+   list; see "Domains under a snapshot" below.
 
 ## Rename a domain
 
@@ -78,10 +80,13 @@ TOC-visible) and writes the successor in the same call — same one-gate rule as
 else: the successor lands `status=proposed`, so `ratify(accept=[<new_domain_id>])` is still
 needed to make the rename live.
 
-**Nothing is inherited.** The successor's `path_prefixes`/`seed_anchors` start at `[]` unless
+**No rule is inherited.** The successor's `path_prefixes`/`seed_anchors` start at `[]` unless
 you pass them explicitly — to keep covering the same code, carry over whatever membership rule
-the old domain had. `drill_down` won't help here (it shows rendered member lines, not the raw
-rule), but you don't need git-history archaeology either:
+the old domain had. (With a domain snapshot, the old domain's frozen membership does carry
+over, to the successor once it is accepted, and the new rule applies only after
+`sidegraph-domains snapshot --refresh --domain <new slug>`; see "Domains under a snapshot".)
+`drill_down` won't help here (it shows rendered member lines, not the raw rule), but you don't
+need git-history archaeology either:
 
 - **`path_prefixes`** reads back out as structured data — `list_domains()` returns it verbatim
   per domain (`{"path_prefixes": [...], ...}`), no file read needed.
@@ -97,7 +102,9 @@ mass-drop](../../../../docs/guides/naming-your-domains.md#recovering-from-a-mass
 the successor NO matching `path_prefixes`/`seed_anchors` (instead of carrying the old rule
 forward) and its `communities` stays empty, freeing the community for a future
 `sidegraph-domains bootstrap` pass — the opposite intent from an ordinary rename, so be
-deliberate about which one you're doing.
+deliberate about which one you're doing. With a domain snapshot, leave that placeholder
+`proposed`: an accepted successor of a domain the snapshot covers takes over its frozen
+membership, and the community stays claimed.
 
 ## Drop a wrong domain
 
@@ -114,6 +121,25 @@ members that belongs to it via `seed_anchors`/`path_prefixes` (see "Add a domain
 `list_domain_candidates(paths=[...])` or your own knowledge of the code to divide the
 membership), ratify both, then drop the original (see "Drop a wrong domain" above).
 
+On a store with a domain snapshot, the two new domains get members by their rules only in
+files the snapshot does not list, so they start almost empty. Once both are ratified and the
+original is dropped, `sidegraph-domains snapshot --refresh --domain <part-a> --domain <part-b>`
+re-derives both parts from their rules and freezes them. A split made by superseding one
+covered domain twice is the same: neither successor holds any of the frozen membership until
+that refresh names both, and `sidegraph-sync` and `sidegraph-doctor` report it as a split.
+
+## Domains under a snapshot
+
+Once a store has a domain snapshot (`.sidegraph/domain-snapshot.json`, written by
+`sidegraph-domains snapshot`), the membership of every domain it covers is frozen per node. A
+graph rebuild or a Graphify upgrade does not move it, and neither does an edit to the domain's
+rules: new `seed_anchors` or `path_prefixes`, or a `supersede_domain` re-scope, change a
+covered domain's membership only after `sidegraph-domains snapshot --refresh --domain <slug>`.
+Two things apply at once: a path prefix adds files the snapshot does not list (new ones), and
+a domain created after the snapshot gets members by its rules in those files only. A split
+needs `--refresh` with one `--domain` per part. The `ratify` and `supersede_domain` answers
+include a note for frozen membership or a split.
+
 ## See also
 
 - `sidegraph:name-domains` — the whole-set onboarding flow; use it for the *first* naming pass
@@ -121,5 +147,5 @@ membership), ratify both, then drop the original (see "Drop a wrong domain" abov
 - [`docs/guides/naming-your-domains.md`](../../../../docs/guides/naming-your-domains.md) —
   background on bootstrap idempotency, mass-drop recovery, and the CLI equivalents
   (`sidegraph-domains add`, `sidegraph-ratify`).
-- CLI commands run as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, at the session's version, never the copy on `PATH`:
+- CLI commands run as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 <command>`, at the session's version, never the copy on `PATH`:
   [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).

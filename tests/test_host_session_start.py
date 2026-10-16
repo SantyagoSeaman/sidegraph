@@ -3,12 +3,59 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 import sidegraph.host.hooks as hooks
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
 
 
+def _existing_store(path):
+    """Prepare an existing store for map, dedupe and freshness controls."""
+    from sidegraph.store import Store
+
+    Store(path).close()
+    return path
+
+
+@pytest.mark.parametrize("layout", ["git-root", "git-nested", "non-git", "absolute"])
+def test_missing_store_reports_setup_without_constructing_store(
+    tmp_path, monkeypatch, capsys, layout
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    if layout != "non-git":
+        (root / ".git").mkdir()
+    launch = root
+    if layout == "git-nested":
+        launch = root / "nested"
+        launch.mkdir()
+    selected = root / ".sidegraph"
+    monkeypatch.chdir(launch)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(launch))
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(selected) if layout == "absolute" else ".sidegraph")
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"session_id":"setup"}'))
+    opened = []
+
+    def forbidden_store(*args, **kwargs):
+        opened.append(args)
+        raise AssertionError("SessionStart must not construct a missing Store")
+
+    monkeypatch.setattr("sidegraph.store.Store", forbidden_store)
+    hooks.session_start()
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert opened == []
+    assert "sidegraph-init" in result["systemMessage"]
+    assert str(selected) in result["systemMessage"]
+    assert "creating new store" not in captured.err
+    assert not selected.exists()
+    assert not (launch / ".sidegraph").exists()
+
+
 def test_session_start_emits_additional_context(tmp_path, monkeypatch, capsys):
+    _existing_store(tmp_path / "s.db")
     monkeypatch.setenv("SIDEGRAPH_DB", str(tmp_path / "s.db"))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
@@ -20,6 +67,7 @@ def test_session_start_emits_additional_context(tmp_path, monkeypatch, capsys):
 
 
 def test_session_start_never_raises(tmp_path, monkeypatch, capsys):
+    _existing_store(tmp_path / "s.db")
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     monkeypatch.setenv("SIDEGRAPH_DB", str(tmp_path / "s.db"))
 
@@ -46,6 +94,7 @@ def test_session_start_relative_store_anchors_to_claude_project_dir_and_graph_fo
     project_dir = tmp_path / "project"
     (project_dir / "sub").mkdir(parents=True)
     shutil.copy(FIXTURE, project_dir / "sub" / "graph.json")
+    _existing_store(project_dir / "sub" / "s.db")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.setenv("SIDEGRAPH_DIR", "sub/s.db")
     monkeypatch.setenv("SIDEGRAPH_GRAPH", "graph.json")
@@ -488,7 +537,7 @@ def _run_session_start(monkeypatch, capsys, db, session_id=None):
 
 
 def test_second_session_start_within_window_same_session_is_silent(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     first = _run_session_start(monkeypatch, capsys, db, session_id="dup-1")
     assert "hookSpecificOutput" in first  # the first call emits normally
 
@@ -497,7 +546,7 @@ def test_second_session_start_within_window_same_session_is_silent(tmp_path, mon
 
 
 def test_session_start_emits_for_a_different_session_id(tmp_path, monkeypatch, capsys):
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     _run_session_start(monkeypatch, capsys, db, session_id="dup-2a")
     second = _run_session_start(monkeypatch, capsys, db, session_id="dup-2b")
     assert "hookSpecificOutput" in second  # a different session is never a duplicate
@@ -542,7 +591,7 @@ def test_session_start_naive_stamp_is_not_suppressed_and_self_heals(tmp_path, mo
 def test_session_start_dedupe_ignores_payload_without_session_id(tmp_path, monkeypatch, capsys):
     """Every existing session_start test omits session_id entirely — the dedupe guard
     must never touch that path (design D7.2 is gated on a real session id)."""
-    db = tmp_path / "s.db"
+    db = _existing_store(tmp_path / "s.db")
     first = _run_session_start(monkeypatch, capsys, db)
     second = _run_session_start(monkeypatch, capsys, db)
     assert "hookSpecificOutput" in first
@@ -629,7 +678,7 @@ def _session_context(fx, tmp_path, monkeypatch, capsys) -> str:
     """Run SessionStart over a repository from ``tests.test_graph_freshness`` and return the
     additionalContext it printed."""
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(fx.repo))
-    monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "store"))
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(_existing_store(tmp_path / "store")))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(fx.graph))
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     hooks.session_start()

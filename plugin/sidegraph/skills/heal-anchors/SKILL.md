@@ -1,7 +1,7 @@
 ---
 name: heal-anchors
 description: >-
-  Use when sync reports anchor damage after a refactor or graph rebuild — "orphaned", "possibly stale decisions", "ambiguous", "possibly empty domains", "slug conflicts", "path rule too broad", "domains that FAILED to refresh" — or when a decision stopped surfacing where it used to. Also reachable directly as /sidegraph:heal-anchors. Runs the sync_anchors MCP tool (or sidegraph-sync as a CLI fallback) and routes each finding to its correct heal: restore the name, supersede with fresh anchors, re-scope the domain, drop the loser, or fix-and-retry a failed domain refresh. Sidegraph never guesses a rebind — that judgment is this skill's job.
+  Use when sync reports anchor damage after a refactor or graph rebuild — "orphaned", "possibly stale decisions", "ambiguous", "possibly empty domains", "slug conflicts", "path rule too broad", "domains that FAILED to refresh", "snapshot domains split" — or when a decision stopped surfacing where it used to. Also reachable directly as /sidegraph:heal-anchors. Runs the sync_anchors MCP tool (or sidegraph-sync as a CLI fallback) and routes each finding to its correct heal: restore the name, supersede with fresh anchors, re-scope the domain, drop the loser, or fix-and-retry a failed domain refresh, or refresh the parts of a split snapshot domain. Sidegraph never guesses a rebind — that judgment is this skill's job.
 ---
 
 # Heal anchors
@@ -10,25 +10,21 @@ Code and docs moved; the sync pass re-resolved every tracked entity and reported
 honestly, never guessing — what it could no longer follow. Sidegraph auto-heals everything
 it can prove (`rebound`, `moved`, community re-pointing); everything else is routed to a
 human, and this skill is how you walk them through it. CLI commands below run through
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>` at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 <command>` at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 ## Get a current report
 
-Rebuild the graph first — sync against a stale graph is noise:
-
-```bash
-graphify update .
-```
+Rebuild the graph first — sync against a stale graph is noise: run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set.
 
 **MCP-first:** from inside a session, call `sync_anchors(force=True)` — the diagnostic/heal
 counterpart to `sidegraph-sync`, run as a tool instead of a shell command. `force=True`
 re-runs the rebind pass even when `graph_version` already matches the store's last-synced
-stamp (e.g. right after `graphify update .`, or after hand-editing a domain's
+stamp (e.g. right after a graph rebuild, or after hand-editing a domain's
 `path_prefixes`); omit it to respect the version gate on a routine re-check.
 
 `sync_anchors` returns the report as data — `{"synced", "from_version", "to_version",
 "counts", "repointed", "outcomes", "stale_decisions", "empty_domains", "overbroad_domains",
-"slug_conflicts", "domains_refreshed", "domain_failures"}` (see
+"slug_conflicts", "domains_refreshed", "domain_failures", "snapshot_splits"}` (see
 [`docs/reference/mcp-tools.md`](../../../../docs/reference/mcp-tools.md#sync_anchors) for
 the full shape). `synced: false` with no `force` means the pass was skipped outright
 (`graph_version` unchanged) — every other field is then an *empty* default, not a stale
@@ -48,7 +44,7 @@ entities; the `force=True` call above already re-runs everything, so it makes th
 **CLI fallback** (outside a session, scripted/CI use, or reviewing as plain text):
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
 ```
 
 (Reads also self-heal lazily — `get_task_context`/`SessionStart` run `maybe_sync()` — so
@@ -72,7 +68,7 @@ store write or a source change: confirm before acting.
    or `retrieve_decisions(ids=[...])`, and look at the current code); then one of two heals:
    - **Restore the name** — the symbol/heading was renamed or dropped and the decision is
      still true of the code. Restoring it is a **source change**: propose the edit to the
-     human, never do it silently. Then `graphify update . && uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync` — the anchor
+     human, never do it silently. Then run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, followed by `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-sync` — the anchor
      heals back to `rebound`/`unchanged` on an exact match.
    - **Supersede** — the code it described is genuinely gone. `supersede_decision(...)`
      with **explicit fresh `anchors` pointing at the successor code**. Do NOT omit
@@ -89,8 +85,9 @@ store write or a source change: confirm before acting.
 4. **`possibly empty domains — re-scope or supersede:`** — an accepted domain resolved to
    zero communities and its paths match nothing. Either re-scope:
    `supersede_domain(old_slug_or_id=..., new_slug=..., new_title=..., new_summary=...,
-   seed_anchors=[...], path_prefixes=[...])` — **nothing is inherited**; read the old
-   rule back first (`list_domains()` returns `path_prefixes` verbatim; for the actual
+   seed_anchors=[...], path_prefixes=[...])` — **no rule is inherited** (with a domain snapshot, a covered
+   domain's frozen membership is, and a re-scope applies only after
+   `sidegraph-domains snapshot --refresh --domain <slug>`); read the old rule back first (`list_domains()` returns `path_prefixes` verbatim; for the actual
    `seed_anchors` list read `.sidegraph/domains/<domain_id>.json`) and carry what's still
    right — then `ratify(accept=[<new_id>])`. Or retire it: `ratify(drop=[<domain_id>])`
    if the area is genuinely gone.
@@ -104,15 +101,29 @@ store write or a source change: confirm before acting.
    domains hold one slug (a cross-branch merge race). The human picks the loser;
    `ratify(drop=[<loser-id>])` — domain drop legitimately works on an *accepted* domain.
 7. **`domains that FAILED to refresh (fix, then re-run with --force):`** — an accepted
-   domain's community refresh itself raised (a malformed `seed_anchors` descriptor, the
-   domain vanishing mid-pass, a lock-contended write). The domain's `communities` mapping
-   is left exactly as it was, not zeroed, and isolated — one broken domain never costs any
-   other domain its heal. This is **not** a per-pass retry: a completed pass clears the
-   volatile-reload gate regardless of whether this domain's own refresh succeeded, so an
-   unfixed cause silently stops being reported on the next ordinary sync — that means
-   nothing healed, not that it's fine. Fix the named cause (correct the descriptor, resolve
-   the concurrent-supersede race), then re-run with `--force`/`sync_anchors(force=True)` to
-   confirm it actually cleared.
+   domain's refresh itself raised (a malformed `seed_anchors` descriptor, the domain
+   vanishing mid-pass, a lock-contended write, an invalid `.sidegraph/domain-snapshot.json`).
+   The domain's membership is left exactly as it was, not zeroed, and isolated — one broken
+   domain never costs any other domain its heal. Until the cause is fixed, every later sync,
+   lazy or explicit, reports the failure again; the refresh itself reruns only when the graph,
+   the snapshot or a domain's status changes. Fix the named cause (correct the descriptor,
+   resolve the concurrent-supersede race, restore the snapshot from git), then re-run with
+   `--force`/`sync_anchors(force=True)` to confirm it cleared. One entry with slug `*`
+   ("every accepted domain") under this finding means the whole pass failed: fix the named
+   cause the same way. When another process held the store instead, the report says
+   `domain membership not refreshed: the store's writer was busy; the next sync runs it`
+   (`busy: true` on the `*` entry from `sync_anchors`): nothing failed, there is nothing to
+   heal, and the next sync runs the pass.
+
+8. **`snapshot domains split between parts — neither part holds the frozen membership until
+   it is refreshed:`** (`snapshot_splits` in the report, `snapshot-split` in
+   `sidegraph-doctor`) — two accepted domains descend, through `supersedes`, from one domain
+   the domain snapshot covers, so neither holds its frozen members. Ask the human whether the
+   split is intended. If it is, the command printed under the finding,
+   `sidegraph-domains snapshot --refresh --domain <part> --domain <part>`, re-derives both
+   parts from their rules and freezes them; commit `.sidegraph/domain-snapshot.json`. If it is
+   not, `ratify(drop=[<the part that should not exist>])`: the remaining domain takes the
+   frozen membership back at once.
 
 ## Triage decision tree (add_anchors, propose_decisions, or recommend a drop)
 

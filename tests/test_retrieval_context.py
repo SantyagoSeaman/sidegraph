@@ -493,7 +493,7 @@ def test_pathless_peripheral_entity_still_feeds_decisions(tmp_path):
 # -- structure-budget fallback: summaries instead of leaves (M5, spec §5 NFR2) -----------
 
 
-def _accepted_domain(store, slug, communities, summary="s"):
+def _accepted_domain(store, slug, communities, summary="s", *, reader=None):
     d = store.add_domain(
         Domain(
             slug=slug,
@@ -504,13 +504,23 @@ def _accepted_domain(store, slug, communities, summary="s"):
         )
     )
     store.ratify_domains(accept=[d.domain_id])
-    return store.get_domain(d.domain_id)
+    accepted = store.get_domain(d.domain_id)
+    if reader is not None:
+        store.replace_domain_members(
+            accepted.domain_id,
+            [
+                (n.node_id, n.file_path, n.community)
+                for n in reader.list_nodes()
+                if n.community in accepted.communities
+            ],
+        )
+    return accepted
 
 
 def test_structure_overflow_falls_back_to_domain_summary_when_covered(tmp_path):
     r = _overflow_reader(tmp_path)
     s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "payments", ["9"])
+    _accepted_domain(s, "payments", ["9"], reader=r)
     ctx = get_task_context(
         [Seed(file_path="mod.py")],
         s,
@@ -548,7 +558,7 @@ def test_structure_overflow_fallback_respects_remaining_budget(tmp_path):
     a budget violation)."""
     r = _overflow_reader(tmp_path)
     s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "payments", ["9"], summary="x" * 500)
+    _accepted_domain(s, "payments", ["9"], summary="x" * 500, reader=r)
     ctx = get_task_context(
         [Seed(file_path="mod.py")],
         s,
@@ -607,7 +617,7 @@ def test_structure_fallback_fires_on_walk_saturation_without_render_overflow(tmp
     g = _chain_graph(8, 20, ["c0"] * 8)
     r = _chain_reader(tmp_path, g)
     s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "widgets", ["c0"])
+    _accepted_domain(s, "widgets", ["c0"], reader=r)
     budget = RetrievalBudget(structure_chars=400, memory_chars=0)
     ctx = get_task_context([Seed(file_path="mod.py")], s, r, budget)
 
@@ -630,7 +640,7 @@ def test_structure_fallback_silent_when_walk_unsaturated_and_no_overflow(tmp_pat
     domain happens to exist."""
     r = GraphifyReader(FIXTURE)
     s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "trading", ["1"])  # covers m_cls/m_fn's community
+    _accepted_domain(s, "trading", ["1"], reader=r)  # covers m_cls/m_fn's community
     ctx = get_task_context([Seed(file_path="trader/exec.py")], s, r)  # default budget
     assert not any("[domain]" in line for line in ctx.structure)
     assert len(ctx.structure) == 3  # m_cls, m_fn, o_fn -- the whole reachable graph, unaffected
@@ -649,7 +659,7 @@ def test_structure_fallback_dedups_across_both_triggers_and_caps_at_five(tmp_pat
     r = _chain_reader(tmp_path, g)
     s = Store(tmp_path / "t.db")
     for cid in ["c0", "c1", "c2", "c3", "c6", "c7"]:  # 6 domains, one (c7) must never surface
-        _accepted_domain(s, cid, [cid])
+        _accepted_domain(s, cid, [cid], reader=r)
     budget = RetrievalBudget(structure_chars=900, memory_chars=0)
     ctx = get_task_context([Seed(file_path="mod.py")], s, r, budget)
 
