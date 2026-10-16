@@ -160,10 +160,10 @@ Migration steps: [migrate to Sidegraph 0.14](docs/guides/migrating-to-0.14.md).
   0.162.1). The Windows hook definition changes, so approve the changed hooks once in `/hooks`
   on Windows; other platforms are unaffected.
 - The optional terminal CLI now installs from the same place as the plugin, the public
-  repository's `main` branch: `uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`,
+  repository's `main` branch: `uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main`,
   updated after each release with `uv tool upgrade sidegraph`. The docs no longer send you to
   PyPI for it; PyPI still carries every release for pinning an exact version. The `path-skew`
-  SessionStart line now offers `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`,
+  SessionStart line now offers `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main`,
   which moves an older install from PyPI, pinned or not, to the latest release.
 - README: the Quickstart is one numbered sequence with the plugin commands inline, a teammate
   path, and the rarer options below it; "How it works" is a numbered list instead of a diagram.
@@ -1865,7 +1865,7 @@ First public release.
   server and all three hooks in one step, functional today: it builds straight from this
   repository via `uvx --from git+...`, no PyPI publish required.
 - **Plugin-first install docs**: README and the getting-started guides now lead with the
-  plugin (or a bare `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1
+  plugin (or a bare `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main
   <entrypoint>` for manual/no-plugin wiring) as the primary install path; the source-checkout
   (`git clone` + `uv sync` + `uv run --project`) form moves to a "from source (contributors)"
   section. `graphifyy` installs without the `[mcp]` extra by default — `[mcp]` is documented

@@ -35,7 +35,7 @@ source takes `owner/repo[@ref]`, a local path or a Git URL.
 Installs the MCP server, the `SessionStart`/`Stop`/`SubagentStart` hooks, and all 12 skills in one step,
 pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by default.
 It installs from the public Git repository: the MCP server and `SessionStart`
-run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1` under the hood, and
+run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main` under the hood, and
 `Stop` and `SubagentStart` start from the commit `SessionStart` resolved. See
 [the plugin install path](../integrations/codex.md#plugin-install-path) for exactly what
 gets registered and the cwd-pinning details, and what has and hasn't been verified live.

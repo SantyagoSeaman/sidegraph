@@ -72,14 +72,14 @@ reports Sidegraph 0.14.0 or later. This terminal check verifies the command sour
 the rest of the guide; it does not update a running plugin session:
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 python -c "import sidegraph; print(sidegraph.__version__)"
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main python -c "import sidegraph; print(sidegraph.__version__)"
 ```
 
 If you installed the [optional terminal CLI](../getting-started/installation.md#option-a--the-cli-on-your-path),
 update it too, or remove it if you only use the plugin and `uvx`:
 
 ```bash
-uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1
+uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main
 # Alternative: uv tool uninstall sidegraph
 ```
 
@@ -93,7 +93,7 @@ Keep the protection setting after migration.
 Every teammate runs plain init with the updated Sidegraph:
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-init
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
 ```
 
 This refreshes an installed or wired graph-refresh helper so its builds also protect
@@ -111,15 +111,15 @@ Every teammate runs this baseline block in their own clone:
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # PowerShell/cmd: use the step 1 process setting
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-sync
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-doctor
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor
 ```
 
 Only the chosen maintainer takes the snapshot. Everyone else waits for the commit in
 step 4 and pulls it instead:
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-domains snapshot
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-domains snapshot
 ```
 
 Retain the snapshot's printed per-domain file counts. Its `files` entries preserve the
@@ -132,7 +132,7 @@ to mentioned code, or whose generation cannot be identified. Rebuild the committ
 with the old engine for this first snapshot instead:
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-domains snapshot --build-with 0.9.6
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-domains snapshot --build-with 0.9.6
 ```
 
 Commit relevant source and domain changes first: `--build-with` uses an isolated archive
@@ -175,9 +175,9 @@ for this migration. Re-verify before choosing a different one.
 ## 6. Sync and compare with the baseline
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-sync
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-doctor
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-domains snapshot --dry-run
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-domains snapshot --dry-run
 ```
 
 There should be no additional orphaned bindings and no `engine-version` advisory. Investigate
@@ -193,7 +193,7 @@ without publishing it.
 Run this block in a POSIX shell, including Git Bash on Windows:
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 python - <<'PY'
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main python - <<'PY'
 from sidegraph import domain_snapshot
 from sidegraph.config import default_graph_path, resolve_store_path
 from sidegraph.engine.reader import GraphifyReader
@@ -252,8 +252,8 @@ store and explicitly require the new Sidegraph:
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # PowerShell/cmd: use the step 1 process setting
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-init
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-require --sidegraph 0.14.0
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-require --sidegraph 0.14.0
 ```
 
 This clears the migration advisory without taking a snapshot. Once you have accepted

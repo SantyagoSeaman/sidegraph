@@ -38,7 +38,7 @@ server only when that name has no explicit configuration. An existing entry, inc
         "command": [
           "uvx",
           "--from",
-          "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1",
+          "git+https://github.com/SantyagoSeaman/sidegraph.git@main",
           "sidegraph-mcp",
           "--repo-root"
         ],

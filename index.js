@@ -3,7 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const RUNTIME_SOURCE = "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1";
+const RUNTIME_SOURCE = "git+https://github.com/SantyagoSeaman/sidegraph.git@main";
 const SKILLS = fileURLToPath(new URL("./plugin/sidegraph/skills/", import.meta.url));
 
 async function loadSkills() {

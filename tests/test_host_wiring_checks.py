@@ -315,7 +315,7 @@ def test_path_skew_older_path_install_is_reported(tmp_path, monkeypatch, repo_di
         f"Sidegraph: `sidegraph-session-start` on PATH ({link}) is 0.6.0 but this session runs "
         "0.11.1. Plugin skills and hooks use the session's version through uvx; your own shell "
         "commands use the old one. Update it with `uv tool install --reinstall "
-        "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, or "
+        "git+https://github.com/SantyagoSeaman/sidegraph.git@main`, or "
         "remove it with `uv tool uninstall sidegraph` if you only use the plugin."
     )
 

@@ -36,7 +36,7 @@ read what `uv` or `uvx` prints. For the plugin and the manual recipes:
 
 ```bash
 SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json \
-  uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-session-start </dev/null
+  uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start </dev/null
 ```
 
 The `@main` ref tracks a mutable branch; see
@@ -323,7 +323,7 @@ raises costs only its own line.
      `sidegraph-mcp`, `sidegraph-doctor` found on `PATH` once the running environment's own `bin`
      (which `uvx` and `uv run` put first) is skipped, its real path, and the one
      `sidegraph-<version>.dist-info` in that environment. The line names the command, its
-     directory and both versions, and offers `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1` or
+     directory and both versions, and offers `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main` or
      `uv tool uninstall sidegraph` when the environment is a `uv tool` one, a generic "upgrade
      or remove" otherwise. It fires for an older and for a newer copy. No binary on `PATH`, no
      or two dist-infos, a non-numeric version or a Windows layout: the check does not run.

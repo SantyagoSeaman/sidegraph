@@ -38,7 +38,7 @@ newly opened terminal. If `claude mcp list` shows `sidegraph` as failed to conne
 lists no `sidegraph` tools, run the launcher by hand to see the error (Ctrl+C stops it):
 
 ```powershell
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-mcp --repo-root
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp --repo-root
 ```
 
 For Codex, `codex mcp list` should show the `sidegraph` server, and `/hooks` should list its
@@ -339,7 +339,7 @@ install's `sidegraph-<version>.dist-info` and never runs the command.
 - **You use only the plugin.** Remove it: `uv tool uninstall sidegraph`.
 - **You use the CLI on purpose.** Update it: `uv tool upgrade sidegraph` for an install from
   `main`. An install from PyPI, pinned or not, moves to `main` with
-  `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, the command the line offers because it works for
+  `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main`, the command the line offers because it works for
   either. The line is shown whenever the versions differ, so a deliberately pinned or newer copy
   shows it daily.
 - **Not a `uv tool` install** (pipx, pip). The line says "upgrade or remove" without a command.

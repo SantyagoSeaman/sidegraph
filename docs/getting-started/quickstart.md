@@ -23,7 +23,7 @@ $env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line ins
 graphify update .
 echo "graphify-out/" >> .gitignore          # macOS, Linux
 Add-Content .gitignore "graphify-out/"      # Windows PowerShell: use this line instead, not >>
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-init
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
 ```
 
 `graphify update .` creates `graphify-out/graph.json`; Sidegraph reads it but never writes to
@@ -115,7 +115,7 @@ The agent should call `get_task_context` with that path or entity. The gotcha ap
 
 ```bash
 git status --short
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-verify
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
 ```
 
 Commit the whole `.sidegraph/` directory (`git add .sidegraph`), the root `.gitignore`, and

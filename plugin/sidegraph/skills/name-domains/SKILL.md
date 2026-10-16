@@ -136,7 +136,7 @@ gate: present and wait, never auto-write.
 - `sidegraph-domains bootstrap` (CLI) does the same deterministic candidate selection but skips
   the curation step — it's the scripted/CI alternative, not the recommended path for a human in
   a session. See [naming your domains](../../../../docs/guides/naming-your-domains.md). Run it as
-  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
+  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
 
 ## See also
 

@@ -56,7 +56,7 @@ def test_init_prints_wiring_snippets(tmp_path, capsys):
     assert "/plugin install sidegraph@sidegraph" in out
     # The no-plugin alternative is a single native command, project-scoped.
     assert "claude mcp add sidegraph -s project" in out
-    assert "uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1" in out
+    assert "uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main" in out
     assert "sidegraph-mcp" in out
     # Manual hook-by-hook setup lives in the docs, not in the init dump.
     assert "docs/getting-started/claude-code-setup.md" in out

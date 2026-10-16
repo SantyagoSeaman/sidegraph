@@ -42,8 +42,8 @@ both `--db` and `--graph` against its own `--root` instead.
 ## Running the CLIs beside the plugin
 
 The plugin's MCP server and hooks run the Sidegraph at
-`git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`. A plugin skill that runs a
-`sidegraph-*` command runs it the same way, `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 <command>`, and never the copy on `PATH`: a
+`git+https://github.com/SantyagoSeaman/sidegraph.git@main`. A plugin skill that runs a
+`sidegraph-*` command runs it the same way, `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, and never the copy on `PATH`: a
 persistent `uv tool install` is frozen at the version it was installed at and can lack
 commands or flags the plugin's skills use. In a Sidegraph checkout (the session's working
 directory holds a `pyproject.toml` named `sidegraph`) run `uv run --project <checkout> <command>`
@@ -54,7 +54,7 @@ and SessionStart says when a `sidegraph-*` on `PATH` differs from the session's 
 (`path-skew`, see [troubleshooting](../guides/troubleshooting.md#path-skew)).
 
 Commands on the documentation pages are shown by name. (`@main` is a mutable ref: see [mutable development references](../getting-started/installation.md#mutable-development-references).) Without a CLI install, run them as
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 <command>`, for example `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-doctor`.
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, for example `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor`.
 
 ## `sidegraph-bootstrap`
 

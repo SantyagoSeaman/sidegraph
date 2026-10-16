@@ -738,7 +738,7 @@ def init_main(argv: list[str] | None = None) -> int:
     print(
         "  claude mcp add sidegraph -s project "
         "--env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json "
-        "-- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 "
+        "-- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main "
         "sidegraph-mcp"
     )
     print()

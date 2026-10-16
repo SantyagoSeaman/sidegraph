@@ -63,7 +63,7 @@ Add-Content .gitignore "graphify-out/"   # the same line on Windows (PowerShell)
 **2. Create the store**, the `.sidegraph/` directory that holds the records:
 
 ```sh
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-init
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
 ```
 
 It asks two questions. Both default to yes, so press Enter twice.
@@ -221,7 +221,7 @@ contents, or import existing ADRs and design specs with the
   Update cached plugin assets with your host recipe above. To pin a version instead, see
   [pinning](docs/getting-started/installation.md#mutable-development-references).
 - **Sidegraph commands in your own terminal.** Optional:
-  `uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, from the same place as the plugin. It does not update itself, so
+  `uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main`, from the same place as the plugin. It does not update itself, so
   after each release run `uv tool upgrade sidegraph`
   ([details](docs/getting-started/installation.md#option-a--the-cli-on-your-path)).
 - **Other MCP clients.** Run `sidegraph-mcp` over stdio; see the
@@ -348,9 +348,10 @@ building automation against it. By default the MCP runtime follows the latest re
 reproducible deployments, [pin a version](docs/getting-started/installation.md#mutable-development-references).
 The [changelog](CHANGELOG.md) records release changes.
 
-The platform badges at the top summarize the 0.13.0 release checks of 2026-10-14: Windows x64
-and macOS arm64 both ran the full plugin session for Claude Code and Codex. The badges are not
-live CI status; see [Platform coverage](docs/getting-started/installation.md#platform-coverage).
+The platform badges summarize the release gate: full Claude Code and Codex plugin sessions
+on Windows x64 and macOS arm64, with Python 3.13 and 3.14. Publication of 0.14.0 requires
+this gate, including Windows PowerShell 5.1 without PowerShell 7. See
+[Platform coverage](docs/getting-started/installation.md#platform-coverage) for limits.
 
 ## Contributing and support
 

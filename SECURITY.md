@@ -37,7 +37,7 @@ provider according to your repository's data policy. The runtime data boundary i
   `sidegraph-init --remove-hooks` takes the blocks, the helper and that key out again. The
   SessionStart hook writes one 40-character commit id to
   `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`, and only when the running package was
-  installed from the canonical `git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`. That
+  installed from the canonical `git+https://github.com/SantyagoSeaman/sidegraph.git@main`. That
   covers the plugin and the manual `uvx --from …@main` recipe. A PyPI, tag, SHA or editable
   install never writes it. Beyond those, the only filesystem writes are the standard config
   snippets you install yourself (`.mcp.json`, hook entries). See

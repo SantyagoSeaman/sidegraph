@@ -13,7 +13,7 @@ sessions.
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
 $env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-bootstrap --host claude-code
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --host claude-code
 ```
 
 Bootstrap scans, previews, reviews, writes, verifies, checks the selected host, and proves
@@ -213,7 +213,7 @@ cd sidegraph-demo
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
 $env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-bootstrap \
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap \
   --profile superpowers --host claude-code --report bootstrap-report.md
 ```
 

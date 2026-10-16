@@ -31,9 +31,13 @@ plugin's MCP server, `SessionStart` context, records before a Read, a bundled sk
 subagent brief, the `Stop` capture prompt, capture and ratification, and recall in a fresh
 session. The project folder and host profile paths contain a non-ASCII character.
 
-**Last verified: 2026-10-14, the 0.13.0 release candidate,** with Claude Code 2.1.296 and
-Codex CLI 0.162.1. The README's blue platform badges summarize these checks, rather than
-live workflow status or support for every published version.
+**0.14.0 publication gate:** Claude Code 2.1.296 and Codex CLI 0.162.1 on all four cells
+above, including a Windows 3.14 cell with PowerShell 7 unavailable for preflight and both
+real host sessions. Windows 3.13 retains PowerShell 7; its launcher checks also cover 5.1.
+Stable publication requires the full gate to pass without a known-issue exception. The
+README's blue badges summarize release acceptance, rather than live workflow status or
+support for every published version. Muse and OpenCode have the narrower coverage in
+their installation guides and are outside this native matrix.
 
 On native Windows, the Claude Code hooks run through Git Bash, which comes with Git for
 Windows; the MCP launchers and the Codex hooks need no POSIX shell. The native checks run
@@ -126,7 +130,7 @@ It installs from the same place as the plugin, the public repository's `main` br
 changes only at releases:
 
 ```bash
-uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1
+uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main
 ```
 
 That puts `sidegraph-mcp` and every `sidegraph-*` CLI on your PATH, where the documentation's
@@ -153,7 +157,7 @@ versions when the copy on `PATH` differs from the session's, and shows it to you
 day.
 
 To stop maintaining the copy, run `uv tool uninstall sidegraph`. The plugin keeps working, and
-any command still runs as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 <command>`.
+any command still runs as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`.
 
 For CI or a reproducible pilot, pin a version instead (`pip install 'sidegraph==X.Y.Z'`) and move
 the pin when you upgrade. For an ephemeral run without installing,
@@ -181,7 +185,7 @@ The Claude Code host installs the MCP server and all four hooks (`SessionStart`,
 `SubagentStart`, and the bundled skills;
 its tool surface has no equivalent target for the Claude-specific `PreToolUse` records block. The
 plugin's bundled config installs from the public repository, not PyPI: the MCP server and
-`SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, and the
+`SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`, and the
 `Stop`, `PreToolUse` and `SubagentStart` hooks start from the commit `SessionStart` resolved. Unlike the package
 install, the plugin deliberately follows the public repository's `main` branch. See
 the integration details for [Claude Code](../integrations/claude-code.md#plugin-install-path)
@@ -218,8 +222,8 @@ checkout. `@main` moves only when a release is cut. For reproducibility, pin a t
 (see "Mutable development references" above):
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-init
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-bootstrap --help
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --help
 ```
 
 Every Sidegraph entry-point name differs from the source location, so any `uvx` invocation

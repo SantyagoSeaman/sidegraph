@@ -355,7 +355,7 @@ _PATH_SKEW = (
 )
 _PATH_SKEW_FIX_UV = (
     "Update it with `uv tool install --reinstall "
-    "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, or remove it with "
+    "git+https://github.com/SantyagoSeaman/sidegraph.git@main`, or remove it with "
     "`uv tool uninstall sidegraph` if you only use the plugin."
 )
 _PATH_SKEW_FIX_OTHER = "Upgrade it, or remove it if you only use the plugin."

@@ -10,7 +10,7 @@ Code and docs moved; the sync pass re-resolved every tracked entity and reported
 honestly, never guessing — what it could no longer follow. Sidegraph auto-heals everything
 it can prove (`rebound`, `moved`, community re-pointing); everything else is routed to a
 human, and this skill is how you walk them through it. CLI commands below run through
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 <command>` at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>` at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 ## Get a current report
 
@@ -44,7 +44,7 @@ entities; the `force=True` call above already re-runs everything, so it makes th
 **CLI fallback** (outside a session, scripted/CI use, or reviewing as plain text):
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
 ```
 
 (Reads also self-heal lazily — `get_task_context`/`SessionStart` run `maybe_sync()` — so
@@ -68,7 +68,7 @@ store write or a source change: confirm before acting.
    or `retrieve_decisions(ids=[...])`, and look at the current code); then one of two heals:
    - **Restore the name** — the symbol/heading was renamed or dropped and the decision is
      still true of the code. Restoring it is a **source change**: propose the edit to the
-     human, never do it silently. Then run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, followed by `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-sync` — the anchor
+     human, never do it silently. Then run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, followed by `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync` — the anchor
      heals back to `rebound`/`unchanged` on an exact match.
    - **Supersede** — the code it described is genuinely gone. `supersede_decision(...)`
      with **explicit fresh `anchors` pointing at the successor code**. Do NOT omit

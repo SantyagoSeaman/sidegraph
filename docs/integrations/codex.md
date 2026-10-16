@@ -225,7 +225,7 @@ launcher's `@main` does not update cached skills, manifests or hook definitions,
 marketplace update remains necessary. Update Codex itself if this command is unavailable.
 
 **How the plugin launches.** The MCP server and `SessionStart` run `uvx --from
-git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1`, a mutable branch (see
+git+https://github.com/SantyagoSeaman/sidegraph.git@main`, a mutable branch (see
 [Mutable development references](../getting-started/installation.md#mutable-development-references)).
 `Stop` and `SubagentStart` run many times a session and `uv` re-resolves a branch reference on every call, so they launch from the commit `SessionStart`
 recorded in `${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit`, falling back to `@main`

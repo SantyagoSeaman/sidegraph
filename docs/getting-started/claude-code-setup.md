@@ -33,7 +33,7 @@ Installs the MCP server and all four hooks (`SessionStart`, `Stop`, `PreToolUse`
 `SubagentStart`) in one step, pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by
 default. It installs from the public Git repository: the MCP
 server and `SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/
-sidegraph.git@rc/0.14.0-1` under the hood, and `Stop`, `PreToolUse` and `SubagentStart` start from the
+sidegraph.git@main` under the hood, and `Stop`, `PreToolUse` and `SubagentStart` start from the
 commit `SessionStart` resolved. See
 [the plugin install path](../integrations/claude-code.md#plugin-install-path) for exactly
 what gets registered and the cwd-pinning details. Skip to [Verify](#verify) once installed.
@@ -93,7 +93,7 @@ Create (or merge into) `.mcp.json`:
   "mcpServers": {
     "sidegraph": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1", "sidegraph-mcp"],
+      "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp"],
       "env": {
         "SIDEGRAPH_DIR": ".sidegraph",
         "SIDEGRAPH_GRAPH": "graphify-out/graph.json"
@@ -106,7 +106,7 @@ Create (or merge into) `.mcp.json`:
 Or via the CLI — carry both env vars so this lands on the same store path as the JSON above:
 
 ```bash
-claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-mcp
+claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp
 ```
 
 `-s project` writes a repo-committed `.mcp.json`, so the whole team gets the server
@@ -140,7 +140,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -150,7 +150,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-stop || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -161,7 +161,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       },
@@ -171,22 +171,22 @@ Add to `.claude/settings.json` (merge into an existing file):
           {
             "type": "command",
             "if": "Bash(sed *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
           },
           {
             "type": "command",
             "if": "Bash(grep *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
           },
           {
             "type": "command",
             "if": "Bash(rg *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
           },
           {
             "type": "command",
             "if": "Bash(cat *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       },
@@ -195,7 +195,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       }
@@ -205,7 +205,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-subagent-start || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-subagent-start || printf '{}\\n'"
           }
         ]
       }

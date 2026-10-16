@@ -1052,7 +1052,7 @@ def test_quickstart_does_not_install_the_cli_for_plugin_users():
     installation = (_ROOT / "docs" / "getting-started" / "installation.md").read_text(
         encoding="utf-8"
     )
-    source_ref = "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1"
+    source_ref = "git+https://github.com/SantyagoSeaman/sidegraph.git@main"
     assert f"uv tool install {source_ref}" in installation
     assert "uv tool upgrade sidegraph" in installation
     assert "### Option A — the CLI on your PATH\n" in installation

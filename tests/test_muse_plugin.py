@@ -49,7 +49,7 @@ def test_native_muse_mcp_uses_the_public_runtime_without_a_shell() -> None:
     assert server["id"] == "sidegraph"
     assert server["command"] == [
         "uvx",
-        "--from=git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1",
+        "--from=git+https://github.com/SantyagoSeaman/sidegraph.git@main",
         "sidegraph-mcp",
         "--repo-root",
     ]

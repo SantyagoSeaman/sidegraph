@@ -15,7 +15,7 @@ The commands below follow the current development branch. For durable environmen
   "mcpServers": {
     "sidegraph": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1", "sidegraph-mcp"],
+      "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp"],
       "env": { "SIDEGRAPH_DIR": ".sidegraph", "SIDEGRAPH_GRAPH": "graphify-out/graph.json" }
     }
   }
@@ -26,7 +26,7 @@ Or via the CLI — carry both env vars so this setup lands on the same store pat
 other setup path (manual, plugin, Codex):
 
 ```bash
-claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-mcp
+claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp
 ```
 
 **From a source checkout** (contributors — see
@@ -248,7 +248,7 @@ the recommended install path, and it works today, no PyPI publish required:
 > **Public and development manifests differ.** The marketplace receives
 > `plugin/sidegraph/.mcp.public.json` and `plugin/sidegraph/hooks/hooks.public.json`, renamed
 > to the canonical filenames during the public release. Those variants run `uvx --from
-> git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 …`, so the plugin deliberately
+> git+https://github.com/SantyagoSeaman/sidegraph.git@main …`, so the plugin deliberately
 > follows the public repository rather than the PyPI package. The unsuffixed files in this
 > development repository run the checkout the plugin was loaded from, with
 > `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.." --package
@@ -327,7 +327,7 @@ Two mitigations, both config-level (no source change needed to use them):
   ```json
   {
     "command": "uvx",
-    "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1", "sidegraph-mcp", "--repo-root"]
+    "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp", "--repo-root"]
   }
   ```
   `--repo-root` anchors the server to the project: `sidegraph-mcp` moves to
@@ -335,7 +335,7 @@ Two mitigations, both config-level (no source change needed to use them):
   cwd. Because it needs no `sh`, the same entry starts on native Windows.
 - **Hooks**: hook command entries have no `cwd`/`env` fields, so the public command carries a
   `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from
-  git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-session-start`. This is
+  git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start`. This is
   the content of `plugin/sidegraph/hooks/hooks.public.json`; the release renames it to
   `hooks.json`. The `Stop`, `PreToolUse` and `SubagentStart` commands start with the `launch-commit` read
   described in the note above and launch `uvx --from "$u"`. The development variant uses the same prefix and runs the checkout the plugin

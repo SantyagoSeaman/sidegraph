@@ -22,7 +22,7 @@ the question is whether what the record says survived what the code became.
 The CLI runs through uvx at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@rc/0.14.0-1 sidegraph-doctor --json    # findings[] entries with "code": "code-drift"
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor --json    # findings[] entries with "code": "code-drift"
 ```
 
 Each finding names the record and which anchored file(s) changed since
