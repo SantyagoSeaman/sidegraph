@@ -1,11 +1,12 @@
 # CLI reference
 
-20 console scripts are registered in `pyproject.toml` (`[project.scripts]`): fifteen
+21 console scripts are registered in `pyproject.toml` (`[project.scripts]`): sixteen
 commands documented on this page — fourteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
 (including `sidegraph-prepare-commit-msg`, which doubles as a git hook — see
 [`reference/git-bindings.md`](git-bindings.md) for its installation and mechanism) and the
 guided `sidegraph-bootstrap` in
-[`src/sidegraph/bootstrap/cli.py`](../../src/sidegraph/bootstrap/cli.py) — plus the MCP server
+[`src/sidegraph/bootstrap/cli.py`](../../src/sidegraph/bootstrap/cli.py) and ADR export in
+[`src/sidegraph/adr_cli.py`](../../src/sidegraph/adr_cli.py) — plus the MCP server
 (`sidegraph-mcp`) and the four hook entry points (`sidegraph-session-start`,
 `sidegraph-stop`, `sidegraph-pre-tool-use`, `sidegraph-subagent-start`; see
 [`reference/hooks.md`](hooks.md)).
@@ -1226,6 +1227,7 @@ plain-text line):
 | `dangling-supersedes` | snapshot | a `supersedes` id doesn't resolve to any record, hot or archived (a file skipped for its unsafe name still counts as the record it holds, so renaming it back is the only heal) |
 | `dangling-binding-entity` | snapshot | a binding's `entity_id` doesn't resolve to any `entities/<id>.json` (an entity held by a file skipped for its unsafe name still counts) |
 | `dangling-fact-support` | snapshot | a fact's `supports` id doesn't resolve to any decision (a file skipped for its unsafe name still counts, as for `dangling-supersedes`) |
+| `dangling-drift-check` | snapshot | an auxiliary verification references no hot or archived decision; terminal targets remain valid history |
 | `dangling-parent` | snapshot | a domain's `parent_id` doesn't resolve to any domain, hot or archived (a superseded, dropped or archived parent still counts, as the write path only checks that it exists; a file skipped for its unsafe name counts too, as for `dangling-supersedes`) |
 | `parent-cycle` | snapshot | the `parent_id` chain of some domains loops back on itself (a domain that is its own parent included); reported once per cycle, at the domain with the smallest id on it, and not for a domain that merely hangs off the cycle |
 | `duplicate-ulid` | snapshot | the same internal id appears in more than one canonical location — two hot files, a hot file plus any archive copy, or two archive segments whose payloads for that id actually differ. **Exempt:** two or more archive segments carrying byte-*identical* payloads for the same id — a sanctioned cross-branch `sidegraph-compact` merge (independent compaction on two branches, later merged) — see [`reference/store-format.md#archive-segments-sidegraph-compact`](store-format.md#archive-segments-sidegraph-compact) |
@@ -1233,7 +1235,7 @@ plain-text line):
 | `filename-id-mismatch` | snapshot | a hot record file's name doesn't match its own internal id |
 | `unsafe-record-id` | snapshot | a record's id is not a safe filename (a single path segment, at most 128 characters, starting with a letter or digit), or is not a string; also a `bindings/` file or hot record file whose name is unsafe, and an `archive/*.jsonl` line whose id is missing, not a string or unsafe. The store's reload skips such a file, and its startup warning points here. A file with an unsafe name gets this code whether or not its content parses; a file with an unsafe name or an unsafe id gets no other snapshot finding (no `filename-id-mismatch`, `duplicate-ulid` or `parse-error`) |
 | `symlinked-store-entry` | snapshot | a store-owned directory or file inside the store is a symlink, live or dangling (one violation per entry); `Store()` refuses to open such a store, so `sidegraph-verify` and `sidegraph-doctor` report the links and stop: no record is linted, no reference checked, no `--against` diff run and no advisory check made until the links are removed (an `--against` ref that does not resolve, or a store outside git, is checked first and still exits `1` without reporting the links) (the text output says so in one line; `--json` carries no marker), see [`reference/store-format.md`](store-format.md#layout-file-per-record-json-plus-a-derived-local-index) |
-| `illegal-field-change` | transition | an immutable field changed between `GIT_REF` and the working tree (the detail names the field); also covers immutable raw keys lost during hot-to-archive transfer, or a modified already-published archive segment (write-once) |
+| `illegal-field-change` | transition | an immutable field changed between `GIT_REF` and the working tree (the detail names the field); also covers immutable raw keys lost during hot-to-archive transfer, or a modified already-published archive segment or auxiliary verification (write-once) |
 | `illegal-status-jump` | transition | `status` changed to something that isn't a real write-path transition for that record kind |
 | `valid-to-unset` | transition | `valid_to` reverted from a value back to `null` |
 | `valid-to-changed` | transition | `valid_to` changed from one value to a *different* value (only `null → value`, once, is legal) |
@@ -1281,6 +1283,9 @@ which methods):
 - **Initiatives:** no append-only guard in `store.py` at all (`Store.upsert_initiative` is a
   bare, unconditional upsert) — only a *deletion* is flagged (`illegal-deletion`); no
   field-level check runs for initiatives.
+- **Auxiliary verifications** (`verifications/*.json`): write-once, including formatting;
+  additions are schema/reference-checked by the snapshot layer, every later modification
+  or deletion is illegal. Older verifier versions ignore this directory.
 - **Archive segments** (`archive/*.jsonl`): write-once — a brand-new segment (git status
   `A`) is legal; any modification or deletion of an already-published one is always
   illegal.
@@ -1383,7 +1388,7 @@ plain-text line):
 | `stale-proposal` | a proposed decision/domain whose ULID timestamp is strictly older than `--stale-days` |
 | `unreferenced-entity` | a hot entity no committed anchor set references (structural `domain:*`/`community:*` entities are exempt) |
 | `expired-open-validity` | a decision's `valid_to` is strictly past but its status is still open (`proposed`/`accepted`) |
-| `code-drift` | an open (`proposed`/`accepted`) decision's anchored file(s) changed since the commit its `provenance.commit` was captured at; when binding statuses are uncomputed or unavailable, excludes committed deletions and says "binding status unknown"; also carries the "N record(s) predate commit stamping — not checkable" and git-unavailable notes, in place, when either applies |
+| `code-drift` | an open (`proposed`/`accepted`) decision's anchored file(s) changed since capture, or an earlier scoped check no longer applies; `record_drift_check` can record an explicit current inspection without rewriting the decision (MCP only); when binding statuses are uncomputed or unavailable, excludes committed deletions and says "binding status unknown"; also carries the "N record(s) predate commit stamping — not checkable" and git-unavailable notes, in place, when either applies |
 | `never-surfaced` | an accepted decision has `0` shows against `N > 0` queries on its anchored file(s) — anchored where people repeatedly work, never once rendered or injected by a hook |
 | `stale-instructions` | an auto-injected agent-instructions file beside the store (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`) still carries the distinctive wording of a **superseded** decision — that file reaches the agent at turn zero, before retrieval, so an abandoned rule surviving there outranks the store's correction by default. Verbatim-ish match on normalized text with length/word floors; superseded records only; no git call. Advisory: it reports a quotation, not a proven contradiction — the file may be narrating history |
 | `unratified-accept` | an **accepted** record whose provenance says `agent` and which carries no ratifier stamp — the signature `SIDEGRAPH_AUTO_ACCEPT=on` leaves in a shared store (one environment's setting bypassing the ratification gate for everyone). Scoped to records created at/after the EARLIER of the store's earliest ratifier stamp and its creation marker (`.sidegraph/stamping_live_since`, written once when a store is genuinely new — never backfilled onto an existing one), so a store predating both reports nothing rather than everything; a store that has never ratified anything but was created by a marker-writing version is still in scope from its own creation, closing the blind window an unratified store would otherwise sit in forever. A stamped record — including one stamped `auto:<policy>` by an auto-ratification policy — and a human-sourced one are never flagged. A **supersession successor** (`supersedes` set — `supersede_decision`/`supersede_fact`) is never flagged either: reversal has no ratification queue to bypass and lands accepted immediately by design, so it reproduces the signature with no relation to the env var this check hunts. Narrowed exception: a `supersedes`-bearing record IS still flagged if it carries a `layer`, a `provenance.ref`, or a tier-0 `tag:`/`initiative:` binding absent from its predecessor — neither `supersede_decision` nor `supersede_fact` can produce any of the three, so one present proves the `propose_decisions`/auto-accept path wrote it. (The fact half is defensive only: `supersede_fact` always stamps `source="human"`, so a fact successor never reaches this agent-sourced check, and no draft shape carries `supersedes` on a fact.) Only a MINIMAL superseding draft (none of the three) is indistinguishable from a legitimate successor by the record's own fields, and stays excluded — a known, accepted, narrower trade-off than treating every supersession alike. Advisory: the signature is not proof — verify before concluding |
@@ -1517,6 +1522,45 @@ so startup may migrate supported legacy data or rebuild `index.db`. Binding stat
 Exit code 0 on success (a store with problems still exits 0 — the problems are the output), 2
 on an operational error (uninitialized store or unwritable output path).
 
+## `sidegraph-export-adr`
+
+```bash
+uv run sidegraph-export-adr --db .sidegraph --out docs/adr          # preview only
+uv run sidegraph-export-adr --db .sidegraph --out docs/adr --write  # explicit application
+uv run sidegraph-export-adr --profile madr --json
+```
+
+Generate and maintain record-derived ADRs with a unified diff by default. Accepted,
+superseded and deprecated ADR/constraint decisions become documents; proposed/rejected
+records stay out. A fixed footer retains complete accepted, unclosed explicit evidence,
+source pointers, status, history, anchors and domain intent. No inferred architectural
+coverage, automatic prose synthesis or retrieval policy change.
+
+| Flag | Behavior |
+|---|---|
+| `--db` | store path; `SIDEGRAPH_DIR` preferred, deprecated `SIDEGRAPH_DB` retained |
+| `--profile` | export settings from a flow profile; default `generic-adr` |
+| `--out` | override the profile directory, otherwise below the store's parent |
+| `--template` | UTF-8 body template, regular file up to 64 KiB |
+| `--filename` | safe flat pattern containing `{id}`, optionally `{number:04d}` |
+| `--write` | explicitly apply a conflict-free plan; absent means no output writes |
+| `--json` | changes/diffs, advisory states, warnings and write-completion flags |
+
+Manual additions after the managed region survive. Editing generated prose/ownership
+causes a conflict, preserving the file; any planned conflict prevents all writes.
+Existing filenames/numbers are stable; no generated history is deleted. Symlinks,
+nonregular targets and source-store overlap are refused. Existing files are replaced
+atomically, but an I/O/race failure can leave earlier writes or a partial newly created
+file: inspect `applied` and `partial_write_possible` before retrying.
+
+Export never opens Store, migrates it, or updates source/index/graph files. Drift is
+report-only and can be unknown, including for unopened WAL indexes. Both import and
+bootstrap skip generated projections; importing exported ADRs does not create fresh
+memory. Exit 0 for successful preview/write (including an admitted empty population), 2
+for invalid input/store, conflicts or operational errors. See the
+[ADR export guide](../guides/adr-export.md) for formats, custom templates, source tracing,
+conflict recovery, drift limits and round-trip semantics.
+
 ## `sidegraph-export-okf`
 
 ```bash
@@ -1573,6 +1617,16 @@ sidegraph-stats [--db PATH] [--window DAYS] [--graph PATH] [--json]
 
 One screen of usage statistics, read-only: how often memory was asked for, how much of the
 code being worked on has memory anchored to it, what the store holds, and how the anchors are doing.
+An additional **DELIVERY** section (`delivery_evidence` in JSON) reports observed MCP
+outcomes and prepared hook blocks separately: occurrences, actual record placements, anchor relations,
+retained unique records, status/kind at emission, comparable ranker populations and bounded
+retention metadata. It is not added to legacy activation or `showings`. Missing optional
+tables mean unavailable evidence, not zero; with telemetry off the JSON field is `null`.
+Capacity-eviction counts cover this index's recording lifetime, not just the requested
+window. Older writers, failed writes and host receipt remain unknown, and hooks have no
+all-attempt denominator. See [delivery evidence](store-format.md#delivery-evidence-derived-index-only)
+for exact surfaces, units, privacy and caps. This read-only command never migrates the ledger.
+
 It states what was **shown, asked and touched** — never what was improved, prevented, saved
 or caused. A journal cannot separate "memory sent the agent there" from "the agent was going
 there anyway", so no line of the report claims an effect.

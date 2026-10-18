@@ -30,7 +30,7 @@ import shutil
 import sqlite3
 import sys
 import sysconfig
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NamedTuple
@@ -54,6 +54,7 @@ from ..store_layout import (
     check_store_requirement,
     clip_line,
 )
+from .diagnostics import HookDiagnostics
 
 if TYPE_CHECKING:
     from ..hot_index import HotIndex, Record
@@ -575,7 +576,12 @@ def _notice_is_due(stamp: str | None, severity: str, now: datetime) -> bool:
         return True
 
 
-def _claim_notice(store, problem: Problem, now: datetime) -> bool:
+def _claim_notice(
+    store,
+    problem: Problem,
+    now: datetime,
+    diagnostics: HookDiagnostics | None = None,
+) -> bool:
     """True iff this process may send ``problem``'s notice to the human, and the claim is made.
 
     The decision and the write are one ``Store.update_meta_if`` (an immediate transaction): the
@@ -595,12 +601,17 @@ def _claim_notice(store, problem: Problem, now: datetime) -> bool:
     try:
         return store.update_meta_if(_NOTICE_KEY_PREFIX + problem.check, decide)
     except Exception as e:
+        if diagnostics is not None:
+            diagnostics.report("integrity", e)
         if _is_transient_lock(e):
             raise
         return True
 
 
-def _recorded_notice_keys(index) -> frozenset[str]:
+def _recorded_notice_keys(
+    index,
+    diagnostics: HookDiagnostics | None = None,
+) -> frozenset[str]:
     """The ``integrity_notice:`` meta keys that exist, read from the hook's read-only index
     connection (before it closes), so that clearing a key is a write only when there is one to
     clear. Empty when the index cannot be read: under a lock, the time to write nothing."""
@@ -611,13 +622,19 @@ def _recorded_notice_keys(index) -> frozenset[str]:
             "SELECT key FROM meta WHERE substr(key, 1, ?) = ?",
             (len(_NOTICE_KEY_PREFIX), _NOTICE_KEY_PREFIX),
         ).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as error:
+        if diagnostics is not None:
+            diagnostics.report("integrity", error)
         return frozenset()
     return frozenset(row[0] for row in rows)
 
 
 def _due_notices(
-    store, result: RunResult, now: datetime, recorded: frozenset[str] | None = None
+    store,
+    result: RunResult,
+    now: datetime,
+    recorded: frozenset[str] | None = None,
+    diagnostics: HookDiagnostics | None = None,
 ) -> list[str]:
     """The notices to send to the human now, highest severity first (registry order within one
     severity), and the housekeeping that goes with them: a check that ran and found nothing
@@ -642,7 +659,7 @@ def _due_notices(
         claimed = True
         if writable:
             try:
-                claimed = _claim_notice(store, problem, now)
+                claimed = _claim_notice(store, problem, now, diagnostics)
             except Exception:  # a lock another process holds: write nothing more
                 writable = False
         if claimed and problem.notice:
@@ -659,12 +676,19 @@ def _due_notices(
                 continue
             store.delete_meta(key)
         except Exception as e:
+            if diagnostics is not None:
+                diagnostics.report("integrity", e)
             if _is_transient_lock(e):
                 break
     return notices
 
 
-def _session_start_duplicate(store, session_id: str, now: datetime) -> bool:
+def _session_start_duplicate(
+    store,
+    session_id: str,
+    now: datetime,
+    diagnostics: HookDiagnostics | None = None,
+) -> bool:
     """True iff ``session_start()`` already ran for ``session_id`` within
     :data:`_SESSION_START_DEDUPE_SECONDS` of ``now`` (design D7.2), in either direction: a
     stamp up to that far AHEAD also counts, because a sibling hook that took a later ``now``
@@ -708,7 +732,9 @@ def _session_start_duplicate(store, session_id: str, now: datetime) -> bool:
         if recent_same_session(store.get_meta(_SESSION_START_KEY)):
             return True
         return not store.update_meta_if(_SESSION_START_KEY, decide)
-    except Exception:
+    except Exception as error:
+        if diagnostics is not None:
+            diagnostics.report("session", error)
         return False
 
 
@@ -1025,10 +1051,14 @@ def session_start() -> None:
         refuse_arguments(
             "sidegraph-session-start", "Injects the project's decision map at session start."
         )
-    with contextlib.suppress(Exception):
+    diagnostics = HookDiagnostics("SessionStart")
+    try:
         from . import launch
 
-        launch.record_launch_commit()
+        launch.record_launch_commit(on_error=lambda error: diagnostics.report("launch", error))
+    except Exception as error:
+        diagnostics.report("launch", error)
+    stage = "startup"
     try:
         from ..config import (
             _present_by_lstat,
@@ -1046,7 +1076,9 @@ def session_start() -> None:
         )
         from ..store import Store
 
+        stage = "payload"
         payload = _read_payload()
+        stage = "store"
         location = resolve_store_location(
             root=os.environ.get("CLAUDE_PROJECT_DIR"),
             search_ancestors=True,
@@ -1061,19 +1093,24 @@ def session_start() -> None:
         try:
             store = Store(location.path)
         except Exception as e:
+            if not isinstance(e, StoreRequirementError):
+                diagnostics.report("store", e)
             if _is_transient_lock(e):
                 raise
             _report_unreadable_store(location, e, datetime.now(UTC))
             return
         # Not payload["session_id"] directly: that field is the umbrella workspace session
         # on Codex, not this session — see _session_identity.
+        stage = "session"
         session_id, session_group = _session_identity(payload)
 
         # D7.2: double-injection dedupe, checked BEFORE any other work (sync/TOC/nudges) —
         # a duplicate SessionStart call for the same session within the window exits
         # silently, same "print {} and return" shape the Stop hook's own one-shot ledger
         # uses. Gated on a real session id (see _session_start_duplicate's docstring).
-        if session_id and _session_start_duplicate(store, session_id, datetime.now(UTC)):
+        if session_id and _session_start_duplicate(
+            store, session_id, datetime.now(UTC), diagnostics
+        ):
             print(json.dumps({}))
             return
 
@@ -1105,26 +1142,30 @@ def session_start() -> None:
             # Recording stays off when the flag is off; expiry keeps running regardless,
             # so opting out strictly reduces what is retained.
             store.prune_telemetry_events()
-        except Exception:
-            pass
+        except Exception as error:
+            diagnostics.report("telemetry", error)
         # Per-session stamps outlive the longest reader TTL (24 h) by an hour and no more:
         # with telemetry off they are retained session ids, so they expire like the journals.
-        with contextlib.suppress(Exception):
+        try:
             store.prune_meta_prefixes(
                 (TELEMETRY_SESSION_STAMP_PREFIX,),
                 older_than=timedelta(hours=_SESSION_STAMP_RETENTION_HOURS),
             )
+        except Exception as error:
+            diagnostics.report("telemetry", error)
         # The PreToolUse per-file keys are up to ten per agent (hundreds a day in a session that
         # spawns subagents), so they expire like the journals do; the two one-shot prefixes
         # older versions wrote are cleared too, and so are the Stop hook's per-session re-arm
         # stamps. Its own try: the journal prune above failing must not leave these to pile up,
         # and vice versa.
         # see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D2)
-        with contextlib.suppress(Exception):
+        try:
             store.prune_meta_prefixes(
                 (*_PRETOOL_PRUNE_PREFIXES, _CAPTURE_REARM_KEY_PREFIX),
                 older_than=timedelta(days=_PRETOOL_KEY_RETENTION_DAYS),
             )
+        except Exception as error:
+            diagnostics.report("telemetry", error)
 
         # A linked worktree has the tracked store and no graph: with none of its own, the
         # main checkout's graph is read (`borrowed_from` is that checkout's root) and synced
@@ -1133,10 +1174,13 @@ def session_start() -> None:
         # see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)
         borrowed_from: Path | None = None
         graph_path: Path | None = None
+        stage = "graph"
         try:
             graph_path = default_graph_path(store.path)
             reader = GraphifyReader(graph_path)
-        except Exception:
+        except Exception as error:
+            if not isinstance(error, FileNotFoundError):
+                diagnostics.report("graph", error)
             reader = None
             borrowed = open_borrowed_reader(store.path)
             if borrowed is not None:
@@ -1148,8 +1192,8 @@ def session_start() -> None:
                 _sync.maybe_sync(store, reader)
             else:
                 _sync.maybe_sync(store, reader, canonical_writes=False)
-        except Exception:
-            pass  # lazy sync is best-effort; the map still renders un-synced
+        except Exception as error:
+            diagnostics.report("sync", error)  # the map still renders un-synced
 
         # Real TOC (§5): the sync path precomputes named domains into store meta. Read it
         # when present and non-empty; any accepted domain means the mind model has a name
@@ -1160,6 +1204,7 @@ def session_start() -> None:
         # handle degrades to the legacy map too, rather than escaping to the outer handler
         # and losing store-only content along with it (never-crash AND graceful-degrade).
         text = None
+        stage = "cache"
         try:
             cache = json.loads(store.get_meta(TOC_CACHE_KEY) or "null")
         except json.JSONDecodeError:
@@ -1173,18 +1218,24 @@ def session_start() -> None:
             # checkout's.
             try:
                 cache = build_toc(store, reader)
-            except Exception:
+            except Exception as error:
+                diagnostics.report("cache", error)
                 cache = None
         if isinstance(cache, dict) and cache.get("domains"):
             try:
                 # Domain/initiative summaries remain cache-owned, but unratified global
                 # mistakes must reflect the live Store even when the graph is unavailable
                 # and lazy sync cannot refresh an older cache that predates this key.
-                cache = {**cache, "unratified": unratified_mistakes(store)}
+                try:
+                    cache = {**cache, "unratified": unratified_mistakes(store)}
+                except Exception as error:
+                    diagnostics.report("cache", error)
+                    raise
                 text = render_toc(cache)
             except Exception:
                 text = None
         if text is None:
+            stage = "render"
             text = top_tier_map(store, reader)
         # Standing instruction goes first, ahead of either renderer's content — see
         # STANDING_SEARCH_INSTRUCTION's docstring for why it lives here and not in the
@@ -1203,8 +1254,8 @@ def session_start() -> None:
             from .. import sync as _sync_drift
 
             drift_count = _sync_drift.refresh_code_drift_cache(store)
-        except Exception:
-            pass  # the drift line must never cost the map
+        except Exception as error:
+            diagnostics.report("drift", error)
 
         # The status lines and the notices for the human: one registry decides what is wrong
         # (pending ratification, drift, borrowed graph, stale graph, stray store, missing
@@ -1218,9 +1269,11 @@ def session_start() -> None:
             from ..gitio import open_index_ro
 
             now = datetime.now(UTC)
-            index = open_index_ro(Path(store.path))
+            index = open_index_ro(
+                Path(store.path), on_error=lambda error: diagnostics.report("integrity", error)
+            )
             try:
-                recorded = _recorded_notice_keys(index)
+                recorded = _recorded_notice_keys(index, diagnostics)
                 result = integrity.run(
                     integrity.Inputs(
                         store_dir=Path(store.path),
@@ -1235,15 +1288,21 @@ def session_start() -> None:
                     "session",
                     integrity.CHECKS[:5] + host_checks(location) + integrity.CHECKS[5:],
                 )
+            except Exception as error:
+                diagnostics.report("integrity", error)
+                raise
             finally:
                 if index is not None:
-                    index.close()
+                    try:
+                        index.close()
+                    except Exception as error:
+                        diagnostics.report("cleanup", error)
             for problem in result.problems:
                 if problem.line:
                     text += f"\n\n{problem.line}"
-            notices = _due_notices(store, result, now, recorded)
-        except Exception:
-            pass  # the status lines must never cost the map
+            notices = _due_notices(store, result, now, recorded, diagnostics)
+        except Exception as error:
+            diagnostics.report("integrity", error)
 
         output: dict = {
             "hookSpecificOutput": {
@@ -1254,7 +1313,8 @@ def session_start() -> None:
         if notices:
             output = {"systemMessage": "\n".join(notices), **output}
         print(json.dumps(output))
-    except Exception:
+    except Exception as error:
+        diagnostics.report(stage, error)
         print(json.dumps({}))
 
 
@@ -1308,7 +1368,11 @@ def _read_capture_ledger(
     return row["captured_at"], (stamp["value"] if stamp else None)
 
 
-def _commits_since(store_path: Path, since: datetime) -> int | None:
+def _commits_since(
+    store_path: Path,
+    since: datetime,
+    diagnostics: HookDiagnostics | None = None,
+) -> int | None:
     """How many commits authored at or after ``since`` are reachable from a local branch or
     ``HEAD``, or ``None`` when git could not say (a failure or a timeout means no re-arm).
 
@@ -1337,14 +1401,21 @@ def _commits_since(store_path: Path, since: datetime) -> int | None:
             errors="replace",
             timeout=_REARM_GIT_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        if diagnostics is not None:
+            diagnostics.report("rearm", error)
         return None
     if done.returncode != 0:
         return None
     return sum(1 for line in done.stdout.split() if line.isdigit() and int(line) >= since_epoch)
 
 
-def _rearm_commits(store_path: Path, captured_at: str, stamp: str | None) -> int | None:
+def _rearm_commits(
+    store_path: Path,
+    captured_at: str,
+    stamp: str | None,
+    diagnostics: HookDiagnostics | None = None,
+) -> int | None:
     """The commits that make an already-nudged session due another nudge, or ``None`` when it
     is not due: inside the gap (no git work at all), a git failure, or too few commits.
     see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D2, D5)
@@ -1352,7 +1423,7 @@ def _rearm_commits(store_path: Path, captured_at: str, stamp: str | None) -> int
     last = _parse_stamp(stamp) or _parse_stamp(captured_at)
     if last is None or datetime.now(UTC) - last < _REARM_GAP:
         return None
-    commits = _commits_since(store_path, last)
+    commits = _commits_since(store_path, last, diagnostics)
     return commits if commits is not None and commits >= _REARM_MIN_COMMITS else None
 
 
@@ -1383,6 +1454,8 @@ def stop() -> None:
             "sidegraph-stop",
             "Nudges the agent to record what the session learned, once it has done enough.",
         )
+    diagnostics = HookDiagnostics("Stop")
+    stage = "startup"
     try:
         if os.environ.get("SIDEGRAPH_CAPTURE_NUDGE") == "off":
             print(json.dumps({}))
@@ -1391,6 +1464,7 @@ def stop() -> None:
         from ..config import _present_by_lstat, resolve_store_location
         from ..gitio import open_index_ro
 
+        stage = "payload"
         payload = _read_payload()
         if payload.get("stop_hook_active"):
             print(json.dumps({}))
@@ -1406,6 +1480,7 @@ def stop() -> None:
         # to the authoritative `was_captured` check below; the peek never writes. The same
         # connection reads the session's `capture_rearm` stamp, so a Stop inside the gap exits
         # here, and git runs only after the peek is closed.
+        stage = "store"
         store_path = Path(
             resolve_store_location(
                 root=os.environ.get("CLAUDE_PROJECT_DIR"),
@@ -1423,25 +1498,33 @@ def stop() -> None:
         except StoreRequirementError:
             print(json.dumps({}))
             return
-        except OSError:
-            pass  # an unreadable marker: `Store()` below meets it, as it always did
-        peek = open_index_ro(store_path)
+        except OSError as error:
+            diagnostics.report("store", error)
+        stage = "capture_peek"
+        peek = open_index_ro(
+            store_path, on_error=lambda error: diagnostics.report("capture_peek", error)
+        )
         ledger: tuple[str, str | None] | None = None
         if peek is not None:
             try:
                 ledger = _read_capture_ledger(peek, session_id)
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as error:
+                diagnostics.report("capture_peek", error)
             finally:
-                peek.close()
+                try:
+                    peek.close()
+                except Exception as error:
+                    diagnostics.report("cleanup", error)
         rearm_commits: int | None = None
         if ledger is not None:
-            rearm_commits = _rearm_commits(store_path, *ledger)
+            stage = "rearm"
+            rearm_commits = _rearm_commits(store_path, *ledger, diagnostics)
             if rearm_commits is None:
                 print(json.dumps({}))
                 return
 
         if ledger is None:
+            stage = "transcript"
             transcript_path = payload.get("transcript_path")
             # Must be a non-empty str, not just truthy: a malformed/adversarial payload with an
             # int here (e.g. `1`) would otherwise reach `open()`, which treats an int as a raw
@@ -1461,7 +1544,9 @@ def stop() -> None:
         # see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D6)
         from ..store import Store
 
+        stage = "store"
         store = Store(store_path)
+        stage = "capture"
         rearm_key = _CAPTURE_REARM_KEY_PREFIX + session_id
         if ledger is None:
             if store.was_captured(session_id):
@@ -1493,27 +1578,29 @@ def stop() -> None:
 
             n = _sync_drift.refresh_code_drift_cache(store)
             if n and os.environ.get("SIDEGRAPH_DRIFT_NUDGE") != "off":
-                # 601 + 183 = 784 at n=5 on a first nudge, inside the staleness-wave's pinned
-                # <=800 anti-creep bound. A re-armed nudge adds the commit sentence below (43
-                # characters), which is why test_host_stop.py's bound is 850.
+                # Keep this clause within the Stop nudge's 800/850 character bounds.
                 reason += (
-                    f" Also: {n} drifted record(s) — their anchored code changed after "
-                    "capture; if this session's work overtook any of them, "
-                    "supersede_decision it (ids: get_task_context or sidegraph-doctor)."
+                    f" Also: {n} drifted record(s) — changed code or prior check no longer "
+                    "applies; inspect before record_drift_check or supersede_decision "
+                    "(ids: get_task_context or sidegraph-doctor)."
                 )
-        except Exception:
-            pass
+        except Exception as error:
+            diagnostics.report("drift", error)
 
         if rearm_commits is None:
             store.mark_captured(session_id)  # before emitting: a crash cannot double-nudge
             # The stamp the re-arm counts from. A failed write only costs the fallback to
             # `captured_at`, never the nudge.
-            with contextlib.suppress(Exception):
+            try:
                 store.set_meta(rearm_key, datetime.now(UTC).isoformat())
+            except Exception as error:
+                diagnostics.report("capture", error)
         else:
             reason += f" Since the last capture prompt: {rearm_commits} commits."
         print(json.dumps({"decision": "block", "reason": reason, "suppressOutput": True}))
-    except Exception:
+    except Exception as error:
+        if not isinstance(error, StoreRequirementError):
+            diagnostics.report(stage, error)
         print(json.dumps({}))
 
 
@@ -1628,7 +1715,8 @@ class _HotOpener:
     see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D3)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, diagnostics: HookDiagnostics | None = None) -> None:
+        self.diagnostics = diagnostics
         self._asked = False
         self._index: HotIndex | None = None
 
@@ -1637,10 +1725,16 @@ class _HotOpener:
             from ..hot_index import HotIndex
 
             self._asked = True
-            self._index = HotIndex.open(store_path)
+            self._index = HotIndex.open(
+                store_path, on_error=lambda error: self.report("index", error)
+            )
         if self._index is not None and self._index.write_failed:
             return None
         return self._index
+
+    def report(self, stage: str, error: Exception) -> None:
+        if self.diagnostics is not None:
+            self.diagnostics.report(stage, error)
 
     def close(self) -> None:
         if self._index is not None:
@@ -1690,15 +1784,17 @@ def _record_touch_event(payload: dict, hot: _HotOpener) -> None:
         if index is None:
             return
         index.record_touch(session_id, path, str(tool), agent=agent_id)
-    except Exception:
+    except Exception as error:
+        hot.report("touch", error)
         return
 
 
 def _records_for_path(store, rel_path: str) -> list[tuple]:
     """The live decisions anchored to ``rel_path``, each with whether it is a proposal, in the
     order a reader should meet them: accepted mistakes, accepted rest, proposed last, newest
-    first within each bucket. The reference ``HotIndex.records_for`` must equal, byte for byte,
-    on raw index rows (``tests/test_hot_index.py``); the hook itself never builds a ``Store``.
+    first within each bucket. On decision-only fixtures, the reference ``HotIndex.records_for``
+    must equal this byte for byte (``tests/test_hot_index.py``); its fact path has a separate
+    typed eligibility oracle. The hook itself never builds a ``Store``.
 
     Mistakes-first is the product's one hard ranking guarantee (``MISTAKE_KINDS``, imported,
     never re-spelled). WITHIN each bucket the order is newest-first: the scan order is ULID mint
@@ -1789,6 +1885,11 @@ def _clip_choice(sentence: str, limit: int) -> str:
 
 def _record_line(record: Record) -> str:
     decision = record.decision
+    if record.record_type == "fact":
+        trust = " [unratified]" if record.proposed else ""
+        statement = " ".join(decision["statement"].split())
+        source = " ".join(decision["source"].split())
+        return f"- [fact]{trust} {statement} — Source: {source} (id {decision['id']})"
     title = clip_line(" ".join(decision["title"].split()), _RECORD_TITLE_CHARS)
     if record.proposed:
         title += " [unratified]"
@@ -1797,20 +1898,53 @@ def _record_line(record: Record) -> str:
     return f"- [{decision['kind']}] {title}{gist} (id {decision['id']})"
 
 
+def _answer_record_line(record: Record, seen: list[Record] | None) -> str:
+    """Reference only an identical full copy already rendered in this answer.
+
+    Compare whole snapshots, including hidden authored fields and trust, rather than IDs
+    or clipped gists. Callers own the small list; it never outlives one assembled answer.
+    """
+    full = _record_line(record)
+    if seen is None:
+        return full
+    if record in seen:
+        kind = "fact" if record.record_type == "fact" else record.decision["kind"]
+        trust = " [unratified]" if record.proposed else ""
+        body = f"{trust} See above" if record.record_type == "fact" else f" See above{trust}"
+        reference = f"- [{kind}]{body} (id {record.decision['id']})"
+        if len(reference) < len(full):
+            return reference
+    else:
+        seen.append(record)
+    return full
+
+
+# Whole fact lines only: never clip away the qualifiers or the required source.
+_FACT_LINE_CHARS = 512
+
+
+def _renderable_records(records: Sequence[Record]) -> list[Record]:
+    return [
+        r for r in records if r.record_type != "fact" or len(_record_line(r)) <= _FACT_LINE_CHARS
+    ]
+
+
 def _shown_slice(records: Sequence[Record]) -> Sequence[Record]:
     """The records a file's block prints: the top two, three when the first two are both
     mistakes. One definition for the block and for the journal of what it printed."""
     top_two_are_mistakes = len(records) >= 2 and all(
-        r.decision["kind"] in MISTAKE_KINDS for r in records[:2]
+        r.record_type == "decision" and r.decision["kind"] in MISTAKE_KINDS for r in records[:2]
     )
     count = _RECORDS_SHOWN_WHEN_TWO_MISTAKES if top_two_are_mistakes else _RECORDS_SHOWN
     return records[:count]
 
 
-def _records_block(rel: str, records: Sequence[Record]) -> str:
+def _records_block(rel: str, records: Sequence[Record], *, seen: list[Record] | None = None) -> str:
     """The block for one file: a header, the top two records (three when the first two are both
     mistakes), and a line naming the call that returns the rest when there is a rest.
 
+    ``seen`` optionally references identical full copies from earlier winning file blocks
+    in this answer; counts and the remaining-record pointer still use the original records.
     The order is the one :meth:`HotIndex.records_for` returns, which is the model layer's
     per-file order and not ``get_task_context(files=[f])``'s (that orders per entity), so the
     last line promises the remaining records and not the same sequence.
@@ -1818,7 +1952,7 @@ def _records_block(rel: str, records: Sequence[Record]) -> str:
     """
     shown = _shown_slice(records)
     lines = [f"Recorded for {rel} ({len(shown)} of {len(records)}, mistakes first):"]
-    lines += [_record_line(r) for r in shown]
+    lines += [_answer_record_line(r, seen) for r in shown]
     if len(records) > len(shown):
         files = json.dumps([rel], ensure_ascii=False)
         lines.append(f"More: get_task_context(files={files}).")
@@ -1850,6 +1984,51 @@ def _journals_showings() -> bool:
     from ..config import telemetry_enabled
 
     return telemetry_enabled()
+
+
+def _journal_delivery(
+    payload: dict,
+    index: HotIndex,
+    surface: str,
+    groups: Sequence[tuple[str, Sequence[Record]]],
+    on_error: Callable[[Exception], None],
+) -> None:
+    """Optional whole-occurrence evidence after final assembly; no task text is retained."""
+    try:
+        if not _journals_showings():
+            return
+        session_id, _ = _session_identity(payload)
+        if not session_id:
+            return
+        from ..delivery import Delivery, Placement, Snapshot
+
+        placements = [
+            Placement(
+                Snapshot(
+                    record.decision["id"],
+                    record.record_type,
+                    "fact" if record.record_type == "fact" else record.decision["kind"],
+                    record.decision["status"],
+                ),
+                rel,
+            )
+            for rel, records in groups
+            for record in records
+        ]
+        index.record_delivery(
+            Delivery(
+                surface,
+                placements,
+                session_id=session_id,
+                agent_id=_agent_identity(payload) if surface == "hook_read" else None,
+                host_call_id=payload.get("tool_use_id"),
+                unresolved=None,
+            ),
+            on_error=on_error,
+        )
+    except Exception as error:
+        with contextlib.suppress(Exception):
+            on_error(error)
 
 
 def _delivery(payload: dict, hot: _HotOpener) -> str | None:
@@ -1893,7 +2072,9 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
     for rel in dict.fromkeys(files):
         if rel not in anchored:
             continue
-        records = index.records_for(anchored[rel])
+        records = _renderable_records(
+            index.records_for(anchored[rel], on_error=lambda error: hot.report("delivery", error))
+        )
         if records:
             chosen.append((rel, records))
             if len(chosen) == _FILES_PER_CALL:
@@ -1906,6 +2087,8 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
     from ..hot_index import Shown  # already loaded: the index above is a HotIndex
 
     blocks: list[str] = []
+    seen: list[Record] = []
+    winning: list[tuple[str, Sequence[Record]]] = []
     for rel, records in chosen:
         # Claim BEFORE emitting, in one statement that also counts: a crash cannot deliver a
         # file twice, two parallel reads of one agent cannot both deliver it, and the agent's
@@ -1919,12 +2102,18 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
         )
         try:
             if index.claim_file(prefix, rel, now, _FILES_PER_AGENT, shown=shown):
-                blocks.append(_records_block(rel, records))
-        except sqlite3.OperationalError:
+                blocks.append(_records_block(rel, records, seen=seen))
+                winning.append((rel, _shown_slice(records)))
+        except sqlite3.OperationalError as error:
+            hot.report("claim", error)
             break  # the busy timeout: deliver what is already claimed, claim no more
     if not blocks:
         return None
-    return "\n".join([MEMORY_GUARD_LINE, *blocks])
+    text = "\n".join([MEMORY_GUARD_LINE, *blocks])
+    _journal_delivery(
+        payload, index, "hook_read", winning, lambda error: hot.report("delivery", error)
+    )
+    return text
 
 
 def _brief_plan(
@@ -1956,13 +2145,19 @@ def _brief_plan(
     return plan
 
 
-def _render_brief(plan: Sequence[tuple[str | None, str, Sequence[Record]]]) -> str:
+def _render_brief(
+    plan: Sequence[tuple[str | None, str, Sequence[Record]]], *, compact: bool = False
+) -> str:
     """The text of a brief for ``plan`` (non-empty): the opening marker, the guard, one group per
     file (the file, labelled with the document that named it when the brief did not, and its
     records), a line naming the call that returns the rest, and the closing marker."""
+    seen: list[Record] | None = [] if compact else None
     shown = [rel for _, rel, _ in plan]
     groups = [
-        [f"{rel}:" if doc is None else f"{rel} (named in {doc}):", *(_record_line(r) for r in top)]
+        [
+            f"{rel}:" if doc is None else f"{rel} (named in {doc}):",
+            *(_answer_record_line(r, seen) for r in top),
+        ]
         for doc, rel, top in plan
     ]
     more = f"More: get_task_context(files={json.dumps(shown, ensure_ascii=False)})."
@@ -1974,17 +2169,19 @@ def _render_brief(plan: Sequence[tuple[str | None, str, Sequence[Record]]]) -> s
 def _brief_block(plan: Sequence[tuple[str | None, str, Sequence[Record]]]) -> str | None:
     """The block for a brief, rendered from :func:`_brief_plan`'s groups; ``None`` when the plan
     is empty (not even the first file fits). ``More:`` names exactly the files shown.
-    The record lines are the Read path's (``_record_line``); its ``_records_block`` layout is not
-    reused, because a brief covers several files.
+    Record lines share the Read path's within-answer references and original full renderer;
+    its ``_records_block`` layout is not reused, because a brief covers several files.
     see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1, D3)
     """
-    return _render_brief(plan) if plan else None
+    # Selection uses full-body costs; saved space never buys additional records.
+    return _render_brief(plan, compact=True) if plan else None
 
 
 def _journal_brief(
     payload: dict,
     index: HotIndex,
     plan: Sequence[tuple[str | None, str, Sequence[Record]]],
+    on_error: Callable[[Exception], None] | None = None,
 ) -> None:
     """Journal the records a brief printed (``inject_brief`` rows and shows bumps), from the same
     plan that rendered it. Nothing without telemetry or a session id (the touch rule: a row that
@@ -2000,7 +2197,10 @@ def _journal_brief(
         index.record_shows(
             session_id, [(rel, r.decision["id"]) for _, rel, top in plan for r in top]
         )
-    except Exception:
+    except Exception as error:
+        if on_error is not None:
+            with contextlib.suppress(Exception):
+                on_error(error)
         return
 
 
@@ -2043,7 +2243,11 @@ def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
     for doc, rel in brief_files(
         prompt, _touch_root(location), anchored, cwd if isinstance(cwd, str) else None
     ):
-        records = index.records_for(anchored[rel]) if rel in anchored else []
+        records = _renderable_records(
+            index.records_for(anchored[rel], on_error=lambda error: hot.report("delivery", error))
+            if rel in anchored
+            else []
+        )
         if records:
             chosen.append((doc, rel, records))
             if len(chosen) == _BRIEF_MAX_LINES:  # every file shown costs a line at least
@@ -2052,7 +2256,14 @@ def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
     block = _brief_block(plan)
     if block is None:
         return None
-    _journal_brief(payload, index, plan)
+    _journal_brief(payload, index, plan, lambda error: hot.report("brief_journal", error))
+    _journal_delivery(
+        payload,
+        index,
+        "hook_brief",
+        [(rel, top) for _, rel, top in plan],
+        lambda error: hot.report("brief_journal", error),
+    )
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -2105,24 +2316,30 @@ def pre_tool_use() -> None:
             "sidegraph-pre-tool-use",
             "Hands the agent the records anchored to the file it is about to read or edit.",
         )
+    diagnostics = HookDiagnostics("PreToolUse")
     # Payload first: stdin can only be read once, and recording (D4) must see it even when
     # delivery is switched off. Then record, then deliver.
     try:
         payload = _read_payload()
-    except Exception:
+    except Exception as error:
+        diagnostics.report("payload", error)
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    hot = _HotOpener()
+    hot = _HotOpener(diagnostics)
     try:
         _record_touch_event(payload, hot)
         try:
             output = _hook_output(payload, hot)
-        except Exception:
+        except Exception as error:
+            diagnostics.report("delivery", error)
             output = {}
         print(json.dumps(output))
     finally:
-        hot.close()
+        try:
+            hot.close()
+        except Exception as error:
+            diagnostics.report("cleanup", error)
 
 
 def _hook_usage(prog: str, summary: str) -> str:

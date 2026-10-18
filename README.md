@@ -367,6 +367,9 @@ Contributions are reviewed here and carried over, with attribution, before the n
 
 ## Documentation
 
+[Export and maintain ADRs](docs/guides/adr-export.md) from the available decision store,
+with a preview by default and explicit writes.
+
 [Getting started](docs/getting-started/installation.md) ·
 [Concepts](docs/concepts/decision-memory.md) ·
 [Guides](docs/guides/capturing-decisions.md) ·

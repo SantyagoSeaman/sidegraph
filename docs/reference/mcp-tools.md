@@ -99,6 +99,7 @@ for recovery from an incomplete operation.
 | Tool | Purpose | Typically called |
 |---|---|---|
 | [`add_decision`](#add_decision) | Write one decision directly, `status=accepted` | Mid-session, when a human/agent asks to record something now |
+| [`record_drift_check`](#record_drift_check) | Record an attributed inspection of an unchanged decision | After reading current code and confirming the claim still holds |
 | [`supersede_decision`](#supersede_decision) | Close an old decision, write its replacement | When a past decision is explicitly reversed |
 | [`add_fact`](#add_fact) | Write one non-derivable fact directly, `status=accepted` | Mid-session, when a human asks to record a benchmark/limit/trial-learned fact now |
 | [`supersede_fact`](#supersede_fact) | Close an old fact, write its falsifying replacement | When a past fact is disproven or corrected |
@@ -234,7 +235,7 @@ Every tool carries MCP annotations, so a host can tell what a call does before i
 host with an auto-reviewer (Codex's `approvals_reviewer = auto_review`) reviews a call to a tool
 that has none, because the MCP defaults say "destructive" and "open-world". It skips the review
 for a tool marked read-only, or marked non-destructive and closed-world. Two annotation sets
-cover the 24 tools, defined once in `server.py`:
+cover the 25 tools, defined once in `server.py`:
 
 | Hint | Read-only tools | Every other tool |
 |---|---|---|
@@ -252,7 +253,7 @@ cover the 24 tools, defined once in `server.py`:
 |---|---|
 | Read-only | `list_facts`, `find_entity`, `get_entity_history`, `list_proposed`, `list_domains`, `list_domain_candidates`, `verify_store` |
 | Not read-only: they run the lazy sync | `retrieve_decisions`, `get_task_context`, `query_structure`, `query_decisions`, `drill_down` |
-| Not read-only: they write records | `add_decision`, `supersede_decision`, `add_fact`, `supersede_fact`, `propose_decisions`, `ratify`, `ratify_decisions`, `add_domain`, `supersede_domain`, `propose_domains`, `sync_anchors`, `add_anchors` |
+| Not read-only: they write records | `record_drift_check`, `add_decision`, `supersede_decision`, `add_fact`, `supersede_fact`, `propose_decisions`, `ratify`, `ratify_decisions`, `add_domain`, `supersede_domain`, `propose_domains`, `sync_anchors`, `add_anchors` |
 
 What does not count as a write: `.sidegraph/index.db` is local, gitignored state (the derived
 index, usage statistics, the capture ledger and the session meta), never committed and never
@@ -367,9 +368,10 @@ created for them; empty when every anchor resolved cleanly or no graph reader is
 **`anchors_orphaned` is the one to act on.** It carries an entity summary plus a `reason`
 (`{"entity_id", "canonical_name", "tier": 2, "reason": str}`) for every anchor that resolved
 to **nothing**.
-The leaf is still written — orphaned, never dropped — but it is dead on arrival: retrieval,
-`drill_down` and the PreToolUse records block all skip orphaned bindings, and no Tier-1 community
-fallback is created either, so the record has **no delivery path at all** through that anchor.
+The leaf is still written — orphaned, never dropped. Graph-bound retrieval, `drill_down`
+and the PreToolUse records block skip that binding, and no Tier-1 community fallback is
+created. An exact file request can still return eligible memory as `[file-bound]` when an
+available graph lacks the declared file; this does not verify or heal its symbol anchors.
 `reason` says which fix applies — the causes are not interchangeable:
 
 | `reason` | What happened | Fix |
@@ -945,6 +947,15 @@ block.
 
 ### The nearest anchored records
 
+When an available graph does not contain an explicitly requested file, the memory read
+also checks exact durable descriptor paths. Eligible decisions and facts can then arrive as
+`[file-bound]`: declared applicability to that file, with symbol anchors the graph cannot
+verify. This reads no neighboring path as an exact match and changes no anchor or binding.
+Ordinary verified seed routes take precedence over the marker. Named-entity requests,
+ambiguous/directory guesses and graph-present orphan handling keep their existing rules;
+with no graph reader at all, this fallback is unavailable. The file still appears in the
+not-in-graph diagnostic, and proposal policy, history, mistakes-first and budgets still apply.
+
 A file seed that no read could place, and one that resolved with no current record anchored to
 it, is not a dead end: the files around it often carry the memory you wanted. For each such file
 seed the reply says where the nearest memory is, in one sentence. A seed qualifies when it is
@@ -963,13 +974,17 @@ No current record is anchored to `core/a.py`. Nearest anchored: `net/c.py` (link
   superseded record (a superseded one shows only as a "tried, reverted" line) and a record on a
   file the graph lacks do not make a file anchored. A seed path the graph does not hold that has
   open records bound to it (a binding of any status, for instance a file that exists only in a
-  worktree) says so instead of "No current record is anchored":
-  `` `pkg/new.py` has 1 more record(s) bound to it through anchors the graph cannot resolve: retrieve_decisions(files=["pkg/new.py"]) lists them.``
+  worktree) first reads eligible exact-file memory as described above. When records remain
+  unshown, it says so instead of "No current record is anchored":
+  `` `pkg/new.py` has 1 more record(s) bound to it through anchors the graph cannot resolve: retrieve_decisions(files=["pkg/new.py"]) lists decisions; list_facts(files=["pkg/new.py"]) lists facts.``
   followed by `Nearest anchored: …` when there are anchored files near it. Records the answer
   already shows (in the main answer or in the nearest anchored records) are not counted, and a
-  path with none left gets no such line. For a path some of whose bound
-  records are among the nearest anchored records shown, the number reads "at least N", because
-  the hard cap on the text may still cut some of those.
+  path with none left gets no such line or contradictory nearest-only advice. Counts cover
+  decisions and facts, not just decisions. When pre-cap main placements, or nearest-record
+  placements, were subtracted for that path, the remaining count is conservatively "at least N":
+  the final hard cap may still cut some of those placements. If every record was placed before
+  the cap, a later cap removal may leave no remaining-record pointer, matching graph-present
+  behavior; the cut notice and the full listing surfaces remain available.
 - **Candidates**, in this order: the anchored files that hold a node next to a node of the seed in
   the graph, the two with the most records; then the anchored files under the nearest ancestor
   directory that has any (at any depth), the two with the most records. Ties go by path. An ancestor
@@ -1234,7 +1249,8 @@ anchors whose name matched more than one graph node (`candidates` capped at 5), 
 Tier-2 leaf was created for them; empty when every anchor resolved cleanly, there were no
 anchors, or no graph reader was present. Identical path-less external stubs (the per-file stubs newer Graphify emits for an imported name such as `BaseModel`) count as one match. `anchors_orphaned` is `[{"entity_id",
 "canonical_name", "tier": 2, "reason": str}, ...]` for anchors that resolved to nothing —
-the leaf is still written, but dead on arrival for retrieval. `facts` is one
+the leaf is still written but skipped by graph-bound retrieval; exact missing-file
+applicability remains available as described above. `facts` is one
 `ProposeFactResult` dict per entry in that draft's own `facts` list (empty when the draft
 had none) — see below for the shape.
 `neighbors` lists up to 3 live decisions already reachable via the draft's own anchors, newest
@@ -1749,3 +1765,45 @@ bound with no graph present or that resolved to nothing (never dropped either wa
 `ambiguous` is `{"name": str, "reason": "ambiguous", "candidates": list[str]}` (capped at 5)
 for anchor names that matched more than one graph node — no leaf created, the same
 per-anchor feedback `add_decision`'s `anchors_skipped` gives. Identical path-less external stubs (the per-file stubs newer Graphify emits for an imported name such as `BaseModel`) count as one match. On success, inside a git repository, the result also carries a `commit_hint` ([Commit hint](#commit-hint)); the error dict has none.
+
+## `record_drift_check`
+
+```python
+record_drift_check(
+    decision_id: str,
+    checked_commit: str,   # current full inspected Git HEAD
+    files: list[str],     # all required anchor files plus inspected dependencies
+    rationale: str,       # nonblank, redacted before validation; at most 4000 characters
+) -> dict
+```
+
+Append one immutable agent assertion that an open, commit-stamped decision still holds.
+This is a local write. Author and session are currently always unknown; this operation
+does not infer identity from store-wide legacy metadata. It neither ratifies a proposal nor proves the claim true. Original decision
+bytes and capture provenance remain unchanged. There is no companion CLI in this release.
+
+Supply 1–256 unique, safe repository-relative paths (at most 1024 UTF-8 bytes per path,
+16384 in total). Every inspected path must be a tracked regular file clean relative to
+that exact HEAD; unrelated dirty files do not block the check. All current checkable
+concrete anchor files are required; explicitly inspected dependencies may extend coverage.
+Unknown binding status conservatively includes existing committed anchor paths. Abstract-only,
+unstamped, skipped or terminal subjects, missing Git HEAD, incomplete scope and dirty
+inspected files are refused without a new check. Existing safe write diagnostics apply.
+
+The result names `id`, `decision_id`, `checked_commit`, `required_files`, `checked_files`,
+`provenance`, `cache_cleared` and `redactions`. `cache_cleared` only says whether an existing
+valid derived cache contained and removed this decision; other cached ids stay intact.
+When additional anchor paths lie outside inspected coverage, pruning is deferred to the
+normal refresh so a check cannot hide their capture warning.
+No full drift scan runs inside the writer. A later normal refresh recomputes coverage.
+A failed response after publication can leave durable evidence: inspect history before
+retrying; SQLite rollback does not remove an already published immutable file.
+
+A matching check compares current decision/leaf identity, exact required-file coverage,
+and stored file blob ids plus modes. Changed checked dependencies, deletion, mode or
+subject/scope changes re-arm review even if capture's original files match again.
+Unrelated commits and identical bytes after squash/revert do not re-arm. The original
+checked commit remains provenance and need not exist locally after a squash/clone.
+Git/FS edits outside Sidegraph can race the final cleanliness/HEAD check and publication;
+this is an attributed inspection, not an atomic certificate of the external worktree.
+See [store format](store-format.md#scoped-drift-checks) for history and compatibility.

@@ -72,12 +72,15 @@ def prove_task_context(
     accepted_record_ids: Collection[str],
     file_path: str | None = None,
 ) -> ProofResult:
-    """Prove that the deterministic record appears through production task retrieval."""
+    """Prove current graph anchoring and delivery through production task retrieval."""
     selection = select_default_proof(store, accepted_record_ids=accepted_record_ids)
     if selection is None:
         return ProofResult(complete=False, reason="no eligible accepted decision")
 
     anchor_path = file_path or selection.file_path
+    # File applicability cannot establish current graph anchoring for bootstrap.
+    if anchor_path not in reader.source_files():
+        return ProofResult(complete=False, reason="selected decision did not surface")
     context = get_task_context([Seed(file_path=anchor_path)], store, reader)
     if selection.decision.id not in context.shown_ids:
         return ProofResult(complete=False, reason="selected decision did not surface")

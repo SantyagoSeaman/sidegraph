@@ -8,13 +8,28 @@ corpus, not with ours. Re-measure before quoting these numbers elsewhere. The ho
 MCP-call rows were re-measured on 2026-10-03 (a subprocess median of nine, a store of about
 1,500 record files).
 
+The timings below predate optional delivery-evidence journaling. Current covered MCP
+outcomes and delivering read/brief hooks add at most one independent best-effort commit
+when telemetry and the optional tables are available. It never waits for a SQLite lock;
+legacy claim/show transactions are unchanged. No new connection, daemon or retry is added.
+See [the evidence contract](store-format.md#delivery-evidence-derived-index-only).
+
+A small telemetry-enabled comparison on 2026-10-18 measured the added write separately:
+20 calls per surface in a warm Python 3.13.7 process, one synthetic store with two anchored
+decisions, one anchored fact and one global decision. Read-hook median was 1.119 → 1.588 ms
+(about +0.47 ms); the `query_decisions` core was 0.782 → 1.107 ms (about +0.32 ms).
+Output stayed 437 and 192 UTF-8 bytes respectively; canonical JSON stayed byte-identical.
+This excludes interpreter startup, transport and the tool shell's freshness check. It is
+one tiny local fixture and establishes no statistical significance, production latency or
+usefulness; the final sample varies from the preliminary sample.
+
 ## What runs when
 
 | Trigger | What runs | Cost here | Notes |
 |---|---|---|---|
 | Every agent session start | `sidegraph-session-start` hook: opens the store, best-effort sync, renders the memory map | **~350 ms** | Degrades to a shorter map without a graph; a failure never blocks the session |
 | Every `Read`/`Grep`/`Edit`/`Write` tool call, and every Bash line that contains `sed`, `grep`, `rg` or `cat` | `sidegraph-pre-tool-use` hook: one scan of the entities, the records of at most three files, one claim per file | **~26 ms** when it prints nothing; **~35 ms** for a `Read` that delivers the busiest file here (48 records, 2 shown); **~38 ms** for a Bash line that names three anchored files | Reads and writes `index.db` directly, without opening a `Store`; may write local touch/per-file claim telemetry; failure is swallowed by design. In process the same three calls cost under 0.1 ms, 4.5 ms and 6.3 ms; the rest is the interpreter starting |
-| Every `Agent` (`Task`) call that spawns a subagent, on Claude Code | `sidegraph-pre-tool-use` hook, `Agent\|Task` group: reads the files the brief names (and, one hop away, the files named in a plan or notes document it names), looks up their records, and appends a block to the brief | Not measured separately here: the same raw-SQLite path as the row above, plus reading up to 64 KB for each document the brief names | Once per spawn, never per tool call. No `Store`, no write of its own; any failure leaves the brief as the parent wrote it |
+| Every `Agent` (`Task`) call that spawns a subagent, on Claude Code | `sidegraph-pre-tool-use` hook, `Agent\|Task` group: reads the files the brief names (and, one hop away, the files named in a plan or notes document it names), looks up their records, and appends a block to the brief | Not measured separately here: the same raw-SQLite path as the row above, plus reading up to 64 KB for each document the brief names | Once per spawn, never per tool call. No `Store`; legacy brief shows and optional occurrence evidence write only the existing index; any failure leaves the brief as the parent wrote it |
 | Every subagent start, once per spawned subagent | `sidegraph-subagent-start` hook: one pass over the index, to print a short brief that says decision memory exists and how many decisions are anchored to code | Not measured separately here: it reads the index like the PreToolUse hook and loads nothing beyond the standard library | Prints `{}` when no decision is anchored to a file; writes nothing; Claude Code and Codex |
 | Every agent session end | `sidegraph-stop` hook: capture nudge | **~35-40 ms** for a Stop that exits before the capture check (hook already active, session already captured, not yet substantial); **~45-50 ms** for a Stop of a captured session past the 30-minute re-arm gap but below its commit threshold (one `git log`); **~175 ms** for a Stop that reaches the first nudge, and **~0.6-0.7 s** for a re-armed nudge, at most once per 30 minutes per session (opens the store, refreshes the drift cache) | Same failure posture |
 | Every MCP tool call | The server's freshness check before the tool runs: a digest walk over the record files, and a rebuild only if they changed | **+11 ms** per call (17 ms against 6 ms without the check); **~90 ms** when a record changed | A filesystem error during the walk does not fail the call: it answers from the previous index |

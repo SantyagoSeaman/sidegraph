@@ -63,6 +63,7 @@ from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, Field
 
+from . import delivery as delivery_ledger
 from . import store_layout
 from .hot_index import CLAIM_META_SQL, GET_META_SQL, INSERT_EVENT_SQL, SHOW_UPSERT_SQL
 from .schema import (
@@ -73,6 +74,7 @@ from .schema import (
     Descriptor,
     Domain,
     DomainStatus,
+    DriftCheck,
     Entity,
     EntityKind,
     Fact,
@@ -1040,9 +1042,97 @@ class Store:
             self._migrate_retrieval_events_agent()
             self._refresh_freshness()
             self._warn_skipped_files()
+            self._delivery_available: bool | None = None
+            self._delivery_write(delivery_ledger.create_schema, initialize=True)
         except BaseException:
             self._conn.close()
             raise
+
+    def _delivery_write(
+        self,
+        work: Callable[[sqlite3.Connection], None],
+        *,
+        initialize: bool = False,
+    ) -> bool:
+        """Optional derived evidence gets its own nonblocking outer mutation only."""
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if self._conn.in_transaction:
+                return False
+            with delivery_ledger.no_wait(self._conn):
+                if initialize:
+                    if delivery_ledger.available(self._conn):
+                        self._delivery_available = True
+                        return True
+                elif self._delivery_available is False:
+                    return False
+                elif self._delivery_available is not True and not delivery_ledger.available(
+                    self._conn
+                ):
+                    self._delivery_available = False
+                    return False
+                with self._mutation():
+                    work(self._conn)
+            self._delivery_available = True
+            return True
+        except Exception:
+            # Optional schema/counters must never change core open or retrieval behavior.
+            return False
+        finally:
+            self._lock.release()
+
+    def record_drift_check(self, check: DriftCheck, *, clear_cached_advisory: bool = True) -> bool:
+        """Publish immutable auxiliary evidence and remove only its cached advisory.
+
+        The caller checks revision/scope under its enclosing mutation. Files stay outside
+        the shared index digest: old writers cannot discard them or reset binding state.
+        Returns whether an existing cache was changed; no full Git scan runs here.
+        """
+        check = DriftCheck.model_validate(check.model_dump())
+        with self._mutation():
+            refuse_symlinked_internals(self.path)
+            path = _record_file(self.path, store_layout.VERIFICATIONS_SUBDIR, check.id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
+            try:
+                tmp.write_text(check.model_dump_json(indent=2) + "\n", encoding="utf-8")
+                os.link(tmp, path)  # exclusive whole-file publication, never replace history
+            finally:
+                tmp.unlink(missing_ok=True)
+            if not clear_cached_advisory:
+                return False
+            raw = self.get_meta(store_layout.DRIFT_CACHE_KEY)
+            try:
+                payload = json.loads(raw) if raw is not None else None
+            except (ValueError, RecursionError):
+                return False
+            if not isinstance(payload, dict):
+                return False
+            groups = payload.get("by_commit")
+            if not isinstance(groups, dict) or not all(
+                isinstance(key, str)
+                and isinstance(ids, list)
+                and all(isinstance(rid, str) for rid in ids)
+                for key, ids in groups.items()
+            ):
+                return False
+            changed = any(check.decision_id in ids for ids in groups.values())
+            if changed:
+                payload["by_commit"] = {
+                    key: [rid for rid in ids if rid != check.decision_id]
+                    for key, ids in groups.items()
+                }
+                self._conn.execute(
+                    "INSERT INTO meta(key,value) VALUES (?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (store_layout.DRIFT_CACHE_KEY, json.dumps(payload)),
+                )
+            return changed
+
+    def record_delivery(self, delivery: delivery_ledger.Delivery) -> bool:
+        """Append one observed answer, or leave new coverage unavailable without waiting."""
+        return self._delivery_write(lambda conn: delivery_ledger.append(conn, delivery))
 
     def _migrate_retrieval_events_agent(self) -> None:
         """Add ``retrieval_events.agent`` to an index that predates it. Never fails the open.
@@ -4004,6 +4094,8 @@ class Store:
                 deleted += self._conn.execute(
                     f"DELETE FROM {table} WHERE at < ?", (cutoff,)
                 ).rowcount
+        # Keep optional child retention out of the legacy timestamp transaction.
+        self._delivery_write(delivery_ledger.prune)
         return deleted
 
     # -- initiatives --------------------------------------------------------

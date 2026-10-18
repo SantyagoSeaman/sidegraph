@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections import Counter
 from collections.abc import Sequence
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -189,12 +190,51 @@ class HealthItem(BaseModel):
     fix: str
 
 
+class DeliveryGroupStats(BaseModel):
+    occurrences: int
+    surfaces: dict[str, int]
+    outcomes: dict[str, int]
+    unique_retained_records: int
+    reported_placements: int
+    reported_anchor_links: int
+    retained_placements: int
+    retained_anchor_links: int
+    placement_statuses: dict[str, int]
+    placement_kinds: dict[str, int]
+    metadata_omitted_occurrences: int
+    unknown_session_occurrences: int
+    unknown_recipient_occurrences: int
+    host_call_identified_occurrences: int
+    runtime_versions: dict[str, int]
+    budget_occurrences: int
+    budget: dict[str, int] | None
+
+
+class DeliveryEvidenceStats(BaseModel):
+    available: bool
+    coverage: str = "observed_only; older writers and failed writes unavailable"
+    mcp: DeliveryGroupStats | None = None
+    hooks: DeliveryGroupStats | None = None
+    retention_days: int = 30
+    row_caps: dict[str, int] = {
+        "occurrences": 20_000,
+        "placements": 50_000,
+        "anchor_links": 100_000,
+    }
+    recording_since: str | None = None
+    capacity_evicted_through: str | None = None
+    capacity_evicted_occurrences: int = 0
+    capacity_evicted_placements: int = 0
+    capacity_evicted_anchor_links: int = 0
+
+
 class StatsReport(BaseModel):
     repo: str
     window_days: int
     retained_days: int
     telemetry_enabled: bool
     activation: ActivationStats
+    delivery_evidence: DeliveryEvidenceStats | None = None
     reach: ReachStats
     # True when the canonical files on disk differ from what the index loaded (a `git pull`, a
     # hand edit). `memory` and `anchors` are then None: they are derived from the record
@@ -315,6 +355,82 @@ def _empty_bucket() -> dict[str, set[str]]:
     return {"seed": set(), "show": set(), "touch": set()}
 
 
+def _delivery_group(conn: sqlite3.Connection, cutoff: str, *, hooks: bool) -> DeliveryGroupStats:
+    predicate = (
+        "h.surface IN ('hook_read','hook_brief')"
+        if hooks
+        else ("h.surface NOT IN ('hook_read','hook_brief')")
+    )
+    headers = list(
+        conn.execute(
+            f"SELECT * FROM delivery_occurrences h WHERE h.at>=? AND {predicate}", (cutoff,)
+        )
+    )
+    placements = list(
+        conn.execute(
+            "SELECT p.* FROM delivery_placements p "
+            "JOIN delivery_occurrences h ON h.id=p.occurrence "
+            f"WHERE h.at>=? AND {predicate}",
+            (cutoff,),
+        )
+    )
+    known = [r for r in headers if r["considered"] is not None]
+    return DeliveryGroupStats(
+        occurrences=len(headers),
+        surfaces=dict(Counter(r["surface"] for r in headers)),
+        outcomes=dict(Counter(r["outcome"] for r in headers)),
+        unique_retained_records=len({(r["record_type"], r["record_id"]) for r in placements}),
+        reported_placements=sum(r["placement_count"] for r in headers),
+        reported_anchor_links=sum(r["anchor_link_count"] for r in headers),
+        retained_placements=len(placements),
+        retained_anchor_links=sum(r["retained_links"] for r in headers),
+        placement_statuses=dict(Counter(r["status"] for r in placements)),
+        placement_kinds=dict(Counter(r["kind"] for r in placements)),
+        metadata_omitted_occurrences=sum(bool(r["metadata_omitted"]) for r in headers),
+        unknown_session_occurrences=sum(r["session_id"] is None for r in headers),
+        unknown_recipient_occurrences=sum(r["agent_id"] is None for r in headers),
+        host_call_identified_occurrences=sum(r["host_call_id"] is not None for r in headers),
+        runtime_versions=dict(
+            Counter(r["runtime_version"] for r in headers if r["runtime_version"])
+        ),
+        budget_occurrences=len(known),
+        budget=(
+            {
+                "considered": sum(r["considered"] for r in known),
+                "emitted": sum(r["unique_record_count"] for r in known),
+                "rank_refused": sum(r["rank_refused"] for r in known),
+                "hard_cap_removed": sum(r["hard_cap_removed"] for r in known),
+                "degraded": sum(r["degraded"] for r in known),
+            }
+            if known
+            else None
+        ),
+    )
+
+
+def _delivery_evidence(conn: sqlite3.Connection, cutoff: str) -> DeliveryEvidenceStats:
+    from sidegraph import delivery
+
+    try:
+        with delivery.no_wait(conn):
+            if not delivery.available(conn):
+                return DeliveryEvidenceStats(available=False)
+            meta = delivery._meta(conn)
+            return DeliveryEvidenceStats(
+                available=True,
+                mcp=_delivery_group(conn, cutoff, hooks=False),
+                hooks=_delivery_group(conn, cutoff, hooks=True),
+                recording_since=meta.get("recording_since"),
+                capacity_evicted_through=meta.get("capacity_evicted_through"),
+                capacity_evicted_occurrences=meta["capacity_occurrences"],
+                capacity_evicted_placements=meta["capacity_placements"],
+                capacity_evicted_anchor_links=meta["capacity_links"],
+            )
+    except sqlite3.Error:
+        # Optional/mixed-version evidence cannot make the established report unreadable.
+        return DeliveryEvidenceStats(available=False)
+
+
 def build_report(
     store_dir: Path,
     graph_path: Path | None,
@@ -361,6 +477,7 @@ def build_report(
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN")
 
+        delivery_evidence = _delivery_evidence(conn, cutoff)
         sessions: dict[str, dict[str, set[str]]] = {}
         hook_showings = 0
         unattributed_at: set[str] = set()
@@ -564,6 +681,7 @@ def build_report(
         retained_days=retained_days,
         telemetry_enabled=telemetry_enabled(),
         activation=activation,
+        delivery_evidence=delivery_evidence,
         reach=ReachStats(
             files_touched=len(touched),
             files_touched_with_memory=None if index_stale else len(touched & anchored_paths),

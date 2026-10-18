@@ -23,6 +23,7 @@ import importlib.metadata
 import json
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 # The branch the public manifests install from. tools/release-public.sh declares the same
@@ -89,7 +90,10 @@ def _record_main_commit() -> None:
             tmp.unlink()
 
 
-def record_launch_commit() -> None:
+def record_launch_commit(
+    *,
+    on_error: Callable[[Exception], None] | None = None,
+) -> None:
     """Record the commit of an ``@main`` install for the hot-path hooks to launch from.
 
     Writes only for an install that asked for ``@main`` (``requested_revision``): the record
@@ -102,5 +106,9 @@ def record_launch_commit() -> None:
 
     # see design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md (D2)
     """
-    with contextlib.suppress(Exception):
+    try:
         _record_main_commit()
+    except Exception as error:
+        if on_error is not None:
+            with contextlib.suppress(Exception):
+                on_error(error)

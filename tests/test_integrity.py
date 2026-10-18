@@ -420,9 +420,10 @@ def test_pending_is_not_run_without_a_store_or_with_the_switch_off(store, monkey
 def test_drift_line_is_todays_text_for_the_refresh_s_count(tmp_path):
     problem = detect("code-drift", Inputs(store_dir=tmp_path, now=NOW, drift_count=3))
     assert problem.line == (
-        "Sidegraph: 3 record(s) are anchored to code that changed after their capture — "
-        "task-relevant ones carry a [drifted] tag in retrieval; full list: sidegraph-doctor; "
-        "supersede any that no longer hold."
+        "Sidegraph: 3 record(s) need content review: code changed or a prior check "
+        "no longer applies — task-relevant ones carry a [drifted] tag in retrieval; "
+        "full list: sidegraph-doctor; record_drift_check if still true, "
+        "supersede if no longer true."
     )
     assert problem.notice is None
 

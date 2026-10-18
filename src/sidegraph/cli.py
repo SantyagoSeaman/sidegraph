@@ -1417,6 +1417,11 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
                 f"{report.status_derived_proposed} would land proposed "
                 "(source status: draft/proposed/pending/under review)"
             )
+        if report.skipped_generated_adr:
+            print(
+                f"{report.skipped_generated_adr} skipped as generated ADR projection(s) "
+                "(not new memory)"
+            )
         if report.skipped_template:
             print(f"{report.skipped_template} skipped as template(s) (not decisions)")
         if report.skipped_degenerate_parent:
@@ -1470,6 +1475,11 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
         print(
             f"{report.status_derived_proposed} landed proposed "
             "(source status: draft/proposed/pending/under review)"
+        )
+    if report.skipped_generated_adr:
+        print(
+            f"{report.skipped_generated_adr} skipped as generated ADR projection(s) "
+            "(not new memory)"
         )
     if report.skipped_template:
         print(f"{report.skipped_template} skipped as template(s) (not decisions)")

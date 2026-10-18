@@ -70,7 +70,7 @@ established by core/installed-wheel CI; the native Windows route is verified wit
 |---|---|---|---|---|
 | `store-unreadable` | broken | The store cannot be opened, so memory is off for the session | session notice and line | `sidegraph-verify`, or remove the damaged index |
 | `pending-ratification` | advisory | Proposals await a human's verdict | session line; a notice once the oldest is 30 days old | `sidegraph-ratify` |
-| `code-drift` | advisory | Records are anchored to code that changed after their capture | session line | `sidegraph-doctor` |
+| `code-drift` | advisory | Records need content review after code or check-scope changes | session line | `sidegraph-doctor` |
 | `graph-borrowed` | advisory | A linked worktree reads the main checkout's graph | session line | none needed |
 | `graph-stale` | degraded | The graph was built at a commit `HEAD` has moved past | session line and notice, doctor, stats | `graphify update .` |
 | `stray-store` | degraded | A subdirectory launch created a second, empty store | session line and notice | remove the empty store |
@@ -127,9 +127,10 @@ notice.
 
 ### code-drift
 
-Records whose anchored files changed after their capture. The line says how many. It is the
-agent's work to supersede the ones that no longer hold, so there is no notice. `sidegraph-doctor`
-lists them as `code-drift` findings, and the `sidegraph:triage-drift` skill walks them.
+Records needing content review after code changed or a prior scoped check stopped applying.
+The line says how many. Inspect current code: record an explicit `record_drift_check` if the
+claim still holds, or propose a real successor if it does not. There is no user notice.
+`sidegraph-doctor` lists them as `code-drift` findings, and the `sidegraph:triage-drift` skill walks them.
 `SIDEGRAPH_DRIFT_NUDGE=off` silences the line.
 
 ### graph-borrowed

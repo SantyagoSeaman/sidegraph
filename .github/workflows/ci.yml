@@ -193,7 +193,9 @@ jobs:
             tests/test_verify_git_stdin.py tests/test_seed_paths_portable.py `
             tests/test_repo_relative_paths_portable.py `
             tests/test_command_windows.py `
-            tests/test_hook_payload_encoding.py `
+            tests/test_hook_payload_encoding.py tests/test_hook_failure_diagnostics.py `
+            tests/test_hot_index_facts.py `
+            tests/test_delivery_evidence.py tests/test_delivery_stats.py tests/test_delivery_surfaces.py `
             tests/test_git_output_utf8.py `
             $privateTests `
             tests/test_installed_wheel_smoke.py

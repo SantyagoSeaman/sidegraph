@@ -17,6 +17,7 @@ class FrozenModel(BaseModel):
 
 
 class WarningCode(StrEnum):
+    GENERATED_PROJECTION = "generated-projection"
     MISSING_CHOICE = "missing-choice"
     MISSING_REJECTED = "missing-rejected-alternatives"
     UNRESOLVED_ANCHOR = "unresolved-anchor"
@@ -54,6 +55,9 @@ class WarningCode(StrEnum):
 # cells, and over-claimed even for the one cell it fit, since the skipped-existing branch
 # still runs _apply_doc_bindings and can write binding records).
 WARNING_CONSEQUENCES: Mapping[WarningCode, str] = {
+    WarningCode.GENERATED_PROJECTION: (
+        "generated ADRs are projections of existing memory, not new capture evidence"
+    ),
     WarningCode.MISSING_CHOICE: (
         "the document states no decision; the record would carry only context"
     ),

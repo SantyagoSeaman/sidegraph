@@ -492,6 +492,71 @@ Same contract as `retrieval_events`: gitignored `index.db` only, not dropped by 
 silenced by `SIDEGRAPH_TELEMETRY=off`, and pruned to 30 days at each `SessionStart`
 unconditionally — one sweep covers every journal table. `sidegraph-stats` is its reader.
 
+### Delivery evidence (derived, index-only)
+
+Three optional tables keep distinct units separate:
+
+| Table | Unit |
+|---|---|
+| `delivery_occurrences` | One observed MCP outcome or prepared hook block, with its own random 128-bit id |
+| `delivery_placements` | One record body that survived the final output cut, with type/kind/status as rendered |
+| `delivery_anchor_links` | A file relation for one placement; not a second body or evidence of why it ranked |
+
+Covered surfaces are `get_task_context`, `query_decisions`, found and unknown `drill_down`,
+and delivering PreToolUse read blocks and appended Agent/Task briefs. Two calls at the
+same time remain two occurrences. One body with three anchors is one placement and three
+relations. A pathless fact can have a placement without a relation. A fact printed in two
+file groups has two placements. Hooks and later MCP answers are separate occurrences.
+These are observations at Sidegraph's output boundary, without host receipt acknowledgement.
+
+Outcomes are `records`, `structure`, `valid_empty`, `unresolved`, `error`, or `unknown`.
+Known core errors take precedence, then records, then unknown structure visibility,
+structure, unknown seed-resolution evidence, unresolved seeds/domain, and valid empty. A separate unresolved flag retains
+mixed answers for requested seeds; internal nearest-file seeds do not replace that flag.
+Candidate slugs and omitted-id references are neither bodies nor structure.
+Task-context structure after a hard cut can be unknown. Error coverage starts inside the
+three instrumented cores after a usable Store exists. The neutral `core_error` reason names
+that boundary; it does not classify input-validation failures as internal bugs. Error text
+is never recorded.
+
+For ranker calls, typed record keys define C (attempted across ordinary and nearest passes),
+P (placed before the final hard cap) and E (retained). C = E + (C−P) + (P−E), as disjoint
+sets. Degraded is a subset of E. Repeated attempts count once and any emission wins over a
+prior refusal. Drill-down and hook budget populations are unavailable (`NULL`). Legacy
+`selected` remains decision-only; legacy `emitted`/`dropped_for_budget` include facts and
+keep their existing summed/ID-level semantics. Do not add old and new units together.
+
+Full Store open creates missing optional tables in a separate atomic best-effort mutation.
+Hot hooks never create, repair or refuse an index for missing delivery tables. Each covered
+occurrence adds at most one optional commit after legacy writes, on the same open handle.
+Optional reads, capability checks and writes use zero SQLite lock wait; Store lock acquisition
+is nonblocking. An active unrelated transaction or prior failed legacy hook write skips the
+append. New failure loses optional coverage, never an existing claim/show or the answer.
+No retries or extra index connections are added. Legacy prune commits before optional prune.
+
+Rows retain 30 days, with active caps of 20,000 occurrences, 50,000 placements and 100,000
+relations. An occurrence retains at most 1,024 placements and 4,096 relations; true header
+counts, retained counts and `metadata_omitted` disclose the difference. Whole oldest
+occurrences, including children, are evicted on append as well as SessionStart. One bounded
+`delivery_ledger:v1` meta entry retains recording start and saturated capacity-eviction
+counts, plus the UTC time of the newest capacity-evicted header. It survives canonical
+reload, even when all old occurrences are gone; index recreation resets it. These are
+ledger-lifetime losses, not a per-window completeness rate. Row/field bounds do not promise
+an exact physical SQLite file size; no hot VACUUM or global page limit is used.
+
+The new ledger stores no task/query/prompt, source or response text, free-form intent,
+or hashes of that text. Record ids and repo-relative anchor paths are bounded metadata.
+Identifiers are at most 256 UTF-8 bytes with identifier syntax, paths at most 1,024 bytes,
+and package version at most 64 bytes. Invalid/oversized values become unknown or omitted,
+with a flag, rather than a truncated identity. Host call identity is recorded only when
+actually supplied; recipient of an appended brief is unknown. MCP unknown-domain/error
+rows currently have unknown attribution; other MCP rows reuse legacy session evidence.
+Runtime package version is available; model, plugin ref and runtime commit are not inferred
+from session names, checkout HEAD or a cached launcher. `SIDEGRAPH_TELEMETRY=off` stops new
+rows. Older writers, failed writes, no-memory/losing-claim hooks, cold/refused indexes,
+other tools and transport errors outside these cores are unavailable coverage. There is
+no hook-attempt denominator, global invocation census or evidence of memory being used.
+
 ## Archive segments (`sidegraph-compact`)
 
 Terminal-status records — decisions `superseded`/`rejected`/`deprecated`, domains
@@ -805,3 +870,43 @@ locking Sidegraph implements:
 
 In short: **a same-record dispute across branches is a real git conflict, resolved by editing
 the file it landed in — not a database-level race the store arbitrates for you.**
+
+## Scoped drift checks
+
+Optional `.sidegraph/verifications/<generated-id>.json` files are immutable auxiliary
+inspection history. Version 1 stores the decision id, aware UTC check time, full checked
+revision, agent provenance, redacted rationale, exact `required_files`, inspected
+`checked_files` (path, Git blob id and regular-file mode), and a SHA-256 `subject_digest`.
+No source text, engine mapping or binding status is stored. The versioned digest enumerates
+immutable Decision/Provenance fields and durable leaf descriptors (`name`, `file_path`);
+ratification/lifecycle fields and volatile mappings are excluded.
+
+Select the highest generated check id for each decision before validation. This is a
+simple deterministic cross-branch ordering rule, not causal ordering or truth authority.
+A bound malformed latest file cannot expose an older clearing check. Unparseable/unbound
+files cannot be used to clear an advisory and are strict-lint findings. Wrong assertions
+stay history; correct a wrong decision through genuine supersession, not deletion or
+capture-stamp rewriting. Terminal or archived subjects remain valid history references.
+
+These files are outside the shared canonical digest/index record tables. They require no
+format/minimum-version bump. Older writers ignore and preserve them; old verifiers do
+not validate them and old drift readers still use capture commits. Use the newer verifier
+for their schema/reference checks and `--against` write-once byte checks (even formatting
+an existing file is illegal). Commit the files so other checkouts receive them. Symlinked
+auxiliary directories are refused; no directory is required until the first check.
+
+Normal drift refresh reads auxiliary history directly, then applies it after successful
+capture batches. Optional comparison failure retains known capture flags; it cannot turn
+unknown capture history into a clean verdict. The existing retain-on-failure cache limit
+for already-unavailable capture commits is unchanged. The file-level signal remains
+conservative: a changed file does not prove a decision invalid, and an unchanged snapshot
+does not prove a semantic assertion correct.
+
+A transient optional comparison failure can temporarily remove a previously cached
+check-derived dependency-only warning when capture itself is clean. Doctor reports the
+scoped check as skipped, and the next successful refresh restores the warning. This
+release preserves capture flags on optional failure; it does not add a separate
+unknown-check retention ledger. Capture changes outside inspected coverage are retained,
+including non-regular anchor paths; a partial check cannot clear those capture warnings.
+Unpublished `.tmp` crash debris is not inspection history and is excluded from the
+uncommitted-store recommendation; inspect it locally rather than committing it.

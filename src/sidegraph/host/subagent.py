@@ -22,6 +22,7 @@ import os
 import sys
 
 from ..hot_index import HotIndex
+from .diagnostics import HookDiagnostics
 from .hooks import STANDING_SEARCH_INSTRUCTION, _read_payload, refuse_arguments
 
 _EVENT = "SubagentStart"
@@ -46,40 +47,58 @@ def render_brief(records: int, files: int, mistakes: int) -> str:
     )
 
 
-def _answer() -> dict:
+def _answer(diagnostics: HookDiagnostics | None = None) -> dict:
     """The hook's output: the brief, or ``{}`` where there is nothing to ask about."""
-    payload = _read_payload()
-    if not isinstance(payload, dict):
-        return {}
-    # A payload that names another event means a mis-wired entry; empty stdin is ``{}`` and
-    # names none, so it is not refused.
-    if payload.get("hook_event_name", _EVENT) != _EVENT:
-        return {}
-    if os.environ.get("SIDEGRAPH_SUBAGENT_BRIEF") == "off":
-        return {}
-
-    from ..config import resolve_store_location
-
-    # warn_on_create=False: a spawn never creates a store, so the notice would announce
-    # something that is not going to happen.
-    location = resolve_store_location(
-        root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
-    )
-    index = HotIndex.open(location.path)
-    if index is None:
-        return {}
+    stage = "payload"
     try:
-        records, files, mistakes = index.memory_counts()
-    finally:
-        index.close()
-    if not records:
-        return {}
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": _EVENT,
-            "additionalContext": render_brief(records, files, mistakes),
+        if os.environ.get("SIDEGRAPH_SUBAGENT_BRIEF") == "off":
+            return {}
+        payload = _read_payload()
+        if not isinstance(payload, dict):
+            return {}
+        # A payload that names another event means a mis-wired entry; empty stdin is ``{}`` and
+        # names none, so it is not refused.
+        if payload.get("hook_event_name", _EVENT) != _EVENT:
+            return {}
+
+        from ..config import resolve_store_location
+
+        # warn_on_create=False: a spawn never creates a store, so the notice would announce
+        # something that is not going to happen.
+        stage = "store"
+        location = resolve_store_location(
+            root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
+        )
+        stage = "index"
+        index = HotIndex.open(
+            location.path,
+            on_error=(lambda error: diagnostics.report("index", error)) if diagnostics else None,
+        )
+        if index is None:
+            return {}
+        stage = "brief"
+        try:
+            records, files, mistakes = index.memory_counts()
+        except Exception as error:
+            if diagnostics is not None:
+                diagnostics.report(stage, error)
+            raise
+        finally:
+            stage = "cleanup"
+            index.close()
+        if not records:
+            return {}
+        stage = "brief"
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": _EVENT,
+                "additionalContext": render_brief(records, files, mistakes),
+            }
         }
-    }
+    except Exception as error:
+        if diagnostics is not None:
+            diagnostics.report(stage, error)
+        raise
 
 
 def subagent_start() -> None:
@@ -98,8 +117,9 @@ def subagent_start() -> None:
         refuse_arguments(
             "sidegraph-subagent-start", "Prints the memory brief for a starting subagent."
         )
+    diagnostics = HookDiagnostics("SubagentStart")
     try:
-        answer = _answer()
+        answer = _answer(diagnostics)
     except Exception:
         answer = {}
     print(json.dumps(answer))

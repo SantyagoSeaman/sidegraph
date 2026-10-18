@@ -23,6 +23,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, computed_field
 
+from .adr_identity import generated_projection
 from .anchoring import resolve_and_bind
 from .capture import (
     AutoEligibility,
@@ -308,6 +309,7 @@ class DocImportReport(BaseModel):
     imported: int = 0
     superseded: int = 0
     skipped_existing: int = 0
+    skipped_generated_adr: int = 0  # projections are not fresh capture evidence
     skipped_unanchorable: int = 0
     skipped_not_decision: int = 0
     skipped_superseded_frontmatter: int = 0
@@ -905,6 +907,8 @@ def _parse_decision_docs_with_reason(
     :func:`_truncate_section`) — the caller (``import_docs``/the CLI's ``--section-limit``)
     controls it; this function trusts whatever it's given.
     """
+    if generated_projection(path_text):
+        return [], "generated-adr"
     body, fm_status = _strip_frontmatter(path_text)
     fm_type = _frontmatter_type(path_text)
     lines = body.split("\n")
@@ -1905,7 +1909,9 @@ def import_docs(
             title_pattern=active_profile.title_pattern,
         )
         if not docs:
-            if reason == "template":
+            if reason == "generated-adr":
+                report.skipped_generated_adr += 1
+            elif reason == "template":
                 report.skipped_template += 1
             elif reason == "unparseable":
                 report.skipped_unparseable += 1

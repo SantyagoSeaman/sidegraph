@@ -83,6 +83,7 @@ class Plan:
     entries: list[tuple[str, list[Nearby], frozenset[str]]] = field(default_factory=list)
     more: int = 0  # seeds past the third that would have had a sentence
     files: list[str] = field(default_factory=list)  # the files the sentences name, once each
+    floor_paths: frozenset[str] = frozenset()
 
     @property
     def sentences(self) -> list[str]:
@@ -96,7 +97,12 @@ class Plan:
         them from the text, so the count there can only be a floor."""
         gone = set(shown)
         out = [
-            _sentence(path, near, bound - gone, at_least=at_least and bool(bound & gone))
+            _sentence(
+                path,
+                near,
+                bound - gone,
+                at_least=path in self.floor_paths or (at_least and bool(bound & gone)),
+            )
             for path, near, bound in self.entries
         ]
         return [line for line in out if line]
@@ -265,23 +271,25 @@ def _sentence(
     lead = (
         f"`{path}` has {'at least ' if at_least else ''}{len(bound)} more record(s) bound to it "
         "through anchors the graph "
-        f'cannot resolve: retrieve_decisions(files=["{path}"]) lists them.'
+        f'cannot resolve: retrieve_decisions(files=["{path}"]) lists decisions; '
+        f'list_facts(files=["{path}"]) lists facts.'
     )
     return f"{lead} Nearest anchored: {named}." if near else lead
 
 
 def _covered(store: Store, held: frozenset[str], shown_ids: Iterable[str]) -> set[str]:
     """The files the shown records already anchor: for each open record among ``shown_ids``,
-    the file of every entity it is bound to through a live or degraded binding. Reads a handful
-    of records, where :func:`anchored_files` reads the store."""
+    the file of every declared entity. Graph-held files require a live/degraded binding;
+    missing files may already have been delivered as unverified file applicability. Reads
+    a handful of records, where :func:`anchored_files` reads the store."""
     out: set[str] = set()
     for record_id in dict.fromkeys(shown_ids):
         if not _is_open(store, record_id):
             continue
         for binding in store.bindings_for_record(record_id):
-            entity = store.get_entity(binding.entity_id) if binding.status in _REACHED else None
+            entity = store.get_entity(binding.entity_id)
             path = entity.descriptor.file_path if entity and entity.descriptor else None
-            if path is not None and path in held:
+            if path is not None and (path not in held or binding.status in _REACHED):
                 out.add(path)
     return out
 
@@ -303,9 +311,9 @@ def plan(
     nothing to say and is not counted."""
     held = reader.source_files()
     paths = _file_paths(seeds, ladder, held)
+    covered = _covered(store, held, shown_ids) if paths else set()
     if paths:
-        covered = _covered(store, held, shown_ids)
-        paths = [p for p in paths if p not in covered]
+        paths = [p for p in paths if p not in covered or p not in held]
     if not paths:
         return Plan()
     anchored = anchored_files(store, held)
@@ -314,7 +322,7 @@ def plan(
         return Plan()
     said: list[tuple[str, list[Nearby], frozenset[str]]] = []
     for path in paths:
-        if path in anchored:
+        if path in anchored or (path in covered and path not in bound):
             continue
         near = nearest(path, anchored, reader, in_graph=path in held) if anchored else []
         if near or path in bound:
@@ -322,6 +330,9 @@ def plan(
     named = said[:_SENTENCES]
     return Plan(
         entries=named,
+        # A main record subtracted before the hard cap might be cut later. A remainder
+        # is therefore a floor, as for subtraction from the second retrieval below.
+        floor_paths=frozenset(covered - held),
         more=len(said) - len(named),
         files=list(dict.fromkeys(n.path for _path, near, _b in named for n in near)),
     )
@@ -354,7 +365,11 @@ def records_block(ctx: TaskContext, *, guarded: bool) -> tuple[str, bool]:
 
 def combine(first: TaskContext, second: TaskContext) -> TaskContext:
     """``first`` with ``second``'s shown ids appended and its render counters added, for one
-    telemetry row that accounts for both retrievals of a call (spec D12)."""
+    telemetry row that accounts for both retrievals of a call (spec D12).
+
+    ``dataclasses.replace`` preserves the first context's original requested-seed evidence;
+    the internal nearest-file lookup contributes record populations, not new caller seeds.
+    """
     return dataclasses.replace(
         first,
         shown_ids=[*first.shown_ids, *second.shown_ids],
@@ -362,6 +377,14 @@ def combine(first: TaskContext, second: TaskContext) -> TaskContext:
             key: [*first.line_ids.get(key, []), *second.line_ids.get(key, [])]
             for key in (*first.line_ids, *(k for k in second.line_ids if k not in first.line_ids))
         },
+        delivery_atoms={
+            key: [*first.delivery_atoms.get(key, []), *second.delivery_atoms.get(key, [])]
+            for key in (*first.delivery_atoms, *second.delivery_atoms)
+        },
+        delivery_placements=[*first.delivery_placements, *second.delivery_placements],
+        delivery_considered=first.delivery_considered | second.delivery_considered,
+        delivery_placed=first.delivery_placed | second.delivery_placed,
+        delivery_degraded=first.delivery_degraded | second.delivery_degraded,
         selected=first.selected + second.selected,
         emitted=first.emitted + second.emitted,
         degraded=first.degraded + second.degraded,

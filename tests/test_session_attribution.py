@@ -624,4 +624,4 @@ def test_t15_the_console_script_initializes_and_lists_the_tools(tmp_path):
         async with fastmcp.Client(transport) as client:
             return len(await client.list_tools())
 
-    assert asyncio.run(run()) == 24
+    assert asyncio.run(run()) == 25

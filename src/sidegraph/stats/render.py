@@ -344,6 +344,37 @@ def _anchors(report: StatsReport) -> list[str]:
     return [line]
 
 
+def _delivery_evidence(report: StatsReport) -> list[str]:
+    evidence = report.delivery_evidence
+    if not report.telemetry_enabled:
+        return ["recording off; delivery figures withheld"]
+    if evidence is None or not evidence.available:
+        return ["not recorded; coverage unavailable for this index"]
+    lines = ["observed MCP outcomes and prepared hook blocks; separate from legacy activation"]
+    for label, group in (("MCP", evidence.mcp), ("hooks", evidence.hooks)):
+        if group is not None:
+            lines.append(
+                f"{label}: {_n(group.occurrences)} occurrences; "
+                f"{_n(group.reported_placements)} record placements; "
+                f"{_n(group.reported_anchor_links)} anchor relations"
+            )
+            if group.metadata_omitted_occurrences:
+                lines.append(
+                    f"{label}: metadata bounded in "
+                    f"{_n(group.metadata_omitted_occurrences)} occurrences; "
+                    "retained rows are a subset"
+                )
+    if evidence.capacity_evicted_occurrences:
+        lines.append(
+            f"capacity: {_n(evidence.capacity_evicted_occurrences)} occurrences evicted "
+            "since this index began recording; not a window loss rate"
+        )
+    lines.append(
+        "older writers, failed writes and host receipt unavailable; no hook call denominator"
+    )
+    return lines
+
+
 def render_text(report: StatsReport) -> str:
     """The one screen a person reads, newline-terminated so a caller writes it as-is.
 
@@ -353,6 +384,8 @@ def render_text(report: StatsReport) -> str:
     lines = [_header(report), ""]
     lines += _block("HEALTH", _health(report))
     lines += _block("ACTIVATION", _activation(report))
+    if report.delivery_evidence is not None:
+        lines += _block("DELIVERY", _delivery_evidence(report))
     lines += _block("REACH", _reach(report))
     lines.append("")
     lines += _block("MEMORY", _memory(report))
@@ -379,6 +412,7 @@ def render_json(report: StatsReport) -> str:
     if not report.telemetry_enabled:
         # Everything the journal supplied. Store-derived figures stand.
         data["activation"] = None
+        data["delivery_evidence"] = None
         for key in ("files_touched", "files_touched_with_memory", "busiest_seeds"):
             data["reach"][key] = None
         if data["memory"] is not None:

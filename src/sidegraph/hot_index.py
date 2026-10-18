@@ -26,14 +26,16 @@ import sqlite3
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 from urllib.parse import quote
 
+from . import delivery as delivery_ledger
 from .store_layout import (
     INDEX_JOURNAL_PRAGMA,
     INDEX_STAMPS,
     MISTAKE_KINDS,
     VOLATILE_STALE_KEY,
+    StoreRequirementError,
     check_store_requirement,
     proposal_surfaces,
     symlinked_internals,
@@ -93,11 +95,11 @@ def _is_live(record: dict, now: datetime) -> bool:
 
 
 class Record(NamedTuple):
-    """One decision as the hook shows it: the raw row, and whether it is a proposal (it is
-    marked ``[unratified]`` where it surfaces)."""
+    """A raw decision or fact and its trust marker; ``decision`` is the legacy payload name."""
 
     decision: dict
     proposed: bool
+    record_type: Literal["decision", "fact"] = "decision"
 
 
 class Shown(NamedTuple):
@@ -117,9 +119,15 @@ class HotIndex:
         # busy timeout: a rebuild or another writer holds the lock). The hook reads it to stop
         # asking for more writes, since each one would wait out the timeout again.
         self.write_failed = False
+        self._delivery_available: bool | None = None
 
     @classmethod
-    def open(cls, store_path: str | os.PathLike[str]) -> HotIndex | None:
+    def open(
+        cls,
+        store_path: str | os.PathLike[str],
+        *,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> HotIndex | None:
         """The handle for the store at ``store_path``, or ``None`` when ``Store`` would have
         healed something first: the index is missing, a store-owned entry is a symlink (a
         symlinked ``index.db`` would send writes elsewhere), ``schema_version`` is outside
@@ -153,12 +161,22 @@ class HotIndex:
             # change a database another tool left in WAL). A rollback mode is per connection.
             # A pragma that cannot run (another connection holds the file in WAL) is not a
             # reason to refuse: the handle works in whatever mode the file is in.
-            with contextlib.suppress(sqlite3.OperationalError):
+            try:
                 conn.execute(INDEX_JOURNAL_PRAGMA)
+            except sqlite3.OperationalError as error:
+                if on_error is not None:
+                    with contextlib.suppress(Exception):
+                        on_error(error)
             return cls(conn)
-        except Exception:
+        except StoreRequirementError:
+            return None
+        except Exception as error:
+            if on_error is not None:
+                with contextlib.suppress(Exception):
+                    on_error(error)
             if conn is not None:
-                conn.close()
+                with contextlib.suppress(Exception):
+                    conn.close()
             return None
 
     def close(self) -> None:
@@ -169,6 +187,33 @@ class HotIndex:
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute(GET_META_SQL, (key,)).fetchone()
         return row[0] if row else None
+
+    def record_delivery(
+        self,
+        delivery: delivery_ledger.Delivery,
+        *,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> bool:
+        """One optional append after legacy claims; never changes their failure state."""
+        if self.write_failed or self._conn.in_transaction or self._delivery_available is False:
+            return False
+        try:
+            with delivery_ledger.no_wait(self._conn):
+                if self._delivery_available is not True and not delivery_ledger.available(
+                    self._conn
+                ):
+                    self._delivery_available = False
+                    return False
+                with self._conn:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    delivery_ledger.append(self._conn, delivery)
+            self._delivery_available = True
+            return True
+        except Exception as error:
+            if on_error is not None:
+                with contextlib.suppress(Exception):
+                    on_error(error)
+            return False
 
     def _in_transaction[T](self, work: Callable[[sqlite3.Connection], T]) -> T:
         """Run ``work`` in one transaction. An ``OperationalError`` (the busy timeout) marks the
@@ -199,7 +244,8 @@ class HotIndex:
 
         When the claim inserted and ``shown`` is given, the records it printed are journaled in
         the SAME transaction (one ``inject`` row each, and one ``retrieval_shows`` bump each):
-        a claim and its showing commit or vanish together, with no extra commit on the Read path.
+        a claim and its legacy showing commit or vanish together. The optional delivery
+        ledger appends in a separate final transaction after output assembly.
         # see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2)
         # and design/superpowers/specs/2026-10-11-hook-showings-journal-design.md (D3)"""
         params = (prefix + rel_path, value, prefix, prefix + _KEY_RANGE_END, cap)
@@ -346,34 +392,73 @@ class HotIndex:
             return {}
         return {path: ids for path, ids in self.anchored_files().items() if path in wanted}
 
-    def records_for(self, entity_ids: Sequence[str]) -> list[Record]:
-        """The live decisions bound to ``entity_ids``, in the order a reader should meet them:
-        accepted mistakes, accepted rest, proposed last, newest first within each bucket.
+    def records_for(
+        self,
+        entity_ids: Sequence[str],
+        *,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> list[Record]:
+        """Live bound records: accepted mistakes, other decisions, facts, then proposed
+        decisions and facts. Decision order is unchanged; fact ties use ascending ids.
 
-        A decision counts once however many of the entities it is bound to. A proposal appears
-        only inside its surfacing window (``store_layout.proposal_surfaces``) and is marked
-        ``proposed``; a superseded, rejected or expired decision, and one reached only through
-        an orphaned binding, does not appear. A row that fails to parse is skipped on its own.
-        This is the order of the model layer's per-file list, which differs from
-        ``get_task_context(files=[f])`` (that one orders per entity).
-        Withhold selection after canonical reload until sync certifies binding statuses.
-        # see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1)
+        Only certified live/degraded bindings count. Deduplicate ids within this file's
+        candidate list, never across files. Each record table fails independently, and
+        operational SQL errors use the protected diagnostic callback.
         """
         now = datetime.now(UTC)
         mistakes: list[tuple[dict, datetime]] = []
         rest: list[tuple[dict, datetime]] = []
+        facts: list[tuple[dict, datetime]] = []
         seen: set[str] = set()
+
+        def report(error: Exception) -> None:
+            if on_error is not None:
+                with contextlib.suppress(Exception):
+                    on_error(error)
+
         for entity_id in entity_ids:
             try:
-                bound = self._decisions_bound_to(entity_id, now)
-            except Exception:
+                rows = self._conn.execute(
+                    "SELECT data FROM anchor_bindings WHERE entity_id = ? "
+                    "AND NOT EXISTS (SELECT 1 FROM meta WHERE key = ? AND value = '1')",
+                    (entity_id, VOLATILE_STALE_KEY),
+                ).fetchall()
+            except sqlite3.Error as error:
+                report(error)
                 continue
-            for decision, valid_from in bound:
-                if decision["id"] in seen:
+            record_ids: list[str] = []
+            for (data,) in rows:
+                try:
+                    binding = json.loads(data)
+                    if binding.get("status") in ("live", "degraded") and isinstance(
+                        binding["record_id"], str
+                    ):
+                        record_ids.append(binding["record_id"])
+                except (ValueError, TypeError, KeyError, AttributeError):
                     continue
-                seen.add(decision["id"])
-                bucket = mistakes if decision["kind"] in MISTAKE_KINDS else rest
-                bucket.append((decision, valid_from))
+            for is_fact in (False, True):
+                try:
+                    bound = (
+                        self._facts_for_bindings(record_ids)
+                        if is_fact
+                        else self._decisions_for_bindings(record_ids, now)
+                    )
+                except sqlite3.Error as error:
+                    report(error)
+                    continue
+                except Exception as error:
+                    report(error)
+                    continue
+                for record, valid_from in bound:
+                    if record["id"] in seen:
+                        continue
+                    seen.add(record["id"])
+                    bucket = (
+                        facts
+                        if is_fact
+                        else (mistakes if record["kind"] in MISTAKE_KINDS else rest)
+                    )
+                    bucket.append((record, valid_from))
 
         def newest_first(items: list[tuple[dict, datetime]]) -> list[tuple[dict, datetime]]:
             return sorted(items, key=lambda item: item[1], reverse=True)
@@ -384,32 +469,71 @@ class HotIndex:
         def proposed(items: list[tuple[dict, datetime]]) -> list[tuple[dict, datetime]]:
             return [i for i in items if i[0]["status"] == _PROPOSED and proposal_surfaces(i[1])]
 
+        # Stable sorting keeps existing decision ties unchanged and makes fact ties explicit.
+        facts.sort(key=lambda item: item[0]["id"])
         ordered = newest_first(accepted(mistakes)) + newest_first(accepted(rest))
         proposals = newest_first([*proposed(mistakes), *proposed(rest)])
-        return [Record(d, False) for d, _ in ordered] + [Record(d, True) for d, _ in proposals]
+        return (
+            [Record(d, False) for d, _ in ordered]
+            + [Record(f, False, "fact") for f, _ in newest_first(accepted(facts))]
+            + [Record(d, True) for d, _ in proposals]
+            + [Record(f, True, "fact") for f, _ in newest_first(proposed(facts))]
+        )
 
-    def _decisions_bound_to(self, entity_id: str, now: datetime) -> list[tuple[dict, datetime]]:
-        """Live decisions bound to ``entity_id`` by a live or degraded binding, each with its
-        parsed ``valid_from``. Computed-state parity: ``Store.valid_decisions_for_entity``.
-        Unlike that Store helper, reset statuses after reload select nothing until sync;
-        the status rows and their certification flag share one statement snapshot.
-        """
+    def _decisions_for_bindings(
+        self, record_ids: Sequence[str], now: datetime
+    ) -> list[tuple[dict, datetime]]:
+        """Existing decision eligibility over one entity's already guarded bindings."""
         out: list[tuple[dict, datetime]] = []
-        bindings = self._conn.execute(
-            "SELECT data FROM anchor_bindings WHERE entity_id = ? "
-            "AND NOT EXISTS (SELECT 1 FROM meta WHERE key = ? AND value = '1')",
-            (entity_id, VOLATILE_STALE_KEY),
-        ).fetchall()
-        for (bdata,) in bindings:
-            binding = json.loads(bdata)
-            if binding.get("status") not in ("live", "degraded"):
-                continue
+        for record_id in record_ids:
             row = self._conn.execute(
-                "SELECT data FROM decisions WHERE id = ?", (binding["record_id"],)
+                "SELECT data FROM decisions WHERE id = ?", (record_id,)
             ).fetchone()
             if row is None:
                 continue
-            decision = json.loads(row[0])
-            if _is_live(decision, now):
-                out.append((decision, datetime.fromisoformat(decision["valid_from"])))
+            try:
+                decision = json.loads(row[0])
+                if (
+                    any(
+                        not isinstance(decision[key], str)
+                        for key in ("id", "kind", "title", "choice")
+                    )
+                    or decision["id"] != record_id
+                ):
+                    continue
+                valid_from = datetime.fromisoformat(decision["valid_from"])
+                if valid_from.utcoffset() is not None and _is_live(decision, now):
+                    out.append((decision, valid_from))
+            except (ValueError, TypeError, KeyError, AttributeError):
+                continue
+        return out
+
+    def _facts_for_bindings(self, record_ids: Sequence[str]) -> list[tuple[dict, datetime]]:
+        """Raw equivalent of retrieval's composed live-fact oracle; skip damaged rows alone.
+
+        Unlike decisions, even a future valid_to closes a fact. Accepted future valid_from
+        remains eligible, as in explicit retrieval. Proposal windows use the shared rule.
+        """
+        out: list[tuple[dict, datetime]] = []
+        for record_id in record_ids:
+            row = self._conn.execute("SELECT data FROM facts WHERE id = ?", (record_id,)).fetchone()
+            if row is None:
+                continue
+            try:
+                fact = json.loads(row[0])
+                if fact["id"] != record_id or fact.get("valid_to") is not None:
+                    continue
+                if fact["status"] not in (_ACCEPTED, _PROPOSED):
+                    continue
+                if any(
+                    not isinstance(fact[key], str) or not fact[key].strip()
+                    for key in ("statement", "source")
+                ):
+                    continue
+                valid_from = datetime.fromisoformat(fact["valid_from"])
+                if valid_from.utcoffset() is None:
+                    continue
+                out.append((fact, valid_from))
+            except (ValueError, TypeError, KeyError, AttributeError):
+                continue
         return out

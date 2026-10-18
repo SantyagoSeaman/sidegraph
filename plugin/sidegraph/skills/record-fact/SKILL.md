@@ -124,11 +124,12 @@ it never adds to it.
   drop it (`ratify(drop=[...])`) and re-propose corrected. Don't leave a fact effectively
   anchorless because of a silent skip.
 - **Check `anchors_orphaned` too — same discipline, more common failure.** An entry means
-  the name is **not in the graph at all**, so the leaf was bound `orphaned` and retrieval and
-  `drill_down` both skip it: the fact has no delivery path through that anchor and will never
-  surface. (The PreToolUse hook hands an agent decisions only, so a fact never arrives through it,
-  whatever its anchors.) Repair with `add_anchors` (bindings-only, no duplicate
-  record, and it works on a proposed record without touching its status). **Read the
+  the name has no unique graph match, so the leaf was bound `orphaned`. Ordinary graph-based
+  retrieval, `drill_down` and automatic point-of-read delivery skip that binding. When an
+  available graph lacks the declared file, an exact file request can still return eligible
+  facts as `[file-bound]`, with unverified symbol anchors. This does not heal the binding.
+  Repair with `add_anchors` (bindings-only, no duplicate record, and it works on a proposed
+  record without touching its status). **Read the
   `reason` first:** `file-not-in-graph` usually means a stale graph (run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set,
   and re-anchor — the name was probably fine), `name-not-in-file` means the name is wrong
   (`find_entity`/`query_structure` will say what is really there), `no-file-path` means pass

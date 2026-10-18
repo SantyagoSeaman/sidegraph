@@ -35,6 +35,7 @@ LOCAL_WRITE_SYNC = {
     "drill_down",
 }
 LOCAL_WRITE = {
+    "record_drift_check",
     "add_decision",
     "supersede_decision",
     "add_fact",
@@ -83,4 +84,4 @@ def test_t1_the_three_sets_cover_every_registered_tool():
     assert not (READ_ONLY & LOCAL_WRITE_SYNC or READ_ONLY & LOCAL_WRITE)
     assert not LOCAL_WRITE_SYNC & LOCAL_WRITE
     assert registered == READ_ONLY | LOCAL_WRITE_SYNC | LOCAL_WRITE
-    assert len(registered) == 24
+    assert len(registered) == 25

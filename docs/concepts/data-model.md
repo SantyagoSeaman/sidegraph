@@ -286,3 +286,41 @@ The `Initiative` model below is a separate low-level persisted record supported 
 | `name` | str | The label as written at capture — a branch name or a short phrase. |
 | `description` | str \| `null` | Optional one-liner; usually absent for branch-derived initiatives. |
 | `tags` | list[str] | Stored strings on the low-level record; `upsert_initiative` does not slugify them or create `tag:*` entities. |
+
+## `DriftCheck` — attributed auxiliary inspection
+
+An optional immutable file under `.sidegraph/verifications/` records an explicit agent
+judgment that an existing decision still holds. It preserves the decision and original
+capture provenance; it never ratifies a proposal or proves semantic truth. It is outside
+the shared canonical digest/index record tables. See
+[scoped checks](../reference/store-format.md#scoped-drift-checks) and
+[`record_drift_check`](../reference/mcp-tools.md#record_drift_check).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | literal `1` | Version of the auxiliary assertion and fixed subject-digest definition; independent of the store format version. |
+| `id` | ULID | Generated check identity, also its immutable filename. Highest generated id is the deterministic per-decision selection rule, not causal ordering. |
+| `decision_id` | str | Existing decision id; terminal or archived decisions remain valid history references. |
+| `checked_at` | aware datetime | UTC time at which the assertion was recorded. |
+| `checked_commit` | str | Full inspected Git HEAD object id, retained as provenance even after squash/clone removes the object locally. |
+| `provenance` | `Provenance` | Source `agent`, commit equals checked revision; author/session currently unknown. |
+| `rationale` | str | Nonblank explanation, redacted before validation; at most 4000 characters. |
+| `required_files` | list[str] | Exact current required anchor-file set, separate from optional inspected dependencies. |
+| `checked_files` | list[`CheckedCodeFile`] | Explicit inspected regular-file snapshots, covering every required file; 1–256 unique safe paths. |
+| `subject_digest` | str | SHA-256 of fixed immutable decision/provenance fields and durable leaf descriptors; excludes lifecycle and volatile mapping/status fields. |
+
+Changed inspected files/modes or required scope re-arm review. A matching snapshot after
+an unrelated commit remains covered. A mistaken semantic assertion cannot be detected
+from these hashes; a genuine successor corrects the decision and preserves the check as
+history. Optional comparison failure has the bounded behavior described in store-format.
+
+## `CheckedCodeFile` — inspected Git tree entry
+
+Nested in `DriftCheck`; this stores repository metadata, never source bodies or engine
+mappings. The total checked-path budget is 16384 UTF-8 bytes.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | str | Safe repository-relative forward-slash path, at most 1024 UTF-8 bytes. |
+| `blob_id` | str | Full Git content address of the inspected file. |
+| `mode` | `100644` \| `100755` | Regular-file Git mode; mode changes participate in applicability. |

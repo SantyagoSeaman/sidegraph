@@ -244,14 +244,15 @@ raises costs only its own line.
 7. **Code-drift line.** The hook refreshes the code-drift cache
    (`sync.refresh_code_drift_cache` — one bounded git scan: which live, commit-stamped
    decisions are anchored to files that changed since their capture commit; the same
-   detection `sidegraph-doctor`'s `code-drift` check runs). The refresh is UNCONDITIONAL —
+   detection `sidegraph-doctor`'s `code-drift` check runs, including applicable scoped
+   checks). The refresh is UNCONDITIONAL —
    it is what keeps the `[drifted]` retrieval markers fresh. When the count is non-zero and
    `$SIDEGRAPH_DRIFT_NUDGE != "off"`, one more line is appended (own `try/except`, same
    never-cost-the-map guard as step 6). Verbatim, with `N` substituted:
 
-   > Sidegraph: N record(s) are anchored to code that changed after their capture —
+   > Sidegraph: N record(s) need content review: code changed or a prior check no longer applies —
    > task-relevant ones carry a [drifted] tag in retrieval; full list: sidegraph-doctor;
-   > supersede any that no longer hold.
+   > record_drift_check if still true, supersede if no longer true.
 
    `N` counts the whole store; the `[drifted]` tags (see
    [`concepts/retrieval.md`](../concepts/retrieval.md)) mark only the records a given
@@ -510,7 +511,7 @@ does not parse or validate is not such a failure: the store opens without it and
 `store-files-skipped` check names it. A lock held by another process (`SQLITE_BUSY` or `SQLITE_LOCKED`) is not a
 broken store: it still prints `{}`.
 
-**Never-crash / silent-degradation contract:** the whole body is wrapped in one `try/except
+**Never-crash / fail-open contract:** the whole body is wrapped in one `try/except
 Exception`. If anything above raises — including inside `top_tier_map` itself — the hook
 prints `{}` and exits normally; the session start is never blocked by a Sidegraph failure. (A
 store that cannot be opened is the one failure that says so instead: see above.) A
@@ -519,6 +520,44 @@ the map still renders from store content alone) rather than tripping the outer c
 status lines (steps 6 to 17) come from one registry run in its own `try/except`, and each
 check inside it has its own guard: a failure there costs only that one line, never the map that
 came before it.
+
+### Failure diagnostics
+
+SessionStart, Stop, PreToolUse and SubagentStart preserve their existing stdout JSON and
+fail-open behavior when an operation fails. Each invocation attempts at most one compact
+ASCII JSON line on the calling process's stderr (at most 256 bytes including the newline):
+
+```json
+{"sidegraph_hook_error":true,"hook":"PreToolUse","stage":"index","exception":"OperationalError"}
+```
+
+The fixed stage labels identify the operation without carrying user data:
+
+| Hook | Stages |
+| --- | --- |
+| SessionStart | startup, launch, payload, store, session, telemetry, graph, sync, cache, render, drift, integrity, cleanup |
+| Stop | startup, payload, store, capture_peek, rearm, transcript, capture, drift, cleanup |
+| PreToolUse | payload, touch, index, delivery, claim, brief_journal, cleanup |
+| SubagentStart | payload, store, index, brief, cleanup |
+
+Inspect the command's captured stderr or the host's debug output when a hook unexpectedly
+returns no context. Whether a host displays stderr for a successful hook depends on that
+host; Sidegraph adds no persistent log or diagnostic-history command. The first caught
+operational failure wins, so this line is a clue to the failed stage, not a complete trace.
+
+The fields contain only the hook name, a fixed stage label and a bounded, sanitized exception
+class. Error messages, tracebacks, payloads, paths, query text, session/agent identifiers and
+source content are excluded. Telemetry opt-out does not hide operational delivery failures.
+A missing/cold index, deliberately unsupported schema or store format, no graph, disabled
+hook, valid empty result and malformed optional TOC cache remain quiet. Actual I/O, decode,
+SQLite lock/timeout and delivery errors are diagnostic, including caught fallbacks that still
+deliver a map, brief or capture nudge. Whole-hook disable flags take precedence.
+
+Diagnostics do not open the index, change SQLite deadlines, retry, or write to stdout or a
+file. An unavailable or replaced stderr descriptor disables reporting. A broken diagnostic
+sink is ignored; it must not change the hook's answer or process exit status. PreToolUse
+keeps an answer already printed if cleanup fails; SubagentStart retains its existing empty
+answer when cleanup fails before the brief can be returned.
 
 ## `sidegraph-stop`
 
@@ -627,9 +666,8 @@ commits outran it). When the refreshed count is non-zero and `$SIDEGRAPH_DRIFT_N
 "off"`, one sentence is appended to the nudge (the combined text stays inside the pinned
 800-character bound, 850 for a re-armed nudge, which carries one more sentence):
 
-> Also: N drifted record(s) — their anchored code changed after capture; if this session's
-> work overtook any of them, supersede_decision it (ids: get_task_context or
-> sidegraph-doctor).
+> Also: N drifted record(s) — changed code or prior check no longer applies; inspect before
+> record_drift_check or supersede_decision (ids: get_task_context or sidegraph-doctor).
 
 A refresh failure omits only this clause, never the nudge; the refresh itself runs even
 under `SIDEGRAPH_DRIFT_NUDGE=off` (it keeps the retrieval markers' cache fresh — the switch
@@ -692,7 +730,7 @@ Code calls `Stop` every time the agent finishes responding; a later one needs th
 (not yet substantial) is never marked, so it's still eligible to nudge later once it becomes
 substantial; marking it early would have permanently suppressed that later nudge.
 
-**Never-crash / silent-degradation contract:** the whole body is wrapped in one `try/except
+**Never-crash / fail-open contract:** the whole body is wrapped in one `try/except
 Exception`; any failure (store unreachable, malformed payload, unreadable transcript, etc.)
 prints `{}` — the stop is allowed rather than the session getting stuck. A store whose
 format marker refuses this version also prints `{}`, before reading the index or transcript.
@@ -710,7 +748,7 @@ its relative paths from it), the session (`transcript_path`, else `session_id` �
 [Which session a hook is in](#which-session-a-hook-is-in)), and `agent_id`, present only when
 the call comes from a subagent.
 
-**What it does.** When an agent is about to read or edit a file that decisions are anchored to,
+**What it does.** When an agent is about to read or edit a file that decisions or facts are anchored to,
 the hook hands it those records, in the same tool call, as a non-blocking `additionalContext`
 block. The agent does not have to fetch them: the earlier form of this hook asked for a second
 step (call `get_task_context`, which for a deferred tool means loading it first), and in the field
@@ -806,19 +844,60 @@ More: get_task_context(files=["src/sidegraph/store.py"]).
 ```
 
 The block shows the top two records, or three when the first two are both mistakes. The order is
-accepted mistakes, then the other accepted records, then proposed ones, newest first within each
-group; a proposed record carries `[unratified]` after its title and only appears inside its
-surfacing window (`SIDEGRAPH_UNRATIFIED=off` hides proposals, see
-[Retrieval in sessions](../guides/retrieval-in-sessions.md)). Superseded, rejected and expired
-records, and records reached only through an orphaned binding, never appear. The title and the
-first sentence (up to the first `. `, `! ` or `? `) are clipped at a word boundary with `…`. The
-guard line comes once, first, and `More:` appears only when records were left out. That order is
-this hook's own and differs from `get_task_context(files=[f])`, which orders per entity: the
-`More:` line promises the remaining records, not the same sequence. A record anchored to several
-files can reach one agent more than once, once per file.
+accepted mistakes, other accepted decisions, accepted facts, proposed decisions, then proposed
+facts. Decisions keep their existing newest-first order; facts are newest first with ascending
+ids for ties. Facts count as one record against the same caps and are never mistakes. A proposed
+record carries `[unratified]` and only appears inside its surfacing window
+(`SIDEGRAPH_UNRATIFIED=off` hides proposals, see
+[Retrieval in sessions](../guides/retrieval-in-sessions.md)).
+
+Decision titles and first choice sentences (up to the first `. `, `! ` or `? `) keep their
+word-boundary clips. Facts use a distinct line:
+
+```text
+- [fact] <complete statement> — Source: <complete source> (id <ULID>)
+```
+
+For a proposal, `[unratified]` follows `[fact]`. Fact whitespace is normalized; statement,
+source and id are otherwise kept whole. A fact line longer than **512 characters**, including
+its labels, separators and id, is omitted before file selection and record caps. A later shorter
+fact may fill the slot. An oversize-only file claims nothing and spends no file quota. The local
+shown/total counts and `More:` concern only renderable candidates; they do not count facts
+withheld by this size rule. To retrieve full facts, including omitted ids, use
+`list_facts(files=["path"])` within its normal listing budget, or `list_facts(ids=["id"])`
+when the id is known. `get_task_context` also has text clips and is not a full-fact export.
+
+Standalone and supporting facts need their own live or degraded file binding; a `supports`
+link alone does not inherit a decision's anchor. Binding statuses must be certified by sync.
+Superseded, rejected and expired decisions never appear. Facts must be accepted or a surfaced
+proposal, with no `valid_to` at all; even a future closure excludes a fact. Orphaned or
+uncomputed bindings deliver neither kind. Malformed fact rows are skipped individually;
+a failed fact-table query preserves available decisions and uses the hook's protected diagnostic.
+
+The guard line comes once, first, and `More:` appears only when renderable records were left out.
+This hook's per-file order differs from `get_task_context(files=[f])`, which orders per entity:
+the `More:` line promises more context, not the same sequence. Decisions and facts independently
+anchored to several files can reach one agent once per file. Within one answer, a later
+identical complete record snapshot can use `- [gotcha] See above (id <ULID>)` (or its own kind)
+after the first full line. Proposed facts use `- [fact] [unratified] See above (id <ULID>)`;
+proposed decisions keep `[unratified]` after `See above`. A reference is used only when
+shorter. The file header, record ID, trust marker, selection and journal placement remain.
+Different payloads, even with the same visible gist, stay full. Each delivering invocation
+starts afresh; no state crosses calls or agents. Existing per-file claims still apply.
+Use `get_task_context` for fuller decision context or `list_facts` for whole facts.
+
+**Optional occurrence evidence.** A delivering process may also append one whole
+[delivery occurrence](store-format.md#delivery-evidence-derived-index-only) after its final
+block is assembled, in one separate optional commit. Read and brief claims/legacy shows
+keep their existing transactions. Missing tables, an active transaction or a failed legacy
+write skip this evidence; all optional reads/writes use zero lock wait. A busy run can still
+have prepared a partial block without an occurrence row, so absence is unavailable coverage.
+Several Bash matcher processes are separate delivering invocations; all-claim-losers and
+no-memory hooks are not recorded. The new ledger has no prompt text or document path
+extracted from an Agent brief, no empty/error hook census and no host-receipt claim.
 
 **Delivery is journaled.** The records a claimed file's block prints are written to the index in
-the same transaction as the claim, with no extra commit: one `inject` row per printed record (the
+the same transaction as the claim, with no extra commit for these legacy rows: one `inject` row per printed record (the
 printed top two or three, not every record on the file) and one `retrieval_shows` bump each, so
 `sidegraph-stats` and `sidegraph-doctor` count a record the hook printed as shown. A file whose
 claim loses prints nothing and journals nothing. No journal row or shows bump is written under
@@ -829,8 +908,9 @@ id, so a key on the session alone let the main agent's delivery use up the one e
 needed, and the subagents read anchored files blind. A subagent never receives the `SessionStart`
 map (the [`SubagentStart` brief](#sidegraph-subagent-start) tells it memory exists, and nothing
 more), so its own first read of an anchored file is where memory can reach it with a record. The
-cap of ten files per agent bounds what one agent can be handed (about 3,200 characters at the
-median agent that receives any, 7,700 at the 90th percentile, in the field replay). The bound of
+cap of ten files per agent bounds what one agent can be handed. The earlier decision-only field
+replay measured about 3,200 characters at the median recipient and 7,700 at the 90th percentile;
+those measurements do not estimate output after facts were added. The bound of
 three per call is applied before claiming, from the same list in every process, so the several
 processes Claude Code starts for one Bash line cannot add up past it. `SessionStart` deletes
 `pretool_file:` keys whose claim is older than 30 days, the `Stop` hook's `capture_rearm:` keys
@@ -885,7 +965,7 @@ and stays under the parent's session, so session counts do not change. Recording
 existing, usable index (above): a project without one records nothing. Disable with
 `SIDEGRAPH_TELEMETRY=off`.
 
-**Never-crash / silent-degradation contract:** the whole body is wrapped in one `try/except
+**Never-crash / fail-open contract:** the whole body is wrapped in one `try/except
 Exception`; any failure (malformed stdin, store unreachable, etc.) prints `{}` — the tool call
 is never blocked by a Sidegraph failure.
 
@@ -973,8 +1053,15 @@ whole block. Files are taken in order, whole, and the first one that would pass 
 list. One exception: when only the line cap stops it and a line is left, the file's first record
 fills the last line, so the sixth line is never wasted on a file that missed by one. A file the
 character cap stops is dropped whole. `More:` names exactly the files shown. The lines are the ones
-the Read path prints (`- [kind] title — first sentence of the choice (id …)`, accepted mistakes
-first, a proposal marked `[unratified]`).
+the Read path prints: the existing decision line or a complete `[fact]` statement and source,
+with the same ordering, proposal markers and 512-character fact-line admission rule above.
+The character cap drops a whole file group and stops; later shorter groups are not backfilled.
+Selection and character admission use full-body costs. Only the final rendering compacts
+identical repeated snapshots with the same references as the Read path; saved space never
+admits extra files or records. Each brief starts with a full first copy, independently of the
+parent's deliveries. References retain their file groups and journal placements.
+Only the final groups are journaled. The legacy opening marker still says `Recorded decisions`;
+its exact bytes are retained to recognize a forwarded brief, whose body can now include facts.
 
 **It prints `{}`** when `SIDEGRAPH_AGENT_BRIEF` is `off`, when `prompt` is missing or not a
 string, when the prompt already holds the opening marker line (a brief forwarded from another

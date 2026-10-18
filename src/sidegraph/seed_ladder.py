@@ -100,6 +100,7 @@ class FileSeed:
 
     path: str
     outcome: FileOutcome
+    directory_intent: bool = False
 
 
 @dataclass(frozen=True)
@@ -450,7 +451,9 @@ def _file_seed(seed: Seed, files: _Files, out: _Build) -> str:
         if read.remapped:
             out.notes.append(SeedNote(p, "normalised", (read.shown,)))
         out.unresolved.append(read.shown)
-        out.file_seeds.append(FileSeed(read.shown, "unresolved"))
+        out.file_seeds.append(
+            FileSeed(read.shown, "unresolved", directory_intent=p.strip().endswith(("/", "\\")))
+        )
         # The spelling the answer shows is the key telemetry stores, so it joins the records'
         # descriptor paths; an absolute or nested worktree path would not.
         return read.shown if read.remapped else p

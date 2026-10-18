@@ -403,3 +403,8 @@ drafts. Proposed content stays below accepted memory and may be hidden by regula
   `add_anchors`'s MCP shapes.
 - [`guides/team-workflow.md`](team-workflow.md) — committing `.sidegraph/` as an ordinary
   part of the repo, outside of CI.
+
+Scoped drift checks are committed auxiliary history under `.sidegraph/verifications/`.
+Use the current `sidegraph-verify` for their schema/reference checks and write-once
+`--against` enforcement; older verifiers ignore them. CI should not create semantic
+inspection assertions automatically merely to obtain fewer drift warnings.

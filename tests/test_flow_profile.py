@@ -816,6 +816,7 @@ def test_registry_has_every_shipped_profile():
     # Spec T1: openspec joins the registry (design/superpowers/specs/2026-08-06-openspec-
     # profile-design.md).
     assert set(PROFILES) == {
+        "madr",
         "generic-adr",
         "superpowers",
         "genkovich-sdd",

@@ -29,12 +29,14 @@ still never opens a writable ``Store()``, for the same read-only-over-records re
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import sqlite3
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -162,29 +164,41 @@ def resolved_comment_char(cwd: Path) -> str | None:
     return value
 
 
-def open_index_ro(store_dir: Path) -> sqlite3.Connection | None:
-    """Open ``<store_dir>/index.db`` strictly read-only, URI ``mode=ro&immutable=0``,
-    with :data:`RO_OPEN_TIMEOUT_SECONDS` as the busy-timeout fallback (§0). ``None`` on
-    ANY failure -- a refusing format marker, index absent, ro-open denied, or a writer's lock not
-    released inside the timeout -- so every caller degrades to writing/resolving
-    nothing rather than blocking or raising. Never rebuilds the index; never write-opens
-    the store."""
+def open_index_ro(
+    store_dir: Path,
+    *,
+    on_error: Callable[[Exception], None] | None = None,
+) -> sqlite3.Connection | None:
+    """Open the existing index read-only, never repairing or creating anything.
+
+    Missing index and format refusals are quiet. An optional best-effort callback observes
+    operational errors without changing the default fail-open behavior or short timeout.
+    """
+    conn: sqlite3.Connection | None = None
     try:
         check_store_requirement(Path(store_dir))
-    except (StoreRequirementError, OSError):
-        return None  # a store this version may not read (spec D6), or an unreadable marker
-    index_path = Path(store_dir) / "index.db"
-    uri = f"file:{quote(os.fsencode(str(index_path)))}?mode=ro&immutable=0"
-    try:
+        index_path = Path(store_dir) / "index.db"
+        # stat distinguishes expected absence from denied access before SQLite masks both
+        # as OperationalError. mode=ro still prevents a create if the file disappears.
+        try:
+            index_path.stat()
+        except FileNotFoundError:
+            return None
+        uri = f"file:{quote(os.fsencode(str(index_path)))}?mode=ro&immutable=0"
         conn = sqlite3.connect(uri, uri=True, timeout=RO_OPEN_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
-        # Force the lock check now (connect() itself doesn't touch the file), inside the
-        # timeout window above, rather than deferring it silently to the caller's first
-        # query.
         conn.execute("SELECT 1")
-    except sqlite3.Error:
+        return conn
+    except StoreRequirementError:
         return None
-    return conn
+    except Exception as error:
+        if on_error is not None:
+            with contextlib.suppress(Exception):
+                on_error(error)
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+        return None
 
 
 # ============================================================================

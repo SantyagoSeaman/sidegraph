@@ -207,7 +207,7 @@ def test_copied_wrapper_marker_is_not_trusted():
 def test_registered_tool_partition_is_total_and_identity_bound():
     current = asyncio.run(server.mcp.list_tools())
     classified = {item.name: server._classify_tool(item) for item in current}
-    assert len(classified) == 24
+    assert len(classified) == 25
     assert {name for name, write in classified.items() if write} == server._WRITE_TOOLS
     assert {
         name for name, write in classified.items() if not write

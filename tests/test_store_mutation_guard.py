@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 import sidegraph.store as store_module
+from sidegraph.delivery import Delivery
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -28,6 +29,7 @@ from sidegraph.schema import (
     DecisionStatus,
     Descriptor,
     Domain,
+    DriftCheck,
     Entity,
     Fact,
     Initiative,
@@ -316,6 +318,7 @@ class _FailAfterMarker:
         self._real = real
         self._marker = marker
         self._skip = skip
+        self.fired = False
 
     def execute(self, sql: str, *args: object, **kwargs: object) -> object:
         result = self._real.execute(sql, *args, **kwargs)
@@ -323,6 +326,7 @@ class _FailAfterMarker:
             if self._skip > 0:
                 self._skip -= 1
             else:
+                self.fired = True
                 raise RuntimeError(f"injected failure: {self._marker!r}")
         return result
 
@@ -330,8 +334,10 @@ class _FailAfterMarker:
         return getattr(self._real, name)
 
 
-def _raise_when_sql_contains(store: Store, marker: str, *, skip: int = 0) -> None:
-    store._conn = _FailAfterMarker(store._conn, marker, skip=skip)
+def _raise_when_sql_contains(store: Store, marker: str, *, skip: int = 0) -> _FailAfterMarker:
+    failure = _FailAfterMarker(store._conn, marker, skip=skip)
+    store._conn = failure
+    return failure
 
 
 def _case_add_decision(store: Store) -> tuple[str, object]:
@@ -435,6 +441,12 @@ def _case_record_render_event(store: Store) -> tuple[str, object]:
     )
 
 
+def _case_delivery_write(store: Store) -> tuple[str, object]:
+    return "INSERT INTO delivery_occurrences", lambda: store.record_delivery(
+        Delivery("query_decisions")
+    )
+
+
 def _case_prune_telemetry_events(store: Store) -> tuple[str, object]:
     store.record_touch("case-prune-session", "old.py", "Read")
     store.record_render_event(
@@ -517,11 +529,33 @@ def _case_invalidate_membership(store: Store) -> tuple[str, object]:
     return "INSERT INTO meta", lambda: store._invalidate_membership("sha256:case")
 
 
+def _case_record_drift_check(store: Store) -> tuple[str, object]:
+    decision = store.add_decision(_decision("check mutation rollback"))
+    store.set_meta(
+        "code_drift_cache", '{"head":"h","by_commit":{"capture":["' + decision.id + '"]}}'
+    )
+    check = DriftCheck(
+        schema_version=1,
+        decision_id=decision.id,
+        checked_at=datetime.now(UTC),
+        checked_commit="a" * 40,
+        provenance=Provenance(source="agent", commit="a" * 40),
+        rationale="Synthetic rollback check.",
+        required_files=["code.py"],
+        checked_files=[{"path": "code.py", "blob_id": "b" * 40, "mode": "100644"}],
+        subject_digest="c" * 64,
+    )
+    # Publication precedes the SQL cache prune. Failure rolls SQL back and releases the
+    # reservation; immutable published evidence survives, like other canonical writes.
+    return "INSERT INTO meta", lambda: store.record_drift_check(check)
+
+
 # name -> (store) -> (sql_marker, zero-arg thunk to invoke under the marker patch). Setup
 # (creating any prerequisite decision/entity/domain) always happens BEFORE the caller installs
 # the patch, over the real connection -- only the returned thunk is meant to run under it.
 _ROLLBACK_CASES = {
     "add_decision": _case_add_decision,
+    "record_drift_check": _case_record_drift_check,
     "upsert_entity": _case_upsert_entity,
     "get_or_create_abstract_entity": _case_get_or_create_abstract_entity,
     "get_or_create_entity": _case_get_or_create_entity,
@@ -538,6 +572,7 @@ _ROLLBACK_CASES = {
     "_append_event": _case_append_event,
     "record_retrieval_events": _case_record_retrieval_events,
     "record_render_event": _case_record_render_event,
+    "_delivery_write": _case_delivery_write,
     "prune_telemetry_events": _case_prune_telemetry_events,
     "upsert_initiative": _case_upsert_initiative,
     "compact": _case_compact,
@@ -568,10 +603,20 @@ def test_every_write_method_rolls_back_on_failure(tmp_path, method_name):
             "no rollback case registered in _ROLLBACK_CASES -- add one so it stays covered"
         )
     marker, thunk = case(store)
-    _raise_when_sql_contains(store, marker)
-    with pytest.raises(RuntimeError):
-        thunk()
+    failure = _raise_when_sql_contains(store, marker)
+    if method_name == "_delivery_write":
+        # Optional telemetry reports False instead of propagating the injected error.
+        # The marker ran a real header INSERT first, so empty rows prove rollback.
+        assert thunk() is False
+        assert failure.fired, "a skipped optional write would not exercise rollback"
+        assert store._conn.execute("SELECT COUNT(*) FROM delivery_occurrences").fetchone()[0] == 0
+    else:
+        with pytest.raises(RuntimeError):
+            thunk()
     assert store._conn.in_transaction is False, method_name
+    if method_name == "record_drift_check":
+        assert len(list((store.path / "verifications").glob("*.json"))) == 1
+        assert store.get_meta("code_drift_cache") is not None
 
 
 # -- ratify_domains (D2a): commits per item, not once for the whole batch ---------------------

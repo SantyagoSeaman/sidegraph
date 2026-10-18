@@ -34,7 +34,7 @@ from urllib.parse import quote
 
 from ulid import ULID
 
-from . import domain_snapshot, integrity
+from . import domain_snapshot, drift_checks, integrity
 from .engine.reader import GraphifyReader
 from .githooks import GRAPH_REBUILD
 from .schema import DecisionStatus, Domain, DomainStatus, canonicalize, file_anchor_name
@@ -769,6 +769,9 @@ class DriftEntry(NamedTuple):
     record_path: str
     record_id: str
     files: list[str]
+    check_reason: str | None = None
+    check_id: str | None = None
+    checked_commit: str | None = None
 
 
 class DriftBatch(NamedTuple):
@@ -795,6 +798,126 @@ class CodeDriftScan(NamedTuple):
     repo_root_failed: bool
     head: str | None
     binding_statuses_uncomputed: bool = False
+    check_skipped: bool = False
+
+
+def _apply_drift_checks(
+    batches: list[DriftBatch],
+    by_commit: dict[str, list[tuple[Path, str, set[str]]]],
+    decisions: list[tuple[Path, dict]],
+    bindings: dict[str, list[dict]],
+    entities: list[tuple[Path, dict]],
+    statuses: dict[tuple[str, str], str],
+    store_dir: Path,
+    repo_root: Path,
+    head: str | None,
+    remaining,
+) -> tuple[list[DriftBatch], bool]:
+    """Optional per-record overlay AFTER capture scans; it never fails a capture group."""
+    try:
+        selected = drift_checks.latest_checks(store_dir)
+    except (OSError, ValueError):
+        return batches, True
+    if not selected:
+        return batches, False
+    records = {raw["id"]: raw for _, raw in decisions if isinstance(raw.get("id"), str)}
+    raw_entities = {
+        raw["entity_id"]: raw for _, raw in entities if isinstance(raw.get("entity_id"), str)
+    }
+    eligible = {
+        rid: path
+        for batch in batches
+        if not batch.failed
+        for path, rid, _ in by_commit[batch.commit]
+    }
+    old_entries = {entry.record_id: entry for batch in batches for entry in batch.entries}
+    updates: dict[str, DriftEntry | None] = {}
+    pending = {}
+    union: set[str] = set()
+    for rid in sorted(eligible.keys() & selected.keys()):
+        capsule = selected[rid]
+        try:
+            check = capsule.validated()
+            leaves, candidates = drift_checks.scope_leaves(
+                rid, bindings.get(rid, []), raw_entities, statuses
+            )
+            subject = drift_checks.subject_digest(records[rid], leaves)
+        except (ValueError, TypeError, RecursionError):
+            if rid in old_entries:
+                updates[rid] = old_entries[rid]._replace(
+                    check_reason="latest scoped check is invalid; capture advisory retained",
+                    check_id=capsule.path.stem,
+                )
+            continue  # strict snapshot lint reports the malformed capsule/record
+        if subject != check.subject_digest:
+            updates[rid] = DriftEntry(
+                str(eligible[rid]),
+                rid,
+                sorted(candidates | set(check.required_files)),
+                "checked subject or anchor scope changed",
+                check.id,
+                check.checked_commit,
+            )
+            continue
+        pending[rid] = (check, candidates)
+        union.update(candidates)
+        union.update(entry.path for entry in check.checked_files)
+    skipped = False
+    if pending:
+        try:
+            current = head or drift_checks.head_revision(repo_root, remaining())
+            tree = drift_checks.tree_entries(repo_root, current, union, remaining())
+        except (ValueError, OSError):
+            skipped = True
+            for rid, (check, _) in pending.items():
+                if rid in old_entries:
+                    updates[rid] = old_entries[rid]._replace(
+                        check_reason="scoped comparison unavailable; capture advisory retained",
+                        check_id=check.id,
+                        checked_commit=check.checked_commit,
+                    )
+        else:
+            for rid, (check, candidates) in pending.items():
+                required = candidates & tree.keys()
+                changed = sorted(
+                    entry.path
+                    for entry in check.checked_files
+                    if tree.get(entry.path) != (entry.blob_id, entry.mode)
+                )
+                if required != set(check.required_files):
+                    reason = "required anchor file scope changed"
+                    files = sorted(required | set(check.required_files))
+                elif changed:
+                    reason = "checked files changed"
+                    files = changed
+                elif rid in old_entries and (
+                    outside := set(old_entries[rid].files)
+                    - {entry.path for entry in check.checked_files}
+                ):
+                    reason = "changed anchored file outside checked scope"
+                    files = sorted(outside)
+                else:
+                    updates[rid] = None  # valid snapshot equivalence, not semantic proof
+                    continue
+                updates[rid] = DriftEntry(
+                    str(eligible[rid]), rid, files, reason, check.id, check.checked_commit
+                )
+    result = []
+    for batch in batches:
+        if batch.failed:
+            result.append(batch)
+            continue
+        entries = {entry.record_id: entry for entry in batch.entries}
+        for _, rid, _ in by_commit[batch.commit]:
+            if rid in updates:
+                update = updates[rid]
+                if update is None:
+                    entries.pop(rid, None)
+                else:
+                    entries[rid] = update
+        ordered = [entries[rid] for _, rid, _ in by_commit[batch.commit] if rid in entries]
+        result.append(batch._replace(entries=ordered))
+    return result, skipped
 
 
 def _scan_code_drift(
@@ -905,7 +1028,19 @@ def _scan_code_drift(
                     head = result.stdout.strip() or None
             except (ValueError, OSError, subprocess.TimeoutExpired):
                 head = None
-    return CodeDriftScan(batches, unstamped, True, False, head, snapshot.uncomputed)
+    batches, check_skipped = _apply_drift_checks(
+        batches,
+        by_commit,
+        decisions,
+        bindings,
+        entities,
+        snapshot.statuses,
+        store_dir,
+        repo_root,
+        head,
+        _remaining,
+    )
+    return CodeDriftScan(batches, unstamped, True, False, head, snapshot.uncomputed, check_skipped)
 
 
 def scan_code_drift(
@@ -1001,7 +1136,14 @@ def _check_code_drift(
                 Finding(
                     CODE_DRIFT,
                     entry.record_path,
-                    f"anchored file(s) changed since capture (commit {batch.commit[:8]}): "
+                    (
+                        f"content unverified: {entry.check_reason} "
+                        f"(capture {batch.commit[:8]}, check {entry.check_id}"
+                        + (f", checked {entry.checked_commit[:8]}" if entry.checked_commit else "")
+                        + "): "
+                        if entry.check_reason
+                        else f"anchored file(s) changed since capture (commit {batch.commit[:8]}): "
+                    )
                     + ", ".join(entry.files)
                     + (
                         " (binding status unknown; deleted paths excluded)"
@@ -1010,6 +1152,12 @@ def _check_code_drift(
                     ),
                 )
             )
+    if scan.check_skipped:
+        findings.append(
+            Finding(
+                CODE_DRIFT, str(store_dir), "code-drift: scoped check unavailable — check skipped"
+            )
+        )
     return findings
 
 

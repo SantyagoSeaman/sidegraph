@@ -1,13 +1,16 @@
 ---
 name: triage-drift
 description: >-
-  Use when SessionStart reports "N record(s) are anchored to code that changed after their capture", when retrieval output carries [drifted] tags, when sidegraph-doctor prints code-drift findings, or as periodic store maintenance — "разбери drifted записи", "triage the drifted records", "are these decisions still true". Also reachable directly as /sidegraph:triage-drift. Walks each drifted record against the code at HEAD and routes it to a verdict: still true (report, no write), content now wrong (propose a supersession), or code gone (hand to heal-anchors). The manual counterpart to a known limitation — drift detection sees code movement, not semantic invalidity; this skill is where the semantic judgment happens.
+  Use when SessionStart reports records needing content review, retrieval carries
+  [drifted] tags, sidegraph-doctor reports code-drift, or the user asks to triage
+  drifted records, periodic maintenance, "разбери drifted записи", or whether decisions
+  still hold. Also reachable directly as /sidegraph:triage-drift.
 ---
 
 # Triage drift
 
 `code-drift` is a *signal*, not a verdict: a live decision's anchored file(s) changed
-after the commit its provenance was captured at. The store cannot tell whether the change
+since capture, or a previous scoped check no longer applies. The store cannot tell whether the change
 invalidated the record — file hashes move on every refactor while the decision stays
 true, and (the dangerous converse) logic can change semantics without the drift flag
 firing at all. This skill is the judgment pass the flag exists to trigger: read the
@@ -25,8 +28,8 @@ The CLI runs through uvx at the session's version, never the copy on `PATH` ([wh
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor --json    # findings[] entries with "code": "code-drift"
 ```
 
-Each finding names the record and which anchored file(s) changed since
-`provenance.commit`. `sidegraph-doctor` is a pure read — safe to run any time. From
+Each finding names the record and changed files or why its prior check no longer
+applies (including subject/anchor-scope changes). Original `provenance.commit` stays history. `sidegraph-doctor` is a pure read — safe to run any time. From
 inside a session, the drifted set also announces itself: the SessionStart line and
 `[drifted]` tags in retrieval output are the same population, surfaced lazily.
 
@@ -44,13 +47,30 @@ Triage in batches — a 35-record queue does not need 35 interrupts. Group verdi
    verdict comes from whether the record's claims still hold, not from how big the diff is.
 3. **Route to one of three verdicts:**
 
-   - **(a) Still true.** The code moved or grew but the decision holds. **No store write
-     exists for "confirmed"** — the drift flag is derived from git at read time, not
-     stored, so a confirmed record stays flagged until it is one day superseded. Don't
-     fight that with a content-free supersession "to refresh the stamp" — it pollutes the
-     append-only history with a successor that says nothing new (same rule as
-     heal-anchors' preference for `add_anchors`). Report it as confirmed and move on;
-     the cost of an honest flag is smaller than the cost of a fake successor.
+   - **(a) Still true.** Inspect the current implementation and any dependencies that
+     support the claim. Record the explicit assertion using the current full Git HEAD:
+
+     ```python
+     record_drift_check(
+         decision_id="<existing decision id>",
+         checked_commit="<full inspected HEAD>",
+         files=["src/component.py", "src/inspected_dependency.py"],
+         rationale="What was inspected and why the original claims still hold.",
+     )
+     ```
+
+     Include every current checkable concrete anchor file and each additional dependency
+     actually inspected. The files must be tracked regular files and clean relative to
+     that HEAD; unrelated dirt is allowed. The target must be open, commit-stamped and
+     concretely anchored. With no Git HEAD, dirty inspected files, incomplete scope or an
+     ineligible target, report the judgment and why no check was recorded; retain the
+     advisory. Do not omit a required dirty file or substitute another revision.
+
+     This immutable agent assertion preserves the decision and its capture provenance.
+     It does not certify semantic truth, ratify a proposal, or permanently mute warnings.
+     Changed checked files or required scope re-arm review; unchanged file bytes after
+     unrelated commits remain covered. A known wrong claim belongs in route (b).
+     Never create a content-free successor just to refresh a stamp.
    - **(b) Content now wrong or too broad.** The code change genuinely invalidated or
      narrowed the record. Propose the successor — never write it directly on your own
      initiative:
@@ -80,9 +100,9 @@ longer holds actively misleads every future session — triage those before drif
 Within a batch, records whose anchored files changed *most recently* are likelier to be
 genuinely affected than ones flagged by an old mechanical rename.
 
-Not every flag deserves a deep read: a record anchored to a file whose diff since
-`provenance.commit` is formatting or an unrelated function can be confirmed in seconds.
-Spend the judgment where the diff touches what the record is actually about.
+A formatting-only or unrelated diff helps prioritize the review. Still read the current
+required implementation before recording a check; the diff alone does not establish that
+the claim holds. Spend more judgment where the change touches the claim or dependencies.
 
 **Prime suspects: records born during a review whose implementation has since landed.**
 A gotcha captured while reviewing spec N describes the code *before* N's fix — correct at
@@ -93,8 +113,8 @@ of the wave's own definition of done, not a later triage's discovery.
 
 ## Report shape
 
-End with one summary the human can act on in a single pass: confirmed (ids, one line
-each), proposed supersessions (old id → new draft title, awaiting
+End with one summary the human can act on in a single pass: checked (decision id, returned check id, revision, inspected scope and cache-clear outcome), still true but
+check unavailable (id and reason), proposed supersessions (old id → new draft title, awaiting
 `sidegraph:ratify-decisions`), handed to heal-anchors (ids), and recommended drops
 (ids + reason — recommendation only, the human runs `ratify(drop=[...])`).
 

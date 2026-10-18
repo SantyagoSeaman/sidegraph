@@ -125,14 +125,10 @@ def test_3_record_bound_to_the_worktree_only_path(tmp_path, monkeypatch):
 
     out = ask(monkeypatch, main, ["pkg/new.py"])
 
-    near = "\n".join(lines(out, NEAREST))
-    assert (
-        "`pkg/new.py` has 1 more record(s) bound to it through anchors the graph cannot resolve"
-        in near
-    )
-    assert "this answer" not in near
-    assert 'retrieve_decisions(files=["pkg/new.py"])' in near
-    assert "Nearest anchored: `pkg/m.py`" in near
+    # Direct file retrieval replaces the old listing-only behavior with explicit file applicability.
+    assert "[file-bound] new.py must stay pure" in out
+    assert "the graph cannot verify its symbol anchors" in out
+    assert "more record(s)" not in out and NEAREST not in out
     assert "No current record is anchored to `pkg/new.py`" not in out
 
 
@@ -144,9 +140,8 @@ def test_3b_only_the_orphan_bound_record_in_the_store(tmp_path, monkeypatch):
 
     out = ask(monkeypatch, main, ["pkg/new.py"])
 
-    near = "\n".join(lines(out, "## Why this is empty"))
-    assert "`pkg/new.py` has 1 more record(s) bound to it" in near
-    assert "Nearest anchored:" not in near
+    assert "[file-bound] new.py must stay pure" in out
+    assert "## Why this is empty" not in out and "Nearest anchored:" not in out
 
 
 def test_3c_an_orphan_on_a_file_the_graph_holds_keeps_todays_line(tmp_path, monkeypatch):
@@ -179,7 +174,7 @@ def test_3d_a_record_the_answer_delivers_is_not_called_undelivered(tmp_path, mon
 
 
 def test_3e_a_record_the_nearest_anchored_records_show_is_not_called_more(tmp_path, monkeypatch):
-    """The main answer holds no memory, so the records of the near files follow it."""
+    """Retrieval delivers the explicit file directly, without nearest-record substitution."""
     main = make_main(tmp_path, files=("pkg/m.py", "pkg/n.py"))
     bind(
         main / ".sidegraph",
@@ -193,8 +188,8 @@ def test_3e_a_record_the_nearest_anchored_records_show_is_not_called_more(tmp_pa
 
     alone = ask(monkeypatch, main, ["pkg/new.py"])
 
-    assert "## Nearest anchored records" in alone
-    assert "new.py and n.py share a lock" in alone
+    assert "## Nearest anchored records" not in alone
+    assert "[file-bound] new.py and n.py share a lock" in alone
     assert "more record(s)" not in alone and "this answer does not" not in alone
 
 
@@ -576,12 +571,8 @@ def test_19b_a_remapped_seed_for_a_file_no_checkout_holds_is_journaled_normalise
     store.close()
 
 
-def test_20_the_bound_record_count_is_a_floor_only_where_nearest_records_were_taken_off(
-    tmp_path, monkeypatch
-):
-    """The records of the second retrieval come off a path's count before the hard cap, which
-    may cut some of them from the text: so "at least" for that path (batch panel fix F4, round
-    2). Where nothing was taken off, the count is exact and says so."""
+def test_20_direct_file_delivery_supersedes_the_old_nearest_count(tmp_path, monkeypatch):
+    """Retrieval reaches the seed itself; partial-count floors have separate budget regressions."""
     main = make_main(tmp_path, files=("pkg/m.py", "pkg/n.py"))
     bind(main / ".sidegraph", "orphaned note on new.py", "pkg/new.py", "n")
     bind(main / ".sidegraph", "a live note on n.py", "pkg/n.py", "fn_1()", "live")
@@ -590,11 +581,12 @@ def test_20_the_bound_record_count_is_a_floor_only_where_nearest_records_were_ta
 
     out = ask(monkeypatch, main, ["pkg/new.py"])
 
-    assert "## Nearest anchored records" in out  # precondition: a second retrieval happened
-    assert "`pkg/new.py` has 1 more record(s) bound to it" in out  # none of them was taken off
+    assert "[file-bound] orphaned note on new.py" in out
+    assert "a live note on n.py" not in out
+    assert "## Nearest anchored records" not in out and "more record(s)" not in out
 
 
-def test_20b_a_nearest_record_taken_off_the_count_makes_it_a_floor(tmp_path, monkeypatch):
+def test_20b_direct_file_records_are_not_claimed_as_remaining(tmp_path, monkeypatch):
     main = make_main(tmp_path, files=("pkg/m.py", "pkg/n.py"))
     bind(main / ".sidegraph", "orphaned note on new.py", "pkg/new.py", "n")
     bind(
@@ -609,8 +601,8 @@ def test_20b_a_nearest_record_taken_off_the_count_makes_it_a_floor(tmp_path, mon
 
     out = ask(monkeypatch, main, ["pkg/new.py"])
 
-    assert "shared lock" in out  # precondition: shown as a nearest record, so taken off
-    assert "`pkg/new.py` has at least 1 more record(s) bound to it" in out
+    assert "shared lock" in out and "orphaned note on new.py" in out
+    assert "more record(s)" not in out and "No current record is anchored" not in out
 
 
 def test_19c_an_ambiguous_entity_seed_with_a_remapped_path_is_journaled_normalised(

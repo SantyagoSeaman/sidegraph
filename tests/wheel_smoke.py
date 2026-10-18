@@ -255,7 +255,7 @@ async def probe_stdio(
         assert initialized.serverInfo.version == importlib.metadata.version("sidegraph")
         _progress.start("list-tools")
         listed = await client.list_tools()
-        assert len(listed.tools) == 24
+        assert len(listed.tools) == 25
         tools = {tool.name: tool for tool in listed.tools}
         assert tools["get_task_context"].outputSchema is None
         _progress.start("add-decision")

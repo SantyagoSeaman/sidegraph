@@ -64,6 +64,7 @@ from .schema import (
     AnchorBinding,
     Decision,
     Domain,
+    DriftCheck,
     Entity,
     Fact,
     Initiative,
@@ -84,6 +85,7 @@ from .store_layout import (
     MAX_FORMAT_MARKER_BYTES,
     NOT_A_FILE_REASON,
     REQUIREMENT_MARKER_VERSION,
+    VERIFICATIONS_SUBDIR,
     StoreRequirementError,
     hot_matches_archive,
     is_regular_file,
@@ -109,6 +111,7 @@ SUPERSEDED_WITHOUT_SUCCESSOR = "superseded-without-successor"
 DANGLING_SUPERSEDES = "dangling-supersedes"
 DANGLING_BINDING_ENTITY = "dangling-binding-entity"
 DANGLING_FACT_SUPPORT = "dangling-fact-support"
+DANGLING_DRIFT_CHECK = "dangling-drift-check"
 DANGLING_PARENT = "dangling-parent"
 PARENT_CYCLE = "parent-cycle"
 DUPLICATE_ULID = "duplicate-ulid"
@@ -377,6 +380,32 @@ def _check_plain_dir(dir_path: Path, model: type[BaseModel], id_field: str) -> _
         except ValueError as e:  # ValidationError, or a payload that cannot be serialised
             violations.append(_violation(PARSE_ERROR, path, str(e)))
     return _WalkResult(raw_by_id, path_by_id, all_paths_by_id, skipped_by_id, violations)
+
+
+def _check_drift_checks(store_dir: Path, decision_ids: set[str]) -> list[Violation]:
+    """Lint auxiliary assertions, including terminal/archived subjects as valid history."""
+    folder = store_dir / VERIFICATIONS_SUBDIR
+    try:
+        directory_stat = folder.stat()
+    except FileNotFoundError:
+        return []
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        return [_violation(PARSE_ERROR, folder, "verification history is not a directory")]
+    links = [path for path in _iter_json_files(folder) if path.is_symlink()]
+    if links:
+        return [
+            _violation(SYMLINKED_STORE_ENTRY, path, "verification file is a symlink")
+            for path in links
+        ]
+    raw, paths, all_paths, _, violations = _check_plain_dir(folder, DriftCheck, "id")
+    violations += _check_duplicate_ulids(all_paths, {})
+    for rid, payload in raw.items():
+        target = payload.get("decision_id")
+        if isinstance(target, str) and target not in decision_ids:
+            violations.append(
+                _violation(DANGLING_DRIFT_CHECK, paths[rid], "checked decision does not exist")
+            )
+    return violations
 
 
 def _check_bindings_dir(
@@ -911,6 +940,7 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
         **decision_paths,
     }
     violations += _check_supersedes(combined_decisions, decision_path_by_id, decisions_skipped)
+    violations += _check_drift_checks(store_dir, set(combined_decisions) | set(decisions_skipped))
 
     # Facts are never archived (see docs/reference/store-format.md) -- hot only.
     violations += _check_supersedes(facts_raw, fact_paths, facts_skipped)
@@ -1471,6 +1501,7 @@ _DIR_TO_KIND = {
     "entities": "entity",
     "bindings": "binding",
     "initiatives": "initiative",
+    VERIFICATIONS_SUBDIR: "verification",
 }
 
 
@@ -1587,7 +1618,7 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
                 )
             continue
 
-        if kind == "archive":
+        if kind in {"archive", "verification"}:
             # Segments are write-once (store._write_archive_segment: "Segments are
             # write-once ... and this always creates a brand-new file"). A new segment
             # (status "A") is the only legal shape; any other change to an already-
@@ -1600,7 +1631,11 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
                     _violation(
                         ILLEGAL_DELETION,
                         repo_path,
-                        "archive segment deleted (write-once; no pruning path exists)",
+                        (
+                            "archive segment deleted (write-once; no pruning path exists)"
+                            if kind == "archive"
+                            else "verification deleted (write-once; no pruning path exists)"
+                        ),
                     )
                 )
             elif status != "A":
@@ -1608,7 +1643,11 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
                     _violation(
                         ILLEGAL_FIELD_CHANGE,
                         repo_path,
-                        "write-once archive segment modified",
+                        (
+                            "write-once archive segment modified"
+                            if kind == "archive"
+                            else "write-once verification modified"
+                        ),
                     )
                 )
             continue

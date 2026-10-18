@@ -62,7 +62,7 @@ from .store import (
     parse_skip_list,
     skipped_segment_text,
 )
-from .store_layout import StoreRequirementError, store_requirement
+from .store_layout import VERIFICATIONS_SUBDIR, StoreRequirementError, store_requirement
 
 Severity = Literal["broken", "degraded", "advisory"]
 Surface = Literal["session", "notice", "doctor", "stats"]
@@ -109,8 +109,20 @@ _BRANCHES_NAMED = 3
 # other directories a write touches, and the root files. Anything else under the store is not a
 # store write.
 _HOT_RECORD_DIRS = ("decisions", "facts", "domains")
-_STORE_DIRS = (*_HOT_RECORD_DIRS, "initiatives", "bindings", "entities", "archive")
-_ULID_NAMED_DIRS = (*_HOT_RECORD_DIRS, "initiatives", "entities")  # named by the id minted at write
+_STORE_DIRS = (
+    *_HOT_RECORD_DIRS,
+    "initiatives",
+    "bindings",
+    "entities",
+    "archive",
+    VERIFICATIONS_SUBDIR,
+)
+_ULID_NAMED_DIRS = (
+    *_HOT_RECORD_DIRS,
+    "initiatives",
+    "entities",
+    VERIFICATIONS_SUBDIR,
+)  # named by the id minted at write
 _ROOT_FILES = ("format", ".gitignore", "stamping_live_since", "domain-snapshot.json")
 
 # A record is stranded unless it is terminal: a decision or fact superseded, rejected or
@@ -294,7 +306,9 @@ def _detect_pending_ratification(inputs: Inputs) -> Problem | None:
 
 
 def _detect_code_drift(inputs: Inputs) -> Problem | None:
-    """Records anchored to code that changed after their capture. The count is the refresh's own
+    """Records needing review after code changed or a scoped check stopped applying.
+
+    The count is the refresh's own
     return value: when the refresh could not run (outside git) it returns ``None`` and the old
     cache must not be counted. ``SIDEGRAPH_DRIFT_NUDGE=off`` switches the check off (the host
     still refreshes the cache). No notice: superseding drifted records is the agent's work.
@@ -305,10 +319,10 @@ def _detect_code_drift(inputs: Inputs) -> Problem | None:
     if not n:
         return None
     line = (
-        f"Sidegraph: {n} record(s) are anchored to code that changed "
-        "after their capture — task-relevant ones carry a [drifted] tag in "
-        "retrieval; full list: sidegraph-doctor; supersede any that no "
-        "longer hold."
+        f"Sidegraph: {n} record(s) need content review: code changed or a prior check "
+        "no longer applies — task-relevant ones carry a [drifted] tag in retrieval; "
+        "full list: sidegraph-doctor; record_drift_check if still true, "
+        "supersede if no longer true."
     )
     return Problem(
         check="code-drift",
@@ -907,6 +921,7 @@ def _stranded_kinds(entries: list[_Stranded]) -> str:
         "domains": "domain",
         "bindings": "binding",
         "entities": "entity",
+        VERIFICATIONS_SUBDIR: "verification",
     }
     counts: dict[str, int] = {kind: 0 for kind in by_dir.values()}
     other = deleted = 0
@@ -967,6 +982,8 @@ def _detect_store_uncommitted(inputs: Inputs) -> Problem | None:
             continue
         rel = path[len(prefix) :]
         first = rel.split("/", 1)[0]
+        if first == VERIFICATIONS_SUBDIR and rel.endswith(".tmp"):
+            continue  # unpublished crash debris is not history to commit
         in_layout = first in _STORE_DIRS and first != rel
         if not in_layout and rel not in _ROOT_FILES:
             continue

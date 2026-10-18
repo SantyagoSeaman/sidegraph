@@ -82,6 +82,7 @@ warning code is rendered beside the consequence of accepting it anyway:
 
 | Warning code | Consequence of accepting |
 | --- | --- |
+| `generated-projection` | generated ADRs are projections of existing memory, not new capture evidence |
 | `missing-choice` | the document states no decision; the record would carry only context |
 | `missing-rejected-alternatives` | no rejected alternatives were found; the most valuable field stays empty |
 | `unresolved-anchor` | the anchor does not resolve; the record would not surface for that code |
@@ -112,7 +113,8 @@ stored. There is no default accept-all action.
 Bootstrap reports four outcomes independently: store, anchors, host integration, and
 production-path proof. Proof selects an accepted, currently valid decision with a resolved
 tier-2 anchor and calls the same `get_task_context` production retrieval path used by agent
-sessions. Optional domain suggestions do not block that proof.
+sessions. File-bound applicability remains useful retrieval, but does not satisfy this
+current-graph anchor proof. Optional domain suggestions do not block that proof.
 
 | Host | MCP | SessionStart | Stop | Read/Grep PreToolUse | Completion label |
 | --- | --- | --- | --- | --- | --- |

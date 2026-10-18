@@ -163,16 +163,23 @@ def test_telemetry_off_journals_no_showing(project, monkeypatch, capsys):
     assert set(_shows(project).values()) == {1}, "only the telemetry-on Read counted"
 
 
-def test_claim_and_showing_commit_together(project, monkeypatch, capsys):
-    """One Read of one file is two commits: the claim with its showings, and the touch row.
-    Red against a design that writes the showings after the claim (a third commit), not against
-    unfixed code."""
+@pytest.mark.parametrize("ledger", [False, True])
+def test_claim_and_showing_commit_together(project, monkeypatch, capsys, ledger):
+    """Legacy claim/showings stay atomic; the optional delivery ledger commits separately.
+
+    An older index has only the claim/showings and touch commits. The new ledger may add
+    one final commit, without moving the legacy showings into that transaction.
+    """
     _crowded(project)
+    if not ledger:
+        for table in ("delivery_anchor_links", "delivery_placements", "delivery_occurrences"):
+            project.store._conn.execute(f"DROP TABLE {table}")
+        project.store._conn.commit()
     trace: list[str] = []
     real_open = HotIndex.open
 
-    def opening(store_path):
-        index = real_open(store_path)
+    def opening(store_path, **kwargs):
+        index = real_open(store_path, **kwargs)
         if index is not None:
             index._conn.set_trace_callback(trace.append)
         return index
@@ -180,7 +187,34 @@ def test_claim_and_showing_commit_together(project, monkeypatch, capsys):
     monkeypatch.setattr(HotIndex, "open", staticmethod(opening))
     _read(monkeypatch, capsys, project, "src/a.py")
     assert len(_events(project, "inject")) == 2
-    assert trace.count("COMMIT") == 2, trace
+    transactions: list[list[str]] = []
+    current: list[str] | None = None
+    for sql in trace:
+        if sql.startswith("BEGIN"):
+            current = []
+        elif sql == "COMMIT":
+            assert current is not None, trace
+            transactions.append(current)
+            current = None
+        elif sql == "ROLLBACK":
+            current = None
+        elif current is not None:
+            current.append(sql)
+    showing_transactions = [
+        statements
+        for statements in transactions
+        if any("INSERT INTO retrieval_events" in sql and "'inject'" in sql for sql in statements)
+    ]
+    assert len(showing_transactions) == 1, trace
+    assert any("INSERT INTO meta" in sql for sql in showing_transactions[0]), trace
+    assert not any("delivery_occurrences" in sql for sql in showing_transactions[0]), trace
+    ledger_transactions = [
+        statements
+        for statements in transactions
+        if any("INSERT INTO delivery_occurrences" in sql for sql in statements)
+    ]
+    assert len(ledger_transactions) == int(ledger), trace
+    assert trace.count("COMMIT") == 2 + int(ledger), trace
 
 
 # -- the Agent brief ---------------------------------------------------------------------------

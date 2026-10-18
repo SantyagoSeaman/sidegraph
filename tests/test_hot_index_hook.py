@@ -149,9 +149,9 @@ def test_one_read_opens_the_index_at_most_once(tmp_path, monkeypatch, capsys, in
     opens: list[str] = []
     real_open = HotIndex.open
 
-    def counting(store_path):
+    def counting(store_path, **kwargs):
         opens.append(str(store_path))
-        return real_open(store_path)
+        return real_open(store_path, **kwargs)
 
     monkeypatch.setattr(HotIndex, "open", staticmethod(counting))
     payload = {

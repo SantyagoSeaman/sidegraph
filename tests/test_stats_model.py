@@ -1033,6 +1033,8 @@ def _pathless_fact_delivery(tmp_path, monkeypatch, *, sid="s1"):
         Fact(
             statement="the-pathless-fact",
             source="measured",
+            # This fixture tests accounting, independently of the proposal-age policy.
+            status=DecisionStatus.ACCEPTED,
             valid_from=NOW - timedelta(days=1),
             provenance=Provenance(source="manual"),
         )
@@ -1045,9 +1047,27 @@ def _pathless_fact_delivery(tmp_path, monkeypatch, *, sid="s1"):
     return store, text
 
 
-def test_a_session_delivered_one_pathless_fact_is_asking_and_fed(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "visibility_now",
+    [
+        pytest.param(datetime(2026, 10, 16, 14, tzinfo=UTC), id="before-old-expiry"),
+        pytest.param(datetime(2026, 10, 17, 14, tzinfo=UTC), id="after-old-expiry"),
+        pytest.param(datetime(2030, 1, 1, tzinfo=UTC), id="future"),
+    ],
+)
+def test_a_session_delivered_one_pathless_fact_is_asking_and_fed(
+    tmp_path, monkeypatch, visibility_now
+):
     """Red before wave 3: `emitted` counted decisions only, so this render read as nothing
     delivered and the session as asked-but-empty with zero showings."""
+    from sidegraph import store_layout
+
+    class VisibilityClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(visibility_now.timestamp(), tz)
+
+    monkeypatch.setattr(store_layout, "datetime", VisibilityClock)
     store, text = _pathless_fact_delivery(tmp_path, monkeypatch)
     assert "the-pathless-fact" in text, "the render did deliver the fact"
     assert store.retrieval_events() == [], "and left no seed and no show row behind it"

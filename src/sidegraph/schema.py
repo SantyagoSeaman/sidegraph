@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
@@ -238,6 +239,74 @@ class Provenance(BaseModel):
     commit: str | None = None
 
 
+class CheckedCodeFile(BaseModel):
+    """A reviewed Git tree entry; no source bytes or engine mappings."""
+
+    path: str
+    blob_id: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    mode: Literal["100644", "100755"]
+
+    @field_validator("path")
+    @classmethod
+    def _safe_path(cls, value: str) -> str:
+        if (
+            not value
+            or "\\" in value
+            or "\0" in value
+            or PurePosixPath(value).is_absolute()
+            or re.match(r"^[A-Za-z]:", value)
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+            or len(value.encode("utf-8")) > 1024
+        ):
+            raise ValueError("expected a safe repository-relative file")
+        return value
+
+
+class DriftCheck(BaseModel):
+    """Immutable auxiliary assertion that an existing decision was checked at a revision.
+
+    This neither changes the decision nor certifies its semantic truth or ratification.
+    Version1 owns the enumerated subject-digest definition in drift_checks.py.
+    """
+
+    schema_version: Literal[1]
+    id: str = Field(default_factory=_new_id, pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
+    decision_id: str
+    checked_at: AwareDatetime
+    checked_commit: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    provenance: Provenance
+    rationale: str = Field(min_length=1, max_length=4000)
+    required_files: list[str] = Field(min_length=1, max_length=256)
+    checked_files: list[CheckedCodeFile] = Field(min_length=1, max_length=256)
+    subject_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("rationale")
+    @classmethod
+    def _nonblank_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("rationale must explain the check")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _scope_is_explicit(self) -> DriftCheck:
+        if not is_safe_record_id(self.decision_id):
+            raise ValueError("unsafe decision id")
+        if self.provenance.source != "agent" or self.provenance.commit != self.checked_commit:
+            raise ValueError("check provenance must identify its agent revision")
+        paths = [entry.path for entry in self.checked_files]
+        if len(set(paths)) != len(paths) or len(set(self.required_files)) != len(
+            self.required_files
+        ):
+            raise ValueError("duplicate checked scope")
+        if not set(self.required_files) <= set(paths):
+            raise ValueError("check does not cover required files")
+        if sum(len(path.encode("utf-8")) for path in paths) > 16_384:
+            raise ValueError("checked scope is too large")
+        self.required_files = sorted(self.required_files)
+        self.checked_files = sorted(self.checked_files, key=lambda entry: entry.path)
+        return self
+
+
 class Domain(BaseModel):
     """The owned abstraction: a named area of the system with WHY-IT-EXISTS prose.
 
@@ -364,7 +433,8 @@ class Fact(BaseModel):
     # panel, security reviewer objection 7).
     ratified_by: str | None = None
     ratified_at: AwareDatetime | None = None
-    status: DecisionStatus = DecisionStatus.PROPOSED  # DEPRECATED unused for facts
+    # Trust status; valid_to also controls closure.
+    status: DecisionStatus = DecisionStatus.PROPOSED
 
     valid_from: AwareDatetime
     valid_to: AwareDatetime | None = None

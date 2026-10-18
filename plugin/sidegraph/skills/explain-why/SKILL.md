@@ -36,8 +36,8 @@ Three shapes of why-question, three entry points:
   slug, then `drill_down(domain_slug)` — the domain's summary, member sample, and its
   decisions, mistakes first.
 
-A record tagged `[drifted]` is anchored to code that changed after capture — verify it
-against the current code before presenting it as current truth (and if it no longer
+A record tagged `[drifted]` needs content review: code changed or a prior check no longer
+applies — verify it against the current code before presenting it as current truth (and if it no longer
 holds, that's `sidegraph:triage-drift`'s job). `[unratified]` means a human hasn't
 accepted it yet — present it as a proposal, not settled memory.
 

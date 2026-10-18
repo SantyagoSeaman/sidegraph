@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from string import Formatter, Template
 
 from pydantic import BaseModel, ConfigDict, model_validator
+
+from .adr_identity import reserved_lines
 
 
 class ProfileDetection(BaseModel):
@@ -50,11 +53,135 @@ class ReaderDialect(BaseModel):
         return self.context + self.choice + self.rejected + self.consequences + self.gate_only
 
 
+NYGARD_ADR_TEMPLATE = """# $title
+
+## Context
+
+$context
+
+## Decision
+
+$choice
+
+## Rejected alternatives
+
+$rejected
+
+## Consequences
+
+$consequences
+"""
+
+MADR_ADR_TEMPLATE = """# $title
+
+## Context and Problem Statement
+
+$context
+
+## Considered Options
+
+$rejected
+
+## Decision Outcome
+
+$choice
+
+## Consequences
+
+$consequences
+"""
+
+_ADR_FIELDS = frozenset(
+    {
+        "title",
+        "kind",
+        "status",
+        "valid_from",
+        "valid_to",
+        "context",
+        "choice",
+        "rejected",
+        "consequences",
+        "evidence",
+        "anchors",
+        "domains",
+        "supersedes",
+        "successors",
+        "record_link",
+        "source",
+    }
+)
+_ADR_PROSE = frozenset({"title", "context", "choice", "rejected", "consequences"})
+_BAD_BASENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+class AdrExport(BaseModel):
+    """Declarative ADR output settings; templates interpolate text, never executable code."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    directory: str = "docs/adr"
+    filename: str = "{id}.md"
+    template: str = NYGARD_ADR_TEMPLATE
+
+    @model_validator(mode="after")
+    def _valid_export(self) -> AdrExport:
+        template = Template(self.template)
+        if len(self.template.encode("utf-8")) > 65_536 or not template.is_valid():
+            raise ValueError("ADR template must be valid interpolation text of at most64KiB")
+        fields = set(template.get_identifiers())
+        if not fields >= _ADR_PROSE or fields - _ADR_FIELDS:
+            raise ValueError(
+                "ADR template needs title/context/choice/rejected/consequences and known fields"
+            )
+        if reserved_lines(self.template):
+            raise ValueError("ADR template contains a reserved projection marker line")
+        if not self.directory.strip():
+            raise ValueError("ADR directory is empty")
+        seen = set()
+        for _literal, name, spec, conversion in Formatter().parse(self.filename):
+            if name is None:
+                continue
+            if name not in {"id", "number"} or conversion:
+                raise ValueError("ADR filename permits only id and number fields")
+            if spec and (name != "number" or re.fullmatch(r"0?[1-8]d", spec) is None):
+                raise ValueError("ADR number width must be a decimal integer width of1–8")
+            seen.add(name)
+        if "id" not in seen:
+            raise ValueError("ADR filename must contain {id}")
+        self.basename("record", 1)
+        return self
+
+    def basename(self, record_id: str, number: int) -> str:
+        """Format a portable flat filename; no traversal, device names or reserved index."""
+        name = self.filename.format(id=record_id, number=number)
+        stem = name.split(".", 1)[0].upper()
+        devices = {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            *[f"COM{i}" for i in range(1, 10)],
+            *[f"LPT{i}" for i in range(1, 10)],
+        }
+        if (
+            not name.endswith(".md")
+            or _BAD_BASENAME.search(name)
+            or name.casefold() == "index.md"
+            or stem in devices
+            or name.endswith((" ", "."))
+            or len(name.encode("utf-8")) > 255
+        ):
+            raise ValueError("ADR filename is unsafe, reserved or not a Markdown basename")
+        return name
+
+
 class FlowProfile(BaseModel):
     """One external flow's reader configuration and auto-detection marker."""
 
     name: str
     dialect: ReaderDialect
+    adr_export: AdrExport | None = None
     ingest_globs: tuple[str, ...]
     marker: str | None = None
     # E1 (openspec profile design, design/superpowers/specs/2026-08-06-openspec-profile-
@@ -347,20 +474,30 @@ OPENSPEC_DIALECT = ReaderDialect(
 )
 
 PROFILES: dict[str, FlowProfile] = {
+    "madr": FlowProfile(
+        name="madr",
+        dialect=GENERIC_ADR_DIALECT,
+        adr_export=AdrExport(template=MADR_ADR_TEMPLATE),
+        ingest_globs=("docs/adr/*.md", "docs/decisions/*.md"),
+        marker=None,
+    ),
     "generic-adr": FlowProfile(
         name="generic-adr",
+        adr_export=AdrExport(directory="docs/adr"),
         dialect=GENERIC_ADR_DIALECT,
         ingest_globs=("docs/adr/*.md", "docs/decisions/*.md"),
         marker="docs/adr",
     ),
     "superpowers": FlowProfile(
         name="superpowers",
+        adr_export=AdrExport(directory="docs/superpowers/adr"),
         dialect=SUPERPOWERS_DIALECT,
         ingest_globs=("docs/superpowers/specs/*.md",),
         marker="docs/superpowers",
     ),
     "genkovich-sdd": FlowProfile(
         name="genkovich-sdd",
+        adr_export=AdrExport(directory="docs/features/sidegraph/adr"),
         dialect=GENKOVICH_SDD_DIALECT,
         # spec.md deliberately excluded (owner ruling, 2026-07-27: do not ingest requirements
         # documents — genkovich itself separates requirements from decisions, and this
@@ -376,6 +513,7 @@ PROFILES: dict[str, FlowProfile] = {
     ),
     "spec-kit": FlowProfile(
         name="spec-kit",
+        adr_export=AdrExport(directory="specs/sidegraph/adr"),
         dialect=SPEC_KIT_DIALECT,
         # spec.md deliberately excluded (R3, owner ruling 2026-07-27: do not ingest
         # requirements documents). Upstream's spec.md states user scenarios / requirements /
@@ -386,6 +524,7 @@ PROFILES: dict[str, FlowProfile] = {
     ),
     "bmad": FlowProfile(
         name="bmad",
+        adr_export=AdrExport(directory="_bmad-output/sidegraph-adr"),
         dialect=BMAD_DIALECT,
         # Measured layout (upstream defaults): output_folder = "_bmad-output",
         # planning_artifacts = "{output_folder}/planning-artifacts", spine_output_path =
@@ -406,6 +545,7 @@ PROFILES: dict[str, FlowProfile] = {
     # rationale each decision carries.
     "openspec": FlowProfile(
         name="openspec",
+        adr_export=AdrExport(directory="openspec/adr"),
         dialect=OPENSPEC_DIALECT,
         ingest_globs=(
             "openspec/changes/*/proposal.md",

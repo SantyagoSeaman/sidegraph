@@ -273,7 +273,19 @@ def plan_sources(
             title_pattern=profile.title_pattern,
         )
         if not parsed_docs:
-            if reason == "unparseable":
+            if reason == "generated-adr":
+                issues.append(
+                    PlanIssue(
+                        file_path=file_path,
+                        ref=normalized_path,
+                        warning=WarningCode.GENERATED_PROJECTION,
+                        detail=(
+                            "Generated ADR projection withheld; "
+                            "transfer the canonical store instead."
+                        ),
+                    )
+                )
+            elif reason == "unparseable":
                 issues.append(
                     PlanIssue(
                         file_path=file_path,

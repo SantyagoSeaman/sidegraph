@@ -55,6 +55,7 @@ SCHEMA_VERSION = "0.6.0"
 # Set to "1" on canonical reload and cleared by a completed sync: binding statuses are
 # placeholders until then. Shared by Store and the dependency-light hook index.
 VOLATILE_STALE_KEY = "volatile_stale"
+DRIFT_CACHE_KEY = "code_drift_cache"
 
 # The canonical, git-committed record directories (relative to Store.path). Order matters
 # only for readability; digest/reload iterate them in this order.
@@ -78,6 +79,9 @@ CANONICAL_SUBDIRS = ("decisions", "facts", "domains", "entities", "bindings", "i
 # conflict — the loader's ULID dedup absorbs any record overlap), and identical content
 # always gets the identical name AND bytes (no conflict either — trivially the same file).
 ARCHIVE_SUBDIR = "archive"
+
+# Optional immutable drift assertions; read directly, outside the old/new shared digest.
+VERIFICATIONS_SUBDIR = "verifications"
 
 # The format marker: a one-line ``<path>/format`` file (see ``Store._ensure_format_marker``).
 FORMAT_MARKER_NAME = "format"
@@ -136,6 +140,7 @@ SQLITE_SIDECAR_NAMES = ("index.db-journal", "index.db-wal", "index.db-shm")
 STORE_INTERNAL_NAMES = (
     *CANONICAL_SUBDIRS,
     ARCHIVE_SUBDIR,
+    VERIFICATIONS_SUBDIR,
     FORMAT_MARKER_NAME,
     STAMPING_MARKER_NAME,
     DOMAIN_SNAPSHOT_NAME,
@@ -243,7 +248,7 @@ def require_listable_record_dirs(store_dir: Path) -> None:
     empty directory is probed too), and each raises on every Python where the 3.14 pathlib
     predicates go quiet. A missing path, or one that is not a directory, is left to
     the walkers (the store creates directories lazily)."""
-    for name in (*CANONICAL_SUBDIRS, ARCHIVE_SUBDIR):
+    for name in (*CANONICAL_SUBDIRS, ARCHIVE_SUBDIR, VERIFICATIONS_SUBDIR):
         record_dir = store_dir / name
         try:
             os.listdir(record_dir)

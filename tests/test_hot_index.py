@@ -419,6 +419,8 @@ _ENVIRONMENTS = [
 def _hot_records(index: HotIndex, rel: str) -> list[tuple]:
     """What the hook's records query returns for one file: one scan, then the file's records."""
     entity_ids = index.anchored_entities([rel]).get(rel, [])
+    records = index.records_for(entity_ids)
+    assert all(r.record_type == "decision" for r in records), "decision-only parity fixture"
     return [
         (
             r.decision["id"],
@@ -427,7 +429,7 @@ def _hot_records(index: HotIndex, rel: str) -> list[tuple]:
             r.decision["choice"],
             r.proposed,
         )
-        for r in index.records_for(entity_ids)
+        for r in records
     ]
 
 

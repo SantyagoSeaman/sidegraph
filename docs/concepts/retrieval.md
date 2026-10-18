@@ -353,6 +353,17 @@ reported separately, by comparing the graph's build commit with `HEAD` (see
 [the Graphify integration](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks)), and
 only a rebuild fixes it.
 
+### File applicability outside the graph
+
+When an available graph does not contain an explicitly requested file, the memory read
+also checks exact durable descriptor paths. Eligible decisions and facts can then arrive as
+`[file-bound]`: declared applicability to that file, with symbol anchors the graph cannot
+verify. This reads no neighboring path as an exact match and changes no anchor or binding.
+Ordinary verified seed routes take precedence over the marker. Named-entity requests,
+ambiguous/directory guesses and graph-present orphan handling keep their existing rules;
+with no graph reader at all, this fallback is unavailable. The file still appears in the
+not-in-graph diagnostic, and proposal policy, history, mistakes-first and budgets still apply.
+
 ### Rendering
 
 `TaskContext.render()` emits, in order: **Known mistakes & gotchas**, **Decisions** (with any

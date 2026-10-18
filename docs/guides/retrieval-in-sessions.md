@@ -109,8 +109,14 @@ no query. All three read the store's index directly, so each costs a few tens of
   carries no records: the subagent asks `get_task_context` for the files it works on.
   `SIDEGRAPH_SUBAGENT_BRIEF=off` stops it.
 
-The first two channels deliver decisions only (facts reach the agent through `get_task_context`)
-and exist on Claude Code only. `SubagentStart` runs on Claude Code and on
+The first two channels can deliver eligible facts as well as decisions, within the same record
+caps. Facts keep their whole statement and source; fact lines longer than 512 characters are
+withheld whole and remain available through `list_facts`. Within one answer or appended brief,
+a later identical record may say `See above` with its kind, trust marker and ID under each
+applicable file. The first copy remains complete for that surface. No state crosses calls or
+agents, and saved characters do not buy extra records. Existing once-per-file claims remain;
+use `get_task_context` for fuller decision context and `list_facts` for whole facts.
+These two channels exist on Claude Code only. `SubagentStart` runs on Claude Code and on
 Codex. The wiring is in the [hooks reference](../reference/hooks.md#sidegraph-pre-tool-use).
 
 ## Asking task-scoped questions so `get_task_context` fires with the right seeds
@@ -138,6 +144,15 @@ lists them and reads none: pass the repo-relative path.
 Vague, non-task questions ("what does this project do") don't give the tool anything to seed
 on — be concrete about the file or symbol so the retrieval has something to resolve. A call with
 no seeds at all says so, and names the domains you can drill into.
+
+When an available graph does not contain an explicitly requested file, the memory read
+also checks exact durable descriptor paths. Eligible decisions and facts can then arrive as
+`[file-bound]`: declared applicability to that file, with symbol anchors the graph cannot
+verify. This reads no neighboring path as an exact match and changes no anchor or binding.
+Ordinary verified seed routes take precedence over the marker. Named-entity requests,
+ambiguous/directory guesses and graph-present orphan handling keep their existing rules;
+with no graph reader at all, this fallback is unavailable. The file still appears in the
+not-in-graph diagnostic, and proposal policy, history, mistakes-first and budgets still apply.
 
 ## Reading the output blocks
 
@@ -271,3 +286,13 @@ The SessionStart pending-ratification counter is exempt from both: it reports th
 size **and the oldest item's age** even when nothing in it renders, because a queue you
 cannot see is exactly the one that rots. `sidegraph-doctor` adds the latency counterpart
 (`time-to-ratify`) once records carry the ratifier stamp.
+
+## When a drift warning remains after inspection
+
+`[drifted]` requests a content review; a moved file alone does not invalidate a decision.
+Use `sidegraph:triage-drift` to read the claim and current code. If the claim still holds,
+`record_drift_check` can append a justified inspection of the current clean committed
+files without changing the decision. If it no longer holds, propose a real successor.
+The [tool reference](../reference/mcp-tools.md#record_drift_check) describes refusal cases
+and coverage. Changed inspected files or scope re-arm the warning; unrelated commits do
+not. The check is an attributed assertion and can be wrong.

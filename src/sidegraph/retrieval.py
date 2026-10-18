@@ -14,11 +14,15 @@ is absent or the store is empty. See ``docs/concepts/retrieval.md``.
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import NamedTuple, TypeVar
 
+from .delivery import Placement, Snapshot
 from .engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader, NodeRef
 from .schema import (
     Decision,
@@ -33,9 +37,11 @@ from .schema import (
     matches_path_prefix,
 )
 from .store import _TERMINAL_DECISION_STATUSES, Store
+from .store_layout import DRIFT_CACHE_KEY as DRIFT_CACHE_KEY
 from .store_layout import MEMORY_GUARD_LINE, MISTAKE_KINDS
 from .store_layout import clip_line as _clip_line
 from .store_layout import proposal_surfaces as _proposal_surfaces
+from .worktree_seeds import has_drive
 
 # Store meta key for the precomputed SessionStart TOC (§5/§6, mind-model layer): written by
 # ``sync.sync`` at the end of every completed pass, read by ``host.hooks.session_start``.
@@ -95,22 +101,23 @@ _STANDING_SUPERSEDE_HINT = (
     "id — do not leave a contradicting record alive."
 )
 
-# Drift cache (drift→supersede wave D2): written by `sync.refresh_code_drift_cache` from
-# the SessionStart/Stop hooks, read here by `drifted_record_ids`. Declared beside
-# TOC_CACHE_KEY's own write-in-sync/read-elsewhere split for the same reason: retrieval
-# owns the KEY (its readers live here), sync owns the freshness.
-# Value shape: {"head": "<sha>", "computed_at": "<iso>", "by_commit": {"<sha>": [ids]}}
-# — grouped by capture commit so a partially failed scan can merge per commit instead of
-# choosing between erasing real markers and never updating again (spec round-2 N1).
-DRIFT_CACHE_KEY = "code_drift_cache"
-
 # One fixed legend line per rendered surface (D3), appended outside the budget under the
 # same fixed-cost-exception ruling as _STANDING_SUPERSEDE_HINT above — only when at least
 # one ` [drifted]` marker actually rendered, so a clean store costs zero characters.
 _DRIFT_LEGEND = (
-    "[drifted] = code this record is anchored to changed after it was captured — "
-    "verify against the current code, and supersede_decision it if it no longer holds."
+    "[drifted] = changed code or a prior check no longer applies; content unverified — "
+    "inspect current code, record_drift_check if still true, or supersede_decision "
+    "if it no longer holds."
 )
+
+
+# Drift cache (drift→supersede wave D2): written by `sync.refresh_code_drift_cache` from
+# the SessionStart/Stop hooks, read here by `drifted_record_ids`. Declared beside
+# TOC_CACHE_KEY's own write-in-sync/read-elsewhere split for the same reason: retrieval
+# reads the shared store_layout key; sync owns the freshness.
+# Value shape: {"head": "<sha>", "computed_at": "<iso>", "by_commit": {"<sha>": [ids]}}
+# — grouped by capture commit so a partially failed scan can merge per commit instead of
+# choosing between erasing real markers and never updating again (spec round-2 N1).
 
 
 def drifted_record_ids(store: Store) -> frozenset[str]:
@@ -171,6 +178,7 @@ class TaskContext:
     # True when at least one placed line carries the ` [drifted]` marker (drift→supersede
     # D3) — `render()` keys the one legend line on it. Not rendered itself.
     drift_shown: bool = False
+    file_bound_shown: bool = False
     # Budget accounting (2026-09-18-usage-stats-design.md, D5). Not rendered.
     # `emitted` counts RECORD lines placed, decisions and facts alike: it is the render
     # journal's statement of what reached the agent, and a fact that rendered reached the
@@ -193,6 +201,15 @@ class TaskContext:
     degraded: int = 0
     dropped_for_budget: int = 0
     chars_used: int = 0
+
+    # Ephemeral occurrence evidence follows individual atoms, including repeated bodies.
+    delivery_atoms: dict[str, list[Snapshot]] = field(default_factory=dict)
+    delivery_placements: list[Placement] = field(default_factory=list)
+    delivery_considered: set[tuple[str, str]] = field(default_factory=set)
+    delivery_placed: set[tuple[str, str]] = field(default_factory=set)
+    delivery_degraded: set[tuple[str, str]] = field(default_factory=set)
+    # Requested-seed evidence; internal nearest-file seeds do not replace this flag.
+    delivery_unresolved: bool | None = None
 
     def render(self, include_structure: bool = True) -> str:
         """``include_structure=False`` renders the decision-memory blocks only (mistakes,
@@ -246,7 +263,15 @@ class TaskContext:
         # Legend before the standing hint: the legend explains the tag a line above just
         # used; the hint tells the reader what to DO about any invalidated record — the
         # action line stays last. Same fixed-cost exception as the hint (D3).
-        legend = _DRIFT_LEGEND if self.drift_shown else None
+        legends = []
+        if self.drift_shown:
+            legends.append(_DRIFT_LEGEND)
+        if self.file_bound_shown:
+            legends.append(
+                "[file-bound] = declared applicability to the exact requested file; "
+                "the graph cannot verify its symbol anchors. No anchor was rebound."
+            )
+        legend = "\n\n".join(legends) or None
         hint = _STANDING_SUPERSEDE_HINT if (self.mistakes or self.decisions) else None
         return text, legend, hint
 
@@ -259,6 +284,9 @@ class SeedResolution:
     # node id -> the entities the store last saw there, built once per call by ``resolve_seeds``
     # and reused by ``_gather_structure``; ``None`` when the resolution came from elsewhere.
     entities_by_node: dict[str, list[Entity]] | None = None
+    unresolved: bool = False
+    file_bound_entity_ids: frozenset[str] = frozenset()
+    ordinary_seed_entity_ids: frozenset[str] = frozenset()
 
 
 def _entities_by_node(
@@ -289,14 +317,21 @@ def resolve_seeds(
     ``entities_by_node`` is the map ``_entities_by_node`` builds; a caller that resolves many
     seeds one call at a time builds it once and passes it, instead of one pass per call."""
     nodes: list[NodeRef] = []
+    matched: set[tuple[str | None, str | None]] = set()
     if reader is not None:
         for s in seeds:
             if s.name:  # entity ref (name [+ file])
                 r = reader.resolve(Descriptor(name=s.name, file_path=s.file_path), collapse=False)
                 ids = [r.node_id] if r.node_id else r.candidates
-                nodes.extend(n for nid in ids if (n := reader.get_node(nid)) is not None)
+                found = [n for nid in ids if (n := reader.get_node(nid)) is not None]
+                nodes.extend(found)
+                if found and r.node_id is not None:
+                    matched.add((s.name, s.file_path))
             elif s.file_path:  # file seed
-                nodes.extend(reader.nodes_in_file(s.file_path))
+                found = list(reader.nodes_in_file(s.file_path))
+                nodes.extend(found)
+                if found:
+                    matched.add((s.name, s.file_path))
 
     node_ids: list[str] = []
     communities: set[str] = set()
@@ -322,7 +357,10 @@ def resolve_seeds(
     # orphaned one may have no node at all.
     for s in seeds:
         if s.name:
-            add(store.resolve_descriptor(s.name, s.file_path))
+            entity = store.resolve_descriptor(s.name, s.file_path)
+            add(entity)
+            if entity is not None:
+                matched.add((s.name, s.file_path))
     # A resolved node reaches its entities through the engine mapping the write path and sync
     # keep (`last_seen_node_id`), looked up in one map built once per call. The node's own
     # label still gets its descriptor lookup beside it: an entity that was never mapped (no
@@ -336,7 +374,63 @@ def resolve_seeds(
                 add(e)
             add(store.resolve_descriptor(n.name, n.file_path))
 
-    return SeedResolution(node_ids, entities, sorted(communities), by_node)
+    # Exact file applicability is independent of symbol resolution. A graph-held file
+    # (including non-anchorable types) must keep the ordinary orphan rules.
+    ordinary_entities = frozenset(e.entity_id for e in entities)
+    file_entities: set[str] = set()
+    requested_files = {
+        s.file_path for s in seeds if not s.name and s.file_path and _is_file_seed_path(s.file_path)
+    }
+    if reader is not None and requested_files:
+        missing = requested_files - reader.source_files()
+        if missing:
+            for entity in sorted(store.iter_concrete_entities(), key=lambda e: e.entity_id):
+                if entity.descriptor is not None and entity.descriptor.file_path in missing:
+                    add(entity)
+                    file_entities.add(entity.entity_id)
+
+    return SeedResolution(
+        node_ids,
+        entities,
+        sorted(communities),
+        by_node,
+        any((s.name, s.file_path) not in matched for s in seeds),
+        file_bound_entity_ids=frozenset(file_entities),
+        ordinary_seed_entity_ids=ordinary_entities,
+    )
+
+
+def _is_file_seed_path(path: str) -> bool:
+    """A canonical exact file spelling, never directory intent or an outside path."""
+    pure = PurePosixPath(path)
+    return bool(path) and (
+        path != "."
+        and not path.endswith(("/", "\\"))
+        and not pure.is_absolute()
+        and not has_drive(path)
+        and ".." not in pure.parts
+        and posixpath.normpath(path) == path
+    )
+
+
+def _file_bound_records(store: Store, entity_id: str) -> tuple[list[Decision], list[Fact]]:
+    """Read declared file applicability without claiming its symbol bindings resolved.
+
+    Only callers with an exact missing-file seed may use this. Binding status is derived;
+    record status/trust and the stricter fact policy remain with the ordinary ranker.
+    """
+    decisions: list[Decision] = []
+    facts: list[Fact] = []
+    now = datetime.now(UTC)
+    for binding in store.bindings_for_entity(entity_id):
+        record = store.get_decision(binding.record_id) or store.get_fact(binding.record_id)
+        if record is None or (record.valid_to is not None and record.valid_to <= now):
+            continue
+        if isinstance(record, Decision):
+            decisions.append(record)
+        else:
+            facts.append(record)
+    return decisions, facts
 
 
 # Derived from the plain-string kinds in store_layout.py, which the hook hot path tests raw rows
@@ -504,7 +598,12 @@ def _id_suffix(d: Decision) -> str:
 
 
 def _fmt_decision(
-    d: Decision, prefix: str = "- ", *, detailed: bool = False, drifted: bool = False
+    d: Decision,
+    prefix: str = "- ",
+    *,
+    detailed: bool = False,
+    drifted: bool = False,
+    file_bound: bool = False,
 ) -> str:
     """Render one decision line. Imported decisions set ``title`` to (a prefix of) ``choice``'s
     first line, so ``"{title}: {choice}"`` would duplicate it (``"- [adr] X: X"``) -- when
@@ -536,12 +635,13 @@ def _fmt_decision(
     # its degrade path re-renders tight with the same flag, so the marker never jumps to
     # a position after the id suffix on a degraded line.
     dtag = " [drifted]" if drifted else ""
+    ftag = " [file-bound]" if file_bound else ""
     choice_limit = _DIRECT_FIELD_CLIP_CHARS if detailed else _LINE_CLIP_CHARS
     if d.choice.strip().startswith(d.title.strip()):
         body = d.title
     else:
         body = f"{d.title}: {_clip_line(d.choice, choice_limit)}"
-    line = f"{prefix}[{d.kind.value}]{tag}{dtag} {body}"
+    line = f"{prefix}[{d.kind.value}]{tag}{dtag}{ftag} {body}"
     if not detailed:
         return line
     if d.context:
@@ -553,7 +653,7 @@ def _fmt_decision(
     return line + _id_suffix(d)
 
 
-def _fmt_fact(f: Fact, prefix: str = "- ") -> str:
+def _fmt_fact(f: Fact, prefix: str = "- ", *, file_bound: bool = False) -> str:
     """Render one fact line for the ``## Known facts`` bucket (standalone facts — those not
     already rendered inline under a supported decision, see ``rank_decisions``). Same tight
     ``_LINE_CLIP_CHARS`` clip and ``[unratified]`` PROPOSED tag as an inline evidence line
@@ -561,7 +661,8 @@ def _fmt_fact(f: Fact, prefix: str = "- ") -> str:
     allowance, since it has no analogous "seed-anchored" render tier of its own."""
     tag = " [unratified]" if f.status == DecisionStatus.PROPOSED else ""
     statement = _clip_line(f.statement, _LINE_CLIP_CHARS)
-    return f"{prefix}fact{tag}: {statement} [{_clip_line(f.source, 80)}]"
+    ftag = " [file-bound]" if file_bound else ""
+    return f"{prefix}fact{tag}{ftag}: {statement} [{_clip_line(f.source, 80)}]"
 
 
 def _live_facts(facts: list[Fact]) -> list[Fact]:
@@ -634,6 +735,8 @@ def rank_decisions(
     *,
     trailing_entities: Sequence[Entity] = (),
     seed_node_ids: Sequence[str] = (),
+    file_bound_entity_ids: frozenset[str] = frozenset(),
+    ordinary_seed_entity_ids: frozenset[str] = frozenset(),
 ) -> TaskContext:
     """Gather valid decisions and rank them mistakes-first under budget.memory_chars.
 
@@ -707,6 +810,7 @@ def rank_decisions(
     # detailed-selected records only — the tier that carries the id supersede_decision
     # needs. Related/superseded one-liners never consult this set.
     drifted_ids = drifted_record_ids(store)
+    file_bound_record_ids: set[str] = set()
 
     def add_line(bucket: list[str], line: str, *, at: int | None = None) -> bool:
         """Shared budget primitive: place ``line`` into ``bucket`` iff it fits what's left of
@@ -734,12 +838,19 @@ def rank_decisions(
         in ``refused_facts`` and is settled once at the end of the call, so a fact refused
         under one decision and placed as a standalone entry is delivered (and counted once,
         when it is placed)."""
+        ctx.delivery_considered.add(("fact", fact.id))
         if not add_line(bucket, line, at=at):
             refused_facts.add(fact.id)
             return False
         rendered_fact_ids.add(fact.id)
+        if fact.id in file_bound_record_ids:
+            ctx.file_bound_shown = True
         fact_order.append(fact.id)
         ctx.line_ids.setdefault(line, []).append(fact.id)
+        snapshot = Snapshot(fact.id, "fact", "fact", fact.status.value)
+        ctx.delivery_atoms.setdefault(line, []).append(snapshot)
+        ctx.delivery_placements.append(Placement(snapshot))
+        ctx.delivery_placed.add(snapshot.key)
         ctx.emitted += 1
         return True
 
@@ -776,13 +887,20 @@ def rank_decisions(
     ) -> bool:
         if d.id in seen:
             return False
+        ctx.delivery_considered.add(("decision", d.id))
         if d.id not in counted:
             counted.add(d.id)
             ctx.selected += 1
         if detailed is None:
             detailed = bucket is not ctx.related
         drifted = detailed and d.id in drifted_ids
-        line = _fmt_decision(d, prefix, detailed=detailed, drifted=drifted)
+        line = _fmt_decision(
+            d,
+            prefix,
+            detailed=detailed,
+            drifted=drifted,
+            file_bound=d.id in file_bound_record_ids,
+        )
         if not add_line(bucket, line):
             if not detailed:
                 refused.add(d.id)
@@ -793,17 +911,30 @@ def rank_decisions(
             # branch, which would also restore context/rejected/consequences. The drifted
             # marker rides the same ruling (drift→supersede I3), staying in the tag
             # cluster via the explicit flag rather than jumping after the id.
-            line = _fmt_decision(d, prefix, detailed=False, drifted=drifted) + _id_suffix(d)
+            line = _fmt_decision(
+                d,
+                prefix,
+                detailed=False,
+                drifted=drifted,
+                file_bound=d.id in file_bound_record_ids,
+            ) + _id_suffix(d)
             if not add_line(bucket, line):
                 refused.add(d.id)
                 return False
             ctx.degraded += 1
             ctx.degraded_ids.append(d.id)
+            ctx.delivery_degraded.add(("decision", d.id))
         if drifted:
             ctx.drift_shown = True
         seen.add(d.id)
+        if d.id in file_bound_record_ids:
+            ctx.file_bound_shown = True
         ctx.shown_ids.append(d.id)
         ctx.line_ids.setdefault(line, []).append(d.id)
+        snapshot = Snapshot(d.id, "decision", d.kind.value, d.status.value)
+        ctx.delivery_atoms.setdefault(line, []).append(snapshot)
+        ctx.delivery_placements.append(Placement(snapshot))
+        ctx.delivery_placed.add(snapshot.key)
         ctx.emitted += 1
         proposal_fact_bucket = direct_proposed_facts if detailed else related_proposed_facts
         for fact in _live_facts(store.facts_for_decision(d.id)):
@@ -816,10 +947,45 @@ def rank_decisions(
 
     seed_accepted: dict[str, list[Decision]] = {}
     seed_proposed: dict[str, list[Decision]] = {}
+    seed_facts: dict[str, list[Fact]] = {}
+    verified_ids: set[str] = set()
     for entity in seed_entities:
-        accepted, proposed = partition_by_trust(store.valid_decisions_for_entity(entity.entity_id))
+        if entity.entity_id in file_bound_entity_ids:
+            decisions, facts = _file_bound_records(store, entity.entity_id)
+            route_ids = file_bound_record_ids
+        else:
+            decisions = store.valid_decisions_for_entity(entity.entity_id)
+            facts = store.valid_facts_for_entity(entity.entity_id)
+            route_ids = verified_ids
+        accepted, proposed = partition_by_trust(decisions)
         seed_accepted[entity.entity_id] = accepted
         seed_proposed[entity.entity_id] = proposed
+        seed_facts[entity.entity_id] = _live_facts(facts)
+        if file_bound_entity_ids:
+            route_ids.update(d.id for d in [*accepted, *proposed])
+            route_ids.update(f.id for f in seed_facts[entity.entity_id])
+            for decision in [*accepted, *proposed]:
+                route_ids.update(f.id for f in _live_facts(store.facts_for_decision(decision.id)))
+            route_ids.update(d.id for d in store.superseded_for_entity(entity.entity_id))
+            if (
+                entity.entity_id in file_bound_entity_ids
+                and entity.entity_id in ordinary_seed_entity_ids
+            ):
+                # The SAME entity can have ordinary live records and file-only orphan
+                # records. Preserve both routes instead of classifying the entity once.
+                normal_accepted, normal_proposed = partition_by_trust(
+                    store.valid_decisions_for_entity(entity.entity_id)
+                )
+                normal_facts = _live_facts(store.valid_facts_for_entity(entity.entity_id))
+                verified_ids.update(d.id for d in [*normal_accepted, *normal_proposed])
+                verified_ids.update(f.id for f in normal_facts)
+                for decision in [*normal_accepted, *normal_proposed]:
+                    verified_ids.update(
+                        f.id for f in _live_facts(store.facts_for_decision(decision.id))
+                    )
+                verified_ids.update(d.id for d in store.superseded_for_entity(entity.entity_id))
+    # Ordinary direct routes win, even when the unverified file seed was listed first.
+    file_bound_record_ids.difference_update(verified_ids)
 
     # (A) mistakes on seeds — two-phase (see this function's docstring). Phase 1: place
     # every mistake decision line with no evidence interleaved.
@@ -918,14 +1084,16 @@ def rank_decisions(
     # docstring for why that ordering, not a priority flag, is what guarantees facts never
     # displace a mistake.
     for e in seed_entities:
-        entity_facts = _live_facts(store.valid_facts_for_entity(e.entity_id))
+        entity_facts = seed_facts[e.entity_id]
         accepted_facts, unratified_facts = partition_by_trust(
             sorted(entity_facts, key=lambda f: f.id)
         )
         for fact in accepted_facts:
             if fact.id in rendered_fact_ids:
                 continue
-            place_fact(ctx.facts, fact, _fmt_fact(fact))
+            place_fact(
+                ctx.facts, fact, _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids)
+            )
         for fact in unratified_facts:
             direct_proposed_facts.setdefault(fact.id, fact)
 
@@ -937,7 +1105,9 @@ def rank_decisions(
         for fact in accepted_facts:
             if fact.id in rendered_fact_ids:
                 continue
-            place_fact(ctx.facts, fact, _fmt_fact(fact))
+            place_fact(
+                ctx.facts, fact, _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids)
+            )
         for fact in unratified_facts:
             if fact.id not in direct_proposed_facts:
                 related_proposed_facts.setdefault(fact.id, fact)
@@ -958,7 +1128,11 @@ def rank_decisions(
                 if fact.status == DecisionStatus.PROPOSED:
                     proposal_fact_bucket.setdefault(fact.id, fact)
                 elif fact.id not in rendered_fact_ids:
-                    place_fact(ctx.facts, fact, _fmt_fact(fact))
+                    place_fact(
+                        ctx.facts,
+                        fact,
+                        _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids),
+                    )
 
     direct_records: list[Decision | Fact] = [*direct_proposed, *direct_proposed_facts.values()]
     related_records: list[Decision | Fact] = [
@@ -974,7 +1148,11 @@ def rank_decisions(
             if isinstance(record, Decision):
                 add(ctx.unratified, record, evidence=False, detailed=detailed)
             elif record.id not in rendered_fact_ids:
-                place_fact(ctx.unratified, record, _fmt_fact(record))
+                place_fact(
+                    ctx.unratified,
+                    record,
+                    _fmt_fact(record, file_bound=record.id in file_bound_record_ids),
+                )
 
     # Trailing entities (the guessed seeds): last of all, after every record an exact-only call
     # would have placed, the exact seeds' own unratified ones included, so a guess never spends
@@ -1000,7 +1178,9 @@ def rank_decisions(
         for fact in accepted_facts:
             if fact.id in rendered_fact_ids:
                 continue
-            place_fact(ctx.facts, fact, _fmt_fact(fact))
+            place_fact(
+                ctx.facts, fact, _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids)
+            )
         for fact in unratified_facts:
             trailing_proposed_facts.setdefault(fact.id, fact)
     trailing_proposed = _by_recency(trailing_proposed)
@@ -1009,7 +1189,9 @@ def rank_decisions(
             if fact.status == DecisionStatus.PROPOSED:
                 trailing_proposed_facts.setdefault(fact.id, fact)
             elif fact.id not in rendered_fact_ids:
-                place_fact(ctx.facts, fact, _fmt_fact(fact))
+                place_fact(
+                    ctx.facts, fact, _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids)
+                )
     trailing_records: list[Decision | Fact] = [
         *trailing_proposed,
         *trailing_proposed_facts.values(),
@@ -1018,7 +1200,11 @@ def rank_decisions(
         if isinstance(record, Decision):
             add(ctx.unratified, record, evidence=False, detailed=False)
         elif record.id not in rendered_fact_ids:
-            place_fact(ctx.unratified, record, _fmt_fact(record))
+            place_fact(
+                ctx.unratified,
+                record,
+                _fmt_fact(record, file_bound=record.id in file_bound_record_ids),
+            )
 
     # fact_order already tracks exactly the facts that made it into the render, in the
     # order each was placed (inline evidence at every bucket plus the standalone
@@ -1290,8 +1476,11 @@ def get_task_context(
         budget,
         trailing_entities=demoted,
         seed_node_ids=res.seed_node_ids,
+        file_bound_entity_ids=res.file_bound_entity_ids,
+        ordinary_seed_entity_ids=res.ordinary_seed_entity_ids,
     )
     ctx.structure = structure
+    ctx.delivery_unresolved = res.unresolved
     return ctx
 
 
@@ -1337,6 +1526,8 @@ def query_decisions(
         store,
         budget,
         seed_node_ids=res.seed_node_ids,
+        file_bound_entity_ids=res.file_bound_entity_ids,
+        ordinary_seed_entity_ids=res.ordinary_seed_entity_ids,
     )
     return ctx.render(include_structure=False)
 
@@ -1932,6 +2123,9 @@ def drill_down(
         "members": members,
         "decisions": decisions,
         "decision_ids": [d.id for d in ordered],
+        "_delivery_snapshots": [
+            Snapshot(d.id, "decision", d.kind.value, d.status.value) for d in ordered
+        ],
     }
     # A separate optional key, never "note" (owned by the no-reader case above) and never
     # appended into "decisions" (pinned same-order as decision_ids by the telemetry

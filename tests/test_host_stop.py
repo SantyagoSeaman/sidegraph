@@ -1608,7 +1608,7 @@ def test_stop_peek_none_falls_back(tmp_path, monkeypatch, capsys):
     db = tmp_path / "s.db"
     Store(db)  # without it the real open_index_ro returns None anyway
     transcript = _substantial(tmp_path, name="s1.jsonl")
-    monkeypatch.setattr("sidegraph.gitio.open_index_ro", lambda _d: None)
+    monkeypatch.setattr("sidegraph.gitio.open_index_ro", lambda _d, **kwargs: None)
     out = _run(
         monkeypatch,
         capsys,

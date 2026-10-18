@@ -17,8 +17,10 @@ import posixpath
 import re
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path, PurePosixPath
@@ -32,7 +34,8 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import FunctionTool, Tool, ToolResult
 from pydantic import ValidationError
 
-from . import domain_snapshot, nearest_anchored, seed_ladder, worktree_seeds
+from . import delivery as delivery_ledger
+from . import domain_snapshot, drift_checks, nearest_anchored, seed_ladder, worktree_seeds
 from .anchoring import anchor_descriptor, anchor_roots, orphan_reason, resolve_and_bind
 from .anchoring import entity_summaries as _entity_summaries
 from .capture import (
@@ -93,16 +96,19 @@ from .retrieval import get_task_context as _retrieve
 from .retrieval import query_structure as _query_structure
 from .schema import (
     AnchorBinding,
+    CheckedCodeFile,
     Decision,
     DecisionKind,
     DecisionStatus,
     Descriptor,
     Domain,
     DomainStatus,
+    DriftCheck,
     Fact,
     Provenance,
     Relation,
     file_anchor_descriptors,
+    is_safe_record_id,
 )
 from .store import VOLATILE_STALE_KEY, Store, skipped_refusal_text
 from .sync import (
@@ -114,7 +120,7 @@ from .sync import (
 )
 from .tool_rate_limit import ToolCallRateLimit
 from .validation_errors import SafeWriteError
-from .verify import verify_snapshot
+from .verify import find_store_project_repo, verify_snapshot
 from .write_boundary import (
     CONFIGURATION_ERROR,
     WRITE_FAILURE,
@@ -352,6 +358,7 @@ def _unknown_argument_error(tool: str, unknown: list[str], parameters: list[str]
 
 _WRITE_TOOLS = frozenset(
     {
+        "record_drift_check",
         "add_decision",
         "supersede_decision",
         "add_fact",
@@ -778,12 +785,13 @@ def _resolve_anchors(
 
     ``orphaned`` is the entity summary of every leaf bound for an anchor that resolved to
     NOTHING. That leaf IS written (``anchoring.resolve_and_bind``: "created when resolved
-    or unresolved"), deliberately — but it is dead on arrival: ``valid_decisions_for_entity``
-    skips orphaned bindings, so no retrieval path, no ``drill_down`` and no PreToolUse hook
-    can ever deliver the record through it, and no Tier-1 community fallback is created
-    either (there is no resolved node to take a community from). Reporting it is the whole
-    point: an unresolved anchor used to come back as ``bindings: 1``, an entity summary and
-    an empty ``anchors_skipped`` — indistinguishable from success. Measured cost of that
+    or unresolved"), deliberately. ``valid_decisions_for_entity``, ``drill_down`` and the
+    PreToolUse hook skip orphaned bindings; no Tier-1 community fallback is created
+    (there is no resolved node to take a community from). Exact missing-file applicability
+    can still deliver eligible records as ``[file-bound]``, without verifying the anchor.
+    Reporting it is the whole point: an unresolved anchor used to come back as
+    ``bindings: 1``, an entity summary and an empty ``anchors_skipped`` — indistinguishable from
+    success. Measured cost of that
     silence: 29% of Tier-2 bindings orphaned-at-birth on the airflow corpus against 0-4%
     everywhere else (``design/testing/2026-08-03-delivery-gap-remeasure.md``).
 
@@ -831,6 +839,123 @@ def _resolve_anchors(
                     for s in _entity_summaries(store, [b for b in result if b.tier == 2])
                 )
     return skipped, orphaned
+
+
+def _record_drift_check_impl(
+    store: Store, decision_id: str, checked_commit: str, files: list[str], rationale: str
+) -> dict:
+    """Record one explicit agent assertion, without changing or ratifying its subject."""
+    preflight_direct(decision_id, checked_commit, files, rationale)
+    if not is_safe_record_id(decision_id):
+        raise SafeWriteError("decision_id")
+    if (
+        not isinstance(files, list)
+        or not 1 <= len(files) <= 256
+        or any(not isinstance(path, str) for path in files)
+    ):
+        raise SafeWriteError("files")
+    if len(set(files)) != len(files) or sum(len(p.encode("utf-8")) for p in files) > 16_384:
+        raise SafeWriteError("files")
+    for path in files:
+        CheckedCodeFile(path=path, blob_id="0" * 40, mode="100644")
+    clean, redactions = redact(rationale)
+    with store._mutation():
+        expires = time.monotonic() + 3.0
+
+        def remaining() -> float:
+            return expires - time.monotonic()
+
+        root = find_store_project_repo(store.path, timeout=remaining())
+        if root is None:
+            raise SafeWriteError("checked_commit")
+        try:
+            head = drift_checks.head_revision(root, remaining())
+        except ValueError:
+            raise SafeWriteError("checked_commit") from None
+        if checked_commit != head:
+            raise SafeWriteError("checked_commit")
+        if store.is_skipped("decisions", decision_id) or store.is_skipped("bindings", decision_id):
+            raise SafeWriteError("decision_id")
+        decision = store.get_decision(decision_id)
+        if decision is None or decision.status not in {
+            DecisionStatus.PROPOSED,
+            DecisionStatus.ACCEPTED,
+        }:
+            raise SafeWriteError("decision_id")
+        if not decision.provenance.commit:
+            raise SafeWriteError("checked_commit")
+        bindings = store.bindings_for_record(decision_id)
+        entities = {
+            b.entity_id: entity.model_dump(mode="json")
+            for b in bindings
+            if (entity := store.get_entity(b.entity_id)) is not None
+        }
+        statuses = {(decision_id, b.entity_id): b.status for b in bindings}
+        leaves, candidates = drift_checks.scope_leaves(
+            decision_id, [b.model_dump(mode="json") for b in bindings], entities, statuses
+        )
+        tree = drift_checks.tree_entries(root, head, set(files) | candidates, remaining())
+        required = sorted(candidates & tree.keys())
+        if not required or not set(required) <= set(files) or not set(files) <= tree.keys():
+            raise SafeWriteError("files")
+        check = DriftCheck(
+            schema_version=1,
+            decision_id=decision_id,
+            checked_at=datetime.now(UTC),
+            checked_commit=head,
+            provenance=Provenance(source="agent", commit=head),
+            rationale=clean,
+            required_files=required,
+            checked_files=[
+                CheckedCodeFile(path=p, blob_id=tree[p][0], mode=tree[p][1]) for p in files
+            ],
+            subject_digest=drift_checks.subject_digest(decision.model_dump(mode="json"), leaves),
+        )
+        # Recheck the inspected source, not unrelated dirty files. This reads real file
+        # hashes as well as index differences, so index skip flags cannot certify dirt.
+        if not drift_checks.clean_inspected_files(
+            root, head, {path: tree[path] for path in files}, remaining()
+        ):
+            raise SafeWriteError("files")
+        if drift_checks.head_revision(root, remaining()) != head:
+            raise SafeWriteError("checked_commit")
+        # Capture also observes unusual lower-tier descriptors and non-regular/missing
+        # anchor paths. Do not prune their cached warning before a normal full refresh.
+        capture_paths = {
+            descriptor["file_path"]
+            for binding in bindings
+            if binding.status != "orphaned"
+            for descriptor in [entities.get(binding.entity_id, {}).get("descriptor")]
+            if isinstance(descriptor, dict)
+            and isinstance(descriptor.get("file_path"), str)
+            and descriptor["file_path"]
+        }
+        cleared = store.record_drift_check(check, clear_cached_advisory=capture_paths <= set(files))
+    return {
+        "id": check.id,
+        "decision_id": decision_id,
+        "checked_commit": head,
+        "required_files": required,
+        "checked_files": sorted(files),
+        "provenance": check.provenance.model_dump(mode="json"),
+        "cache_cleared": cleared,
+        "redactions": redactions,
+    }
+
+
+@mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
+def record_drift_check(
+    decision_id: str, checked_commit: str, files: list[str], rationale: str
+) -> dict:
+    """Record that you inspected an existing decision and it still holds at this revision.
+
+    Inspect the decision and every supplied file first. Supply exact current HEAD and
+    all required anchored files plus inspected dependencies; source files must be clean.
+    The attributed assertion preserves original capture history and does not ratify or
+    establish semantic truth. Later checked code/mode/scope changes re-arm the advisory.
+    """
+    return _record_drift_check_impl(_get_store(), decision_id, checked_commit, files, rationale)
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
@@ -886,8 +1011,10 @@ def add_decision(
     graph is present. ``anchors_orphaned`` is
     ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
     to nothing (always ``[]`` when no graph is present).
-    The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
-    PreToolUse hook skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
+    The leaf is still written. Graph-bound retrieval, ``drill_down`` and the PreToolUse
+    hook skip that binding. An exact file request can still return eligible memory as
+    ``[file-bound]`` when an available graph lacks the declared file; its symbol anchors
+    remain unverified. Read ``reason`` first: ``file-not-in-graph`` usually means a
     stale graph (run `graphify update .` with the environment variable
     `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor), ``name-not-in-file`` means the
     name is wrong (``find_entity`` says what is there), ``no-file-path`` means pass
@@ -1090,8 +1217,10 @@ def supersede_decision(
     inheritance never resolves against the graph. ``anchors_orphaned`` is
     ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
     to nothing (always ``[]`` when no graph is present).
-    The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
-    PreToolUse hook skip it. Read ``reason`` first: ``file-not-in-graph`` usually means a
+    The leaf is still written. Graph-bound retrieval, ``drill_down`` and the PreToolUse
+    hook skip that binding. An exact file request can still return eligible memory as
+    ``[file-bound]`` when an available graph lacks the declared file; its symbol anchors
+    remain unverified. Read ``reason`` first: ``file-not-in-graph`` usually means a
     stale graph (run `graphify update .` with the environment variable
     `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor), ``name-not-in-file`` means the
     name is wrong (``find_entity`` says what is there), ``no-file-path`` means pass
@@ -1271,8 +1400,10 @@ def add_fact(
     to nothing against a graph. With no graph present every anchor lands here instead, as
     ``{"entity_id", "canonical_name", "tier": 2}`` with no ``reason`` key; it heals on the
     next sync once a graph exists.
-    The leaf is still written but is dead on arrival: retrieval, ``drill_down`` and the
-    PreToolUse hook skip it. When ``reason`` is present, read it first:
+    The leaf is still written. Graph-bound retrieval, ``drill_down`` and the PreToolUse
+    hook skip that binding. An exact file request can still return eligible memory as
+    ``[file-bound]`` when an available graph lacks the declared file; its symbol anchors
+    remain unverified. When ``reason`` is present, read it first:
     ``file-not-in-graph`` usually means a stale graph (run `graphify update .` with the
     environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor),
     ``name-not-in-file`` means the name is wrong (``find_entity`` says what is
@@ -1779,7 +1910,19 @@ def _hard_cap(
     def join(note: str | None) -> str:
         kept = assemble(range(split))
         kept_near = assemble(range(split, len(lines)))
-        keep_legend = legend if legend and _DRIFT_MARK in kept + kept_near else None
+        retained = kept + kept_near
+        keep_legend = (
+            "\n\n".join(
+                part
+                for part in (legend or "").split("\n\n")
+                if (
+                    " [file-bound]" in retained
+                    if part.startswith("[file-bound]")
+                    else _DRIFT_MARK in retained
+                )
+            )
+            or None
+        )
         items = list(trailer)
         if kept_near:
             items.insert(min(near_at, len(items)), kept_near)
@@ -1860,8 +2003,13 @@ def _delivered(ctx: TaskContext, report: _CapReport) -> TaskContext:
     if not ctx.line_ids:
         return ctx
     left = {key: list(ids) for key, ids in ctx.line_ids.items()}
+    snapshots = {key: list(values) for key, values in ctx.delivery_atoms.items()}
+    placements: list[delivery_ledger.Placement] = []
     kept_ids: set[str] = set()
     for unit in report.kept:
+        queue = snapshots.get(unit)
+        if queue:
+            placements.append(delivery_ledger.Placement(queue.pop(0)))
         ids = left.get(unit)
         if ids:
             kept_ids.add(ids.pop(0))
@@ -1876,6 +2024,7 @@ def _delivered(ctx: TaskContext, report: _CapReport) -> TaskContext:
     return dataclasses.replace(
         ctx,
         shown_ids=shown,
+        delivery_placements=placements,
         emitted=max(0, ctx.emitted - len(removed)),
         degraded=max(0, ctx.degraded - len(removed & set(ctx.degraded_ids))),
         dropped_for_budget=ctx.dropped_for_budget + len(removed),
@@ -2928,6 +3077,56 @@ def _empty_block(store, *, graph_missing: bool = False) -> str:
     return f"{_EMPTY_HEADING}\n{text}."
 
 
+def _delivery_data(
+    surface: str,
+    ctx: TaskContext,
+    *,
+    structure: bool | None = False,
+    reason: str | None = None,
+    ranker: bool = True,
+    unresolved_extra: bool = False,
+) -> delivery_ledger.Delivery:
+    """Only in-memory render evidence; no new current-store or attribution reads."""
+    return delivery_ledger.Delivery(
+        surface,
+        ctx.delivery_placements,
+        structure=structure,
+        unresolved=True if unresolved_extra else ctx.delivery_unresolved,
+        reason=reason,
+        considered=frozenset(ctx.delivery_considered) if ranker else None,
+        placed=frozenset(ctx.delivery_placed) if ranker else None,
+        degraded=frozenset(ctx.delivery_degraded) if ranker else None,
+    )
+
+
+def _observe_delivery_errors(surface: str):
+    """Observe only exceptions inside cores that already have a usable Store."""
+
+    def decorate(function):
+        @wraps(function)
+        def observed(store, *args, **kwargs):
+            try:
+                return function(store, *args, **kwargs)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    if _telemetry_enabled():
+                        store.record_delivery(
+                            delivery_ledger.Delivery(
+                                surface,
+                                error=True,
+                                reason="core_error",
+                                structure=None,
+                                unresolved=None,
+                            )
+                        )
+                raise
+
+        return observed
+
+    return decorate
+
+
+@_observe_delivery_errors("get_task_context")
 def _get_task_context_impl(
     store,
     reader,
@@ -2985,6 +3184,19 @@ def _get_task_context_impl(
     budget = RetrievalBudget(
         min(structure_budget, _LISTING_BUDGET_MAX), min(memory_budget, _LISTING_BUDGET_MAX)
     )
+    if ladder is not None:
+        # FileSeed preserves original unnamed-file authority; Ladder.unresolved also
+        # contains failed named queries. A trailing slash must never become a file read.
+        exact = [
+            *exact,
+            *(
+                Seed(file_path=f.path)
+                for f in ladder.file_seeds
+                if f.outcome == "unresolved"
+                and not f.directory_intent
+                and nearest_anchored._is_repo_relative(f.path)
+            ),
+        ]
     ctx = _retrieve(exact, store, reader, budget, guessed=guessed)
     body, legend, hint = ctx.render_parts()
     text = "\n\n".join(part for part in (body, legend, hint) if part)
@@ -3072,6 +3284,22 @@ def _get_task_context_impl(
         ladder.seed_paths if ladder is not None else [s.file_path for s in seeds if s.file_path],
         ctx=delivered,
         intent=_caller_intent(intent),
+        delivery=_delivery_data(
+            "get_task_context",
+            delivered,
+            unresolved_extra=ladder is not None
+            and (
+                bool(ladder.unresolved)
+                or any(
+                    note.outcome in ("ambiguous", "directory-too-large", "unresolved-name")
+                    for note in ladder.notes
+                )
+            ),
+            structure=None if report.cut and recorded.structure else bool(recorded.structure),
+            reason="structure_cut"
+            if report.cut and recorded.structure
+            else ("graph_unavailable" if reader is None else None),
+        ),
     )
     return answer
 
@@ -3149,6 +3377,7 @@ def _query_structure_impl(
     return _hard_cap(text, [], _BUDGET_CUT_ADVICE)
 
 
+@_observe_delivery_errors("query_decisions")
 def _query_decisions_impl(
     store,
     reader,
@@ -3187,6 +3416,11 @@ def _query_decisions_impl(
         [s.file_path for s in seeds if s.file_path],
         ctx=delivered,
         intent=_caller_intent(intent),
+        delivery=_delivery_data(
+            "query_decisions",
+            delivered,
+            reason="graph_unavailable" if reader is None else None,
+        ),
     )
     return answer
 
@@ -3400,6 +3634,7 @@ def _record(
     *,
     ctx: TaskContext | None = None,
     intent: str | None = None,
+    delivery: delivery_ledger.Delivery | None = None,
 ) -> None:
     """Best-effort telemetry. Swallows everything: a retrieval that failed because a
     counter could not be written would be strictly worse than no counters (D9).
@@ -3482,6 +3717,13 @@ def _record(
             had_rejected=had_rejected,
             had_superseded=had_superseded,
         )
+    if delivery is not None:
+        with contextlib.suppress(Exception):
+            store.record_delivery(
+                delivery._replace(
+                    session_id=None if session_id == UNATTRIBUTED_SESSION else session_id
+                )
+            )
 
 
 def _propose_decisions_impl(
@@ -4923,6 +5165,7 @@ def _cut_drill_down(result: dict, decision_ids: list[str], limit: int, budget: i
     return list(decision_ids[:taken])
 
 
+@_observe_delivery_errors("drill_down")
 def _drill_down_impl(
     store: Store,
     reader,
@@ -4952,6 +5195,8 @@ def _drill_down_impl(
             ensure_domain_membership(store, reader)
     result = _drill_down(domain_slug, store, reader)
     decision_ids = result.pop("decision_ids", [])
+    # Remove private snapshots BEFORE any public result sizing/cut.
+    snapshots = result.pop("_delivery_snapshots", [])
     if result.get("found"):
         if limit is not None and budget_chars is not None:
             decision_ids = _cut_drill_down(result, decision_ids, limit, budget_chars)
@@ -4961,7 +5206,13 @@ def _drill_down_impl(
         # It applies no relevance budget, so the row carries the records shown and zeros
         # elsewhere, under the reserved intent that keeps those zeros out of the budget figures.
         delivered = TaskContext(
-            shown_ids=list(decision_ids), selected=len(decision_ids), emitted=len(decision_ids)
+            shown_ids=list(decision_ids),
+            selected=len(decision_ids),
+            emitted=len(decision_ids),
+            delivery_placements=[
+                delivery_ledger.Placement(x) for x in snapshots[: len(decision_ids)]
+            ],
+            delivery_unresolved=False,
         )
         _record(
             store,
@@ -4969,7 +5220,20 @@ def _drill_down_impl(
             [f"domain:{domain_slug}"],
             ctx=delivered,
             intent=DRILL_DOWN_INTENT,
+            delivery=_delivery_data(
+                "drill_down",
+                delivered,
+                structure=bool(
+                    result.get("domain") or result.get("subdomains") or result.get("members")
+                ),
+                reason="graph_unavailable" if reader is None else None,
+                ranker=False,
+            ),
         )
+    elif _telemetry_enabled():
+        # Unknown slugs had no legacy rows. Do not add a legacy render or count references.
+        with contextlib.suppress(Exception):
+            store.record_delivery(delivery_ledger.Delivery("drill_down", unresolved=True))
     return result
 
 

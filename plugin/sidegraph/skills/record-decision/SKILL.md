@@ -105,10 +105,11 @@ anchors resurface as noise in someone else's task context later.
   still-proposed draft, drop it and re-propose corrected. Don't leave a decision
   effectively anchorless because of a silent skip.
 - **Check `anchors_orphaned` too — it is the more common failure.** An entry means the name
-  is **not in the graph at all**. The leaf is still written, but orphaned, and an orphaned
-  binding is skipped by retrieval, by `drill_down` and by the PreToolUse records block — the record
-  has no delivery path through that anchor. It will never surface. **Read the `reason`
-  before fixing anything — the causes need opposite actions:** `file-not-in-graph` usually
+  has no unique graph match. The leaf is still written, but orphaned; ordinary graph-based
+  retrieval, `drill_down` and the PreToolUse records block skip that binding. When an available
+  graph lacks the declared file, an exact file request can still return eligible memory as
+  `[file-bound]`, with unverified symbol anchors. This does not heal the binding. **Read the
+  `reason` before fixing anything — the causes need opposite actions:** `file-not-in-graph` usually
   means your graph is stale (run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor — the name was probably
   fine); `name-not-in-file` means the name is wrong (`find_entity`/`query_structure` will say
   what is really there); `no-file-path` means pass one. Repair with `add_anchors`

@@ -7,6 +7,45 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-10-18
+
+### Added
+
+- `sidegraph-export-adr` previews and explicitly writes profile-driven ADR sets with stable
+  identity, status/history links, full supporting evidence and preserved human notes.
+  Import and bootstrap withhold generated projections instead of duplicating memory.
+
+- Explicit `record_drift_check` inspections preserve decision capture history and clear
+  only the checked advisory. Changed inspected files or anchor scope re-arm review;
+  immutable auxiliary evidence is linted without changing the shared store digest.
+
+- Local delivery evidence distinguishes prepared answers, rendered record placements and
+  anchor relations, with record status at emission and explicit unknown/empty/error outcomes.
+  Stats keeps MCP and automatic hooks separate. Optional bounded index-only writes cannot
+  block delivery and retain no task/response text or hashes.
+- Automatic point-of-read context and appended task briefs can include eligible facts with
+  their complete statement, source and id, using existing record caps and trust rules.
+  Fact lines over 512 characters are withheld whole; full facts remain available through
+  `list_facts`. SubagentStart's awareness counts still cover decisions only.
+
+### Fixed
+
+- Automatic file-read context and appended agent briefs replace later identical record bodies
+  within one answer with explicit references. First copies, per-file applicability, trust,
+  selection limits and journal placements stay intact; no state crosses calls or agents.
+- Explicit file lookups return eligible decisions and facts by their exact durable file
+  binding when an available graph lacks the file, marked as file applicability with
+  unverified symbol anchors. Remaining-record pointers name both decision and fact listings.
+- Failed lifecycle hooks emit at most one content-free diagnostic line on stderr while
+  preserving their existing fail-open output. Missing indexes and deliberate format
+  refusals remain quiet; diagnostics do not depend on the index or create a log file.
+
+### Known limitations
+
+- Selection still uses file/entity/domain context and can include off-task records.
+  Task-query ranking remains future work; this release makes no measured relevance or
+  time-saving claim. See the [0.15 update and case guide](https://github.com/SantyagoSeaman/sidegraph/blob/v0.15.0/docs/guides/using-0.15.md).
+
 ## [0.14.0] — 2026-10-16
 
 ### Graphify 0.9.90

@@ -274,7 +274,7 @@ setup, scripted/CI use, and the two deliberately human-run jobs (`sidegraph-impo
 | `sidegraph-stop` | `Stop` hook — nudges the agent to distill decisions. |
 | `sidegraph-pre-tool-use` | `PreToolUse` hook — hands the agent the records anchored to a file when it reads or edits it (`Read`, `Grep`, `Edit`, `Write`, and `sed`/`grep`/`rg`/`cat` in Bash). |
 | `sidegraph-subagent-start` | `SubagentStart` hook — tells a starting subagent that decision memory exists and how to ask it. |
-| `sidegraph-bootstrap` | Guided CLI — scan one of six supported ADR/spec profiles, preview and review candidates, write only after confirmation, verify anchors/host integration, and prove production retrieval. |
+| `sidegraph-bootstrap` | Guided CLI — scan one of seven supported ADR/spec profiles, preview and review candidates, write only after confirmation, verify anchors/host integration, and prove production retrieval. |
 | `sidegraph-init` | CLI — bootstrap `.sidegraph/` in a repo: create the store, check for the graph, ask (in a terminal) whether to install the git hook that keeps the graph fresh (`--hooks`, `--no-hooks`, `--remove-hooks`), print the plugin install path (and the no-plugin `claude mcp add` alternative). |
 | `sidegraph-ratify` | CLI — review/accept/drop proposed decisions, facts, and domains. |
 | `sidegraph-sync` | CLI — re-anchor the store after a Graphify rebuild. |
@@ -285,6 +285,7 @@ setup, scripted/CI use, and the two deliberately human-run jobs (`sidegraph-impo
 | `sidegraph-verify` | CLI — lint the store's canonical files against its write-path invariants (schema, validity windows, referential integrity, ULID uniqueness); `--against <git-ref>` additionally checks that every store file changed vs that ref was mutated legally (CI mode). |
 | `sidegraph-doctor` | CLI — one-stop store health: composes `sidegraph-verify`'s strict lint with an advisory curation pass (stale proposals, dangling/degraded/orphaned records, never-surfaced decisions); `--check` also fails on advisory findings. |
 | `sidegraph-viz` | CLI — render an interactive HTML/JSON view of decisions, facts, entities, anchor status, supersession, and evidence links. |
+| `sidegraph-export-adr` | CLI — preview ADR projections and diffs from canonical memory; explicitly write managed documents with preserved human notes. See [ADR export](../guides/adr-export.md). |
 | `sidegraph-export-okf` | CLI — project the store into a deterministic [Open Knowledge Format v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) bundle any OKF-aware tool can read; strictly one-way, the store stays the source of truth. |
 | `sidegraph-stats` | CLI — one screen of local usage statistics from the gitignored index (how often memory was asked for, how much of the code worked on has memory anchored to it, what the store holds, anchor health); read-only, never creates the index, `--json` for the same report as data. Reachable in a session as `/sidegraph:stats`. |
 | `sidegraph-prepare-commit-msg` | `prepare-commit-msg` git hook — comments candidate `Sidegraph-Decision:` trailers into the commit message template; fail-open with bounded git/SQLite stages. See [`reference/git-bindings.md`](../reference/git-bindings.md). |

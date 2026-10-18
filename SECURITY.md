@@ -51,6 +51,17 @@ provider according to your repository's data policy. The runtime data boundary i
   separate Graphify CLI against the LLM provider you configure. Review that provider's
   data policy before using the pass on private documents.
 
+## Scoped inspection history
+
+`record_drift_check` writes immutable `.sidegraph/verifications/<id>.json` files intended
+for source control. They contain a redacted rationale, decision id, UTC time, inspected
+revision, repository-relative paths, Git blob ids and modes, a subject digest and agent
+provenance. Author/session are currently unknown. There is no source body or transcript
+in these files. Paths and Git content addresses are durable repository metadata; review
+the rationale and paths before sharing a store. Redaction is best-effort and cannot
+remove sensitive semantics from ordinary prose. These assertions can be wrong; they are
+neither truth certificates nor ratification. Older runtimes ignore and preserve them.
+
 ## Secret hygiene
 
 Text captured into decisions passes a redaction step before it is stored (API keys,

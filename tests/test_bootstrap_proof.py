@@ -452,3 +452,28 @@ def test_proof_uses_real_retrieval_without_writing_or_promoting_proposals(tmp_pa
         )
         == store_before
     )
+
+
+@pytest.mark.parametrize("file_path", [None, "src/alpha.py"])
+def test_file_applicability_does_not_complete_bootstrap_graph_proof(tmp_path, file_path):
+    """Useful memory outside the graph cannot prove current graph anchoring."""
+    from sidegraph.retrieval import get_task_context
+
+    store, _reader = proof_store_and_reader(tmp_path)
+    record_id = selected_id(store)
+    graph_path = tmp_path / "graph.json"
+    graph = json.loads(graph_path.read_text())
+    graph["nodes"] = [node for node in graph["nodes"] if node["source_file"] != "src/alpha.py"]
+    graph_path.write_text(json.dumps(graph) + "\n")
+    reader = GraphifyReader(graph_path)
+
+    context = get_task_context([Seed(file_path="src/alpha.py")], store, reader)
+    assert record_id in context.shown_ids
+    assert "[file-bound]" in context.render(include_structure=False)
+
+    proof = prove_task_context(
+        store, reader, accepted_record_ids=accepted_ids(store), file_path=file_path
+    )
+    assert not proof.complete
+    assert proof.reason == "selected decision did not surface"
+    assert proof.primary_line is None

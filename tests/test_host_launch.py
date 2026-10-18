@@ -307,7 +307,7 @@ def test_t4_session_start_records_before_it_opens_the_store(
             events.append("store")
             super().__init__(*args, **kwargs)
 
-    monkeypatch.setattr(launch, "record_launch_commit", lambda: events.append("writer"))
+    monkeypatch.setattr(launch, "record_launch_commit", lambda **kwargs: events.append("writer"))
     monkeypatch.setattr(store_module, "Store", _Recording)
     _run_session_start(tmp_path / "s.db", monkeypatch, capsys)
     assert events[:2] == ["writer", "store"]
@@ -319,7 +319,7 @@ def test_t4_a_writer_that_raises_changes_nothing_in_the_output(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(launch, "record_launch_commit", lambda: None)
+    monkeypatch.setattr(launch, "record_launch_commit", lambda **kwargs: None)
     baseline = _run_session_start(tmp_path / "a.db", monkeypatch, capsys)
 
     def boom() -> None:

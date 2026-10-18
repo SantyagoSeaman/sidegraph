@@ -79,7 +79,7 @@ def test_session_start_appends_drift_line(tmp_path, monkeypatch, capsys):
     calls = _fake_refresh(monkeypatch, 3)
     out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"))
     text = out["hookSpecificOutput"]["additionalContext"]
-    assert "Sidegraph: 3 record(s) are anchored to code that changed after their capture" in text
+    assert "Sidegraph: 3 record(s) need content review: code changed or a prior check" in text
     assert "[drifted] tag in retrieval" in text
     assert "sidegraph-doctor" in text
     assert len(calls) == 1
@@ -90,7 +90,7 @@ def test_session_start_no_line_when_zero_or_none(tmp_path, monkeypatch, capsys):
         _fake_refresh(monkeypatch, n)
         out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / f".sidegraph-{n}"))
         text = out["hookSpecificOutput"]["additionalContext"]
-        assert "anchored to code that changed" not in text
+        assert "need content review:" not in text
 
 
 def test_session_start_kill_switch_suppresses_line_but_still_refreshes(
@@ -103,7 +103,7 @@ def test_session_start_kill_switch_suppresses_line_but_still_refreshes(
     calls = _fake_refresh(monkeypatch, 3)
     out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"))
     text = out["hookSpecificOutput"]["additionalContext"]
-    assert "anchored to code that changed" not in text
+    assert "need content review:" not in text
     assert len(calls) == 1
 
 
