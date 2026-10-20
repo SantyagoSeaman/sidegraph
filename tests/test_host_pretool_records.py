@@ -550,11 +550,24 @@ def test_t4_a_bash_read_is_not_a_touch(bash_project, monkeypatch, capsys):
 
 
 _HOOK_PROCESS = "from sidegraph.host.hooks import pre_tool_use; pre_tool_use()"
+_WAITED_HOOK_PROCESS = """from sidegraph.hot_index import HotIndex
+
+original_open = HotIndex.open.__func__
+
+def waited_open(cls, store_path, *, on_error=None, busy_timeout_seconds=0.0):
+    return original_open(
+        cls, store_path, on_error=on_error, busy_timeout_seconds=1.0
+    )
+
+HotIndex.open = classmethod(waited_open)
+from sidegraph.host.hooks import pre_tool_use
+pre_tool_use()
+"""
 
 
-def _spawn(project: Project) -> subprocess.Popen:
+def _spawn(project: Project, *, waited: bool = False) -> subprocess.Popen:
     return subprocess.Popen(
-        [sys.executable, "-c", _HOOK_PROCESS],
+        [sys.executable, "-c", _WAITED_HOOK_PROCESS if waited else _HOOK_PROCESS],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -569,29 +582,104 @@ def _spawn(project: Project) -> subprocess.Popen:
     )
 
 
-def test_t4b_two_processes_for_one_line_inject_exactly_three_files_between_them(bash_project):
-    """Claude Code spawns one process per matching ``if`` entry, so a ``sed … | grep …`` line
-    starts two for one call. Both pick the same three files and claim only those: five files
-    named, three delivered, none twice. A per-process bound that counts the files each process
-    WON would deliver five here (M7). Five trials, since the interleaving varies."""
+def _parallel_hook_calls(
+    project: Project, payload: str, *, waited: bool
+) -> list[tuple[int, str, str]]:
+    """Submit both hook inputs before collecting either process; always kill and reap siblings."""
+    processes: list[subprocess.Popen] = []
+    try:
+        for _ in range(2):
+            processes.append(_spawn(project, waited=waited))
+        for process in processes:
+            assert process.stdin is not None
+            process.stdin.write(payload)
+            process.stdin.close()
+            process.stdin = None
+        outcomes = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=60)
+            outcomes.append((process.returncode, stdout, stderr))
+        return outcomes
+    except Exception as error:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+        details = []
+        for process in processes:
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                except subprocess.TimeoutExpired as reap_error:
+                    raise AssertionError(
+                        "hook child did not reap after kill; "
+                        f"stdout={reap_error.output!r}, stderr={reap_error.stderr!r}"
+                    ) from reap_error
+            details.append((process.returncode, stdout, stderr))
+        raise AssertionError(
+            f"parallel hook child failed: {error!r}; outcomes={details!r}"
+        ) from error
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+        for process in processes:
+            if process.returncode is None:
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired as reap_error:
+                        raise AssertionError(
+                            "hook child did not reap after final kill; "
+                            f"stdout={reap_error.output!r}, stderr={reap_error.stderr!r}"
+                        ) from reap_error
+
+
+def _parallel_payload(project: Project, trial: int) -> str:
     names = ["a.py", "b.py", "c.py", "d.py", "e.py"]
+    command = f"sed -n 1,5p {' '.join(names)} | grep -n x"
+    return json.dumps({**_bash(command, session=f"par-{trial}"), "cwd": str(project.root)})
+
+
+def _parallel_delivered(outcomes: list[tuple[int, str, str]]) -> list[str]:
+    delivered: list[str] = []
+    for returncode, stdout, stderr in outcomes:
+        assert returncode == 0, stderr
+        answer = json.loads(stdout)
+        assert isinstance(answer, dict), stdout
+        if answer:
+            delivered += _files_in(answer["hookSpecificOutput"]["additionalContext"])
+    return delivered
+
+
+def test_t4b_two_processes_for_one_line_inject_exactly_three_files_between_them(bash_project):
+    """Two matching Claude hook entries submit the same line concurrently. The test-only opener
+    waits up to one second; when both children are admitted, shared claims deliver exactly the
+    first three files once. Five trials exercise interleavings; production stays zero-wait."""
     for trial in range(5):
-        command = f"sed -n 1,5p {' '.join(names)} | grep -n x"
-        payload = json.dumps(
-            {**_bash(command, session=f"par-{trial}"), "cwd": str(bash_project.root)}
+        outcomes = _parallel_hook_calls(
+            bash_project, _parallel_payload(bash_project, trial), waited=True
         )
-        procs = [_spawn(bash_project) for _ in range(2)]
-        for proc in procs:
-            proc.stdin.write(payload)
-            proc.stdin.close()
-        delivered: list[str] = []
-        for proc in procs:
-            out = proc.stdout.read()
-            assert proc.wait(timeout=60) == 0, proc.stderr.read()
-            answer = json.loads(out)
-            if answer:
-                delivered += _files_in(answer["hookSpecificOutput"]["additionalContext"])
-        assert sorted(delivered) == ["a.py", "b.py", "c.py"], (trial, delivered)
+        delivered = _parallel_delivered(outcomes)
+        assert sorted(delivered) == ["a.py", "b.py", "c.py"], (trial, delivered, outcomes)
+
+
+def test_t4b_zero_wait_processes_deliver_only_a_unique_subset_of_three(bash_project):
+    """Zero-wait hooks may refuse contention but retain valid, bounded, unique output."""
+    allowed = {"a.py", "b.py", "c.py"}
+    for trial in range(5, 10):
+        outcomes = _parallel_hook_calls(
+            bash_project, _parallel_payload(bash_project, trial), waited=False
+        )
+        delivered = _parallel_delivered(outcomes)
+        assert len(delivered) <= 3, (trial, delivered, outcomes)
+        assert len(delivered) == len(set(delivered)), (trial, delivered, outcomes)
+        assert set(delivered) <= allowed, (trial, delivered, outcomes)
 
 
 # -- T5: the cap --------------------------------------------------------------------------------
