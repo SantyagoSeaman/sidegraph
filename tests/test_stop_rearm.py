@@ -210,8 +210,10 @@ def test_commits_on_a_branch_that_is_not_checked_out_count(tmp_path, monkeypatch
 
 def test_two_parallel_stops_past_the_threshold_nudge_exactly_once(tmp_path, monkeypatch):
     """Both Stops read the old stamp, count their commits and meet at a barrier before either
-    writes, as two hook processes can. Red against a write without compare-and-swap (M4):
-    both would nudge."""
+    writes, as two hook processes can. This isolates compare-and-swap (M4): the hook Store's
+    zero-wait policy is covered separately, so this test lets hook Store handles wait while
+    they construct and reserve the writer. A write without compare-and-swap would still let
+    both stale snapshots nudge."""
     world = _world(tmp_path)
     store = Store(world.db)
     store.mark_captured(SESSION)
@@ -247,6 +249,17 @@ def test_two_parallel_stops_past_the_threshold_nudge_exactly_once(tmp_path, monk
         return real_count(*args, **kwargs)
 
     monkeypatch.setattr(hooks, "_commits_since", meet_then_count)
+
+    # Both hooks have already read the same old ledger value and passed the barrier. Let their
+    # Store constructors and CAS writes serialize here so zero-wait setup contention does not
+    # mask whether the stale-value compare-and-swap has exactly one winner.
+    original_init = Store.__init__
+
+    def waited_hook_store_init(self, path=".sidegraph", *, busy_timeout_seconds=None):
+        assert busy_timeout_seconds == 0.0
+        original_init(self, path, busy_timeout_seconds=5.0)
+
+    monkeypatch.setattr(Store, "__init__", waited_hook_store_init)
     threads = [threading.Thread(target=hooks.stop) for _ in range(2)]
     for thread in threads:
         thread.start()

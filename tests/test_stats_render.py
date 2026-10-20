@@ -265,6 +265,10 @@ def _states() -> dict[str, StatsReport]:
         "narrowed-window": _narrowed_window(),
         "stale-index": _stale(),
         "stale-index-recording-off": _stale(telemetry_enabled=False),
+        "cold-binding-statuses": _report(anchors=None, binding_statuses_computed=False),
+        "cold-binding-statuses-recording-off": _report(
+            anchors=None, binding_statuses_computed=False, telemetry_enabled=False
+        ),
         "mature": _report(),
         "immature": _immature(),
         "telemetry-off": _report(telemetry_enabled=False),
@@ -1138,6 +1142,36 @@ def test_a_stale_index_states_itself_and_names_what_to_run():
     assert _block(text, "ANCHORS") == ["ANCHORS     not shown: the index is behind the store files"]
 
 
+def test_cold_binding_statuses_withhold_anchor_counts_and_recommend_sync():
+    report = _report(anchors=None, binding_statuses_computed=False)
+    text = render_text(report)
+    assert _block(text, "ANCHORS") == [
+        "ANCHORS     not computed for current graph → sidegraph-sync"
+    ]
+    assert "191 live" not in text and "none yet" not in _block(text, "ANCHORS")
+
+
+def test_canonical_staleness_takes_precedence_over_cold_binding_statuses():
+    report = _stale(binding_statuses_computed=False)
+    assert _block(render_text(report), "ANCHORS") == [
+        "ANCHORS     not shown: the index is behind the store files"
+    ]
+
+
+def test_other_missing_anchor_stats_keep_the_existing_omission_message():
+    report = _report(anchors=None, binding_statuses_computed=True)
+    assert _block(render_text(report), "ANCHORS") == [
+        "ANCHORS     not shown: the index is behind the store files"
+    ]
+
+
+def test_cold_binding_statuses_remain_visible_when_recording_is_off():
+    report = _report(anchors=None, binding_statuses_computed=False, telemetry_enabled=False)
+    assert _block(render_text(report), "ANCHORS") == [
+        "ANCHORS     not computed for current graph → sidegraph-sync"
+    ]
+
+
 def test_a_stale_index_prints_no_number_from_the_record_half():
     text = render_text(_stale())
     for figure in ("242", "119", "361", "230", "191", "silent domains", "anchored to"):
@@ -1307,6 +1341,13 @@ def test_json_carries_the_graph_freshness_fields_additively():
     assert g["built_at"] == "314f1ac" + "0" * 33
     assert (g["commits_behind"], g["stale_files"]) == (314, 258)
     assert (g["nodes"], g["files"], g["communities"]) == (6164, 300, 238)
+
+
+def test_json_marks_cold_binding_statuses_without_claiming_zero_anchors():
+    d = _data(_report(anchors=None, binding_statuses_computed=False))
+    assert d["anchors"] is None
+    assert d["binding_statuses_computed"] is False
+    assert d["index_stale"] is False
 
 
 @pytest.mark.parametrize("graph", [GraphStats(available=False), GraphStats(unreadable=True)])

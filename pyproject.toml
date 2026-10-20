@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.15.0"
+version = "0.16.0"
 description = "Own the memory, rent the graph — a durable decision/lessons layer as a sidecar over a code-graph engine."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -36,10 +36,10 @@ dependencies = [
     "pydantic>=2.9",
     "fastmcp>=3.4.2,<4",
     "python-ulid>=3.0",
-    # Imported directly by server.py (the refresh middleware). Both arrive through fastmcp;
-    # the bounds are the ones that import needs (mcp: fastmcp-slim's own lower bound).
+    # Imported directly by server.py (the refresh middleware). Keep the security floor for
+    # GHSA-84m7-p3x7-pcfv / CVE-2026-59951: MCP 1.30.0 fixes stateful StreamableHTTP.
     "anyio>=4",
-    "mcp>=1.24,<2",
+    "mcp>=1.30,<2",
 ]
 
 [project.urls]

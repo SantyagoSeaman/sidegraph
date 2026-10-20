@@ -595,17 +595,21 @@ collision — publishing retries under the next sequence number rather than over
 Identical content normally produces identical bytes and a matching hash suffix; the loader
 deduplicates overlapping ULIDs after branches merge.
 
-The loader reads hot files **and** every archive segment on every load, deduping by ULID (a
-record can legitimately appear in more than one segment — e.g. compaction run independently on
-two branches before they merged — but terminal records are immutable, so any duplicate is
-byte-identical and it doesn't matter which copy wins). If a hot file and an archived copy of
-the same id ever disagree, the hot file wins and a warning prints — that shape means
-corruption or a hand-edit, and the store never silently prefers the archive over live disk
-state. A key the hot file lacks, against `null` or an empty list or object in the archive, is
-not a disagreement (the file predates the field); a key only the hot file holds, at any depth
-and whatever its value, always is, and `sidegraph-compact` keeps such a file. The freshness digest (above) covers `archive/*.jsonl` too, so a segment absorbed from a
-teammate's branch via `git pull` is picked up on the next open exactly like any other new
-committed file.
+The loader reads hot files **and** every archive segment on every load, deduping by ULID (an
+archive record can legitimately appear in more than one segment — e.g. compaction run
+independently on two branches before they merged — and byte-identical archive copies are
+equivalent). If a hot file and an archived copy of the same id disagree, the hot file wins and
+a warning prints; the store never silently prefers the archive over live disk state. A key the
+hot file lacks, against `null` or an empty list or object in the archive, is not a disagreement
+(the file predates the field). A key only the hot file holds, at any depth and whatever its
+value, always is, and `sidegraph-compact` keeps that file. Warnings identify whether hot-only
+fields explain the mismatch or whether shared values/structures differ; neither cause alone
+proves which writer produced the copy. Both copies remain available, so `sidegraph-verify` may
+report `duplicate-ulid`. Back up the store, verify it, compare both copies against known-good
+history, and retain both until an information-preserving reconciliation is established. An
+upgrade alone does not promise to reconcile an existing immutable archive entry. The freshness
+digest (above) covers `archive/*.jsonl` too, so a segment absorbed from a teammate's branch via
+`git pull` is picked up on the next open exactly like any other new committed file.
 
 `sidegraph-compact --older-than N` additionally requires a record to have been terminal for at
 least `N` days; domains are always excluded from that filter (nothing on `Domain` records when

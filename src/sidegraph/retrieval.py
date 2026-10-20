@@ -6,7 +6,7 @@ graph nodes, pull a budgeted structural subgraph, gather currently-valid decisio
 ``TaskContext``. Phase 1 (``top_tier_map``): an on-demand table of contents for SessionStart.
 
 Portable core: imports only the engine-seam interface (``GraphifyReader``/``NodeRef``) and the
-store; node→entity mapping goes through ``store.find_entity``. Budget is char-based
+store; entity mapping uses the operation-scoped descriptor lookup. Budget is char-based
 (``len(text)`` vs ``*_chars``) — no tokenizer dependency. Everything degrades when the reader
 is absent or the store is empty. See ``docs/concepts/retrieval.md``.
 """
@@ -36,7 +36,7 @@ from .schema import (
     Scope,
     matches_path_prefix,
 )
-from .store import _TERMINAL_DECISION_STATUSES, Store
+from .store import _TERMINAL_DECISION_STATUSES, DescriptorLookup, Store
 from .store_layout import DRIFT_CACHE_KEY as DRIFT_CACHE_KEY
 from .store_layout import MEMORY_GUARD_LINE, MISTAKE_KINDS
 from .store_layout import clip_line as _clip_line
@@ -298,7 +298,7 @@ def _entities_by_node(
     One pass over the concrete entities, not one scan per node; a caller that already holds
     them passes ``entities`` and the store is not read again."""
     by_node: dict[str, list[Entity]] = {}
-    for e in store.iter_concrete_entities() if entities is None else entities:
+    for e in store.descriptor_lookup().concrete_entities if entities is None else entities:
         if e.last_seen_node_id is not None:
             by_node.setdefault(e.last_seen_node_id, []).append(e)
     for entities in by_node.values():
@@ -311,11 +311,14 @@ def resolve_seeds(
     reader: GraphifyReader | None,
     store: Store,
     entities_by_node: dict[str, list[Entity]] | None = None,
+    *,
+    descriptor_lookup: DescriptorLookup | None = None,
 ) -> SeedResolution:
     """Resolve seeds to node ids, their store entities, and their community ids.
 
     ``entities_by_node`` is the map ``_entities_by_node`` builds; a caller that resolves many
     seeds one call at a time builds it once and passes it, instead of one pass per call."""
+    lookup = descriptor_lookup or store.descriptor_lookup()
     nodes: list[NodeRef] = []
     matched: set[tuple[str | None, str | None]] = set()
     if reader is not None:
@@ -357,7 +360,7 @@ def resolve_seeds(
     # orphaned one may have no node at all.
     for s in seeds:
         if s.name:
-            entity = store.resolve_descriptor(s.name, s.file_path)
+            entity = lookup.resolve_descriptor(s.name, s.file_path)
             add(entity)
             if entity is not None:
                 matched.add((s.name, s.file_path))
@@ -367,12 +370,16 @@ def resolve_seeds(
     # `last_seen_node_id` yet) or whose carrier adopted a path-less name is found only that way.
     by_node = None
     if nodes:
-        by_node = _entities_by_node(store) if entities_by_node is None else entities_by_node
+        by_node = (
+            _entities_by_node(store, lookup.concrete_entities)
+            if entities_by_node is None
+            else entities_by_node
+        )
     if by_node is not None:
         for n in nodes:
             for e in by_node.get(n.node_id, []):
                 add(e)
-            add(store.resolve_descriptor(n.name, n.file_path))
+            add(lookup.resolve_descriptor(n.name, n.file_path))
 
     # Exact file applicability is independent of symbol resolution. A graph-held file
     # (including non-anchorable types) must keep the ordinary orphan rules.
@@ -384,7 +391,7 @@ def resolve_seeds(
     if reader is not None and requested_files:
         missing = requested_files - reader.source_files()
         if missing:
-            for entity in sorted(store.iter_concrete_entities(), key=lambda e: e.entity_id):
+            for entity in sorted(lookup.concrete_entities, key=lambda e: e.entity_id):
                 if entity.descriptor is not None and entity.descriptor.file_path in missing:
                     add(entity)
                     file_entities.add(entity.entity_id)
@@ -1437,6 +1444,7 @@ def get_task_context(
     budget: RetrievalBudget | None = None,
     *,
     guessed: Sequence[Seed] = (),
+    descriptor_lookup: DescriptorLookup | None = None,
 ) -> TaskContext:
     """Phase-2 merge: budgeted structural subgraph + mistakes-first decision memory.
 
@@ -1452,18 +1460,21 @@ def get_task_context(
     # see design/superpowers/specs/2026-10-02-tolerant-seeds-design.md (D3)
     """
     budget = budget or RetrievalBudget()
-    res = resolve_seeds(seeds, reader, store)
+    lookup = descriptor_lookup or store.descriptor_lookup()
+    res = resolve_seeds(seeds, reader, store, descriptor_lookup=lookup)
     demoted: list[Entity] = []
     if guessed:
         if res.seed_node_ids:
             exact_ids = {e.entity_id for e in res.seed_entities}
             demoted = [
                 e
-                for e in resolve_seeds(list(guessed), reader, store).seed_entities
+                for e in resolve_seeds(
+                    list(guessed), reader, store, descriptor_lookup=lookup
+                ).seed_entities
                 if e.entity_id not in exact_ids
             ]
         else:
-            res = resolve_seeds([*seeds, *guessed], reader, store)
+            res = resolve_seeds([*seeds, *guessed], reader, store, descriptor_lookup=lookup)
     structure, peripheral = _gather_structure(res, store, reader, budget)
     if demoted:
         held = {e.entity_id for e in peripheral}

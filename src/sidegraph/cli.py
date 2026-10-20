@@ -2199,10 +2199,10 @@ def compact_main(argv: list[str] | None = None) -> int:
     ``--older-than N`` additionally requires N days in a terminal state (a decision's
     ``valid_to``; domains have no such field at all and are conservatively excluded —
     reported separately as "terminal age unknown" — whenever this flag is set; see
-    ``Store.compact``'s docstring). ``--dry-run`` lists what would be compacted (and what
-    leftover hot files from an interrupted prior run would be cleaned up) without writing an
-    archive segment or removing hot files; opening the store may still initialise or migrate
-    it, or rebuild ``index.db``.
+    ``Store.compact``'s docstring). ``--dry-run`` lists what would be compacted, hot files it
+    would keep on mismatch, and leftover hot files from an interrupted prior run it would
+    clean up, without writing an archive segment or removing hot files; opening the store may
+    still initialise or migrate it, or rebuild ``index.db``.
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-compact",
@@ -2262,6 +2262,7 @@ def compact_main(argv: list[str] | None = None) -> int:
             and report.skipped_age_filtered == 0
             and report.domains_excluded_age_unknown == 0
             and report.cleaned_up_hot_files == 0
+            and report.kept_hot_files == 0
         ):
             print("nothing to compact")
             return 0
@@ -2277,9 +2278,18 @@ def compact_main(argv: list[str] | None = None) -> int:
                 f"would also remove {report.cleaned_up_hot_files} leftover hot file(s) "
                 "already durably archived by a prior, interrupted compact run"
             )
+        if report.kept_hot_files:
+            print(
+                f"would keep {report.kept_hot_files} hot file(s): their content is not fully "
+                "represented in the archive"
+            )
         return 0
 
-    if report.total_compacted == 0 and report.cleaned_up_hot_files == 0:
+    if (
+        report.total_compacted == 0
+        and report.cleaned_up_hot_files == 0
+        and report.kept_hot_files == 0
+    ):
         parts = []
         if report.skipped_age_filtered:
             parts.append(f"{report.skipped_age_filtered} skipped (not terminal enough)")
@@ -2307,6 +2317,11 @@ def compact_main(argv: list[str] | None = None) -> int:
         print(
             f"cleaned up {report.cleaned_up_hot_files} leftover hot file(s) from an "
             "interrupted prior compact run"
+        )
+    if report.kept_hot_files:
+        print(
+            f"kept {report.kept_hot_files} hot file(s): their content is not fully represented "
+            "in the archive"
         )
     return 0
 

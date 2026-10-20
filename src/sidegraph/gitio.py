@@ -168,6 +168,7 @@ def open_index_ro(
     store_dir: Path,
     *,
     on_error: Callable[[Exception], None] | None = None,
+    busy_timeout_seconds: float = RO_OPEN_TIMEOUT_SECONDS,
 ) -> sqlite3.Connection | None:
     """Open the existing index read-only, never repairing or creating anything.
 
@@ -185,7 +186,7 @@ def open_index_ro(
         except FileNotFoundError:
             return None
         uri = f"file:{quote(os.fsencode(str(index_path)))}?mode=ro&immutable=0"
-        conn = sqlite3.connect(uri, uri=True, timeout=RO_OPEN_TIMEOUT_SECONDS)
+        conn = sqlite3.connect(uri, uri=True, timeout=busy_timeout_seconds)
         conn.row_factory = sqlite3.Row
         conn.execute("SELECT 1")
         return conn

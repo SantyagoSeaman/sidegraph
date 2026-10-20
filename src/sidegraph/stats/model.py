@@ -240,6 +240,9 @@ class StatsReport(BaseModel):
     # hand edit). `memory` and `anchors` are then None: they are derived from the record
     # tables, which describe the files as they were. Never a guess at what changed.
     index_stale: bool = False
+    # Binding statuses are volatile index state and reset on a canonical reload. True is the
+    # backwards-compatible default for reports constructed outside ``build_report``.
+    binding_statuses_computed: bool = True
     memory: MemoryStats | None
     graph: GraphStats
     anchors: AnchorStats | None
@@ -581,7 +584,8 @@ def build_report(
             )
         # Called while the connection is still open, on rows already fetched: a reopen here
         # would be a second read path, and a `Store` a write path (D8).
-        anchors = None if index_stale else _anchor_stats(bindings)
+        binding_statuses_computed = not index_stale and integrity.binding_statuses_computed(conn)
+        anchors = _anchor_stats(bindings) if binding_statuses_computed else None
         # The registry reads the same snapshot, and gets none while the index is behind the
         # files (its index checks would describe a store that is gone). Only what is broken or
         # degraded is a HEALTH item: an advisory problem is already visible in its own block.
@@ -689,6 +693,7 @@ def build_report(
             silent_domains=None if index_stale else silent[:4],
         ),
         index_stale=index_stale,
+        binding_statuses_computed=binding_statuses_computed,
         memory=(
             None
             if index_stale

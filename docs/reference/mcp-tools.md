@@ -1,6 +1,6 @@
 # MCP tools reference
 
-Twenty-four tools, all defined in [`src/sidegraph/server.py`](../../src/sidegraph/server.py) and
+Twenty-five tools, all defined in [`src/sidegraph/server.py`](../../src/sidegraph/server.py) and
 exposed by the `sidegraph-mcp` stdio server (`FastMCP("sidegraph")`). The server holds one
 process-wide `Store` (path resolved via `$SIDEGRAPH_DIR`, same precedence the CLI and hooks
 use — see [`configuration.md`](configuration.md#store-path-resolution)) and a best-effort
@@ -19,24 +19,26 @@ server without host identity: the session id stays null and retrievals are journ
 
 ## Transport and protocol compatibility
 
-`sidegraph-mcp` is a local **stdio** server started by an MCP client. Standard input and
-standard output carry protocol messages; diagnostics go to standard error. The console
-entry point does not provide an HTTP listener or an HTTP authorization configuration.
+`sidegraph-mcp` defaults to a local **stdio** server started by an MCP client. Standard input
+and standard output carry protocol messages; diagnostics go to standard error. FastMCP
+transport settings can select HTTP, but Sidegraph supplies no separate HTTP authorization
+configuration.
 Configure the working directory and `SIDEGRAPH_DIR` for the repository the server should
 use; see [configuration](configuration.md#path-resolution-semantics).
 
 Git commands for provenance, initiative, ratification identity and graph checks receive
 EOF on standard input, keeping subprocesses separate from the MCP protocol stream.
 
-The development lockfile selects FastMCP 3.4.2 and MCP Python SDK 1.28.1. Supported package
-dependencies are `fastmcp>=3.4.2,<4` and `mcp>=1.24,<2`. The locked stack
+The development lockfile selects FastMCP 3.4.2 and MCP Python SDK 1.30.0. Supported package
+dependencies are `fastmcp>=3.4.2,<4` and `mcp>=1.30,<2`. The locked stack
 uses the `initialize` / `notifications/initialized` lifecycle and negotiates protocol
 versions through **2025-11-25**. The server reports Sidegraph's package version in
 `serverInfo.version`; that is separate from the negotiated protocol version.
 
 The [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
 also describes a newer discovery lifecycle. The locked stack does not implement
-`server/discover`: a client must support the legacy initialization flow to use this
+`server/discover`; the installed MCP 1.30.0 server returns JSON-RPC `-32602` (`Invalid request
+parameters`) for that request. A client must support the legacy initialization flow to use this
 release. A request for a newer version during `initialize` can receive `2025-11-25`;
 the client must check that it supports the returned version.
 
@@ -59,15 +61,16 @@ counting or rendering those as separate answers.
 **Every listing tool is bounded.** The host replaces an answer over its limit with a notice
 (Claude Code: a warning above 10,000 tokens, an "exceeds maximum allowed tokens" notice above
 25,000 tokens by default, and a result saved to a file above 50,000 characters). So
-`retrieve_decisions`, `list_facts`, `get_entity_history`, `drill_down`, `list_domain_candidates`
-and `list_proposed` take `budget_chars` (default 24,000, maximum 40,000), the first four also
-`limit` (default 25, maximum 100; `list_domain_candidates` keeps its own `limit`), and each
-says what it left out and how to narrow. `get_task_context`, `query_structure`,
+`retrieve_decisions`, `list_facts`, `get_entity_history`, `drill_down`, `list_domain_candidates`,
+`list_proposed` and `list_domains` are bounded and say what they left out and how to narrow.
+All seven take `budget_chars` (default 24,000, maximum 40,000). `retrieve_decisions`,
+`list_facts`, `get_entity_history`, `drill_down` and `list_domains` take `limit` (default 25,
+maximum 100); `list_domain_candidates` keeps its own `limit`. `get_task_context`, `query_structure`,
 `query_decisions` and `list_proposed` never return more than 40,000 characters: a cut names
 the sections it removed in a closing note, and the advice at the end of the answer (how the
 seeds were read, what is not in the graph, the supersede hint, the drift legend) is kept.
-`list_domains`, `verify_store`, `sync_anchors` and `find_entity` are sized by the number of
-domains, findings or name candidates, not by accumulated memory, and stay unbounded. In Codex
+`verify_store`, `sync_anchors` and `find_entity` are sized by the number of findings or name
+candidates, not by accumulated memory, and stay unbounded. In Codex
 the host-side knob is `mcp_servers.<id>.tools.<tool>.output_token_limit` (its default is not
 documented).
 
@@ -1198,21 +1201,37 @@ key instead of erroring.
 ## `list_domains`
 
 ```python
-list_domains(status: str | None = None) -> list[dict]
+list_domains(
+    status: str | None = None,
+    query: str | None = None,
+    ids: list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+) -> ToolResult
 ```
 
-The full-listing counterpart to `list_proposed` (proposed-only) and `list_domain_candidates`
-(unclaimed-only) — the tool that actually answers "show me all domains". `status`, when given,
-filters to one of `"proposed"`/`"accepted"`/`"dropped"`/`"superseded"`; omitted (the default)
-returns every domain regardless of status. Read-only — writes nothing, ever; safe to call
-repeatedly.
+The bounded, full-listing counterpart to `list_proposed` (proposed-only) and
+`list_domain_candidates` (unclaimed-only). `status`, when given, filters to one of
+`"proposed"`/`"accepted"`/`"dropped"`/`"superseded"`; omitted returns every status.
+`ids` matches exact domain ids (`Domain.domain_id`, the row's `id`, never its slug).
+`query` is case-insensitive whitespace-separated AND terms searched across slug, title and
+summary joined with newlines. Filters combine with AND; blank query and blank-only ids are
+ignored. `limit` is clamped to 1..100 and `budget_chars` to 4,000..40,000. Read-only — writes
+nothing, ever; safe to call repeatedly.
 
-**Returns:** a list sorted by `slug`, one dict per domain: `{"id": str, "slug": str, "title":
-str, "summary": str, "status": str, "member_count": int, "path_prefixes": list[str],
-"seed_anchor_count": int, "parent_slug": str | None, "child_slugs": list[str]}`.
-`member_count` is `len(domain.communities)`: the number of communities whose every node
-is in the domain (0 until `ratify`/`sidegraph-sync` resolves a freshly proposed domain). `parent_slug`/`child_slugs` reflect the FULL domain set regardless of the
-`status` filter, so a filtered call still reports accurate lineage.
+**Returns:** one text block containing compact JSON: `{"matched": int, "returned": int,
+"omitted": int, "domains": [...], "hint": str | null}`. Counts are after filtering and
+before bounds; no matches means all three counts are zero. `domains` is the largest fitting
+initial prefix of complete rows, sorted by slug. Each row retains the existing fields:
+`{"id", "slug", "title", "summary", "status", "member_count", "path_prefixes",
+"seed_anchor_count", "parent_slug", "child_slugs"}`. `member_count` remains
+`len(domain.communities)`. Parent/child lineage comes from the full store even when filters
+exclude relatives. When the character budget omits rows, `hint` identifies the effective bound,
+suggests filters, and gives a bounded relative local-file fallback for the next omitted domain.
+When `limit` cuts the list, the hint suggests filters and raising `limit` only below 100. Empty
+stores say `No domains in the store.`; empty filtered matches name active filter keys without
+echoing their values. This is the provisional MCP return shape and sends no output schema or
+structured duplicate.
 
 ## `propose_decisions`
 

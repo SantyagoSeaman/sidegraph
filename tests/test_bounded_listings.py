@@ -13,8 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import fastmcp
 import mcp.types as mt
@@ -29,6 +31,8 @@ from sidegraph.schema import (
     DecisionKind,
     DecisionStatus,
     Descriptor,
+    Domain,
+    DomainStatus,
     Fact,
     Provenance,
 )
@@ -88,6 +92,437 @@ def _bind(store: Store, record_id: str, entity_id: str, tier: int = 1) -> None:
     store.add_binding(
         AnchorBinding(record_id=record_id, entity_id=entity_id, tier=tier, status="live")
     )
+
+
+def test_mcp_list_domains_bounds_oversized_domain_before_envelope_assertions(tmp_path, monkeypatch):
+    """The real MCP response must stay inside its text budget for one oversized row."""
+    store = Store(tmp_path / "mcp_oversized_domain.db")
+    monkeypatch.setattr(server, "_store", store)
+    domain = Domain(
+        slug="large-domain",
+        title="Large domain",
+        summary="x" * 60_000,
+        provenance=Provenance(source="manual"),
+    )
+    store.add_domain(domain)
+
+    async def run():
+        async with fastmcp.Client(server.mcp) as client:
+            return await client.call_tool("list_domains", {})
+
+    try:
+        result = asyncio.run(run())
+        text = result.content[0].text
+        assert len(text) <= 24_000
+        payload = json.loads(text)
+        assert payload["matched"] == 1
+        assert payload["returned"] == 0
+        assert payload["omitted"] == 1
+        assert payload["domains"] == []
+        assert f"domains/{domain.domain_id}.json" in payload["hint"]
+    finally:
+        store.close()
+
+
+def _add_listing_domain(
+    store: Store,
+    slug: str,
+    *,
+    title: str | None = None,
+    summary: str = "summary",
+    parent: str | None = None,
+    status: DomainStatus = DomainStatus.PROPOSED,
+):
+    return store.add_domain(
+        Domain(
+            slug=slug,
+            title=title or slug.title(),
+            summary=summary,
+            parent_id=parent,
+            status=status,
+            provenance=Provenance(source="manual"),
+        )
+    )
+
+
+def test_domain_listing_keeps_raw_rows_and_filters_exact_ids_and_query(store):
+    parent = _add_listing_domain(store, "group", title="Shared name", summary="Payments and orders")
+    _add_listing_domain(
+        store, "child", title="Child", summary="Payments refunds", parent=parent.domain_id
+    )
+    rows = server._list_domains_impl(store)
+
+    plain = json.loads(server._domain_listing(store))
+    assert plain == {
+        "matched": len(rows),
+        "returned": len(rows),
+        "omitted": 0,
+        "domains": rows,
+        "hint": None,
+    }
+
+    child = next(row for row in rows if row["slug"] == "child")
+    selected = json.loads(server._domain_listing(store, ids=[child["id"]]))
+    assert [row["id"] for row in selected["domains"]] == [child["id"]]
+    assert selected["domains"][0]["parent_slug"] == "group"
+    query = json.loads(server._domain_listing(store, query="payments refunds"))
+    assert [row["slug"] for row in query["domains"]] == ["child"]
+    combined = json.loads(
+        server._domain_listing(
+            store,
+            status="proposed",
+            query="child payments refunds",
+            ids=[child["id"]],
+        )
+    )
+    assert [row["id"] for row in combined["domains"]] == [child["id"]]
+    assert json.loads(server._domain_listing(store, query="payments missing"))["matched"] == 0
+    with pytest.raises(ValueError, match="DomainStatus"):
+        server._domain_listing(store, status="unknown")
+
+
+def test_domain_listing_empty_hints_distinguish_store_and_filters(store):
+    empty = json.loads(server._domain_listing(store))
+    assert empty["hint"] == "No domains in the store."
+
+    _add_listing_domain(store, "present")
+    filtered = json.loads(server._domain_listing(store, query="secret caller text"))
+    assert filtered["matched"] == filtered["returned"] == filtered["omitted"] == 0
+    assert "query" in filtered["hint"]
+    assert "secret caller text" not in filtered["hint"]
+
+
+def test_domain_listing_blank_filters_match_the_unfiltered_call(store):
+    _add_listing_domain(store, "present")
+    assert server._domain_listing(store, query=" \n ", ids=[" ", ""]) == server._domain_listing(
+        store
+    )
+
+
+def test_domain_listing_mid_list_oversize_keeps_prefix_and_local_fallback(store):
+    first = _add_listing_domain(store, "a-small")
+    blocked = _add_listing_domain(store, "b-large", summary="z" * 50_000)
+    third = _add_listing_domain(store, "c-small")
+
+    text = server._domain_listing(store, budget_chars=4000)
+    answer = json.loads(text)
+    assert len(text) <= 4000
+    assert answer["matched"] == 3 and answer["returned"] == 1 and answer["omitted"] == 2
+    assert [row["id"] for row in answer["domains"]] == [first.domain_id]
+    assert f"domains/{blocked.domain_id}.json" in answer["hint"]
+    assert "raise budget" not in answer["hint"]
+    follow_up = json.loads(server._domain_listing(store, ids=[third.domain_id]))
+    assert [row["id"] for row in follow_up["domains"]] == [third.domain_id]
+
+
+def test_domain_listing_first_oversized_row_does_not_suggest_a_larger_maximum(store):
+    domain = _add_listing_domain(store, "too-large", summary="z" * 60_000)
+    text = server._domain_listing(store, budget_chars=40_000)
+    answer = json.loads(text)
+    assert len(text) <= 40_000
+    assert answer["matched"] == 1 and answer["returned"] == 0 and answer["omitted"] == 1
+    assert f"domains/{domain.domain_id}.json" in answer["hint"]
+    assert "budget_chars=40000" in answer["hint"]
+    assert "raise budget" not in answer["hint"]
+
+
+def test_domain_listing_count_cut_suggests_a_real_limit_and_filters(store):
+    for index in range(3):
+        _add_listing_domain(store, f"row-{index}")
+    answer = json.loads(server._domain_listing(store, limit=1))
+    assert answer["returned"] == 1 and answer["omitted"] == 2
+    assert "limit=1" in answer["hint"]
+    assert "raise limit (max 100)" in answer["hint"]
+    assert "status, query or ids" in answer["hint"]
+
+
+def test_domain_listing_nonvacuous_limit_and_budget_clamps(store):
+    for index in range(101):
+        _add_listing_domain(store, f"many-{index:03d}")
+    by_count = json.loads(server._domain_listing(store, limit=1000, budget_chars=40_000))
+    assert by_count["matched"] == 101
+    assert by_count["returned"] == 100 and by_count["omitted"] == 1
+    assert "limit=100" in by_count["hint"]
+
+    one_small = server._list_domains_impl(store)[0]
+    only_one = json.loads(server._domain_listing(store, ids=[one_small["id"]], limit=0))
+    assert only_one["returned"] == 1 and only_one["omitted"] == 0
+
+    oversized_store = Store(store.path.parent / "oversized-clamp.db")
+    try:
+        oversized = _add_listing_domain(oversized_store, "large", summary="x" * 50_000)
+        max_clamped = json.loads(
+            server._domain_listing(oversized_store, ids=[oversized.domain_id], budget_chars=10**9)
+        )
+        assert max_clamped["returned"] == 0 and max_clamped["omitted"] == 1
+        assert "budget_chars=40000" in max_clamped["hint"]
+        assert "raise budget" not in max_clamped["hint"]
+    finally:
+        oversized_store.close()
+
+    minimum_budget = json.loads(
+        server._domain_listing(store, ids=[one_small["id"]], budget_chars=1)
+    )
+    assert minimum_budget["returned"] == 1 and minimum_budget["omitted"] == 0
+    assert len(server._domain_listing(store, ids=[one_small["id"]], budget_chars=1)) <= 4000
+
+
+@pytest.mark.parametrize(
+    ("limit", "budget", "expected_limit", "expected_budget"),
+    [
+        (0, 1, 1, 4000),
+        (1, 4000, 1, 4000),
+        (25, 24_000, 25, 24_000),
+        (100, 40_000, 100, 40_000),
+        (1000, 10**9, 100, 40_000),
+    ],
+)
+def test_domain_listing_clamps_limits_and_budgets(
+    store, limit, budget, expected_limit, expected_budget
+):
+    for index in range(3):
+        _add_listing_domain(store, f"row-{index}", summary=f"summary {index}")
+    text = server._domain_listing(store, limit=limit, budget_chars=budget)
+    answer = json.loads(text)
+    assert len(text) <= expected_budget
+    assert answer["returned"] <= expected_limit
+    assert answer["matched"] == answer["returned"] + answer["omitted"]
+
+
+def test_domain_listing_uses_maximal_prefix_at_hint_null_boundary(store):
+    _add_listing_domain(store, "first", summary="a" * 3000)
+    _add_listing_domain(store, "second", summary="b" * 3000)
+    rows = server._list_domains_impl(store)
+    full = {"matched": 2, "returned": 2, "omitted": 0, "domains": rows, "hint": None}
+    boundary = len(server._dump(full))
+    answer = json.loads(server._domain_listing(store, budget_chars=boundary))
+    assert answer["returned"] == 2 and answer["hint"] is None
+
+    under = json.loads(server._domain_listing(store, budget_chars=boundary - 1))
+    assert under["returned"] == 1 and under["omitted"] == 1
+    assert len(server._dump(under)) <= boundary - 1
+
+
+def test_domain_listing_real_tool_is_text_only_and_read_only(store, monkeypatch):
+    _add_listing_domain(store, "present")
+    monkeypatch.setattr(server, "_synced_reader", lambda: pytest.fail("unexpected sync"))
+    monkeypatch.setattr(server, "_load_reader", lambda: pytest.fail("unexpected reader load"))
+    monkeypatch.setattr(store, "_mutation", lambda *a, **k: pytest.fail("unexpected mutation"))
+    before = {
+        path.relative_to(store.path): path.read_bytes()
+        for path in store.path.rglob("*")
+        if path.is_file()
+    }
+
+    text, answer = wire("list_domains", {})
+    assert len(text) <= 24_000 and answer["returned"] == 1
+    tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+    assert tools["list_domains"].output_schema is None
+    assert tools["list_domains"].annotations.readOnlyHint is True
+    after = {
+        path.relative_to(store.path): path.read_bytes()
+        for path in store.path.rglob("*")
+        if path.is_file()
+    }
+    assert before == after
+    relative = {str(path) for path in before}
+    assert any(path.endswith("index.db") for path in relative)
+    assert any("/domains/" in f"/{path}" and path.endswith(".json") for path in relative)
+
+
+def test_domain_listing_sizes_escaped_fields_and_long_fallback_ids(store, monkeypatch):
+    escaped = _add_listing_domain(store, "escaped", summary='quote " slash \\\\ ' + "\x01" * 500)
+    text = server._domain_listing(store, ids=[escaped.domain_id], budget_chars=4000)
+    answer = json.loads(text)
+    assert len(text) <= 4000
+    assert answer["returned"] == 1
+    assert answer["domains"][0]["summary"] == 'quote " slash \\\\ ' + "\x01" * 500
+
+    row = {
+        "id": "long-id" * 30,
+        "slug": "large",
+        "title": "Large",
+        "summary": "x" * 50_000,
+        "status": "proposed",
+        "member_count": 0,
+        "path_prefixes": [],
+        "seed_anchor_count": 0,
+        "parent_slug": None,
+        "child_slugs": [],
+    }
+    monkeypatch.setattr(server, "_list_domains_impl", lambda store, status=None: [row])
+    long_id = json.loads(server._domain_listing(store, budget_chars=4000))
+    assert long_id["returned"] == 0
+    assert "Read the domains directory under the configured store" in long_id["hint"]
+    assert row["id"] not in long_id["hint"]
+    assert "raise budget" not in long_id["hint"]
+
+
+@pytest.mark.parametrize(("budget", "count"), [(4000, 700), (40000, 7000)])
+def test_domain_listing_omits_escaped_overflow_without_raise_budget_advice(
+    store, monkeypatch, budget, count
+):
+    row = {
+        "id": "escaped-overflow",
+        "slug": "escaped",
+        "title": "Escaped",
+        "summary": "\x01" * count,
+        "status": "proposed",
+        "member_count": 0,
+        "path_prefixes": [],
+        "seed_anchor_count": 0,
+        "parent_slug": None,
+        "child_slugs": [],
+    }
+    assert len(row["summary"]) < budget < len(server._dump(row))
+    monkeypatch.setattr(server, "_list_domains_impl", lambda store, status=None: [row])
+    text = server._domain_listing(store, budget_chars=budget)
+    answer = json.loads(text)
+    assert len(text) <= budget
+    assert answer["returned"] == 0 and answer["omitted"] == 1
+    assert f"budget_chars={budget}" in answer["hint"]
+    assert "raise budget" not in answer["hint"]
+
+
+def test_domain_listing_rejects_a_long_non_summary_row_whole(store, monkeypatch):
+    row = {
+        "id": "long-fields",
+        "slug": "area-" + "s" * 1200,
+        "title": "Title " + "t" * 1500,
+        "summary": "short",
+        "status": "proposed",
+        "member_count": 0,
+        "path_prefixes": ["src/" + "p" * 1500],
+        "seed_anchor_count": 0,
+        "parent_slug": None,
+        "child_slugs": ["child-" + str(index) for index in range(150)],
+    }
+    monkeypatch.setattr(server, "_list_domains_impl", lambda store, status=None: [row])
+    text = server._domain_listing(store, budget_chars=4000)
+    answer = json.loads(text)
+    assert len(text) <= 4000
+    assert answer["matched"] == 1 and answer["returned"] == 0 and answer["omitted"] == 1
+    assert answer["domains"] == []
+
+
+def test_domain_listing_fallback_identity_serialized_width_boundary(store, monkeypatch):
+    for identity in ("s" * 126, "l" * 127):
+        row = {
+            "id": identity,
+            "slug": "wide-id",
+            "title": "Wide id",
+            "summary": "x" * 50_000,
+            "status": "proposed",
+            "member_count": 0,
+            "path_prefixes": [],
+            "seed_anchor_count": 0,
+            "parent_slug": None,
+            "child_slugs": [],
+        }
+        monkeypatch.setattr(server, "_list_domains_impl", lambda store, status=None, row=row: [row])
+        answer = json.loads(server._domain_listing(store, budget_chars=4000))
+        assert answer["returned"] == 0
+        if len(server._dump(identity)) == 128:
+            assert f"Read domains/{identity}.json under the configured store" in answer["hint"]
+        else:
+            assert "Read the domains directory under the configured store" in answer["hint"]
+            assert identity not in answer["hint"]
+
+
+def test_domain_listing_fallback_never_uses_configured_store_path(store):
+    _add_listing_domain(store, "too-large", summary="x" * 50_000)
+    fake_root = store.path / "not-created-configured-store"
+    fake_path = fake_root / "/".join(["p" * 200] * 24)
+    assert len(server._dump(str(fake_path))) > 4000
+    assert not fake_root.exists()
+    proxy = SimpleNamespace(path=fake_path, iter_domains=store.iter_domains)
+    text = server._domain_listing(proxy, budget_chars=1)
+    answer = json.loads(text)
+    assert len(text) <= 4000
+    assert not fake_root.exists()
+    assert str(fake_path) not in answer["hint"]
+    assert "Read domains/" in answer["hint"]
+    assert "under the configured store" in answer["hint"]
+
+
+def test_domain_listing_filtered_lineage_keeps_unselected_status_relatives(store):
+    parent = _add_listing_domain(store, "parent")
+    store.ratify_domains(accept=[parent.domain_id])
+    selected_child = _add_listing_domain(store, "selected-child", parent=parent.domain_id)
+    dropped_sibling = _add_listing_domain(store, "dropped-sibling", parent=parent.domain_id)
+    store.ratify_domains(drop=[dropped_sibling.domain_id])
+
+    child = json.loads(
+        server._domain_listing(
+            store, status="proposed", ids=[selected_child.domain_id], query="selected-child"
+        )
+    )["domains"][0]
+    assert child["parent_slug"] == "parent"
+    assert child["child_slugs"] == []
+
+    parent_row = json.loads(
+        server._domain_listing(store, status="accepted", ids=[parent.domain_id])
+    )["domains"][0]
+    assert parent_row["child_slugs"] == ["dropped-sibling", "selected-child"]
+
+
+def test_domain_listing_dumps_each_oversized_candidate_row_once(store, monkeypatch):
+    rows = [
+        {
+            "id": f"synthetic-id-{index}",
+            "slug": f"synthetic-{index}",
+            "title": f"Synthetic {index}",
+            "summary": "x" * 60_000,
+            "status": "proposed",
+            "member_count": 0,
+            "path_prefixes": [],
+            "seed_anchor_count": 0,
+            "parent_slug": None,
+            "child_slugs": [],
+        }
+        for index in range(8)
+    ]
+    monkeypatch.setattr(server, "_list_domains_impl", lambda store, status=None: rows)
+    original_dump = server._dump
+    appearances: Counter[str] = Counter()
+
+    def tracking_dump(value):
+        def visit(item):
+            if isinstance(item, dict):
+                slug = item.get("slug")
+                if isinstance(slug, str) and slug.startswith("synthetic-"):
+                    appearances[slug] += 1
+                for nested in item.values():
+                    visit(nested)
+            elif isinstance(item, (list, tuple)):
+                for nested in item:
+                    visit(nested)
+
+        visit(value)
+        return original_dump(value)
+
+    monkeypatch.setattr(server, "_dump", tracking_dump)
+    answer = json.loads(server._domain_listing(store, budget_chars=4000))
+    assert answer["matched"] == 8 and answer["returned"] == 0 and answer["omitted"] == 8
+    assert appearances == Counter({f"synthetic-{index}": 1 for index in range(8)})
+
+
+def test_domain_listing_distinguishes_same_slug_revisions_by_id(store):
+    old = _add_listing_domain(store, "revision", summary="old")
+    new = Domain(
+        slug=old.slug,
+        title="New revision",
+        summary="new",
+        supersedes=old.domain_id,
+        provenance=Provenance(source="manual"),
+    )
+    store.supersede_domain(old.domain_id, new)
+    rows = server._list_domains_impl(store)
+    assert [row["id"] for row in rows] == [old.domain_id, new.domain_id]
+    old_rows = json.loads(server._domain_listing(store, ids=[old.domain_id]))["domains"]
+    new_rows = json.loads(server._domain_listing(store, ids=[new.domain_id]))["domains"]
+    assert [row["id"] for row in old_rows] == [old.domain_id]
+    assert [row["id"] for row in new_rows] == [new.domain_id]
 
 
 @pytest.fixture

@@ -27,6 +27,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from sidegraph.store_layout import hot_archive_difference, hot_matches_archive
 
 
 @pytest.fixture
@@ -421,8 +422,7 @@ def test_external_archive_segment_absorbed_on_reopen(tmp_path) -> None:
         reopened.close()
 
 
-# -- hot file always wins over a conflicting archive entry (corruption-shaped, never
-# destroy data) -----------------------------------------------------------------------------
+# -- hot file always wins over a conflicting archive entry; both copies stay available -----
 
 
 def test_reload_prefers_hot_file_over_conflicting_archive_entry_and_warns(tmp_path, capsys) -> None:
@@ -449,6 +449,8 @@ def test_reload_prefers_hot_file_over_conflicting_archive_entry_and_warns(tmp_pa
     err = capsys.readouterr().err
     assert "WARNING" in err
     assert d.id in err
+    assert "shared values or structures differ; compare both copies" in err
+    assert "stale archive" not in err
 
 
 def test_compact_leaves_mismatched_leftover_hot_file_untouched_and_warns(
@@ -461,8 +463,8 @@ def test_compact_leaves_mismatched_leftover_hot_file_untouched_and_warns(
     hot_path = _hot_decision_path(store, old.id)
     assert not hot_path.exists()
 
-    # Recreate the hot file with DIFFERENT content than the archived copy -- corruption,
-    # not crash debris (a real crash-window duplicate is byte-identical).
+    # Recreate the hot file with a changed shared value, not crash debris (a real
+    # crash-window duplicate is byte-identical).
     tampered = old.model_copy(update={"title": "tampered after archiving"})
     hot_path.write_text(
         json.dumps(tampered.model_dump(mode="json"), sort_keys=True, indent=2, ensure_ascii=False)
@@ -478,6 +480,84 @@ def test_compact_leaves_mismatched_leftover_hot_file_untouched_and_warns(
     err = capsys.readouterr().err
     assert "WARNING" in err
     assert old.id in err
+
+
+@pytest.mark.parametrize(
+    ("hot", "archived", "expected"),
+    [
+        ({"known": 1}, {"known": 1, "old_default": None}, None),
+        ({"known": 1}, {"known": 1, "old_default": []}, None),
+        ({"known": 1}, {"known": 1, "old_default": {}}, None),
+        ({"known": 1, "extra": None}, {"known": 1}, "extra-fields"),
+        ({"nested": {"extra": []}}, {"nested": {}}, "extra-fields"),
+        ([{"extra": False}], [{}], "extra-fields"),
+        ([{"extra": 0}], [{}], "extra-fields"),
+        ({"known": 2}, {"known": 1}, "different-values"),
+        ({"extra": None, "known": 2}, {"known": 1}, "different-values"),
+        ({"a": {"x": None}}, {"a": None}, "different-values"),
+        ([1, 2], [1], "different-values"),
+        ({"a": {"x": 1}}, {"a": [1]}, "different-values"),
+    ],
+)
+def test_hot_archive_difference_preserves_boolean_contract(hot, archived, expected):
+    assert hot_archive_difference(hot, archived) == expected
+    assert (hot_archive_difference(hot, archived) is None) is hot_matches_archive(hot, archived)
+
+
+def test_compact_kept_leftover_count_ignores_fresh_age_and_status_filter(store: Store):
+    old = store.add_decision(_decision(title="archived leftover"))
+    store.add_decision(_decision(title="successor", supersedes=old.id))
+    assert store.compact().decisions_compacted == 1
+
+    hot_path = _hot_decision_path(store, old.id)
+    payload = old.model_dump(mode="json")
+    payload["status"] = DecisionStatus.ACCEPTED.value
+    payload["valid_from"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    payload["valid_to"] = None
+    hot_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+    report = store.compact(older_than_days=365, dry_run=True)
+
+    assert report.kept_hot_files == 1
+    assert report.cleaned_up_hot_files == 0
+    assert report.skipped_age_filtered == 0
+
+
+def test_compact_skipped_hot_leftover_is_not_counted_as_kept(tmp_path):
+    path = tmp_path / "s"
+    store = Store(path)
+    old = store.add_decision(_decision(title="archived old"))
+    store.add_decision(_decision(title="successor", supersedes=old.id))
+    assert store.compact().decisions_compacted == 1
+    hot_path = _hot_decision_path(store, old.id)
+    hot_path.write_text(json.dumps({"id": "wrong-id"}) + "\n", encoding="utf-8")
+    store.close()
+
+    with Store(path) as reopened:
+        report = reopened.compact(dry_run=True)
+        assert report.kept_hot_files == 0
+        assert report.cleaned_up_hot_files == 0
+        assert hot_path.is_file()
+
+
+def test_compact_reports_kept_domain_hot_file(store: Store, capsys):
+    domain = store.add_domain(_domain(slug="kept-domain"))
+    store.ratify_domains(drop=[domain.domain_id])
+    hot_path = store.path / "domains" / f"{domain.domain_id}.json"
+    payload = json.loads(hot_path.read_text(encoding="utf-8"))
+    payload["future_field"] = False
+    hot_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+    dry_report = store.compact(dry_run=True)
+    dry_warning = capsys.readouterr().err
+    real_report = store.compact()
+
+    assert dry_report.kept_hot_files == 1
+    assert "prospective archive payload" in dry_warning
+    assert "no archive segment has been published" in dry_warning
+    assert "exists in BOTH" not in dry_warning
+    assert real_report.kept_hot_files == 1
+    assert hot_path.is_file()
 
 
 # -- everything stays retrievable after compaction (the invariant guard) --------------------

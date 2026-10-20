@@ -70,6 +70,10 @@ class Sandbox:
         path = self.root / name
         path.mkdir()
         git(path, "init", "-q", "-b", "main")
+        # The seed commit must not launch detached maintenance that changes .git while tests
+        # inspect repository contents. Keep this policy local to synthetic repositories.
+        git(path, "config", "--local", "maintenance.auto", "false")
+        git(path, "config", "--local", "gc.auto", "0")
         if files:
             (path / "a.txt").write_text("a\n")
             git(path, "add", "a.txt")

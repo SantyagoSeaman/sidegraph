@@ -1091,30 +1091,45 @@ before removing the now-redundant hot files leaves those as harmless leftover du
 run detects and removes them without writing a second, duplicate segment — counted separately
 in the output as "leftover hot file(s)".
 
-**A hot file that differs from its archived copy.** Compact keeps a hot file whose content
-differs from what it just archived, for example one holding a key the archive line lacks
-(written by a newer Sidegraph), and prints a `DIFFERENT content` warning on stderr. The record
-is still counted in `compacted N record(s)`, because it is in the new segment; its hot file is
-not removed. The warning repeats on every later compact and store open, and `sidegraph-verify`
-reports `duplicate-ulid` for the pair until a Sidegraph version that knows the key compacts it,
-or you restore the hot file and remove the segment by hand.
+**A hot file that differs from its archived copy.** Compact keeps both copies and prints a
+`DIFFERENT content` warning on stderr. When ignoring hot-only fields makes the shared content
+match, the warning says those extra fields are not represented in the archive and that a newer
+Sidegraph may have written them; that is an observed shape, not proof of which version wrote it.
+If shared values or structures differ, the warning says to compare both copies. The record is
+still counted in `compacted N record(s)`, because it is in the new segment; its hot file is not
+removed. Output also reports `kept K hot file(s): their content is not fully represented in the
+archive`, including on later compact runs that have no new records to archive. `sidegraph-verify`
+continues to report `duplicate-ulid` while both copies remain. Upgrading alone is not promised to
+reconcile an existing immutable archive entry. Back up the store, run `sidegraph-verify --db
+<store-dir>`, compare both copies against known-good history, and retain both until you establish
+an information-preserving reconciliation. For a fresh candidate in `--dry-run`, the warning
+compares the hot file with the prospective archive payload; no second copy has been published yet.
 
 **`--dry-run` output:** one line per candidate — `<ulid>  <kind>  <status>  <title>` — or a bare
 `nothing to compact` if there is nothing eligible at all (no candidates, nothing age-filtered
-out, no leftovers). Otherwise: `would compact N record(s) (X decisions, Y domains); Z skipped
-(not terminal enough)`; if `--older-than` excluded any domains outright (no terminal timestamp
-to check), an additional line reports `M domain(s) excluded: terminal age unknown`; if a prior
-interrupted run left redundant hot files behind, an additional line reports `would also remove
-K leftover hot file(s) already durably archived by a prior, interrupted compact run`.
+out, no leftovers, and no mismatched hot files). Otherwise: `would compact N record(s) (X
+decisions, Y domains); Z skipped (not terminal enough)`; if `--older-than` excluded any domains
+outright (no terminal timestamp to check), an additional line reports `M domain(s) excluded:
+terminal age unknown`; if a prior interrupted run left redundant hot files behind, an additional
+line reports `would also remove K leftover hot file(s) already durably archived by a prior,
+interrupted compact run`; and mismatches add `would keep K hot file(s): their content is not fully
+represented in the archive`. Dry-run compares fresh candidates as well as archived leftovers and
+writes no canonical file, archive segment or digest. `--older-than` filters fresh candidates;
+already archived leftovers remain eligible for cleanup or retention regardless of their current
+hot status or age. Opening the store may still initialize or
+migrate it, or rebuild `index.db`.
 
 **Real-run output:** when there was nothing to do at all, a single line —
 `nothing to compact` (bare), or `nothing to compact; Z skipped (not terminal enough)` and/or
-`; M domain(s) excluded: terminal age unknown` appended when either applies. Otherwise:
+`; M domain(s) excluded: terminal age unknown` appended when either applies. A positive kept
+count bypasses that no-op line. Otherwise:
 `compacted N record(s) into <segment_path> (X decisions, Y domains); Z skipped (not terminal
-enough)` — or `compacted 0 record(s); Z skipped (not terminal enough)` when only leftover
-cleanup happened and no new segment was written — followed by an `M domain(s) excluded:
-terminal age unknown` line and/or a `cleaned up K leftover hot file(s) from an interrupted
-prior compact run` line, each only when applicable.
+enough)` — or `compacted 0 record(s); Z skipped (not terminal enough)` when kept hot files or
+leftover cleanup remain and no new segment was written — followed by an `M domain(s) excluded:
+terminal age unknown` line, a `cleaned up K leftover hot file(s) from an interrupted prior
+compact run` line, and/or `kept K hot file(s): their content is not fully represented in the
+archive`, each only when applicable. `compacted N` counts new archive entries; `kept K` counts
+distinct hot files retained after comparison.
 
 **Exit code:** `0` on success, including a no-op run and every `--dry-run` that completes.
 Returns `1` before touching the store if `--older-than` is negative (`--older-than must be >= 0
@@ -1771,6 +1786,13 @@ Lines the report will not invent:
   no figure derived from the records: MEMORY and ANCHORS read `not shown: the index is behind
   the store files`, and REACH says which of its figures are not counted. The journal-derived
   lines are unaffected. `--json` carries `"index_stale": true` and `null` for those figures.
+- **Binding statuses not computed.** A fresh index can still have binding statuses waiting for
+  `sidegraph-sync` after reload. In that state, ANCHORS reads `not computed for current graph →
+  sidegraph-sync`; no anchor counts are shown, while MEMORY and REACH inventory remain available.
+  `--json` carries `"anchors": null`, `"binding_statuses_computed": false` and
+  `"index_stale": false`. When both conditions apply, canonical file staleness takes precedence
+  in the text; `binding_statuses_computed` is false without implying that volatile state alone
+  caused the omission.
 - **Budget and abandoned counts not recorded.** Once the report is past the floor above, when
   the window holds no render-journal record, the budget lines are replaced by the single line
   `budget and tried-and-abandoned counts: not recorded yet`. A zero there would read as a

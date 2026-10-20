@@ -681,7 +681,9 @@ class _BindingStatusSnapshot(NamedTuple):
     uncomputed: bool
 
 
-def _binding_status_snapshot(store_dir: Path) -> _BindingStatusSnapshot:
+def _binding_status_snapshot(
+    store_dir: Path, *, busy_timeout_seconds: float = 5.0
+) -> _BindingStatusSnapshot:
     """Read statuses and their certification in one short, read-only SQLite snapshot.
 
     An unavailable index cannot certify statuses; readable legacy rows without meta can.
@@ -692,7 +694,11 @@ def _binding_status_snapshot(store_dir: Path) -> _BindingStatusSnapshot:
     if not index_path.is_file():
         return _BindingStatusSnapshot({}, True)
     try:
-        conn = sqlite3.connect(f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True)
+        conn = sqlite3.connect(
+            f"file:{quote(os.fsencode(str(index_path)))}?mode=ro",
+            uri=True,
+            timeout=busy_timeout_seconds,
+        )
         try:
             conn.execute("BEGIN")
             try:
@@ -929,6 +935,7 @@ def _scan_code_drift(
     *,
     deadline: float | None = None,
     resolve_head: bool = False,
+    busy_timeout_seconds: float = 5.0,
 ) -> CodeDriftScan:
     """The pure scan half of the code-drift check (D1): record → committed bindings →
     entity ``file_path`` join, orphaned-binding exclusion, one batched diff per distinct
@@ -946,7 +953,7 @@ def _scan_code_drift(
     its anchored code lives.
     # see design/superpowers/specs/2026-10-02-store-git-root-symlink-design.md (D3)"""
     file_by_entity = _file_by_entity(entities)
-    snapshot = _binding_status_snapshot(store_dir)
+    snapshot = _binding_status_snapshot(store_dir, busy_timeout_seconds=busy_timeout_seconds)
 
     unstamped = 0
     by_commit: dict[str, list[tuple[Path, str, set[str]]]] = {}
@@ -1048,6 +1055,7 @@ def scan_code_drift(
     repo_root: Path | None = None,
     *,
     deadline: float | None = None,
+    busy_timeout_seconds: float = 5.0,
 ) -> CodeDriftScan:
     """Load-inclusive public entry point for the drift→supersede surfaces (D1): loads the
     three record sets itself (the same helpers ``curate()`` uses — no ``Store``, this
@@ -1061,7 +1069,14 @@ def scan_code_drift(
     entities = _iter_records(root, "entities")
     bindings = _binding_entries(root)
     return _scan_code_drift(
-        decisions, bindings, entities, root, repo_root, deadline=deadline, resolve_head=True
+        decisions,
+        bindings,
+        entities,
+        root,
+        repo_root,
+        deadline=deadline,
+        resolve_head=True,
+        busy_timeout_seconds=busy_timeout_seconds,
     )
 
 

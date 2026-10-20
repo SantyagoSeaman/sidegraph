@@ -87,8 +87,10 @@ store write or a source change: confirm before acting.
    `supersede_domain(old_slug_or_id=..., new_slug=..., new_title=..., new_summary=...,
    seed_anchors=[...], path_prefixes=[...])` — **no rule is inherited** (with a domain snapshot, a covered
    domain's frozen membership is, and a re-scope applies only after
-   `sidegraph-domains snapshot --refresh --domain <slug>`); read the old rule back first (`list_domains()` returns `path_prefixes` verbatim; for the actual
-   `seed_anchors` list read `.sidegraph/domains/<domain_id>.json`) and carry what's still
+   `sidegraph-domains snapshot --refresh --domain <slug>`); read the old rule back first
+   (`list_domains(ids=[<domain_id>])` returns the exact complete row, including
+   `path_prefixes`; check its `hint` and use its local-file fallback if the row does not fit;
+   for the actual `seed_anchors` list read `.sidegraph/domains/<domain_id>.json`) and carry what's still
    right — then `ratify(accept=[<new_id>])`. Or retire it: `ratify(drop=[<domain_id>])`
    if the area is genuinely gone.
 5. **`path rule too broad — path contribution dropped (...):`** — a `path_prefixes` rule

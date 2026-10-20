@@ -34,7 +34,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.server import _decision_listing
-from sidegraph.store import Store
+from sidegraph.store import DescriptorLookup, Store
 
 ROW_KEYS = {"id", "kind", "status", "title", "valid_from"}
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -355,15 +355,31 @@ def test_t5_files_and_status_combine_with_and(repo):
 
 
 def test_a6_the_entities_are_read_once_per_call_not_once_per_file(repo, monkeypatch):
-    reads = []
-    real = repo.store.iter_concrete_entities
+    materializations = []
+    legacy_scans = []
+    real_read_entities = DescriptorLookup._read_entities
+    real_iter_concrete_entities = repo.store.iter_concrete_entities
     monkeypatch.setattr(
-        repo.store, "iter_concrete_entities", lambda: reads.append(1) or real(), raising=True
+        DescriptorLookup,
+        "_read_entities",
+        lambda lookup: materializations.append(1) or real_read_entities(lookup),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        repo.store,
+        "iter_concrete_entities",
+        lambda: legacy_scans.append(1) or real_iter_concrete_entities(),
+        raising=True,
     )
 
-    _ask(repo.store, repo.reader, files=["pkg/a.py", "b.py", "lib/c.py", "dup/x.py", "big/"])
+    answer = _ask(
+        repo.store, repo.reader, files=["pkg/a.py", "b.py", "lib/c.py", "dup/x.py", "big/"]
+    )
 
-    assert len(reads) == 1
+    assert set(_ids(answer)) == {repo.on_a.id, repo.on_b.id, repo.orphaned.id, repo.nopath.id}
+    assert answer["matched"] == 4
+    assert len(materializations) == 1
+    assert legacy_scans == []
 
 
 # -- T6, T7: query and ids ---------------------------------------------------------------

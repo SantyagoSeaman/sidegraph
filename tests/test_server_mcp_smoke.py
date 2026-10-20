@@ -415,9 +415,16 @@ def test_mcp_list_domains_and_supersede_domain_roundtrip(tmp_path, monkeypatch):
 
     listed, filtered, supersede_result, domain_id = asyncio.run(_run())
 
-    assert len(listed.data) == 1
-    assert listed.data[0]["slug"] == "payments"
-    assert len(filtered.data) == 1
+    assert not listed.is_error and not filtered.is_error
+    assert len(listed.content) == 1 and isinstance(listed.content[0], mt.TextContent)
+    assert listed.structured_content is None and listed.data is None
+    assert len(filtered.content) == 1 and isinstance(filtered.content[0], mt.TextContent)
+    listed_payload = json.loads(listed.content[0].text)
+    filtered_payload = json.loads(filtered.content[0].text)
+    assert listed_payload["returned"] == 1
+    assert listed_payload["domains"][0]["id"] == domain_id
+    assert listed_payload["domains"][0]["slug"] == "payments"
+    assert filtered_payload["returned"] == 1
 
     assert supersede_result.data["supersedes"] == domain_id
     assert supersede_result.data["status"] == "proposed"

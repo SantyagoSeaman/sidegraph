@@ -1678,7 +1678,8 @@ def _listing_entities(
     ``matched`` says it has no memory.
     see design/superpowers/specs/2026-10-04-bounded-decision-listing-design.md (D3, A2)
     """
-    entities = list(store.iter_concrete_entities())
+    descriptor_lookup = store.descriptor_lookup()
+    entities = list(descriptor_lookup.concrete_entities)
     by_path: dict[str, list[str]] = {}
     for entity in entities:
         if entity.descriptor is not None and entity.descriptor.file_path:
@@ -1715,7 +1716,13 @@ def _listing_entities(
                     )
             except Exception:
                 read, spelled, note = [Seed(file_path=entry)], [], None
-            resolved = resolve_seeds(read, reader, store, entities_by_node=by_node)
+            resolved = resolve_seeds(
+                read,
+                reader,
+                store,
+                entities_by_node=by_node,
+                descriptor_lookup=descriptor_lookup,
+            )
             entry_ids = {e.entity_id for e in resolved.seed_entities}
             paths = {s.file_path for s in read if s.file_path} | set(spelled)
         else:
@@ -3197,7 +3204,10 @@ def _get_task_context_impl(
                 and nearest_anchored._is_repo_relative(f.path)
             ),
         ]
-    ctx = _retrieve(exact, store, reader, budget, guessed=guessed)
+    descriptor_lookup = store.descriptor_lookup()
+    ctx = _retrieve(
+        exact, store, reader, budget, guessed=guessed, descriptor_lookup=descriptor_lookup
+    )
     body, legend, hint = ctx.render_parts()
     text = "\n\n".join(part for part in (body, legend, hint) if part)
     # The nearest anchored files (spec D10-D12): a sentence per file seed that has no record of
@@ -3211,7 +3221,13 @@ def _get_task_context_impl(
     recorded = ctx
     with contextlib.suppress(Exception):
         if near.files and not nearest_anchored.has_memory(ctx):
-            second = _retrieve([Seed(file_path=f) for f in near.files], store, reader, budget)
+            second = _retrieve(
+                [Seed(file_path=f) for f in near.files],
+                store,
+                reader,
+                budget,
+                descriptor_lookup=descriptor_lookup,
+            )
             merged = nearest_anchored.combine(ctx, second)
             near_ctx, recorded = second, merged
     # Each block has its own try/except: advice about the seeds must never cost the answer it
@@ -4906,26 +4922,135 @@ def _list_domains_impl(store: Store, status: str | None = None) -> list[dict]:
     return out
 
 
+def _domain_listing(
+    store: Store,
+    *,
+    status: str | None = None,
+    query: str | None = None,
+    ids: list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+) -> str:
+    """Return whole domain rows in a compact, character-bounded JSON envelope."""
+    rows = _list_domains_impl(store, status=status)
+    wanted_ids = _listing_texts(ids)
+    terms = (query or "").lower().split()
+    if wanted_ids:
+        wanted = set(wanted_ids)
+        rows = [row for row in rows if row["id"] in wanted]
+    if terms:
+        rows = [
+            row
+            for row in rows
+            if all(
+                term in "\n".join((row["slug"], row["title"], row["summary"])).lower()
+                for term in terms
+            )
+        ]
+
+    limit = max(1, min(_LISTING_LIMIT_MAX, limit))
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
+    matched = len(rows)
+    filters = []
+    if status is not None:
+        filters.append("status")
+    if terms:
+        filters.append("query")
+    if wanted_ids:
+        filters.append("ids")
+
+    def hint_for(returned: int) -> str | None:
+        omitted = matched - returned
+        if not matched:
+            if not filters:
+                return "No domains in the store."
+            return f"No domains matched filters: {', '.join(filters)}."
+        if not omitted:
+            return None
+        if returned < min(matched, limit):
+            next_id = rows[returned]["id"]
+            fallback = (
+                f"Read domains/{next_id}.json under the configured store for the full domain."
+                if len(_dump(next_id)) <= 128
+                else "Read the domains directory under the configured store for the full domain."
+            )
+            first = (
+                "The first matching domain does not fit"
+                if returned == 0
+                else "The character budget cut the list"
+            )
+            return (
+                f"{first} at budget_chars={budget}; use status, query or ids to narrow. {fallback}"
+            )
+        advice = "Use status, query or ids to narrow"
+        if limit < _LISTING_LIMIT_MAX:
+            advice += f" or raise limit (max {_LISTING_LIMIT_MAX})"
+        return f"limit={limit} cut the list; {advice}."
+
+    def envelope(returned: int, domains: list[dict]) -> dict:
+        return {
+            "matched": matched,
+            "returned": returned,
+            "omitted": matched - returned,
+            "domains": domains,
+            "hint": hint_for(returned),
+        }
+
+    # Serialize each eligible row once. Evaluate every eligible prefix against its own
+    # envelope and hint while adding known row payload widths to the exact empty-envelope size.
+    cap = min(matched, limit)
+    serialized_rows = [_dump(row) for row in rows[:cap]]
+    selected = 0
+    rows_size = 0
+    for count in range(cap + 1):
+        if count:
+            rows_size += len(serialized_rows[count - 1]) + (1 if count > 1 else 0)
+        if len(_dump(envelope(count, []))) + rows_size <= budget:
+            selected = count
+    return _dump(envelope(selected, rows[:selected]))
+
+
 @mcp.tool(annotations=_READ_ONLY)
-def list_domains(status: str | None = None) -> list[dict]:
-    """List every Domain in the store — the full-listing counterpart to ``list_proposed``
-    (proposed-only) and ``list_domain_candidates`` (unclaimed-only): the tool that
-    actually answers "show me all domains".
+def list_domains(
+    status: str | None = None,
+    query: str | None = None,
+    ids: list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+) -> ToolResult:
+    """List domains across every status, returning a bounded prefix of whole rows.
+
+    This is the full-listing counterpart to ``list_proposed`` (proposed-only) and
+    ``list_domain_candidates`` (unclaimed-only): the tool that actually answers
+    "show me all domains". The default response may omit rows due to its limit or budget.
 
     ``status``, when given, filters to one of ``"proposed"``/``"accepted"``/
     ``"dropped"``/``"superseded"``; omitted (the default) returns every domain regardless
-    of status. Read-only — writes nothing, ever; safe to call repeatedly.
+    of status. ``ids`` filters by exact domain id, and ``query`` applies case-insensitive
+    whitespace-separated AND terms across slug, title and summary. Filters combine with AND;
+    blank query and blank-only ids are ignored. ``limit`` defaults to 25 and is clamped to
+    1..100. ``budget_chars`` defaults to 24,000 and is clamped to 4,000..40,000. Read-only —
+    writes nothing, ever; safe to call repeatedly.
 
-    Returns a list sorted by ``slug``, one dict per domain: ``{"id": str, "slug": str,
-    "title": str, "summary": str, "status": str, "member_count": int, "path_prefixes":
-    list[str], "seed_anchor_count": int, "parent_slug": str | None, "child_slugs":
-    list[str]}``. ``member_count`` is ``len(domain.communities)`` — the number of communities
-    whose every node belongs to the domain (0 until the next `ratify`/`sidegraph-sync` resolves
-    `path_prefixes`/`seed_anchors`, for a freshly proposed domain). ``parent_slug``/
-    ``child_slugs`` reflect the FULL domain set regardless of the ``status`` filter, so a
-    filtered call still reports accurate lineage.
+    Returns one text block of compact JSON: ``{"matched", "returned", "omitted",
+    "domains", "hint"}``. ``domains`` is an ascending-slug prefix of complete rows with
+    the same ten fields as the raw projection. Counts are after filtering and before bounds;
+    lineage still reflects the full store. ``member_count`` remains ``len(domain.communities)``.
+    When the character budget omits rows, the hint names the active bound, suggests filters,
+    and gives a bounded relative local-file fallback for the next omitted domain. A limit cut
+    suggests filters and raising ``limit`` only below 100. No output schema or structured
+    duplicate is sent.
     """
-    return _list_domains_impl(_get_store(), status=status)
+    return ToolResult(
+        content=_domain_listing(
+            _get_store(),
+            status=status,
+            query=query,
+            ids=ids,
+            limit=limit,
+            budget_chars=budget_chars,
+        )
+    )
 
 
 def _drill_hint(omitted: int, unlisted: int, *, limit: int, budget: int, k: int) -> str:

@@ -14,6 +14,11 @@ before it reads stdin or opens the store, so typing `--help` never runs a hook. 
 without arguments. For wiring them into `.claude/settings.json`, see
 [`getting-started/claude-code-setup.md`](../getting-started/claude-code-setup.md).
 
+Hook-owned SQLite connections use a zero-second busy timeout, so a lock held by another
+Sidegraph writer is refused immediately at the database layer. This bounds SQLite lock waits;
+graph loading, filesystem work, transcript parsing and Git still contribute to whole-hook time.
+Other `Store`, hot-index and read-only-index callers retain their existing defaults.
+
 ## The command guard
 
 The wiring commands in the plugin manifests and the setup recipes end with a shell guard:
@@ -145,8 +150,9 @@ Behavior:
    60 seconds of the recorded one, before or after it, is a duplicate (the hook registered
    twice on one host, for example the plugin and a hand-written project hook), and it prints
    `{}` and returns before anything below runs. The check is a read that takes no write lock,
-   so a duplicate does not wait behind another process's write transaction. A start that is not a duplicate decides again and stamps the ledger in one write
-   transaction, so two copies of the hook firing together for one session inject the map once.
+   so a readable, already-stamped duplicate exits immediately. A start that is not a duplicate
+   decides again and stamps the ledger in one write transaction. Stamping remains best-effort:
+   if overlapping copies both encounter a busy write, both may emit the standing map.
    If the store cannot be opened, the hook does not print `{}` (see
    [A store that cannot open](#a-store-that-cannot-open)): memory is off for the session and the
    person is told. Only a lock another process holds keeps the silent `{}`.
@@ -483,7 +489,7 @@ lines only.
   host (different session ids, so the duplicate guard in step 1 does not apply) do not both
   send it. If the write itself fails, the notice is sent anyway: a duplicate is better than
   silence. When the failure is a lock another process holds, the hook stops writing for that
-  start (every further write would wait out the same busy timeout) and sends the remaining due
+  start (further writes are refused promptly too) and sends the remaining due
   notices unclaimed.
 - A check that ran and found nothing deletes its row, so a problem that returns after a fix is
   reported at once. Only a row that exists is deleted, so a start with nothing recorded makes no
@@ -783,8 +789,9 @@ repairs it, the hook keeps printing `{}`. `Store` repairs some of these and refu
   re-checks the record files before each call, but it keeps the connection it opened, so a deleted
   `index.db` stays gone for it until it restarts.
 
-A write that cannot get the index's write lock within 1 s (a rebuild is running) is dropped, and
-the hook then makes no further write in that run, so a call waits at most about 1 s.
+Hook-owned writes refuse the index lock immediately. A refused hot write is dropped, and the
+hook makes no further hot write in that run. SQLite contention does not set a whole-hook latency
+target; unrelated startup, graph and filesystem work can still take time.
 
 Two consequences are visible:
 
@@ -1077,8 +1084,8 @@ spawn), and one `retrieval_shows` bump each. Nothing is journaled without a sess
 64 KB for each text document the brief names, and one records query for each file the brief names
 that has anchored records, stopping at the sixth file that has any (each shown file costs at least
 one line), then one write transaction for the journal rows. This path used to be read-only: while
-another process holds the write lock, that write can wait out the one-second busy timeout before
-the spawn proceeds, and a failed write is swallowed (the brief is still delivered). It loads
+another process holds the write lock, the optional journal write now refuses immediately, and a
+failed write is swallowed (the brief is still delivered). It loads
 nothing beyond the standard library, like the rest of this hook.
 
 **Not tested.**

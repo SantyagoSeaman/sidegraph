@@ -2071,7 +2071,11 @@ def maybe_sync(
 
 
 def refresh_code_drift_cache(
-    store: Store, *, repo_root: Path | None = None, deadline: float = 10.0
+    store: Store,
+    *,
+    repo_root: Path | None = None,
+    deadline: float = 10.0,
+    busy_timeout_seconds: float = 5.0,
 ) -> int | None:
     """Rescan code drift and merge the result into the :data:`~sidegraph.retrieval.
     DRIFT_CACHE_KEY` meta cache — the write half of the drift→supersede affordance (D2).
@@ -2106,9 +2110,19 @@ def refresh_code_drift_cache(
     # see design/superpowers/specs/2026-07-30-drift-supersede-affordance-design.md (D2)
     """
     try:
-        scan = scan_code_drift(store.path, repo_root, deadline=deadline)
+        scan = scan_code_drift(
+            store.path,
+            repo_root,
+            deadline=deadline,
+            busy_timeout_seconds=busy_timeout_seconds,
+        )
         if not scan.active:
             return 0
+        # A hook that cannot certify binding membership must not read an old drift cache or
+        # publish a result filtered against incomplete statuses. With zero wait, this guard
+        # wins even when the unreadable snapshot coincides with the ordinary uncomputed state.
+        if busy_timeout_seconds == 0.0 and scan.binding_statuses_uncomputed:
+            return None
         if scan.repo_root_failed:
             return None
 

@@ -335,6 +335,8 @@ def _stale(g: GraphStats) -> list[str]:
 def _anchors(report: StatsReport) -> list[str]:
     a = report.anchors
     if a is None:
+        if not report.index_stale and not report.binding_statuses_computed:
+            return ["not computed for current graph → sidegraph-sync"]
         return [f"not shown: {_BEHIND}"]
     if a.live + a.degraded + a.orphaned == 0:
         return ["none yet"]

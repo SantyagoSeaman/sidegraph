@@ -26,6 +26,7 @@ If the repository already has ADRs or specs, use the
 ## Operate and maintain it
 
 - [Migrate an existing store to Sidegraph 0.14](guides/migrating-to-0.14.md).
+- [Check a Sidegraph installation](guides/health-check.md).
 - [Survive refactors and heal anchors](guides/surviving-refactors.md).
 - [Read what Sidegraph tells you when it needs attention](guides/troubleshooting.md).
 - [Run CI and scheduled maintenance](guides/ci-cd-maintenance.md).

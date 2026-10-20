@@ -127,6 +127,7 @@ class HotIndex:
         store_path: str | os.PathLike[str],
         *,
         on_error: Callable[[Exception], None] | None = None,
+        busy_timeout_seconds: float = BUSY_TIMEOUT_SECONDS,
     ) -> HotIndex | None:
         """The handle for the store at ``store_path``, or ``None`` when ``Store`` would have
         healed something first: the index is missing, a store-owned entry is a symlink (a
@@ -148,7 +149,7 @@ class HotIndex:
             # mode=rw never creates the file; quoted like gitio.open_index_ro (a path may
             # hold characters a URI treats as syntax).
             uri = f"file:{quote(os.fsencode(str(index)))}?mode=rw"
-            conn = sqlite3.connect(uri, uri=True, timeout=BUSY_TIMEOUT_SECONDS)
+            conn = sqlite3.connect(uri, uri=True, timeout=busy_timeout_seconds)
             row = conn.execute(GET_META_SQL, ("schema_version",)).fetchone()
             if row is None or row[0] not in INDEX_STAMPS:
                 conn.close()

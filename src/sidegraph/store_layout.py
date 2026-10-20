@@ -522,6 +522,41 @@ def hot_matches_archive(hot: object, archived: object) -> bool:
     return hot == archived
 
 
+def hot_archive_difference(
+    hot: object, archived: object
+) -> Literal["extra-fields", "different-values"] | None:
+    """Classify a hot/archive mismatch without exposing any raw keys or values.
+
+    ``None`` means the existing one-directional hot-file predicate accepts the pair.
+    ``extra-fields`` means dropping only hot-side keys absent from the archive makes that
+    predicate accept it; every other mismatch has differing shared values or structure.
+    """
+    if hot_matches_archive(hot, archived):
+        return None
+
+    def project_shared(hot_value: object, archived_value: object) -> object:
+        if isinstance(hot_value, dict) and isinstance(archived_value, dict):
+            return {
+                key: project_shared(value, archived_value[key])
+                for key, value in hot_value.items()
+                if key in archived_value
+            }
+        if (
+            isinstance(hot_value, list)
+            and isinstance(archived_value, list)
+            and len(hot_value) == len(archived_value)
+        ):
+            return [
+                project_shared(hot_item, archived_item)
+                for hot_item, archived_item in zip(hot_value, archived_value, strict=True)
+            ]
+        return hot_value
+
+    if hot_matches_archive(project_shared(hot, archived), archived):
+        return "extra-fields"
+    return "different-values"
+
+
 def read_snapshot_bytes(store_dir: str | os.PathLike[str]) -> bytes | None:
     """The store's domain snapshot, read once, or ``None`` when it has none. A reader that
     certifies membership hashes and parses these same bytes."""

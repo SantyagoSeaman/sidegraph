@@ -24,18 +24,18 @@ installs a non-editable wheel outside the checkout, checks its package bytes aga
 artifact, runs a CLI, and exchanges real MCP stdio messages in a Unicode/spaced directory.
 The exact selection is in [the CI workflow](../../.github/workflows/ci.yml).
 
-Separately, each release candidate runs real Claude Code and Codex sessions with the
+For the 0.14.0 release-candidate campaign, real Claude Code and Codex sessions ran with the
 installed plugin, in fresh host profiles, on Windows Server 2022 x64 and macOS 15 arm64,
-each with Python 3.13 and 3.14. Each run is the full plugin session for both hosts: the
+each with Python 3.13 and 3.14. Each run was the full plugin session for both hosts: the
 plugin's MCP server, `SessionStart` context, records before a Read, a bundled skill, a
 subagent brief, the `Stop` capture prompt, capture and ratification, and recall in a fresh
-session. The project folder and host profile paths contain a non-ASCII character.
+session. The project folder and host profile paths contained a non-ASCII character.
 
 **0.14.0 publication gate:** Claude Code 2.1.296 and Codex CLI 0.162.1 on all four cells
 above, including a Windows 3.14 cell with PowerShell 7 unavailable for preflight and both
 real host sessions. Windows 3.13 retains PowerShell 7; its launcher checks also cover 5.1.
-Stable publication requires the full gate to pass without a known-issue exception. The
-README's blue badges summarize release acceptance, rather than live workflow status or
+Stable publication of 0.14.0 required the full gate to pass without a known-issue exception.
+The README's blue badges summarize release acceptance, rather than live workflow status or
 support for every published version. Muse and OpenCode have the narrower coverage in
 their installation guides and are outside this native matrix.
 
@@ -45,14 +45,15 @@ with Git for Windows installed; they do not establish support for Windows hosts 
 remains outside these checks.
 See [Windows](#windows) before installing a host plugin.
 
-Package dependencies support `fastmcp>=3.4.2,<4` and `mcp>=1.24,<2`. Major SDK upgrades
+Package dependencies support `fastmcp>=3.4.2,<4` and `mcp>=1.30,<2`. Major SDK upgrades
 require a separate compatibility review; an unlocked package install may resolve newer
 versions within those bounds than the development lockfile.
 
 ### Windows
 
-The native checks above cover the tested release, not every published version. On
-Windows they cover the full plugin session; WSL is not a separate CI target.
+Current native CI covers selected core/MCP checks, wheel installation, CLI execution, and
+MCP stdio paths; WSL is not a separate CI target. Full Windows plugin sessions were exercised
+in the historical 0.14.0 release-candidate campaign described above.
 
 **Version requirement:** releases before 0.12.0 can stall a native Windows write: a Git
 child inherits the MCP stdin pipe and holds the write until the request times out (see

@@ -130,7 +130,7 @@ jobs:
           interpreter="$environment/bin/python"
           constraints=()
           if [ "$SDK_PAIR" = minimum ]; then
-            constraints=(fastmcp==3.4.2 mcp==1.24.0)
+            constraints=(fastmcp==3.4.2 mcp==1.30.0)
           fi
           uv pip install --python "$interpreter" "$wheel" pytest "${constraints[@]}"
           mkdir -p "$RUNNER_TEMP/sdk-check"
@@ -188,6 +188,7 @@ jobs:
           uv run pytest -q --junitxml="$env:RUNNER_TEMP/windows-core.xml" `
             tests/test_store_mutation_guard.py `
             tests/test_store_mutation_immediate.py tests/test_store_cross_process_mutations.py `
+            tests/test_hook_contention.py tests/test_retrieval_seeds.py `
             tests/test_portable_json.py tests/test_bootstrap_descriptor_cleanup.py `
             tests/test_server_result_contract.py tests/test_server_invocation_policy.py `
             tests/test_verify_git_stdin.py tests/test_seed_paths_portable.py `
@@ -197,6 +198,7 @@ jobs:
             tests/test_hot_index_facts.py `
             tests/test_delivery_evidence.py tests/test_delivery_stats.py tests/test_delivery_surfaces.py `
             tests/test_git_output_utf8.py `
+            tests/test_health_check_skill.py `
             $privateTests `
             tests/test_installed_wheel_smoke.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

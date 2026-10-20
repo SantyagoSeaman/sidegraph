@@ -69,6 +69,11 @@ def _decision(store, *, status=DecisionStatus.ACCEPTED, **kw):
     )
 
 
+def _mark_binding_statuses_computed(store):
+    """Fixture control: ``Store`` starts cold until a sync computes binding statuses."""
+    store.set_meta("volatile_stale", "0")
+
+
 def _assert_partition(tmp_path, a):
     """The three session buckets must cover EVERY session the journals name.
 
@@ -378,6 +383,7 @@ def test_anchor_statuses_are_counted_from_the_index_rows(tmp_path):
         store.add_binding(
             AnchorBinding(record_id=d.id, entity_id=e.entity_id, tier=2, status=status)
         )
+    _mark_binding_statuses_computed(store)
     store.close()
     r = build_report(tmp_path / "s", None, window_days=30, now=NOW)
     assert (r.anchors.live, r.anchors.degraded, r.anchors.orphaned) == (2, 1, 1)
@@ -393,11 +399,142 @@ def test_stats_reads_a_store_under_a_hash_dir(tmp_path, name):
         store.add_binding(
             AnchorBinding(record_id=d.id, entity_id=e.entity_id, tier=2, status=status)
         )
+    _mark_binding_statuses_computed(store)
     store.close()
     r = build_report(store_dir, None, window_days=30, now=NOW)
     assert (r.anchors.live, r.anchors.degraded, r.anchors.orphaned) == (1, 1, 0)
     # no empty database is created at the path cut short at the special character
     assert sorted(p.name for p in (tmp_path / "B").iterdir()) == [name]
+
+
+def test_recreated_index_with_cold_binding_statuses_withholds_only_anchor_figures(tmp_path):
+    """Rebuilding derived state resets statuses to live while canonical records stay intact."""
+    import hashlib
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    store_dir = tmp_path / "s"
+    store = Store(store_dir)
+    d = _decision(store)
+    entity = store.get_or_create_entity(Descriptor(name="run", file_path="a.py"))
+    store.add_binding(
+        AnchorBinding(record_id=d.id, entity_id=entity.entity_id, tier=2, status="orphaned")
+    )
+    store.record_touch("session", "a.py", "Edit")
+    _backdate(store, 1)
+    _mark_binding_statuses_computed(store)
+    store.close()
+
+    warm = build_report(store_dir, None, window_days=30, now=NOW)
+    assert warm.anchors is not None and warm.anchors.orphaned == 1
+    assert warm.reach.files_touched_with_memory == 1
+
+    canonical_dirs = ("decisions", "facts", "entities", "bindings", "domains", "archive")
+    before = {
+        path.relative_to(store_dir): hashlib.sha256(path.read_bytes()).digest()
+        for name in canonical_dirs
+        for path in (store_dir / name).rglob("*")
+        if path.is_file()
+    }
+    with closing(sqlite3.connect(store_dir / "index.db")) as conn:
+        touch_rows = conn.execute(
+            "SELECT session_id, at, kind, key, detail, agent FROM retrieval_events"
+        ).fetchall()
+    (store_dir / "index.db").unlink()
+    Store(store_dir).close()
+    # Journals are index-local. Restore this synthetic touch evidence to isolate the record
+    # reload under test while preserving the same read-only stats inputs.
+    with closing(sqlite3.connect(store_dir / "index.db")) as conn:
+        conn.executemany(
+            "INSERT INTO retrieval_events(session_id, at, kind, key, detail, agent) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            touch_rows,
+        )
+        conn.commit()
+    after = {
+        path.relative_to(store_dir): hashlib.sha256(path.read_bytes()).digest()
+        for name in canonical_dirs
+        for path in (store_dir / name).rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+    def source_snapshot():
+        db_uri = f"{(store_dir / 'index.db').as_uri()}?mode=ro"
+        with closing(sqlite3.connect(db_uri, uri=True)) as conn:
+            volatile_stale = conn.execute(
+                "SELECT value FROM meta WHERE key = 'volatile_stale'"
+            ).fetchone()[0]
+        source_bytes = {
+            path.relative_to(store_dir): path.read_bytes()
+            for name in canonical_dirs
+            for path in (store_dir / name).rglob("*")
+            if path.is_file()
+        }
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            path = store_dir / f"index.db{suffix}"
+            if path.exists():
+                source_bytes[path.relative_to(store_dir)] = path.read_bytes()
+        return source_bytes, volatile_stale
+
+    source_before = source_snapshot()
+    cold = build_report(store_dir, None, window_days=30, now=NOW)
+    source_after = source_snapshot()
+    assert source_after == source_before
+    assert source_after[1] == "1"
+    assert cold.anchors is None
+    assert cold.binding_statuses_computed is False
+    assert cold.index_stale is False
+    assert cold.memory is not None and cold.memory.decisions == 1
+    assert cold.reach.files_touched_with_memory == 1
+    from sidegraph.stats.render import render_json, render_text
+
+    data = json.loads(render_json(cold))
+    assert data["anchors"] is None
+    assert data["binding_statuses_computed"] is False
+    assert data["index_stale"] is False
+    anchor_lines = [line for line in render_text(cold).splitlines() if line.startswith("ANCHORS")]
+    assert anchor_lines == ["ANCHORS     not computed for current graph → sidegraph-sync"]
+
+
+def test_missing_volatile_stale_flag_keeps_legacy_computed_behavior(tmp_path):
+    store = Store(tmp_path / "s")
+    d = _decision(store)
+    entity = store.get_or_create_entity(Descriptor(name="run", file_path="a.py"))
+    store.add_binding(
+        AnchorBinding(record_id=d.id, entity_id=entity.entity_id, tier=2, status="orphaned")
+    )
+    store.set_meta("volatile_stale", "0")
+    store.close()
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(tmp_path / "s" / "index.db")) as conn:
+        conn.execute("DELETE FROM meta WHERE key = 'volatile_stale'")
+        conn.commit()
+    report = build_report(tmp_path / "s", None, window_days=30, now=NOW)
+    assert report.binding_statuses_computed is True
+    assert report.anchors is not None and report.anchors.orphaned == 1
+
+
+def test_empty_store_anchor_state_tracks_binding_status_currency(tmp_path):
+    from sidegraph.stats.render import render_text
+
+    store = Store(tmp_path / "s")
+    store.close()
+    cold = build_report(tmp_path / "s", None, window_days=30, now=NOW)
+    assert cold.anchors is None
+    assert cold.binding_statuses_computed is False
+    assert "not computed for current graph → sidegraph-sync" in render_text(cold)
+
+    store = Store(tmp_path / "s")
+    _mark_binding_statuses_computed(store)
+    store.close()
+    warm = build_report(tmp_path / "s", None, window_days=30, now=NOW)
+    assert warm.anchors is not None
+    assert (warm.anchors.live, warm.anchors.degraded, warm.anchors.orphaned) == (0, 0, 0)
+    assert "ANCHORS     none yet" in render_text(warm)
 
 
 def test_the_reader_never_opens_the_index_for_writing(tmp_path, monkeypatch):
@@ -813,6 +950,7 @@ def test_a_canonical_change_the_index_has_not_loaded_is_stated_not_measured(tmp_
     _pull_a_change(tmp_path, d.id)
     after = build_report(tmp_path / "s", None, window_days=30, now=NOW)
     assert after.index_stale is True
+    assert after.binding_statuses_computed is False
     assert after.memory is None and after.anchors is None
     assert after.reach.files_touched_with_memory is None and after.reach.silent_domains is None
 

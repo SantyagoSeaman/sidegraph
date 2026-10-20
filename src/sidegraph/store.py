@@ -90,7 +90,7 @@ from .store_layout import (
     NOT_A_FILE_REASON,
     VOLATILE_STALE_KEY,
     check_store_requirement,
-    hot_matches_archive,
+    hot_archive_difference,
     index_stamp,
     is_regular_file,
     stat_entry,
@@ -675,19 +675,31 @@ def _archive_record_line(record_type: Literal["decision", "domain"], payload: di
     return json.dumps({"record_type": record_type, **payload}, sort_keys=True, ensure_ascii=False)
 
 
-def _warn_hot_archive_mismatch(kind: str, record_id: str) -> None:
-    """A ULID present in BOTH a hot canonical file and an archive segment with DIFFERENT
-    content — terminal records are supposed to be immutable once archived, so this is
-    corruption-shaped (e.g. a hand-edited archive segment, or a bug). Never destroy data:
-    the hot file always wins (see ``_reload_index_from_canonical`` / ``Store.compact``);
-    this only surfaces the disagreement for a human to investigate."""
-    print(
-        f"sidegraph: WARNING {kind} {record_id!r} exists in BOTH a hot canonical file and "
-        "an archive segment with DIFFERENT content — archive segments are meant to be "
-        "immutable; keeping the hot file and ignoring the stale archive copy. This is "
-        "corruption-shaped (e.g. a hand-edited archive segment); investigate manually.",
-        file=sys.stderr,
+def _warn_hot_archive_mismatch(
+    kind: str,
+    record_id: str,
+    *,
+    reason: Literal["extra-fields", "different-values"],
+    prospective_archive: bool = False,
+) -> None:
+    """Describe a hot/archive mismatch by structural cause, without exposing its payload."""
+    detail = (
+        "extra fields are not represented in the archive; a newer Sidegraph may have written them"
+        if reason == "extra-fields"
+        else "shared values or structures differ; compare both copies"
     )
+    if prospective_archive:
+        message = (
+            f"sidegraph: WARNING {kind} {record_id!r} hot canonical file has DIFFERENT content "
+            f"from the prospective archive payload — {detail}. Dry-run would keep the hot file; no "
+            "archive segment has been published."
+        )
+    else:
+        message = (
+            f"sidegraph: WARNING {kind} {record_id!r} exists in BOTH a hot canonical file and "
+            f"an archive segment with DIFFERENT content — {detail}. Keeping both copies."
+        )
+    print(message, file=sys.stderr)
 
 
 def parse_skip_list(value: str) -> list[dict]:
@@ -830,19 +842,16 @@ def _parse_segment_seq(stem: str, date_str: str) -> int | None:
     return int(seq_part) if seq_part.isdigit() else None
 
 
-def _hot_file_matches(path: Path, expected_payload: dict) -> bool | None:
-    """Compare a hot canonical file's ON-DISK content against ``expected_payload`` (never
-    trust an in-memory snapshot for a decision as destructive as unlinking a file — review
-    Minor-6). Returns ``True``/``False`` if the file exists and does/doesn't match, or
-    ``None`` if there is no hot file there at all (nothing to compare, nothing to
-    remove). A key the hot file LACKS matches an explicit null or empty container in the
-    archive (``hot_matches_archive``): a hot file written before a field existed lacks the key
-    the archive line, dumped from the model, fills with its default. A key only the hot file
-    holds, at any depth and whatever its value, always differs (the dump drops keys it does
-    not know, so unlinking would lose it), as does any other difference."""
+def _hot_file_comparison(
+    path: Path, expected_payload: dict
+) -> Literal["match", "extra-fields", "different-values"] | None:
+    """Read and classify the current hot file once; ``None`` means it is absent."""
     if not path.is_file():
         return None
-    return hot_matches_archive(json.loads(path.read_text(encoding="utf-8")), expected_payload)
+    difference = hot_archive_difference(
+        json.loads(path.read_text(encoding="utf-8")), expected_payload
+    )
+    return "match" if difference is None else difference
 
 
 def _hot_file_skipped_by_reload(path: Path, id_field: str, listed: frozenset[str]) -> bool:
@@ -898,6 +907,9 @@ class CompactReport(BaseModel):
     #: segment (crash-window debris from a prior compact that wrote its segment but was
     #: interrupted before removing the hot file) — no new segment was written for these.
     cleaned_up_hot_files: int = 0
+    #: Distinct compared hot decision/domain files retained because the archived payload does
+    #: not fully represent them. Includes fresh candidates and archived leftovers.
+    kept_hot_files: int = 0
     items: list[CompactedRecord] = Field(default_factory=list)
     dry_run: bool = False
 
@@ -975,6 +987,93 @@ def _lookup_preference(e: Entity) -> tuple[bool, str]:
     return (file_anchor_name(name, file_path) != name, e.entity_id)
 
 
+def _choose_path_carrier(candidates: Sequence[Entity]) -> Entity | None:
+    """Choose the sole path-bearing descriptor identity, preserving ambiguity by file."""
+    carriers = [
+        e for e in candidates if e.descriptor is not None and e.descriptor.file_path is not None
+    ]
+    if len({e.descriptor.file_path for e in carriers if e.descriptor}) != 1:
+        return None
+    return min(carriers, key=_lookup_preference) if carriers else None
+
+
+def _choose_pathless(candidates: Sequence[Entity]) -> Entity | None:
+    """Apply path-carrying adoption, then the original exact-None-path fallback."""
+    adopted = _choose_path_carrier(candidates)
+    if adopted is not None:
+        return adopted
+    exact = [e for e in candidates if (e.descriptor.file_path if e.descriptor else None) is None]
+    return min(exact, key=_lookup_preference) if exact else None
+
+
+class DescriptorLookup:
+    """One operation's lazy, parsed view of entity descriptor identities.
+
+    Construction is cheap; the first lookup or concrete-entity access reads and parses rows
+    once. The holder is intentionally short-lived and never retained by ``Store``.
+    """
+
+    def __init__(self, store: Store):
+        self._store = store
+        self._entities: tuple[Entity, ...] | None = None
+        self._concrete_entities: tuple[Entity, ...] | None = None
+        self._exact: dict[tuple[str, str | None], list[Entity]] = {}
+        self._pathless: dict[str, list[Entity]] = {}
+
+    def _read_entities(self) -> tuple[Entity, ...]:
+        """Materialization seam: fetch and parse the entity table once for this holder."""
+        with self._store._lock:
+            rows = self._store._conn.execute("SELECT data FROM entities").fetchall()
+        return tuple(Entity.model_validate_json(row["data"]) for row in rows)
+
+    def _materialize(self) -> tuple[Entity, ...]:
+        if self._entities is None:
+            entities = self._read_entities()
+            self._entities = entities
+            for entity in entities:
+                _name, file_path = _descriptor_name_and_path(entity)
+                identity = _identity_name(entity)
+                self._exact.setdefault((identity, file_path), []).append(entity)
+                self._pathless.setdefault(identity, []).append(entity)
+            self._concrete_entities = tuple(
+                entity
+                for entity in entities
+                if entity.kind == EntityKind.CONCRETE and entity.descriptor is not None
+            )
+        return self._entities
+
+    @property
+    def concrete_entities(self) -> tuple[Entity, ...]:
+        """Concrete entities with descriptors in the store's current row order."""
+        self._materialize()
+        assert self._concrete_entities is not None
+        return self._concrete_entities
+
+    def resolve_descriptor(self, name: str, file_path: str | None) -> Entity | None:
+        """Resolve with Store's exact-path and pathless ambiguity rules."""
+        self._materialize()
+        if file_path:
+            target = canonicalize(file_anchor_name(name, file_path))
+            matches = self._exact.get((target, file_path), ())
+            return min(matches, key=_lookup_preference) if matches else None
+
+        keys = {canonicalize(name)}
+        stripped = name.strip()
+        if "/" in stripped:
+            keys.add(canonicalize(stripped.rsplit("/", 1)[-1]))
+        candidates_by_id: dict[str, Entity] = {}
+        for key in keys:
+            for entity in self._pathless.get(key, ()):
+                candidates_by_id.setdefault(entity.entity_id, entity)
+        candidates = [
+            entity
+            for entity in candidates_by_id.values()
+            if canonicalize(file_anchor_name(name, _descriptor_name_and_path(entity)[1]))
+            == _identity_name(entity)
+        ]
+        return _choose_pathless(candidates)
+
+
 class StoreBusyError(sqlite3.OperationalError):
     """The outermost mutation could not reserve SQLite before running its body."""
 
@@ -990,7 +1089,9 @@ class Store:
     and result shape is unchanged from the pre-0.4.0 single-file store.
     """
 
-    def __init__(self, path: str | Path = ".sidegraph") -> None:
+    def __init__(
+        self, path: str | Path = ".sidegraph", *, busy_timeout_seconds: float | None = None
+    ) -> None:
         raw = Path(path)
         self._lock = threading.RLock()
         # Depth counter for `_mutation` (design D1/D2): only the OUTERMOST `_mutation` scope
@@ -1002,6 +1103,9 @@ class Store:
         self._requirement: str | None = None
         self._marker_signature: tuple[int, int, int, int] | None = None
         self.path = raw
+        # Per-handle policy is set before either legacy dispatch or the canonical index open.
+        # None preserves sqlite3's ordinary five-second connection default.
+        self._busy_timeout_seconds = busy_timeout_seconds
 
         # Before the legacy dispatch: `_migrate_legacy` would otherwise move records through
         # a symlinked subdirectory before anything refused it.
@@ -1030,7 +1134,14 @@ class Store:
         self._ensure_format_marker()
         self._ensure_stamping_marker()
         self._ensure_gitignore()
-        self._conn = sqlite3.connect(str(self.path / "index.db"), check_same_thread=False)
+        if busy_timeout_seconds is not None:
+            self._conn = sqlite3.connect(
+                str(self.path / "index.db"),
+                timeout=busy_timeout_seconds,
+                check_same_thread=False,
+            )
+        else:
+            self._conn = sqlite3.connect(str(self.path / "index.db"), check_same_thread=False)
         try:
             # First, before any write: a journal-mode change after the schema/freshness writes
             # would let those transactions create and delete the journal once per open. A
@@ -1494,7 +1605,10 @@ class Store:
         canonical-only rebuild — the next sync re-derives volatile state from the live
         graph, same as design §3's git-pull-absorption path.
         """
-        conn = sqlite3.connect(str(legacy_file))
+        if self._busy_timeout_seconds is None:
+            conn = sqlite3.connect(str(legacy_file))
+        else:
+            conn = sqlite3.connect(str(legacy_file), timeout=self._busy_timeout_seconds)
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
@@ -1761,7 +1875,7 @@ class Store:
     def _delete_canonical_stat(self, subdir: str, stem: str) -> None:
         """Remove ``canonical_stat``'s row for ``(subdir, stem)`` — called wherever a
         canonical file is actually removed (``compact``, Task 2): the row must not outlive
-        the file it describes being GONE-by-design, mirroring ``_hot_file_matches``'s own
+        the file it describes being GONE-by-design, mirroring the hot-file comparison's own
         skip (a file kept because it diverged from the archive keeps its row too — this is
         simply never called for that case)."""
         self._conn.execute(
@@ -2186,14 +2300,16 @@ class Store:
         restore exactly this bug. Do not bring ``executescript`` back into this method.
         """
         with self._lock:
-            # Two concurrent rebuilds now serialize on SQLite's RESERVED lock instead of
-            # interleaving, so the default 5s busy timeout becomes a new failure mode under
-            # load. Raise it for the rebuild ONLY -- raising it on connect would apply to
-            # every statement for the connection's lifetime, stalling an ordinary tool call
-            # behind a wedged writer for 30s where it stalls 5s today (design D3). A
-            # measured rebuild of this repo's own store (683 canonical files) is 40ms.
+            # Two concurrent rebuilds serialize on SQLite's RESERVED lock. Ordinary handles
+            # retain the historical 30s rebuild allowance; an explicit per-handle override
+            # also bounds this cold path for hook-owned stores.
             previous_timeout = self._conn.execute("PRAGMA busy_timeout").fetchone()[0]
-            self._conn.execute("PRAGMA busy_timeout = 30000")
+            rebuild_timeout = (
+                30000
+                if self._busy_timeout_seconds is None
+                else int(self._busy_timeout_seconds * 1000)
+            )
+            self._conn.execute(f"PRAGMA busy_timeout = {rebuild_timeout}")
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
                 try:
@@ -2330,10 +2446,8 @@ class Store:
                     # ALWAYS wins (it was just indexed above) — either it's the
                     # crash-window duplicate a compact leaves behind (identical modulo keys the
                     # hot file lacks, silently a no-op here; ``Store.compact`` is what
-                    # actually cleans those up) or, if it genuinely differs, that's
-                    # corruption-shaped and never something a mere reload should resolve by
-                    # preferring the
-                    # archive over live disk state. Only ids with NO hot file are indexed
+                    # actually cleans those up) or, if it differs, both copies are retained
+                    # and its structural cause is reported. Only ids with NO hot file are indexed
                     # from the archive.
                     # Tolerant here only (D4): a line that cannot be read costs that line,
                     # and its segment joins the skip list once.
@@ -2351,19 +2465,21 @@ class Store:
                     for did, payload in archived_decisions.items():
                         hot_path = _record_file(self.path, "decisions", did)
                         if did in hot_decision_ids:
-                            if not hot_matches_archive(
+                            difference = hot_archive_difference(
                                 json.loads(hot_path.read_text(encoding="utf-8")), payload
-                            ):
-                                _warn_hot_archive_mismatch("decision", did)
+                            )
+                            if difference is not None:
+                                _warn_hot_archive_mismatch("decision", did, reason=difference)
                             continue
                         self._index_write_decision(Decision.model_validate(payload))
                     for dmid, payload in archived_domains.items():
                         hot_path = _record_file(self.path, "domains", dmid)
                         if dmid in hot_domain_ids:
-                            if not hot_matches_archive(
+                            difference = hot_archive_difference(
                                 json.loads(hot_path.read_text(encoding="utf-8")), payload
-                            ):
-                                _warn_hot_archive_mismatch("domain", dmid)
+                            )
+                            if difference is not None:
+                                _warn_hot_archive_mismatch("domain", dmid, reason=difference)
                             continue
                         self._index_write_domain(Domain.model_validate(payload))
 
@@ -2672,6 +2788,10 @@ class Store:
             ).fetchone()
         return Entity.model_validate_json(row["data"]) if row else None
 
+    def descriptor_lookup(self) -> DescriptorLookup:
+        """Create a cheap, operation-scoped lazy descriptor lookup."""
+        return DescriptorLookup(self)
+
     def find_entity(self, name: str, file_path: str | None) -> Entity | None:
         """Dedup lookup by canonical name + file_path (see schema.canonicalize).
 
@@ -2742,13 +2862,10 @@ class Store:
         (external review, finding 1 — demonstrated, not theorised). Returns None when the
         descriptor names nothing yet; only ``get_or_create_entity`` mints.
 
-        ONE scan for the path-less case, not two. Every entity lookup here is a full Python
-        scan that re-parses each row, and ``resolve_seeds`` runs this per graph node — a
-        path-less node is not exotic (45 in this repo's own graph, 6646 in airflow's). Asking
-        ``_adopt_path_carrying_entity`` and then falling back to ``find_entity`` scanned
-        twice and measured 2.00 ms/call against ``find_entity``'s 0.99 ms at 219 entities:
-        13 s of pure scanning on an airflow-sized seed. Both answers come out of the same
-        candidate list instead.
+        ONE scan for the path-less case, not two. This retained scan is the read/write
+        equivalence oracle; retrieval uses ``DescriptorLookup`` to avoid repeating it per graph
+        node. Asking ``_adopt_path_carrying_entity`` and then falling back to ``find_entity``
+        would scan twice; both answers come out of the same candidate list instead.
 
         ``""`` counts as no path. Graphify emits ``source_file: ""`` — an empty STRING, not
         a missing key — for every path-less node (measured: 6646/6646 in airflow's graph,
@@ -2761,16 +2878,7 @@ class Store:
         if file_path:
             return self.find_entity(name, file_path)
         candidates = self.find_entities_by_name(name)
-        adopted = self._adopt_path_carrying_entity(candidates)
-        if adopted is not None:
-            return adopted
-        # No carrier: reproduce find_entity(name, None) — same predicate (``desc_file is
-        # None``, which an abstract entity satisfies by having no descriptor at all), same
-        # D4 tie-break — off the list already in hand.
-        exact = [
-            e for e in candidates if (e.descriptor.file_path if e.descriptor else None) is None
-        ]
-        return min(exact, key=_lookup_preference) if exact else None
+        return _choose_pathless(candidates)
 
     def _adopt_path_carrying_entity(self, candidates: list[Entity]) -> Entity | None:
         """The CONCRETE entity a path-less descriptor should adopt, out of ``candidates``
@@ -2778,12 +2886,7 @@ class Store:
         Returns None when nothing carries a path, or when two files do — the caller then
         falls back to the plain path-less lookup. Ties on one path resolve by lowest
         ``entity_id``, the store's one duplicate rule (design D4)."""
-        concrete = [
-            e for e in candidates if e.descriptor is not None and e.descriptor.file_path is not None
-        ]
-        if len({e.descriptor.file_path for e in concrete if e.descriptor}) != 1:
-            return None
-        return min(concrete, key=_lookup_preference)
+        return _choose_path_carrier(candidates)
 
     def find_entities_by_name(self, name: str) -> list[Entity]:
         """Name-only scan across all entities, ignoring ``file_path`` — the fallback
@@ -2893,9 +2996,9 @@ class Store:
         compacted into an archive segment — see :meth:`compact`) is never rewritten, and
         its status never flips again. Without this guard, superseding an archived
         ``rejected`` decision would resurrect a mutated copy of it as a fresh hot file —
-        permanently corruption-shaped from compaction's point of view (every teammate's
-        next cold reload would warn about a hot/archive mismatch, and the record could
-        never compact again). The successor's ``supersedes`` field still records the
+        permanently a shared-value mismatch from compaction's point of view (every
+        teammate's next cold reload would report both copies, and the record could never
+        compact again). The successor's ``supersedes`` field still records the
         intended relationship either way — append-only semantics: the link is a fact that
         happened, even when the target itself can no longer be edited.
 
@@ -4227,10 +4330,9 @@ class Store:
         :meth:`compact`). These are safe to
         remove without writing a new segment: the archive already has them.
 
-        A hot file that instead DIFFERS from its archived counterpart (including any key only
-        the hot file holds) is corruption-shaped,
-        not crash debris — it is left exactly as it is (never destroy data) and surfaced via
-        a stderr warning. Returns ``(decision_ids_safe_to_remove, domain_ids_safe_to_remove,
+        A hot file that instead differs from its archived counterpart is retained and its
+        structural cause is surfaced via a stderr warning. Returns
+        ``(decision_ids_safe_to_remove, domain_ids_safe_to_remove,
         mismatch_count)``.
         """
         safe_decisions: set[str] = set()
@@ -4242,25 +4344,25 @@ class Store:
             match = (
                 None
                 if _hot_file_skipped_by_reload(hot, "id", listed)
-                else _hot_file_matches(hot, archived_payload)
+                else _hot_file_comparison(hot, archived_payload)
             )
-            if match is True:
+            if match == "match":
                 safe_decisions.add(did)
-            elif match is False:
+            elif match in {"extra-fields", "different-values"}:
                 mismatches += 1
-                _warn_hot_archive_mismatch("decision", did)
+                _warn_hot_archive_mismatch("decision", did, reason=match)
         for dmid, archived_payload in archived_domains.items():
             hot = _record_file(self.path, "domains", dmid)
             match = (
                 None
                 if _hot_file_skipped_by_reload(hot, "domain_id", listed)
-                else _hot_file_matches(hot, archived_payload)
+                else _hot_file_comparison(hot, archived_payload)
             )
-            if match is True:
+            if match == "match":
                 safe_domains.add(dmid)
-            elif match is False:
+            elif match in {"extra-fields", "different-values"}:
                 mismatches += 1
-                _warn_hot_archive_mismatch("domain", dmid)
+                _warn_hot_archive_mismatch("domain", dmid, reason=match)
         return safe_decisions, safe_domains, mismatches
 
     def _next_archive_seq(self, archive_dir: Path, date_str: str) -> int:
@@ -4414,8 +4516,8 @@ class Store:
         archived, not removed.
 
         ``dry_run=True`` computes and returns the full report (including which records WOULD
-        be archived/cleaned up) without writing or removing anything — not the new segment,
-        not a hot file, not even the digest.
+        be archived/cleaned up or kept on mismatch) without writing or removing anything — not
+        the new segment, not a hot file, not even the digest.
 
         Idempotent / crash-safe: a prior run that durably wrote its segment but crashed
         before removing the now-redundant hot files leaves those files as harmless
@@ -4487,11 +4589,30 @@ class Store:
                 key=lambda item: item.ulid,
             )
 
-            safe_decisions, safe_domains, _mismatches = self._leftover_archived_hot(
+            safe_decisions, safe_domains, kept_hot_files = self._leftover_archived_hot(
                 archived_decisions, archived_domains
             )
 
             if dry_run:
+                for d in new_decisions:
+                    comparison = _hot_file_comparison(
+                        _record_file(self.path, "decisions", d.id), d.model_dump(mode="json")
+                    )
+                    if comparison in {"extra-fields", "different-values"}:
+                        kept_hot_files += 1
+                        _warn_hot_archive_mismatch(
+                            "decision", d.id, reason=comparison, prospective_archive=True
+                        )
+                for dom in new_domains:
+                    comparison = _hot_file_comparison(
+                        _record_file(self.path, "domains", dom.domain_id),
+                        _domain_canonical_payload(dom),
+                    )
+                    if comparison in {"extra-fields", "different-values"}:
+                        kept_hot_files += 1
+                        _warn_hot_archive_mismatch(
+                            "domain", dom.domain_id, reason=comparison, prospective_archive=True
+                        )
                 return CompactReport(
                     segment_path=None,
                     decisions_compacted=len(new_decisions),
@@ -4499,6 +4620,7 @@ class Store:
                     skipped_age_filtered=skipped_age_filtered,
                     domains_excluded_age_unknown=domains_excluded_age_unknown,
                     cleaned_up_hot_files=len(safe_decisions) + len(safe_domains),
+                    kept_hot_files=kept_hot_files,
                     items=items,
                     dry_run=True,
                 )
@@ -4512,19 +4634,23 @@ class Store:
             # INDEX snapshot alone for a destructive removal. Its canonical_stat row is removed
             # in the SAME step (digest-integrity design Task 2): a file kept because it
             # MISMATCHED (the `continue` below) keeps its row too -- mirroring
-            # `_hot_file_matches`'s own skip exactly, so a diverged-but-kept file is never
+            # the comparison's own skip exactly, so a diverged-but-kept file is never
             # treated as though this index stopped having loaded it.
             for d in new_decisions:
                 p = _record_file(self.path, "decisions", d.id)
-                if _hot_file_matches(p, d.model_dump(mode="json")) is False:
-                    _warn_hot_archive_mismatch("decision", d.id)
+                comparison = _hot_file_comparison(p, d.model_dump(mode="json"))
+                if comparison in {"extra-fields", "different-values"}:
+                    kept_hot_files += 1
+                    _warn_hot_archive_mismatch("decision", d.id, reason=comparison)
                     continue
                 p.unlink(missing_ok=True)
                 self._delete_canonical_stat("decisions", d.id)
             for dom in new_domains:
                 p = _record_file(self.path, "domains", dom.domain_id)
-                if _hot_file_matches(p, _domain_canonical_payload(dom)) is False:
-                    _warn_hot_archive_mismatch("domain", dom.domain_id)
+                comparison = _hot_file_comparison(p, _domain_canonical_payload(dom))
+                if comparison in {"extra-fields", "different-values"}:
+                    kept_hot_files += 1
+                    _warn_hot_archive_mismatch("domain", dom.domain_id, reason=comparison)
                     continue
                 p.unlink(missing_ok=True)
                 self._delete_canonical_stat("domains", dom.domain_id)
@@ -4547,6 +4673,7 @@ class Store:
                 skipped_age_filtered=skipped_age_filtered,
                 domains_excluded_age_unknown=domains_excluded_age_unknown,
                 cleaned_up_hot_files=cleaned_up,
+                kept_hot_files=kept_hot_files,
                 items=items,
                 dry_run=False,
             )

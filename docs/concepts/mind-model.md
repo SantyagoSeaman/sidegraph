@@ -131,9 +131,11 @@ this matters in practice beyond an ordinary rename: freeing a community that a d
 still claims (give the successor no matching `path_prefixes`/`seed_anchors` instead of
 carrying the old rule forward).
 
-**Listing.** `list_domains(status=None)` returns every domain in the store — optionally
-filtered to one status — with membership/lineage counts (`member_count`, `seed_anchor_count`,
-`parent_slug`/`child_slugs`); it's the general "show me all domains" answer `list_proposed`
+**Listing.** `list_domains(status=None)` searches every status and returns whole domain rows
+inside a bounded JSON-text envelope, with counts and a hint when filters or output limits omit
+rows. Narrow by exact domain ids or query terms to reach a row from an omitted listing. Rows
+include membership/lineage fields (`member_count`, `seed_anchor_count`, `parent_slug` and
+`child_slugs`); this is the general "show me all domains" answer `list_proposed`
 (proposed-only) and `list_domain_candidates` (unclaimed-only) don't cover.
 
 ## How domains relate to engine communities

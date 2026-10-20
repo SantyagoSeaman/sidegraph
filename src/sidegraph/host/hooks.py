@@ -588,8 +588,8 @@ def _claim_notice(
     hook registered twice fires both copies for one session start, with different session ids,
     and only the process that writes the stamp emits. When the claim itself fails the notice is
     sent anyway: a duplicate is better than silence. A failure that is a lock another process
-    holds is raised instead, so the caller can stop writing: every further write would wait out
-    the busy timeout too (``_due_notices``).
+    holds is raised instead, so the caller can stop writing after the refused transaction
+    (``_due_notices``).
     see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D5)
     """
 
@@ -641,8 +641,8 @@ def _due_notices(
     deletes its key, so a problem that comes back after a fix is reported at once. A check that
     did not run (``_NotRun``, an exception, a switch) leaves its key alone.
 
-    Writes are rationed, because each one waits out the busy timeout when another process holds
-    the write lock (5 s by default, per write). A key is deleted only when it exists:
+    Writes are rationed, because each one can be refused when another process holds the write
+    lock. A key is deleted only when it exists:
     ``recorded`` is the set of existing keys the caller already read (``None`` reads each clean
     id's key from the store, which takes no write lock), so a healthy start writes nothing. And
     the first failure that is a lock stops all further claims and deletes: the remaining due
@@ -1091,7 +1091,7 @@ def session_start() -> None:
         # anyone. Only a lock another process holds keeps that: it passes by itself.
         # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D3)
         try:
-            store = Store(location.path)
+            store = Store(location.path, busy_timeout_seconds=0.0)
         except Exception as e:
             if not isinstance(e, StoreRequirementError):
                 diagnostics.report("store", e)
@@ -1253,7 +1253,7 @@ def session_start() -> None:
         try:
             from .. import sync as _sync_drift
 
-            drift_count = _sync_drift.refresh_code_drift_cache(store)
+            drift_count = _sync_drift.refresh_code_drift_cache(store, busy_timeout_seconds=0.0)
         except Exception as error:
             diagnostics.report("drift", error)
 
@@ -1270,7 +1270,9 @@ def session_start() -> None:
 
             now = datetime.now(UTC)
             index = open_index_ro(
-                Path(store.path), on_error=lambda error: diagnostics.report("integrity", error)
+                Path(store.path),
+                on_error=lambda error: diagnostics.report("integrity", error),
+                busy_timeout_seconds=0.0,
             )
             try:
                 recorded = _recorded_notice_keys(index, diagnostics)
@@ -1502,7 +1504,9 @@ def stop() -> None:
             diagnostics.report("store", error)
         stage = "capture_peek"
         peek = open_index_ro(
-            store_path, on_error=lambda error: diagnostics.report("capture_peek", error)
+            store_path,
+            on_error=lambda error: diagnostics.report("capture_peek", error),
+            busy_timeout_seconds=0.0,
         )
         ledger: tuple[str, str | None] | None = None
         if peek is not None:
@@ -1545,7 +1549,7 @@ def stop() -> None:
         from ..store import Store
 
         stage = "store"
-        store = Store(store_path)
+        store = Store(store_path, busy_timeout_seconds=0.0)
         stage = "capture"
         rearm_key = _CAPTURE_REARM_KEY_PREFIX + session_id
         if ledger is None:
@@ -1576,7 +1580,7 @@ def stop() -> None:
         try:
             from .. import sync as _sync_drift
 
-            n = _sync_drift.refresh_code_drift_cache(store)
+            n = _sync_drift.refresh_code_drift_cache(store, busy_timeout_seconds=0.0)
             if n and os.environ.get("SIDEGRAPH_DRIFT_NUDGE") != "off":
                 # Keep this clause within the Stop nudge's 800/850 character bounds.
                 reason += (
@@ -1709,9 +1713,8 @@ class _HotOpener:
     Touch recording and the nudge both need the index and both resolve the same store, so the
     second step reuses the first one's handle (or its refusal: ``None`` is remembered too, so a
     store that cannot be used is looked at once). A handle whose write hit the busy timeout
-    (``HotIndex.write_failed``) is not handed out again: the next write would wait out the same
-    timeout, so a Read under a held lock costs one wait, not two. ``close`` releases the handle
-    at the end of the run.
+    (``HotIndex.write_failed``) is not handed out again. Hook-owned handles use zero wait, so a
+    Read under a held lock refuses promptly. ``close`` releases the handle at the end of the run.
     see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D3)
     """
 
@@ -1726,7 +1729,9 @@ class _HotOpener:
 
             self._asked = True
             self._index = HotIndex.open(
-                store_path, on_error=lambda error: self.report("index", error)
+                store_path,
+                on_error=lambda error: self.report("index", error),
+                busy_timeout_seconds=0.0,
             )
         if self._index is not None and self._index.write_failed:
             return None
@@ -2106,7 +2111,7 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
                 winning.append((rel, _shown_slice(records)))
         except sqlite3.OperationalError as error:
             hot.report("claim", error)
-            break  # the busy timeout: deliver what is already claimed, claim no more
+            break  # contention refusal: deliver what is already claimed, claim no more
     if not blocks:
         return None
     text = "\n".join([MEMORY_GUARD_LINE, *blocks])
@@ -2186,7 +2191,7 @@ def _journal_brief(
     """Journal the records a brief printed (``inject_brief`` rows and shows bumps), from the same
     plan that rendered it. Nothing without telemetry or a session id (the touch rule: a row that
     cannot be attributed is not written). Never raises: a brief must not fail on a journal. This
-    makes the Agent path a writer: under a held lock it can wait out the busy timeout.
+    makes the Agent path a writer: under a held lock the optional journal refuses promptly.
     see design/superpowers/specs/2026-10-11-hook-showings-journal-design.md (D4)"""
     try:
         if not _journals_showings():

@@ -73,6 +73,7 @@ def _answer(diagnostics: HookDiagnostics | None = None) -> dict:
         index = HotIndex.open(
             location.path,
             on_error=(lambda error: diagnostics.report("index", error)) if diagnostics else None,
+            busy_timeout_seconds=0.0,
         )
         if index is None:
             return {}

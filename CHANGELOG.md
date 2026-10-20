@@ -7,6 +7,42 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-10-20
+
+See [Using Sidegraph 0.16](docs/guides/using-0.16.md) for update, compatibility, and
+limitation notes.
+
+### Security
+
+- Raise the minimum MCP Python SDK to 1.30.0, which includes the upstream fix for
+  [GHSA-84m7-p3x7-pcfv](https://github.com/advisories/GHSA-84m7-p3x7-pcfv). The supported
+  SDK major remains 1.
+
+### Added
+
+- Add `/sidegraph:health-check`, a read-only installation report with six evidence sections
+  and prioritized manual recommendations. It uses an already identified Python interpreter
+  and skips doctor and stats paths when an existing SQLite index is unsafe to open.
+
+### Changed
+
+- Hook-owned SQLite handles now refuse lock contention immediately across session, stop,
+  tool-use and subagent entry paths. SessionStart's dedupe remains best-effort under overlap;
+  its graph, filesystem and Git work is outside this lock-wait bound.
+- Retrieval and file listings reuse a lazy, per-call descriptor lookup, avoiding repeated
+  full entity scans while preserving seed selection and rendered output.
+- `sidegraph-compact` reports distinct hot files retained when their content is not fully
+  represented in the immutable archive, with warnings that distinguish extra fields from
+  shared-value or structure differences.
+
+### Fixed
+
+- `list_domains` now bounds its complete MCP text response and reports matched, returned and
+  omitted counts with whole rows. Its provisional return shape changes from a bare list to a
+  JSON-text envelope; exact domain-id and query filters can retrieve rows left out by the cap.
+- `sidegraph-stats` withholds anchor health counts while a fresh index's binding statuses await
+  `sidegraph-sync`, while keeping the record inventory and reach figures available.
+
 ## [0.15.0] — 2026-10-18
 
 ### Added

@@ -21,12 +21,16 @@ to `ratify` on a guess — confirm the specific change with the human first when
 
 ## "Show me all domains"
 
-Call `list_domains()` — the full listing tool, every domain in the store regardless of status.
-Each entry: `{id, slug, title, summary, status, member_count, path_prefixes,
-seed_anchor_count, parent_slug, child_slugs}` — `member_count` is `len(communities)` (0 for a
-domain not yet ratified/synced), `parent_slug`/`child_slugs` give you the hierarchy without a
-separate lookup. Pass `status="accepted"` (or `"proposed"`/`"dropped"`/`"superseded"`) to
-narrow. This is the tool for "show me all domains" — prefer it over the narrower views below:
+Call `list_domains()` — it includes every status, with a default limit of 25 and a 24,000
+character budget. It returns one JSON text block with `matched`, `returned`, `omitted`,
+`domains`, and `hint`; each complete row has `{id, slug, title, summary, status, member_count,
+path_prefixes, seed_anchor_count, parent_slug, child_slugs}`. `member_count` is
+`len(communities)` (0 for a domain not yet ratified/synced), and lineage reflects the full store.
+Read `hint` before assuming the listing is complete. Narrow with `status`, `query` (AND terms
+across slug/title/summary), or `ids` (exact domain ids). `limit` is clamped to 1..100 and
+`budget_chars` to 4,000..40,000. A budget cut includes the relative domain-file fallback for
+the next omitted row; a count cut suggests filters and raising `limit` only while it is below
+100. This is the tool for "show me all domains" — prefer it over the narrower views below:
 
 - **`list_proposed()`** — domains awaiting ratification only (`status=proposed`), rendered
   human-readably with their `paths:`/`communities:` membership rule — reach for this
@@ -88,8 +92,9 @@ over, to the successor once it is accepted, and the new rule applies only after
 `drill_down` won't help here (it shows rendered member lines, not the raw rule), but you don't
 need git-history archaeology either:
 
-- **`path_prefixes`** reads back out as structured data — `list_domains()` returns it verbatim
-  per domain (`{"path_prefixes": [...], ...}`), no file read needed.
+- **`path_prefixes`** reads back out as structured data — use `list_domains(ids=[<domain_id>])`
+  to retrieve the exact complete row (`{"path_prefixes": [...], ...}`), and read its `hint` if
+  the row still does not fit.
 - **`seed_anchors`** has no structured tool-read for the descriptors themselves —
   `list_domains()` gives you only `seed_anchor_count` (how many, not what). For the actual
   `{"name", "file_path"}` list, read the committed domain file directly:

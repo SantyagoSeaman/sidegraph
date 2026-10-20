@@ -103,6 +103,12 @@ an empty list with an explanatory `"note"` key — everything store-derived (`do
 takes the seeds as `files` and `entities`): given what the agent is about to touch, return a compact slice of structure *and* memory, memory ranked so the things
 most likely to save it from a repeat mistake come first.
 
+Within one retrieval or file-list call, descriptor resolution shares a lazy, operation-scoped
+lookup of parsed entities. It preserves the existing exact-path, pathless adoption, ambiguity,
+and winner rules while avoiding a full entity-table parse for each graph node. The lookup is
+discarded after the call; a later call sees entity changes. This is a performance-only change:
+seed selection, record ranking, budgets, and rendered output are unchanged.
+
 ### Seeds
 
 A `Seed` is either:

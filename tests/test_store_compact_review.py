@@ -397,6 +397,22 @@ def test_fresh_candidate_hot_file_changed_externally_is_never_deleted(store: Sto
     assert old.id in err
 
 
+def test_compact_dry_run_after_hot_becomes_unparseable_is_read_only(store: Store) -> None:
+    old = store.add_decision(_decision(title="invalid-dry-run-old"))
+    store.add_decision(_decision(title="invalid-dry-run-successor", supersedes=old.id))
+    hot_path = _hot_decision_path(store, old.id)
+    hot_path.write_text("not json\n", encoding="utf-8")
+    invalid_bytes = hot_path.read_bytes()
+    digest_before = store.get_meta("canonical_digest")
+
+    with pytest.raises(ValueError):
+        store.compact(dry_run=True)
+
+    assert hot_path.read_bytes() == invalid_bytes
+    assert not (store.path / "archive").exists()
+    assert store.get_meta("canonical_digest") == digest_before
+
+
 # == Minor-7: domains excluded under --older-than get their own report field + CLI wording ==
 
 

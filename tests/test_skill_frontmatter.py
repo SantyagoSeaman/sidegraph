@@ -10,6 +10,7 @@ _EXPECTED = {
     "check-plan",
     "explain-why",
     "heal-anchors",
+    "health-check",
     "import-adrs",
     "manage-domains",
     "name-domains",

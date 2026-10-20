@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "sidegraph",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Durable decisions, facts and lessons over your code graph.",
   "compat": {
     "source": "native",
@@ -20,6 +20,10 @@
       {
         "id": "heal-anchors",
         "path": "skills/heal-anchors/SKILL.md"
+      },
+      {
+        "id": "health-check",
+        "path": "skills/health-check/SKILL.md"
       },
       {
         "id": "import-adrs",

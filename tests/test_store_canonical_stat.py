@@ -15,6 +15,7 @@ reason)."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -235,7 +236,7 @@ def test_compact_deletes_the_stat_row_of_hot_files_it_removes(tmp_path):
 
 
 def test_compact_keeps_the_stat_row_of_a_hot_file_it_keeps_on_mismatch(tmp_path):
-    """Mirrors ``_hot_file_matches``'s own skip (store.py, compact): a hot file whose
+    """Mirrors the hot-file comparison's own skip (store.py, compact): a hot file whose
     on-disk content diverged from what compact was about to archive is left in place
     (never destroy data) -- and its canonical_stat row is left alone too, since the file it
     describes is still exactly the file on disk."""
@@ -260,3 +261,35 @@ def test_compact_keeps_the_stat_row_of_a_hot_file_it_keeps_on_mismatch(tmp_path)
     # matters here is that the row was not DELETED just because compact chose not to
     # archive-and-remove this file.
     assert _stat_row(store, "decisions", old.id) is not None
+
+
+def test_compact_rechecks_hot_file_after_segment_publication(tmp_path, monkeypatch):
+    store = Store(tmp_path / "s")
+    old = store.add_decision(_decision("publish-recheck-old"))
+    store.add_decision(_decision("publish-recheck-new", supersedes=old.id))
+    hot_path = store.path / "decisions" / f"{old.id}.json"
+    publisher = store._write_archive_segment
+    published: dict[str, bytes] = {}
+    edited: dict[str, bytes] = {}
+
+    def publish_then_edit(decisions, domains):
+        segment_relpath = publisher(decisions, domains)
+        segment_path = store.path / segment_relpath
+        published["bytes"] = segment_path.read_bytes()
+        payload = json.loads(hot_path.read_text(encoding="utf-8"))
+        payload["future_field"] = None
+        edited["bytes"] = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode()
+        hot_path.write_bytes(edited["bytes"])
+        return segment_relpath
+
+    monkeypatch.setattr(store, "_write_archive_segment", publish_then_edit)
+    report = store.compact()
+
+    assert report.decisions_compacted == 1
+    assert report.kept_hot_files == 1
+    assert hot_path.is_file()
+    assert hot_path.read_bytes() == edited["bytes"]
+    assert json.loads(edited["bytes"])["future_field"] is None
+    assert _stat_row(store, "decisions", old.id) is not None
+    segment_path = store.path / report.segment_path
+    assert segment_path.read_bytes() == published["bytes"]
