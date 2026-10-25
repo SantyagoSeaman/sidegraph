@@ -225,7 +225,8 @@ def _redact_assignments(text: str, *, quoted_key: bool) -> tuple[str, int]:
     return "".join(parts), total
 
 
-def _replace_secret_spans(text: str, spans: Iterable[tuple[int, int]]) -> tuple[str, int]:
+def _replace_spans(text: str, spans: Iterable[tuple[int, int]]) -> tuple[str, int]:
+    """Replace supplied spans with the redaction marker and count replacements."""
     parts: list[str] = []
     cursor = 0
     count = 0
@@ -239,16 +240,16 @@ def _replace_secret_spans(text: str, spans: Iterable[tuple[int, int]]) -> tuple[
 
 def redact(text: str) -> tuple[str, int]:
     """Scrub secrets from text. Returns (clean_text, replacement_count)."""
-    text, total = _replace_secret_spans(text, iter_private_key_spans(text))
+    text, total = _replace_spans(text, iter_private_key_spans(text))
     for pattern in _SECRET_PATTERNS_BEFORE_ASSIGNMENTS[1:]:
         text, n = pattern.subn("[REDACTED]", text)
         total += n
     for quoted_key in (False, True):
         text, n = _redact_assignments(text, quoted_key=quoted_key)
         total += n
-    text, n = _replace_secret_spans(text, iter_jwt_spans(text))
+    text, n = _replace_spans(text, iter_jwt_spans(text))
     total += n
-    text, n = _replace_secret_spans(text, PhaseScanner(text).url_spans())
+    text, n = _replace_spans(text, PhaseScanner(text).url_spans())
     total += n
     for pattern in _SECRET_PATTERNS_AFTER_ASSIGNMENTS[2:]:
         text, n = pattern.subn("[REDACTED]", text)

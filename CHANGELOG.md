@@ -7,6 +7,18 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-10-25
+
+### Security
+
+- Upgrade locked certifi, FastMCP/full+slim, opentelemetry-api, filelock and virtualenv
+  beyond their reported vulnerable ranges. Raise the runtime floors to FastMCP 3.4.10,
+  certifi 2026.10.19 and opentelemetry-api 1.45.1 so standalone wheel installs also exclude
+  the affected versions; retain FastMCP `<4` and MCP SDK `>=1.30,<2` compatibility.
+- Remove the misleading private redaction-helper name that CodeQL interpreted as a
+  secret-producing function. All 24 reported logging paths originated at its already
+  redacted output or integer replacement count; redaction and terminal output are unchanged.
+
 ## [0.17.0] — 2026-10-24
 
 ### Changed (Contract change)

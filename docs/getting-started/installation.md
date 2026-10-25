@@ -45,7 +45,9 @@ with Git for Windows installed; they do not establish support for Windows hosts 
 remains outside these checks.
 See [Windows](#windows) before installing a host plugin.
 
-Package dependencies support `fastmcp>=3.4.2,<4` and `mcp>=1.30,<2`. Major SDK upgrades
+Package dependencies support `fastmcp>=3.4.10,<4` and `mcp>=1.30,<2`. Runtime security
+floors also require `certifi>=2026.10.19` and
+`opentelemetry-api>=1.45.1`, including standalone wheel installations. Major SDK upgrades
 require a separate compatibility review; an unlocked package install may resolve newer
 versions within those bounds than the development lockfile.
 

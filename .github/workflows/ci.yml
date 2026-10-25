@@ -135,7 +135,7 @@ jobs:
           interpreter="$environment/bin/python"
           constraints=()
           if [ "$SDK_PAIR" = minimum ]; then
-            constraints=(fastmcp==3.4.2 mcp==1.30.0)
+            constraints=(fastmcp==3.4.10 mcp==1.30.0)
           fi
           uv pip install --python "$interpreter" "$wheel" pytest "${constraints[@]}"
           mkdir -p "$RUNNER_TEMP/sdk-check"

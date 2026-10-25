@@ -29,8 +29,9 @@ use; see [configuration](configuration.md#path-resolution-semantics).
 Git commands for provenance, initiative, ratification identity and graph checks receive
 EOF on standard input, keeping subprocesses separate from the MCP protocol stream.
 
-The development lockfile selects FastMCP 3.4.2 and MCP Python SDK 1.30.0. Supported package
-dependencies are `fastmcp>=3.4.2,<4` and `mcp>=1.30,<2`. The locked stack
+The development lockfile selects FastMCP 3.4.11 and MCP Python SDK 1.30.0. Supported package
+dependencies are `fastmcp>=3.4.10,<4` and `mcp>=1.30,<2`, with runtime security floors
+`certifi>=2026.10.19` and `opentelemetry-api>=1.45.1`. The locked stack
 uses the `initialize` / `notifications/initialized` lifecycle and negotiates protocol
 versions through **2025-11-25**. The server reports Sidegraph's package version in
 `serverInfo.version`; that is separate from the negotiated protocol version.
@@ -141,7 +142,7 @@ shape, string and node policy described below. Unknown write parameter names are
 from errors while valid parameter help remains. Read-tool aliases/help are unchanged.
 The server rejects unsupported tool registrations rather than executing an unguarded
 write. The isolated FastMCP compatibility adapter requires the tested argument-only
-core-schema shape (locked FastMCP 3.4.2 / Pydantic 2.13.4); it validates no function body.
+core-schema shape (locked FastMCP 3.4.11 / Pydantic 2.13.4); it validates no function body.
 
 An incomplete store operation can report `rejected` after canonical replacement. Follow
 its may-have-written warning: do not repeat the proposal in the same session; reopen the
