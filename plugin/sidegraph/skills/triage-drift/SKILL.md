@@ -28,10 +28,18 @@ The CLI runs through uvx at the session's version, never the copy on `PATH` ([wh
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor --json    # findings[] entries with "code": "code-drift"
 ```
 
-Each finding names the record and changed files or why its prior check no longer
-applies (including subject/anchor-scope changes). Original `provenance.commit` stays history. `sidegraph-doctor` is a pure read — safe to run any time. From
-inside a session, the drifted set also announces itself: the SessionStart line and
-`[drifted]` tags in retrieval output are the same population, surfaced lazily.
+For a per-decision `code-drift` finding, use `record_id` and `record_type` ("decision")
+to identify the subject. `path` is its physical source: several records may share one shard.
+Never infer identity from the shard, capture commit or human-readable `detail`. Global notes
+(commit stamping unavailable, Git unavailable, check skipped) have null record fields; they
+are not records to triage. `detail` names changed files or why a prior check no longer applies.
+Original `provenance.commit` stays history. Doctor is a pure read.
+
+The SessionStart count and `[drifted]` tags in detailed formatted `get_task_context`,
+`query_decisions` and `drill_down` output use the lazily refreshed drift cache. Budgets can
+omit records, and compact related-record lines do not all show the marker. Raw
+`retrieve_decisions` JSON has no drift field or tag in either storage layout; use doctor
+for the explicit current list.
 
 Triage in batches — a 35-record queue does not need 35 interrupts. Group verdicts and
 **put every question to the human into one message** (same discipline as
@@ -60,7 +68,10 @@ Triage in batches — a 35-record queue does not need 35 interrupts. Group verdi
      ```
 
      Include every current checkable concrete anchor file and each additional dependency
-     actually inspected. The files must be tracked regular files and clean relative to
+     actually inspected. If `missing_required_files` is returned, inspect the local configured
+     Store: `bindings_for_record(decision_id)`, then `get_entity(binding.entity_id).descriptor`
+     for each binding. Include every current checkable concrete file, not just the files
+     named as changed by doctor. The files must be tracked regular files and clean relative to
      that HEAD; unrelated dirt is allowed. The target must be open, commit-stamped and
      concretely anchored. With no Git HEAD, dirty inspected files, incomplete scope or an
      ineligible target, report the judgment and why no check was recorded; retain the
@@ -88,10 +99,14 @@ Triage in batches — a 35-record queue does not need 35 interrupts. Group verdi
      The direct `supersede_decision` path is legitimate only when the human has dictated
      or approved the successor text in this conversation. For an invalidated *fact*,
      the same split applies with `supersede_fact`.
-   - **(c) The anchored code is gone entirely** — deleted, not changed. That's binding
-     damage, not content drift: run `sidegraph:heal-anchors` (its stale-decisions tree
-     already covers restore-the-name vs. supersede vs. recommend-a-drop). Never drop a
-     record yourself — a drop is a ratify-gate action for a human.
+   - **(c) The anchored code is gone entirely** — deleted, not changed. Run
+     `sidegraph:heal-anchors` to distinguish a rename from a lost subject. For accepted
+     decisions, propose a meaningful supersession that explains the obsolete scope and
+     anchors what remains true. `ratify(drop=...)` only rejects proposed decisions/facts;
+     it cannot retire an accepted decision. If there is no meaningful successor, report
+     that limitation to the human and retain history; do not invent an empty successor
+     or edit status/valid_to in canonical files. Accepted domains have their own supported
+     drop path; do not generalize that exception to decisions.
 
 ## Calibrate the effort
 
@@ -115,8 +130,9 @@ of the wave's own definition of done, not a later triage's discovery.
 
 End with one summary the human can act on in a single pass: checked (decision id, returned check id, revision, inspected scope and cache-clear outcome), still true but
 check unavailable (id and reason), proposed supersessions (old id → new draft title, awaiting
-`sidegraph:ratify-decisions`), handed to heal-anchors (ids), and recommended drops
-(ids + reason — recommendation only, the human runs `ratify(drop=[...])`).
+`sidegraph:ratify-decisions`), handed to heal-anchors (ids), and unresolved obsolete subjects
+(ids + current status + reason). Recommend `ratify(drop=[...])` only for proposed
+decisions/facts, or domains whose drop path explicitly permits it.
 
 ## See also
 

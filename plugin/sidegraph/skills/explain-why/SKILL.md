@@ -45,8 +45,10 @@ accepted it yet — present it as a proposal, not settled memory.
 
 `get_entity_history` returns superseded records too — that's the point. On a long-lived
 entity the newest records come in full and the rest as short rows (`omitted_records`) or bare
-ids (`omitted_ids`): read one with `retrieve_decisions(ids=[...])` / `list_facts(ids=[...])`, or
-narrow with `status=["superseded"]`. The answer to a
+ids (`omitted_ids`). Explicit-id `retrieve_decisions` / `list_facts` calls obey the
+proposal-surfacing policy and can omit old or regulated-mode proposals. For complete local
+records use `Store.get_decision(id)` / `Store.get_fact(id)` on the configured store, or
+narrow history with `status=["superseded"]`. The answer to a
 why-question has two layers, and the reader deserves both, clearly separated:
 
 1. **Current truth** — the live (`accepted`) records: the standing decision, its

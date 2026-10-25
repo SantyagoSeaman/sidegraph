@@ -1617,6 +1617,16 @@ neither flagged nor cleared. `drill_down` does record a `domain:<slug>` seed, bu
 consumes it yet; its *shows* count normally, so surfacing only through a domain drill-down
 still protects a decision from a false flag.
 
+Each JSON finding has `code`, `path`, `detail`, `record_id` and `record_type`.
+Per-record findings carry their logical identity (`decision`, `fact`, `entity`, `domain`,
+or `bindings`); global notes have null record fields. A malformed raw record whose id
+cannot be read also has a null subject; use its violation and physical path for repair. `path` retains the physical source,
+including a shared shard or archive segment, so it is not a record locator. Text prints
+`<code>  <record_type>:<record_id>  <path>  <detail>` for identified subjects; global notes
+omit the subject column. `duplicate-entity` identifies the selected lowest-id entity;
+its detail names the other members. A `bindings` subject uses the bound record's id.
+Use `record_id` to retrieve or check a drifted decision; do not parse the shard or detail.
+
 `clean` is `true` only when both `violations` and `findings` are empty.
 
 **Skipped checks.** A check that cannot look says so and is never a finding: it affects neither

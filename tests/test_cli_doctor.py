@@ -140,7 +140,7 @@ def test_json_output_shape_and_purity(tmp_path, capsys):
     assert doc["clean"] is False
     assert doc["violations"] == []
     assert doc["findings"][0]["code"] == "dangling-record"
-    assert set(doc["findings"][0]) == {"code", "path", "detail"}
+    assert set(doc["findings"][0]) == {"code", "path", "detail", "record_id", "record_type"}
     # An index that no sync has computed the statuses of, and no graph in this test's directory.
     assert doc["skipped"] == ["binding-status", "orphaned-records", "graph"]
 

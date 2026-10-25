@@ -55,6 +55,8 @@ def test_flags_superseded_wording_in_instructions_file(tmp_path):
     hits = [f for f in findings if f.code == STALE_INSTRUCTIONS]
     assert len(hits) == 1
     assert d.id in hits[0].detail
+    assert hits[0].record_id == d.id
+    assert hits[0].record_type == "decision"
     assert "CLAUDE.md" in hits[0].path
 
 

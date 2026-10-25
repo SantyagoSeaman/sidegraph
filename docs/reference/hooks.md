@@ -832,6 +832,10 @@ permission flow, untouched:
    session's own agent, so the main agent's keys do not start with any subagent's prefix. The value
    is the claim's ISO timestamp. These keys are deliberately **not** the `Stop` hook's
    `capture_sessions` ledger, so the guards can't consume each other.
+   If any record-selection read fails, the hook refuses this delivery before claiming any
+   file. An unreadable early file is not treated as an empty one: otherwise parallel hooks
+   could choose different triples from the same command. A later clean call may deliver
+   the files because this refusal consumes no per-file claim or showing.
 7. If at least one claim succeeded, the winner emits one non-blocking, `additionalContext`-only
    block for the files it won:
 

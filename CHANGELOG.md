@@ -7,6 +7,31 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-10-25
+
+### Fixed
+
+- Doctor identifies per-record advisory findings with `record_id` and `record_type` in
+  JSON and prints the subject beside its physical path in text. Decisions sharing one
+  packed shard, source file and capture commit can now be triaged separately. This also
+  covers never-surfaced, orphaned-record, binding and other record findings; global notes
+  remain subjectless. Fixes [#1](https://github.com/SantyagoSeaman/sidegraph/issues/1).
+- MCP domain-listing hints use the local Store API for oversized records, including packed
+  domains, and pending-proposal hints explain the visibility policy instead of promising
+  that an explicit id can bypass it.
+- Drift checks distinguish missing required anchor files, absent checkable anchors and
+  untracked inspected paths with safe fixed diagnostics. Missing-scope errors explain how
+  to inspect the full anchor scope locally without reading SQLite. Unavailable anchor
+  entities and failed Git scope lookups get specific diagnostics before any check is published.
+- Ratification refusals explain that an accepted decision or fact is not proposed. The
+  drift and anchor playbooks no longer recommend dropping accepted decisions, and clarify
+  that drift markers appear in formatted context rather than raw decision-listing JSON.
+- PreToolUse refuses delivery before claiming files if a record-selection read fails.
+  Concurrent zero-wait hooks therefore cannot skip an unreadable early file and consume
+  different three-file sets from the same command.
+- Complete the headless anchor-healing example's write-tool deny list with drift-check
+  writes and domain proposals.
+
 ## [0.17.1] — 2026-10-25
 
 ### Security

@@ -212,7 +212,8 @@ def test_unstamped_and_drift_findings_coexist(git_repo):
     report = curate(store_dir)
     findings = [f for f in report.findings if f.code == CODE_DRIFT]
     assert len(findings) == 2
-    assert any("1 record(s) predate commit stamping" in f.detail for f in findings)
+    note = next(f for f in findings if "1 record(s) predate commit stamping" in f.detail)
+    assert note.record_id is None and note.record_type is None
     assert any("trader/exec.py" in f.detail for f in findings)
 
 

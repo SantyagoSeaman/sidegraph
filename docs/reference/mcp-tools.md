@@ -765,8 +765,10 @@ hundreds of records, so the answer fills in this order:
    `omitted_ids_unlisted` counts ids the budget cut as well.
 
 Nothing is dropped silently: a superseded record is at worst a short row or a bare id. Read an
-omitted decision with `retrieve_decisions(ids=[...])` and an omitted fact with
-`list_facts(ids=[...])`, or narrow with `status=[...]` (for example `["superseded"]`).
+omitted decision locally with `Store.get_decision(id)` and an omitted fact with
+`Store.get_fact(id)` on the configured store, or narrow with `status=[...]` (for example
+`["superseded"]`). Explicit-id `retrieve_decisions`/`list_facts` calls still obey the
+proposal-surfacing policy and may omit older or regulated-mode proposals.
 `omitted_records` and `omitted_ids` appear only when something was left out.
 
 ## `get_task_context`
@@ -1228,10 +1230,13 @@ initial prefix of complete rows, sorted by slug. Each row retains the existing f
 "seed_anchor_count", "parent_slug", "child_slugs"}`. `member_count` remains
 `len(domain.communities)`. Parent/child lineage comes from the full store even when filters
 exclude relatives. When the character budget omits rows, `hint` identifies the effective bound,
-suggests filters, and names a bounded relative local-file fallback for the next omitted domain
-(`domains/<id>.json`). That file exists only while the domain is stored as a per-record file;
-once maintenance has packed it into a shard (store format 2), narrow with `status`, `query` or
-`ids` instead of following the path.
+suggests filters, and names a bounded local Python fallback for the next omitted domain:
+`Store.get_domain("<id>")` on the configured store. It returns the full model, including
+`seed_anchors`, for both per-record and packed layouts. Open the configured store with
+`with Store(store_path) as store:` and call `store.get_domain(id)`; a domain may no longer
+have an individual `.json` file. If the id itself cannot fit the hint, use
+`Store.iter_domains()`. This local Store access can rebuild the derived index; it is distinct
+from the read-only MCP listing.
 When `limit` cuts the list, the hint suggests filters and raising `limit` only below 100. Empty
 stores say `No domains in the store.`; empty filtered matches name active filter keys without
 echoing their values. This is the provisional MCP return shape and sends no output schema or
@@ -1494,12 +1499,14 @@ When the queue does not fit, the first line counts it (`Pending: 31 decisions, 4
 domains. Showing 18 decisions, 0 facts, 2 domains.`), the sections fill in order with the
 blocks that fit (a block that does not fit is skipped and the fill goes on), and the end lists
 what is missing, in the order of the blocks, as `<id> <title head>` entries (then `and N more
-ids`). `ratify` accepts an id you have not read, so nothing is out of reach. The end also says how to read
-an item that is not shown (`retrieve_decisions(ids=[...])`, `list_facts(ids=[...])`,
-`list_domains(status="proposed")`). Those reads obey the proposal window
-(`SIDEGRAPH_PROPOSAL_WINDOW_DAYS`), so a proposed decision or fact older than the window is not
-returned by id; read it with `sidegraph-ratify` without flags, which lists every pending
-proposal. Ratify what is shown, then call again, or raise `budget_chars`.
+ids`). Read every item before deciding its verdict. The hint explains that decision
+or fact proposals may be hidden from `retrieve_decisions`/`list_facts` by the proposal
+window or regulated mode;
+explicit ids do not bypass that policy. Inspect omitted decisions locally with
+`Store.get_decision(id)` and omitted facts with `Store.get_fact(id)` on the configured
+store, or use `sidegraph-ratify` without flags for the full pending queue. Domains use
+`list_domains(status="proposed")`. Ratify what is shown, then call again, or raise
+`budget_chars`.
 
 **Returns:** a plain-text string.
 
@@ -1555,6 +1562,12 @@ makes `bootstrap → ratify` turn the TOC on in the same session, without waitin
 "accepted (evidence of <decision_id>)" | "dropped (evidence of <decision_id>)"}` — the last
 two only ever appear for a fact id that rode a decision's cascade rather than being named
 directly.
+
+Decisions and facts can be accepted or dropped only while `proposed`. A refusal names
+the existing status; an accepted decision cannot be retired through `drop`. Propose a
+meaningful supersession when the recorded claim becomes obsolete. If no successor exists,
+report that limitation and retain history rather than editing canonical status fields.
+Domain drop has its separate accepted-domain exception.
 
 ## `ratify_decisions` (deprecated)
 
@@ -1815,7 +1828,15 @@ that exact HEAD; unrelated dirty files do not block the check. All current check
 concrete anchor files are required; explicitly inspected dependencies may extend coverage.
 Unknown binding status conservatively includes existing committed anchor paths. Abstract-only,
 unstamped, skipped or terminal subjects, missing Git HEAD, incomplete scope and dirty
-inspected files are refused without a new check. Existing safe write diagnostics apply.
+inspected files are refused without a new check. Missing required anchors return the
+fixed code `missing_required_files`, distinct from `no_checkable_files` and `untracked_files`.
+To inspect the scope locally without querying SQLite, open the configured Store, call
+`store.bindings_for_record(decision_id)`, and resolve each `binding.entity_id` with
+`store.get_entity(...)`; inspect the descriptors' file paths and current Git entries.
+Include every current checkable concrete anchor, not just doctor's changed-file subset.
+An unloadable required entity returns `unavailable_anchor_scope`; a failed initial Git
+scope lookup returns `git_scope_unavailable`. Both refusals occur before check publication.
+Write errors keep their bounded schema vocabulary and do not echo file names or raw causes.
 
 The result names `id`, `decision_id`, `checked_commit`, `required_files`, `checked_files`,
 `provenance`, `cache_cleared` and `redactions`. `cache_cleared` only says whether an existing

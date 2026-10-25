@@ -92,7 +92,8 @@ def test_t11_doctor_prints_the_finding_through_the_cli(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert (
-        f"orphaned-record  {store_dir / 'decisions' / f'{decision}.json'}  every code anchor" in out
+        f"orphaned-record  decision:{decision}  "
+        f"{store_dir / 'decisions' / f'{decision}.json'}  every code anchor" in out
     )
 
 

@@ -859,3 +859,33 @@ def test_a_lock_error_on_the_second_claim_still_delivers_the_first_file(
     assert _files_in(_text(out)) == ["a.py"]
     assert calls == ["a.py", "b.py"]  # the third is not tried once the lock is hit
     assert set(project.meta("pretool_file:%")) == {f"pretool_file:{SESSION}:-:a.py"}
+
+
+@pytest.mark.parametrize("fail_at", [1, 2, 3])
+@pytest.mark.parametrize("partial", [False, True])
+def test_record_read_failure_refuses_selection_before_claiming(
+    bash_project, monkeypatch, capsys, fail_at, partial
+):
+    """An uncertain early file must not shift parallel hooks to different three-file sets."""
+    from sidegraph.hot_index import HotIndex
+
+    original = HotIndex.records_for
+    calls = 0
+
+    def sometimes_locked(self, entity_ids, *, on_error=None):
+        nonlocal calls
+        calls += 1
+        if calls == fail_at:
+            assert on_error is not None
+            on_error(sqlite3.OperationalError("synthetic read contention"))
+            return original(self, entity_ids) if partial else []
+        return original(self, entity_ids, on_error=on_error)
+
+    monkeypatch.setattr(HotIndex, "records_for", sometimes_locked)
+    payload = _bash("cat a.py b.py c.py d.py e.py")
+    out = _run(monkeypatch, capsys, bash_project, payload)
+    assert not out or _files_in(_text(out)) == []
+    assert bash_project.meta("pretool_file:%") == {}
+    monkeypatch.setattr(HotIndex, "records_for", original)
+    retry = _run(monkeypatch, capsys, bash_project, payload)
+    assert _files_in(_text(retry)) == ["a.py", "b.py", "c.py"]

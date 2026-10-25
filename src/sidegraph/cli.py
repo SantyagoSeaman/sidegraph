@@ -2894,7 +2894,13 @@ def doctor_main(argv: list[str] | None = None) -> int:
                         {"code": v.code, "path": v.path, "detail": v.detail} for v in violations
                     ],
                     "findings": [
-                        {"code": f.code, "path": f.path, "detail": f.detail}
+                        {
+                            "code": f.code,
+                            "path": f.path,
+                            "detail": f.detail,
+                            "record_id": f.record_id,
+                            "record_type": f.record_type,
+                        }
                         for f in report.findings
                     ],
                     "skipped": skipped + (["graph"] if reader is None else []),
@@ -2906,7 +2912,8 @@ def doctor_main(argv: list[str] | None = None) -> int:
         for v in violations:
             print(f"{v.code}  {v.path}  {v.detail}")
         for f in report.findings:
-            print(f"{f.code}  {f.path}  {f.detail}")
+            subject = f"  {f.record_type}:{f.record_id}" if f.record_id is not None else ""
+            print(f"{f.code}{subject}  {f.path}  {f.detail}")
         stamp_note = None if index_usable else index_stamp_note(args.db)
         if stamp_note is not None:
             print(f"index checks withheld: {stamp_note}")

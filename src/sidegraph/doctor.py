@@ -133,13 +133,16 @@ _STRUCTURAL_ENTITY_PREFIXES = ("domain:", "community:")
 
 @dataclass(frozen=True)
 class Finding:
-    """One curation finding. Same field shape as ``verify.Violation``, a distinct type on
-    purpose: findings are advice, violations are contract breaches — the CLI must never
-    mix the two lists."""
+    """One advisory, with an optional logical record subject and physical source path.
+
+    Distinct from ``verify.Violation`` on purpose: findings are advice, violations
+    are contract breaches — the CLI must never mix the two lists."""
 
     code: str
     path: str
     detail: str
+    record_id: str | None = None
+    record_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -296,6 +299,8 @@ def _check_dangling_records(
                     DANGLING_RECORD,
                     str(path),
                     f"open {kind} has no committed anchor set (bindings/{rid}.json {state})",
+                    record_id=rid,
+                    record_type=kind,
                 )
             )
             continue
@@ -321,7 +326,9 @@ def _check_dangling_records(
                 "supporting decision is superseded/rejected/deprecated -- reachable only "
                 "via list_facts, not task-seeded retrieval"
             )
-        findings.append(Finding(DANGLING_RECORD, str(path), detail))
+        findings.append(
+            Finding(DANGLING_RECORD, str(path), detail, record_id=rid, record_type=kind)
+        )
     return findings
 
 
@@ -357,6 +364,8 @@ def _check_stale_proposals(
                 STALE_PROPOSAL,
                 str(path),
                 f"{kind} proposed {(now - created).days} days ago (threshold {stale_days} days)",
+                record_id=rid,
+                record_type=kind,
             )
         )
 
@@ -392,6 +401,8 @@ def _check_unreferenced_entities(
                 UNREFERENCED_ENTITY,
                 str(path),
                 f"entity {name!r} is referenced by no committed anchor set",
+                record_id=eid,
+                record_type="entity",
             )
         )
     return findings
@@ -528,6 +539,8 @@ def _check_duplicate_entities(
                 str(winner_path),
                 f"{len(members_sorted)} entities share one logical identity; lookups "
                 f"resolve to the lowest id: {detail_ids}",
+                record_id=_winner["entity_id"],
+                record_type="entity",
             )
         )
     return sorted(findings, key=lambda f: f.path)
@@ -562,6 +575,8 @@ def _check_expired_open(decisions: list[tuple[Path, dict]], now: datetime) -> li
                 EXPIRED_OPEN_VALIDITY,
                 str(path),
                 f"valid_to {d['valid_to']} is past but status is still {d['status']!r}",
+                record_id=d.get("id") if isinstance(d.get("id"), str) else None,
+                record_type="decision" if isinstance(d.get("id"), str) else None,
             )
         )
     return findings
@@ -608,9 +623,17 @@ def _check_binding_statuses(store_dir: Path) -> tuple[list[Finding], list[str]]:
     except sqlite3.Error:
         return [], [BINDING_STATUS_CHECK]
 
+    packed_bindings = records_of(store_dir, "bindings", lenient=True)
+    binding_paths = (
+        {r.record_id: str(r.source_path(store_dir)) for r in packed_bindings}
+        if packed_bindings is not None
+        else {}
+    )
     code_by_status = {"degraded": DEGRADED_BINDING, "orphaned": ORPHANED_BINDING}
     findings: list[Finding] = []
     for record_id, entity_id, data in rows:
+        if not isinstance(record_id, str) or not isinstance(entity_id, str):
+            continue  # malformed derived identity; never expose bytes in JSON metadata
         try:
             payload = json.loads(data)
         except (json.JSONDecodeError, TypeError):
@@ -624,8 +647,10 @@ def _check_binding_statuses(store_dir: Path) -> tuple[list[Finding], list[str]]:
         findings.append(
             Finding(
                 code,
-                f"bindings/{record_id}.json",
+                binding_paths.get(record_id, f"bindings/{record_id}.json"),
                 f"binding {record_id} -> {entity_id} is {status} as of last sync",
+                record_id=record_id,
+                record_type="bindings",
             )
         )
     return findings, []
@@ -697,6 +722,8 @@ def _check_never_surfaced(store_dir: Path) -> tuple[list[Finding], list[str]]:
                 str(path),
                 f"anchored to {', '.join(anchored_paths)}, queried {total_queries} times, "
                 "never surfaced — check its anchors or the ranking",
+                record_id=rid,
+                record_type="decision",
             )
         )
     return findings, []
@@ -1210,6 +1237,8 @@ def _check_code_drift(
                         if scan.binding_statuses_uncomputed
                         else ""
                     ),
+                    record_id=entry.record_id,
+                    record_type="decision",
                 )
             )
     if scan.check_skipped:
@@ -1294,6 +1323,8 @@ def _check_stale_instructions(
                         f'("{norm[:60]}…") — an auto-injected file reaches the agent '
                         "before retrieval does, so verify it no longer teaches the "
                         "abandoned rule",
+                        record_id=rid,
+                        record_type="decision",
                     )
                 )
     return findings
@@ -1411,6 +1442,10 @@ def _registry_findings(
         if code is None:
             continue
         findings += [Finding(code, path, detail) for path, detail in problem.findings]
+        findings += [
+            Finding(code, row.path, row.detail, row.record_id, row.record_type)
+            for row in problem.record_findings
+        ]
     return findings
 
 
@@ -1632,7 +1667,10 @@ def _check_unratified_accepts(
     }
 
     findings: list[Finding] = []
-    for path, rec in [*decisions, *facts]:
+    for path, rec, kind in [
+        *((p, r, "decision") for p, r in decisions),
+        *((p, r, "fact") for p, r in facts),
+    ]:
         if rec.get("status") != DecisionStatus.ACCEPTED.value:
             continue
         provenance = rec.get("provenance")
@@ -1656,6 +1694,8 @@ def _check_unratified_accepts(
                 "ratified before the ratifier stamp existed look identical, so verify "
                 "rather than assume; if the switch is on, decide whether that is the "
                 "policy you want committed",
+                record_id=rec.get("id") if isinstance(rec.get("id"), str) else None,
+                record_type=kind if isinstance(rec.get("id"), str) else None,
             )
         )
     return findings

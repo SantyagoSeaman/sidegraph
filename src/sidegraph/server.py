@@ -891,13 +891,23 @@ def _record_drift_check_impl(
             if (entity := store.get_entity(b.entity_id)) is not None
         }
         statuses = {(decision_id, b.entity_id): b.status for b in bindings}
+        if any(b.tier == 2 and b.entity_id not in entities for b in bindings):
+            raise SafeWriteError("files", "unavailable_anchor_scope")
         leaves, candidates = drift_checks.scope_leaves(
             decision_id, [b.model_dump(mode="json") for b in bindings], entities, statuses
         )
-        tree = drift_checks.tree_entries(root, head, set(files) | candidates, remaining())
+        try:
+            tree = drift_checks.tree_entries(root, head, set(files) | candidates, remaining())
+        except ValueError:
+            # This lookup precedes check creation and publication; no check was written.
+            raise SafeWriteError("checked_commit", "git_scope_unavailable") from None
         required = sorted(candidates & tree.keys())
-        if not required or not set(required) <= set(files) or not set(files) <= tree.keys():
-            raise SafeWriteError("files")
+        if not required:
+            raise SafeWriteError("files", "no_checkable_files")
+        if not set(required) <= set(files):
+            raise SafeWriteError("files", "missing_required_files")
+        if not set(files) <= tree.keys():
+            raise SafeWriteError("files", "untracked_files")
         check = DriftCheck(
             schema_version=1,
             decision_id=decision_id,
@@ -2674,8 +2684,9 @@ def _entity_history_listing(
                 where.append("bare ids in omitted_ids")
             hint = (
                 f"{len(rest)} more records are anchored to this entity: {', '.join(where)}. "
-                "Read a decision with retrieve_decisions(ids=[...]) and a fact with "
-                "list_facts(ids=[...]), or narrow with status=[...]."
+                "Explicit-id reads obey the surfacing policy. For complete local records use "
+                "Store.get_decision(id) or Store.get_fact(id) on the configured store, "
+                "or narrow with status=[...]."
             )
             if "omitted_ids_unlisted" in out:
                 hint += (
@@ -2746,8 +2757,8 @@ def get_entity_history(
     row in ``omitted_records`` (``id``, ``record_type``, ``kind``, ``status``, ``valid_from``,
     ``title``), and when even the rows overflow the budget, the rest are bare ids in
     ``omitted_ids`` (``omitted_ids_unlisted`` counts ids cut as well). Read an omitted decision
-    with ``retrieve_decisions(ids=[...])`` and an omitted fact with ``list_facts(ids=[...])``;
-    ``status`` (one value or a list) narrows the history.
+    locally with ``Store.get_decision(id)`` and an omitted fact with ``Store.get_fact(id)``.
+    Explicit-id MCP reads obey the proposal-surfacing policy; ``status`` narrows history.
     """
     text = _entity_history_listing(
         _get_store(), entity_id, status=status, limit=limit, budget_chars=budget_chars
@@ -3944,8 +3955,11 @@ def _list_proposed_impl(store, budget_chars: int | None = None) -> str:
         else ""
     )
     ending = (
-        "Read one with retrieve_decisions(ids=[...]), list_facts(ids=[...]) or "
-        'list_domains(status="proposed"). Ratify what is shown, then call list_proposed '
+        "Decision/fact proposals may be hidden from retrieve_decisions/list_facts by the "
+        "surfacing policy; inspect them locally with Store.get_decision(id) or "
+        "Store.get_fact(id) on the configured store. "
+        'Read domains with list_domains(status="proposed"). '
+        "Ratify what is shown, then call list_proposed "
         f"again{raise_it}."
     )
     prefix = f"Not shown ({counts(left_counts)}): "
@@ -4060,7 +4074,7 @@ def list_proposed(budget_chars: int = 24000) -> str:
 
     The text is at most ``budget_chars`` long (default 24000, max 40000). A longer queue is
     shown in part: the first line counts the whole queue and what is shown, and the end lists
-    the rest by id (``ratify`` accepts an id you have not read). Ratify what is shown, then
+    the rest by id with local-read guidance. Read each item before deciding; ratify it, then
     call again, or raise ``budget_chars``.
     """
     budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
@@ -4070,10 +4084,9 @@ def list_proposed(budget_chars: int = 24000) -> str:
 def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
     """Route one id to a decision, a fact, or a domain by lookup (decision first, then
     fact, then domain) and apply ``action`` ("accept" | "drop"). Unknown ids get a generic
-    error entry — never guess which kind an id belongs to. The known-decision branch
-    mirrors ``_ratify_decisions_impl``'s per-id try/except exactly, so existing error text
-    for a decision id is unchanged; a fact id's ``ratify_fact``/``drop_fact`` ValueError
-    (not proposed) surfaces the same way. Only a genuinely unknown id's wording differs.
+    error entry — never guess which kind an id belongs to. Known non-proposed decisions
+    and facts get a fixed status explanation. Unexpected mutation failures retain the
+    conservative recovery message rather than exposing raw causes.
 
     Returns ``(result, cascaded)`` — ``cascaded`` is the list of :class:`Fact` records that
     rode a DECISION's verdict in this call (``Store.ratify``/``Store.drop``'s own cascade;
@@ -4081,7 +4094,14 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
     anything of its own to cascade. The caller (``_ratify_impl``) turns this into per-fact
     result-dict entries.
     """
-    if store.get_decision(id_) is not None:
+    decision = store.get_decision(id_)
+    if decision is not None:
+        if decision.status != DecisionStatus.PROPOSED:
+            return (
+                f"error: decision is not proposed (status: {decision.status.value}); "
+                "ratify cannot change it",
+                [],
+            )
         try:
             if action == "accept":
                 _decision, cascaded = store.ratify(id_)
@@ -4093,7 +4113,14 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
                 "error: ratification failed; reopen the store and inspect status before retrying",
                 [],
             )
-    if store.get_fact(id_) is not None:
+    fact = store.get_fact(id_)
+    if fact is not None:
+        if fact.status != DecisionStatus.PROPOSED:
+            return (
+                f"error: fact is not proposed (status: {fact.status.value}); "
+                "ratify cannot change it",
+                [],
+            )
         try:
             if action == "accept":
                 store.ratify_fact(id_)
@@ -4970,9 +4997,11 @@ def _domain_listing(
         if returned < min(matched, limit):
             next_id = rows[returned]["id"]
             fallback = (
-                f"Read domains/{next_id}.json under the configured store for the full domain."
+                f"Use local Python Store.get_domain({_dump(next_id)}) on the configured store "
+                "for the full domain, including seed_anchors, in either store layout."
                 if len(_dump(next_id)) <= 128
-                else "Read the domains directory under the configured store for the full domain."
+                else "Use local Python Store.iter_domains() on the configured store "
+                "for full domains."
             )
             first = (
                 "The first matching domain does not fit"
@@ -5037,7 +5066,7 @@ def list_domains(
     the same ten fields as the raw projection. Counts are after filtering and before bounds;
     lineage still reflects the full store. ``member_count`` remains ``len(domain.communities)``.
     When the character budget omits rows, the hint names the active bound, suggests filters,
-    and gives a bounded relative local-file fallback for the next omitted domain. A limit cut
+    and gives a bounded local Store.get_domain(id) fallback for the next omitted domain. A limit cut
     suggests filters and raising ``limit`` only below 100. No output schema or structured
     duplicate is sent.
     """

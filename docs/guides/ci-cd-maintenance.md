@@ -10,9 +10,10 @@ unattended.
 
 1. **CI never ratifies.** Nothing in these recipes calls `ratify`/`sidegraph-ratify --accept`
    (or `--drop`, for that matter). A scheduled job may *propose* a superseding decision
-   (`propose_decisions` with `supersedes`) or *recommend* a drop in its summary, but turning
-   a proposal into an accepted/rejected terminal state stays a human action, every
-   time. See [`heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md#triage-decision-tree-add_anchors-propose_decisions-or-recommend-a-drop)
+   (`propose_decisions` with `supersedes`) or report obsolete subjects in its summary.
+   Recommend drop only for proposed decisions/facts or a supported domain drop; accepted
+   decisions without a meaningful successor retain their history. A proposal verdict
+   stays a human action. See [`heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md#triage-decision-tree-re-anchor-supersede-or-report-an-obsolete-subject)
    for the triage tree these jobs run. An auto-ratification policy would break this rule
    without any `ratify` call — the transition rides `propose_decisions` itself, which the
    deny list below cannot block. Legacy `SIDEGRAPH_AUTO_ACCEPT=on` bypasses the queue too.
@@ -316,9 +317,10 @@ jobs:
           claude -p 'Run the heal-anchors playbook: call sync_anchors(force=True), then for
           every orphaned/ambiguous entity and every stale decision, follow the triage tree —
           add_anchors for code that moved, propose_decisions(supersedes=...) for content
-          that is genuinely outdated, and a plain-text recommendation (never a tool call)
-          for anything to drop. Summarize every action taken and every recommendation at
-          the end.' \
+          that is genuinely outdated, and a status-aware summary for obsolete subjects.
+          Recommend drop only for proposed decisions/facts or a supported domain drop;
+          retain accepted decision history when there is no meaningful successor.
+          Summarize every action taken and recommendation at the end.' \
             --model "$SIDEGRAPH_TRIAGE_MODEL" \
             --mcp-config mcp-config.json --strict-mcp-config \
             --allowedTools "mcp__sidegraph__sync_anchors mcp__sidegraph__find_entity mcp__sidegraph__query_structure mcp__sidegraph__query_decisions mcp__sidegraph__add_anchors mcp__sidegraph__propose_decisions mcp__sidegraph__list_proposed mcp__sidegraph__retrieve_decisions mcp__sidegraph__get_entity_history mcp__sidegraph__list_facts mcp__sidegraph__verify_store" \
@@ -355,7 +357,7 @@ CLI default.
 
 Do not add `--permission-mode bypassPermissions`: it disables both tool lists. The
 `--disallowedTools` list is the ratification guard: it names the tools that ratify or write a
-record directly and the one that records a drift check. The allowlist only narrows normal MCP
+record directly, records a drift check, or proposes a domain. The allowlist only narrows normal MCP
 access and can be widened by ambient host settings. Keep both. Read-only built-in
 tools can still inspect the checkout in a headless run; the troubleshooting note below states
 that boundary explicitly. The matching

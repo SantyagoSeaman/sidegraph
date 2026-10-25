@@ -167,6 +167,16 @@ class _BudgetExhausted(_NotRun):
 
 
 @dataclass(frozen=True)
+class RecordFinding:
+    """A doctor row whose logical subject cannot be inferred from a shared shard path."""
+
+    path: str
+    detail: str
+    record_id: str
+    record_type: str
+
+
+@dataclass(frozen=True)
 class Problem:
     check: str  # the check id
     severity: Severity
@@ -174,7 +184,8 @@ class Problem:
     fix: str  # the exact command or action ("graphify update .")
     line: str | None  # model-facing SessionStart line, None = none
     notice: str | None  # human-facing sentence, None = not for the human
-    findings: tuple[tuple[str, str], ...] = ()  # doctor (path, detail) pairs
+    findings: tuple[tuple[str, str], ...] = ()  # subjectless doctor (path, detail) pairs
+    record_findings: tuple[RecordFinding, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -654,11 +665,13 @@ def _detect_orphaned_records(inputs: Inputs) -> Problem | None:
     degraded = recent >= _ORPHANED_RECENT_COUNT
     where = _record_locations(inputs.store_dir)
     findings = tuple(
-        (
+        RecordFinding(
             where(table, record_id),
             f"every code anchor of this record is orphaned ({leaves} leaf anchor(s)); "
             "retrieval reaches it only through its file or domain — re-anchor it with "
             "add_anchors or the heal-anchors skill, or supersede it if the code is gone",
+            record_id=record_id,
+            record_type={"decisions": "decision", "facts": "fact"}[table],
         )
         for table, record_id, leaves, _orphans in sorted(orphaned, key=lambda o: o[1])
     )
@@ -669,7 +682,7 @@ def _detect_orphaned_records(inputs: Inputs) -> Problem | None:
         fix="sidegraph-doctor",
         line=line,
         notice=line if degraded else None,
-        findings=findings,
+        record_findings=findings,
     )
 
 

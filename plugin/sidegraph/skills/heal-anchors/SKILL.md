@@ -74,6 +74,9 @@ store write or a source change: confirm before acting.
      with **explicit fresh `anchors` pointing at the successor code**. Do NOT omit
      `anchors` here: omitting inherits the predecessor's bindings verbatim — *including
      their orphaned status* — which reproduces exactly the problem you're healing.
+   If an accepted decision has no meaningful successor, report the obsolete subject to
+   the human and retain its history. `ratify(drop=...)` rejects only proposed decisions
+   and facts; it cannot retire an accepted decision. Do not edit canonical status fields.
 2. **A lone `orphaned: <name> (no match)`** whose decision is NOT in the stale block —
    multi-anchor did its job: another anchor still holds the decision live. No action
    needed unless the orphaned one was the load-bearing anchor.
@@ -89,8 +92,9 @@ store write or a source change: confirm before acting.
    domain's frozen membership is, and a re-scope applies only after
    `sidegraph-domains snapshot --refresh --domain <slug>`); read the old rule back first
    (`list_domains(ids=[<domain_id>])` returns the exact complete row, including
-   `path_prefixes`; check its `hint` and use its local-file fallback if the row does not fit;
-   for the actual `seed_anchors` list read `.sidegraph/domains/<domain_id>.json`) and carry what's still
+   `path_prefixes`; check its `hint` and use its local Store fallback if the row does not fit;
+   for the actual `seed_anchors` list use local Python `Store.get_domain(domain_id)`
+   on the configured store, which works for files and packed shards) and carry what's still
    right — then `ratify(accept=[<new_id>])`. Or retire it: `ratify(drop=[<domain_id>])`
    if the area is genuinely gone.
 5. **`path rule too broad — path contribution dropped (...):`** — a `path_prefixes` rule
@@ -127,7 +131,7 @@ store write or a source change: confirm before acting.
    not, `ratify(drop=[<the part that should not exist>])`: the remaining domain takes the
    frozen membership back at once.
 
-## Triage decision tree (add_anchors, propose_decisions, or recommend a drop)
+## Triage decision tree (re-anchor, supersede, or report an obsolete subject)
 
 For every `orphaned`/`ambiguous` entity and every `stale_decisions` entry, walk this tree
 before touching anything — the same tree whether you're triaging interactively or running
@@ -174,16 +178,17 @@ is gated on a human's `ratify`. Never call `supersede_decision`/`supersede_fact`
 immediately-`accepted` MCP tools) from an unattended/CI context — unlike `propose_decisions`,
 they skip the ratify gate entirely.
 
-**(c) The subject is genuinely gone.** The code (or doc section) the decision was about was
-deleted outright, not renamed or moved. There is no tool call for this: recommend a drop in
-your summary (`ratify(drop=[<id>])`, or `sidegraph-ratify --drop <id>`, for a *human* to
-run) and stop there. **Never drop a decision yourself.** Dropping is append-only-safe, but
-it is a ratify-gate action exactly like accepting one — that judgment call belongs to a
-human, same as every other write this skill routes to a human instead of performing.
+**(c) The subject is genuinely gone.** Confirm that it was deleted rather than renamed
+or moved. Check the record's current status. For an accepted decision, propose a meaningful
+supersession when something remains true or successor code exists; otherwise report the
+obsolete subject and retain its history. There is no accepted-decision retirement API.
+`ratify(drop=[<id>])` and `sidegraph-ratify --drop <id>` reject only proposed decisions/facts.
+Recommend those only for proposed records, and leave the verdict to the human. Domain drop
+has its separate accepted-domain exception. Never edit canonical status or valid_to fields.
 
 ## Running this playbook headlessly (CI)
 
-Everything above except the drop in (c) is a tool call, not a judgment a human has to make
+The lookup, binding-repair and proposal steps above can run without a human verdict
 in the moment — `sync_anchors`/`find_entity`/`query_structure`/`add_anchors`/
 `propose_decisions` all run fine unattended, and so do the tools that read records
 (`retrieve_decisions`/`get_entity_history`/`list_facts`/`verify_store`) used to confirm a
@@ -199,12 +204,13 @@ policy would ratify through `propose_decisions` with no `ratify` call at all, wh
 claude -p 'Run the heal-anchors playbook: call sync_anchors(force=True), then for every
 orphaned/ambiguous entity and every stale decision, follow the triage tree — add_anchors
 for code that moved, propose_decisions(supersedes=...) for content that is genuinely
-outdated, and a plain-text recommendation (never a tool call) for anything to drop. Do not
-call ratify. Summarize every action taken and every recommendation at the end.' \
+outdated, and a status-aware summary for obsolete subjects. Recommend drop only for
+proposed decisions/facts or a supported domain drop; retain accepted decision history when
+there is no meaningful successor. Do not call ratify. Summarize every action taken and every recommendation at the end.' \
   --model claude-sonnet-5 \
   --mcp-config mcp-config.json --strict-mcp-config \
   --allowedTools "mcp__sidegraph__*" \
-  --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__ratify_decisions,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact" \
+  --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__ratify_decisions,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact,mcp__sidegraph__record_drift_check,mcp__sidegraph__propose_domains" \
   --output-format stream-json --verbose
 ```
 
@@ -214,7 +220,8 @@ system itself consults, so under bypass they'd bind nothing at all, and the run 
 able to call every tool including `ratify`. **The `--disallowedTools` deny list is the
 load-bearing guard**: it names the exact write-gate tools this playbook must never call
 unattended — `ratify`/`ratify_decisions`, `add_decision`/`supersede_decision`,
-`add_fact`/`supersede_fact`, `add_domain`/`supersede_domain` — and blocks them regardless
+`add_fact`/`supersede_fact`, `add_domain`/`supersede_domain`, `record_drift_check`,
+`propose_domains` — and blocks them regardless
 of the machine's ambient permission configuration. The `--allowedTools` wildcard is scoping,
 not enforcement: on a pristine machine a headless `-p` run auto-denies *MCP* tool calls
 outside it (no terminal to prompt), but a permissive user- or project-level `settings.json`

@@ -231,7 +231,7 @@ def test_orphaned_records_names_shard_for_packed(world):
     finally:
         conn.close()
     assert problem is not None
-    paths = [path for path, _ in problem.findings]
+    paths = [row.path for row in problem.record_findings]
     assert paths and all("/shards/" in p and p.endswith(".shard") for p in paths)
 
 
@@ -247,7 +247,10 @@ def test_orphaned_records_names_the_file_for_a_per_record_file(world):
     finally:
         conn.close()
     assert problem is not None
-    assert all(p.endswith(".json") and "/decisions/" in p for p, _ in problem.findings)
+    assert all(
+        p.endswith(".json") and "/decisions/" in p
+        for p in (row.path for row in problem.record_findings)
+    )
 
 
 def test_catalog_reads_u2028_in_archive_line(tmp_path):

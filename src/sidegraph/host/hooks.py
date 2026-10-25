@@ -2091,13 +2091,22 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
         return None
 
     anchored = index.anchored_entities(files)
+    selection_failed = False
+
+    def selection_error(error: Exception) -> None:
+        nonlocal selection_failed
+        selection_failed = True
+        hot.report("delivery", error)
+
     chosen: list[tuple[str, list[Record]]] = []
     for rel in dict.fromkeys(files):
         if rel not in anchored:
             continue
-        records = _renderable_records(
-            index.records_for(anchored[rel], on_error=lambda error: hot.report("delivery", error))
-        )
+        records = _renderable_records(index.records_for(anchored[rel], on_error=selection_error))
+        if selection_failed:
+            # Unknown is not empty: skipping an unreadable early file would let parallel
+            # hooks choose different three-file sets. No claims have been made yet.
+            return None
         if records:
             chosen.append((rel, records))
             if len(chosen) == _FILES_PER_CALL:

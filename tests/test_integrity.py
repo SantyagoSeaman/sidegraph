@@ -672,8 +672,8 @@ def test_orphaned_findings_are_one_per_record_sorted_by_id_with_full_paths(store
         ],
         key=lambda pair: Path(pair[0]).stem,
     )
-    assert [path for path, _ in problem.findings] == [path for path, _ in expected]
-    details = dict(problem.findings)
+    assert [row.path for row in problem.record_findings] == [path for path, _ in expected]
+    details = {row.path: row.detail for row in problem.record_findings}
     assert details[expected[0][0]] == (
         f"every code anchor of this record is orphaned ({expected[0][1]} leaf anchor(s)); "
         "retrieval reaches it only through its file or domain — re-anchor it with add_anchors "

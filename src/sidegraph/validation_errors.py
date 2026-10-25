@@ -103,6 +103,27 @@ _CODES = frozenset(
 )
 
 _MESSAGES = {
+    "unavailable_anchor_scope": (
+        "invalid draft: files: unavailable_anchor_scope; a required anchor entity could not "
+        "be read. Inspect sidegraph-doctor and sidegraph-verify before checking this scope."
+    ),
+    "git_scope_unavailable": (
+        "invalid draft: checked_commit: git_scope_unavailable; Git scope lookup failed "
+        "before check publication. Inspect repository access and retry after it is available."
+    ),
+    "missing_required_files": (
+        "invalid draft: files: missing_required_files; "
+        "include every current checkable anchor file. "
+        "Inspect Store.bindings_for_record(decision_id) and each Store.get_entity(entity_id) "
+        "descriptor on the configured store; retry only after inspecting the complete scope."
+    ),
+    "no_checkable_files": (
+        "invalid draft: files: no_checkable_files; no current tracked regular anchor file"
+    ),
+    "untracked_files": (
+        "invalid draft: files: untracked_files; "
+        "inspected files must exist as tracked regular files at HEAD"
+    ),
     "no_named_anchor": "anchors: none of the given anchors has a name",
     "no_live_support": (
         "anchorless fact has no live supporting decision — add an anchor, or "

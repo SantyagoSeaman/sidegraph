@@ -28,8 +28,8 @@ path_prefixes, seed_anchor_count, parent_slug, child_slugs}`. `member_count` is
 `len(communities)` (0 for a domain not yet ratified/synced), and lineage reflects the full store.
 Read `hint` before assuming the listing is complete. Narrow with `status`, `query` (AND terms
 across slug/title/summary), or `ids` (exact domain ids). `limit` is clamped to 1..100 and
-`budget_chars` to 4,000..40,000. A budget cut includes the relative domain-file fallback for
-the next omitted row; a count cut suggests filters and raising `limit` only while it is below
+`budget_chars` to 4,000..40,000. A budget cut includes a local `Store.get_domain(id)` fallback for
+the next omitted row in either storage layout; a count cut suggests filters and raising `limit` only while it is below
 100. This is the tool for "show me all domains" — prefer it over the narrower views below:
 
 - **`list_proposed()`** — domains awaiting ratification only (`status=proposed`), rendered
@@ -97,10 +97,9 @@ need git-history archaeology either:
   the row still does not fit.
 - **`seed_anchors`** has no structured tool-read for the descriptors themselves —
   `list_domains()` gives you only `seed_anchor_count` (how many, not what). For the actual
-  `{"name", "file_path"}` list, read the committed domain file directly:
-  `.sidegraph/domains/<domain_id>.json` (the full row minus the volatile `communities` field —
-  see [store format](../../../../docs/reference/store-format.md)) — still structured JSON, just
-  not exposed through an MCP tool yet.
+  `{"name", "file_path"}` list, use local Python `Store.get_domain(domain_id)` on the configured store and read
+  its `seed_anchors`. This works for per-record files and packed shards; a domain may no
+  longer have its own `.json` file (see [store format](../../../../docs/reference/store-format.md)).
 
 `supersede_domain` is also the mechanism behind the naming guide's [recovering from a
 mass-drop](../../../../docs/guides/naming-your-domains.md#recovering-from-a-mass-drop): give

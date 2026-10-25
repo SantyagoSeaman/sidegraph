@@ -125,7 +125,7 @@ def test_mcp_list_domains_bounds_oversized_domain_before_envelope_assertions(tmp
         assert payload["returned"] == 0
         assert payload["omitted"] == 1
         assert payload["domains"] == []
-        assert f"domains/{domain.domain_id}.json" in payload["hint"]
+        assert f'Store.get_domain("{domain.domain_id}")' in payload["hint"]
     finally:
         store.close()
 
@@ -215,7 +215,7 @@ def test_domain_listing_mid_list_oversize_keeps_prefix_and_local_fallback(store)
     assert len(text) <= 4000
     assert answer["matched"] == 3 and answer["returned"] == 1 and answer["omitted"] == 2
     assert [row["id"] for row in answer["domains"]] == [first.domain_id]
-    assert f"domains/{blocked.domain_id}.json" in answer["hint"]
+    assert f'Store.get_domain("{blocked.domain_id}")' in answer["hint"]
     assert "raise budget" not in answer["hint"]
     follow_up = json.loads(server._domain_listing(store, ids=[third.domain_id]))
     assert [row["id"] for row in follow_up["domains"]] == [third.domain_id]
@@ -227,7 +227,7 @@ def test_domain_listing_first_oversized_row_does_not_suggest_a_larger_maximum(st
     answer = json.loads(text)
     assert len(text) <= 40_000
     assert answer["matched"] == 1 and answer["returned"] == 0 and answer["omitted"] == 1
-    assert f"domains/{domain.domain_id}.json" in answer["hint"]
+    assert f'Store.get_domain("{domain.domain_id}")' in answer["hint"]
     assert "budget_chars=40000" in answer["hint"]
     assert "raise budget" not in answer["hint"]
 
@@ -337,7 +337,7 @@ def test_domain_listing_sizes_escaped_fields_and_long_fallback_ids(store, monkey
     monkeypatch.setattr(server, "_list_domains_impl", lambda store, status=None: [row])
     long_id = json.loads(server._domain_listing(store, budget_chars=4000))
     assert long_id["returned"] == 0
-    assert "Read the domains directory under the configured store" in long_id["hint"]
+    assert "Store.iter_domains() on the configured store" in long_id["hint"]
     assert row["id"] not in long_id["hint"]
     assert "raise budget" not in long_id["hint"]
 
@@ -401,8 +401,8 @@ def test_domain_listing_fallback_never_uses_configured_store_path(store):
     assert len(text) <= 4000
     assert not fake_root.exists()
     assert str(fake_path) not in answer["hint"]
-    assert "Read domains/" in answer["hint"]
-    assert "under the configured store" in answer["hint"]
+    assert "Store.get_domain(" in answer["hint"]
+    assert "on the configured store" in answer["hint"]
 
 
 def test_domain_listing_filtered_lineage_keeps_unselected_status_relatives(store):
@@ -641,7 +641,7 @@ def test_l6_every_record_stays_reachable_and_the_fill_rule_holds(history):
         expected += 1
     assert answer["returned"] == expected == len(answer["records"])
     assert answer["omitted"] == 150 - expected
-    assert "retrieve_decisions(ids=" in answer["hint"] and "list_facts(ids=" in answer["hint"]
+    assert "Store.get_decision" in answer["hint"] and "Store.get_fact" in answer["hint"]
 
     only = json.loads(
         server._entity_history_listing(store, eid, status=["superseded"], budget_chars=40000)
@@ -679,7 +679,7 @@ def test_l6b_overflow_falls_back_to_ids_and_counts_the_unlisted(history):
     assert "omitted_ids" in answer
     listed = _reachable(answer)
     assert len(listed) + answer.get("omitted_ids_unlisted", 0) == len(everything)
-    assert "retrieve_decisions(ids=" in answer["hint"] and "list_facts(ids=" in answer["hint"]
+    assert "Store.get_decision" in answer["hint"] and "Store.get_fact" in answer["hint"]
 
     garbage = "9" * 5000
     clipped = server._entity_history_listing(store, garbage, budget_chars=4000)
@@ -1245,7 +1245,7 @@ def test_the_shells_clamp_limit_and_budget(store, tmp_path, monkeypatch):
     assert 24000 < len(text) <= 40000
     text, _ = wire("list_proposed", {"budget_chars": 1})
     assert len(text) <= 4000 and text.startswith("Pending:")
-    assert "retrieve_decisions(ids=[...])" in text
+    assert "Store.get_decision(id)" in text
 
 
 def test_list_proposed_does_not_offer_a_budget_at_its_maximum(store):
@@ -1277,3 +1277,22 @@ def test_hard_cap_keeps_the_legend_only_while_a_kept_line_is_drifted():
         assert len(out) <= cap and "## Structural map" not in out and "node 0" not in out
         assert ("LEGEND" in out) is legend_kept, tag
         assert out.endswith("advice")
+
+
+def test_proposed_tail_does_not_promise_by_id_bypasses_visibility(store):
+    decision = _decision(store, 1, status=DecisionStatus.PROPOSED, size=60_000)
+    text = server._list_proposed_impl(store, budget_chars=4000)
+    assert decision.id in text
+    assert "Store.get_decision" in text
+    assert "Store.get_fact" in text
+    assert "may be hidden" in text
+    assert "Read one with retrieve_decisions" not in text
+
+
+def test_history_tail_explains_visibility_and_offers_local_record_reads(history):
+    _store, eid, _ = history
+    answer = json.loads(server._entity_history_listing(_store, eid, budget_chars=4000))
+    assert answer["omitted"] > 0
+    assert "surfacing policy" in answer["hint"]
+    assert "Store.get_decision" in answer["hint"]
+    assert "Store.get_fact" in answer["hint"]

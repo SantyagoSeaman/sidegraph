@@ -577,3 +577,49 @@ def test_unpublished_auxiliary_temp_is_not_reported_for_commit(project):
         )
         is None
     )
+
+
+def test_missing_required_file_has_specific_safe_error(project):
+    root, store, decision = project
+    commit_file(root, "other.py", "value = 1\n")
+    result = record_check(root, decision.id, files=["other.py"])
+    assert result.is_error
+    text = result.content[0].text
+    assert "missing_required_files" in text
+    assert "Store.bindings_for_record" in text
+    assert not (store.path / "verifications").exists()
+
+
+def test_ratify_drop_accepted_decision_explains_status_without_mutation(project):
+    _root, store, decision = project
+    before = decision.model_dump(mode="json")
+    result = server._ratify_impl(store, drop=[decision.id])
+    assert "not proposed" in result[decision.id]
+    assert "accepted" in result[decision.id]
+    assert "reopen" not in result[decision.id]
+    assert store.get_decision(decision.id).model_dump(mode="json") == before
+
+
+@pytest.mark.parametrize("failure", ["entity", "git"])
+def test_known_prepublication_scope_failures_get_specific_safe_errors(
+    project, monkeypatch, failure
+):
+    root, store, decision = project
+    before = {p.relative_to(store.path): p.read_bytes() for p in store.path.rglob("*.json")}
+    if failure == "entity":
+        monkeypatch.setattr(store, "get_entity", lambda _id: None)
+        expected = "unavailable_anchor_scope"
+    else:
+
+        def unavailable(*_args, **_kwargs):
+            raise ValueError("private-git-failure-canary")
+
+        monkeypatch.setattr(server.drift_checks, "tree_entries", unavailable)
+        expected = "git_scope_unavailable"
+    result = record_check(root, decision.id)
+    assert result.is_error
+    text = result.content[0].text
+    assert expected in text
+    assert "private-git-failure-canary" not in text
+    assert not (store.path / "verifications").exists()
+    assert before == {p.relative_to(store.path): p.read_bytes() for p in store.path.rglob("*.json")}
