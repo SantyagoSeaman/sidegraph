@@ -1,6 +1,8 @@
 import json
 
-from sidegraph.engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader
+import pytest
+
+from sidegraph.engine.reader import GraphifyReader
 from sidegraph.schema import Descriptor
 
 # Shape observed on the real ADR/SAD corpus: heading nodes with label + source_file +
@@ -88,10 +90,6 @@ def reader(tmp_path):
     return GraphifyReader(p)
 
 
-def test_allowlist_is_code_document_concept_rationale():
-    assert frozenset({"code", "document", "concept", "rationale"}) == ANCHORABLE_FILE_TYPES
-
-
 def test_resolve_heading_by_name_and_file(tmp_path):
     r = reader(tmp_path).resolve(Descriptor(name="Context", file_path="ADR-001-dq.md"))
     assert r.status == "resolved"
@@ -117,18 +115,18 @@ def test_image_only_name_stays_unresolved(tmp_path):
     assert r.status == "unresolved"
 
 
-def test_resolve_concept_by_name_and_file(tmp_path):
-    r = reader(tmp_path).resolve(Descriptor(name="Idempotency", file_path="ADR-001-dq.md"))
+@pytest.mark.parametrize(
+    ("name", "file_path", "node_id"),
+    [
+        ("Idempotency", "ADR-001-dq.md", "concept1"),
+        ("Chose idempotent retries to survive at-least-once delivery", None, "rationale1"),
+    ],
+    ids=["concept", "rationale"],
+)
+def test_resolve_semantic_node_by_name(tmp_path, name, file_path, node_id):
+    r = reader(tmp_path).resolve(Descriptor(name=name, file_path=file_path))
     assert r.status == "resolved"
-    assert r.node_id == "concept1"
-
-
-def test_resolve_rationale_by_name(tmp_path):
-    r = reader(tmp_path).resolve(
-        Descriptor(name="Chose idempotent retries to survive at-least-once delivery")
-    )
-    assert r.status == "resolved"
-    assert r.node_id == "rationale1"
+    assert r.node_id == node_id
 
 
 def test_nodes_in_file_returns_doc_nodes_not_images(tmp_path):

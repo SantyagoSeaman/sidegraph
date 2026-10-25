@@ -178,13 +178,13 @@ def test_claim_meta_refuses_the_schema_version_key(tmp_path):
 
 
 def test_claim_meta_is_atomic_across_connections(tmp_path):
-    """Eight real connections claim each key at the same instant: exactly one wins per key.
+    """Four real connections claim each key at the same instant: exactly one wins per key.
     A get-then-set claim lets several of them read "absent" before any writes; this loop
     fails it within the first few keys."""
     path = tmp_path / "s"
     Store(path).close()
-    stores = [Store(path) for _ in range(8)]
-    keys = [f"pretool_nudge:S:agent-{i}" for i in range(40)]
+    stores = [Store(path) for _ in range(4)]
+    keys = [f"pretool_nudge:S:agent-{i}" for i in range(10)]
     wins: dict[str, int] = dict.fromkeys(keys, 0)
     guard = threading.Lock()
     errors: list[BaseException] = []

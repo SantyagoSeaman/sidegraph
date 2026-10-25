@@ -22,8 +22,10 @@ written until the user reviews the redacted action summary and types the literal
 
 ## Supported document profiles
 
-Exactly six profiles are supported in v1. Pass `--profile NAME` to select one; an explicit
-choice always wins. Auto-detection uses the profile marker and input globs. When several
+Seven profiles are supported in v1; the six in the table below are auto-detected, and `madr`
+(the same ADR dialect and globs as `generic-adr`, with its own ADR export template) is selected
+only by naming it. Pass `--profile NAME` to select one; an explicit
+choice always wins. Auto-detection selects a specific profile by its marker path alone, and `generic-adr` by its input globs. When several
 specific profiles match, Bootstrap asks for an explicit choice rather than merging dialects.
 `generic-adr` is selected automatically only when its own globs match and no specific marker
 wins.
@@ -102,11 +104,12 @@ The available action stays visible at every line-oriented prompt:
 | edit | no result until reconfirmed | no |
 | keep proposed | `proposed` | only through the quarantine tier |
 | skip | no stored record | no |
+| batch `N,M` | the listed candidates are accepted; every other remaining candidate stays `proposed` | accepted ones only |
 
 `edit` opens one mode-`0600` temporary file through `$VISUAL`, then `$EDITOR`. Edited content
 is parsed, redacted, validated, re-anchored, shown as a new diff, and confirmed again. If no
 editor is configured, the candidate remains proposed. `skip` is run-local state and is never
-stored. There is no default accept-all action.
+stored. There is no default accept-all action: `batch` accepts only the numbers you list.
 
 ## Completion, recovery, and hosts
 
@@ -120,6 +123,14 @@ current-graph anchor proof. Optional domain suggestions do not block that proof.
 | --- | --- | --- | --- | --- | --- |
 | Claude Code | verified | verified | verified | verified | complete v1 flow |
 | Codex | verified when configured | verified when configured | verified when configured | unsupported | best-effort only |
+
+The host check reads the manual registration files only: `.mcp.json` and the `hooks` of
+`.claude/settings.json` for Claude Code, `.codex/config.toml` and `.codex/hooks.json` for Codex.
+It does not recognise a plugin install, whose MCP server and hooks live in the plugin
+manifest. On a project that uses the plugin, `INTEGRATION` is therefore reported `incomplete`
+and the command exits `2` even though the plugin works. Ignore that result if the plugin is
+installed, or register the entry points by hand as described in the
+[Claude Code](../integrations/claude-code.md) or [Codex](../integrations/codex.md) setup guide.
 
 Claude Code has the complete v1 flow. Codex has MCP, SessionStart, and Stop support, but no
 Read/Grep PreToolUse equivalent. When store, anchors, all three supported Codex checks, and
@@ -202,9 +213,11 @@ first-user cohort or task-benefit result. Inspect the report before sharing.
 A release may include a `demo` branch with Sidegraph's own sample store. When that branch
 is available, run the supported-document path against it:
 
-> **Check that the release includes `demo` before running this clone.** If it does not,
-> use a repository containing one of the supported document profiles for the same
-> bootstrap and retrieval loop.
+> **Check that the release includes `demo` before running this clone.** The clone below
+> fails when the branch is not published. Check with
+> `git ls-remote --heads https://github.com/SantyagoSeaman/sidegraph.git demo`: run the
+> clone only if that prints a line. If it prints nothing, use a repository containing one of
+> the supported document profiles for the same bootstrap and retrieval loop.
 
 This command installs from the public `main`, which advances at releases. To pin a version, see
 [how to pin mutable development references](installation.md#mutable-development-references).

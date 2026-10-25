@@ -98,9 +98,23 @@ def _shells() -> list[Any]:
     return shells
 
 
+def _distinct(entries: list[Any]) -> list[Any]:
+    """One entry per ``(event, command)``: a command repeated across manifests (or across
+    matcher groups) runs the same shell code, so the shell tests need it once. The id keeps
+    every manifest that carries it."""
+    labels: dict[tuple[str, str], list[str]] = {}
+    for entry in entries:
+        labels.setdefault(tuple(entry.values), []).append(entry.id)
+    return [
+        pytest.param(event, command, id=",".join(dict.fromkeys(ids)))
+        for (event, command), ids in labels.items()
+    ]
+
+
 _ENTRIES = _hook_entries()
-_EMPTY_ANSWER = [e for e in _ENTRIES if e.values[0] in ("Stop", "PreToolUse", "SubagentStart")]
-_SESSION_START = [e for e in _ENTRIES if e.values[0] == "SessionStart"]
+_DISTINCT = _distinct(_ENTRIES)
+_EMPTY_ANSWER = [e for e in _DISTINCT if e.values[0] in ("Stop", "PreToolUse", "SubagentStart")]
+_SESSION_START = [e for e in _DISTINCT if e.values[0] == "SessionStart"]
 
 
 def _script(path: Path, body: str) -> None:
@@ -199,7 +213,7 @@ def test_t2b_a_failed_start_on_session_start_tells_the_user(
 
 
 @pytest.mark.parametrize("shell", _shells())
-@pytest.mark.parametrize(("event", "command"), _ENTRIES)
+@pytest.mark.parametrize(("event", "command"), _DISTINCT)
 def test_t3_a_missing_project_directory_is_caught(
     shell: str, event: str, command: str, tmp_path: Path
 ) -> None:
@@ -214,7 +228,7 @@ def test_t3_a_missing_project_directory_is_caught(
 
 
 @pytest.mark.parametrize("shell", _shells())
-@pytest.mark.parametrize(("event", "command"), _ENTRIES)
+@pytest.mark.parametrize(("event", "command"), _DISTINCT)
 def test_t4_the_guard_leaves_a_real_answer_alone(
     shell: str, event: str, command: str, tmp_path: Path
 ) -> None:

@@ -1,4 +1,5 @@
 import re
+from importlib import resources
 
 from sidegraph.viz.model import VizGraph, VizNode, VizStats
 from sidegraph.viz.render import to_html
@@ -31,7 +32,10 @@ def test_to_html_is_self_contained():
 
 def test_to_html_embeds_library_and_data():
     html = to_html(_graph())
-    assert "vis.Network" in html or "DataSet" in html  # the library is inlined
+    # the vendored library is inlined whole (the template's own script mentions vis.Network
+    # and DataSet, so those names alone cannot tell the library from a stub)
+    library = resources.files("sidegraph.viz").joinpath("assets", "vis-network.min.js")
+    assert library.read_text(encoding="utf-8") in html
     assert "ZZ_UNIQUE_LABEL" in html  # the graph data is inlined
     assert html.lstrip().lower().startswith("<!doctype html")
     # both substitution tokens were actually replaced (not left as literal placeholders) --

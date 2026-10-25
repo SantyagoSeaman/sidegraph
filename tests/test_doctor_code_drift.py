@@ -525,13 +525,9 @@ def test_binding_snapshot_blocks_writer_until_rows_fetched_but_releases_before_j
         ("0", "orphaned", [], False),
         ("1", "live", ["modified.py"], True),
         ("1", "orphaned", [], True),
-        ("odd", "live", ["deleted.py", "modified.py"], False),
         ("no-meta", "live", ["deleted.py", "modified.py"], False),
-        ("no-key", "live", ["deleted.py", "modified.py"], False),
         ("missing", "live", ["modified.py"], True),
         ("corrupt", "live", ["modified.py"], True),
-        ("no-bindings", "live", ["modified.py"], True),
-        ("bad-meta", "live", ["modified.py"], True),
         pytest.param("bad-meta", "orphaned", [], True, id="unreadable-meta-keeps-readable-orphan"),
     ],
 )

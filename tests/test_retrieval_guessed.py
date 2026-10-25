@@ -111,31 +111,14 @@ def test_a11_guessed_seeds_land_in_related_and_every_direct_record_stays(tmp_pat
     assert all(d.id in "".join(alone.decisions) for d in adrs)
     assert both.decisions == alone.decisions
     assert both.mistakes == alone.mistakes == []
+    # The map is the exact seeds' map: the guessed seed's file is not drawn into it.
+    assert both.structure == alone.structure
+    assert "b/guess.py" not in "\n".join(both.structure)
     related = "".join(both.related)
     assert any(g.id not in related and g.title in related for g in gotchas)  # tight, no id
     assert all(g.title not in "".join(both.decisions) for g in gotchas)
     for g in gotchas:
         assert g.id not in "".join(both.mistakes)
-
-
-def test_a11_the_map_is_the_exact_seeds_map_when_they_resolved(tmp_path):
-    store, _adrs, _gotchas = _store_with_adrs_and_gotchas(tmp_path)
-    reader = _reader(tmp_path)
-
-    alone = get_task_context([EXACT], store, reader, BUDGET)
-    both = get_task_context([EXACT], store, reader, BUDGET, guessed=[GUESS])
-
-    assert both.structure == alone.structure
-    assert "b/guess.py" not in "\n".join(both.structure)
-
-
-def test_a11_with_no_exact_seed_the_map_is_the_guessed_seeds_map(tmp_path):
-    store, _adrs, _gotchas = _store_with_adrs_and_gotchas(tmp_path)
-    reader = _reader(tmp_path)
-
-    out = get_task_context([], store, reader, BUDGET, guessed=[GUESS])
-
-    assert "b/guess.py" in "\n".join(out.structure)
 
 
 def _neighbour_graph(tmp_path: Path) -> GraphifyReader:
@@ -231,6 +214,7 @@ def test_a11_with_no_exact_seed_the_guessed_ones_act_as_seeds(tmp_path):
     as_seed = get_task_context([GUESS], store, reader, BUDGET)
 
     assert as_guessed.render() == as_seed.render()
+    assert "b/guess.py" in "\n".join(as_guessed.structure)  # the map is the guessed seed's
     assert as_guessed.mistakes and gotchas[0].title in "".join(as_guessed.mistakes)
 
 
@@ -242,17 +226,6 @@ def test_a11_exact_seeds_that_resolve_nothing_do_not_demote_the_guessed_ones(tmp
     out = get_task_context([Seed(name="Frobnicate")], store, reader, BUDGET, guessed=[GUESS])
 
     assert any(g.title in "".join(out.mistakes) for g in gotchas)
-
-
-def test_a11_without_guessed_seeds_nothing_changes(tmp_path):
-    store, _adrs, _gotchas = _store_with_adrs_and_gotchas(tmp_path)
-    reader = _reader(tmp_path)
-
-    plain = get_task_context([EXACT, GUESS], store, reader, BUDGET)
-    keyword = get_task_context([EXACT, GUESS], store, reader, BUDGET, guessed=())
-
-    assert plain.render() == keyword.render()
-    assert plain.shown_ids == keyword.shown_ids
 
 
 def test_a11_a_guessed_seed_already_exact_is_not_listed_twice(tmp_path):

@@ -52,6 +52,12 @@ def test_community_entity_never_writes_canonical(store, tmp_path):
     assert e.entity_id  # index row exists
     assert store.find_abstract_entity("community:72") is not None
     assert not (tmp_path / "s" / "entities" / f"{e.entity_id}.json").exists()
+    # it has no canonical file, so it cannot block the stamp of an ordinary write after it
+    before = store.get_meta("canonical_digest")
+    store.add_decision(_decision())
+    after = store.get_meta("canonical_digest")
+    assert after is not None
+    assert after != before
 
 
 def test_upsert_entity_direct_call_is_index_only_for_community(store, tmp_path):

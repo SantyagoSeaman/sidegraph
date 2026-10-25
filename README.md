@@ -5,8 +5,8 @@
 ![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 ![MCP](https://img.shields.io/badge/MCP-server-8A2BE2)
-[![Windows x64 full plugin session checked](https://img.shields.io/badge/Windows%20x64-full%20plugin%20session%20checked-blue)](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/getting-started/installation.md#platform-coverage)
-[![macOS arm64 full plugin session checked](https://img.shields.io/badge/macOS%20arm64-full%20plugin%20session%20checked-blue)](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/getting-started/installation.md#platform-coverage)
+[![Windows x64: Claude Code and Codex plugin sessions checked](https://img.shields.io/badge/Windows%20x64-Claude%20Code%20%2B%20Codex%20checked-blue)](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/getting-started/installation.md#platform-coverage)
+[![macOS arm64: Claude Code and Codex plugin sessions checked](https://img.shields.io/badge/macOS%20arm64-Claude%20Code%20%2B%20Codex%20checked-blue)](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/getting-started/installation.md#platform-coverage)
 
 Sidegraph is a local MCP server and CLI for preserving engineering decisions and
 facts alongside your code. It records why a design was chosen, which alternatives were
@@ -16,7 +16,7 @@ the files and symbols an agent is working on.
 Records live in your repository as reviewable JSON files. A derived SQLite index supports
 retrieval; [Graphify](https://github.com/Graphify-Labs/graphify) supplies the code and document
 graph used to anchor records. Claude Code and Codex plugins connect capture and retrieval
-to coding sessions. OpenCode V2 and experimental Muse expose MCP tools and shared skills
+to coding sessions. OpenCode V2 and the experimental Muse and Grok Build expose MCP tools and shared skills
 for explicit retrieval and capture.
 
 - Keep decisions, rejected alternatives, and evidence with their provenance and history.
@@ -31,33 +31,63 @@ for explicit retrieval and capture.
 
 ### Set up a repository (once)
 
-**You need** Git, one of the four hosts below, and [uv](https://docs.astral.sh/uv/getting-started/installation/),
+**You need** Git, one of the hosts below, and [uv](https://docs.astral.sh/uv/getting-started/installation/),
 which also downloads Python 3.13 if you do not have it. On Windows you also need
 [Git for Windows](https://gitforwindows.org/) with its default options
 ([details](docs/getting-started/installation.md#windows)); run the commands below in
-PowerShell, using the Windows line where one is given. No API keys and no existing ADRs are required.
+PowerShell, using the Windows block where one is given. No API keys and no existing ADRs are required.
+
+macOS, Linux:
 
 ```sh
-curl -LsSf https://astral.sh/uv/install.sh | sh                                     # uv on macOS, Linux
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"   # uv on Windows
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-**Already using Sidegraph?** Follow the [0.14 migration guide](docs/guides/migrating-to-0.14.md)
-before upgrading Graphify, so accepted domains keep their membership. Update every client
-first, then use the existing-install update recipe for your host below. Claude Code and
-Codex keep the same `sidegraph@sidegraph` identity; no uninstall/reinstall is needed.
+Windows (PowerShell):
 
-**1. Build the code graph.** [Graphify](https://github.com/Graphify-Labs/graphify) maps your
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Linux follows the macOS commands but is not among the checked platforms. Open a new terminal afterwards so `uv` is on your PATH, then change into the root of your
+repository (`cd /path/to/your/repo`). Every command below runs there, except the Muse
+install, which says otherwise.
+
+**Already using Sidegraph?** (New here? Skip to step 1.) Follow the [0.14 migration guide](docs/guides/migrating-to-0.14.md)
+before upgrading Graphify, so accepted domains keep their membership. Update every client
+first, then use the existing-install recipe for your host below. Claude Code and Codex keep
+the same `sidegraph@sidegraph` identity; no uninstall/reinstall is needed.
+
+**The short path** (macOS or Linux, Claude Code; every step is explained below):
+
+```sh
+uv tool install "graphifyy==0.9.90" && GRAPHIFY_NO_AUTO_REFRESH=1 graphify update .   # step 1 (optional)
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init   # step 2: press Enter twice
+```
+
+then, in Claude Code, `/plugin marketplace add SantyagoSeaman/sidegraph` and
+`/plugin install sidegraph@sidegraph` (step 3), and ask the agent to record a gotcha (step 4).
+
+**1. Build the code graph** (recommended; you can [skip it](#other-options), and then answer
+no to the first question in step 2). [Graphify](https://github.com/Graphify-Labs/graphify) maps your
 functions, classes and files, so a record can point at the exact function it is about.
+
+macOS, Linux:
 
 ```sh
 uv tool install "graphifyy==0.9.90"   # two y's in the package name; the command is graphify
-cd /path/to/your/repo
-export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+export GRAPHIFY_NO_AUTO_REFRESH=1     # stops Graphify rewriting its skill files in your agent after an upgrade (this shell only; the git hook in step 2 sets it itself)
+graphify update .                     # ends with "Code graph updated."
+grep -qxF "graphify-out/" .gitignore 2>/dev/null || printf '\ngraphify-out/\n' >> .gitignore   # the graph is rebuilt from your code; keep it out of git
+```
+
+Windows (PowerShell):
+
+```powershell
+uv tool install "graphifyy==0.9.90"   # two y's in the package name; the command is graphify
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"   # stops Graphify rewriting its skill files in your agent after an upgrade (this window only; the git hook in step 2 sets it itself)
 graphify update .
-echo "graphify-out/" >> .gitignore   # the graph is rebuilt from your code; keep it out of git
-Add-Content .gitignore "graphify-out/"   # the same line on Windows (PowerShell); do not use >> there
+if (-not (Select-String -Path .gitignore -Pattern "^graphify-out/$" -Quiet -ErrorAction SilentlyContinue)) { Add-Content .gitignore "`ngraphify-out/" }   # keep the graph out of git; do not use >> in PowerShell
 ```
 
 **2. Create the store**, the `.sidegraph/` directory that holds the records:
@@ -66,20 +96,33 @@ Add-Content .gitignore "graphify-out/"   # the same line on Windows (PowerShell)
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
 ```
 
-It asks two questions. Both default to yes, so press Enter twice.
+The command is the same on Windows. It prints `created store: .sidegraph` and asks two questions. Both default to yes, so press
+Enter twice. Outside a terminal (a script, CI, an agent session) it asks nothing, installs no
+git hook and leaves `.claude/settings.json` alone; pass `--hooks` and
+`--ratify-policy auto-low-risk` to answer yes up front.
 
 - *Keep the code graph fresh?* Yes installs a git hook that rebuilds the graph after each commit.
-- *Auto-ratify low-risk records?* Yes means the lessons, gotchas and facts the agent proposes
-  are accepted without review. Other proposals still wait for you. The answer is saved in
-  `.claude/settings.json`, which you commit. Sidegraph reads it for all four MCP integrations unless an explicit
+- *Auto-ratify low-risk records?* Yes (the default) means the lessons, gotchas and facts the
+  agent proposes are accepted without review once they are anchored to code; answer no to
+  review every proposal. ADRs, constraints and domains always wait for you. The answer is saved in
+  `.claude/settings.json`, which you commit. Sidegraph reads it for every MCP integration unless an explicit
   `SIDEGRAPH_RATIFY_POLICY` overrides it, so teammates use the same project policy.
 
 Details: [`sidegraph-init`](docs/reference/cli.md#sidegraph-init).
 
-**3. Choose one host.** Install its cached plugin assets, then start a new session in this
-repository. Host plugin updates and the MCP runtime are separate: the default runtime
-follows the public repository's `main`, which advances at releases; that does not refresh
-cached skills, manifests or hook definitions. Use your host's update recipe after a release.
+**3. Choose one host.** Install its plugin, then start a new session in this repository.
+| Host | Automatic session memory | Checked |
+|---|---|---|
+| Claude Code | yes: hooks, capture reminders, context on reads | macOS and Windows |
+| Codex | yes: hooks, after you approve them | macOS and Windows |
+| Muse (experimental) | no: MCP and skills | macOS |
+| OpenCode V2 | no: MCP and skills | macOS |
+| Grok Build (experimental) | no: MCP and skills | macOS |
+
+Claude Code is shown first; open the section for another host. Host plugin updates and the
+MCP runtime are separate: the default runtime follows the public repository's `main`, which
+advances at releases; that does not refresh cached skills, manifests or hook definitions.
+Use your host's update recipe after a release.
 
 #### Claude Code
 
@@ -91,7 +134,8 @@ In a Claude Code session in the repository:
 ```
 
 Review the installation summary and any approval prompts, then start a new Claude Code
-session. It provides MCP, skills, session memory, capture reminders and context on reads.
+session. The plugin provides MCP, skills, session memory, capture reminders and context on reads.
+To check the connection, run `/mcp` in the new session: `sidegraph` should be listed as connected.
 For an existing install, run these in your terminal:
 
 ```sh
@@ -101,6 +145,9 @@ claude plugin update sidegraph@sidegraph
 
 Keep the same install scope; see the [Claude Code guide](docs/getting-started/claude-code-setup.md#update-an-existing-plugin).
 Start a new session after updating, or use `/reload-plugins` and review its prompts.
+
+<details>
+<summary><strong>Codex</strong></summary>
 
 #### Codex
 
@@ -122,13 +169,44 @@ codex plugin marketplace upgrade sidegraph
 
 Start a new session and review any changed hook definitions through the startup warning or
 `/hooks`; updating does not grant approval. This update recipe requires Codex CLI 0.162.1
-or a version with that command. See the [Codex guide](docs/getting-started/codex-setup.md#keep-the-plugin-updated).
+or later. See the [Codex guide](docs/getting-started/codex-setup.md#keep-the-plugin-updated).
+
+</details>
+
+<details>
+<summary><strong>Grok Build</strong> (experimental)</summary>
+
+#### Grok Build (experimental)
+
+MCP and skills only; no automatic session map, read context or capture reminder: ask the
+agent for context and for capture explicitly. Run in a terminal:
+
+```sh
+grok plugin marketplace add SantyagoSeaman/sidegraph
+grok plugin install sidegraph@sidegraph
+```
+
+Accept the trust prompt (`--trust` skips it), then start a new Grok session in the repository.
+Ask the agent which Sidegraph tools it has: `get_task_context` should be among them. Checked
+with Grok Build 1.0.62 on macOS: install, MCP tools, skills, and recording and retrieving a
+gotcha across two sessions. Windows is not checked. See the [Grok Build guide](docs/integrations/grok.md).
+For an existing install, run these in your terminal, then start a new session:
+
+```sh
+grok plugin marketplace update
+grok plugin update sidegraph
+```
+
+</details>
+
+<details>
+<summary><strong>Muse</strong> (experimental)</summary>
 
 #### Muse (experimental)
 
 MCP and shared skills only; no automatic session map, read context or capture reminder.
 Run the install and update commands from the same stable directory outside any project
-(for example, your home directory). Keep that checkout with LF line endings:
+(for example, your home directory), not from the repository. Keep that checkout with LF line endings:
 
 ```sh
 git clone -c core.autocrlf=false https://github.com/SantyagoSeaman/sidegraph.git sidegraph-plugin
@@ -158,13 +236,19 @@ Review changes, then approve and restart Muse from the target project:
 muse plugins approve sidegraph
 ```
 
-Basic installation and MCP access were checked on Muse 1.4.7 on macOS; the update command is supported by native
-help, with full lifecycle and Windows acceptance deferred. See the [Muse guide](docs/integrations/muse.md).
+Basic installation and MCP access were checked on Muse 1.4.7 on macOS; the update command is
+supported by native help, with its full lifecycle and Windows not checked. See the
+[Muse guide](docs/integrations/muse.md).
+
+</details>
+
+<details>
+<summary><strong>OpenCode V2</strong></summary>
 
 #### OpenCode V2
 
-Requires OpenCode V2 (native baseline 2.0.29), `uv` and Git on PATH. Native packaging/MCP
-was checked on macOS; Windows acceptance is pending. In your terminal:
+Requires OpenCode V2 (native baseline 2.0.29), `uv` and Git on PATH. Native packaging and MCP
+were checked on macOS; Windows is not checked. In your terminal:
 
 ```sh
 opencode plugin add 'git+https://github.com/SantyagoSeaman/sidegraph.git#main'
@@ -184,6 +268,8 @@ The [OpenCode installation guide](.opencode/INSTALL.md) is the canonical recipe,
 configuration overrides. The package target `#main` and the MCP runtime's Git ref are
 separate settings.
 
+</details>
+
 ### First memory
 
 **4. Record a decision.** In a session, ask the agent, naming a real file and function:
@@ -192,12 +278,16 @@ separate settings.
 > a single unbounded request because it fails for larger imports. Anchor it to
 > `import_batch` in `src/importer.py`.
 
-It is saved right away. Records the agent proposes on its own may wait for your review.
+A record you ask for is accepted at once when the agent saves it directly (`add_decision`), or
+when auto-ratify is on (step 2) and the function is found in the graph; otherwise it waits for
+your review, like the records the agent proposes on its own.
 Ask the agent to review pending Sidegraph decisions through MCP on any host; Claude Code
 also offers `/sidegraph:ratify-decisions`.
 
 **5. Check and commit.** Start a new session and ask: "Before I edit `src/importer.py`, what
-should I know? Retrieve Sidegraph context for that file with `get_task_context`." The agent
+should I know? Retrieve Sidegraph context for that file with `get_task_context`." A record still waiting for review is shown tagged `[unratified]`. The reply should
+contain the gotcha and the rejected alternative, for example "import_batch calls an
+upstream API that accepts at most 100 items per batch request". The agent
 should show the gotcha on every host, including those without lifecycle hooks. Then commit `.sidegraph/` and `.gitignore`,
 and `.claude/settings.json` if step 2 created or changed it. The index file inside
 `.sidegraph/` is git-ignored automatically.
@@ -212,16 +302,34 @@ contents, or import existing ADRs and design specs with the
 [preview-first bootstrap](docs/getting-started/bootstrap.md). The
 [verification checklist](docs/guides/verifying-your-setup.md) covers the whole workflow.
 
+### If something does not work
+
+- Run `sidegraph-doctor` (as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor`,
+  or by its plain name if you installed the CLI, see [Other options](#other-options)): it lists what is wrong with the store, the graph and the wiring.
+  [Troubleshooting](docs/guides/troubleshooting.md) explains each message, and the
+  [verification checklist](docs/guides/verifying-your-setup.md) walks the whole workflow.
+- `get_task_context` finds nothing for a function: there is no graph yet (step 1), or the
+  record was saved before the graph existed; run `sidegraph-sync`.
+- The agent has no Sidegraph tools: start a new session after installing, approve the
+  plugin's prompts (Codex: its hooks too), and in Claude Code check `/mcp`.
+
+**Removing Sidegraph.** Remove the plugin with your host's plugin command
+(`/plugin uninstall sidegraph@sidegraph` in Claude Code, `grok plugin uninstall sidegraph`
+in Grok Build). `sidegraph-init --remove-hooks` removes the git hook. The records in
+`.sidegraph/` are your project's memory and are committed: delete them only if you mean to
+lose them. `graphify-out/` can always be deleted and rebuilt.
+
 ### Other options
 
-- **Without the graph.** Skip step 1 and answer no to the first question in step 2. Records
-  then attach to whole files instead of functions.
+- **Without the graph.** Skip the Graphify install and `graphify update` in step 1 (still
+  work from the repository root) and answer no to the first question in step 2. Records then
+  attach to whole files instead of functions.
 - **Versions.** The default MCP runtime and the step 2 command install Sidegraph from the
   public repository on GitHub, whose `main` branch changes only when a release is published.
-  Update cached plugin assets with your host recipe above. To pin a version instead, see
+  To pin a version instead, see
   [pinning](docs/getting-started/installation.md#mutable-development-references).
 - **Sidegraph commands in your own terminal.** Optional:
-  `uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main`, from the same place as the plugin. It does not update itself, so
+  `uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main`. It does not update itself, so
   after each release run `uv tool upgrade sidegraph`
   ([details](docs/getting-started/installation.md#option-a--the-cli-on-your-path)).
 - **Other MCP clients.** Run `sidegraph-mcp` over stdio; see the
@@ -248,9 +356,10 @@ evaluate it on your own repository.
 
 1. **Capture.** During a session the agent saves a decision when you ask for one. At the end of
    a Claude Code or Codex session the plugin reminds it to propose decisions worth keeping.
-   In OpenCode and Muse, ask for capture explicitly. Secrets are redacted before storage.
+   In OpenCode, Muse and Grok Build, ask for capture explicitly. Known secret patterns are redacted before storage (best effort).
 2. **Review.** You accept or drop what the agent proposed; Sidegraph calls this *ratifying*.
-   Records are JSON files in `.sidegraph/`, committed with your code.
+   Records are JSON in `.sidegraph/`, committed with your code: one file per record, or lines
+   in shard files once maintenance has packed them.
 3. **Anchoring.** Each record is linked to the functions, classes, files or document headings it
    is about, using the graph Graphify builds from your code. When a refactor moves code,
    Sidegraph follows the move; when it cannot tell where the code went, it flags the record for
@@ -281,8 +390,8 @@ Nothing is ever deleted. A reversed decision is closed and replaced by a new one
 before, abandoned because…"* stays retrievable with `get_entity_history`. Dropping a proposal
 marks it rejected; it stays in the history too.
 
-Facts follow the same review and history rules as decisions. Accepting or dropping a decision also accepts or drops
-the pending facts attached to it. Details:
+Facts follow the same review and history rules as decisions. Accepting a decision also accepts the pending facts
+attached to it; dropping it drops them unless they still back another live decision. Details:
 [docs/concepts/data-model.md](docs/concepts/data-model.md) and
 [docs/guides/capturing-decisions.md#facts-the-evidence-layer](docs/guides/capturing-decisions.md#facts-the-evidence-layer).
 
@@ -320,12 +429,14 @@ concepts and themes that records can anchor to. Walkthrough:
   provider. See [SECURITY.md](SECURITY.md) for the data boundary.
 - **Reviewable capture:** text is redacted before storage using best-effort patterns.
   Review drafts and scan the committed store for secrets. Agent proposals wait for human
-  review unless the project answered yes to auto-ratify in `sidegraph-init`; even then,
-  architecture decisions and domains wait. See the
+  review unless the project answered yes to auto-ratify in `sidegraph-init` (the default
+  answer; `SIDEGRAPH_RATIFY_POLICY` overrides it); even then, architecture decisions,
+  constraints and domains wait. See the
   [ratification policy](docs/reference/configuration.md).
-- **Preserved history:** a reversal closes the old record and adds a new one. Only two things
-  change a record in place: review sets its status, and a confirmed file move updates where
-  its anchor points.
+- **Preserved history:** a reversal closes the old record and adds a new one. Records change in
+  place only in narrow ways: review sets a status, closing a superseded record sets its end
+  date and status, adding anchors adds bindings, and a confirmed file move updates where an
+  anchor points.
 - **Local counts:** for `sidegraph-stats`, Sidegraph counts how often memory was shown. The
   counts stay in `.sidegraph/index.db`, which is git-ignored and never leaves your machine.
   To stop counting, set `SIDEGRAPH_TELEMETRY=off`.
@@ -338,19 +449,19 @@ it and never writes into it. Without a graph, records anchor to files and domain
 still works. Three things need the graph: anchoring a record to a function, grouping related
 code automatically, and following moved code (see the
 [operations reference](docs/reference/operations.md#the-graph-dependency-stated-plainly)).
-The graph and the local index can be rebuilt at any time. The JSON records in `.sidegraph/`
+The graph and the local index can be rebuilt at any time. The JSON records in `.sidegraph/` (files or shard lines)
 cannot: they are the source of truth, so keep them in your repository and backups.
 
 ## Status
 
 Sidegraph is in beta. Read the [stability policy](docs/reference/stability.md) before
-building automation against it. By default the MCP runtime follows the latest release; for
-reproducible deployments, [pin a version](docs/getting-started/installation.md#mutable-development-references).
+building automation against it. For reproducible deployments,
+[pin a version](docs/getting-started/installation.md#mutable-development-references).
 The [changelog](CHANGELOG.md) records release changes.
 
-The platform badges summarize the release gate: full Claude Code and Codex plugin sessions
-on Windows x64 and macOS arm64, with Python 3.13 and 3.14. Publication of 0.14.0 requires
-this gate, including Windows PowerShell 5.1 without PowerShell 7. See
+The platform badges cover full Claude Code and Codex plugin sessions on Windows x64 and
+macOS arm64, with Python 3.13 and 3.14, including Windows PowerShell 5.1 without
+PowerShell 7. Muse, OpenCode V2 and Grok Build are checked on macOS only. See
 [Platform coverage](docs/getting-started/installation.md#platform-coverage) for limits.
 
 ## Contributing and support
@@ -367,15 +478,13 @@ Contributions are reviewed here and carried over, with attribution, before the n
 
 ## Documentation
 
-[Export and maintain ADRs](docs/guides/adr-export.md) from the available decision store,
-with a preview by default and explicit writes.
-
 [Getting started](docs/getting-started/installation.md) ·
 [Concepts](docs/concepts/decision-memory.md) ·
 [Guides](docs/guides/capturing-decisions.md) ·
+[ADR export](docs/guides/adr-export.md) ·
 [Reference](docs/reference/mcp-tools.md) ·
-[Integrations](docs/integrations/graphify.md) (Graphify · [Claude Code](docs/integrations/claude-code.md) · [Codex](docs/integrations/codex.md) ·
-[Muse](docs/integrations/muse.md) · [OpenCode V2](docs/integrations/opencode.md)) ·
+Integrations: [Graphify](docs/integrations/graphify.md) · [Claude Code](docs/integrations/claude-code.md) · [Codex](docs/integrations/codex.md) ·
+[Muse](docs/integrations/muse.md) · [OpenCode V2](docs/integrations/opencode.md) · [Grok Build](docs/integrations/grok.md) ·
 [Verify your setup](docs/guides/verifying-your-setup.md) ·
 [Operations](docs/reference/operations.md) ·
 [Pilot kit](docs/pilot-kit/README.md) ·

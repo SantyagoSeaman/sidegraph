@@ -160,7 +160,7 @@ def test_codex_hooks_config_parses() -> None:
 
 def test_every_skill_has_openai_yaml_naming_sidegraph_dependency() -> None:
     skill_dirs = sorted(p for p in _SKILLS_DIR.iterdir() if (p / "SKILL.md").is_file())
-    assert len(skill_dirs) == 13, f"expected 13 skills, found {len(skill_dirs)}"
+    assert len(skill_dirs) == 14, f"expected 14 skills, found {len(skill_dirs)}"
 
     for skill_dir in skill_dirs:
         openai_yaml = skill_dir / "agents" / "openai.yaml"
@@ -185,6 +185,7 @@ def test_implicit_invocation_matches_human_driven_vs_agent_observed_split() -> N
         "manage-domains",
         "stats",
         "health-check",
+        "compact",
     }
     agent_observed = {
         "check-plan",

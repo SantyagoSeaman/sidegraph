@@ -86,7 +86,7 @@ def test_skipped_store_files_are_a_health_item(tmp_path):
 def test_a_stale_graph_is_a_health_item_and_freshness_is_computed_once(tmp_path, monkeypatch):
     """The graph block and the registry share one ``freshness()`` call: git runs once."""
     from sidegraph.engine.reader import GraphifyReader
-    from tests.test_graph_freshness import stale_repo
+    from tests.graph_repo_support import stale_repo
 
     fx = stale_repo(tmp_path)
     calls: list[int] = []

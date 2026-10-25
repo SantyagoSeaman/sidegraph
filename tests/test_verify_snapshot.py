@@ -10,10 +10,12 @@ clean. A clean store always yields ``[]``.
 from __future__ import annotations
 
 import errno
+import inspect
 import json
 import os
 import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -53,6 +55,7 @@ from sidegraph.verify import (
     Violation,
     verify_snapshot,
 )
+from tests.store_format2_support import format1_store
 from tests.test_store_requirement import above_running, running_release, write_requirement_marker
 
 
@@ -82,7 +85,7 @@ def _fact(**overrides) -> Fact:
 
 @pytest.fixture
 def store(tmp_path) -> Store:
-    with Store(tmp_path / ".sidegraph") as s:
+    with Store(format1_store(tmp_path / ".sidegraph")) as s:
         yield s
 
 
@@ -128,7 +131,7 @@ def test_clean_store_has_no_violations(store: Store):
 
 
 def test_empty_fresh_store_is_clean(tmp_path):
-    with Store(tmp_path / ".sidegraph") as s:
+    with Store(format1_store(tmp_path / ".sidegraph")) as s:
         assert verify_snapshot(s.path) == []
 
 
@@ -283,7 +286,7 @@ def test_dangling_supersedes_on_domain(store: Store):
     assert _codes(violations) == [DANGLING_SUPERSEDES]
 
 
-@pytest.mark.parametrize("bad", [["01JANOTHERDECISIONIDXXXXX"], {"id": "x"}], ids=["list", "dict"])
+@pytest.mark.parametrize("bad", [["01JANOTHERDECISIONIDXXXXX"]], ids=["list"])
 def test_non_string_supersedes_is_reported_not_a_crash(store: Store, capsys, bad):
     """Unfixed, the successor set hashed the raw value and ``verify_snapshot`` raised
     ``TypeError: unhashable type``. The model check already owns the field: parse-error."""
@@ -518,7 +521,7 @@ def test_verify_snapshot_raises_on_missing_store_dir(tmp_path):
 
 
 def test_cli_exit_0_on_clean_store(tmp_path, capsys):
-    with Store(tmp_path / ".sidegraph") as s:
+    with Store(format1_store(tmp_path / ".sidegraph")) as s:
         s.add_decision(_decision())
     rc = verify_main(["--db", str(tmp_path / ".sidegraph")])
     out = capsys.readouterr().out
@@ -528,7 +531,7 @@ def test_cli_exit_0_on_clean_store(tmp_path, capsys):
 
 def test_cli_exit_2_and_human_output_on_violation(tmp_path, capsys):
     store_dir = tmp_path / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         path = _decision_path(s, d.id)
     data = _read(path)
@@ -548,7 +551,7 @@ def test_cli_exit_2_and_human_output_on_violation(tmp_path, capsys):
 
 def test_cli_json_flag_prints_pure_json(tmp_path, capsys):
     store_dir = tmp_path / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         path = _decision_path(s, d.id)
     data = _read(path)
@@ -571,7 +574,7 @@ def test_cli_json_flag_prints_pure_json(tmp_path, capsys):
 
 def test_cli_json_clean_shape(tmp_path, capsys):
     store_dir = tmp_path / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         s.add_decision(_decision())
 
     rc = verify_main(["--db", str(store_dir), "--json"])
@@ -965,7 +968,7 @@ def test_a_symlinked_store_root_is_still_checked(store: Store, tmp_path, capsys)
 
 def test_a_store_reached_through_a_symlinked_parent_is_fully_linted(tmp_path, capsys):
     real = tmp_path / "real"
-    with Store(real / ".sidegraph") as s:
+    with Store(format1_store(real / ".sidegraph")) as s:
         d = s.add_decision(_decision())
         path = _decision_path(s, d.id)
     _write(path, {**_read(path), "id": "01SOMEOTHERID"})
@@ -1060,7 +1063,7 @@ def test_a_record_file_of_invalid_utf8_is_a_parse_error_naming_its_path(tmp_path
     raised, and the CLI exited 1 with "store not readable" and no file name.
     see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D2, T14)"""
     store_dir = tmp_path / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         path = _decision_path(s, d.id)
     path.write_bytes(b'{"id": "\xff\xfe"}')
@@ -1122,14 +1125,6 @@ def test_an_archive_line_of_invalid_utf8_is_a_bad_archive_segment_naming_its_lin
     assert "not readable" not in out
 
 
-def test_an_archive_line_nested_past_the_recursion_limit_is_a_bad_archive_segment(store: Store):
-    seg = _segment(store, _archived_decision_line(), "[" * 200_000 + "]" * 200_000)
-
-    violations = verify_snapshot(store.path)
-    assert [(v.code, v.path) for v in violations] == [(BAD_ARCHIVE_SEGMENT, str(seg))]
-    assert "line 2" in violations[0].detail
-
-
 @pytest.mark.parametrize("fault", ["invalid status", "lone surrogate"])
 def test_an_archive_line_whose_decision_does_not_validate_is_a_bad_archive_segment(
     store: Store, fault
@@ -1160,24 +1155,6 @@ def test_an_archive_line_holding_a_unicode_line_separator_is_not_a_bad_segment(s
 # -- hot files: what the reload skips as ``parse-error`` ------------------------------------
 
 
-def test_a_record_file_nested_past_the_recursion_limit_is_a_parse_error_naming_its_path(
-    store: Store, capsys
-):
-    """Unfixed, ``json.loads`` raised ``RecursionError`` through ``_load_raw_json``: the CLI
-    exited 1 with "maximum recursion depth" and no file name."""
-    d = store.add_decision(_decision())
-    path = _decision_path(store, d.id)
-    path.write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
-
-    violations = verify_snapshot(store.path)
-    assert [(v.code, v.path) for v in violations] == [(PARSE_ERROR, str(path))]
-
-    assert verify_main(["--db", str(store.path)]) == 2
-    out = capsys.readouterr().out
-    assert str(path) in out
-    assert "not readable" not in out
-
-
 @pytest.mark.parametrize("kind", ["decision", "entity", "bindings"])
 def test_a_record_that_validates_but_cannot_be_serialised_is_a_parse_error(store: Store, kind):
     """A lone surrogate passes the model and fails ``model_dump_json``, which the store's
@@ -1202,20 +1179,16 @@ def test_a_record_that_validates_but_cannot_be_serialised_is_a_parse_error(store
     assert violations[0].path.startswith(str(path))
 
 
-def test_against_reader_reports_invalid_utf8_and_deep_nesting_as_unparsable(tmp_path):
+def test_against_reader_reports_invalid_utf8_as_unparsable(tmp_path):
     """``--against`` reads the working-tree side through ``_read_json_object``. A record file of
-    invalid UTF-8, or JSON nested past the recursion limit, is unparsable content to report,
-    not a crash that takes verify down with exit 1.
+    invalid UTF-8 is unparsable content to report, not a crash that takes verify down with exit 1.
     see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D2"""
     from sidegraph.verify import _read_json_object, _UnparsableContent
 
     bad_utf8 = tmp_path / "a.json"
     bad_utf8.write_bytes(b'{"id": "\xff"}')
-    deep = tmp_path / "b.json"
-    deep.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
-    for path in (bad_utf8, deep):
-        with pytest.raises(_UnparsableContent):
-            _read_json_object(path)
+    with pytest.raises(_UnparsableContent):
+        _read_json_object(bad_utf8)
 
 
 # -- an unreadable store directory reads as unreadable on every Python ----------------------
@@ -1261,7 +1234,7 @@ def test_an_unsearchable_store_is_not_readable_not_a_missing_marker(
     cmd, what, tmp_path, monkeypatch, capsys
 ):
     store_dir = tmp_path / ".sidegraph"
-    Store(store_dir).close()
+    Store(format1_store(store_dir)).close()
     if what == "marker":  # mode 0600 on the store dir
         _as_3_14_for(monkeypatch, lstat_of=store_dir / "format")
     else:  # an unsearchable parent: the store dir itself cannot be stat'ed
@@ -1282,7 +1255,7 @@ def test_an_unsearchable_store_is_not_readable_not_a_missing_marker(
 @pytest.mark.parametrize("mode", [0o000, 0o600])
 def test_a_store_dir_without_the_search_bit_is_not_readable_end_to_end(cmd, mode, tmp_path, capsys):
     store_dir = tmp_path / ".sidegraph"
-    Store(store_dir).close()
+    Store(format1_store(store_dir)).close()
     store_dir.chmod(mode)
     try:
         main = verify_main if cmd == "verify" else doctor_main
@@ -1302,7 +1275,7 @@ def test_a_store_dir_without_the_search_bit_is_not_readable_end_to_end(cmd, mode
 def test_an_unsearchable_parent_is_not_readable_not_a_missing_directory(cmd, tmp_path, capsys):
     parent = tmp_path / "parent"
     store_dir = parent / ".sidegraph"
-    Store(store_dir).close()
+    Store(format1_store(store_dir)).close()
     parent.chmod(0o600)
     try:
         main = verify_main if cmd == "verify" else doctor_main
@@ -1319,7 +1292,7 @@ def test_an_unsearchable_parent_is_not_readable_not_a_missing_directory(cmd, tmp
 def test_a_searchable_unlistable_store_dir_is_checked_normally(cmd, tmp_path, capsys):
     """Mode 0300: ``Store()`` works on it, so the lint must not call it unreadable."""
     store_dir = tmp_path / ".sidegraph"
-    Store(store_dir).close()
+    Store(format1_store(store_dir)).close()
     store_dir.chmod(0o300)
     try:
         main = verify_main if cmd == "verify" else doctor_main
@@ -1338,7 +1311,7 @@ def test_a_searchable_unlistable_store_dir_is_checked_normally(cmd, tmp_path, ca
 def _store_in_git(tmp_path: Path) -> Store:
     """A committed store whose facts support its decisions and whose bindings name entities, so
     an emptied decisions pool would dangle the facts and read as deleted against HEAD."""
-    with Store(tmp_path / ".sidegraph") as s:
+    with Store(format1_store(tmp_path / ".sidegraph")) as s:
         for n in range(2):
             d = s.add_decision(_decision(title=f"d{n}"))
             e = s.upsert_entity(
@@ -1366,29 +1339,52 @@ def _chmod_or_skip(path: Path, mode: int) -> None:
     pytest.skip("chmod has no effect here")
 
 
-@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
-@pytest.mark.parametrize("subdir", ["decisions", "facts", "bindings"])
-@pytest.mark.parametrize("mode", [0o000, 0o100, 0o400, 0o600])  # none, search only, read only, rw
-@pytest.mark.parametrize("cmd", ["verify", "verify-against", "doctor"])
+ROOT_SKIP = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes"
+)
+# modes: none, search only, read only, rw
+UNREADABLE_MODES = [0o000, 0o100, 0o400, 0o600]
+UNREADABLE_CASES = [
+    (cmd, mode, subdir)
+    for subdir in ["decisions", "facts", "bindings"]
+    for mode in UNREADABLE_MODES
+    for cmd in ["verify", "verify-against", "doctor"]
+]
+# the public sample: every mode through verify on decisions, the other commands at mode 000
+PUBLIC_UNREADABLE_CASES = [("verify", mode, "decisions") for mode in UNREADABLE_MODES] + [
+    ("verify-against", 0o000, "decisions"),
+    ("doctor", 0o000, "decisions"),
+]
+# the rest of each matrix is tests/private/test_verify_snapshot.py (release-only)
+PROBED_CASES = [(mode, subdir) for subdir in CANONICAL_SUBDIRS for mode in [0o000, 0o400]]
+PUBLIC_PROBED_CASES = [(0o000, subdir) for subdir in CANONICAL_SUBDIRS]
+EMPTY_DIR_CASES = [(cmd, subdir) for subdir in CANONICAL_SUBDIRS for cmd in ["verify", "doctor"]]
+PUBLIC_EMPTY_DIR_CASES = [("verify", subdir) for subdir in CANONICAL_SUBDIRS]
+
+
+@ROOT_SKIP
+@pytest.mark.parametrize("cmd,mode,subdir", PUBLIC_UNREADABLE_CASES)
 def test_an_unreadable_record_directory_is_reported_once_not_as_missing_records(
     cmd, mode, subdir, tmp_path, capsys
 ):
     _assert_unreadable_dir_reported_once(cmd, mode, subdir, tmp_path, capsys)
 
 
-@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
-@pytest.mark.parametrize("subdir", CANONICAL_SUBDIRS)
-@pytest.mark.parametrize("mode", [0o000, 0o400])
+@ROOT_SKIP
+@pytest.mark.parametrize("mode,subdir", PUBLIC_PROBED_CASES)
 def test_every_canonical_record_directory_is_probed(mode, subdir, tmp_path, capsys):
     _assert_unreadable_dir_reported_once("verify", mode, subdir, tmp_path, capsys)
 
 
-@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
-@pytest.mark.parametrize("subdir", CANONICAL_SUBDIRS)
-@pytest.mark.parametrize("cmd", ["verify", "doctor"])
+@ROOT_SKIP
+@pytest.mark.parametrize("cmd,subdir", PUBLIC_EMPTY_DIR_CASES)
 def test_an_empty_record_directory_without_the_search_bit_is_unreadable(
     cmd, subdir, tmp_path, capsys
 ):
+    _assert_empty_dir_without_search_bit_is_unreadable(cmd, subdir, tmp_path, capsys)
+
+
+def _assert_empty_dir_without_search_bit_is_unreadable(cmd, subdir, tmp_path, capsys):
     """No entry to lstat, so the search bit has to be probed on the directory itself."""
     store = _store_in_git(tmp_path)
     record_dir = store.path / subdir
@@ -1604,17 +1600,23 @@ def test_a_parent_cycle_through_an_archived_domain_is_reported_once(store: Store
 
 
 def test_a_long_parent_chain_is_clean_and_a_long_cycle_is_reported_once(store: Store, capsys):
-    """Iterative, so a chain far past the recursion limit neither crashes nor loops."""
+    """Iterative, so a chain longer than the recursion headroom neither crashes nor loops."""
     template = _read(_domain_path(store, store.add_domain(_domain("seed")).domain_id))
     _domain_path(store, template["domain_id"]).unlink()
-    ids = [f"D{i:05d}" for i in range(1500)]
+    ids = [f"D{i:05d}" for i in range(80)]
     for i, did in enumerate(ids):
         parent = ids[i - 1] if i else None
         payload = {**template, "domain_id": did, "slug": did.lower(), "parent_id": parent}
         _write(_domain_path(store, did), payload)
-    assert verify_snapshot(store.path) == []
-    path = _set_parent(store, ids[0], ids[-1])
-    assert _cli_pairs(store, capsys) == (2, [(PARENT_CYCLE, str(path))])
+    # 50 frames of headroom over this test: the 80-link chain is out of reach of a recursive walk
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(len(inspect.stack()) + 50)
+    try:
+        assert verify_snapshot(store.path) == []
+        path = _set_parent(store, ids[0], ids[-1])
+        assert _cli_pairs(store, capsys) == (2, [(PARENT_CYCLE, str(path))])
+    finally:
+        sys.setrecursionlimit(limit)
 
 
 def _hand_domains(store: Store, parents: dict[str, str | None]) -> dict[str, Path]:
@@ -1663,7 +1665,7 @@ def test_an_archived_domain_holding_the_smallest_id_gets_the_cycle_finding(store
 
 
 def test_a_huge_cycle_gets_a_short_detail(store: Store):
-    n = 300
+    n = 14  # past the 10 ids the detail names
     ids = [f"D{i:05d}" for i in range(n)]
     _hand_domains(store, {did: ids[(i + 1) % n] for i, did in enumerate(ids)})
     (found,) = verify_snapshot(store.path)

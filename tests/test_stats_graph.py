@@ -59,27 +59,6 @@ def test_graph_metrics_are_read_through_the_reader(tmp_path):
     assert r.graph.graph_version.startswith("content:")
 
 
-def test_a_missing_graph_is_reported_as_unavailable_not_as_zeroes(tmp_path):
-    Store(tmp_path / "s").close()
-    r = build_report(tmp_path / "s", tmp_path / "nope.json", window_days=30, now=NOW)
-    assert r.graph.available is False
-    assert r.graph.graph_version is None
-
-
-def test_no_graph_path_is_reported_as_unavailable(tmp_path):
-    Store(tmp_path / "s").close()
-    r = build_report(tmp_path / "s", None, window_days=30, now=NOW)
-    assert r.graph.available is False
-
-
-def test_an_unreadable_graph_is_unavailable_not_an_exception(tmp_path):
-    Store(tmp_path / "s").close()
-    bad = tmp_path / "graph.json"
-    bad.write_text("{ not json")
-    r = build_report(tmp_path / "s", bad, window_days=30, now=NOW)
-    assert r.graph.available is False
-
-
 def test_an_unreadable_graph_is_told_apart_from_an_absent_one(tmp_path):
     """`sidegraph-init` only tests that the file exists, so "not built yet → sidegraph-init"
     sends the owner of a corrupt graph in a circle. The two states need two answers."""
@@ -95,6 +74,11 @@ def test_an_unreadable_graph_is_told_apart_from_an_absent_one(tmp_path):
 
     unset = build_report(tmp_path / "s", None, window_days=30, now=NOW).graph
     assert (unset.available, unset.unreadable) == (False, False)
+
+    # None of the three is reported as zeroes, and none carries a version or freshness figure.
+    for g in (unreadable, absent, unset):
+        assert g.graph_version is None
+        assert (g.freshness, g.built_at, g.commits_behind, g.stale_files) == (None,) * 4
 
 
 def test_a_readable_graph_is_not_flagged_unreadable(tmp_path):
@@ -115,7 +99,7 @@ def test_a_graph_of_the_wrong_shape_is_unreadable_not_a_crash(tmp_path):
 
 def test_a_stale_graph_carries_its_freshness_into_the_report(tmp_path):
     """Spec D7: `_graph_stats` fills the four fields from `reader.freshness()`."""
-    from tests.test_graph_freshness import stale_repo
+    from tests.graph_repo_support import stale_repo
 
     fx = stale_repo(tmp_path)
     Store(tmp_path / "s").close()
@@ -130,7 +114,7 @@ def test_a_stale_graph_carries_its_freshness_into_the_report(tmp_path):
 
 
 def test_a_graph_built_at_head_is_fresh_with_no_stale_files(tmp_path):
-    from tests.test_graph_freshness import make_repo
+    from tests.graph_repo_support import make_repo
 
     fx = make_repo(tmp_path)
     Store(tmp_path / "s").close()
@@ -148,13 +132,3 @@ def test_a_graph_that_cannot_be_compared_is_unknown_with_no_figures(tmp_path):
     assert g.available is True
     assert g.freshness == "unknown"
     assert (g.built_at, g.commits_behind, g.stale_files) == (None, None, None)
-
-
-def test_no_readable_graph_has_no_freshness_fields(tmp_path):
-    Store(tmp_path / "s").close()
-    bad = tmp_path / "graph.json"
-    bad.write_text("{ not json")
-
-    for path in (None, tmp_path / "nope.json", bad):
-        g = build_report(tmp_path / "s", path, window_days=30, now=NOW).graph
-        assert (g.freshness, g.built_at, g.commits_behind, g.stale_files) == (None,) * 4

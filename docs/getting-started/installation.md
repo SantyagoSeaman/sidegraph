@@ -205,7 +205,7 @@ launch directory's own project settings and no parent's, so a plugin installed a
 root leaves sessions started below it without it. `sidegraph-doctor` reports the gap as
 [`plugin-off-in-subdirectories`](../guides/troubleshooting.md#plugin-off-in-subdirectories).
 
-For installation and updates across all four hosts, see the
+For installation and updates for every host, see the
 [README host recipes](../../README.md#claude-code). Existing Claude Code and Codex installs
 keep `sidegraph@sidegraph`; update cached assets with the host's native update commands,
 then start a new session and review any changed approvals. The runtime's `@main` does not
@@ -265,8 +265,8 @@ This table is the terminal reference. In day-to-day use you rarely type any of i
 operations (recording, ratifying, syncing, domain work) run conversationally inside a
 session through the MCP tools and plugin skills — see
 [`reference/mcp-tools.md`](../reference/mcp-tools.md). The CLI commands below matter for
-setup, scripted/CI use, and the two deliberately human-run jobs (`sidegraph-import`,
-`sidegraph-compact`).
+setup, scripted/CI use, and the three deliberately human-run jobs (`sidegraph-import`,
+`sidegraph-compact`, `sidegraph-migrate`).
 
 | Command | What it runs |
 |---|---|
@@ -281,7 +281,8 @@ setup, scripted/CI use, and the two deliberately human-run jobs (`sidegraph-impo
 | `sidegraph-sync` | CLI — re-anchor the store after a Graphify rebuild. |
 | `sidegraph-import` | CLI — bootstrap decisions from Graphify rationale nodes (code docstrings, or ADR/SAD prose after a semantic pass), or from existing ADR/spec markdown directly (`--docs`). |
 | `sidegraph-domains` | CLI — author Domain proposals: `bootstrap` from graph communities, or `add` manually. |
-| `sidegraph-compact` | CLI — pack terminal-status (superseded/rejected/dropped) decisions and domains into an immutable archive segment. |
+| `sidegraph-compact` | CLI — pack terminal-status decisions (superseded/rejected/deprecated) and domains (superseded/dropped) into an immutable archive segment. On a packed (format 2) store it is maintenance instead: it folds settled per-record files and archive segments into the shard files verbatim. Never commits. |
+| `sidegraph-migrate` | CLI — convert a store to the packed format 2 (shard files): switches the `format` marker first, then folds every per-record file and archive segment into the shards. Run on the default branch; never commits. |
 | `sidegraph-require` | CLI — make the store refuse Sidegraph versions older than `--sidegraph X.Y.Z`: rewrites `.sidegraph/format` and prints the commit command; never lowers a requirement. |
 | `sidegraph-verify` | CLI — lint the store's canonical files against its write-path invariants (schema, validity windows, referential integrity, ULID uniqueness); `--against <git-ref>` additionally checks that every store file changed vs that ref was mutated legally (CI mode). |
 | `sidegraph-doctor` | CLI — one-stop store health: composes `sidegraph-verify`'s strict lint with an advisory curation pass (stale proposals, dangling/degraded/orphaned records, never-surfaced decisions); `--check` also fails on advisory findings. |

@@ -31,7 +31,11 @@ from sidegraph.engine.reader import GraphifyReader
 from sidegraph.profiles import FlowProfile, get_profile
 from sidegraph.schema import Decision, DecisionStatus, DomainStatus
 from sidegraph.store import Store
-from sidegraph.store_layout import DOMAIN_SNAPSHOT_NAME, STAMPING_MARKER_NAME
+from sidegraph.store_layout import (
+    DOMAIN_SNAPSHOT_NAME,
+    SHARDS_SUBDIR,
+    STAMPING_MARKER_NAME,
+)
 from sidegraph.verify import verify_snapshot
 
 _CANONICAL_DIRS = (
@@ -42,6 +46,7 @@ _CANONICAL_DIRS = (
     "bindings",
     "initiatives",
     "archive",
+    SHARDS_SUBDIR,
 )
 _CANONICAL_ROOT_FILES = ("format", ".gitignore", STAMPING_MARKER_NAME, DOMAIN_SNAPSHOT_NAME)
 

@@ -119,8 +119,10 @@ drives different bindings:
 The Tier-0 initiative binding does not depend on the resolve status: it is decision-level, made
 once by the write path, `live`, whenever an initiative is named.
 
-An ambiguous match with candidates spanning different communities gets **no binding at all**
-beyond a possible initiative — Sidegraph would rather anchor nothing than anchor to a guess.
+An ambiguous match with candidates spanning different communities gets **no community binding**.
+The one exception is an accepted domain that holds every candidate: the group binding then goes to
+that shared domain, `live`. Beyond that and a possible initiative it gets nothing — Sidegraph
+would rather anchor nothing than anchor to a guess.
 
 Identical path-less external stubs count as one match. Newer Graphify emits one stub node per
 importing file for an imported name such as `BaseModel` or `Path`; when every match has no file,

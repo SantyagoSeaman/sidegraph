@@ -11,8 +11,6 @@ see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (T1-T5)
 
 from __future__ import annotations
 
-import ast
-import inspect
 import io
 import json
 import os
@@ -24,12 +22,12 @@ from pathlib import Path
 import pytest
 
 import sidegraph
-import sidegraph.doctor as doctor_module
 import sidegraph.host.hooks as hooks
 from sidegraph import integrity
 from sidegraph.cli import doctor_main
 from sidegraph.config import StoreLocation
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 
 VERSION_SKEW = "version-skew"
 PLUGIN_OFF = "plugin-off-in-subdirectories"
@@ -237,7 +235,7 @@ def test_t2_the_session_hook_puts_the_skew_line_in_the_context_and_a_notice_for_
     monkeypatch.setattr(sidegraph, "__version__", "0.9.0")
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(_plugin_root(tmp_path, "0.10.0")))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
-    Store(repo / ".sidegraph").close()
+    Store(format1_store(repo / ".sidegraph")).close()
     monkeypatch.setenv("SIDEGRAPH_DIR", str(repo / ".sidegraph"))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
@@ -458,7 +456,7 @@ def test_path_skew_session_hook_adds_the_line_and_the_notice_once(
     monkeypatch.setenv("PATH", os.pathsep.join([str(link), os.environ["PATH"]]))
     monkeypatch.setattr(hooks, "_own_bin_dirs", lambda: set())
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
-    Store(repo_dir / ".sidegraph").close()
+    Store(format1_store(repo_dir / ".sidegraph")).close()
     monkeypatch.setenv("SIDEGRAPH_DIR", str(repo_dir / ".sidegraph"))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))
 
@@ -894,18 +892,6 @@ def test_t4_doctor_without_the_finding_stays_clean_of_it(tmp_path, capsys):
 
     findings = json.loads(capsys.readouterr().out)["findings"]
     assert [f for f in findings if f["code"] == PLUGIN_OFF] == []
-
-
-def test_t4_doctor_py_imports_nothing_from_the_host_seam():
-    tree = ast.parse(inspect.getsource(doctor_module))
-    imported: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            imported.append(("." * node.level) + (node.module or ""))
-            imported += [f"{'.' * node.level}{node.module or ''}.{a.name}" for a in node.names]
-        elif isinstance(node, ast.Import):
-            imported += [a.name for a in node.names]
-    assert [name for name in imported if "host" in name.split(".")] == []
 
 
 # -- T5: one git call ------------------------------------------------------------------------

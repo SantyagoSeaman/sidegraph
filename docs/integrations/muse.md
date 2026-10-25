@@ -20,7 +20,11 @@ muse plugins approve sidegraph
 ```
 
 Start a new Muse process **from the intended
-project directory**. The MCP server uses that process's working directory. If you change
+project directory**. The MCP server starts in that process's working directory, then moves to the
+top level of the enclosing Git repository (the plugin passes `--repo-root`; a valid
+`CLAUDE_PROJECT_DIR` wins when it is set), so a Muse started in a package subdirectory of a
+monorepo uses the repository's store, not the package's. Outside a Git repository it stays where
+it started. If you change
 workspace, exit and start Muse again from the new directory; selecting a different workspace
 with `--workspace` or inside an existing host does not reliably move the MCP server.
 

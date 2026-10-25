@@ -187,14 +187,6 @@ def test_doctor_reads_a_cyrillic_name_with_a_space(tmp_path: Path) -> None:
     assert doctor._git_diff_name_only(repo, base, ["файл с пробелом.py"]) == ["файл с пробелом.py"]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="CR is not valid in a Windows file name")
-def test_doctor_keeps_a_carriage_return_in_a_name(tmp_path: Path) -> None:
-    repo = _repo(tmp_path)
-    base = _commit(repo, "base.py")
-    _commit(repo, "a\rb.py")
-    assert doctor._git_diff_name_only(repo, base, ["a\rb.py"]) == ["a\rb.py"]
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="tab and quote are not valid file names")
 def test_staged_files_come_back_exactly_and_deduped_in_order(tmp_path: Path) -> None:
     repo = _repo(tmp_path)

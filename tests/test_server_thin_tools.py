@@ -59,18 +59,6 @@ def test_query_decisions_impl_renders_mistake(tmp_path):
     assert "## Structural map" not in out
 
 
-def test_query_decisions_impl_no_reader_still_returns_str(tmp_path):
-    s = Store(tmp_path / "t.db")
-    out = _query_decisions_impl(
-        s,
-        None,
-        files=["trader/exec.py"],
-        entities=None,
-        budget_chars=2000,
-    )
-    assert isinstance(out, str)
-
-
 def test_query_decisions_tool_docstring_notes_default_structure_budget():
     """M6 review fold-in: query_decisions has no structure_budget param, but peripheral
     gathering still walks the structural subgraph with RetrievalBudget's default -- the

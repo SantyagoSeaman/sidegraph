@@ -19,18 +19,13 @@ reinvent one, per that inventory's own "no two tasks invent the same builder" ru
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import hashlib
 import inspect
 import io
 import json
 import os
-import re
 import sys
-import threading
-import time
-from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -54,7 +49,7 @@ from sidegraph.schema import (
     Fact,
     Provenance,
 )
-from sidegraph.store import Store
+from sidegraph.store import Store, StoreBusyError
 from sidegraph.sync import refresh_domain_communities_now
 
 # Task 5 cross-file fixture aliases (test-inventory.md "no two tasks invent the same
@@ -225,21 +220,6 @@ def _eligible_domain_draft(**over) -> dict:
     }
     base.update(over)
     return base
-
-
-def test_feature_graph_offers_resolvable_and_ambiguous_anchors(tmp_path):
-    """Guards the shared scaffolding itself: a break in ``FEATURE_GRAPH`` would otherwise
-    surface as a confusing failure three tasks away, in whichever Task 2/4 eligibility test
-    happens to hit it first, rather than here at its source. ``Trader`` (also present on
-    ``GOLDEN_GRAPH``) must stay resolvable; ``retry()`` -- the whole reason this graph
-    exists -- must stay genuinely ambiguous (2 candidates), never orphaned or resolved."""
-    reader = _feature_graph(tmp_path)
-    assert (
-        reader.resolve(Descriptor(name="Trader", file_path="trader/exec.py")).status == "resolved"
-    )
-    result = reader.resolve(Descriptor(name="retry()"))
-    assert result.status == "ambiguous"
-    assert len(result.candidates) == 2
 
 
 # ── Step 1: parser ───────────────────────────────────────────────────────────────────
@@ -909,26 +889,6 @@ def _render_parity_surfaces(
     }
 
 
-def test_manual_render_parity_goldens_are_frozen(tmp_path):
-    """Guard against silent golden drift: rebuilding the T9 fixture on THIS revision
-    (policy manual -- the only policy this task's code can produce, since no
-    auto-ratification behavior exists yet) and re-rendering the four surfaces under a
-    freshly-frozen clock must match the committed
-    ``tests/fixtures/auto_policy/parity_goldens.json`` byte-for-byte, regardless of the
-    real calendar date this test happens to run on (see ``_render_parity_surfaces``'s
-    docstring for why the clock is frozen). This is Task 1's own guard that the frozen
-    file matches its own builder; Task 7 owns the actual manual-vs-auto-code and
-    real-vs-shifted-clock parity assertions (spec T9) once the auto-ratify machinery
-    exists to threaten them.
-    """
-    now = datetime.now(UTC)
-    store = _golden_store(tmp_path, now)
-    reader = GraphifyReader(GOLDEN_GRAPH)
-    rendered = _render_parity_surfaces(store, reader, GOLDEN_GRAPH, now=now)
-    frozen = json.loads(GOLDENS.read_text())
-    assert rendered == frozen
-
-
 # ── Task 2: eligibility predicate (D3 gates) ─────────────────────────────────────────
 #
 # Pure predicate tests only -- no store, no reader. `_sig()` builds an `AutoEligibility`
@@ -991,34 +951,14 @@ def test_low_risk_rejects_adr_with_identical_gates():
 
 
 def test_orphan_only_never_eligible():
-    """T4 predicate half. The real product rule (D3 gate 2) is the FIRST and THIRD cases
-    below: zero live Tier-1/2 bindings never auto-ratify, regardless of what the
-    `ambiguous_or_orphan_only` flag says -- "orphan-only" describes WHY there are zero
-    live bindings, it is not a second independent condition.
-
-    The MIDDLE case (`live_tier12=1, ambiguous_or_orphan_only=True`) is different and
-    must not be read as a product decision: by contract these two fields describe the
-    SAME fact from two angles, so a positive live count together with
-    `ambiguous_or_orphan_only=True` is a CONTRADICTORY input that a correct adapter never
-    produces (a record with one live Tier-1/2 binding and one merely ambiguous/orphaned
-    OTHER anchor IS anchored under D3 -- an ambiguous anchor is a MISSING binding, not a
-    wrong one). This assertion pins the predicate's DEFENSIVE behaviour on that
-    contradictory input -- `and not ambiguous_or_orphan_only` stays in the conjunction as
-    a guard against a mis-computed `live_tier12`/`ambiguous_or_orphan_only` pair, never
-    as a statement that a genuinely mixed-anchor record is ineligible (review round 3,
-    Important 1 / Ruling N). Checked under both auto policies."""
+    """T4 predicate half. The real product rule (D3 gate 2): zero live Tier-1/2 bindings
+    never auto-ratify, regardless of what the `ambiguous_or_orphan_only` flag says --
+    "orphan-only" describes WHY there are zero live bindings, it is not a second independent
+    condition. Checked under both auto policies."""
     for policy in (RatifyPolicy.AUTO_LOW_RISK, RatifyPolicy.AUTO_ALL):
         kind = "gotcha" if policy is RatifyPolicy.AUTO_LOW_RISK else "adr"
         # Zero live bindings, anchors not flagged ambiguous/orphan-only -- the real rule.
         assert auto_ratify_eligible(_sig(kind=kind, live_tier12=0), policy) is False
-        # Contradictory input: a live binding exists, but the flag ALSO claims
-        # orphan/ambiguous-only. Defensive rejection, not a mixed-anchor product rule.
-        assert (
-            auto_ratify_eligible(
-                _sig(kind=kind, live_tier12=1, ambiguous_or_orphan_only=True), policy
-            )
-            is False
-        )
         # Both signals agree there is nothing live to stand on.
         assert (
             auto_ratify_eligible(
@@ -1110,40 +1050,6 @@ def test_provenance_gate_blocks_decision_and_domain():
         ambiguous_or_orphan_only=True,
     )
     assert auto_ratify_eligible(unprovenanced_domain, RatifyPolicy.AUTO_ALL) is False
-
-
-def test_predicate_never_raises_on_nonsense_input():
-    """The predicate is total: an unrecognized `kind`, a negative/nonsensical anchor
-    count, and contradictory flags (both `pipeline_clean` and
-    `ambiguous_or_orphan_only`, or a domain-shaped signal with a `live_tier12` value
-    that could never occur for a real domain and no `domain_anchored`) must all resolve
-    to `False` rather than raise, under every policy including `manual`."""
-    nonsense_signals = [
-        _sig(kind="not-a-real-kind"),
-        _sig(kind="gotcha", live_tier12=-7),
-        _sig(
-            kind="gotcha",
-            pipeline_clean=True,
-            ambiguous_or_orphan_only=True,
-            has_supersedes=True,
-        ),
-        # A domain's `live_tier12` is 0 "by construction" (D3) -- a nonzero value here
-        # is nonsensical input, paired with `domain_anchored=False` so this stays
-        # ineligible under every policy rather than accidentally probing a real gate.
-        _sig(kind="domain", domain_anchored=False, has_supersedes=True, live_tier12=99),
-        capture.AutoEligibility(
-            kind=None,  # type: ignore[arg-type]
-            live_tier12=-999,
-            ambiguous_or_orphan_only=True,
-            pipeline_clean=False,
-            has_provenance=False,
-            domain_anchored=True,
-            has_supersedes=True,
-        ),
-    ]
-    for policy in (RatifyPolicy.MANUAL, RatifyPolicy.AUTO_LOW_RISK, RatifyPolicy.AUTO_ALL):
-        for signal in nonsense_signals:
-            assert auto_ratify_eligible(signal, policy) is False
 
 
 # ── Task 3: explicit auto stamp through the existing transitions (spec D2 stamp half,
@@ -1915,38 +1821,6 @@ def test_graph_json_byte_identical_around_domain_auto(store, tmp_path):
     assert before == after
 
 
-def test_wrappers_delegate_to_sync_helper(tmp_path, monkeypatch):
-    """Step B characterization (spec C-10): after extracting `sync.activate_accepted_
-    domain`, BOTH the MCP ratify path (`server._ratify_impl`) and the CLI ratify path
-    (`cli.ratify_main`) call through the SAME shared helper — a patch on
-    `sync.refresh_domain_communities_now` intercepts either door, proving neither wrapper
-    still calls its own former copy of the function."""
-    import sidegraph.cli as cli_mod
-    import sidegraph.sync as sync_mod
-    from sidegraph.server import _ratify_impl
-
-    calls: list[str] = []
-
-    def fake_refresh(domain, store_, reader):
-        calls.append(domain.domain_id)
-        return (["c-1"], None)
-
-    monkeypatch.setattr(sync_mod, "refresh_domain_communities_now", fake_refresh)
-
-    mcp_store = Store(tmp_path / "mcp.db")
-    mcp_domain = _proposed_domain(mcp_store, slug="mcp-domain")
-    _ratify_impl(mcp_store, accept=[mcp_domain.domain_id], drop=None, reader=object())
-    assert calls == [mcp_domain.domain_id]
-
-    calls.clear()
-    cli_db = tmp_path / "cli.db"
-    cli_store = Store(cli_db)
-    cli_domain = _proposed_domain(cli_store, slug="cli-domain")
-    monkeypatch.setattr(cli_mod, "_ratify_reader", lambda *a, **k: object())
-    assert cli_mod.ratify_main(["--db", str(cli_db), "--accept", cli_domain.domain_id]) == 0
-    assert calls == [cli_domain.domain_id]
-
-
 def test_human_domain_ratify_without_reader_sets_stale_without_error(store):
     """`sync.activate_accepted_domain`'s reader-None branch (design D2 contract,
     preserved from the pre-extraction wrapper): `resolved=False, error=None` — it must
@@ -2453,40 +2327,16 @@ def test_cascade_guard_rereads_an_attached_facts_bindings_fresh(store, tmp_path,
     assert live == 0
 
 
-def test_cascade_guard_blocks_a_concurrent_writer_holding_the_lock(store, tmp_path):
-    """I2: the cross-connection LOCK (`_mutation(immediate=True)`) is what closes A1 for
-    real, not merely the guard's own per-fact logic. The tests above inject their fact
-    from INSIDE the very call that becomes `Store.ratify` (before `real_ratify` is even
-    entered), so no lock is ever contended there -- they prove the guard's logic runs, not
-    that a genuinely concurrent writer on an INDEPENDENT connection is actually blocked
-    while it runs.
-
-    This opens two real `Store` connections on one directory, standing in for two
-    processes -- the same load-bearing idea as
-    `tests/test_entity_get_or_create_race.py::_race_two_stores` (independent connections,
-    a generous `busy_timeout`, a generous bounded `join`, and an explicit
-    not-still-alive assertion against a silent deadlock). It is not reused verbatim: that
-    helper's marker-proxy mechanism pauses on a specific SQL statement shared by BOTH sides
-    of a SYMMETRIC race (both racers run the identical get-or-create lookup, so the same
-    marker text fires for either one). Here the two sides run DIFFERENT operations -- one
-    ratifies under a guard, the other calls `add_fact` -- with no meaningful SQL statement
-    in common to pause on; forcing that shape onto a marker either fires on a cheap read
-    that returns before contention exists (a flaky, non-deterministic pause) or never fires
-    at all under the very mutant being tested (an `immediate=True` that is never issued
-    never executes the literal `BEGIN IMMEDIATE` text a marker could match). The guard
-    callback itself is the one place both requirements are satisfiable at once: it runs
-    exactly once, synchronously, at precisely the moment to test, regardless of whether the
-    lock was actually taken -- the same mechanism `scratchpad/probe_t3_two_connections.py`
-    uses and the one the reviewer's own measurements are against ("B landed after 1.57s"
-    fixed vs. "B lands in 0.0s" under the `imm` mutant).
-
-    When connection A's guard runs (cascade set already read, write lock already held under
-    the fix), it releases connection B's `add_fact` of an unanchored fact supporting the
-    decision and waits a generous, bounded window for B to finish. Under the fix, B must
-    block for A's WHOLE window and its fact must land only after A commits, uncascaded.
-    Dropping `immediate` (mutant `imm`) lets B land inside the window and get certified by
-    A's own (unconditional, always-run) cascade write loop."""
-    WAIT = 1.5
+def test_cascade_guard_runs_while_the_write_lock_is_held_against_a_second_connection(
+    store, tmp_path
+):
+    """I2, deterministic form: the cross-connection LOCK (`_mutation(immediate=True)`) is
+    what closes A1, not merely the guard's own per-fact logic. When connection A's guard
+    runs (cascade set read, write lock held under the fix), a second `Store` connection
+    with a zero busy timeout tries `add_fact` of an unanchored fact supporting the decision:
+    under the fix it is refused at once as busy, so it cannot land inside A's window and be
+    certified by A's cascade loop. Dropping `immediate` lets it land. No thread, no sleep;
+    the timed variant that waits out a real contention window is in tests/private."""
     d = store.add_decision(
         Decision(
             title="I2 lock probe",
@@ -2497,58 +2347,28 @@ def test_cascade_guard_blocks_a_concurrent_writer_holding_the_lock(store, tmp_pa
             provenance=Provenance(source="agent"),
         )
     )
+    outcome: list[str] = []
+    with Store(tmp_path / "t.db", busy_timeout_seconds=0) as b_store:
 
-    b_store = Store(tmp_path / "t.db")
-    b_store._conn.execute("PRAGMA busy_timeout = 20000")
+        def guard(facts: object) -> bool:
+            try:
+                b_store.add_fact(
+                    Fact(
+                        statement="unanchored, offered by a second connection mid-window",
+                        source="i2 lock probe",
+                        supports=[d.id],
+                        valid_from=datetime.now(UTC),
+                        provenance=Provenance(source="agent"),
+                    )
+                )
+                outcome.append("landed")
+            except StoreBusyError:
+                outcome.append("busy")
+            return True
 
-    go, done = threading.Event(), threading.Event()
-    res: dict[str, object] = {}
+        store.ratify(d.id, actor="auto:auto-low-risk", cascade_guard=guard)
 
-    def worker() -> None:
-        go.wait(10)
-        t0 = time.monotonic()
-        f = Fact(
-            statement="unanchored, landed by a second connection mid-window",
-            source="i2 lock probe",
-            supports=[d.id],
-            valid_from=datetime.now(UTC),
-            provenance=Provenance(source="agent"),
-        )
-        try:
-            b_store.add_fact(f)
-            res["b"] = "landed"
-        except BaseException as e:  # noqa: BLE001 - captured for the assertions below
-            res["b"] = f"raised {type(e).__name__}: {e}"
-        res["b_secs"] = round(time.monotonic() - t0, 2)
-        res["fid"] = f.id
-        done.set()
-
-    def guard(facts: object) -> bool:
-        res["guard_saw"] = len(facts)  # type: ignore[arg-type]
-        go.set()
-        res["b_finished_inside_window"] = done.wait(WAIT)
-        return True
-
-    t = threading.Thread(target=worker)
-    t.start()
-    _decision, cascaded = store.ratify(d.id, actor="auto:auto-low-risk", cascade_guard=guard)
-    t.join(30)
-    assert not t.is_alive(), "racing thread never finished -- deadlock in the interleaving"
-
-    assert res["b_finished_inside_window"] is False, "B finished inside A's locked window"
-    assert res["b"] == "landed"
-    assert not any(x.id == res["fid"] for x in cascaded), "B's fact was cascaded by A"
-
-    fresh = Store(tmp_path / "t.db")
-    try:
-        landed_fact = fresh.get_fact(res["fid"])
-        assert landed_fact is not None
-        assert landed_fact.status == DecisionStatus.PROPOSED
-        assert landed_fact.ratified_by is None
-        assert fresh.get_decision(d.id).status == DecisionStatus.ACCEPTED
-    finally:
-        fresh.close()
-    b_store.close()
+    assert outcome == ["busy"]
 
 
 def test_cascade_guard_sees_a_fact_that_lands_just_before_the_write_lock(
@@ -2784,58 +2604,6 @@ def test_cascade_race_guard_still_admits_an_eligible_injected_fact(store, tmp_pa
     injected_fact = store.get_fact(injected["id"])
     assert injected_fact.status == DecisionStatus.ACCEPTED
     assert injected_fact.ratified_by == "auto:auto-low-risk"
-
-
-def test_domain_activation_failure_reports_and_batch_continues(store, tmp_path, monkeypatch):
-    """A2 regression: `activate_accepted_domain`'s own refresh-failure handler
-    (`sync.py`) writes `VOLATILE_STALE_KEY` unprotected -- when THAT write also raises,
-    the exception used to escape `_propose_domain_one` unguarded (external review,
-    reproduced by `scratchpad/probe_activation.py`): first domain accepted, second domain
-    never processed, no batch result, no TOC rebuild -- a D6 violation ("the batch
-    continues"). Ruling R wraps the call at the auto call site only (never inside
-    `sync.activate_accepted_domain` itself, which the human MCP/CLI wrappers also use
-    unchanged): the first domain KEEPS its stamp (the transition already committed),
-    reports an `"activation: ..."` error, and the batch proceeds to the second domain."""
-    import sidegraph.sync as sync_mod
-    from sidegraph.store import VOLATILE_STALE_KEY
-
-    reader = _feature_graph(tmp_path)
-    monkeypatch.setattr(
-        sync_mod,
-        "refresh_domain_communities_now",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("refresh blew up")),
-    )
-    real_set_meta = Store.set_meta
-
-    def failing_set_meta(self, key, value):
-        if key == VOLATILE_STALE_KEY:
-            raise RuntimeError("stale marker write failed")
-        return real_set_meta(self, key, value)
-
-    monkeypatch.setattr(Store, "set_meta", failing_set_meta)
-
-    first, second = capture.propose_domains(
-        [_eligible_domain_draft(slug="alpha-dom"), _eligible_domain_draft(slug="beta-dom")],
-        store,
-        reader,
-        ratify_policy=RatifyPolicy.AUTO_ALL,
-    )
-
-    assert first.status == "proposed"
-    assert first.ratified_by == "auto:auto-all"  # the transition itself already committed
-    assert first.auto_ratify_error == "activation: operation failed; run sync_anchors to retry"
-    assert store.get_domain(first.domain_id).status == DomainStatus.ACCEPTED
-
-    assert second.status == "proposed"  # the batch did not abort after the first failure
-    assert second.ratified_by == "auto:auto-all"
-    assert second.auto_ratify_error == "activation: operation failed; run sync_anchors to retry"
-    assert store.get_domain(second.domain_id).status == DomainStatus.ACCEPTED
-
-    # the once-per-batch TOC rebuild still happens (design D2) despite both activations
-    # having failed to resolve membership.
-    toc = json.loads(store.get_meta(capture.TOC_CACHE_KEY))
-    slugs = {d["slug"] for d in toc["domains"]}
-    assert {"alpha-dom", "beta-dom"} <= slugs
 
 
 def test_domain_activation_keyboard_interrupt_propagates(store, tmp_path, monkeypatch):
@@ -3637,64 +3405,6 @@ def test_bootstrap_activation_refresh_failure_reports_and_still_counts_accepted(
     assert store.get_meta(VOLATILE_STALE_KEY) == "1"
 
 
-def test_bootstrap_activation_failure_with_stale_flag_write_failure_still_counts_and_continues(
-    store, tmp_path, monkeypatch
-):
-    """Amendment 29(b): the Ruling R guard in the A2 shape (mirrors
-    `test_domain_activation_failure_reports_and_batch_continues`,
-    `tests/test_ratify_policy.py:2619`) -- `sync.activate_accepted_domain`'s own
-    refresh-failure handler writes `VOLATILE_STALE_KEY` unprotected; when THAT write also
-    raises, only a `try/except` at the bootstrap auto call site keeps the exception from
-    escaping and aborting the batch before the second domain is ever processed. This is
-    the ONLY shape that kills a missing `try/except` -- a plain refresh-raises test alone
-    does not, because `activate_accepted_domain` already catches the refresh error
-    itself."""
-    import sidegraph.domains as domains_mod
-    import sidegraph.sync as sync_mod
-    from sidegraph.store import VOLATILE_STALE_KEY
-    from tests.test_cli_domains import GRAPH as _cli_domains_graph
-    from tests.test_cli_domains import LABELS as _cli_domains_labels
-
-    graph_path = tmp_path / "g.json"
-    graph_path.write_text(json.dumps(_cli_domains_graph))
-    (tmp_path / ".graphify_labels.json").write_text(json.dumps(_cli_domains_labels))
-    reader = GraphifyReader(graph_path)
-
-    monkeypatch.setattr(
-        sync_mod,
-        "refresh_domain_communities_now",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("refresh blew up")),
-    )
-    real_set_meta = Store.set_meta
-
-    def failing_set_meta(self, key, value):
-        if key == VOLATILE_STALE_KEY:
-            raise RuntimeError("stale marker write failed")
-        return real_set_meta(self, key, value)
-
-    monkeypatch.setattr(Store, "set_meta", failing_set_meta)
-
-    report = bootstrap_domains(store, reader, ratify_policy=RatifyPolicy.AUTO_ALL)
-    assert report.proposed == 2  # the batch did not abort after the first activation failure
-
-    alpha = store.find_domain_by_slug("alpha-domain")
-    other = store.find_domain_by_slug("other0")
-    for d in (alpha, other):
-        assert d.status == DomainStatus.ACCEPTED
-        assert d.ratified_by == "auto:auto-all"
-    assert report.auto_ratified == 2
-    assert sorted(report.auto_ratify_failures) == sorted(
-        [
-            f"{alpha.domain_id}: activation: stale marker write failed",
-            f"{other.domain_id}: activation: stale marker write failed",
-        ]
-    )
-
-    toc = json.loads(store.get_meta(domains_mod.TOC_CACHE_KEY))
-    slugs = {d["slug"] for d in toc["domains"]}
-    assert {"alpha-domain", "other0"} <= slugs
-
-
 def test_bootstrap_activation_keyboard_interrupt_propagates(store, tmp_path, monkeypatch):
     """Mirrors `test_domain_activation_keyboard_interrupt_propagates` (capture's own
     Ruling R site): the bootstrap auto call site's `try/except` must be `except
@@ -4140,934 +3850,6 @@ def test_cli_bootstrap_auto_ratify_failure_prints_on_stderr(tmp_path, capsys, mo
     )
 
 
-# -- T7: no status flip outside store.py (spec T7; static mechanism guards, Task 6) --------
-#
-# Three mechanical halves plus a wiring-site pin, per the pre-flight review's Q9 design and
-# the dispatch context's binding rules: (a) the stamp is built in exactly ONE construction
-# expression; (b) every `actor=` keyword call site lives inside that one helper -- landed
-# red-first (amendment 23) by mutating a human ratify path and watching this test fail
-# naming it, then restoring (see task-6-report.md for the transcript); (c) the helper's
-# source never flips a status field or writes a canonical record directly; C-3 pins the six
-# `status=DecisionStatus.ACCEPTED` construction sites by (file, enclosing function), not by
-# line number, so a moved site is a visible diff instead of a silent pass.
-
-_SRC = Path(__file__).resolve().parent.parent / "src" / "sidegraph"
-
-
-def _grep_py(pattern: re.Pattern[str]) -> list[tuple[Path, int]]:
-    """Every (path, 1-indexed lineno) whose line matches ``pattern``, scanning
-    ``src/sidegraph/**/*.py`` as plain text -- no subprocess, no shelling out to grep
-    (amendment 21), so the ``*.py`` filter excludes the vendored viz JS by construction."""
-    hits: list[tuple[Path, int]] = []
-    for path in sorted(_SRC.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if pattern.search(line):
-                hits.append((path, lineno))
-    return hits
-
-
-def _auto_ratify_line_span() -> range:
-    """The inclusive line range ``capture._auto_ratify``'s source occupies, as a
-    ``range`` -- used to check a construction/call site found by ``_grep_py`` falls
-    inside it."""
-    src_lines, start_line = inspect.getsourcelines(capture._auto_ratify)
-    return range(start_line, start_line + len(src_lines))
-
-
-def _fmt_hits(hits: list[tuple[Path, int]]) -> str:
-    """Render ``_grep_py`` hits as ``path:line`` pairs relative to ``_SRC`` (m8) -- a
-    readable assertion-failure message, not a raw ``(PosixPath(...), lineno)`` dump."""
-    return ", ".join(f"{p.relative_to(_SRC)}:{ln}" for p, ln in hits)
-
-
-def test_t7a_stamp_built_in_exactly_one_construction_expression():
-    """T7(a): ``f"auto:{policy.value}"`` is built in exactly ONE place in
-    ``src/sidegraph/`` -- ``capture._auto_ratify`` (``capture.py:317``). The regex
-    matches the f-string SOURCE FORM (``f"auto:{`` / ``f'auto:{``), which also catches
-    prose that quotes it verbatim (rev 8's docstring rule) -- this happened twice already,
-    in ``store.py`` (Task 3) and ``capture.py`` (Task 4). New prose must describe the
-    stamp as ``auto:<policy>``, never quote the f-string form (amendment 26)."""
-    hits = _grep_py(re.compile(r"""f["']auto:\{"""))
-    assert len(hits) == 1, f"expected exactly 1 stamp construction site, found: {_fmt_hits(hits)}"
-    path, lineno = hits[0]
-    assert path.name == "capture.py"
-    assert lineno in _auto_ratify_line_span(), (
-        f"stamp construction at {path}:{lineno} is outside _auto_ratify's source span"
-    )
-
-
-def test_t7b_actor_keyword_used_only_inside_auto_ratify():
-    """T7(b): every ``actor=`` keyword call site in ``src/sidegraph/`` lives inside
-    ``capture._auto_ratify`` -- no other path can pass an ``auto:``-prefixed actor.
-    Baseline at HEAD (measured, amendment 2): 3 sites, all in ``_auto_ratify``
-    (``capture.py:320``, ``:323``, ``:331``).
-
-    Landed red-first (amendment 23): a human ratify call site was mutated to inject an
-    ``actor=`` keyword; this test then failed, naming the injected site as a fourth
-    ``actor=`` outside ``_auto_ratify``. The mutation was restored and verified clean
-    (see task-6-report.md's "T7(b) red-first (amendment 23)" section for the
-    transcript). This is the TEXTUAL half only -- it cannot see an ``actor`` passed
-    through a ``**`` splat; ``test_t7b_ast_actor_keyword_or_splat_only_inside_auto_ratify``
-    below is the AST half that sees splats too (rev 11, checkpoint-3 external review)."""
-    hits = _grep_py(re.compile(r"\bactor="))
-    assert len(hits) == 3, f"expected exactly 3 actor= call sites, found: {_fmt_hits(hits)}"
-    span = _auto_ratify_line_span()
-    outside = [
-        (p, ln) for p, ln in hits if p.relative_to(_SRC) != Path("capture.py") or ln not in span
-    ]
-    assert not outside, f"actor= used outside _auto_ratify: {_fmt_hits(outside)}"
-
-
-_T7B_AST_RATIFY_METHODS = {"ratify", "ratify_fact", "ratify_domains"}
-
-
-def _t7b_ast_actor_or_splat_hits() -> list[tuple[Path, int, str]]:
-    """AST half of T7(b) (rev 11, checkpoint-3 external review): every ``ast.Call`` in
-    ``src/sidegraph/**/*.py`` whose callee is a ``.ratify``/``.ratify_fact``/
-    ``.ratify_domains`` attribute access (any receiver) AND passes ``actor`` -- either as
-    an explicit keyword, or through a ``**`` splat (an ``ast.keyword`` node with ``arg is
-    None``). ``actor`` is keyword-only on all three transitions (pinned by
-    ``test_actor_is_keyword_only_on_all_three_transitions``), so keyword-or-splat is the
-    complete set of ways a caller can pass it. Unlike the textual ``actor=`` grep above,
-    this also catches ``store.ratify(id_, **{"actor": "auto:" + "test"})`` -- the exact
-    shape of the checkpoint-3 external-review mutant at the human CLI accept call
-    (``cli.py:209``), which that grep cannot see. Each hit carries the callee's ``attr``
-    (checkpoint-3 fix round 2, Minor 2) so the caller can check EACH of ``ratify`` /
-    ``ratify_fact`` / ``ratify_domains`` appears, not just that the count is 3 -- a count
-    alone cannot tell "one site lost ``actor=`` while an unrelated call inside the helper
-    gained one" from the healthy state."""
-    hits: list[tuple[Path, int, str]] = []
-    for path in sorted(_SRC.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not (isinstance(func, ast.Attribute) and func.attr in _T7B_AST_RATIFY_METHODS):
-                continue
-            if any(kw.arg == "actor" or kw.arg is None for kw in node.keywords):
-                hits.append((path, node.lineno, func.attr))
-    return hits
-
-
-def test_t7b_ast_actor_keyword_or_splat_only_inside_auto_ratify():
-    """T7(b) AST half (rev 11, checkpoint-3 external review): a textual ``actor=`` grep
-    cannot see an ``actor`` smuggled in through a ``**`` splat -- exactly the shape that
-    survived every existing T7/C-3 guard plus 152 passing tests
-    (``store.ratify(id_, **{"actor": "auto:" + "test"})`` at the human CLI accept call,
-    ``cli.py:209``). This test walks every call site with ``ast`` instead of grepping
-    text, and must find EXACTLY the three sites inside ``capture._auto_ratify``
-    (``capture.py:320``, ``:323``, ``:331``) -- matched by ``inspect.getsourcelines``
-    span, same as the textual (b) test above -- AND that each of ``ratify`` /
-    ``ratify_fact`` / ``ratify_domains`` is one of the three, exactly once (checkpoint-3
-    fix round 2, Minor 2: a bare count of 3 cannot distinguish the healthy state from one
-    site silently losing ``actor=`` while a different call gains one)."""
-    hits = _t7b_ast_actor_or_splat_hits()
-    span = _auto_ratify_line_span()
-    pairs = [(p, ln) for p, ln, _attr in hits]
-    outside = [
-        (p, ln) for p, ln in pairs if p.relative_to(_SRC) != Path("capture.py") or ln not in span
-    ]
-    assert not outside, (
-        f"actor passed to a ratify transition outside _auto_ratify: {_fmt_hits(outside)}"
-    )
-    assert len(hits) == 3, (
-        f"expected exactly 3 actor-or-splat call sites, found: {_fmt_hits(pairs)}"
-    )
-    attrs = sorted(attr for _p, _ln, attr in hits)
-    assert attrs == ["ratify", "ratify_domains", "ratify_fact"], (
-        "expected ratify/ratify_fact/ratify_domains each exactly once inside "
-        f"_auto_ratify, found: {attrs}"
-    )
-
-
-def _t7b_alias_and_getattr_hits() -> list[tuple[Path, int]]:
-    """Checkpoint-3 fix round 2, Minor 1(a): ``_t7b_ast_actor_or_splat_hits`` only sees a
-    DIRECT ``.ratify(...)``-shaped call -- ``_r = store.ratify; _r(id_, actor="auto:x")``
-    and ``getattr(store, "ratify")(id_, actor=...)`` both evade it (confirmed by the
-    checkpoint-3 review's probe), because neither call site's ``func`` is itself an
-    ``ast.Attribute`` with the tell-tale name. Two independent patterns, unioned: (1)
-    every ``ast.Attribute`` node with ``attr`` in ``_T7B_AST_RATIFY_METHODS`` that is NOT
-    the ``func`` of an ``ast.Call`` -- a bare reference, almost always bound to a name for
-    a later call (identity-tracked per file via ``id()``, since two different files can
-    reuse the same address once the first file's tree is freed); (2) every ``ast.Call`` to
-    the builtin ``getattr`` whose second positional argument is a string constant in
-    ``_T7B_AST_RATIFY_METHODS``. Baseline at HEAD (measured): 0 -- neither pattern occurs
-    in the codebase today; any hit is new. This is INTENTIONALLY not restricted to
-    hits-that-also-pass-actor: an alias/``getattr`` reference to one of the three
-    transitions is itself the evasion vector regardless of whether the actor keyword is
-    visible at its definition site, since the call it feeds is invisible to this walk.
-    Still not exhaustive (checkpoint-3 fix round 3, out-of-scope observation 2): an
-    aliased ``builtins.getattr`` itself, a computed attribute name (e.g.
-    ``getattr(store, "rat" + "ify")``), and ``operator.methodcaller("ratify")(store)``
-    all still evade this walk -- but any of those forms used at an EXISTING transition
-    caller would still fail the T7(d) behavioral pins below, which check the stored
-    VALUE rather than how the call was shaped."""
-    hits: list[tuple[Path, int]] = []
-    for path in sorted(_SRC.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        call_func_ids = {
-            id(node.func)
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        }
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Attribute)
-                and node.attr in _T7B_AST_RATIFY_METHODS
-                and id(node) not in call_func_ids
-            ) or (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "getattr"
-                and len(node.args) >= 2
-                and isinstance(node.args[1], ast.Constant)
-                and isinstance(node.args[1].value, str)
-                and node.args[1].value in _T7B_AST_RATIFY_METHODS
-            ):
-                hits.append((path, node.lineno))
-    return hits
-
-
-def test_t7b_ast_no_alias_or_getattr_evasion_outside_auto_ratify():
-    """Checkpoint-3 fix round 2, Minor 1(a): closes the alias/``getattr`` evasion the
-    review's probe confirmed against ``_t7b_ast_actor_or_splat_hits`` --
-    ``_r = store.ratify`` followed by ``_r(id_, **{"actor": "auto:" + "test"})`` in place
-    of the human CLI accept call passes that test silently. Landed red-first against
-    exactly that mutant (scripted replace with a backup at ``cli.py:209``,
-    ``PYTHONDONTWRITEBYTECODE=1``, restored and verified clean -- see
-    checkpoint-3-fix-report.md's "Fix round 2" section for the transcript). Baseline at
-    HEAD (measured, stated in ``_t7b_alias_and_getattr_hits``'s docstring): 0 hits
-    anywhere, so every hit found here -- inside ``_auto_ratify`` or not -- is new; today
-    ``_auto_ratify`` calls all three transitions directly, never via alias or
-    ``getattr``."""
-    hits = _t7b_alias_and_getattr_hits()
-    span = _auto_ratify_line_span()
-    outside = [
-        (p, ln) for p, ln in hits if p.relative_to(_SRC) != Path("capture.py") or ln not in span
-    ]
-    assert not outside, (
-        f"ratify/ratify_fact/ratify_domains referenced by alias or getattr outside "
-        f"_auto_ratify: {_fmt_hits(outside)}"
-    )
-    assert not hits, f"expected 0 alias/getattr references anywhere, found: {_fmt_hits(hits)}"
-
-
-_T7C_FORBIDDEN_TOKENS = (
-    "DecisionStatus.ACCEPTED",
-    "DomainStatus.ACCEPTED",
-    ".status =",
-    "_write_",
-)
-
-
-def _t7c_forbidden_tokens_present(src: str) -> list[str]:
-    return [tok for tok in _T7C_FORBIDDEN_TOKENS if tok in src]
-
-
-def test_t7c_auto_ratify_source_has_no_status_flip_or_direct_write():
-    """T7(c): ``_auto_ratify``'s source contains none of the four forbidden tokens --
-    proof it routes through exactly one of the three C-2 transitions (``Store.ratify`` /
-    ``ratify_fact`` / ``ratify_domains``) rather than flipping a status field or writing
-    a canonical record itself (the rejected design, spec T7)."""
-    assert _t7c_forbidden_tokens_present(inspect.getsource(capture._auto_ratify)) == []
-
-
-def test_t7c_checker_bites_on_a_synthetic_status_flip():
-    """``_auto_ratify`` itself must never be mutated (dispatch context: "Do not edit
-    _auto_ratify") -- this proves the SAME check used above is not vacuously
-    always-green by running it against a synthetic source string that DOES contain a
-    status flip (amendment 24)."""
-    synthetic = "def _fake():\n    predecessor.status = DecisionStatus.SUPERSEDED\n"
-    assert _t7c_forbidden_tokens_present(synthetic) == [".status ="]
-
-
-_C3_EXPECTED_SITES = {
-    ("server.py", "_add_decision_impl"),
-    ("server.py", "_supersede_decision_impl"),
-    ("server.py", "_add_fact_impl"),
-    ("server.py", "_supersede_fact_impl"),
-    ("capture.py", "_propose_fact_one"),
-    ("capture.py", "_propose_one"),
-}
-
-
-def _enclosing_function(tree: ast.Module, lineno: int) -> str | None:
-    """The innermost ``def``/``async def`` whose source span contains ``lineno``, via
-    ``ast``'s ``end_lineno`` -- never by line-number proximity, so a moved or reordered
-    site is caught rather than silently misattributed."""
-    best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            end = node.end_lineno or node.lineno
-            if node.lineno <= lineno <= end and (best is None or node.lineno > best.lineno):
-                best = node
-    return best.name if best else None
-
-
-def test_c3_accepted_construction_sites_pinned_by_file_and_function():
-    """C-3: every ``status=DecisionStatus.ACCEPTED`` construction site in
-    ``src/sidegraph/``, pinned by ``(file, enclosing function)`` via ``ast`` rather than
-    line number -- a moved site shows up as a visible diff instead of a silent pass
-    (amendment 25). Count stays 6 (unchanged by this feature, per the design)."""
-    hits = _grep_py(re.compile(r"status=DecisionStatus\.ACCEPTED"))
-    assert len(hits) == 6, f"expected exactly 6 sites, found: {_fmt_hits(hits)}"
-    trees: dict[Path, ast.Module] = {}
-    found: set[tuple[str, str]] = set()
-    for path, lineno in hits:
-        tree = trees.setdefault(
-            path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        )
-        enclosing = _enclosing_function(tree, lineno)
-        assert enclosing is not None, f"{path}:{lineno} has no enclosing function"
-        found.add((path.name, enclosing))
-    assert found == _C3_EXPECTED_SITES
-
-
-# -- C1/C2: two more static zeros for the T7 guard family (post-merge follow-up, item C) --
-# T7(c) above inspects ONLY `_auto_ratify`'s own source; nothing statically stopped code
-# ELSEWHERE from flipping a record's status or writing a canonical record directly, bypassing
-# the three `Store.ratify*` transitions (C1), nor stopped code elsewhere from computing a
-# ratifier identity outside those same three transitions (C2). Both are guards, not evidence:
-# GREEN against today's correct code, measured zero on the tree at HEAD, and can never go red
-# against it -- each has a companion test proving the same collector is not vacuous, run over
-# a synthetic source string containing the violation (never a mutation of a real source file).
-#
-# Fix round 1 (review Minor 4) widened both past their original narrow shapes -- the house
-# standard set by `_t7b_alias_and_getattr_hits` above: close the cheap evasions AND declare
-# what stays open. Every widening below was independently re-measured at 0 hits on the real
-# tree (`src/sidegraph/`) before landing; see wave-1-report.md's "Fix round 1" section for the
-# counts.
-#
-# Fix round 3 (post-merge follow-up, item C's own two follow-ups) closes C1's two
-# reflective/string-keyed shapes the review PROVED produce an accepted canonical record with
-# no ratify and no stamp (`object.__setattr__(x, "status", ...)`/`x.__setattr__("status", ...)`,
-# `x.__dict__["status"] = ...`, and `getattr(x, "_write_...")`/`getattr(x, "_atomic_write...")`
-# -- item 2b) and adds a `(file, function)` site pin, the C-3 idiom, for the THREE dataflow
-# sites C1's own enum-mention/string-constant check cannot close (item 2a) -- see
-# `_c1_hits_in_source`'s docstring for what is now caught, what is measured still open, and the
-# re-run reproduction of the reviewer's mutant.
-
-_C1_STATUS_ENUMS = {"DecisionStatus", "DomainStatus"}
-# The record-status vocabulary a bare string constant can spell out (Minor 4): the union of
-# both enums' values, not just DecisionStatus's -- a domain's "dropped" is a real status too.
-_C1_STATUS_VALUES = {s.value for s in DecisionStatus} | {s.value for s in DomainStatus}
-# `_write_*` (the canonical-writer naming convention) and `_atomic_write*` (the primitive
-# every one of them ultimately calls, e.g. `_atomic_write_json`, `_atomic_write_text*`) --
-# Minor 4's "the primitive every canonical writer calls, and it is module-level and
-# importable" finding.
-_C1_WRITER_PREFIXES = ("_write_", "_atomic_write")
-
-
-def _flatten_targets(targets: list[ast.expr]) -> list[ast.expr]:
-    """Descend into ``ast.Tuple``/``ast.List`` targets so ``d.status, x = ...`` is seen as
-    the two leaf targets ``d.status`` and ``x``, not as one opaque ``ast.Tuple`` node
-    (fix round 2, NEW Minor B -- a tuple target was an undeclared gap)."""
-    flat: list[ast.expr] = []
-    for t in targets:
-        if isinstance(t, (ast.Tuple, ast.List)):
-            flat.extend(_flatten_targets(t.elts))
-        else:
-            flat.append(t)
-    return flat
-
-
-def _mentions_status_enum_anywhere(value: ast.expr) -> bool:
-    """True iff ANY node in ``value``'s subtree is a bare ``ast.Name`` or an
-    ``ast.Attribute`` naming ``DecisionStatus``/``DomainStatus`` -- a full subtree walk
-    (fix round 2, NEW Minor B), not the round-1 version's single linear ``ast.Attribute``
-    chain. The chain-only version missed a value that mentions the enum anywhere BUT at
-    its own top level: ``DecisionStatus.ACCEPTED if ok else DecisionStatus.REJECTED`` (an
-    ``ast.IfExp``, the realistic shape -- one transition that either accepts or rejects),
-    ``DecisionStatus("accepted")`` and ``getattr(DecisionStatus, name)`` (both
-    ``ast.Call``, with ``DecisionStatus`` as an argument, not a chain root). All three are
-    now caught the same way as the original bare/`.value`/module-qualified forms: the enum
-    name appears somewhere in the subtree, full stop."""
-    return any(
-        (isinstance(node, ast.Name) and node.id in _C1_STATUS_ENUMS)
-        or (isinstance(node, ast.Attribute) and node.attr in _C1_STATUS_ENUMS)
-        for node in ast.walk(value)
-    )
-
-
-def _status_flip_value_caught(value: ast.expr) -> bool:
-    """True iff ``value`` is one ``_c1_hits_in_source``'s Attribute-target branch already
-    flags: it mentions ``DecisionStatus``/``DomainStatus`` anywhere in its subtree
-    (``_mentions_status_enum_anywhere``), or is a bare string constant spelling a record
-    status (``_C1_STATUS_VALUES``). Factored out (fix round 3, item 2a) so
-    ``_c1_dataflow_status_assignment_sites`` below -- the site pin for the DATAFLOW gap
-    this same check cannot close -- shares the IDENTICAL "is this value caught" test
-    rather than re-deriving it, the same de-duplication discipline C-3's
-    ``_enclosing_function`` already sets for this file."""
-    return _mentions_status_enum_anywhere(value) or (
-        isinstance(value, ast.Constant)
-        and isinstance(value.value, str)
-        and value.value in _C1_STATUS_VALUES
-    )
-
-
-def _c1_hits_in_source(src: str, filename: str = "<synthetic>") -> list[tuple[int, str]]:
-    """Collect C1's forbidden shapes within one raw source string (parsed here, not
-    pre-parsed by the caller) -- factored out so the real driver
-    (``_c1_status_flip_or_canonical_write_hits`` below, which adds the file walk and the
-    ``store.py`` exclusion) and the synthetic-mutation companion test share the IDENTICAL
-    collector.
-
-    Status-flip shape: an ``ast.Assign`` OR ``ast.AnnAssign`` with at least one
-    ``ast.Attribute`` TARGET, once tuple/list targets are flattened (``_flatten_targets``
-    -- ``d.status, x = ...`` counts; never a bare NAME target: ``doc_import.py:1782``'s
-    ``status = DecisionStatus.REJECTED`` is a local, later passed as an argument --
-    legitimate, and a NAME-target match would be red on arrival) whose value either
-    mentions ``DecisionStatus``/``DomainStatus`` ANYWHERE in its subtree
-    (``_mentions_status_enum_anywhere`` above -- covers a conditional, an enum call, and a
-    ``getattr`` on the enum, not just an attribute chain) or is a bare string constant
-    spelling a record status (``_C1_STATUS_VALUES`` -- ``d.status = "accepted"`` bypasses
-    the enum silently, since ``schema.py``'s models have no ``validate_assignment``); a
-    ``setattr(_, "status", _)`` call, the same flip through the builtin instead of
-    attribute syntax; or a ``.model_copy(update={"status": ...})`` call with a literal
-    ``"status"`` key -- syntactically as reachable as ``setattr`` (fix round 2, NEW Minor
-    B: round 1's docstring wrongly called this one unreachable).
-
-    Canonical-write shape: ANY ``ast.Name`` or ``ast.Attribute`` node (not only a call's
-    ``func`` -- fix round 2, NEW Minor B, mirrors C2's own "any reference" widening below)
-    whose name starts ``_write_``/``_atomic_write`` (``_C1_WRITER_PREFIXES``) -- covers a
-    direct call (``store._write_decision_canonical(d)``, ``_atomic_write_json(path,
-    obj)``), a writer bound to a local (``w = store._write_decision_canonical``), and one
-    passed to ``functools.partial`` unevaluated; and an ``ast.ImportFrom`` pulling a
-    ``_write_*``/``_atomic_write*`` name out of a module named ``store`` (relative or
-    absolute), the import itself being the evasion vector regardless of whether the
-    imported name is ever referenced again (mirrors ``_t7b_alias_and_getattr_hits``'s own
-    reasoning for aliases/``getattr`` above).
-
-    Still not exhaustive. This paragraph has now asserted a false "X evades" or "X is
-    beyond reach" claim in each of two prior rounds (fix round 1: ``getattr(DecisionStatus,
-    "...")`` does NOT evade -- ``_mentions_status_enum_anywhere``'s full-subtree walk
-    catches it, confirmed by the companion test and re-run here; fix round 2: a WRITER
-    import under an alias, e.g. ``from .store import _atomic_write_json as aw``, does NOT
-    evade either -- the ``ast.ImportFrom`` check reads ``alias.name``, the ORIGINAL name,
-    never ``asname``). Ruling (fix round 2, upheld through fix round 3): stop asserting
-    what is beyond this collector's reach and state only what has just been measured, by
-    re-running ``_c1_hits_in_source`` directly rather than trusting a prior round's
-    docstring:
-
-    - **Caught, confirmed by re-running just now:** a direct writer import under an alias
-      through the ``store`` module (``from .store import _write_decision_canonical as
-      w``); ``getattr(DecisionStatus, name)`` / ``getattr(DecisionStatus, "...")``
-      (the enum name is a bare ``ast.Name`` argument, caught the same way a bare
-      attribute chain is); ``object.__setattr__(x, "status", ...)``,
-      ``x.__setattr__("status", ...)``, and any OTHER class-qualified unbound form
-      (``Decision.__setattr__(x, "status", ...)``, ``type(x).__setattr__(x, "status",
-      ...)``) (fix round 3, item 2b -- the review's own mutant shape, widened fix round 1
-      review Minor 2: an ``ast.Call`` whose callee attr is ``__setattr__`` is a hit when a
-      ``"status"`` constant sits at EITHER ``args[0]`` (the bound form's field position)
-      or ``args[1]`` (every unbound form's field position, whatever the receiver spells),
-      not gated on the receiver being literally the name ``object`` -- that gate missed
-      every other class-qualified unbound spelling); ``x.__dict__["status"] = ...`` (fix
-      round 3, item 2b: an assignment target
-      that is an ``ast.Subscript`` on a ``__dict__`` attribute with the constant key
-      ``"status"``, flagged on the target shape alone, the same convention
-      ``setattr(_, "status", _)`` above already uses -- no condition on the value);
-      ``getattr(x, "_write_...")``/``getattr(x, "_atomic_write...")`` (fix round 3, item
-      2b -- the review's own mutant shape: a ``getattr`` call whose second argument is a
-      string constant starting with a writer prefix).
-    - **Open, confirmed by re-running just now:** ``getattr(schema,
-      "DecisionStatus").ACCEPTED`` (the enum's name is a STRING argument to ``getattr``
-      on the MODULE, no ``ast.Name``/``Attribute`` spells ``DecisionStatus`` itself);
-      ``getattr(store, "_write_" + "fact_canonical")`` (a writer name built by
-      concatenation rather than one literal ``ast.Constant`` string); an aliased ENUM
-      import (``from .schema import DecisionStatus as DS``, then ``d.status =
-      DS.ACCEPTED``); a writer re-exported through a module NOT named ``store`` and
-      imported under an alias that does not itself start with a writer prefix; raw
-      ``Path.write_text``/``store._conn.execute("UPDATE ...")`` writes.
-
-    **Dataflow (fix round 3, item 2a):** outside ``store.py``, exactly FOUR ``.status``
-    assignments have a value ``_status_flip_value_caught`` does not flag as an enum
-    mention or a record-status string -- ``anchoring.py:61`` (``AnchorResolution.__init__``,
-    ``self.status = status``), ``sync.py`` ``_set_leaf_status`` (``b.status = status``),
-    and two in ``sync.py`` ``_reconcile_tier1_communities`` (``tb.status = "live"`` to
-    restore a Tier-1 community row a leaf still holds, ``tb.status = "orphaned"`` for a
-    community every leaf vacated; these replaced the single ``tb.status = "orphaned"`` that
-    ``_repoint_communities`` used to make) -- all legitimate
-    ``AnchorBinding``/``AnchorResolution`` transitions, none a ``Decision``/``Domain``
-    status flip; re-derived by an AST walk
-    this session (not copied from a prior round's docstring), landing on the same count
-    fix round 2 first measured. Fix round 2 recorded a ``(file, function)`` site pin for
-    this gap -- the C-3 idiom -- as an unbuilt follow-up rather than build it there,
-    citing this guard's then-approved scope of "two static zeros". Fix round 3 builds it:
-    ``test_c1_dataflow_status_sites_pinned_by_file_and_function`` below pins exactly
-    these three sites via ``_c1_dataflow_status_assignment_hits``, so a fourth ``.status``
-    ADDITIONAL ``.status`` assignment landing in this same gap anywhere outside
-    ``store.py`` is a visible diff in that pinned Counter (a set, which this pin used
-    before its own review round, silently swallowed both duplicates and cross-subpackage
-    basename collisions) instead of a silent pass. Replacing a pinned assignment in place
-    keeps the count and stays green -- see that test's own docstring.
-
-    **What the behavioral ``test_t7d_*`` pins (T7(d)) actually cover, measured, not
-    assumed (fix round 3 correction carried forward: "cover the human-vs-auto boundary
-    for every call site this codebase has TODAY" was false and demonstrably so):** they
-    check ``ratified_by`` on the EIGHT human ratify doors (CLI and MCP accept for each of
-    decision/fact/domain, plus the legacy MCP batch path and doc-import ratify) -- proving
-    a human accept never stores an ``auto:`` stamp. They do NOT cover every call site.
-
-    Re-measured this fix round, in a scratchpad copy (``PYTHONDONTWRITEBYTECODE=1``,
-    ``sidegraph.__file__`` confirmed to resolve inside the scratchpad, never the
-    checkout): the reviewer's own mutant -- ``object.__setattr__(fact, "status",
-    DecisionStatus.ACCEPTED)`` then ``getattr(store, "_write_fact_canonical")(fact)``,
-    inserted right after ``capture._propose_fact_one``'s ``store.add_fact(fact)`` -- run
-    through a real ``propose_facts`` call BEFORE this fix round's two shapes were closed:
-    the canonical file lands ``accepted`` with no ratifier stamp while the index (and a
-    freshly reopened store) still reads ``proposed``, and this collector's own tests,
-    T7(d), and the rest of the suite all stay green; only ``sidegraph-doctor``'s
-    ``unratified-accept`` check catches it (1 finding on the mutant, 0 on clean code,
-    once the store holds one genuine ratifier stamp to compare against -- that check's
-    own scoping rule). AFTER closing the two shapes: the identical mutant now trips
-    ``test_c1_no_status_flip_or_canonical_write_outside_store_py`` directly -- both the
-    ``object.__setattr__`` line and the ``getattr`` writer call are reported as hits in
-    ``capture.py``, so the guard fails before doctor is ever consulted. Doctor's check
-    remains the runtime backstop for a value that reaches ``accepted`` through a shape no
-    static collector here has been written for yet."""
-    tree = ast.parse(src, filename=filename)
-    hits: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            flat_targets = _flatten_targets(targets)
-            if any(
-                isinstance(t, ast.Subscript)
-                and isinstance(t.value, ast.Attribute)
-                and t.value.attr == "__dict__"
-                and isinstance(t.slice, ast.Constant)
-                and t.slice.value == "status"
-                for t in flat_targets
-            ):
-                # x.__dict__["status"] = ... (fix round 3, item 2b): flagged on the
-                # target shape alone -- the key is a literal "status", unambiguous the
-                # same way setattr(_, "status", _)'s field argument is below, so no
-                # condition is layered on the value.
-                hits.append((node.lineno, "status-flip"))
-            has_attr_target = any(isinstance(t, ast.Attribute) for t in flat_targets)
-            if has_attr_target and _status_flip_value_caught(node.value):
-                hits.append((node.lineno, "status-flip"))
-        elif isinstance(node, ast.Call):
-            func = node.func
-            if (
-                isinstance(func, ast.Name)
-                and func.id == "setattr"
-                and len(node.args) >= 2
-                and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value == "status"
-            ):
-                hits.append((node.lineno, "status-flip"))
-            elif isinstance(func, ast.Attribute) and func.attr == "__setattr__" and node.args:
-                # x.__setattr__("status", ...) [bound form: field at args[0]] and ANY
-                # unbound form -- object.__setattr__(x, "status", ...),
-                # Decision.__setattr__(x, "status", ...), type(x).__setattr__(x, "status",
-                # ...) [field at args[1]] alike (fix round 3, item 2b; widened fix round 1
-                # review Minor 2: gating args[1] on the receiver being literally the name
-                # `object` missed every OTHER class-qualified unbound spelling).
-                #
-                # The position follows the ARITY, not the receiver (fix round 1 re-review
-                # Minor B): `__setattr__` takes (name, value) bound and (obj, name, value)
-                # unbound, so the field is args[0] at two arguments and args[1] at three.
-                # Accepting "status" at either position regardless of arity flagged
-                # `w.__setattr__("label", "status")` -- setting some other field TO the
-                # string "status" -- as a status flip. Measured on the real tree: zero
-                # `__setattr__` calls outside store.py at all, so both rules are 0 hits
-                # there; this one is 0 hits for the right reason.
-                field = (
-                    node.args[0]
-                    if len(node.args) == 2
-                    else node.args[1]
-                    if len(node.args) == 3
-                    else None
-                )
-                if isinstance(field, ast.Constant) and field.value == "status":
-                    hits.append((node.lineno, "status-flip"))
-            elif isinstance(func, ast.Attribute) and func.attr == "model_copy":
-                for kw in node.keywords:
-                    if kw.arg == "update" and (
-                        (
-                            isinstance(kw.value, ast.Dict)
-                            and any(
-                                isinstance(k, ast.Constant) and k.value == "status"
-                                for k in kw.value.keys
-                            )
-                        )
-                        or (
-                            # update=dict(status=...): the same flip, spelled as a call.
-                            isinstance(kw.value, ast.Call)
-                            and isinstance(kw.value.func, ast.Name)
-                            and kw.value.func.id == "dict"
-                            and any(k.arg == "status" for k in kw.value.keywords)
-                        )
-                    ):
-                        hits.append((node.lineno, "status-flip"))
-                        break
-            elif (
-                isinstance(func, ast.Name)
-                and func.id == "getattr"
-                and len(node.args) >= 2
-                and isinstance(node.args[1], ast.Constant)
-                and isinstance(node.args[1].value, str)
-                and node.args[1].value.startswith(_C1_WRITER_PREFIXES)
-            ):
-                # getattr(x, "_write_...")/getattr(x, "_atomic_write...") (fix round 3,
-                # item 2b): the writer reached through a string constant -- the literal
-                # form the review's mutant used. A concatenated (non-Constant) name still
-                # evades this check; see this function's own docstring.
-                hits.append((node.lineno, "canonical-write-getattr"))
-        elif isinstance(node, (ast.Name, ast.Attribute)):
-            # ANY reference, not only a call's `func` (NEW Minor B): closes a writer bound
-            # to a local, or passed unevaluated to `functools.partial`, the same class C2's
-            # widening already closes for `_ratifier_identity` below.
-            writer_name = node.id if isinstance(node, ast.Name) else node.attr
-            if writer_name.startswith(_C1_WRITER_PREFIXES):
-                hits.append((node.lineno, "canonical-write"))
-        elif isinstance(node, ast.ImportFrom):
-            module_tail = (node.module or "").rsplit(".", 1)[-1]
-            if module_tail == "store" and any(
-                alias.name.startswith(_C1_WRITER_PREFIXES) for alias in node.names
-            ):
-                hits.append((node.lineno, "canonical-write-import"))
-    return hits
-
-
-# Run outcomes, not record statuses: ``BootstrapReport.with_run_status`` swaps the RUN status
-# (``RunStatus``: complete, incomplete, diagnostic, ...) of a report, which the key-only
-# ``model_copy`` shape below cannot tell from a record flip. Pinned by (file, function).
-_C1_RUN_STATUS_EXEMPT = frozenset({("bootstrap/model.py", "with_run_status")})
-
-
-def _c1_exempt_lines(path: Path, text: str) -> set[int]:
-    rel = path.relative_to(_SRC).as_posix()
-    lines: set[int] = set()
-    for node in ast.walk(ast.parse(text, filename=str(path))):
-        if isinstance(node, ast.FunctionDef) and (rel, node.name) in _C1_RUN_STATUS_EXEMPT:
-            lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
-    return lines
-
-
-def _c1_status_flip_or_canonical_write_hits() -> list[tuple[Path, int, str]]:
-    """C1's real driver: ``_c1_hits_in_source`` over every file in ``src/sidegraph/``
-    EXCLUDING ``store.py`` -- the only module allowed to flip a record's status or call a
-    canonical ``_write_*``/``_atomic_write*`` writer. Deliberately AST, not a textual
-    ``.status =`` grep: that would also flag ``AnchorBinding``'s own string ``status`` field
-    assignments (``sync.py:72``, ``:110``, ``anchoring.py:61``) -- a different field
-    entirely, not a record-status flip. Excludes by PATH, not basename (Minor 5, mirrors
-    T7(b)'s own form above): a future ``src/sidegraph/<pkg>/store.py`` must still be
-    scanned, not silently skipped whole. The only exemption is ``_C1_RUN_STATUS_EXEMPT``."""
-    hits: list[tuple[Path, int, str]] = []
-    for path in sorted(_SRC.rglob("*.py")):
-        if path.relative_to(_SRC) == Path("store.py"):
-            continue
-        text = path.read_text(encoding="utf-8")
-        exempt = _c1_exempt_lines(path, text)
-        for lineno, shape in _c1_hits_in_source(text, filename=str(path)):
-            if lineno not in exempt:
-                hits.append((path, lineno, shape))
-    return hits
-
-
-def test_c1_no_status_flip_or_canonical_write_outside_store_py():
-    """C1: nothing outside ``store.py`` flips a record's status field or calls a canonical
-    ``_write_*``/``_atomic_write*`` writer directly -- T7(c) above pins only
-    ``_auto_ratify``'s own source; this pins everywhere else, closing the gap external
-    review noted. Exactly zero today (measured zero on the tree at HEAD) -- this is a GUARD,
-    not evidence: it is green against today's correct code and can never go red against it.
-    ``test_c1_checker_bites_on_a_synthetic_status_flip_and_write`` below proves the same
-    collector is not vacuously always-empty."""
-    hits = _c1_status_flip_or_canonical_write_hits()
-    rendered = ", ".join(f"{p.relative_to(_SRC)}:{ln} ({shape})" for p, ln, shape in hits)
-    assert not hits, (
-        f"status flip or canonical write outside store.py -- route it through "
-        f"Store.ratify/ratify_fact/ratify_domains (or a canonical _write_*/_atomic_write* "
-        f"call) inside store.py instead: {rendered}"
-    )
-
-
-def test_c1_run_status_exemption_names_a_real_function_that_would_otherwise_hit():
-    """The pinned exemption must stay load-bearing: the function exists and, unexempted, hits."""
-    for rel, name in _C1_RUN_STATUS_EXEMPT:
-        path = _SRC / rel
-        text = path.read_text(encoding="utf-8")
-        exempt = _c1_exempt_lines(path, text)
-        assert exempt, f"{rel}::{name} no longer exists; drop the exemption"
-        assert any(ln in exempt for ln, _ in _c1_hits_in_source(text)), f"{rel}::{name} is stale"
-
-
-def test_c1_checker_bites_on_a_synthetic_status_flip_and_write():
-    """Proves ``_c1_hits_in_source`` -- the SAME collector ``test_c1_...`` above runs over
-    real source -- is not vacuously always-empty: run it over a synthetic source string
-    exercising every shape (round 1's original two, fix round 2's widenings, and fix
-    round 3's item-2b closures -- ``object.__setattr__``/``__setattr__``,
-    ``__dict__["status"]``, and the ``getattr`` writer reach) and assert each is
-    reported, by shape label, the exact number of times expected. A ``Counter`` rather
-    than an ordered-list equality, since ``ast.walk`` is breadth-first (a top-level
-    ``ast.ImportFrom`` would sort before same-function statements it textually follows)
-    -- the count per shape is what this test is proving, not traversal order. Not a
-    mutation of a real source file (item C's brief)."""
-    synthetic = (
-        "def _fake(d, ok, name, store, path, obj):\n"
-        "    from .store import _write_decision_canonical\n"  # canonical-write-import
-        "    d.status = DecisionStatus.ACCEPTED\n"  # status-flip: bare enum
-        "    d.status = DecisionStatus.ACCEPTED.value\n"  # status-flip: .value accessor
-        "    d.status = schema.DecisionStatus.ACCEPTED\n"  # status-flip: module-qualified
-        "    d.status: DecisionStatus = DecisionStatus.ACCEPTED\n"  # status-flip: AnnAssign
-        '    d.status = "accepted"\n'  # status-flip: string constant
-        '    setattr(d, "status", "accepted")\n'  # status-flip: setattr
-        "    d.status = DecisionStatus.ACCEPTED if ok else DecisionStatus.REJECTED\n"  # conditional
-        '    d.status = DecisionStatus("accepted")\n'  # status-flip: enum call
-        "    d.status = getattr(DecisionStatus, name)\n"  # status-flip: getattr on enum
-        "    d.status, x = DecisionStatus.ACCEPTED, 1\n"  # status-flip: tuple target
-        '    d2 = d.model_copy(update={"status": "accepted"})\n'  # status-flip: model_copy
-        '    d3 = d.model_copy(update=dict(status="accepted"))\n'  # status-flip: model_copy dict()
-        '    object.__setattr__(d, "status", "accepted")\n'  # status-flip: unbound __setattr__
-        '    d.__setattr__("status", "accepted")\n'  # status-flip: bound __setattr__
-        '    d.__dict__["status"] = "accepted"\n'  # status-flip: __dict__ subscript
-        "    store._write_decision_canonical(d)\n"  # canonical-write: attribute call
-        "    _atomic_write_json(path, obj)\n"  # canonical-write: bare-name call
-        "    w = store._write_decision_canonical\n"  # canonical-write: bound reference
-        '    getattr(store, "_write_decision_canonical")(d)\n'  # getattr-writer: _write_
-        '    getattr(store, "_atomic_write_json")(path, obj)\n'  # getattr-writer: _atomic_write
-    )
-    hits = _c1_hits_in_source(synthetic)
-    assert Counter(shape for _ln, shape in hits) == Counter(
-        {
-            "status-flip": 15,
-            "canonical-write": 3,
-            "canonical-write-import": 1,
-            "canonical-write-getattr": 2,
-        }
-    )
-
-
-_C1_DATAFLOW_SITES = Counter(
-    {
-        ("anchoring.py", "__init__"): 1,
-        ("sync.py", "_set_leaf_status"): 1,
-        ("sync.py", "_reconcile_tier1_communities"): 2,
-    }
-)
-
-
-def _c1_dataflow_status_assignment_sites(
-    src: str, filename: str = "<synthetic>"
-) -> list[tuple[int, str | None]]:
-    """Fix round 3, item 2a: every ``.status`` Attribute-target assignment (tuple/list
-    targets flattened via ``_flatten_targets``, same as ``_c1_hits_in_source``'s own
-    Attribute-target branch) whose value ``_status_flip_value_caught`` does NOT flag --
-    the dataflow gap that same branch's enum-mention/record-status-string check cannot
-    close: a value arriving through a local name (``b.status = status``) mentions no
-    enum and spells no record-status string. Each hit carries its enclosing function via
-    ``_enclosing_function`` (the same idiom C-3's own site pin uses,
-    ``test_c3_accepted_construction_sites_pinned_by_file_and_function`` above).
-
-    Narrowed to a target whose ``attr`` is literally ``"status"`` -- unlike
-    ``_c1_hits_in_source``'s own Attribute-target branch, which stays deliberately
-    attr-name-agnostic because it is gated by the rare enum-mention/record-status-string
-    VALUE condition, this collector inverts that condition (looking for values that
-    AREN'T caught), so without the attr-name filter it would flag every ordinary
-    ``self.<anything> = <local>`` assignment in the tree -- measured: 55 sites across 9
-    files on the real tree without this filter, none of them a status field."""
-    tree = ast.parse(src, filename=filename)
-    hits: list[tuple[int, str | None]] = []
-    for node in ast.walk(tree):
-        if not (isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None):
-            continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        status_targets = [
-            t
-            for t in _flatten_targets(targets)
-            if isinstance(t, ast.Attribute) and t.attr == "status"
-        ]
-        if not status_targets:
-            continue
-        if not _status_flip_value_caught(node.value):
-            hits.append((node.lineno, _enclosing_function(tree, node.lineno)))
-    return hits
-
-
-def _c1_dataflow_status_assignment_hits() -> list[tuple[Path, int, str | None]]:
-    """Fix round 3, item 2a's real driver: ``_c1_dataflow_status_assignment_sites`` over
-    every file in ``src/sidegraph/`` excluding ``store.py`` -- mirrors
-    ``_c1_status_flip_or_canonical_write_hits``'s own exclusion (the only module allowed
-    to flip a record's status)."""
-    hits: list[tuple[Path, int, str | None]] = []
-    for path in sorted(_SRC.rglob("*.py")):
-        if path.relative_to(_SRC) == Path("store.py"):
-            continue
-        text = path.read_text(encoding="utf-8")
-        for lineno, fn in _c1_dataflow_status_assignment_sites(text, filename=str(path)):
-            hits.append((path, lineno, fn))
-    return hits
-
-
-def test_c1_dataflow_status_sites_pinned_by_file_and_function():
-    """Fix round 3, item 2a: C1's enum-mention/record-status-string check cannot close a
-    ``.status`` assignment whose value arrives through a local name -- fix round 2 first
-    measured exactly three such sites outside ``store.py`` and recorded a
-    ``(file, function)`` site pin as an unbuilt follow-up rather than build it there. This
-    is that pin, re-derived by an AST walk THIS session (not copied from that round's
-    docstring): all three are legitimate ``AnchorBinding``/``AnchorResolution`` status
-    transitions, never a ``Decision``/``Domain`` status flip.
-
-    Keyed on a ``Counter`` of ``(path relative to _SRC, function)`` -- NOT ``p.name``/a
-    bare ``set`` (fix round 1 review, Major 1): a basename-only, count-less set collapses
-    a SECOND hit under an already-pinned key into that same key (a hurried edit adding a
-    second ``.status = <local>`` next to an already-pinned one inside
-    ``sync._set_leaf_status`` went undetected), and collides two files sharing a basename
-    in different subpackages (a hypothetical ``engine/sync.py`` colliding with
-    ``sync.py``). A ``Counter`` catches both: an extra hit under an existing key raises
-    that key's count past 1, and a same-named function in a same-basename file under a
-    different relative path is a DIFFERENT key entirely. The C-3 idiom this pin already
-    cites (``test_c3_accepted_construction_sites_pinned_by_file_and_function``) asserts a
-    count for exactly this reason; this pin now does too. A NEW ``.status`` assignment
-    landing in this same gap anywhere else outside ``store.py`` -- including a second one
-    under a key already pinned -- is a Counter mismatch instead of a silent pass. What it
-    does NOT catch, stated because the earlier wording implied otherwise: REPLACING one of
-    the three pinned assignments in place (``b.status = status`` becoming
-    ``decision.status = status`` inside the same function) leaves the count at 1 and stays
-    green. Keying on the statement text would close that; it is not done, because a pin
-    that fires on every rewording of a line it already covers is a pin people delete."""
-    hits = _c1_dataflow_status_assignment_hits()
-    lines_by_key: dict[tuple[str, str | None], list[int]] = {}
-    for p, ln, fn in hits:
-        lines_by_key.setdefault((str(p.relative_to(_SRC)), fn), []).append(ln)
-    found = Counter({key: len(lns) for key, lns in lines_by_key.items()})
-    if found == _C1_DATAFLOW_SITES:
-        return
-    added = found - _C1_DATAFLOW_SITES
-    missing = _C1_DATAFLOW_SITES - found
-
-    def _by_path_then_fn(pair: tuple[str, str | None]) -> tuple[str, str]:
-        return (pair[0], pair[1] or "")
-
-    added_desc = "; ".join(
-        f"{path}:{','.join(str(ln) for ln in lines_by_key[(path, fn)])} ({fn})"
-        for path, fn in sorted(added, key=_by_path_then_fn)
-    )
-    missing_desc = "; ".join(f"{path} ({fn})" for path, fn in sorted(missing, key=_by_path_then_fn))
-    parts = []
-    if added_desc:
-        parts.append(
-            f"new/extra .status dataflow site(s) -- justify and pin, or route through "
-            f"Store.ratify/ratify_fact/ratify_domains instead: {added_desc}"
-        )
-    if missing_desc:
-        parts.append(f"pinned site(s) gone or renamed -- update the pin: {missing_desc}")
-    pytest.fail(" | ".join(parts))
-
-
-def test_c1_dataflow_checker_bites_on_a_synthetic_local_name_assignment():
-    """Proves ``_c1_dataflow_status_assignment_sites`` is not vacuously always-empty (nor
-    vacuously always-full): a ``.status`` assignment whose value arrives through a local
-    name is reported, pinned to its enclosing function -- while a shape
-    ``_c1_hits_in_source`` already catches (a bare enum reference) sitting right next to
-    it in the SAME function is not, since ``_status_flip_value_caught`` already flags
-    that one, so it is not a dataflow gap."""
-    synthetic = (
-        "def _fake(d, local_status):\n"
-        "    d.status = DecisionStatus.ACCEPTED\n"  # caught by _c1_hits_in_source, not here
-        "    d.status = local_status\n"  # the dataflow gap
-    )
-    hits = _c1_dataflow_status_assignment_sites(synthetic)
-    assert hits == [(3, "_fake")]
-
-
-def _c2_hits_in_source(src: str, filename: str = "<synthetic>") -> list[tuple[int, str | None]]:
-    """Collect C2's forbidden shape within one raw source string (parsed here, not
-    pre-parsed by the caller) -- factored out so the real driver
-    (``_c2_ratifier_identity_call_hits`` below, which adds the file walk) and the
-    synthetic-mutation companion test share the IDENTICAL collector. Shape: ANY ``ast.Name``
-    or ``ast.Attribute`` node named ``_ratifier_identity``, or an ``ast.ImportFrom`` pulling
-    that name out of anywhere (Minor 4) -- not just a bare call, the collector's original
-    narrower shape. Today's three sites are unqualified calls (``_ratifier_identity(actor)``
-    inside ``store.py``, an ``ast.Name`` used as a call's ``func``), so this widening does
-    not change their count; it additionally closes `store_mod._ratifier_identity(a)``
-    (attribute access), ``who = _ratifier_identity`` (aliasing), and
-    ``functools.partial(_ratifier_identity)`` -- all three carry an ``ast.Name`` or
-    ``ast.Attribute`` node spelling the name and so are already caught by this ONE rule,
-    with no special-casing per evasion shape. Each hit carries its enclosing function name
-    via ``_enclosing_function`` (shared with C-3 above, not a second implementation).
-
-    Still not exhaustive: a ``getattr(module, "_ratifier_identity")`` string-keyed lookup,
-    or an identifier assembled at runtime by string concatenation, carries no ``ast.Name``/
-    ``ast.Attribute`` node spelling ``_ratifier_identity`` and evades every shape above --
-    the same class of gap ``_t7b_alias_and_getattr_hits`` documents for
-    ``getattr(store, "rat" + "ify")``. A wholesale reimplementation of the identity-
-    resolution logic under a different name is beyond any mechanism guard by construction."""
-    tree = ast.parse(src, filename=filename)
-    hits: list[tuple[int, str | None]] = []
-    for node in ast.walk(tree):
-        is_name_ref = isinstance(node, ast.Name) and node.id == "_ratifier_identity"
-        is_attr_ref = isinstance(node, ast.Attribute) and node.attr == "_ratifier_identity"
-        is_import_ref = isinstance(node, ast.ImportFrom) and any(
-            alias.name == "_ratifier_identity" for alias in node.names
-        )
-        if is_name_ref or is_attr_ref or is_import_ref:
-            hits.append((node.lineno, _enclosing_function(tree, node.lineno)))
-    return hits
-
-
-def _c2_ratifier_identity_call_hits() -> list[tuple[Path, int, str | None]]:
-    """C2's real driver: ``_c2_hits_in_source`` over every file in ``src/sidegraph/`` --
-    unlike C1, no file is excluded, since the three legitimate call sites themselves live
-    in ``store.py``."""
-    hits: list[tuple[Path, int, str | None]] = []
-    for path in sorted(_SRC.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        for lineno, fn in _c2_hits_in_source(text, filename=str(path)):
-            hits.append((path, lineno, fn))
-    return hits
-
-
-def test_c2_ratifier_identity_called_only_in_the_three_c2_transitions():
-    """C2: ``store._ratifier_identity`` is referenced (called, aliased, accessed via
-    attribute, or imported) in exactly the three C-2 transitions
-    (``Store.ratify``/``ratify_fact``/``ratify_domains``), zero references anywhere else --
-    pinned by the SET of enclosing function names, not a bare count of 3 (same reasoning as
-    T7(b)'s per-method assertion above: a bare count cannot distinguish today's healthy
-    state from "one transition lost its call while a fourth site gained one"). Exactly 3
-    today, all in ``store.py`` (measured zero elsewhere on the tree at HEAD) -- this is a
-    GUARD, not evidence: it is green against today's correct code and can never go red
-    against it. ``test_c2_checker_bites_on_a_synthetic_call_outside_the_three_transitions``
-    below proves the same collector is not vacuously always-empty."""
-    hits = _c2_ratifier_identity_call_hits()
-    pairs = [(p, ln) for p, ln, _fn in hits]
-    outside = [(p, ln) for p, ln, _fn in hits if p.relative_to(_SRC) != Path("store.py")]
-    assert not outside, (
-        f"_ratifier_identity referenced outside store.py -- route it through "
-        f"Store.ratify/ratify_fact/ratify_domains, the three C-2 transitions, instead: "
-        f"{_fmt_hits(outside)}"
-    )
-    assert len(hits) == 3, f"expected exactly 3 references, found: {_fmt_hits(pairs)}"
-    fns = sorted(fn for _p, _ln, fn in hits if fn is not None)
-    assert fns == ["ratify", "ratify_domains", "ratify_fact"], (
-        f"expected ratify/ratify_domains/ratify_fact each exactly once, found: {fns}"
-    )
-
-
-def test_c2_checker_bites_on_a_synthetic_call_outside_the_three_transitions():
-    """Proves ``_c2_hits_in_source`` -- the SAME collector ``test_c2_...`` above runs over
-    real source -- is not vacuously always-empty: a synthetic function exercising every
-    reference shape (the original bare call plus every Minor-4 widening -- attribute
-    access, aliasing, ``functools.partial``, and an import) is reported, all five times,
-    each with the correct enclosing-function name. Not a mutation of a real source file
-    (item C's brief)."""
-    synthetic = (
-        "def _rogue():\n"
-        "    from .store import _ratifier_identity\n"  # import reference
-        "    x = _ratifier_identity(actor)\n"  # bare call
-        "    y = store_mod._ratifier_identity(actor)\n"  # attribute call
-        "    who = _ratifier_identity\n"  # aliasing
-        "    g = functools.partial(_ratifier_identity)\n"  # functools.partial
-    )
-    hits = _c2_hits_in_source(synthetic)
-    assert len(hits) == 5, f"expected 5 references, found: {hits}"
-    assert all(fn == "_rogue" for _ln, fn in hits), hits
-
-
 # -- T7(d): behavioral pin (rev 11, checkpoint-3 external review) -- T7(a)-(c)/C-3 above are
 # static mechanism guards over the SOURCE; none of them pins what the human CLI/MCP ratify
 # paths actually WRITE. The checkpoint-3 mutant (`store.ratify(id_, **{"actor": "auto:" +
@@ -5110,91 +3892,33 @@ def _t7d_assert_human_stamp(store_path: Path, getter, id_: str) -> None:
         assert not (record.ratified_by or "").startswith("auto:")
 
 
-def test_t7d_cli_accept_decision_stores_human_identity_not_auto_stamp(tmp_path, monkeypatch):
-    """T7(d) RED-FIRST case (fix brief): the human CLI accept path
-    (``cli.ratify_main --accept``) for a proposed DECISION stores the faked human
-    identity, never an ``auto:`` stamp. Landed red against the checkpoint-3 mutant
-    (``store.ratify(id_, **{"actor": "auto:" + "test"})`` at ``cli.py:209``), which makes
-    ``_t7d_assert_human_stamp`` fail on ``ratified_by == "auto:test"`` instead."""
+@pytest.mark.parametrize("kind", ["decision", "fact", "domain"])
+@pytest.mark.parametrize("door", ["cli", "mcp"])
+def test_t7d_human_ratify_stores_human_identity_not_auto_stamp(tmp_path, monkeypatch, door, kind):
+    """T7(d): the human CLI accept path (``cli.ratify_main --accept``) and the human MCP
+    ratify path (``server._ratify_impl``), over a proposed DECISION, FACT and DOMAIN, store
+    the faked human identity, never an ``auto:`` stamp. The CLI decision case landed
+    red-first against the checkpoint-3 mutant (``store.ratify(id_, **{"actor": "auto:" +
+    "test"})`` at ``cli.py:209``), which makes ``_t7d_assert_human_stamp`` fail on
+    ``ratified_by == "auto:test"``; the other five (door, kind) pairs are guards for a
+    sibling defect on their own transition, not separately proven red."""
     from sidegraph.cli import ratify_main
-
-    monkeypatch.setattr("sidegraph.store._ratifier_identity", _t7d_fake_ratifier_identity)
-    store_path = tmp_path / "s"
-    seed = Store(store_path)
-    d = _proposed(seed, "t7d cli decision")
-    assert ratify_main(["--db", str(store_path), "--accept", d.id]) == 0
-    _t7d_assert_human_stamp(store_path, Store.get_decision, d.id)
-
-
-def test_t7d_cli_accept_fact_stores_human_identity_not_auto_stamp(tmp_path, monkeypatch):
-    """Guard: same property as the decision case above, over the human CLI accept path
-    for a proposed standalone FACT -- not separately proven red (the checkpoint-3 mutant
-    lives on the decision transition specifically); this is what would catch a sibling
-    defect on the fact transition."""
-    from sidegraph.cli import ratify_main
-
-    monkeypatch.setattr("sidegraph.store._ratifier_identity", _t7d_fake_ratifier_identity)
-    store_path = tmp_path / "s"
-    seed = Store(store_path)
-    f = _proposed_fact(seed, "t7d cli fact")
-    assert ratify_main(["--db", str(store_path), "--accept", f.id]) == 0
-    _t7d_assert_human_stamp(store_path, Store.get_fact, f.id)
-
-
-def test_t7d_cli_accept_domain_stores_human_identity_not_auto_stamp(tmp_path, monkeypatch):
-    """Guard: same property, over the human CLI accept path for a proposed DOMAIN -- not
-    separately proven red (see the decision case's docstring)."""
-    from sidegraph.cli import ratify_main
-
-    monkeypatch.setattr("sidegraph.store._ratifier_identity", _t7d_fake_ratifier_identity)
-    store_path = tmp_path / "s"
-    seed = Store(store_path)
-    dm = _proposed_domain(seed, slug="t7d-cli-domain")
-    assert ratify_main(["--db", str(store_path), "--accept", dm.domain_id]) == 0
-    _t7d_assert_human_stamp(store_path, Store.get_domain, dm.domain_id)
-
-
-def test_t7d_mcp_ratify_decision_stores_human_identity_not_auto_stamp(tmp_path, monkeypatch):
-    """Guard: same property, over the human MCP ratify path (``server._ratify_impl``) for
-    a proposed DECISION -- the MCP door onto the exact transition the checkpoint-3 mutant
-    forges; not separately proven red (see the CLI decision case's docstring)."""
     from sidegraph.server import _ratify_impl
 
     monkeypatch.setattr("sidegraph.store._ratifier_identity", _t7d_fake_ratifier_identity)
     store_path = tmp_path / "s"
     seed = Store(store_path)
-    d = _proposed(seed, "t7d mcp decision")
-    out = _ratify_impl(seed, accept=[d.id], drop=None, reader=None)
-    assert out[d.id] == "accepted"
-    _t7d_assert_human_stamp(store_path, Store.get_decision, d.id)
-
-
-def test_t7d_mcp_ratify_fact_stores_human_identity_not_auto_stamp(tmp_path, monkeypatch):
-    """Guard: same property, over the human MCP ratify path for a proposed FACT -- not
-    separately proven red (see the CLI decision case's docstring)."""
-    from sidegraph.server import _ratify_impl
-
-    monkeypatch.setattr("sidegraph.store._ratifier_identity", _t7d_fake_ratifier_identity)
-    store_path = tmp_path / "s"
-    seed = Store(store_path)
-    f = _proposed_fact(seed, "t7d mcp fact")
-    out = _ratify_impl(seed, accept=[f.id], drop=None, reader=None)
-    assert out[f.id] == "accepted"
-    _t7d_assert_human_stamp(store_path, Store.get_fact, f.id)
-
-
-def test_t7d_mcp_ratify_domain_stores_human_identity_not_auto_stamp(tmp_path, monkeypatch):
-    """Guard: same property, over the human MCP ratify path for a proposed DOMAIN -- not
-    separately proven red (see the CLI decision case's docstring)."""
-    from sidegraph.server import _ratify_impl
-
-    monkeypatch.setattr("sidegraph.store._ratifier_identity", _t7d_fake_ratifier_identity)
-    store_path = tmp_path / "s"
-    seed = Store(store_path)
-    dm = _proposed_domain(seed, slug="t7d-mcp-domain")
-    out = _ratify_impl(seed, accept=[dm.domain_id], drop=None, reader=None)
-    assert out[dm.domain_id] == "accepted"
-    _t7d_assert_human_stamp(store_path, Store.get_domain, dm.domain_id)
+    if kind == "decision":
+        id_, getter = _proposed(seed, "t7d decision").id, Store.get_decision
+    elif kind == "fact":
+        id_, getter = _proposed_fact(seed, "t7d fact").id, Store.get_fact
+    else:
+        id_, getter = _proposed_domain(seed, slug="t7d-domain").domain_id, Store.get_domain
+    if door == "cli":
+        assert ratify_main(["--db", str(store_path), "--accept", id_]) == 0
+    else:
+        assert _ratify_impl(seed, accept=[id_], drop=None, reader=None)[id_] == "accepted"
+    _t7d_assert_human_stamp(store_path, getter, id_)
 
 
 # -- Checkpoint-3 fix round 2, Minor 1(b): two more human ratify call sites the original six

@@ -37,5 +37,5 @@ End with a summary table: answer id → correctness, rubric_hits, #false_claims,
 
 ---
 
-**Effort:** one judge run per bundle, ~$5–10 at 32 answers. Use the strongest model you
+**Effort:** one judge run per bundle. A bundle is one question/repeat (two blinded answers), so the battery is 32 bundles; at roughly $5–10 per 32 answers that is about $10–20 for all of them. Use the strongest model you
 have; a weak judge is the cheapest way to get a wrong result.

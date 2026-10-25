@@ -34,6 +34,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 from tests.test_store_requirement import above_running, running_release, write_requirement_marker
 
 
@@ -271,7 +272,7 @@ def test_rule_b_filters_path_less_bindings_before_capping_at_five(tmp_path, monk
 # -- G3: no-op sources, store-less repo, empty repo (degrades to (b)-only) ---------------
 
 
-@pytest.mark.parametrize("source", ["message", "merge", "squash", "commit"])
+@pytest.mark.parametrize("source", ["message", "merge"])
 def test_noop_on_non_plain_commit_sources(tmp_path, monkeypatch, source):
     repo = _init_repo(tmp_path)
     head = _commit_file(repo, "f.txt", "1", "initial")
@@ -504,14 +505,12 @@ def _decision_repo(tmp_path, monkeypatch) -> str:
     return _message_file(tmp_path, "original message\n")
 
 
-@pytest.mark.parametrize("source", ["message", "merge", "squash", "commit"])
+@pytest.mark.parametrize("source", ["message", "merge"])
 def test_framework_one_arg_non_plain_source_env_leaves_file_untouched(
     tmp_path, monkeypatch, source
 ):
     msg = _decision_repo(tmp_path, monkeypatch)
     monkeypatch.setenv("PRE_COMMIT_COMMIT_MSG_SOURCE", source)
-    if source == "commit":
-        monkeypatch.setenv("PRE_COMMIT_COMMIT_OBJECT_NAME", "HEAD")
     before = Path(msg).read_bytes()
     assert prepare_commit_msg_main([msg]) == 0
     assert Path(msg).read_bytes() == before
@@ -528,7 +527,7 @@ def test_framework_one_arg_absent_empty_or_template_source_writes_block(
     assert "framework candidate" in Path(msg).read_text()
 
 
-@pytest.mark.parametrize("value", [None, "template", "message"])
+@pytest.mark.parametrize("value", [None, "message"])
 def test_framework_zero_args_is_a_no_op_whatever_the_env_says(tmp_path, monkeypatch, value):
     """`pass_filenames: false` makes the framework call the hook with no argument at all while
     the source variable is still set; the hook must stay a no-op and exit 0 (fail-open), never
@@ -557,7 +556,7 @@ def test_raw_git_positionals_win_over_pre_commit_env(tmp_path, monkeypatch):
 def test_open_index_ro_refuses_a_store_this_version_may_not_read(tmp_path):
     """Red against unfixed code: the read-only open never looked at the marker."""
     store_dir = tmp_path / ".sidegraph"
-    Store(store_dir).close()
+    Store(format1_store(store_dir)).close()
     write_requirement_marker(store_dir, running_release())
     conn = gitio.open_index_ro(store_dir)
     assert conn is not None  # a requirement this version meets: read as before

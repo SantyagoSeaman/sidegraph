@@ -90,7 +90,9 @@ def test_six_sessions_in_one_day_are_reported_as_too_few_days_not_as_a_ratio(tmp
     assert "sidegraph-init" in text, "no graph in this fixture"
 
 
-def test_the_same_store_a_few_days_later_renders_its_ratios(tmp_path):
+def test_the_same_store_a_few_days_later_renders_its_ratios_and_a_per_session_delivery_count(
+    tmp_path,
+):
     text = _text(_fixture(tmp_path, journal_age=timedelta(days=5)))
     assert "ACTIVATION" in text
     assert "6 of 6 sessions" in text
@@ -99,6 +101,13 @@ def test_the_same_store_a_few_days_later_renders_its_ratios(tmp_path):
     assert "no recorded showing, all time: 0 of 1 decisions and facts (0%)" in text
     assert "1 file touched, 1 with memory anchored to it (100%)" in text
     assert "sidegraph-init" in text, "no graph in this fixture"
+
+    # The delivery count is per session, so one record shown in six sessions counts six times,
+    # while the line below `1 of 1 decisions and facts` counts distinct records. Dividing one by
+    # the other means nothing, and only the line itself is in front of the reader.
+    (line,) = [ln for ln in text.splitlines() if "per session that got any" in ln]
+    assert "6 showings" in line and "repeats counted" in line, line
+    assert "record" not in line, "a noun the denominator below also uses invites the division"
 
 
 def test_a_file_bound_only_to_a_fact_is_reported_as_carrying_memory_not_a_decision(tmp_path):
@@ -151,14 +160,3 @@ def test_a_record_shown_while_recording_was_off_is_not_reported_as_never_shown(
     (line,) = [ln for ln in text.splitlines() if "1 of 1 decisions and facts" in ln]
     assert "never" not in line and "not shown" not in line, line
     assert "no recorded showing" in line, line
-
-
-def test_one_record_delivered_in_six_sessions_is_not_worded_as_six_records(tmp_path):
-    """The delivery count is per session, so one record shown in six sessions counts six times,
-    while two blocks lower `1 of 1 decisions and facts` counts distinct records. Dividing one by
-    the other means nothing, and only the line itself is in front of the reader."""
-    text = _text(_fixture(tmp_path, journal_age=timedelta(days=5)))
-
-    (line,) = [ln for ln in text.splitlines() if "per session that got any" in ln]
-    assert "6 showings" in line and "repeats counted" in line, line
-    assert "record" not in line, "a noun the denominator below also uses invites the division"

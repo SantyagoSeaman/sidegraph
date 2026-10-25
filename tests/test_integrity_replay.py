@@ -19,7 +19,7 @@ from sidegraph import githooks
 from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.schema import AnchorBinding, Descriptor, Entity
 from sidegraph.store import Store
-from tests.test_graph_freshness import T_AFTER, head, stale_repo, write_graph
+from tests.graph_repo_support import T_AFTER, head, stale_repo, write_graph
 from tests.test_host_integrity import NOTICE_KEY, _proposal, start
 from tests.test_integrity import add_record
 

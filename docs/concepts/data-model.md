@@ -69,7 +69,9 @@ is not repaired in place; the store is append-only. See
 
 Invariants enforced on write (`store.add_decision`): `valid_to >= valid_from`; a decision that
 supersedes another closes the predecessor (`valid_to` set, `status` flipped to `superseded`)
-in the same write; nothing is ever hard-deleted.
+in the same write; nothing is ever hard-deleted. The exception is an imported, edited ADR that
+arrives as a `proposed` successor: the accepted predecessor stays open (`accepted`, no
+`valid_to`) until the successor is ratified, and is closed then.
 
 ### Example `Decision` (illustrative values)
 
@@ -249,7 +251,8 @@ for how this differs from a `Domain`.
 
 `SCHEMA_VERSION` (currently `0.6.0`, defined in `store_layout.py` and re-exported by
 `schema.py`) names the record/table layout. The index's `meta.schema_version` is `0.6.0`
-without a minimum Sidegraph requirement, or `0.6.0+requires` with one. A full reload and an
+without a minimum Sidegraph requirement, or `0.6.0+requires` with one. A format-2 store (packed shards, since 0.17.0) has its index
+stamped `0.7.0+format2` instead. A full reload and an
 explicit requirement raise set the stamp from the marker. The fast freshness path checks
 that expected stamp: the other accepted stamp triggers a reload, and an unknown stamp is
 refused. `_RELOADABLE_SCHEMA_VERSIONS` (`0.4.0`, `0.5.0`, whose canonical files are fully
@@ -265,7 +268,10 @@ file-per-record layout, stamped at the running code's current `SCHEMA_VERSION`; 
 file is renamed to `<name>.migrated-backup` (never deleted) rather than removed. Both `0.2.0`
 and `0.3.0` sources go through this same export, not a stamp-only rewrite — see
 [store format: migration to schema 0.4.0](../reference/store-format.md#migration-to-schema-040-from-schema-02x-and-03x)
-for the full four-step sequence. Any other mismatch (a version older than `0.2.0`, a
+for the full four-step sequence. From 0.17 there is a second, explicit transition, `sidegraph-migrate`, which packs the
+per-record files into `shards/` (format 2); the old layout stays served until you run it, and the
+records keep their content byte for byte (see the
+[migration guide](../guides/migrating-to-0.17.md)). Any other mismatch (a version older than `0.2.0`, a
 newer/future version, or an unrecognized string) is a hard rejection: use a fresh store.
 
 ## `Initiative` — the Tier-0 grouping container

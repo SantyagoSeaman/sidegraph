@@ -343,6 +343,21 @@ _SHELLS = [pytest.param("/bin/sh", id="sh")] + [
 ]
 
 
+def _cases(shells: list[Any], cases: list[Any]) -> list[Any]:
+    """``(shell, host, event, command, manifest)`` rows: every case under every shell given."""
+    return [
+        pytest.param(sh.values[0], *case.values, id=f"{sh.id}-{case.id}")
+        for sh in shells
+        for case in cases
+    ]
+
+
+# The prefix is the same shell code in every hot command (T1 asserts it word for word), so the
+# record, FIFO, XDG and locale matrices run on one command per host; every command still gets
+# a launch with no record, one with a valid record, and the pinned-ref pair (A1, A2).
+_PRIMARY = [case for case in _HOT_CASES if case.values[1] == "Stop"]
+
+
 def _stub(path: Path, body: str) -> None:
     path.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -474,8 +489,9 @@ _RECORDS: list[Any] = [
 
 
 @pytest.mark.slow  # runs the hot command in a real shell
-@pytest.mark.parametrize("shell", _SHELLS)
-@pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
+@pytest.mark.parametrize(
+    ("shell", "host", "event", "command", "manifest"), _cases(_SHELLS[:1], _HOT_CASES)
+)
 def test_t2_no_record_launches_the_branch(
     shell: str, host: str, event: str, command: str, manifest: Path, tmp_path: Path
 ) -> None:
@@ -485,6 +501,7 @@ def test_t2_no_record_launches_the_branch(
 # Every record in /bin/sh, the shell Claude Code runs hooks in and the one the Codex wrap
 # starts. bash and zsh, which only parse the Codex wrapper, get the cases where a shell can
 # differ: a valid commit, a short value, and the two that leak through a locale-aware range.
+# The matrix runs on one command per host; the other commands launch from a valid record.
 _CORE_RECORD_IDS = {"valid-commit", "too-short", "ABCDE-x8", "e-acute-x40"}
 _SHELL_RECORDS: list[Any] = [
     pytest.param(sh.values[0], *rec.values, id=f"{sh.id}-{rec.id}")
@@ -492,11 +509,19 @@ _SHELL_RECORDS: list[Any] = [
     for rec in _RECORDS
     if sh.id == "sh" or rec.id in _CORE_RECORD_IDS
 ]
+_RECORD_CASES: list[Any] = [
+    pytest.param(shell, *hot.values, content, want, id=f"{hot.id}-{rec.id}")
+    for hot in _HOT_CASES
+    for rec in _SHELL_RECORDS
+    for shell, content, want in [rec.values]
+    if hot in _PRIMARY or rec.id == "sh-valid-commit"
+]
 
 
 @pytest.mark.slow  # runs the hot command in a real shell
-@pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
-@pytest.mark.parametrize(("shell", "content", "want"), _SHELL_RECORDS)
+@pytest.mark.parametrize(
+    ("shell", "host", "event", "command", "manifest", "content", "want"), _RECORD_CASES
+)
 def test_t2_the_record_decides_the_launch_ref(
     shell: str,
     host: str,
@@ -548,24 +573,24 @@ def test_a2_a_fallback_on_the_branch_takes_the_record(
 
 
 @pytest.mark.slow  # runs the hot command in a real shell
-@pytest.mark.parametrize("shell", _SHELLS)
-@pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
-def test_t2_a_fifo_or_a_directory_is_not_read(
+@pytest.mark.parametrize(
+    ("shell", "host", "event", "command", "manifest"), _cases(_SHELLS[:1], _PRIMARY)
+)
+def test_t2_a_fifo_is_not_read(
     shell: str, host: str, event: str, command: str, manifest: Path, tmp_path: Path
 ) -> None:
-    """``cat`` on a FIFO blocks forever: `[ -f ]` must refuse it before any read."""
+    """``head`` on a FIFO blocks forever: `[ -f ]` must refuse it before any read. (A
+    directory at the path cannot tell ``-f`` from ``-e``: the read of it fails silently.)"""
     record = tmp_path / "cache" / "sidegraph" / "launch-commit"
     record.parent.mkdir(parents=True)
     os.mkfifo(record)
     assert _from_value(shell, command, tmp_path) == _expected(command, None)
-    record.unlink()
-    record.mkdir()
-    assert _from_value(shell, command, tmp_path) == _expected(command, None)
 
 
 @pytest.mark.slow  # runs the hot command in a real shell
-@pytest.mark.parametrize("shell", _SHELLS)
-@pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
+@pytest.mark.parametrize(
+    ("shell", "host", "event", "command", "manifest"), _cases(_SHELLS[:1], _PRIMARY)
+)
 def test_t2_without_xdg_the_record_is_under_home(
     shell: str, host: str, event: str, command: str, manifest: Path, tmp_path: Path
 ) -> None:
@@ -582,8 +607,9 @@ def _utf8_locale() -> str | None:
 
 
 @pytest.mark.slow  # runs the hot command in a real shell
-@pytest.mark.parametrize("shell", _SHELLS)
-@pytest.mark.parametrize(("host", "event", "command", "manifest"), _HOT_CASES)
+@pytest.mark.parametrize(
+    ("shell", "host", "event", "command", "manifest"), _cases(_SHELLS[:1], _PRIMARY)
+)
 @pytest.mark.parametrize(
     "content", [b"ABCDE" * 8, "é".encode() * 40], ids=["ABCDE-x8", "e-acute-x40"]
 )

@@ -29,6 +29,9 @@ from sidegraph.schema import Descriptor, Entity, EntityKind
 from sidegraph.store import Store
 
 _WAIT_TIMEOUT = 2.0
+# How long A waits for B to reach its own lookup. Against fixed code B never does, so this is
+# pure dead time on every green run; against unfixed code the marker fires within milliseconds.
+_B_LOOKUP_WAIT = 0.4
 
 
 class _MarkerProxy:
@@ -85,7 +88,7 @@ def _race_two_stores(tmp_path, marker: str, call_a, call_b):
         # marker a chance to fire, and the shorter it is, the less exposure to contention
         # inflating how long A holds the write lock before fixed code's B can acquire it.
         go_b.set()
-        b_reached_lookup.wait(_WAIT_TIMEOUT)
+        b_reached_lookup.wait(_B_LOOKUP_WAIT)
 
     def _on_b_marker() -> None:
         b_reached_lookup.set()

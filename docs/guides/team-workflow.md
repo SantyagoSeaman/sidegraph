@@ -1,16 +1,18 @@
 # Running Sidegraph in a team
 
 Commit the decision store in version control alongside the code and docs it describes.
-Each `Decision`, `Fact`, `Domain`, durable `Entity`, and anchor set is a small text file,
-so changes can be reviewed and merged using the team's usual git workflow. See
+Each `Decision`, `Fact`, `Domain`, durable `Entity`, and anchor set is a small text file
+(or, in a packed format-2 store, a line in a shard file), so changes can be reviewed and
+merged using the team's usual git workflow. See
 [`reference/store-format.md`](../reference/store-format.md) for the full on-disk layout.
 
 ## Commit the store
 
 The store lives at `.sidegraph/` (the `SIDEGRAPH_DIR` default — see
 [`reference/configuration.md`](../reference/configuration.md)), as a directory of small JSON
-files: one per decision, fact, domain, durable entity, and anchored record's binding set.
-Commit it like any other repo-owned artifact:
+files: one per decision, fact, domain, durable entity, and anchored record's binding set. A
+packed store (format 2, since 0.17) also holds `shards/`, where `sidegraph-compact` folds the
+settled ones. Commit it like any other repo-owned artifact:
 
 ```bash
 git add .sidegraph/
@@ -24,9 +26,9 @@ and anchor mappings are rebuilt from canonical files and the graph. Local retrie
 telemetry is not reconstructible; deleting the index loses those local statistics, but never
 loses the team's durable decisions or facts.
 
-The committed files under `decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`, and
-`initiatives/`, plus optional `archive/` segments, **are** the team's memory. Never
-`.gitignore` those paths, and never treat them as disposable local cache the way you
+The committed files under `decisions/`, `facts/`, `domains/`, `entities/`, `bindings/` and
+`initiatives/`, plus `shards/` in a packed store and optional `archive/` segments, **are** the
+team's memory. Never `.gitignore` those paths, and never treat them as disposable local cache the way you
 might Graphify's `graph.json` — that one really is regenerated on every build; the decision
 store is the opposite, deliberately durable, and is the one piece of Sidegraph's state that
 must survive a laptop being wiped.
@@ -60,7 +62,7 @@ code did ([CLI reference](../reference/cli.md#sidegraph-verify)).
 
 ## Ratification as part of PR review
 
-Because each decision is its own small file, a raw `git diff` on a branch that ratified
+Because each new decision is its own small file, a raw `git diff` on a branch that ratified
 something is directly readable — a PR that adds `decisions/01J8Z....json` reads as exactly
 what it is: a new gotcha, lesson, ADR, or constraint entering the team's memory, with its
 `rejected` field right there in the diff for a reviewer to weigh in on before it's permanent.
@@ -132,6 +134,13 @@ any other source file. There is no silent "last write wins" here, and there neve
 lose: the whole point of moving to file-per-record was making this kind of disagreement visible
 instead of an unmergeable binary diff.
 
+In a packed (format 2) store a record that maintenance has folded lives as a line in
+`shards/NN.shard` instead of its own file. A branch that edits such a record while main has
+folded it meets a modify/delete conflict rather than a text conflict, and one case merges
+clean and can lose an edit. The recipes are in
+[Open branches](migrating-to-0.17.md#open-branches) and
+[The limits: what a clean merge can lose](migrating-to-0.17.md#the-limits-what-a-clean-merge-can-lose).
+
 A rarer version of the same shape: two branches independently name a domain with the **same
 slug**. Because they're different `domain_id`s, the files themselves don't conflict — both
 merge in cleanly. `find_domain_by_slug` resolves the ambiguity deterministically in the
@@ -156,6 +165,14 @@ survivor and retire the other:
   it), so pick a distinct slug for the successor if you go this route.
 
 ## Compaction: team hygiene, not a merge fix
+
+In a packed (format 2) store, `sidegraph-compact` is maintenance: it folds per-record files that
+have settled (landed on the default branch at least seven days ago) into the shard files, byte
+for byte, and deletes a file only once a shard line holds its exact content. It runs on the
+default branch and never commits, so review and commit the result in a pull request. See
+[`reference/cli.md`](../reference/cli.md#sidegraph-compact) and the
+[0.17 migration guide](migrating-to-0.17.md). The rest of this section describes the
+format-1 command, which a store that is not yet migrated still runs.
 
 Once a decision or domain reaches a terminal status (`superseded`/`rejected`/`deprecated` for
 decisions, `superseded`/`dropped` for domains), it can never change again — append-only rules

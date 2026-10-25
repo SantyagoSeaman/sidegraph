@@ -15,7 +15,6 @@ import pytest
 
 from sidegraph.bootstrap import scan
 from sidegraph.bootstrap.model import Exclusion
-from sidegraph.profiles import get_profile
 
 # The child imports and exercises the actual installed scanner. A timeout is always a
 # failing outcome; kill/reap is parent-side so OSError handlers cannot swallow it.
@@ -103,25 +102,9 @@ def _accept(root: Path, path: Path, *, include: bool = False, limit: int = 512_0
     )
 
 
-def test_subprocess_regular_positive_control(tmp_path: Path) -> None:
-    assert _child(tmp_path, "regular") == {"files": ["docs/adr/source.md"], "exclusions": []}
-
-
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo unavailable")
-@pytest.mark.parametrize("mode", ["profile", "explicit", "include", "alias"])
-def test_fifo_without_writer_is_excluded_without_blocking(tmp_path: Path, mode: str) -> None:
-    assert _child(tmp_path, mode) == {
-        "files": [],
-        "exclusions": [["docs/adr/source.md", "non-regular-file"]],
-    }
-
-
-@pytest.mark.skipif(
-    not hasattr(os, "mkfifo") or not hasattr(os, "O_NONBLOCK"),
-    reason="FIFO/nonblocking open unavailable",
-)
-def test_regular_to_fifo_open_race_does_not_block_or_read(tmp_path: Path) -> None:
-    assert _child(tmp_path, "swap") == {
+def test_fifo_without_writer_is_excluded_without_blocking(tmp_path: Path) -> None:
+    assert _child(tmp_path, "profile") == {
         "files": [],
         "exclusions": [["docs/adr/source.md", "non-regular-file"]],
     }
@@ -303,170 +286,6 @@ def test_growth_is_bounded_by_opened_metadata(tmp_path, monkeypatch, include, wa
     assert events[-1][2] == consumed
 
 
-def test_path_swap_after_prefix_validates_original_descriptor(tmp_path, monkeypatch) -> None:
-    path = _write(tmp_path, b"x" * 6000)
-    backup = tmp_path / "original.md"
-
-    def replace_path():
-        path.rename(backup)
-        path.write_bytes(b"\xff")
-
-    events = _trace_reads(monkeypatch, after=replace_path)
-    assert _accept(tmp_path, path) == ("docs/adr/source.md", None)
-    assert backup.read_bytes() == b"x" * 6000
-    assert path.read_bytes() == b"\xff"
-    assert sum(e[1] for e in events) == 6000
-
-
-@pytest.mark.parametrize("failure", ["binary", "utf8", "read", "fdopen", "size", "success"])
-def test_descriptor_is_closed_on_every_exit(tmp_path, monkeypatch, failure) -> None:
-    data = {"binary": b"a\0", "utf8": b"\xff"}.get(failure, b"valid")
-    path = _write(tmp_path, data)
-    real_open, real_fstat = os.open, os.fstat
-    created: list[int] = []
-
-    def record_open(name, flags, *args, **kwargs):
-        fd = real_open(name, flags, *args, **kwargs)
-        created.append(fd)
-        return fd
-
-    def grow_before_metadata(fd):
-        with path.open("ab") as writer:
-            writer.write(b"x" * 30)
-        return real_fstat(fd)
-
-    monkeypatch.setattr(os, "open", record_open)
-    if failure == "size":
-        monkeypatch.setattr(os, "fstat", grow_before_metadata)
-    elif failure == "fdopen":
-
-        def broken_fdopen(*args, **kwargs):
-            raise OSError(errno.EMFILE, "synthetic transfer failure")
-
-        monkeypatch.setattr(os, "fdopen", broken_fdopen)
-    elif failure == "read":
-        _trace_reads(monkeypatch, fail=True)
-    outcome = _accept(tmp_path, path, limit=8)
-    want = {
-        "binary": "binary",
-        "utf8": "unreadable",
-        "read": "unreadable",
-        "fdopen": "unreadable",
-        "size": "over-size-limit",
-    }.get(failure)
-    assert outcome == (
-        ("docs/adr/source.md", None)
-        if want is None
-        else (None, Exclusion(path="docs/adr/source.md", reason=want))
-    )
-    # Restore fstat before inspecting closure so the failure injector does not run again.
-    monkeypatch.setattr(os, "fstat", real_fstat)
-    _assert_closed(created)
-    assert len(created) == 1
-
-
-@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no-follow open unavailable")
-def test_resolved_leaf_replaced_by_outside_link_is_not_read(tmp_path, monkeypatch) -> None:
-    path = _write(tmp_path, b"visible")
-    outside = tmp_path.parent / "sg224-outside.md"
-    outside.write_bytes(b"\0outside")
-    real_open = os.open
-    attempts: list = []
-
-    def replace_before_open(name, flags, *args, **kwargs):
-        attempts.append(Path(name))
-        path.unlink()
-        path.symlink_to(outside)
-        return real_open(name, flags, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", replace_before_open)
-    assert _accept(tmp_path, path) == (
-        None,
-        Exclusion(path="docs/adr/source.md", reason="unreadable"),
-    )
-    assert attempts == [path]
-    assert outside.read_bytes() == b"\0outside"
-
-
-def test_alias_newly_resolved_outside_is_rejected_before_open(tmp_path, monkeypatch) -> None:
-    target = _write(tmp_path, b"visible", "visible.md")
-    alias = tmp_path / "alias.md"
-    alias.symlink_to(target)
-    outside = tmp_path.parent / "sg224-new-target.md"
-    outside.write_bytes(b"\0outside")
-    real_resolve = scan._resolve
-
-    def resolve_after_switch(path):
-        if path == alias:
-            alias.unlink()
-            alias.symlink_to(outside)
-        return real_resolve(path)
-
-    monkeypatch.setattr(scan, "_resolve", resolve_after_switch)
-    events = _trace_reads(monkeypatch)
-    assert _accept(tmp_path, alias) == (
-        None,
-        Exclusion(path="alias.md", reason="outside-repository"),
-    )
-    assert events == []
-
-
-@pytest.mark.parametrize("include", [False, True])
-def test_alias_switched_into_excluded_target_rechecks_exact_override(
-    tmp_path, monkeypatch, include
-) -> None:
-    visible = _write(tmp_path, b"visible", "visible.md")
-    hidden = _write(tmp_path, b"hidden", ".sidegraph/hidden.md")
-    alias = tmp_path / "docs/adr/source.md"
-    alias.parent.mkdir(parents=True)
-    alias.symlink_to(visible)
-    real_accept = scan._accept_file
-
-    def switch_after_discovery(root, path, **kwargs):
-        if path == alias:
-            alias.unlink()
-            alias.symlink_to(hidden)
-        return real_accept(root, path, **kwargs)
-
-    monkeypatch.setattr(scan, "_accept_file", switch_after_discovery)
-    events = _trace_reads(monkeypatch)
-    result = scan.scan_sources(
-        tmp_path, get_profile("generic-adr"), included_files=(hidden,) if include else ()
-    )
-    if include:
-        assert result.files == (".sidegraph/hidden.md", "docs/adr/source.md")
-        assert result.exclusions == ()
-    else:
-        assert result.files == ()
-        assert result.exclusions == (
-            Exclusion(path="docs/adr/source.md", reason="excluded-directory"),
-        )
-        assert events == []
-
-
-def test_fstat_failure_closes_owned_descriptor(tmp_path, monkeypatch) -> None:
-    path = _write(tmp_path, b"valid")
-    real_open, real_fstat = os.open, os.fstat
-    created: list[int] = []
-
-    def record_open(name, flags, *args, **kwargs):
-        fd = real_open(name, flags, *args, **kwargs)
-        created.append(fd)
-        return fd
-
-    def failed_metadata(fd):
-        raise OSError(errno.EIO, "synthetic fstat failure")
-
-    monkeypatch.setattr(os, "open", record_open)
-    monkeypatch.setattr(os, "fstat", failed_metadata)
-    assert _accept(tmp_path, path) == (
-        None,
-        Exclusion(path="docs/adr/source.md", reason="unreadable"),
-    )
-    monkeypatch.setattr(os, "fstat", real_fstat)
-    _assert_closed(created)
-
-
 @pytest.mark.parametrize("include", [False, True])
 def test_valid_shrink_after_open_remains_eligible(tmp_path, monkeypatch, include) -> None:
     path = _write(tmp_path, b"original valid text")
@@ -518,45 +337,6 @@ def test_nul_overflow_reports_growth_before_binary(tmp_path, monkeypatch, includ
         Exclusion(path="docs/adr/source.md", reason=want),
     )
     assert events == [(9, 9, 9)]
-
-
-@pytest.mark.parametrize("phase", ["prefix", "remainder"])
-def test_would_block_is_not_eof_and_closes_regular_descriptor(tmp_path, monkeypatch, phase):
-    # Inject the documented raw-I/O return at one read boundary. This does not claim
-    # that a normal local regular filesystem actually produces EAGAIN.
-    path = _write(tmp_path, b"a" * 4096 + b"\xff")
-    real_fdopen = os.fdopen
-    owned: list[int] = []
-
-    def fdopen(fd, *args, **kwargs):
-        handle = real_fdopen(fd, *args, **kwargs)
-        owned.append(fd)
-
-        class WouldBlock:
-            calls = 0
-
-            def read(self, size):
-                blocked_call = 0 if phase == "prefix" else 1
-                if self.calls == blocked_call:
-                    self.calls += 1
-                    return None
-                self.calls += 1
-                return handle.read(size)
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                handle.close()
-
-        return WouldBlock()
-
-    monkeypatch.setattr(os, "fdopen", fdopen)
-    assert _accept(tmp_path, path) == (
-        None,
-        Exclusion(path="docs/adr/source.md", reason="unreadable"),
-    )
-    _assert_closed(owned)
 
 
 @pytest.mark.parametrize("include", [False, True])

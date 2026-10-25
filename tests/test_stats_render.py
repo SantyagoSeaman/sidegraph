@@ -721,7 +721,9 @@ def test_a_single_silent_domain_reads_in_the_singular():
 
 
 def test_no_silent_domains_means_no_silent_line():
-    assert "no decision is bound" not in render_text(_report(reach=_reach(silent_domains=[])))
+    text = render_text(_report(reach=_reach(silent_domains=[])))
+    assert "silent domains" not in text
+    assert "no record is bound" not in text
 
 
 def test_zero_files_touched_is_a_sentence_not_a_ratio_of_zeroes():

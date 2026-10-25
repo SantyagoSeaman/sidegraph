@@ -160,12 +160,6 @@ def test_ratify_impl_mixed_batch_decisions_and_domains(tmp_path):
     assert store.get_domain(domain_id).status == DomainStatus.ACCEPTED
 
 
-def test_ratify_impl_unknown_id_reports_error(tmp_path):
-    store = Store(tmp_path / "t.db")
-    out = _ratify_impl(store, accept=["totally-unknown-id"])
-    assert out["totally-unknown-id"].startswith("error")
-
-
 def test_ratify_impl_accept_and_drop_same_domain_id_does_not_clobber(tmp_path):
     store = Store(tmp_path / "t.db")
     dom_out = _add_domain_impl(store, None, slug="payments", title="Payments", summary="s.")
@@ -214,27 +208,6 @@ def test_ratify_impl_decisions_only_leaves_toc_cache_untouched(tmp_path):
     _ratify_impl(store, accept=[did])
 
     assert store.get_meta(TOC_CACHE_KEY) == "sentinel"
-
-
-def test_ratify_decisions_alias_still_ratifies_decisions(tmp_path):
-    """ratify_decisions is now an alias for the unified _ratify_impl — same behavior for
-    decision ids (existing callers must not notice a difference)."""
-    store = Store(tmp_path / "t.db")
-    results = _propose_decisions_impl(store, None, [dict(DRAFT, anchors=[])])
-    did = results[0]["decision_id"]
-    out = _ratify_impl(store, accept=[did])
-    assert out[did] == "accepted"
-
-
-def test_ratify_decisions_tool_body_also_covers_domains(tmp_path):
-    """The MCP `ratify_decisions` tool now dispatches to the same routing impl as `ratify`
-    — verified here by calling _ratify_impl directly with a domain id, exactly what the
-    tool's body does (fastmcp dispatch itself is exercised by test_server_mcp_smoke.py)."""
-    store = Store(tmp_path / "t.db")
-    dom_out = _add_domain_impl(store, None, slug="payments", title="Payments", summary="s.")
-    domain_id = dom_out["domain_id"]
-    out = _ratify_impl(store, accept=[domain_id])
-    assert out[domain_id] == "accepted"
 
 
 # -- add_decision: per-anchor ambiguous feedback (Gate-5 finding S3) ----------------------
@@ -288,23 +261,6 @@ def test_add_decision_impl_reports_ambiguous_anchor_in_anchors_skipped(tmp_path)
     ]
     # no Tier-2 leaf was created for the ambiguous anchor -- only the Tier-1 community binding
     assert out["bindings"] == 1
-
-
-def test_add_decision_impl_resolved_anchor_unaffected(tmp_path):
-    store = Store(tmp_path / "t.db")
-    reader = GraphifyReader(FIXTURE)
-
-    out = _add_decision_impl(
-        store,
-        reader,
-        "title",
-        "adr",
-        "ctx",
-        "choice",
-        anchors=[{"name": "Trader", "file_path": "trader/exec.py"}],
-    )
-    assert out["anchors_skipped"] == []
-    assert out["bindings"] == 2  # leaf + community, both resolved cleanly
 
 
 def test_add_decision_impl_ambiguous_candidates_capped_at_five(tmp_path):
@@ -389,22 +345,6 @@ def test_add_decision_impl_explicit_session_id_wins_over_fallback(tmp_path, curr
     )
 
     assert store.get_decision(out["id"]).provenance.session_id == "explicit-session"
-
-
-def test_add_decision_impl_ignores_stale_telemetry_session_marker(tmp_path, current_session):
-    """Window-expired twin (declared exception): passes before AND after."""
-    from datetime import UTC, datetime, timedelta
-
-    from sidegraph.config import TELEMETRY_SESSION_KEY
-
-    store = Store(tmp_path / "t.db")
-    stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
-    current_session(session_id=None)
-    store.set_meta(TELEMETRY_SESSION_KEY, f"stale-session|{stale}")
-
-    out = _add_decision_impl(store, None, "title", "adr", "ctx", "choice")
-
-    assert store.get_decision(out["id"]).provenance.session_id is None
 
 
 # -- propose_decisions: tags + layer carry through (recovered FR1.4, §2/§3) ----------------

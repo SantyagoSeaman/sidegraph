@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sidegraph.engine.reader import UNSTABLE_LABEL_FILE_TYPES, NodeRef, is_file_node
+from sidegraph.engine.reader import NodeRef, is_file_node
 
 
 def _n(name, path, file_type="code"):
@@ -18,7 +18,3 @@ def test_a_file_node_is_a_code_or_document_node_named_like_its_file():
     assert not is_file_node(_n("api.py", "src/pay/api.py", "rationale"))
     assert not is_file_node(_n("Invoice", "src/pay/model.py"))
     assert not is_file_node(_n("api.py", None))
-
-
-def test_rationale_labels_are_the_unstable_ones():
-    assert frozenset({"rationale"}) == UNSTABLE_LABEL_FILE_TYPES

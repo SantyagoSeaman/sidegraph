@@ -66,8 +66,6 @@ def test_drill_down_tool_triggers_lazy_sync(tmp_path, monkeypatch):
     every other retrieval-facing tool (get_task_context/query_structure/query_decisions),
     not the un-synced ``_load_reader()`` -- verified the same way test_sync_wiring.py
     verifies session_start/get_task_context: a real sync run stamps LAST_SYNCED_KEY."""
-    import importlib
-
     from sidegraph.sync import LAST_SYNCED_KEY
 
     db = tmp_path / "t.db"
@@ -80,7 +78,7 @@ def test_drill_down_tool_triggers_lazy_sync(tmp_path, monkeypatch):
 
     import sidegraph.server as srv
 
-    importlib.reload(srv)  # rebind module _store to env
+    monkeypatch.setattr(srv, "_store", None)  # rebind the module store to env
     try:
         dom = srv._add_domain_impl(
             srv._get_store(),
@@ -94,6 +92,5 @@ def test_drill_down_tool_triggers_lazy_sync(tmp_path, monkeypatch):
         srv.drill_down("trading")
         assert Store(db).get_meta(LAST_SYNCED_KEY).startswith("abc123:")
     finally:
-        monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
-        monkeypatch.delenv("SIDEGRAPH_GRAPH", raising=False)
-        importlib.reload(srv)  # restore with default env
+        if srv._store is not None:
+            srv._store.close()

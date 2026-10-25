@@ -1,5 +1,7 @@
-"""The corpus-fit pre-flight's kill rule, pinned against the study's own measured cells
-and against the repository shapes a practitioner re-review broke it with.
+"""The corpus-fit pre-flight's kill rule, pinned against the repository shapes a
+practitioner re-review broke it with. The study's own measured cells (the airflow and
+this-repository scans) are pinned in the maintainer's release-only test set: they need the
+sandbox corpora and the private ``design/`` tree.
 
 Why this file exists: the paper claimed the rule was "validated against this study's own
 cells" while shipping no fixture, no recorded output and no test — a reviewer searched for
@@ -9,16 +11,13 @@ rests on never asserting an unmeasured claim. Now the claim IS the test.
 Red targets: the three synthetic shapes below were each measured wrong (permissively) by
 the first implementation — service monorepo and infra monorepo both returned PILOT-ish
 verdicts, and the parent-directory case flipped a verdict on the name of the directory the
-repository happened to be cloned into. The two real-cell tests are the guard: they must
-keep matching the measured outcome after any threshold change.
+repository happened to be cloned into. The measured cells are the guard on thresholds:
+they must keep matching after any threshold change.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -41,61 +40,65 @@ def _verdict(root: Path) -> str:
 
 
 # The kill rule fires at corpus_fit._BIG_CODE_SURFACE (2,000 code files) with density under
-# the floor. 2,100 modules is 5% over that threshold: a mutant that raises it to 2,200, or
+# the floor. The scanner is exercised on a small real tree; the threshold is exercised on its
+# metrics scaled to 2,100 modules, 5% over the threshold: a mutant that raises it to 2,200, or
 # drops the surface test, flips the verdict, while the tree stays 30% smaller than the 3,000
-# the first reviewer built. Both tests only read the tree, so it is built once per module.
-# The "drops the surface test" mutant is killed by the small-repository test below instead.
+# the first reviewer built. The "drops the surface test" mutant is killed by the
+# small-repository test below instead.
 _MONOREPO_MODULES = 2100
+_SMALL_MODULES = 30
 
 
-@pytest.fixture(scope="module")
-def service_monorepo(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+@pytest.fixture
+def service_monorepo(tmp_path: Path) -> Path:
     """Services, a README each, cloned into a directory whose name is design-shaped.
 
-    One tree serves both tests below: the first needs any root, the second needs this
-    parent name; the verdict must be the same for both. Because the shared root sits under
-    ``design-docs/``, the monorepo test also fails for a regression that matches decision
-    shapes on the absolute path: that parent can only ADD decision-shaped documents, which
-    moves the tree away from the kill rule, so the test cannot pass for a wrong reason.
+    The tree is small and real; the tests that need the big-repository verdict scale its
+    metrics. Because the root sits under ``design-docs/``, the monorepo test also fails for a
+    regression that matches decision shapes on the absolute path: that parent can only ADD
+    decision-shaped documents, which moves the tree away from the kill rule, so the test
+    cannot pass for a wrong reason.
     """
-    base = tmp_path_factory.mktemp("monorepo")
-    inner = base / "design-docs" / "checkout"
-    for i in range(_MONOREPO_MODULES):
+    inner = tmp_path / "design-docs" / "checkout"
+    for i in range(_SMALL_MODULES):
         _write(inner, f"services/svc{i}/main.py", 900)
         _write(inner, f"services/svc{i}/README.md", 900)
-    yield inner
-    # Pytest's retention policy covers ``tmp_path``, not factory dirs: a passing session
-    # without --basetemp removes the whole base anyway, but a --basetemp run or a failing
-    # session keeps them, and the tree is ~6,000 entries. Removing it here frees the peak too.
-    shutil.rmtree(base, ignore_errors=True)
+    return inner
+
+
+def _at_monorepo_scale(root: Path) -> dict:
+    """The scan of a small tree, as if it had _MONOREPO_MODULES modules (same shape: ~50%
+    prose by bytes, no decision-shaped documents)."""
+    return {**corpus_fit.scan(root), "code_files": _MONOREPO_MODULES}
 
 
 def test_service_monorepo_with_a_readme_per_module_is_not_waved_through(service_monorepo):
     """2,100 modules + a README each: ~50% prose by bytes, still entirely grep-answerable.
     The first rule needed prose < 10% to fire, so it structurally could not reject this."""
-    assert corpus_fit.scan(service_monorepo)["code_files"] == _MONOREPO_MODULES
-    assert _verdict(service_monorepo) == "DO NOT PILOT (kill rule)"
+    assert corpus_fit.scan(service_monorepo)["code_files"] == _SMALL_MODULES
+    assert corpus_fit.verdict(_at_monorepo_scale(service_monorepo))[0] == "DO NOT PILOT (kill rule)"
 
 
 def test_infrastructure_repo_is_code_not_prose(tmp_path):
     """Terraform/YAML/SQL/proto are grep-answerable. The first version knew none of these
     extensions and reported '0 code files, prose share 100%, VERDICT: PILOT'."""
-    for i in range(800):
+    for i in range(8):
         _write(tmp_path, f"terraform/mod{i}/main.tf")
-    for i in range(1200):
+    for i in range(12):
         _write(tmp_path, f"k8s/app{i}/deploy.yaml")
-    for i in range(300):
+    for i in range(3):
         _write(tmp_path, f"db/migrations/{i}.sql")
-    for i in range(200):
+    for i in range(2):
         _write(tmp_path, f"proto/svc{i}.proto")
     for i in range(24):
         _write(tmp_path, f"docs/architecture/note{i}.md")
     m = corpus_fit.scan(tmp_path)
-    assert m["code_files"] == 2500  # first version saw ZERO of these
-    # 9.6 docs/1k sits between the measured losers (<=1.2) and every real ADR corpus
-    # (>=35.5), so the honest verdict is the cost gate — not the PILOT the first version
-    # gave, and not a kill rule stretched to cover an ambiguous shape.
-    assert _verdict(tmp_path) == "PILOT ONLY WITH A COST GATE"
+    assert m["code_files"] == 25  # first version saw ZERO of these
+    # The same shape at 2,500 code files: 9.6 docs/1k sits between the measured losers (<=1.2)
+    # and every real ADR corpus (>=35.5), so the honest verdict is the cost gate -- not the
+    # PILOT the first version gave, and not a kill rule stretched to cover an ambiguous shape.
+    scaled = {**m, "code_files": 2500, "decision_docs_per_1k_code_files": 24 / 2.5}
+    assert corpus_fit.verdict(scaled)[0] == "PILOT ONLY WITH A COST GATE"
 
 
 def test_verdict_does_not_depend_on_the_parent_directory_name(service_monorepo):
@@ -103,7 +106,7 @@ def test_verdict_does_not_depend_on_the_parent_directory_name(service_monorepo):
     ~/design-docs/ turned every file in the repo into a 'decision-shaped document'."""
     assert "design-docs" in service_monorepo.parts
     assert corpus_fit.scan(service_monorepo)["decision_shaped_docs"] == 0
-    assert _verdict(service_monorepo) == "DO NOT PILOT (kill rule)"
+    assert corpus_fit.verdict(_at_monorepo_scale(service_monorepo))[0] == "DO NOT PILOT (kill rule)"
 
 
 def test_a_small_repository_without_decision_docs_is_not_killed(tmp_path):
@@ -141,34 +144,3 @@ def test_thin_documentation_lands_in_the_cost_gate_band(tmp_path):
     for i in range(300):
         _write(tmp_path, f"src/mod{i}.py")
     assert _verdict(tmp_path) == "PILOT ONLY WITH A COST GATE"
-
-
-# ── the measured cells: the claim "validated against the study's own cells" ──────────
-
-# SIDEGRAPH_SANDBOXES names the sandbox's corpus working-copy root (see
-# design/testing/sandbox.md, "Two environment variables"; read by the sandbox's own
-# harness/sandboxes.py). Reused here rather than a hardcoded path so this file ships without
-# the maintainer's local username/layout — unset locally, this test just skips.
-_SANDBOXES_DIR = os.environ.get("SIDEGRAPH_SANDBOXES")
-_AIRFLOW = Path(_SANDBOXES_DIR) / "airflow" if _SANDBOXES_DIR else None
-_SELF = Path(__file__).resolve().parent.parent
-
-
-@pytest.mark.skipif(
-    _AIRFLOW is None or not _AIRFLOW.is_dir(),
-    reason="SIDEGRAPH_SANDBOXES not set, or measured corpus not present there",
-)
-def test_measured_losing_cell_is_refused():
-    """airflow — the cell that measured +25.5% cost and worse answers. Its shape as this
-    script sees it: 39 decision-shaped docs across 33,028 code files = 1.2 per 1,000."""
-    m = corpus_fit.scan(_AIRFLOW)
-    assert m["decision_docs_per_1k_code_files"] < corpus_fit._DENSITY_FLOOR
-    assert corpus_fit.verdict(m)[0] == "DO NOT PILOT (kill rule)"
-
-
-def test_measured_self_corpus_reads_as_pilot():
-    """This repository: 174 decision-shaped documents across 274 code files (635 per
-    1,000) — the band the measured winners occupy."""
-    m = corpus_fit.scan(_SELF)
-    assert m["decision_docs_per_1k_code_files"] >= corpus_fit._DENSITY_GOOD
-    assert corpus_fit.verdict(m)[0] == "PILOT"

@@ -7,6 +7,8 @@ is future work. Release changes are listed in the [changelog](../../CHANGELOG.md
 
 ## Update
 
+This section is for upgrading *to* 0.15. A store packed into shards (format 2) needs 0.17.0 or newer, so on newer releases follow the [latest guide](migrating-to-0.17.md) instead of pinning 0.15.0.
+
 Keep a backup or commit of your authored `.sidegraph/` files. For a CLI installation:
 
 ```bash

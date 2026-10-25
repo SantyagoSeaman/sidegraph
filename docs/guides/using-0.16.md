@@ -7,6 +7,8 @@ SQLite lock contention, and clearer reporting of retained hot files during compa
 
 ## Update
 
+This section is for upgrading *to* 0.16. A store packed into shards (format 2) needs 0.17.0 or newer, so on newer releases follow the [latest guide](migrating-to-0.17.md) instead of pinning 0.16.0.
+
 For a CLI installed from the public repository's `main`, run:
 
 ```bash

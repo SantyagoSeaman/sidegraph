@@ -17,7 +17,7 @@ from sidegraph import server
 from sidegraph.schema import DecisionStatus
 from sidegraph.store import Store, StoreBusyError
 from sidegraph.write_boundary import WRITE_FAILURE, safe_write
-from tests.test_store_mutation_guard import _decision, _domain, _fact
+from tests.store_record_support import _decision, _domain, _fact
 
 
 def canonical_bytes(root: Path) -> dict[str, bytes]:
@@ -74,9 +74,9 @@ def _writer(root, mode, role, record_id, ready, go, paused, release, published, 
             outcomes.put((role, type(exc).__name__))
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize("mode", ["ratify-drop", "drop-ratify", "decision", "fact", "domain"])
-def test_conflicting_processes_publish_only_the_winning_verdict(tmp_path, mode):
+def assert_only_the_winning_verdict_is_published(tmp_path, mode):
+    """Two spawned processes race one verdict (``mode`` picks the record kind or the ratify/
+    drop order); only the first to reserve the writer may publish, the second is refused."""
     root = tmp_path / "shared store"
     with Store(root) as initial:
         proposal = _decision(status=DecisionStatus.PROPOSED)
@@ -151,6 +151,12 @@ def test_conflicting_processes_publish_only_the_winning_verdict(tmp_path, mode):
         for queue in (events, outcomes):
             queue.close()
             queue.join_thread()
+
+
+def test_conflicting_processes_publish_only_the_winning_verdict(tmp_path):
+    """The one real-subprocess store test on the Windows core list; the other record kinds and
+    the ratify/drop orders run in ``tests/private``."""
+    assert_only_the_winning_verdict_is_published(tmp_path, "decision")
 
 
 def test_busy_admission_does_not_publish_any_canonical_bytes(tmp_path):

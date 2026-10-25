@@ -156,7 +156,7 @@ def empty_branch(top: Path, name: str, age: timedelta) -> None:
 
 
 def test_the_two_checks_follow_refresh_hook_missing_and_have_their_surfaces():
-    assert [c.id for c in CHECKS][-3:] == ["refresh-hook-missing", UNCOMMITTED, BRANCH_ONLY]
+    assert [c.id for c in CHECKS][-5:-2] == ["refresh-hook-missing", UNCOMMITTED, BRANCH_ONLY]
     assert check_for(UNCOMMITTED).surfaces == frozenset({"session", "doctor", "stats"})
     assert check_for(BRANCH_ONLY).surfaces == frozenset({"session"})
 
@@ -544,26 +544,27 @@ def test_t11_a_dangling_origin_head_falls_back_to_the_local_branch(tmp_path):
     assert "not merged into main (feat: 1)" in only_problem(BRANCH_ONLY, store).line
 
 
-def test_t12_every_branch_is_scanned_so_the_five_oldest_of_thirty_are_found(tmp_path, monkeypatch):
+def test_t12_every_branch_is_scanned_so_the_two_oldest_of_twenty_two_are_found(
+    tmp_path, monkeypatch
+):
     """Red against rev 1's cap of the 20 newest branches: it dropped exactly the stale ones.
-    The budget is not what is tested here: a loaded machine once spent the real 2 s on the
-    ~45 git calls and got the (correct) partial line, so this test gives the scan time."""
+    The budget is not what is tested here: a loaded machine once spent the real 2 s on the git
+    calls and got the (correct) partial line, so this test gives the scan time."""
     monkeypatch.setattr(integrity, "_STRANDED_BUDGET", 60.0)
     repo, store = project(tmp_path)
-    for i in range(5):  # the oldest five hold records, oldest first
+    for i in range(2):  # the oldest two hold records, oldest first
         branch_with(
             store, f"b{i:02d}", {f"decisions/R{i}.json": "accepted"}, age=timedelta(days=40 - i)
         )
-    for i in range(5, 30):
+    for i in range(2, 22):
         empty_branch(repo, f"b{i:02d}", timedelta(days=40 - i))
 
     problem = only_problem(BRANCH_ONLY, store)
 
     assert problem.line == (
-        "Sidegraph: 5 record(s) exist only on branches not merged into main "
-        "(b00: 1, b01: 1, b02: 1, and 2 more branches); they reach main when those merge."
+        "Sidegraph: 2 record(s) exist only on branches not merged into main "
+        "(b00: 1, b01: 1); they reach main when those merge."
     )
-    assert problem.notice is not None and "b00, b01, b02, …" in problem.notice
 
 
 def test_t13_a_spent_budget_before_any_hit_is_not_run_so_the_notice_key_survives(

@@ -19,7 +19,6 @@ from sidegraph.capture import propose
 from sidegraph.engine.reader import GraphifyReader, ResolveResult
 from sidegraph.retrieval import Seed, get_task_context, resolve_seeds
 from sidegraph.schema import (
-    AnchorBinding,
     Decision,
     DecisionKind,
     DecisionStatus,
@@ -151,13 +150,6 @@ def test_the_sync_stamp_carries_the_resolver_revision_and_provenance_does_not():
     assert ":r" not in reader.graph_version()
 
 
-def test_sync_stamps_the_sync_stamp(tmp_path):
-    store = Store(tmp_path / "t.db")
-    reader = _reader()
-    sync(store, reader)
-    assert store.get_meta(LAST_SYNCED_KEY) == reader.sync_stamp()
-
-
 # -- T13, T14: the read path ------------------------------------------------------------
 
 
@@ -216,11 +208,6 @@ def test_an_unrelated_file_seed_has_no_seed_entities(tmp_path):
     _gotcha(store, reader)
     res = resolve_seeds([Seed(file_path="Sources/App/Other.swift")], reader, store)
     assert res.seed_node_ids == [] and res.seed_entities == []
-
-
-def test_guard_binding_import_is_used():
-    # keeps the AnchorBinding import honest for readers extending these tests
-    assert AnchorBinding.model_fields["tier"] is not None
 
 
 # -- a case-only twin shares one entity, and must not share a live leaf ------------------

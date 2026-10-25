@@ -36,7 +36,7 @@ from sidegraph.server import (
     _seeds_from_args,
 )
 from sidegraph.store import Store
-from tests.test_graph_freshness import stale_repo, write_graph
+from tests.graph_repo_support import stale_repo, write_graph
 from tests.test_seed_ladder import make_reader
 
 READ = "## How your seeds were read"

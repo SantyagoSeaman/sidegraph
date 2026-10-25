@@ -451,7 +451,7 @@ def test_meta_with_prefix_is_a_prefix_range_that_excludes_its_neighbours(store):
 # -- T9: the seam -----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("module", ["server", "capture", "store", "config"])
+@pytest.mark.parametrize("module", ["server", "capture", "store", "config", "doctor"])
 def test_t9_core_imports_nothing_from_the_host_seam(module):
     tree = ast.parse((ROOT / "src" / "sidegraph" / f"{module}.py").read_text())
     imported: list[str] = []

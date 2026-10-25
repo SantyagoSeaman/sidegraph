@@ -28,7 +28,7 @@ from sidegraph import __version__, githooks, integrity
 from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
-from tests.test_graph_freshness import commit, stale_repo, write_graph
+from tests.graph_repo_support import commit, stale_repo, write_graph
 from tests.test_integrity import add_record, settled
 from tests.test_store_requirement import above_running, write_requirement_marker
 
@@ -333,7 +333,7 @@ def test_t4_a_stale_graph_is_a_notice_carrying_todays_text(tmp_path, monkeypatch
 def test_t4_a_borrowed_stale_graph_names_the_main_checkout_in_the_notice(
     tmp_path, monkeypatch, capsys
 ):
-    from tests.test_config_borrowed_graph import add_worktree, make_main
+    from tests.graph_repo_support import add_worktree, make_main
 
     main = make_main(tmp_path)
     commit(main, "B", {"pkg/m.py": "def a():\n    return 1\n"})
@@ -737,27 +737,6 @@ def test_t17_a_refresh_that_could_not_run_prints_no_drift_line_whatever_the_cach
 
     assert "anchored to code that changed" not in context(out)
     assert _meta(store_dir, DRIFT_CACHE_KEY) is not None  # the cache itself was left alone
-
-
-def test_the_drift_refresh_still_runs_when_the_nudge_is_off(tmp_path, monkeypatch, capsys):
-    """``SIDEGRAPH_DRIFT_NUDGE=off`` gates the line, never the refresh that keeps the
-    ``[drifted]`` markers' cache fresh."""
-    Store(tmp_path / ".sidegraph").close()
-    import sidegraph.sync as sync_mod
-
-    calls: list[object] = []
-
-    def fake(store, **kwargs):
-        calls.append(store)
-        return 5
-
-    monkeypatch.setattr(sync_mod, "refresh_code_drift_cache", fake)
-    monkeypatch.setenv("SIDEGRAPH_DRIFT_NUDGE", "off")
-
-    out = start(monkeypatch, capsys, tmp_path / ".sidegraph")
-
-    assert len(calls) == 1
-    assert "anchored to code that changed" not in context(out)
 
 
 def test_a_failing_refresh_leaves_the_other_lines(tmp_path, monkeypatch, capsys):

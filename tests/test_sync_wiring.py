@@ -55,22 +55,18 @@ def test_session_start_survives_sync_failure(tmp_path, monkeypatch, capsys):
 
 def test_get_task_context_tool_shell_syncs(tmp_path, monkeypatch):
     db = tmp_path / "t.db"
-    Store(db).close()
+    store = Store(db)
     # SIDEGRAPH_DIR (not the deprecated SIDEGRAPH_DB) so `db` is used LITERALLY -- no
     # legacy-dispatch redirection to its parent when it doesn't exist yet (see
     # config._dispatch_sidegraph_db); back-compat itself is covered by tests/test_config.py.
     monkeypatch.setenv("SIDEGRAPH_DIR", str(db))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
-    import importlib
-
     import sidegraph.server as srv
 
-    importlib.reload(srv)  # rebind module _store to env
+    monkeypatch.setattr(srv, "_store", store)  # the module's store, bound to the env's path
     try:
         result = srv._get_task_context_with_sync(files=["trader/exec.py"])
         assert isinstance(result, str)
         assert Store(db).get_meta(LAST_SYNCED_KEY).startswith("abc123:")
     finally:
-        monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
-        monkeypatch.delenv("SIDEGRAPH_GRAPH", raising=False)
-        importlib.reload(srv)  # restore with default env
+        store.close()

@@ -102,6 +102,19 @@ def test_reading_stats_changes_nothing(tmp_path, monkeypatch):
 
     assert _store_snapshot(store_dir) == before
 
+    # The same after a `git pull` that changed a record: the index is stale, and stating that
+    # (the staleness check, the index reads) rewrites neither the index nor a record.
+    path = next((store_dir / "decisions").glob("*.json"))
+    data = json.loads(path.read_text())
+    data["status"] = "rejected"
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    before = _store_snapshot(store_dir)
+
+    assert stats_main([]) == 0
+    assert stats_main(["--json"]) == 0
+
+    assert _store_snapshot(store_dir) == before
+
 
 def test_a_pull_that_changed_a_record_is_stated_and_the_index_left_alone(
     tmp_path, capsys, monkeypatch
@@ -171,18 +184,15 @@ def test_a_narrowed_window_prints_no_false_absence(tmp_path, capsys, monkeypatch
     assert "1 session" in capsys.readouterr().out, "the same journal, read with a wide window"
 
 
-def test_an_uninitialized_store_is_an_operational_error(tmp_path, monkeypatch):
+@pytest.mark.parametrize("window", ["0", "-3"])
+def test_a_nonpositive_window_is_rejected_before_any_io(window, tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "missing"))
-    assert stats_main([]) == 2
-
-
-def test_a_nonpositive_window_is_rejected_before_any_io(tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "missing"))
-    assert stats_main(["--window", "0"]) == 2
+    assert stats_main(["--window", window]) == 2
     # Exit 2 alone proves nothing here: a missing store also exits 2. The message names the
     # cause, so this fails if the flag stops being what rejects the run.
-    err = capsys.readouterr().err
-    assert "--window" in err and "no store index" not in err
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "--window" in out.err and "no store index" not in out.err
     assert not (tmp_path / "missing").exists(), "a rejected flag must create no store"
 
 
@@ -200,16 +210,6 @@ def test_window_zero_is_rejected_against_a_real_store_too(tmp_path, capsys, monk
 
 
 # --- what the brief did not spell out ---------------------------------------------------
-
-
-def test_a_rejected_window_says_which_flag_and_prints_nothing_on_stdout(
-    tmp_path, capsys, monkeypatch
-):
-    monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "missing"))
-    assert stats_main(["--window", "-3"]) == 2
-    out = capsys.readouterr()
-    assert out.out == ""
-    assert "--window" in out.err
 
 
 def test_a_window_too_large_to_date_is_rejected_not_a_traceback(tmp_path, capsys, monkeypatch):
@@ -474,17 +474,6 @@ def test_an_absolute_graph_is_left_alone(tmp_path, capsys, monkeypatch):
     assert json.loads(capsys.readouterr().out)["graph"]["available"] is True
 
 
-def test_the_graph_env_var_is_anchored_the_same_way(tmp_path, capsys, monkeypatch):
-    project = tmp_path / "project"
-    Store(project / ".sidegraph").close()
-    _copy_graph(project)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SIDEGRAPH_GRAPH", "graphify-out/graph.json")
-
-    assert stats_main(["--db", str(project / ".sidegraph"), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["graph"]["available"] is True
-
-
 # --- a record row the index cannot parse keeps the exit-2 contract (finding 10) ---------------
 
 
@@ -626,12 +615,6 @@ def test_the_inspection_commands_do_not_promise_a_legacy_migration(capsys):
     for main in (verify_main, doctor_main, blame_main):
         text = _help_of(main, capsys)
         assert "cannot migrate" in text and "one-time migration" not in text, main
-
-
-def test_the_ratify_help_says_all_includes_standalone_facts(capsys):
-    from sidegraph.cli import ratify_main
-
-    assert "standalone facts" in _help_of(ratify_main, capsys)
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")

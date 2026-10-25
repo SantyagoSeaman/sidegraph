@@ -20,17 +20,26 @@ from tests.githooks_support import (
     CREATED_HEADER,
     HELPER_NAME,
     HOOKS,
+    NON_ATOMIC_MKDIR,
+    SHELLS,
+    STALE_STATES,
     Sandbox,
     Start,
+    age,
     await_rebuilds,
     commit,
-    count_ends,
-    dead_pid,
     expected_block,
+    fake,
+    fresh_lock_burst,
     git,
     have_shell,
+    hook_file,
     idle,
-    max_concurrent,
+    info_for,
+    make_lock,
+    run_helper,
+    shim,
+    stale_lock_burst,
     wait_for,
 )
 
@@ -45,27 +54,6 @@ OLD_BLOCK = (
 )
 START = "# >>> sidegraph graph refresh >>>\n"
 END = "# <<< sidegraph graph refresh <<<\n"
-
-SHELLS = [
-    "sh",
-    pytest.param(
-        "dash", marks=pytest.mark.skipif(not have_shell("dash"), reason="dash not installed")
-    ),
-]
-
-
-def info_for(path: Path) -> githooks.RepoInfo:
-    info = githooks.repo_info(path)
-    assert info is not None
-    return info
-
-
-def fake(sb: Sandbox) -> str:
-    return str(sb.fake_bin / "graphify")
-
-
-def hook_file(repo: Path, hook: str) -> Path:
-    return repo / ".git" / "hooks" / hook
 
 
 def write_hook(repo: Path, hook: str, content: bytes | str, mode: int = 0o755) -> Path:
@@ -88,12 +76,6 @@ def snapshot(repo: Path) -> dict[str, tuple[bytes, int] | None]:
         path = hook_file(repo, hook)
         out[hook] = (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None
     return out
-
-
-def run_helper(repo: Path, *args: str, shell: str | None = None, env: dict | None = None) -> int:
-    helper = str(hook_file(repo, HELPER_NAME))
-    cmd = [shell, helper, *args] if shell else [helper, *args]
-    return subprocess.run(cmd, cwd=repo, env=env, capture_output=True).returncode
 
 
 # -- the block and the helper text (D2, D5) ------------------------------------------------
@@ -476,161 +458,39 @@ def test_the_rebuild_is_graphify_update_with_a_pinned_hash_seed_and_a_log(sandbo
 # -- T9: concurrency --------------------------------------------------------------------
 
 
-def burst(repo: Path, calls: int, shell: str, *, spread: float = 0.0) -> None:
-    """``calls`` helper invocations. With no ``spread`` they are released at the same instant by a
-    gate file; with one, each starts ``spread`` seconds after the previous."""
-    helper = str(hook_file(repo, HELPER_NAME))
-    gate = repo / ".git" / "go"
-    gate.unlink(missing_ok=True)
-    quiet = {"cwd": repo, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    procs = []
-    if spread:
-        for _ in range(calls):
-            procs.append(subprocess.Popen([shell, helper, "post-commit"], **quiet))
-            time.sleep(spread)
-    else:
-        script = f'while [ ! -e "{gate}" ]; do :; done; exec {shell} "{helper}" post-commit'
-        procs = [subprocess.Popen(["sh", "-c", script], **quiet) for _ in range(calls)]
-        gate.write_text("")
-    for proc in procs:
-        assert proc.wait(timeout=30) == 0
-    gate.unlink(missing_ok=True)
+# The 20-caller, dash and every-stale-state variants, and the shim-built race windows, run in
+# tests/private/test_githooks.py; the two cases here keep the lock contract in every PR run.
+
+
+@NON_ATOMIC_MKDIR
+@pytest.mark.slow
+def test_t9_two_simultaneous_calls_never_overlap_on_a_fresh_lock(sandbox, monkeypatch):
+    fresh_lock_burst(sandbox, monkeypatch, "sh", 2)
+
+
+@NON_ATOMIC_MKDIR
+@pytest.mark.slow
+def test_t9_two_simultaneous_calls_never_overlap_on_a_dead_pid_lock(sandbox, monkeypatch):
+    stale_lock_burst(sandbox, monkeypatch, "sh", 2, "dead pid")
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("shell", SHELLS)
-@pytest.mark.parametrize("calls", [2, 20])
-def test_t9_simultaneous_calls_never_overlap_on_a_fresh_lock(
-    sandbox,
-    monkeypatch,
-    shell,
-    calls,
-):
-    """With no lock at the start. Afterwards no lock and no want flag remain, which means the
-    last request was consumed by a rebuild that started after it."""
-    repo = sandbox.repo()
-    info = info_for(repo)
-    githooks.install(info, graphify=fake(sandbox))
-    monkeypatch.setenv("FAKE_GRAPHIFY_SLEEP", "0.2")
-    burst(repo, calls, shell)
-    starts = await_rebuilds(sandbox, info.common)
-    assert starts
-    assert max_concurrent(sandbox.log) == 1
-
-
-def shim(sb: Sandbox, monkeypatch, name: str, body: str) -> None:
-    """Put an executable ``name`` first on ``PATH``, running the shell ``body``."""
-    folder = sb.root / f"shim-{name}"
-    folder.mkdir(exist_ok=True)
-    (folder / name).write_text(f"#!/bin/sh\n{body}\n")
-    (folder / name).chmod(0o755)
-    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
-
-
-def slow_lock_removal(sb: Sandbox, monkeypatch, *, delay: float = 0.15) -> None:
-    """Put an ``rm`` first on ``PATH`` that dawdles ``delay`` seconds before ``rm -rf <lock>``.
-    That widens the window between a stale-breaker's check and its removal, which is where a
-    second breaker would delete a lock that the first one already replaced with its own, and the
-    window in which a runner has finished but not yet released the lock."""
-    shim(
-        sb,
-        monkeypatch,
-        "rm",
-        f'case "$*" in *-rf*.lock) sleep {delay} ;; esac\nexec /bin/rm "$@"',
-    )
-
-
-def age(path: Path, minutes: float = 20) -> None:
-    """Make ``path``'s modification time ``minutes`` old."""
-    past = time.time() - minutes * 60
-    os.utime(path, (past, past))
-
-
-def make_lock(info: githooks.RepoInfo, state: str) -> Path:
-    """A lock directory in one of the states a dead job leaves: ``dead pid`` (a pid that no
-    longer runs), ``no pid, aged`` and ``empty pid, aged`` (a job that died, or could not write,
-    between creating the lock and writing its pid, 20 minutes ago), and the fresh forms of the
-    last two, which are an owner that is still writing; and ``live pid``, a runner that runs."""
-    lock = info.common / f"{HELPER_NAME}.lock"
-    lock.mkdir()
-    if state == "dead pid":
-        (lock / "pid").write_text(f"{dead_pid()}\n")
-        return lock
-    if state == "live pid":
-        (lock / "pid").write_text(f"{os.getpid()}\n")
-        return lock
-    if state.startswith("empty pid"):
-        (lock / "pid").write_bytes(b"")
-    if state.endswith("aged"):
-        age(lock)
-    return lock
-
-
-STALE_STATES = ["dead pid", "no pid, aged", "empty pid, aged"]
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("shell", SHELLS)
-@pytest.mark.parametrize("calls", [2, 20])
 @pytest.mark.parametrize("state", STALE_STATES)
-def test_t9_simultaneous_calls_never_overlap_on_a_stale_lock(
-    sandbox, monkeypatch, shell, calls, state
-):
-    """The lock's owner is dead, or died before it wrote its pid. One call may break it (the
-    ``.gate``); a second must not delete the lock the first one just took, or a later call takes
-    it and runs alongside."""
+def test_t9_a_held_gate_stops_a_second_stale_breaker(sandbox, state):
+    """Another breaker holds ``.gate``: this call must leave the stale lock alone and the gate
+    standing, and start no rebuild. Deterministic form of the 20-caller private race."""
     repo = sandbox.repo()
     info = info_for(repo)
     githooks.install(info, graphify=fake(sandbox))
-    make_lock(info, state)
-    monkeypatch.setenv("FAKE_GRAPHIFY_SLEEP", "0.3")
-    slow_lock_removal(sandbox, monkeypatch)
-    # Staggered, so that a second breaker's slow removal lands after the first one has taken the
-    # lock, and later calls then find it gone: that is the overlap the gate prevents.
-    burst(repo, calls, shell, spread=0.03)
-    starts = await_rebuilds(sandbox, info.common)
-    assert starts
-    assert max_concurrent(sandbox.log) == 1
-
-
-@pytest.mark.slow
-def test_t9_a_burst_during_a_rebuild_gives_a_rebuild_after_it(sandbox, monkeypatch):
-    """The burst lands while a rebuild runs: that rebuild cannot have consumed it, so a second
-    one must start after, and never alongside."""
-    repo = sandbox.repo()
-    info = info_for(repo)
-    githooks.install(info, graphify=fake(sandbox))
-    monkeypatch.setenv("FAKE_GRAPHIFY_SLEEP", "0.4")
+    lock = make_lock(info, state)
+    before = sorted(p.name for p in lock.iterdir())
+    gate = info.common / f"{HELPER_NAME}.lock.gate"
+    gate.mkdir()
     assert run_helper(repo, "post-commit") == 0
-    wait_for(lambda: len(sandbox.starts()) >= 1, what="the first rebuild")
-    burst(repo, 20, "sh")
-    starts = await_rebuilds(sandbox, info.common, at_least=2)
-    assert len(starts) >= 2
-    assert max_concurrent(sandbox.log) == 1
-
-
-# -- T10: a request during a rebuild ----------------------------------------------------
-
-
-@pytest.mark.slow
-def test_t10_a_request_during_a_rebuild_gives_a_second_rebuild(sandbox, monkeypatch):
-    """Commit, then switch away and back while the rebuild runs: HEAD is unchanged at the end,
-    and the tree moved in between, so a HEAD comparison would rebuild once, and this must twice."""
-    main = sandbox.repo()
-    git(main, "switch", "-q", "-c", "other")
-    commit(main, "on other")
-    git(main, "switch", "-q", "main")
-    info = info_for(main)
-    githooks.install(info, graphify=fake(sandbox))
-    monkeypatch.setenv("FAKE_GRAPHIFY_SLEEP", "0.6")
-    head = commit(main)  # the first rebuild starts and sleeps
-    wait_for(lambda: len(sandbox.starts()) >= 1, what="the first rebuild")
-    git(main, "switch", "-q", "other")
-    git(main, "switch", "-q", "main")
-    starts = await_rebuilds(sandbox, info.common, at_least=2)
-    assert len(starts) >= 2
-    assert starts[-1].head == head
-    assert max_concurrent(sandbox.log) == 1
+    time.sleep(0.5)
+    assert lock.is_dir() and sorted(p.name for p in lock.iterdir()) == before
+    assert gate.is_dir()
+    assert sandbox.starts() == []
 
 
 # -- a lock without a usable pid ----------------------------------------------------------------
@@ -715,34 +575,6 @@ def test_a_pid_write_that_fails_does_not_block_later_rebuilds(sandbox):
 
 
 @pytest.mark.slow
-def test_the_age_is_checked_again_under_the_gate(sandbox, monkeypatch, tmp_path):
-    """A call may see an old lock, and reach the gate after a live owner replaced that lock with
-    its own, still without a pid. The first ``find`` of the test lies (the lock is "old"); the
-    answer under the gate is the real one, and must keep that fresh lock."""
-    repo = sandbox.repo()
-    info = info_for(repo)
-    githooks.install(info, graphify=fake(sandbox))
-    lock = info.common / f"{HELPER_NAME}.lock"
-    lock.mkdir()  # fresh, and no pid yet: its owner is mid-write
-    calls = tmp_path / "find-calls"
-    shim(
-        sandbox,
-        monkeypatch,
-        "find",
-        f'first=$([ -e "{calls}" ] || echo yes)\necho "$*" >> "{calls}"\n'
-        '[ -z "$first" ] || { echo "$1"; exit 0; }\nexec /usr/bin/find "$@"',
-    )
-    assert run_helper(repo, "post-commit") == 0
-
-    def found_twice() -> bool:
-        return calls.exists() and len(calls.read_text().splitlines()) >= 2
-
-    wait_for(found_twice, what="the age to be checked a second time, under the gate")
-    assert lock.is_dir()  # the fresh lock was kept
-    assert sandbox.starts() == []
-
-
-@pytest.mark.slow
 @pytest.mark.parametrize("state", STALE_STATES)
 def test_install_removes_a_dead_lock(sandbox, state):
     """Re-running ``--hooks`` is the documented way out of a lock that a dead job left."""
@@ -763,27 +595,6 @@ def test_install_keeps_a_lock_that_may_be_live(sandbox, state):
     lock = make_lock(info, state)
     githooks.install(info, graphify=fake(sandbox))
     assert lock.is_dir()
-
-
-# -- a request while the lock is being released ------------------------------------------------
-
-
-@pytest.mark.slow
-def test_a_request_while_the_lock_is_being_released_is_not_lost(sandbox, monkeypatch):
-    """The runner has finished and is about to release the lock (its removal is slow here); a
-    call arrives in that gap, finds the lock held, and leaves. The runner must look at the flag
-    again after releasing, or that request is lost and the flag is left over."""
-    repo = sandbox.repo()
-    info = info_for(repo)
-    githooks.install(info, graphify=fake(sandbox))
-    slow_lock_removal(sandbox, monkeypatch, delay=0.4)
-    assert run_helper(repo, "post-commit") == 0
-    wait_for(lambda: count_ends(sandbox.log) >= 1, what="the first rebuild to end")
-    time.sleep(0.15)  # inside the 0.4 s the lock removal takes
-    assert run_helper(repo, "post-commit") == 0
-    starts = await_rebuilds(sandbox, info.common, at_least=2)
-    assert len(starts) == 2
-    assert idle(info.common)
 
 
 # -- T13: Graphify's own hook ----------------------------------------------------------
@@ -839,7 +650,7 @@ def test_t14_the_helper_and_the_hooks_parse(sandbox, shell):
 
 @pytest.mark.slow
 @pytest.mark.parametrize("shell", ["sh", "bash", "dash", "zsh", "ksh"])
-@pytest.mark.parametrize("flags", ["-e", "-u", "-eu"])
+@pytest.mark.parametrize("flags", ["-eu"])  # -e and -u are each part of -eu
 def test_the_block_line_passes_strict_shebangs(sandbox, shell, flags):
     if not have_shell(shell):
         pytest.skip(f"{shell} is not installed")

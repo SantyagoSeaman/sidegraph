@@ -25,10 +25,8 @@ from sidegraph.delivery import Delivery
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
-    DecisionKind,
     DecisionStatus,
     Descriptor,
-    Domain,
     DriftCheck,
     Entity,
     Fact,
@@ -36,45 +34,11 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from sidegraph.store_format import marker_text
+from tests.store_format2_support import format1_store
+from tests.store_record_support import _decision, _domain, _fact
 
 _SOURCE_PATH = Path(store_module.__file__)
-
-
-def _decision(title: str = "an adr", **overrides) -> Decision:
-    base = dict(
-        title=title,
-        kind=DecisionKind.ADR,
-        status=DecisionStatus.ACCEPTED,
-        context="c",
-        choice="ch",
-        valid_from=datetime.now(UTC),
-        provenance=Provenance(source="manual"),
-    )
-    base.update(overrides)
-    return Decision(**base)
-
-
-def _fact(statement: str = "a fact", **overrides) -> Fact:
-    base = dict(
-        statement=statement,
-        source="test",
-        status=DecisionStatus.ACCEPTED,
-        valid_from=datetime.now(UTC),
-        provenance=Provenance(source="manual"),
-    )
-    base.update(overrides)
-    return Fact(**base)
-
-
-def _domain(slug: str = "a-domain", **overrides) -> Domain:
-    base = dict(
-        slug=slug,
-        title=slug,
-        summary="A domain used for mutation-guard testing.",
-        provenance=Provenance(source="manual"),
-    )
-    base.update(overrides)
-    return Domain(**base)
 
 
 def _proposed_decision(store: Store, title: str) -> Decision:
@@ -132,6 +96,65 @@ def _methods_calling(class_name: str, attr_chain: tuple[str, ...]) -> set[str]:
     return hits
 
 
+def _txn_statement_callers(source: str, class_name: str = "Store") -> dict[str, set[str]]:
+    """``{function: {"BEGIN", "COMMIT"}}`` for every method of ``class_name`` in ``source`` that
+    runs ``self._conn.execute("BEGIN ...")`` or ``execute("COMMIT")`` with a literal (or an
+    f-string led by a literal) statement. ``.commit()`` is the other test's business."""
+    tree = ast.parse(source)
+    class_node = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == class_name
+    )
+    out: dict[str, set[str]] = {}
+    for fn in class_node.body:
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for call in ast.walk(fn):
+            if not (
+                isinstance(call, ast.Call)
+                and _attr_chain(call.func) == ("self", "_conn", "execute")
+                and call.args
+            ):
+                continue
+            arg = call.args[0]
+            if isinstance(arg, ast.JoinedStr) and arg.values:
+                arg = arg.values[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                word = arg.value.split(maxsplit=1)[0].upper() if arg.value.strip() else ""
+                if word in ("BEGIN", "COMMIT"):
+                    out.setdefault(fn.name, set()).add(word)
+    return out
+
+
+# Where a transaction may be opened or ended by SQL text: the writer scope, the reload, and the
+# read snapshot of ``bindings_for_entity_group`` (read-only, BEGIN DEFERRED ... COMMIT).
+_TXN_STATEMENT_ALLOWED = {
+    "_mutation": {"BEGIN"},
+    "_reload_index_from_canonical": {"BEGIN"},
+    "bindings_for_entity_group": {"BEGIN", "COMMIT"},
+}
+
+
+def test_transaction_statements_only_in_the_allowlisted_functions():
+    found = _txn_statement_callers(_SOURCE_PATH.read_text(encoding="utf-8"))
+    for name, words in found.items():
+        assert words <= _TXN_STATEMENT_ALLOWED.get(name, set()), (
+            f"{name} runs {sorted(words)} through execute(); allowed: {_TXN_STATEMENT_ALLOWED}"
+        )
+
+
+def test_the_transaction_statement_guard_flags_a_stray_commit():
+    source = (
+        "class Store:\n"
+        "    def stray(self):\n"
+        "        self._conn.execute('COMMIT')\n"
+        "    def stray_begin(self):\n"
+        '        self._conn.execute(f"BEGIN {mode}")\n'
+        "    def fine(self):\n"
+        "        self._conn.execute('SELECT 1')\n"
+    )
+    assert _txn_statement_callers(source) == {"stray": {"COMMIT"}, "stray_begin": {"BEGIN"}}
+
+
 def test_no_bare_commit_call_sites_outside_the_helper():
     commit_helper_callers = _methods_calling("Store", ("self", "_commit"))
     assert commit_helper_callers <= {"_mutation"}, (
@@ -152,31 +175,9 @@ def test_no_bare_commit_call_sites_outside_the_helper():
 def test_a_failed_write_rolls_back(tmp_path, monkeypatch):
     """Inject a failure inside add_decision's PREDECESSOR write (the second of its two
     ``_write_decision`` calls -- the successor is always written first, design's ordering
-    comment). Against unfixed code the exception propagates but the transaction stays open."""
-    store = Store(tmp_path / "s")
-    predecessor = store.add_decision(_decision("first"))
-
-    calls = {"n": 0}
-    original = Store._write_decision
-
-    def _flaky(self, decision):
-        calls["n"] += 1
-        if calls["n"] == 2:
-            raise RuntimeError("disk on fire")
-        return original(self, decision)
-
-    monkeypatch.setattr(Store, "_write_decision", _flaky)
-    successor = _decision("second")
-    successor.supersedes = predecessor.id
-
-    with pytest.raises(RuntimeError):
-        store.add_decision(successor)
-    assert store._conn.in_transaction is False
-
-
-def test_a_failed_write_does_not_lock_out_another_store(tmp_path, monkeypatch):
-    """The defect's actual consequence, not merely a cosmetic flag: after the failure above,
-    an INDEPENDENT ``Store`` on the same directory must complete a write immediately.
+    comment). Against unfixed code the exception propagates but the transaction stays open,
+    and that is not merely a cosmetic flag: an INDEPENDENT ``Store`` on the same directory
+    must complete a write straight after.
 
     ``other`` is opened BEFORE the failure is induced, while canonical/index state still
     agrees, and its ``busy_timeout`` lowered right away -- this isolates the assertion to
@@ -205,8 +206,10 @@ def test_a_failed_write_does_not_lock_out_another_store(tmp_path, monkeypatch):
     monkeypatch.setattr(Store, "_write_decision", _flaky)
     successor = _decision("second")
     successor.supersedes = predecessor.id
+
     with pytest.raises(RuntimeError):
         store.add_decision(successor)
+    assert store._conn.in_transaction is False
 
     try:
         other.add_decision(_decision("third"))
@@ -505,6 +508,16 @@ def _case_compact(store: Store) -> tuple[str, object]:
     return "INSERT INTO meta", lambda: store.compact()
 
 
+def _case_maintain(store: Store) -> tuple[str, object]:
+    # Maintenance needs a format-2 marker: switch this empty store's, then fail the index
+    # rebuild's meta stamp (its last SQL step). The shard files it published stay, as compact's
+    # archive segment does; the SQL transaction rolls back and releases the reservation.
+    (store.path / "format").write_text(marker_text(2, "0.17.0", 64), encoding="utf-8")
+    return "INSERT INTO meta", lambda: store.maintain(
+        settled_days=0, dry_run=False, any_branch=True
+    )
+
+
 def _case_delete_meta(store: Store) -> tuple[str, object]:
     store.set_meta("case-custom-key", "v1")
     return "DELETE FROM meta", lambda: store.delete_meta("case-custom-key")
@@ -576,6 +589,7 @@ _ROLLBACK_CASES = {
     "prune_telemetry_events": _case_prune_telemetry_events,
     "upsert_initiative": _case_upsert_initiative,
     "compact": _case_compact,
+    "maintain": _case_maintain,
     "set_meta": _case_set_meta,
     "claim_meta": _case_claim_meta,
     "raise_requirement": _case_raise_requirement,
@@ -595,7 +609,7 @@ def test_every_write_method_rolls_back_on_failure(tmp_path, method_name):
     guard above. A method with no case registered fails loudly by name, rather than silently
     dropping out of coverage, so this stays complete as methods are converted (Task 2) or
     added (later)."""
-    store = Store(tmp_path / "s")
+    store = Store(format1_store(tmp_path / "s"))
     case = _ROLLBACK_CASES.get(method_name)
     if case is None:
         pytest.fail(

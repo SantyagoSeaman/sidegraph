@@ -87,28 +87,6 @@ def _manifest(
     return result
 
 
-def test_manifest_can_stat_only_locked_sqlite_shm_when_explicitly_allowed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    sidecar = tmp_path / "index.db-shm"
-    sidecar.write_bytes(b"synthetic sidecar")
-    original_read_bytes = Path.read_bytes
-
-    def locked_read_bytes(path: Path) -> bytes:
-        if path == sidecar:
-            raise PermissionError("synthetic held-open sidecar")
-        return original_read_bytes(path)
-
-    monkeypatch.setattr(Path, "read_bytes", locked_read_bytes)
-
-    with pytest.raises(PermissionError):
-        _manifest(tmp_path)
-    stat = sidecar.stat()
-    assert _manifest(tmp_path, allow_locked_shm=True) == {
-        sidecar.name: ("locked_sqlite_shm_bytes_unverified", stat.st_size, stat.st_mtime_ns)
-    }
-
-
 def test_collect_returns_six_sections_and_unknown_active_mcp_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -133,33 +111,6 @@ def test_collect_returns_six_sections_and_unknown_active_mcp_warning(
     }
     assert report["overall"] == "warning"
     assert report["sections"][0]["evidence"]["active_mcp"]["status"] == "UNKNOWN"
-
-
-def test_unsafe_wal_skips_all_doctor_and_stats_paths_without_source_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project, store = _sandbox(tmp_path, monkeypatch)
-    index = store / "index.db"
-    connection = sqlite3.connect(index)
-    try:
-        connection.execute("CREATE TABLE pin (value TEXT)")
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("INSERT INTO pin VALUES ('fixture')")
-    finally:
-        connection.close()
-    assert index.read_bytes()[18:20] == b"\x02\x02"
-    before = _manifest(project)
-
-    report = _collector().collect(
-        project=project, store=store, graph=project / "graphify-out/graph.json", host="claude"
-    )
-
-    after = _manifest(project)
-    assert after == before
-    assert set(after) == set(before)
-    assert report["sections"][4]["evidence"]["doctor_advisories"]["status"] == "UNKNOWN"
-    assert report["sections"][5]["evidence"]["statistics"]["status"] == "UNKNOWN"
-    assert report["overall"] == "warning"
 
 
 @pytest.mark.parametrize("unsafe_state", ["open_wal", "nonempty_journal", "corrupt_header"])
@@ -228,6 +179,8 @@ def test_other_unsafe_indexes_are_not_opened(
 def test_wal_guard_does_not_attempt_a_sqlite_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An unsafe (WAL-mode) index is never opened, by any doctor or stats path, and no source
+    file changes. The audit hook has a positive control, so it cannot pass vacuously."""
     project, store = _sandbox(tmp_path, monkeypatch)
     index = store / "index.db"
     connection = sqlite3.connect(index)
@@ -240,6 +193,7 @@ def test_wal_guard_does_not_attempt_a_sqlite_connection(
     assert index.read_bytes()[18:20] == b"\x02\x02"
     assert not (store / "index.db-wal").exists()
     assert not (store / "index.db-shm").exists()
+    before = _manifest(project)
     events: list[str] = []
     active = [True]
 
@@ -249,55 +203,28 @@ def test_wal_guard_does_not_attempt_a_sqlite_connection(
 
     sys.addaudithook(capture)
     try:
+        audit_probe_dir = tmp_path / "audit probe with spaces"
+        audit_probe_dir.mkdir()
+        audit_probe_uri = f"{(audit_probe_dir / 'index.db').as_uri()}?mode=rwc"
+        sqlite3.connect(audit_probe_uri, uri=True).close()
+        assert len(events) == 1, "the audit hook must see an index.db open"
+        events.clear()
+
         report = _collector().collect(
-            project=project, store=store, graph=project / "graphify-out/graph.json"
+            project=project,
+            store=store,
+            graph=project / "graphify-out/graph.json",
+            host="claude",
         )
     finally:
         active[0] = False
 
+    assert _manifest(project) == before
     assert report["sections"][4]["evidence"]["doctor_advisories"]["counts_by_code"] == "UNKNOWN"
+    assert report["sections"][4]["evidence"]["doctor_advisories"]["status"] == "UNKNOWN"
     assert report["sections"][5]["evidence"]["statistics"]["status"] == "UNKNOWN"
+    assert report["overall"] == "warning"
     assert events == []
-
-
-def test_owned_unsafe_predecessor_opens_the_wal_index(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Disposable old doctor/stats orchestration proves why the collector needs a guard."""
-    project, store = _sandbox(tmp_path, monkeypatch)
-    initialized = Store(store)
-    initialized.close()
-    index = store / "index.db"
-    connection = sqlite3.connect(index)
-    try:
-        connection.execute("PRAGMA journal_mode=WAL")
-    finally:
-        connection.close()
-    assert index.read_bytes()[18:20] == b"\x02\x02"
-    assert not (store / "index.db-wal").exists()
-    assert not (store / "index.db-shm").exists()
-    modules = _collector()._imports()
-    events: list[str] = []
-    active = [True]
-
-    def capture(event: str, args: tuple[object, ...]) -> None:
-        if active[0] and event == "sqlite3.connect" and args and "index.db" in str(args[0]):
-            events.append(str(args[0]))
-
-    sys.addaudithook(capture)
-    connection = modules["doctor"].open_curation_index(store)
-    assert connection is not None
-    try:
-        modules["doctor"].curate(store, index=connection)
-        doctor_open_count = len(events)
-        modules["build_report"](store, project / "graphify-out/graph.json")
-    finally:
-        active[0] = False
-        connection.close()
-
-    stats_open_count = len(events) - doctor_open_count
-    assert doctor_open_count > 0, "unsafe predecessor should attempt a doctor index open"
-    assert stats_open_count > 0, "unsafe predecessor should attempt a stats index open"
 
 
 def test_missing_index_keeps_canonical_doctor_curation_available(

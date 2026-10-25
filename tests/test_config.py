@@ -84,21 +84,16 @@ def test_sidegraph_db_existing_legacy_file_passes_through_unchanged(tmp_path, mo
     assert resolve_store_path() == str(legacy)
 
 
-def test_sidegraph_db_existing_directory_used_directly_never_its_parent(tmp_path, monkeypatch):
+@pytest.mark.parametrize("canonical_layout", [False, True], ids=["plain-dir", "canonical-layout"])
+def test_sidegraph_db_existing_directory_used_directly_never_its_parent(
+    tmp_path, monkeypatch, canonical_layout
+):
     _reset(monkeypatch)
-    existing_dir = tmp_path / "some-store-dir"
+    existing_dir = tmp_path / (".sidegraph" if canonical_layout else "some-store-dir")
     existing_dir.mkdir()
-    monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
-    monkeypatch.setenv("SIDEGRAPH_DB", str(existing_dir))
-    assert resolve_store_path() == str(existing_dir)
-
-
-def test_sidegraph_db_existing_canonical_layout_dir_used_directly(tmp_path, monkeypatch):
-    _reset(monkeypatch)
-    existing_dir = tmp_path / ".sidegraph"
-    existing_dir.mkdir()
-    (existing_dir / "format").write_text("sidegraph-store 0.4.0\n")
-    (existing_dir / "decisions").mkdir()
+    if canonical_layout:
+        (existing_dir / "format").write_text("sidegraph-store 0.4.0\n")
+        (existing_dir / "decisions").mkdir()
     monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
     monkeypatch.setenv("SIDEGRAPH_DB", str(existing_dir))
     assert resolve_store_path() == str(existing_dir)

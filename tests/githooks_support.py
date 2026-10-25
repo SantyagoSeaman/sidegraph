@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from sidegraph import githooks
+
 HOOKS = ("post-commit", "post-merge", "post-checkout")
 HELPER_NAME = "sidegraph-graph-refresh"
 
@@ -64,20 +66,13 @@ class Sandbox:
     log: Path
     fake_bin: Path
     home: Path
+    templates: Path
 
     def repo(self, name: str = "main", *, files: bool = True) -> Path:
-        """A new repository with one commit (``a.txt``), on branch ``main``."""
+        """A new repository with one commit (``a.txt``), on branch ``main``: a copy of a pristine
+        template built once per session, so each test pays a directory copy, not five git runs."""
         path = self.root / name
-        path.mkdir()
-        git(path, "init", "-q", "-b", "main")
-        # The seed commit must not launch detached maintenance that changes .git while tests
-        # inspect repository contents. Keep this policy local to synthetic repositories.
-        git(path, "config", "--local", "maintenance.auto", "false")
-        git(path, "config", "--local", "gc.auto", "0")
-        if files:
-            (path / "a.txt").write_text("a\n")
-            git(path, "add", "a.txt")
-        git(path, "commit", "-q", "--no-verify", "-m", "initial", "--allow-empty")
+        shutil.copytree(self.templates / ("with-files" if files else "empty"), path, symlinks=True)
         return path
 
     def starts(self) -> list[Start]:
@@ -98,8 +93,55 @@ def commit(cwd: Path, message: str = "c") -> str:
     return git(cwd, "rev-parse", "HEAD")
 
 
+def _build_template(path: Path, *, files: bool) -> None:
+    """One commit on branch ``main``. No ``monkeypatch`` here (the fixture is session-scoped), so
+    the hermetic identity goes in through the environment of each git run."""
+    path.mkdir(parents=True)
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "T",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "T",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+    def run(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=path, env=env, capture_output=True, check=True)
+
+    run("init", "-q", "-b", "main")
+    # The seed commit must not launch detached maintenance that changes .git while tests
+    # inspect repository contents. Keep this policy local to synthetic repositories.
+    run("config", "--local", "maintenance.auto", "false")
+    run("config", "--local", "gc.auto", "0")
+    if files:
+        (path / "a.txt").write_text("a\n")
+        run("add", "a.txt")
+    run("commit", "-q", "--no-verify", "-m", "initial", "--allow-empty")
+
+
+_TEMPLATES: dict[Path, Path] = {}
+
+
+def _repo_templates(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The pristine repositories ``Sandbox.repo`` copies, built on first use in this session. A
+    plain cache rather than a fixture: test modules bind ``sandbox`` by name, and a fixture it
+    depends on would have to be bound beside it."""
+    base = tmp_path_factory.getbasetemp()
+    if base not in _TEMPLATES:
+        root = tmp_path_factory.mktemp("repo-templates")
+        _build_template(root / "with-files", files=True)
+        _build_template(root / "empty", files=False)
+        _TEMPLATES[base] = root
+    return _TEMPLATES[base]
+
+
 @pytest.fixture
-def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Sandbox:
+def sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> Sandbox:
     """A hermetic git environment (HOME, global config and identity all inside ``tmp_path``) and a
     fake ``graphify`` first on ``PATH``, logging to ``sandbox.log``."""
     home = tmp_path / "home"
@@ -124,7 +166,13 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Sandbox:
     monkeypatch.setenv("FAKE_GRAPHIFY_LOG", str(log))
     monkeypatch.delenv("FAKE_GRAPHIFY_SLEEP", raising=False)
     monkeypatch.delenv("GRAPHIFY_NO_AUTO_REFRESH", raising=False)
-    return Sandbox(root=work, log=log, fake_bin=fake_bin, home=home)
+    return Sandbox(
+        root=work,
+        log=log,
+        fake_bin=fake_bin,
+        home=home,
+        templates=_repo_templates(tmp_path_factory),
+    )
 
 
 def read_starts(log: Path) -> list[Start]:
@@ -205,3 +253,162 @@ def dead_pid() -> int:
 
 def have_shell(name: str) -> bool:
     return shutil.which(name) is not None
+
+
+def _mkdir_is_uutils() -> bool:
+    """True when ``mkdir`` on PATH is uutils coreutils, the default on Ubuntu 26.04."""
+    try:
+        out = subprocess.run(
+            ["mkdir", "--version"], capture_output=True, text=True, timeout=5
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "uutils" in out
+
+
+# uutils ``mkdir`` 0.10 is not atomic under a race: two callers creating one directory can both
+# exit 0, so the helper's mkdir lock lets two rebuilds run at once. The overlap tests are expected
+# to fail there until the helper takes its lock without an external mkdir.
+NON_ATOMIC_MKDIR = pytest.mark.xfail(
+    _mkdir_is_uutils(),
+    reason="uutils mkdir lets two racing callers both succeed; the helper lock relies on mkdir",
+    strict=False,
+)
+
+
+# -- helpers shared by test_githooks and the private lock-race tests ------------------------
+
+SHELLS = [
+    "sh",
+    pytest.param(
+        "dash", marks=pytest.mark.skipif(not have_shell("dash"), reason="dash not installed")
+    ),
+]
+
+
+def info_for(path: Path) -> githooks.RepoInfo:
+    info = githooks.repo_info(path)
+    assert info is not None
+    return info
+
+
+def fake(sb: Sandbox) -> str:
+    return str(sb.fake_bin / "graphify")
+
+
+def hook_file(repo: Path, hook: str) -> Path:
+    return repo / ".git" / "hooks" / hook
+
+
+def run_helper(repo: Path, *args: str, shell: str | None = None, env: dict | None = None) -> int:
+    helper = str(hook_file(repo, HELPER_NAME))
+    cmd = [shell, helper, *args] if shell else [helper, *args]
+    return subprocess.run(cmd, cwd=repo, env=env, capture_output=True).returncode
+
+
+def burst(repo: Path, calls: int, shell: str, *, spread: float = 0.0) -> None:
+    """``calls`` helper invocations. With no ``spread`` they are released at the same instant by a
+    gate file; with one, each starts ``spread`` seconds after the previous."""
+    helper = str(hook_file(repo, HELPER_NAME))
+    gate = repo / ".git" / "go"
+    gate.unlink(missing_ok=True)
+    quiet = {"cwd": repo, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    procs = []
+    if spread:
+        for _ in range(calls):
+            procs.append(subprocess.Popen([shell, helper, "post-commit"], **quiet))
+            time.sleep(spread)
+    else:
+        script = f'while [ ! -e "{gate}" ]; do :; done; exec {shell} "{helper}" post-commit'
+        procs = [subprocess.Popen(["sh", "-c", script], **quiet) for _ in range(calls)]
+        gate.write_text("")
+    for proc in procs:
+        assert proc.wait(timeout=30) == 0
+    gate.unlink(missing_ok=True)
+
+
+def shim(sb: Sandbox, monkeypatch, name: str, body: str) -> None:
+    """Put an executable ``name`` first on ``PATH``, running the shell ``body``."""
+    folder = sb.root / f"shim-{name}"
+    folder.mkdir(exist_ok=True)
+    (folder / name).write_text(f"#!/bin/sh\n{body}\n")
+    (folder / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
+
+
+def slow_lock_removal(sb: Sandbox, monkeypatch, *, delay: float = 0.15) -> None:
+    """Put an ``rm`` first on ``PATH`` that dawdles ``delay`` seconds before ``rm -rf <lock>``.
+    That widens the window between a stale-breaker's check and its removal, which is where a
+    second breaker would delete a lock that the first one already replaced with its own, and the
+    window in which a runner has finished but not yet released the lock."""
+    shim(
+        sb,
+        monkeypatch,
+        "rm",
+        f'case "$*" in *-rf*.lock) sleep {delay} ;; esac\nexec /bin/rm "$@"',
+    )
+
+
+def age(path: Path, minutes: float = 20) -> None:
+    """Make ``path``'s modification time ``minutes`` old."""
+    past = time.time() - minutes * 60
+    os.utime(path, (past, past))
+
+
+def make_lock(info: githooks.RepoInfo, state: str) -> Path:
+    """A lock directory in one of the states a dead job leaves: ``dead pid`` (a pid that no
+    longer runs), ``no pid, aged`` and ``empty pid, aged`` (a job that died, or could not write,
+    between creating the lock and writing its pid, 20 minutes ago), and the fresh forms of the
+    last two, which are an owner that is still writing; and ``live pid``, a runner that runs."""
+    lock = info.common / f"{HELPER_NAME}.lock"
+    lock.mkdir()
+    if state == "dead pid":
+        (lock / "pid").write_text(f"{dead_pid()}\n")
+        return lock
+    if state == "live pid":
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        return lock
+    if state.startswith("empty pid"):
+        (lock / "pid").write_bytes(b"")
+    if state.endswith("aged"):
+        age(lock)
+    return lock
+
+
+STALE_STATES = ["dead pid", "no pid, aged", "empty pid, aged"]
+
+
+def fresh_lock_burst(
+    sandbox: Sandbox, monkeypatch: pytest.MonkeyPatch, shell: str, calls: int
+) -> None:
+    """``calls`` simultaneous helper runs with no lock at the start. Afterwards no lock and no
+    want flag remain, which means the last request was consumed by a rebuild that started after
+    it, and no two rebuilds ever ran together."""
+    repo = sandbox.repo()
+    info = info_for(repo)
+    githooks.install(info, graphify=fake(sandbox))
+    monkeypatch.setenv("FAKE_GRAPHIFY_SLEEP", "0.2")
+    burst(repo, calls, shell)
+    starts = await_rebuilds(sandbox, info.common)
+    assert starts
+    assert max_concurrent(sandbox.log) == 1, sandbox.log.read_text()
+
+
+def stale_lock_burst(
+    sandbox: Sandbox, monkeypatch: pytest.MonkeyPatch, shell: str, calls: int, state: str
+) -> None:
+    """The lock's owner is dead, or died before it wrote its pid. One call may break it (the
+    ``.gate``); a second must not delete the lock the first one just took, or a later call takes
+    it and runs alongside."""
+    repo = sandbox.repo()
+    info = info_for(repo)
+    githooks.install(info, graphify=fake(sandbox))
+    make_lock(info, state)
+    monkeypatch.setenv("FAKE_GRAPHIFY_SLEEP", "0.3")
+    slow_lock_removal(sandbox, monkeypatch)
+    # Staggered, so that a second breaker's slow removal lands after the first one has taken the
+    # lock, and later calls then find it gone: that is the overlap the gate prevents.
+    burst(repo, calls, shell, spread=0.03)
+    starts = await_rebuilds(sandbox, info.common)
+    assert starts
+    assert max_concurrent(sandbox.log) == 1, sandbox.log.read_text()

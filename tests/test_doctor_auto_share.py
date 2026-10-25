@@ -33,6 +33,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 
 
 def _fake_ratifier_identity(actor: str | None = None) -> str:
@@ -148,7 +149,7 @@ def test_t8_share_and_rate_lines_pinned_before_and_after_compact(tmp_path, capsy
     before/after equality is not vacuously true (e.g. because a future default made
     ``compact()`` a no-op for this fixture)."""
     db = tmp_path / "store"
-    store = Store(db)
+    store = Store(format1_store(db))
     _t8_fixture(store, monkeypatch)
 
     _, out_before = _run_doctor(db, capsys)
@@ -307,7 +308,7 @@ def test_domain_group_drop_counts_toward_domains_retired(tmp_path, capsys):
     drop this domain from the count on compact (the domain half of amendment 9's mutant,
     which 32 tests missed before this clause existed)."""
     db = tmp_path / "store"
-    store = Store(db)
+    store = Store(format1_store(db))
     dom = store.add_domain(
         Domain(
             slug="trading",
@@ -342,7 +343,7 @@ def test_domain_group_supersede_domain_counts_toward_domains_retired(tmp_path, c
     proposed, so it is never compacted) — a hot-only reader would silently drop this
     domain from the count on compact."""
     db = tmp_path / "store"
-    store = Store(db)
+    store = Store(format1_store(db))
     dom = store.add_domain(
         Domain(
             slug="trading",
@@ -521,7 +522,7 @@ def test_doctor_never_writes_on_the_auto_share_path(tmp_path, monkeypatch):
     around a COMPACTED T8 fixture, exercising both the hot and the archive halves of the
     new reader."""
     db = tmp_path / "store"
-    store = Store(db)
+    store = Store(format1_store(db))
     _t8_fixture(store, monkeypatch)
     store.compact()
 
@@ -625,52 +626,22 @@ def test_auto_share_lines_survive_an_unhashable_status(tmp_path):
     assert "decisions+facts superseded 0/2 (0%) vs human 0/1 (0%)" in lines[1]
 
 
-def test_programming_error_in_the_latency_computation_is_not_swallowed(tmp_path, monkeypatch):
-    from sidegraph import doctor
-
-    db = tmp_path / "store"
-    _write_record(db, "decisions", "A", _stamped("A", days=2))
-
-    def boom(*_a: object, **_k: object) -> None:
-        raise TypeError("programming error")
-
-    monkeypatch.setattr(doctor, "_latency_days", boom)
-    with pytest.raises(TypeError):
-        doctor.ratification_latency_lines(db)
-
-
-def test_doctor_main_does_not_swallow_a_programming_error_in_the_auto_share_lines(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("helper", ["_latency_days", "_tally_kind"])
+def test_doctor_main_does_not_swallow_a_programming_error_in_the_ratification_lines(
+    tmp_path, monkeypatch, helper
 ):
     """Red against the old cli.py (`except Exception: pass` around the lines): the
-    run exited 0 with the lines silently gone."""
+    run exited 0 with the lines silently gone. One helper per part of the combined lines
+    (latency, share): a swallow at any layer between the helper and ``doctor_main`` hides it."""
     db = tmp_path / "store"
     _t8_fixture(Store(db), monkeypatch)
 
     def boom(*_a: object, **_k: object) -> None:
         raise TypeError("programming error")
 
-    monkeypatch.setattr("sidegraph.doctor._tally_kind", boom)
+    monkeypatch.setattr(f"sidegraph.doctor.{helper}", boom)
     with pytest.raises(TypeError):
         doctor_main(["--db", str(db)])
-
-
-def test_programming_error_in_the_latency_part_propagates_out_of_the_combined_lines(
-    tmp_path, monkeypatch
-):
-    """The boundary is pinned on the function ``doctor_main`` calls, not only on its
-    latency part: wrapping either part in a swallow must fail a test."""
-    from sidegraph import doctor
-
-    db = tmp_path / "store"
-    _write_record(db, "decisions", "A", _stamped("A", days=2))
-
-    def boom(*_a: object, **_k: object) -> None:
-        raise TypeError("programming error")
-
-    monkeypatch.setattr(doctor, "_latency_days", boom)
-    with pytest.raises(TypeError):
-        doctor.ratification_info_lines(db)
 
 
 def test_ratification_info_lines_order_is_latency_then_share_then_rate(tmp_path, monkeypatch):

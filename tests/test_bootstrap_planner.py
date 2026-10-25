@@ -387,14 +387,15 @@ def test_duplicate_candidate_is_reported_and_first_candidate_wins(tmp_path):
 
 
 def test_same_redacted_content_at_different_refs_is_reported_as_duplicate(tmp_path):
-    content = (
+    # The two documents differ only in the secret, so they match only once it is redacted.
+    template = (
         "# Use SQLite\n\n"
-        "## Context\n\nThe project needs local state.\n\n"
+        "## Context\n\nThe project needs local state, token={secret}\n\n"
         "## Decision\n\nUse SQLite.\n\n"
         "## Rejected\n\nDo not add a hosted database.\n"
     )
-    first = write(tmp_path / "docs/adr/a.md", content)
-    second = write(tmp_path / "docs/adr/b.md", content)
+    first = write(tmp_path / "docs/adr/a.md", template.format(secret="a" * 32))
+    second = write(tmp_path / "docs/adr/b.md", template.format(secret="b" * 32))
     scan = ScanResult(
         root=str(tmp_path),
         files=(first.relative_to(tmp_path).as_posix(), second.relative_to(tmp_path).as_posix()),
@@ -402,6 +403,7 @@ def test_same_redacted_content_at_different_refs_is_reported_as_duplicate(tmp_pa
 
     plan = plan_sources(tmp_path, scan, get_profile("generic-adr"))
 
+    assert "[REDACTED]" in plan.candidates[0].context
     assert tuple(candidate.ref for candidate in plan.candidates) == ("docs/adr/a.md",)
     assert plan.issues[-1].warning == WarningCode.DUPLICATE_PLAN
     assert plan.issues[-1].ref == "docs/adr/b.md"

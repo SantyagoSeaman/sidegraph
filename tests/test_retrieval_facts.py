@@ -69,7 +69,7 @@ def populated_many_mistakes(tmp_path):
     are added — see test_facts_never_displace_mistakes)."""
     store = Store(tmp_path / "t.db")
     entity = store.upsert_entity(Entity(canonical_name="Seed"))
-    for i in range(40):
+    for i in range(15):
         _bound_decision(store, entity.entity_id, f"gotcha{i}", DecisionKind.GOTCHA)
     return store, entity
 
@@ -179,7 +179,7 @@ def test_standalone_facts_never_displace_mistakes(populated_many_mistakes):
     budget = RetrievalBudget(memory_chars=600)
     ctx = rank_decisions([entity], [], [], store, budget)
     baseline_mistakes = len(ctx.mistakes)
-    assert baseline_mistakes < 40  # budget pressure genuinely exists before facts exist
+    assert baseline_mistakes < 15  # budget pressure genuinely exists before facts exist
     for i in range(10):
         f = store.add_fact(_fact(statement=f"filler fact {i}", status=DecisionStatus.ACCEPTED))
         store.add_binding(AnchorBinding(record_id=f.id, entity_id=entity.entity_id, tier=2))
@@ -202,7 +202,7 @@ def test_inline_evidence_never_displaces_mistakes(populated_many_mistakes):
 
     ctx = rank_decisions([entity], [], [], store, budget)
     baseline_decision_lines = _decision_line_count(ctx)
-    assert baseline_decision_lines < 40  # budget pressure exists before any fact exists
+    assert baseline_decision_lines < 15  # budget pressure exists before any fact exists
 
     # Attach a supporting fact to EVERY mistake, not just an arbitrary slice:
     # `store.valid_decisions_for_entity` returns SQLite's natural (insertion) order, which

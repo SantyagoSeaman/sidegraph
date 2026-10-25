@@ -187,7 +187,7 @@ members into the local index, and everything that asks "is this in the domain" r
 members, the decisions a domain gathers, the Tier-1 domain a new decision binds to, retrieval's
 related bucket. A domain's members are the nodes of its communities plus the nodes under its path
 prefixes. With a [domain snapshot](../reference/store-format.md#the-domain-snapshot), a covered
-domain's members come from the snapshot, and its rules change nothing until a refresh. Before all of
+domain's members come from the snapshot, and a change to its rules changes nothing for the files the snapshot lists until a refresh. A file the snapshot does not list (a new one) is still matched against the domain's path prefixes. Before all of
 this, a community that holds code and documents is split in two: Graphify 0.9.62 and later link a
 document to the code it mentions, which merges them.
 

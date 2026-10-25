@@ -15,7 +15,7 @@ whether the store has any accepted domains yet:
 - **`render_toc(cache)`** — the real, domain-named table of contents (activated the moment the
   first domain is ratified — no sync required, see [below](#when-the-toc-goes-live)): one line
   per accepted domain (title, one-line summary truncated to 100 characters, mistake count,
-  subdomain count when non-zero), then initiatives, then global mistakes, then any proposed
+  subdomain count when non-zero), then stored `Initiative` records (if any), then global mistakes, then any proposed
   global mistakes under `## Unratified proposals`. This is what "the
   mind model comes alive" means in practice. The per-domain mistake count is what
   [`drill_down`](#drill_downdomain_slug--the-axis-1-operation) would serve for that domain:
@@ -94,8 +94,10 @@ Works on a not-yet-ratified
 
 Unknown `domain_slug` never guesses a match: it returns `{"found": false, "candidates": [...]}`
 with up to 10 currently-accepted slugs to retry with. No reader present degrades `members` to
-an empty list with an explanatory `"note"` key — everything store-derived (`domain`,
-`subdomains`, `decisions`) is unaffected.
+an empty list with an explanatory `"note"` key. The other store-derived parts (`domain`,
+`subdomains`) are unaffected, and so are the `decisions` found through the domain's own
+bindings. A decision reachable only through the whole-document branch of the drill-down
+(bound to a document whose heading the domain covers) needs the reader and drops out too.
 
 ## `get_task_context`: seeded, budgeted, mistakes-first
 
@@ -254,7 +256,7 @@ unrelated question. The render is tiered instead:
   populated. This is also what stops an off-topic decision's `rejected`/`consequences` from
   repeating across unrelated questions — a related entry never renders them.
 
-Every clip cuts at a word boundary with a trailing ellipsis, never mid-word. The per-field
+Every clip cuts at a word boundary with a trailing ellipsis. The one exception is a single unbroken token longer than the limit (a long identifier or URL), which is cut hard at the limit. The per-field
 clips are applied *before* the `memory_chars` check, not a bypass of it: a single
 generously-rendered direct entry that still doesn't fit the remaining budget is retried once
 at the tight tier before being dropped whole (degrade-before-drop — otherwise the
@@ -323,8 +325,10 @@ and the old truncation behavior is unchanged, byte-for-byte.
 caller already has one half and just needs the other. Both reuse the same seed-resolution
 and ranking code as `get_task_context`, but not its [tolerant seed reading](#seeds): they match
 seeds exactly as written. They're thinner call surfaces, not a different algorithm. `query_structure` needs a reader (no graph, no structural map — it says so rather
-than crashing); `query_decisions` degrades like `get_task_context` always has: named-seed
-resolution needs a reader, but `scope: global` decisions still surface without one.
+than crashing); `query_decisions` degrades like `get_task_context` always has: resolving a seed
+through the graph needs a reader. Without one, a seed whose name and file match an anchor
+descriptor already stored on a live binding still finds its decisions, and `scope: global`
+decisions still surface.
 
 ### Community fallback
 

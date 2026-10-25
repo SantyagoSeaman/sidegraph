@@ -2,11 +2,11 @@
 
 `sidegraph-export-adr` makes stored architectural decisions readable as Markdown ADRs.
 It projects the memory you have; it does not infer a complete architecture from the code.
-Preview first, then run the same command with `--write` after reviewing its diff:
+Preview first, then run the same command with `--write` after reviewing its diff. Commands are shown by name; without the CLI on your PATH, run them with the `uvx` prefix described in [running the CLIs](../reference/cli.md#running-the-clis-beside-the-plugin).
 
 ```bash
-uv run sidegraph-export-adr --db .sidegraph --out docs/adr
-uv run sidegraph-export-adr --db .sidegraph --out docs/adr --write
+sidegraph-export-adr --db .sidegraph --out docs/adr
+sidegraph-export-adr --db .sidegraph --out docs/adr --write
 ```
 
 The default is a read-only preview. It creates no directories or files. Neither preview
@@ -53,9 +53,9 @@ profile's directory can affect structural bootstrap detection (`docs/adr`,
 MADR has no detection marker. Use `--out` to choose a different directory.
 
 ```bash
-uv run sidegraph-export-adr --profile madr --out docs/adr
-uv run sidegraph-export-adr --filename '{number:04d}-{id}.md'
-uv run sidegraph-export-adr --template adr-template.txt --out docs/adr
+sidegraph-export-adr --profile madr --out docs/adr
+sidegraph-export-adr --filename '{number:04d}-{id}.md'
+sidegraph-export-adr --template adr-template.txt --out docs/adr
 ```
 
 Default filenames contain the stable record ID. Numbered patterns append new numbers;

@@ -1,7 +1,7 @@
 # CLI reference
 
-21 console scripts are registered in `pyproject.toml` (`[project.scripts]`): sixteen
-commands documented on this page — fourteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
+22 console scripts are registered in `pyproject.toml` (`[project.scripts]`): seventeen
+commands documented on this page — fifteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
 (including `sidegraph-prepare-commit-msg`, which doubles as a git hook — see
 [`reference/git-bindings.md`](git-bindings.md) for its installation and mechanism) and the
 guided `sidegraph-bootstrap` in
@@ -67,8 +67,10 @@ sidegraph-bootstrap [--root PATH] [--db PATH] [--graph PATH] [--profile NAME]
 ```
 
 Guided, preview-first onboarding for existing ADR/spec rationale. Bootstrap auto-detects or
-accepts one of exactly six profiles (`generic-adr`, `superpowers`, `genkovich-sdd`,
-`spec-kit`, `bmad`, `openspec`), scans inside one repository root, produces a redacted
+accepts one of the seven registered profiles (`generic-adr`, `superpowers`, `genkovich-sdd`,
+`spec-kit`, `bmad`, `openspec` and `madr`; the first six are auto-detected, and `madr`, which
+reads like `generic-adr` and differs only in its ADR export template, is selected only by naming
+it), scans inside one repository root, produces a redacted
 immutable plan, reviews candidates, writes only after literal confirmation, reopens and
 verifies the store, checks the selected host, and calls production task-context retrieval
 for proof. See the
@@ -133,11 +135,15 @@ the Sidegraph checkout):
 1. Creates the store's directory (the canonical `decisions/`/`facts/`/`domains/`/`entities/`/
    `bindings/`/`initiatives/` layout, a committed `format` marker, a committed
    `stamping_live_since` file, and a store-written `.sidegraph/.gitignore` ignoring the derived
-   `index.db`) at `--db` (via `Store(...)`, the
-   same call every other entry point makes — inherently idempotent). If the directory already
-   looks initialized (an existing `format` marker, an un-migrated legacy `decisions.db`, or a
-   legacy `*.db` file path), prints `already initialized: <path> exists.` instead of touching
-   it again; a legacy path that isn't yet migrated is migrated in place, and the (accurate)
+   `index.db` and its SQLite sidecars) at `--db`. A fresh store is **format 2** (marker
+   `sidegraph-store 2.0.0`, `requires-sidegraph >= 0.17.0`, `shards 64`); the shard files
+   themselves appear when [`sidegraph-compact`](#sidegraph-compact) first folds records into
+   them. The store is created through `Store(...)`, the same call every other entry point
+   makes, so the step is inherently idempotent. A new store prints `created store: <path>`. A
+   scaffold with a `format` marker but no record yet prints `empty store: <path> exists;
+   complete setup using the guidance below.` If the directory already holds records (or is an
+   un-migrated legacy `decisions.db`, or a legacy `*.db` file path), it prints
+   `already initialized: <path> exists.` instead of touching it again; a legacy path that isn't yet migrated is migrated in place, and the (accurate)
    "already initialized" message still applies since that's pre-existing data, not a fresh
    store.
 2. Checks whether `--graph` exists. Prints `found graph: <path>` if so, or `missing graph:
@@ -254,10 +260,10 @@ hook question's own write failure prints the same message and leaves the exit co
 **Examples:**
 
 ```bash
-uv run sidegraph-init
-uv run sidegraph-init --db .sidegraph --graph graphify-out/graph.json
-uv run sidegraph-init --hooks          # keep the graph fresh, no question
-uv run sidegraph-init --remove-hooks   # take the hook out again
+sidegraph-init
+sidegraph-init --db .sidegraph --graph graphify-out/graph.json
+sidegraph-init --hooks          # keep the graph fresh, no question
+sidegraph-init --remove-hooks   # take the hook out again
 ```
 
 ## `sidegraph-ratify`
@@ -307,8 +313,7 @@ dropping one mints nothing (an entity already minted by a prior accept is left a
 **TOC refresh:** whenever at least one *domain* id was actually accepted or dropped by this
 run, the `SessionStart` TOC cache is rebuilt immediately (no need to wait for the next
 `sidegraph-sync`) — see
-[retrieval: when the TOC goes live](../concepts/retrieval.md#when-the-toc-goes-live). A
-A run that changes no domain leaves the cache untouched; the next completed or skipped sync
+[retrieval: when the TOC goes live](../concepts/retrieval.md#when-the-toc-goes-live). A run that changes no domain leaves the cache untouched; the next completed or skipped sync
 refreshes content-derived counts.
 
 **Exit code:** `0` on success — including the no-flags listing case and the case where every
@@ -322,11 +327,11 @@ the exit code just lets scripts detect the failure via `$?` instead of parsing s
 **Examples:**
 
 ```bash
-uv run sidegraph-ratify                              # review what's pending (decisions, facts, domains)
-uv run sidegraph-ratify --accept 01J8Z2Q... 01J8Z2R...
-uv run sidegraph-ratify --drop 01J8Z2S...
-uv run sidegraph-ratify --all                         # accept everything pending — see the caveat above for domains
-uv run sidegraph-ratify --db .sidegraph --accept 01J8Z2Q...
+sidegraph-ratify                              # review what's pending (decisions, facts, domains)
+sidegraph-ratify --accept 01J8Z2Q... 01J8Z2R...
+sidegraph-ratify --drop 01J8Z2S...
+sidegraph-ratify --all                         # accept everything pending — see the caveat above for domains
+sidegraph-ratify --db .sidegraph --accept 01J8Z2Q...
 ```
 
 ## `sidegraph-sync`
@@ -444,7 +449,10 @@ rollback instead has one `*` entry with `busy` (item 10 above).
 
 `snapshot_splits` is a list of `{"slug", "domains"}`: a covered domain with multiple accepted
 heirs. Neither holds its frozen membership until `sidegraph-domains snapshot --refresh`
-names each part with `--domain`. Informational; never a finding.
+names each part with `--domain`. The text report prints it after the `path rule too broad`
+block, as `snapshot domains split between parts — neither part holds the frozen membership until
+it is refreshed:` followed by one `  <slug> -> <parts>: sidegraph-domains snapshot --refresh
+--domain <part> ...` line per split. Informational; never a finding.
 
 `--check` exits **2** when the report has an *attention finding* — an `error` outcome, a
 non-empty `stale_decisions`, a non-empty `slug_conflicts`, or a `domain_failures` entry
@@ -492,11 +500,11 @@ attention finding under `--check`, per the paragraph above).
 **Examples:**
 
 ```bash
-uv run sidegraph-sync                                 # normal post-rebuild sync
-uv run sidegraph-sync --force                         # re-run even if unchanged
-uv run sidegraph-sync --db .sidegraph --graph graphify-out/graph.json
-uv run sidegraph-sync --json --force                  # CI-consumable report
-uv run sidegraph-sync --json --check --force          # exit 2 on any attention finding
+sidegraph-sync                                 # normal post-rebuild sync
+sidegraph-sync --force                         # re-run even if unchanged
+sidegraph-sync --db .sidegraph --graph graphify-out/graph.json
+sidegraph-sync --json --force                  # CI-consumable report
+sidegraph-sync --json --check --force          # exit 2 on any attention finding
 ```
 
 ## `sidegraph-import`
@@ -636,10 +644,10 @@ not readable (<path>): <error>`) or the store can't be opened (`store not readab
 **Examples (rationale mode):**
 
 ```bash
-uv run sidegraph-import --dry-run                              # see volume before writing anything
-uv run sidegraph-import --path src/execution/ --limit 50        # filtered import on a large repo
-uv run sidegraph-import --propose                               # land as proposed, ratify later
-uv run sidegraph-import --kind lesson --db .sidegraph
+sidegraph-import --dry-run                              # see volume before writing anything
+sidegraph-import --path src/execution/ --limit 50        # filtered import on a large repo
+sidegraph-import --propose                               # land as proposed, ratify later
+sidegraph-import --kind lesson --db .sidegraph
 ```
 
 ### Importing decision-shaped markdown (`--docs`)
@@ -657,7 +665,9 @@ with `--docs`.
 
 **`--profile NAME`** selects a *flow-profile* — the per-flow reader dialect (which heading
 vocabulary maps onto a decision's context/choice/rejected/consequences) plus its default
-ingest globs. Six profiles ship: `generic-adr` (the default) reads ADR/Nygard-style docs and
+ingest globs. Seven profiles ship: `madr` reads the same ADR dialect and globs as `generic-adr` (it differs only in the
+ADR export template, see [`sidegraph-export-adr`](#sidegraph-export-adr)), and the other six are described
+here. `generic-adr` (the default) reads ADR/Nygard-style docs and
 is intentionally conservative. `superpowers` reads a superpowers spec's free-form `Goal`/
 `Architecture`/`Approaches considered`/`Risks` sections and is scoped to
 `docs/superpowers/specs/*.md`. `genkovich-sdd` reads a genkovich/sdd feature's `adr/*.md` and
@@ -889,12 +899,12 @@ if `graph.json` can't be read or the store can't be opened.
 **Examples (`--docs` mode):**
 
 ```bash
-uv run sidegraph-import --docs docs/adr --dry-run                # see what would import first
-uv run sidegraph-import --docs docs/adr --docs design/            # repeatable, file or directory
-uv run sidegraph-import --docs docs/adr --propose --tag adr-backfill
-uv run sidegraph-import --docs docs/adr --section-limit 4000      # keep more of each section
-uv run sidegraph-import --profile superpowers --dry-run           # profile's own ingest globs
-uv run sidegraph-import --docs design/ --any-doc --dry-run        # ignore the profile's globs
+sidegraph-import --docs docs/adr --dry-run                # see what would import first
+sidegraph-import --docs docs/adr --docs design/            # repeatable, file or directory
+sidegraph-import --docs docs/adr --propose --tag adr-backfill
+sidegraph-import --docs docs/adr --section-limit 4000      # keep more of each section
+sidegraph-import --profile superpowers --dry-run           # profile's own ingest globs
+sidegraph-import --docs design/ --any-doc --dry-run        # ignore the profile's globs
 ```
 
 ## `sidegraph-domains`
@@ -1015,13 +1025,13 @@ store, an unresolvable `--parent`, or an invalid draft (e.g. non-kebab-case `--s
 **Examples:**
 
 ```bash
-uv run sidegraph-domains bootstrap --dry-run                          # tune before committing
-uv run sidegraph-domains bootstrap --min-members 15 --paths src/execution
-uv run sidegraph-domains bootstrap --limit 0                          # "all" -- no default cap
-uv run sidegraph-domains add --slug risk-gate --title "Risk gate" \
+sidegraph-domains bootstrap --dry-run                          # tune before committing
+sidegraph-domains bootstrap --min-members 15 --paths src/execution
+sidegraph-domains bootstrap --limit 0                          # "all" -- no default cap
+sidegraph-domains add --slug risk-gate --title "Risk gate" \
   --summary "Pre-trade checks that block an order before it reaches the exchange." \
   --path src/risk
-uv run sidegraph-domains add --slug order-lifecycle --parent risk-gate \
+sidegraph-domains add --slug order-lifecycle --parent risk-gate \
   --title "Order lifecycle" --summary "State machine from submit to fill/cancel."
 ```
 
@@ -1068,14 +1078,56 @@ lists the `--domain` flags needed for every part. The ratify and `supersede_doma
 ## `sidegraph-compact`
 
 ```
-sidegraph-compact [--db PATH] [--older-than N] [--dry-run]
+sidegraph-compact [--db PATH] [--older-than N] [--dry-run] [--settled-days DAYS] [--any-branch]
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated) |
-| `--older-than N` | unlimited | only compact records that have been in a terminal state for at least `N` days (uses a decision's `valid_to`; domains carry no terminal timestamp at all and are conservatively excluded — kept hot — whenever this flag is set); must be `>= 0` |
+| `--older-than N` | unlimited | **format 1 only** (refused on a format-2 store, exit `2`, the message names `--settled-days`): only compact records that have been in a terminal state for at least `N` days (uses a decision's `valid_to`; domains carry no terminal timestamp at all and are conservatively excluded — kept hot — whenever this flag is set); must be `>= 0` |
 | `--dry-run` | off | list candidates without creating a segment or removing hot files; store open may still migrate supported legacy data or rebuild `index.db` |
+| `--settled-days DAYS` | `7` | **format 2 only** (refused on a format-1 store, exit `2`, the message names `--older-than`): fold a per-record file into the shards once its current content landed on the current branch at least `DAYS` days ago; must be `>= 0`. `0` folds every tracked, committed file and is the only value accepted outside a git work tree |
+| `--any-branch` | off | **format 2 only**: run on a branch other than the repository's default branch |
+
+On a **format-2** store (`sidegraph-store 2.0.0`, records packed into `shards/`) the command is
+maintenance: it moves the bodies of per-record files and archive segments into the shard files
+verbatim, moves misplaced shard lines into their buckets, deletes a file or segment only when
+its body is held by a shard line, and rebuilds the index. It transforms nothing and never
+commits: review the changes under `.sidegraph/` and commit them in a pull request.
+
+- **Branch.** It runs only on the repository's default branch (the target of `origin/HEAD`, else
+  `main` or `master`); on any other branch, or on a detached `HEAD`, it refuses with exit `2`
+  unless `--any-branch` is given. The same rule applies to `--dry-run`. Outside a git work tree
+  there is no branch rule.
+- **Settled.** A file folds only when it is tracked, unmodified against `HEAD` and settled. The
+  clock is the committer time of the newest first-parent commit that added or changed the file,
+  so a file changed or merged less than `--settled-days` ago stays. Outside a git work tree
+  there is no clock: pass `--settled-days 0`. In a shallow clone a file last changed before the
+  boundary takes the boundary commit's time, so little may fold, and the command says so.
+- **Report.** It lists what was folded, moved and deleted, each identity it skipped with the
+  finding that made it skip, each file or segment it kept with the reason, and the instruction
+  to commit. With `--dry-run` nothing tracked is written (the shard directory included) and the
+  lines read `would be folded`, `would be moved` and `would be deleted`. Both lists end with the files the
+  run wrote or removed (would write or remove, in a dry run), shard files created, republished
+  or unlinked included; the commit instruction follows a real run that wrote any, and a run that
+  wrote nothing says `No records to fold or move.`
+- **Exit codes.** `0` after a completed run, a no-op included. `2` when the command refuses
+  before it opens the store, with a one-line message: a flag that belongs to the other format
+  (`--older-than` here, `--settled-days` or `--any-branch` on format 1), a negative
+  `--settled-days`, a path that holds no store (the command never creates one), a branch other
+  than the default (`refused: …`), a git state it cannot read (`refused: …`), or a `--dry-run`
+  on a store that opening would write into (no `.gitignore`, no record yet). `2` also when a
+  run stops: the report is printed with a `Stopped:` line giving the reason, for a store that
+  fails an entry condition (a bad shard line, a shard conflict, an identity with no effective
+  record, shard file names that differ only in case) or a `HEAD` or shard file that changed
+  under the run. `1` when the store cannot be opened or written (for example a full disk) or
+  another writer holds it (`the store is busy, try again`); an interrupted or busy run is safe
+  to repeat. A dry run writes no tracked content: it may only refresh the derived, gitignored
+  `index.db`.
+
+On a **format-1** store the command works as described below and ends with a line advising
+`sidegraph-migrate`. In both formats a path that holds no store (missing, or an empty directory
+with no record) is refused with exit `2`: `sidegraph-compact` never creates a store.
 
 Packs every **terminal**-status record — decisions `superseded`/`rejected`/`deprecated`,
 domains `superseded`/`dropped` — into a new immutable
@@ -1142,9 +1194,78 @@ over a segment it cannot fully read. Restore the segment with git or fix the lin
 **Examples:**
 
 ```bash
-uv run sidegraph-compact --dry-run                 # see what would move before writing anything
-uv run sidegraph-compact                            # pack every terminal record
-uv run sidegraph-compact --older-than 90             # only records terminal for 90+ days
+sidegraph-compact --dry-run                 # see what would move before writing anything
+sidegraph-compact                            # format 1: pack every terminal record
+sidegraph-compact --older-than 90             # format 1 only: terminal for 90+ days
+sidegraph-compact --settled-days 14           # format 2 only: fold files settled 14+ days
+```
+
+On a format-2 store, `sidegraph-compact` folds per-record files of every status, terminal or
+not, into the shards once their current content has been on the current branch for
+`--settled-days` days (default 7); `--older-than` is refused there.
+
+## `sidegraph-migrate`
+
+```
+sidegraph-migrate [--db PATH] [--shards 16|64|256] [--dry-run] [--any-branch]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated) |
+| `--shards N` | `64` | number of shard files (`16`, `64` or `256`; any other value is refused by the parser, exit `2`) for a store that has none yet. A store that already holds shard files keeps the count they show |
+| `--dry-run` | off | check the entry conditions and list what the migration would write, fold, move and delete; write nothing, the format marker and the `.gitattributes` line included |
+| `--any-branch` | off | run on a branch other than the repository's default branch |
+
+Converts a store to **format 2** (`sidegraph-store 2.0.0`, records packed into `shards/`) in two
+steps. It first publishes the `format` marker (written to a temporary file, flushed, renamed
+over the old marker, and the store directory flushed), so from then on the store is a valid
+format-2 store whose records are all still per-record files. It then runs the maintenance of
+[`sidegraph-compact`](#sidegraph-compact) with no age limit: the shard files and the
+`.gitattributes` line `*.shard -text` are created, every per-record file of the packable types
+(decisions, facts, entities, domains and bindings; initiatives stay as they are) and every
+archive segment is folded into the shards verbatim, and a file or segment is deleted only when a shard line holds
+its body. It never commits: review the changes under `.sidegraph/` and commit them in one pull
+request. The marker requires `max(current requirement, 0.17.0)`.
+
+- **Entry conditions** (a format-1 store; the command refuses with exit `2`, naming each reason,
+  and writes nothing): the store opens; the checkout is on the default branch unless
+  `--any-branch` (the target of `origin/HEAD`, else `main` or `master`); nothing under
+  `.sidegraph/` is uncommitted; no `parse-error`, `unsafe-record-id` or `filename-id-mismatch`
+  finding and no symlinked store entry (see [`sidegraph-verify`](#sidegraph-verify)); no
+  identity without an effective record, no unreadable or conflicted shard line, and no shard
+  file whose name differs from its bucket's lower-case name only in case (rename it with
+  `git mv`, commit, and run again). A `duplicate-ulid` finding does not refuse: the command
+  leaves that identity's files and segment exactly where they are and lists it, and
+  `sidegraph-verify` keeps reporting it. Outside a git work tree the branch and
+  uncommitted-changes conditions do not apply; copy the store first.
+- **A store that already holds shard files** under a marker below major 2 (or no marker), for
+  example after a `format` conflict was resolved toward the older branch, is completed: the
+  shard count is the largest of 16, 64 and 256 for which every bucket file `00 … (N−1)` exists
+  (no complete set is refused), and misplaced lines and stray shard files are healed by the
+  maintenance that follows.
+- **Resuming.** If a run stops after the marker was written, run `sidegraph-migrate` again
+  while the marker committed at `HEAD` is still below major 2 or absent. Once the marker switch
+  is committed, `sidegraph-compact --settled-days 0` finishes the run. On a format-2 store
+  whose `HEAD` marker is already major 2, and on one outside a git work tree, `sidegraph-migrate`
+  refuses and names that command, so it is never a way to fold unsettled files on a migrated
+  store.
+- **Report and exit codes** are those of [`sidegraph-compact`](#sidegraph-compact) on a format-2
+  store, with `format` listed among the files written. `0` after a completed run; `2` on a
+  refusal (every reason is printed as a `refused:` line; a store that does not open, including an
+  unreadable `index.db`, is a refusal) or when the run stops (the report ends with a `Stopped:`
+  line); `1` when another writer holds the store (`the store is busy, try again`) or reading or
+  writing it fails (an I/O error such as a full disk). A path that holds no store is refused with
+  exit `2`: the command never creates one. A dry run builds no store handle and creates no file,
+  not even `.gitignore` or `index.db`. After a run, findings of `sidegraph-verify` that did not
+  stop it (a dangling `supersedes`, for example) are listed as carried over.
+
+**Examples:**
+
+```bash
+sidegraph-migrate --dry-run                  # check the conditions, see what would fold
+sidegraph-migrate                             # migrate on the default branch, then commit
+sidegraph-migrate --shards 256                # more, smaller shard files
 ```
 
 ## `sidegraph-require`
@@ -1159,7 +1280,8 @@ sidegraph-require --sidegraph X.Y.Z [--db PATH]
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated). The store is never created or migrated here |
 
 Makes the store refuse Sidegraph versions older than `X.Y.Z`. It rewrites `.sidegraph/format` as
-`sidegraph-store 1.0.0` followed by `requires-sidegraph >= X.Y.Z` (see
+its major's marker followed by `requires-sidegraph >= X.Y.Z` (`sidegraph-store 1.0.0` on a
+format-1 store; a format-2 store keeps `sidegraph-store 2.0.0` and its `shards N` line; see
 [the format marker](store-format.md#the-format-marker)) in one atomic replace, under the same
 writer lock as every store write, and prints the `git add` and `git commit` command for it. The
 requirement reaches teammates when they pull the commit.
@@ -1237,6 +1359,8 @@ plain-text line):
 | `unknown-schema-version` | snapshot | the `format` marker is missing, unreadable, does not start with `sidegraph-store`, or names a version or major this code does not recognize |
 | `malformed-requirement` | snapshot | a `1.0.0` marker lacks exactly one `requires-sidegraph >= X.Y.Z` line, a `0.x` marker has a second line, or the marker exceeds 4 KiB |
 | `requirement-above-verifier` | snapshot | the store requires a newer Sidegraph than the running verifier; move the CI pin to at least the required version |
+| `bad-domain-snapshot` | snapshot | `.sidegraph/domain-snapshot.json` is not a regular file or does not validate (see [`sidegraph-domains snapshot`](#sidegraph-domains-snapshot)) |
+| `snapshot-without-requirement` | snapshot | a `domain-snapshot.json` exists but the `format` marker does not require Sidegraph 0.14.0 or later |
 | `bad-validity-window` | snapshot | `valid_to < valid_from` on a decision or fact |
 | `superseded-without-successor` | snapshot | a `status=superseded` record has no other record's `supersedes` pointing back at it (a successor held by a file skipped for its unsafe name still counts) |
 | `dangling-supersedes` | snapshot | a `supersedes` id doesn't resolve to any record, hot or archived (a file skipped for its unsafe name still counts as the record it holds, so renaming it back is the only heal) |
@@ -1245,16 +1369,25 @@ plain-text line):
 | `dangling-drift-check` | snapshot | an auxiliary verification references no hot or archived decision; terminal targets remain valid history |
 | `dangling-parent` | snapshot | a domain's `parent_id` doesn't resolve to any domain, hot or archived (a superseded, dropped or archived parent still counts, as the write path only checks that it exists; a file skipped for its unsafe name counts too, as for `dangling-supersedes`) |
 | `parent-cycle` | snapshot | the `parent_id` chain of some domains loops back on itself (a domain that is its own parent included); reported once per cycle, at the domain with the smallest id on it, and not for a domain that merely hangs off the cycle |
-| `duplicate-ulid` | snapshot | the same internal id appears in more than one canonical location — two hot files, a hot file plus any archive copy, or two archive segments whose payloads for that id actually differ. **Exempt:** two or more archive segments carrying byte-*identical* payloads for the same id — a sanctioned cross-branch `sidegraph-compact` merge (independent compaction on two branches, later merged) — see [`reference/store-format.md#archive-segments-sidegraph-compact`](store-format.md#archive-segments-sidegraph-compact) |
+| `duplicate-ulid` | snapshot | the same internal id appears in more than one canonical location — two hot files, a hot file plus any archive copy, or two archive segments whose payloads for that id actually differ. **Exempt:** two or more archive segments carrying byte-*identical* payloads for the same id — a sanctioned cross-branch `sidegraph-compact` merge (independent compaction on two branches, later merged) — see [`reference/store-format.md#archive-segments-sidegraph-compact`](store-format.md#archive-segments-sidegraph-compact). **On a packed (format 2) store** a hot file beside an archive line is not a duplicate when the file holds the line's state or a legal successor of it, and a shard line beside an archive line is not when it does or when the archive line is a legal successor of the shard line; a per-record file beside a shard line is the normal state before maintenance and is judged by `shadow-divergence` |
 | `bad-archive-segment` | snapshot | an `archive/*.jsonl` entry is not a regular file (`unreadable: not a regular file`), or a line isn't valid UTF-8 or JSON, isn't a JSON object, or holds a decision or domain that fails its model, can't be serialised, or has a nonterminal status. Schema/decode failures match the lines the reload leaves out; the verifier additionally rejects nonterminal archive records (one violation per line, naming the segment and the line number) |
 | `filename-id-mismatch` | snapshot | a hot record file's name doesn't match its own internal id |
 | `unsafe-record-id` | snapshot | a record's id is not a safe filename (a single path segment, at most 128 characters, starting with a letter or digit), or is not a string; also a `bindings/` file or hot record file whose name is unsafe, and an `archive/*.jsonl` line whose id is missing, not a string or unsafe. The store's reload skips such a file, and its startup warning points here. A file with an unsafe name gets this code whether or not its content parses; a file with an unsafe name or an unsafe id gets no other snapshot finding (no `filename-id-mismatch`, `duplicate-ulid` or `parse-error`) |
 | `symlinked-store-entry` | snapshot | a store-owned directory or file inside the store is a symlink, live or dangling (one violation per entry); `Store()` refuses to open such a store, so `sidegraph-verify` and `sidegraph-doctor` report the links and stop: no record is linted, no reference checked, no `--against` diff run and no advisory check made until the links are removed (an `--against` ref that does not resolve, or a store outside git, is checked first and still exits `1` without reporting the links) (the text output says so in one line; `--json` carries no marker), see [`reference/store-format.md`](store-format.md#layout-file-per-record-json-plus-a-derived-local-index) |
+| `bad-shard-line` | snapshot | a line of a `shards/*.shard` file of a packed store is not a readable record: the envelope (`type`, `id`, `body`) is wrong, the line is not JSON, the body fails its model, the record type is unknown, or the body's own id disagrees with the envelope's. The path is `shards/NN.shard:<line>` |
+| `shard-conflict` | snapshot | a shard line lies inside a git conflict region (between `<<<<<<<` and `>>>>>>>`); the records it names are quarantined until the conflict is resolved |
+| `duplicate-packed-record` | snapshot | one record appears twice in the shard files with differing bodies (two lines with equal bodies are not reported: `sidegraph-compact` collapses them) |
+| `shadow-divergence` | snapshot | a per-record file of a packed record is not a legal successor of the record's shard line (an illegal status move, a changed immutable field). Bindings files are exempt |
+| `binding-entry-dropped` | snapshot | a `bindings/<id>.json` file lacks an entity that the shard line of the same record binds, typically after a merge: add the anchor back. Entries of derived `community:*` entities are not counted |
+| `shard-name-case` | snapshot | two files of `shards/` whose names differ only in case, or a `*.shard` file whose lower-cased name is a bucket name while the name itself is not (`0A.SHARD`); on a case-insensitive checkout git writes both into one file |
+| `shards-without-format2` | snapshot | `shards/*.shard` files beside a `format` marker below major 2: run `sidegraph-migrate`, or restore the major-2 marker |
 | `illegal-field-change` | transition | an immutable field changed between `GIT_REF` and the working tree (the detail names the field); also covers immutable raw keys lost during hot-to-archive transfer, or a modified already-published archive segment or auxiliary verification (write-once) |
 | `illegal-status-jump` | transition | `status` changed to something that isn't a real write-path transition for that record kind |
 | `valid-to-unset` | transition | `valid_to` reverted from a value back to `null` |
 | `valid-to-changed` | transition | `valid_to` changed from one value to a *different* value (only `null → value`, once, is legal) |
 | `illegal-deletion` | transition | a record file — or an already-published archive segment — was deleted with no sanctioned reason. The one exception: a decision/domain preserved by same-kind, same-ID archive copies in the new tree, every copy schema-valid, compactable and a legal raw-payload transition from the baseline (a legitimate `sidegraph-compact`). An ID match alone is insufficient |
+| `shard-body-without-source` | transition | on a packed (format 2) store, a shard line added or changed since `GIT_REF` whose body is not the body of any occurrence of the same record in `GIT_REF` (a per-record file, a shard line or an archive line). `sidegraph-compact` only ever writes bodies it read, so a hand-forged line, or an edit folded in the same pull request that made it, is reported: land the edit on the target branch first, then fold |
+| `format-downgrade` | transition | the `format` marker went from major 2 in `GIT_REF` to a lower major. The one legal shape is the full rollback: no `shards/*.shard` file is left and every record is back in its per-record file with all its keys |
 
 Changed paths come from `git diff --no-renames --name-status -z` as bytes, preserving
 filesystem names without Git quoting or newline translation, including Unicode, TAB/LF/CR,
@@ -1263,6 +1396,20 @@ its decoded `path` is the actual repository-relative name. Empty diff output is 
 incomplete framing or unsupported statuses fail operationally (exit `1`) before any path
 classification. This preserves the frozen baseline described below and does not make
 concurrent working-tree reads an atomic snapshot.
+
+**A packed (format 2) store.** When the `format` marker of `GIT_REF` or of the working tree is
+major 2, both trees are read as inventories of every copy of every record (per-record files,
+shard lines and archive lines), and each record is judged on its own: the record that was
+effective in `GIT_REF` must still have an effective copy, and the move must be a legal
+transition; an edited per-record file is judged as an edited file always was; a file removed
+by a fold must reappear verbatim in a shard line (or, for a decision or domain, in an archive
+line that is a legal transfer), unless a sanctioned removal covers it (resolving a dispute between
+copies) or it is a bindings file with no other copy; a deleted archive segment must be covered
+by shard lines that hold every key of its lines; and no key of a destroyed body may disappear.
+A shard line must carry a body already present in `GIT_REF` (`shard-body-without-source`).
+Resolving a record that had no effective copy in `GIT_REF` (a conflict, a `duplicate-packed-record`)
+is legal when the result is one of the old copies and does not keep an older lifecycle state
+beside a newer one. Pass the target branch's tip as `GIT_REF`, as the CI recipe does.
 
 **What's legally mutable** (transition layer only; derived from `store.py`'s write methods,
 not invented — see `verify.py`'s module comment above the mutable-field tables for exactly
@@ -1302,8 +1449,9 @@ which methods):
   additions are schema/reference-checked by the snapshot layer, every later modification
   or deletion is illegal. Older verifier versions ignore this directory.
 - **Archive segments** (`archive/*.jsonl`): write-once — a brand-new segment (git status
-  `A`) is legal; any modification or deletion of an already-published one is always
-  illegal.
+  `A`) is legal; any modification of an already-published one is always illegal, and so is
+  deleting it, except in a format-2 store (see above), where `sidegraph-migrate` may delete a
+  segment whose every key a shard line now holds.
 
 A field an older file was written before its schema even had is simply absent from that
 file — whether its default is `null` (`Provenance.commit` today) or an empty list/object
@@ -1351,10 +1499,10 @@ them and preserves the violation exit `2`, without a false clean result.
 **Examples:**
 
 ```bash
-uv run sidegraph-verify                                                 # snapshot layer only
-uv run sidegraph-verify --json                                          # CI-consumable
-uv run sidegraph-verify --against HEAD~5                                # local: last 5 commits' store edits
-uv run sidegraph-verify --against "$(git merge-base origin/main HEAD)" --json   # CI-safe transition check
+sidegraph-verify                                                 # snapshot layer only
+sidegraph-verify --json                                          # CI-consumable
+sidegraph-verify --against HEAD~5                                # local: last 5 commits' store edits
+sidegraph-verify --against "$(git merge-base origin/main HEAD)" --json   # CI-safe transition check
 ```
 
 ## `sidegraph-doctor`
@@ -1416,6 +1564,8 @@ plain-text line):
 | `plugin-off-in-subdirectories` | Claude Code sessions started below the repository root run without the Sidegraph plugin. Claude Code reads the project settings (`.claude/settings.json`) of the launch directory only, and the repository root's `.claude/settings.local.json` for every launch inside the repository; `enabledPlugins` merges key by key (user settings, then project, then local). Two problems, reported as up to two findings: (a) the plugin is enabled only in the root's `.claude/settings.json`, so every directory below the root without its own enabling settings runs without it (reported at that file); (b) nested directories with a `.claude/settings.json` or `.claude/settings.local.json` of their own that sets `enabledPlugins` and whose merge leaves the plugin off (reported at the first such directory, naming how many there are; a nested settings file without `enabledPlugins` cannot change the merge, so it is not counted). The walk covers every directory that holds a tracked file (one `git ls-files` over the index, a few tens of milliseconds on a large repository) and looks for the two settings files in each directly, so a repository that ignores `.claude/` is covered. User settings are read from `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set and non-empty, else from `~/.claude/settings.json`. Silent when the plugin is not enabled for a launch at the root at all, and not run outside a git repository, with no `git`, or when `git ls-files` takes longer than 5 seconds. **`--check` exits `2` on it**, like any finding; enabling the plugin at user scope or in the root's `.claude/settings.local.json` clears it |
 | `refresh-helper-outdated` | a git hook runs a graph refresh helper whose Graphify line lacks `GRAPHIFY_NO_AUTO_REFRESH=1` (an older Sidegraph wrote it), so Graphify 0.9.87 and later can rewrite the agent skills they installed on the first rebuild after an upgrade. Advisory, per clone (the helper lives in `.git/hooks`); **`--check` exits `2` on it**, like any finding. One hook that runs the helper is enough, and a recorded decline does not silence it. The fix is `sidegraph-init` (no flag), which refreshes the helper and keeps a recorded hook choice. Silent outside a git repository, with no helper, or when no hook runs it |
 | `engine-version` | the graph was built by a Graphify release this Sidegraph was not tested with (its `graph.graphify_version` stamp is neither absent nor in the tested set), so anchors and domains may read differently. Advisory; **`--check` exits `2` on it**, like any finding. Pin Graphify to a tested release listed under [Engine version pinning](../integrations/graphify.md#engine-version-pinning), then rebuild the graph. It also fires for a mention-edge graph (Graphify 0.9.62 or later) over a store without a minimum Sidegraph version; follow the [0.14 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.14.md). A malformed marker leaves this second case silent. Silent without a readable graph |
+| `store-not-migrated` | the store uses the pre-0.17 layout (a format marker below major 2) and holds at least one record of any kind (initiatives included). One finding, at the store path, naming `sidegraph-migrate` (run on the default branch, after the team checklist in the [0.17 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.17.md)) and the `sidegraph:compact` skill. Degraded; **`--check` exits `2` on it**, like any finding. Silent on an empty store and on a store that is already format 2 |
+| `maintenance-due` | a format-2 store that `sidegraph-compact` would tidy: more than 200 per-record files, or a legacy `archive/` segment it would delete, or a misplaced or duplicated shard line, or a stray shard file. `sidegraph-verify` does not report these; maintenance heals them. A segment kept because one of its lines is not safe to delete does not count. Advisory; **`--check` exits `2` on it**, like any finding. Run `sidegraph-compact` on the default branch. Silent on a store that is not format 2 |
 
 `degraded-binding`/`orphaned-binding` come from `index.db`, opened strictly read-only — it
 is the only source for binding status (canonical `bindings/*.json` files carry identity,
@@ -1502,11 +1652,11 @@ violations, or — with `--check` — advisory findings too.
 **Examples:**
 
 ```bash
-uv run sidegraph-doctor                              # verify + curate, human-readable
-uv run sidegraph-doctor --json                       # CI-consumable
-uv run sidegraph-doctor --check                      # also fail on advisory findings
-uv run sidegraph-doctor --stale-days 14               # tighter ratification-queue threshold
-uv run sidegraph-doctor --against "$(git merge-base origin/main HEAD)"   # + transition layer
+sidegraph-doctor                              # verify + curate, human-readable
+sidegraph-doctor --json                       # CI-consumable
+sidegraph-doctor --check                      # also fail on advisory findings
+sidegraph-doctor --stale-days 14               # tighter ratification-queue threshold
+sidegraph-doctor --against "$(git merge-base origin/main HEAD)"   # + transition layer
 ```
 
 ## `sidegraph-viz`
@@ -1535,14 +1685,16 @@ Rendering does not mutate canonical records or `graph.json`. It opens the ordina
 so startup may migrate supported legacy data or rebuild `index.db`. Binding status
 (live/degraded/orphaned) reflects the last `sidegraph-sync`; run sync first for a fresh view.
 Exit code 0 on success (a store with problems still exits 0 — the problems are the output), 2
-on an operational error (uninitialized store or unwritable output path).
+on an operational error (uninitialized store or unwritable output path). A store that cannot be
+opened at all (for example a corrupt `index.db`) is not caught: the command exits 1 with a
+traceback.
 
 ## `sidegraph-export-adr`
 
 ```bash
-uv run sidegraph-export-adr --db .sidegraph --out docs/adr          # preview only
-uv run sidegraph-export-adr --db .sidegraph --out docs/adr --write  # explicit application
-uv run sidegraph-export-adr --profile madr --json
+sidegraph-export-adr --db .sidegraph --out docs/adr          # preview only
+sidegraph-export-adr --db .sidegraph --out docs/adr --write  # explicit application
+sidegraph-export-adr --profile madr --json
 ```
 
 Generate and maintain record-derived ADRs with a unified diff by default. Accepted,
@@ -1579,8 +1731,8 @@ conflict recovery, drift limits and round-trip semantics.
 ## `sidegraph-export-okf`
 
 ```bash
-uv run sidegraph-export-okf                      # writes ./okf-bundle/
-uv run sidegraph-export-okf --db .sidegraph --out /tmp/bundle
+sidegraph-export-okf                      # writes ./okf-bundle/
+sidegraph-export-okf --db .sidegraph --out /tmp/bundle
 ```
 
 Projects the decision store into an [Open Knowledge Format v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
@@ -1617,7 +1769,8 @@ or `.<out>.okf-old-*` beside `--out` (the repo root for the default `--out`). Th
 one holds the previous export: if `--out` is missing, rename it back; if `--out` already holds
 the new bundle, delete it. Exit `0` on success, `2` on an operational error
 (uninitialized store — never auto-created — or a refused/unwritable out dir or its
-parent).
+parent). A store that cannot be opened at all (for example a corrupt `index.db`) is not
+caught: the command exits 1 with a traceback.
 
 ## `sidegraph-stats`
 

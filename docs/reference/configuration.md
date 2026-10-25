@@ -118,9 +118,10 @@ also the moment a one-line deprecation notice prints to stderr, at most once per
 
 ## Path-resolution semantics
 
-Both defaults, and any value read from the env vars, are relative paths resolved against the
-process's **current working directory at the moment it starts** — plain `pathlib.Path`
-behavior, nothing Sidegraph-specific. The CLI does no repo-root detection or upward search. The
+The store default (`.sidegraph`) and any store path read from the env vars are relative paths
+resolved against the process's **current working directory at the moment it starts** — plain
+`pathlib.Path` behavior, nothing Sidegraph-specific. The graph path follows its own rule, given
+further down this section. The CLI does no repo-root detection or upward search. The
 Claude Code hooks and the MCP server are the exception: the hooks anchor a relative result to
 `$CLAUDE_PROJECT_DIR` when it's set (see `resolve_store_location`'s `root` parameter), and both
 look a missing relative store up inside the repository, as described above.

@@ -70,15 +70,19 @@ early-exit cost of about 26 ms from a source checkout (about 190 ms for the publ
 | Derived index (`.sidegraph/index.db`, gitignored) | 2.5 MiB | Records + telemetry rows; disposable, rebuilt on demand |
 | Code graph (`graphify-out/graph.json`, gitignored) | 10.5 MiB | Your codebase, not your store |
 
-Records are one file each, so a store grows linearly and diffs per record — that is the
-property that makes two branches ratifying different decisions merge without conflict.
+Records are written one file each, so a store grows linearly and diffs per record — that is the
+property that makes two branches ratifying different decisions merge without conflict. A
+format-2 store ([packed shards](store-format.md#format-2-packed-shards)) folds settled records
+into 16, 64 or 256 shard files by an explicit maintenance command; the figures above are of
+the one-file-per-record layout and were not re-measured for shards.
 
 ## The graph dependency, stated plainly
 
 The code-graph engine is **optional for the store, but required for task-seeded structure and
 name/file resolution**. Without it, the SessionStart TOC, proposal queue, raw store listings,
-and global memory still work; `get_task_context` cannot resolve file/name seeds and returns no
-structural map. With it, Sidegraph adds symbol-level anchors, task-scoped retrieval,
+and global memory still work; `get_task_context` cannot resolve file/name seeds against the graph and
+returns no structural map (a seed that names a descriptor already stored with a decision still
+finds that decision). With it, Sidegraph adds symbol-level anchors, task-scoped retrieval,
 community-derived domain candidates, and rebind support. Its rebuild cost (≈8 s here) is on
 your commit or CI path, not on ordinary tool calls. A rebuild may update Graphify's own output,
 but ordinary Sidegraph sync does not dirty canonical store files except for a durable leaf-file

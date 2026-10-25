@@ -12,6 +12,7 @@ from sidegraph.schema import (
     AnchorBinding,
     Decision,
     DecisionKind,
+    DecisionStatus,
     Descriptor,
     Domain,
     Entity,
@@ -318,10 +319,13 @@ def test_drill_down_members_capped(tmp_path):
 def test_drill_down_decisions_mistakes_first(tmp_path):
     store = Store(tmp_path / "t.db")
     _accept(store, _domain(store, "payments"))
-    adr = _decision(store, DecisionKind.ADR, title="use postgres")
-    _bind_domain(store, adr.id, "payments")
-    gotcha = _decision(store, DecisionKind.GOTCHA, title="watch the retry loop")
+    # The gotcha is the OLDER record: only mistake priority puts it ahead of the newer ADR.
+    gotcha = _decision(
+        store, DecisionKind.GOTCHA, title="watch the retry loop", status=DecisionStatus.ACCEPTED
+    )
     _bind_domain(store, gotcha.id, "payments")
+    adr = _decision(store, DecisionKind.ADR, title="use postgres", status=DecisionStatus.ACCEPTED)
+    _bind_domain(store, adr.id, "payments")
 
     out = drill_down("payments", store, None)
     assert len(out["decisions"]) == 2
@@ -453,11 +457,14 @@ def test_drill_down_mistakes_first_across_tag_and_community_join(tmp_path):
     the rest — across both sources."""
     store = Store(tmp_path / "t.db")
     _accept(store, _domain(store, "trading", communities=["1"]))
-    adr = _decision(store, DecisionKind.ADR, title="tagged adr")
-    _bind_domain(store, adr.id, "trading")
     ent = _entity_in_community(store, "Trader", "trader/exec.py", "1")
-    gotcha = _decision(store, DecisionKind.GOTCHA, title="community gotcha")
+    # The gotcha is the OLDER record: only mistake priority puts it ahead of the newer ADR.
+    gotcha = _decision(
+        store, DecisionKind.GOTCHA, title="community gotcha", status=DecisionStatus.ACCEPTED
+    )
     _bind_entity(store, gotcha.id, ent.entity_id)
+    adr = _decision(store, DecisionKind.ADR, title="tagged adr", status=DecisionStatus.ACCEPTED)
+    _bind_domain(store, adr.id, "trading")
 
     out = drill_down("trading", store, None)
     assert len(out["decisions"]) == 2

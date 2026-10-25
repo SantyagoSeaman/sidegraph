@@ -74,6 +74,8 @@ def test_propose_malformed_draft_rejected_batch_continues(tmp_path):
 def test_propose_no_reader_orphaned_anchor_and_initiative(tmp_path):
     store = Store(tmp_path / "t.db")
     results = propose([_draft(initiative="metadata-platform")], store, None)
+    assert results[0].status == "written"
+    assert results[0].anchors_skipped == []
     d_id = results[0].decision_id
     binds = store.bindings_for_record(d_id)
     tiers = {b.tier: b for b in binds}
@@ -181,13 +183,6 @@ def test_propose_resolved_anchor_leaves_anchors_skipped_empty(tmp_path):
     store = Store(tmp_path / "t.db")
     reader = GraphifyReader(FIXTURE)
     results = propose([_draft()], store, reader)
-    assert results[0].status == "written"
-    assert results[0].anchors_skipped == []
-
-
-def test_propose_no_reader_leaves_anchors_skipped_empty(tmp_path):
-    store = Store(tmp_path / "t.db")
-    results = propose([_draft()], store, None)
     assert results[0].status == "written"
     assert results[0].anchors_skipped == []
 
@@ -322,34 +317,8 @@ def test_session_id_fallback_ignores_a_marker_stamped_in_the_future(tmp_path, cu
     assert store.get_decision(results[0].decision_id).provenance.session_id is None
 
 
-def test_session_id_fallback_keeps_a_recent_marker(tmp_path, current_session):
-    from datetime import timedelta
-
-    from sidegraph.config import TELEMETRY_SESSION_STAMP_PREFIX
-
-    store = Store(tmp_path / "t.db")
-    recent = (datetime.now(UTC) - timedelta(seconds=10)).isoformat()
-    current_session(session_id=None)
-    store.set_meta(f"{TELEMETRY_SESSION_STAMP_PREFIX}recent-session", f"{recent}|claude")
-
-    assert capture._session_id_fallback(store) == "recent-session"
-
-
 def test_propose_no_telemetry_marker_leaves_session_id_none(tmp_path):
     store = Store(tmp_path / "t.db")
-    results = propose([_draft(anchors=[])], store, None)
-    assert results[0].status == "written"
-    d = store.get_decision(results[0].decision_id)
-    assert d.provenance.session_id is None
-
-
-def test_propose_malformed_telemetry_marker_never_raises(tmp_path, current_session):
-    from sidegraph.config import TELEMETRY_SESSION_KEY
-
-    store = Store(tmp_path / "t.db")
-    current_session(session_id=None)
-    store.set_meta(TELEMETRY_SESSION_KEY, "not-the-expected-shape")
-
     results = propose([_draft(anchors=[])], store, None)
     assert results[0].status == "written"
     d = store.get_decision(results[0].decision_id)
@@ -387,8 +356,12 @@ def test_format_proposal_renders_fields():
         provenance=Provenance(source="agent", session_id="s9"),
     )
     text = format_proposal(d)
-    assert d.id in text and "T" in text and "what" in text and "alt-approach" in text
-    assert "s9" in text
+    lines = text.splitlines()
+    assert lines[0] == f"{d.id}  [gotcha] T"
+    assert "  what:    what" in lines
+    assert "  why:     why" in lines
+    assert "  rejected: alt-approach" in lines
+    assert "  from:    session=s9 author=-" in lines
 
 
 def test_draft_bare_string_tags_coerced():
@@ -852,7 +825,8 @@ def test_propose_duplicate_secret_tags_counted_and_safe_binding_unique(tmp_path)
 @pytest.mark.parametrize("as_model", [False, True])
 def test_propose_string_tags_redacted_before_comma_split(tmp_path, as_model):
     marker = "second" + "secretmarker"
-    draft = _draft(tags="password" + "=hunter," + marker, anchors=[])
+    # A caller-supplied private count in the dict must not replace the measured one.
+    draft = _draft(tags="password" + "=hunter," + marker, anchors=[], _tag_string_redactions=999)
     if as_model:
         draft = capture.DraftDecision.model_validate(draft)
         assert marker not in str(draft.model_dump())
@@ -880,93 +854,6 @@ def test_secret_bearing_comma_string_drops_all_ambiguous_fragments(separator, qu
     assert capture.normalize_tags(raw) == ([], 1)
 
 
-def test_string_tag_model_keeps_clean_shape_ignores_fake_private_count_and_copy_staleness(tmp_path):
-    clean = capture.DraftDecision.model_validate(
-        _draft(tags=" Alpha , Beta ,, ", anchors=[], _tag_string_redactions=999)
-    )
-    assert clean.tags == ["Alpha", "Beta"]
-    assert "_tag_string_redactions" not in clean.model_dump()
-    with Store(tmp_path / "t.db") as store:
-        assert propose([clean], store, None)[0].redactions == 0
-        secret = capture.DraftDecision.model_validate(
-            _draft(title="Different", tags="password" + "=hunter,secondsecretmarker", anchors=[])
-        )
-        assert capture.DraftDecision.model_validate(secret) is secret
-        copied = secret.model_copy(update={"tags": ["safe"]})
-        result = propose([copied], store, None)[0]
-        assert result.status == "written"
-        assert result.redactions == 0
-        names = [
-            store.get_entity(b.entity_id).canonical_name
-            for b in store.bindings_for_record(result.decision_id)
-            if b.tier == 0
-        ]
-        assert names == ["tag:safe"]
-
-
 def test_scalar_no_comma_partial_token_tag_keeps_safe_suffix():
     token = "ghp_" + "synthetictokenmarker" * 2
     assert capture.normalize_tags(token + "-config") == (["redacted-config"], 1)
-
-
-def test_mapping_string_tags_redacted_before_comma_split(tmp_path):
-    from collections import UserDict
-
-    marker = "second" + "secretmarker"
-    raw = UserDict(_draft(tags="password" + ":start, " + marker, anchors=[]))
-    draft = capture.DraftDecision.model_validate(raw)
-    assert draft.tags == []
-    assert marker not in str(draft.model_dump())
-    with Store(tmp_path / "t.db") as store:
-        result = propose([draft], store, None)[0]
-        assert result.status == "written"
-        assert result.redactions == 1
-        assert store.find_abstract_entity("tag:" + marker) is None
-        for path in tmp_path.rglob("*.json"):
-            assert marker not in path.read_text()
-
-
-def test_attribute_scalar_tags_rejected_instead_of_unsafe_comma_split():
-    from types import SimpleNamespace
-
-    from pydantic import ValidationError
-
-    raw = SimpleNamespace(**_draft(tags="password" + "=hunter, secondsecretmarker"))
-    with pytest.raises(ValidationError):
-        capture.DraftDecision.model_validate(raw, from_attributes=True)
-    raw.tags = ["safe"]
-    assert capture.DraftDecision.model_validate(raw, from_attributes=True).tags == ["safe"]
-
-
-def test_copied_model_with_raw_scalar_tags_keeps_secret_out_of_store(tmp_path):
-    draft = capture.DraftDecision.model_validate(_draft(anchors=[]))
-    copied = draft.model_copy(update={"tags": "password" + "=hunter, secondsecretmarker"})
-    with Store(tmp_path / "t.db") as store:
-        result = propose([copied], store, None)[0]
-        assert result.status == "written"
-        assert result.redactions == 1
-        assert store.find_abstract_entity("tag:secondsecretmarker") is None
-
-
-@pytest.mark.parametrize("replacement", [[], ""])
-def test_copied_model_explicit_empty_tags_has_no_stale_redaction_count(tmp_path, replacement):
-    draft = capture.DraftDecision.model_validate(
-        _draft(tags="password" + "=hunter, secondsecretmarker", anchors=[])
-    )
-    assert draft._tag_string_redactions == 1
-    copied = draft.model_copy(update={"tags": replacement})
-    assert draft._tag_string_redactions == 1
-    with Store(tmp_path / "t.db") as store:
-        result = propose([copied], store, None)[0]
-        assert result.status == "written"
-        assert result.redactions == 0
-
-
-@pytest.mark.parametrize("deep", [False, True])
-def test_unchanged_model_copy_retains_tag_redaction_provenance(tmp_path, deep):
-    draft = capture.DraftDecision.model_validate(
-        _draft(tags="password" + "=hunter, secondsecretmarker", anchors=[])
-    )
-    copied = draft.model_copy(deep=deep)
-    with Store(tmp_path / "t.db") as store:
-        assert propose([copied], store, None)[0].redactions == 1

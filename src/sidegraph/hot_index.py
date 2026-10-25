@@ -32,10 +32,10 @@ from urllib.parse import quote
 from . import delivery as delivery_ledger
 from .store_layout import (
     INDEX_JOURNAL_PRAGMA,
-    INDEX_STAMPS,
     MISTAKE_KINDS,
     VOLATILE_STALE_KEY,
     StoreRequirementError,
+    accepted_index_stamps,
     check_store_requirement,
     proposal_surfaces,
     symlinked_internals,
@@ -151,7 +151,7 @@ class HotIndex:
             uri = f"file:{quote(os.fsencode(str(index)))}?mode=rw"
             conn = sqlite3.connect(uri, uri=True, timeout=busy_timeout_seconds)
             row = conn.execute(GET_META_SQL, ("schema_version",)).fetchone()
-            if row is None or row[0] not in INDEX_STAMPS:
+            if row is None or row[0] not in accepted_index_stamps(root):
                 conn.close()
                 return None
             columns = {r[1] for r in conn.execute("PRAGMA table_info(retrieval_events)")}

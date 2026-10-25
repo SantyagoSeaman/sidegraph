@@ -918,10 +918,11 @@ def test_anchors_message_names_the_accepted_requirement(
 
 def test_console_script_count_in_cli_reference_matches_pyproject() -> None:
     """Red against unfixed code: the doc says eleven registered, pyproject registers 15."""
-    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parent.parent
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     block = pyproject.split("[project.scripts]", 1)[1].split("\n[", 1)[0]
     registered = [line for line in block.splitlines() if line.startswith("sidegraph-")]
-    doc = Path("docs/reference/cli.md").read_text(encoding="utf-8")
+    doc = (root / "docs/reference/cli.md").read_text(encoding="utf-8")
     assert f"{len(registered)} console scripts" in doc.replace("Fifteen", "15")
 
 

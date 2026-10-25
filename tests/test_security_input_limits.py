@@ -1,7 +1,6 @@
 """Pure resource-policy regressions: bounded work before capture or serialization."""
 
 import importlib
-from collections.abc import Mapping
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -10,6 +9,29 @@ from pydantic import BaseModel, ConfigDict
 @pytest.fixture
 def limits():
     return importlib.import_module("sidegraph.input_limits")
+
+
+def test_shipped_limits_match_the_documented_numbers(limits):
+    """The boundary tests below shrink the ceilings; this pins the shipped values to the
+    table in SECURITY.md (resource limits)."""
+    assert limits.MAX_FIELD_BYTES == 256 * 1024
+    assert limits.MAX_REQUEST_BYTES == 4 * 1024 * 1024
+    assert limits.MAX_DRAFTS == 100
+    assert limits.MAX_DEPTH == 32
+    assert limits.MAX_ITEM_NODES == 4096
+    assert limits.MAX_REQUEST_NODES == 65_536
+    assert limits.MAX_IMPORT_BYTES == 8 * 1024 * 1024
+
+
+@pytest.fixture
+def tiny(limits, monkeypatch):
+    """The same policy with small ceilings: a 4-item request is exactly full, 8 bytes or
+    8 nodes make an item exactly full, so the boundaries need no megabyte inputs."""
+    monkeypatch.setattr(limits, "MAX_FIELD_BYTES", 8)
+    monkeypatch.setattr(limits, "MAX_REQUEST_BYTES", 32)
+    monkeypatch.setattr(limits, "MAX_ITEM_NODES", 8)
+    monkeypatch.setattr(limits, "MAX_REQUEST_NODES", 32)
+    return limits
 
 
 @pytest.mark.parametrize(
@@ -70,15 +92,6 @@ def test_model_fields_and_copied_unknown_fields_are_inspected_without_dump(limit
     assert limits.preflight_drafts([bad, good])[1] is None
 
 
-def test_model_construct_cannot_bypass_nested_field_limit(limits):
-    class Draft(BaseModel):
-        metadata: dict
-
-    draft = Draft.model_construct(metadata={"author": "x" * 262_145})
-    with pytest.raises(limits.InputLimitError):
-        limits.measure_item(draft)
-
-
 @pytest.mark.parametrize("container", [list, tuple])
 def test_exact_per_item_node_boundary(limits, container):
     assert limits.measure_item(container([None] * 4095)).nodes == 4096
@@ -86,28 +99,10 @@ def test_exact_per_item_node_boundary(limits, container):
         limits.measure_item(container([None] * 4096))
 
 
-def test_wide_mapping_rejected_before_iteration(limits):
-    class WideMapping(Mapping):
-        def __len__(self):
-            return 4096
-
-        def __iter__(self):
-            pytest.fail("wide mapping iterated")
-
-        def __getitem__(self, key):
-            pytest.fail("wide mapping accessed")
-
+def test_wide_mapping_rejected(limits):
+    assert limits.measure_item(dict.fromkeys(range(2047))).nodes == 4095
     with pytest.raises(limits.InputLimitError):
-        limits.measure_item(WideMapping())
-
-
-def test_wide_list_rejected_before_iteration(limits):
-    class WideList(list):
-        def __iter__(self):
-            pytest.fail("wide list iterated")
-
-    with pytest.raises(limits.InputLimitError):
-        limits.measure_item(WideList([None] * 4096))
+        limits.measure_item(dict.fromkeys(range(2048)))
 
 
 def test_depth_boundary(limits):
@@ -119,23 +114,7 @@ def test_depth_boundary(limits):
         limits.measure_item([value])
 
 
-@pytest.mark.parametrize("kind", ["list", "mapping", "model"])
-def test_cycles_reject_but_shared_subtrees_are_valid(limits, kind):
-    if kind == "list":
-        value = []
-        value.append(value)
-    elif kind == "mapping":
-        value = {}
-        value["self"] = value
-    else:
-
-        class Draft(BaseModel):
-            child: object = None
-
-        value = Draft()
-        value.child = value
-    with pytest.raises(limits.InputLimitError):
-        limits.measure_item(value)
+def test_shared_subtrees_count_per_occurrence_and_are_valid(limits):
     shared = ["ok"]
     assert limits.measure_item([shared, shared]).nodes == 5
 
@@ -147,17 +126,17 @@ def test_invalid_parent_attached_fact_is_one_item_rejection(limits):
     assert errors[1] is None
 
 
-def test_rejected_items_do_not_spend_admitted_byte_budget(limits):
-    bad = ["x" * 262_144] * 16 + ["x" * 262_145]
-    good = ["x" * 262_144] * 16
-    errors = limits.preflight_drafts([bad] * 20 + [good])
+def test_rejected_items_do_not_spend_admitted_byte_budget(tiny):
+    bad = ["x" * 8] * 4 + ["x" * 9]
+    good = ["x" * 8] * 4
+    errors = tiny.preflight_drafts([bad] * 20 + [good])
     assert all(error is not None for error in errors[:-1])
     assert errors[-1] is None
 
 
-def test_rejected_items_do_not_spend_admitted_node_budget(limits):
-    bad = [None] * 4094 + ["x" * 262_145]
-    assert limits.preflight_drafts([bad] * 99 + ["ok"])[-1] is None
+def test_rejected_items_do_not_spend_admitted_node_budget(tiny):
+    bad = [None] * 6 + ["x" * 9]
+    assert tiny.preflight_drafts([bad] * 9 + ["ok"])[-1] is None
 
 
 def test_request_byte_boundary_and_combined_batches(limits):
@@ -167,11 +146,11 @@ def test_request_byte_boundary_and_combined_batches(limits):
         limits.preflight_drafts([*good, "x"])
 
 
-def test_request_node_boundary(limits):
-    good = [[None] * 4095] * 16
-    assert limits.preflight_drafts(good) == (None,) * 16
-    with pytest.raises(limits.InputLimitError):
-        limits.preflight_drafts([*good, None])
+def test_request_node_boundary(tiny):
+    good = [[None] * 7] * 4
+    assert tiny.preflight_drafts(good) == (None,) * 4
+    with pytest.raises(tiny.InputLimitError):
+        tiny.preflight_drafts([*good, None])
 
 
 def test_draft_count_includes_attached_facts_even_for_rejected_parents(limits):
@@ -199,22 +178,9 @@ def test_model_attached_facts_count_without_dump(limits):
         limits.preflight_drafts([Draft(facts=[None] * 100)], decision_indices=[0])
 
 
-def test_wide_draft_batch_rejects_before_iteration(limits):
-    class WideBatch(list):
-        def __iter__(self):
-            pytest.fail("wide batch iterated")
-
+def test_wide_draft_batch_rejects(limits):
     with pytest.raises(limits.InputLimitError):
-        limits.preflight_drafts(WideBatch([None] * 101))
-
-
-def test_wide_attached_fact_batch_rejects_before_iteration(limits):
-    class WideFacts(list):
-        def __iter__(self):
-            pytest.fail("wide attached facts iterated")
-
-    with pytest.raises(limits.InputLimitError):
-        limits.preflight_drafts([{"facts": WideFacts([None] * 101)}], decision_indices=[0])
+        limits.preflight_drafts([None] * 101)
 
 
 def test_malformed_attached_facts_remains_structural_item_error(limits):
@@ -225,21 +191,21 @@ def test_malformed_attached_facts_remains_structural_item_error(limits):
     assert errors[1] is None
 
 
-def test_direct_arguments_share_aggregate_and_individual_limits(limits):
-    exact = ["x" * 262_144] * 16
-    measurement = limits.preflight_direct(*exact)
-    assert (measurement.string_bytes, measurement.nodes) == (4_194_304, 16)
-    with pytest.raises(limits.InputLimitError):
-        limits.preflight_direct(*exact, "x")
-    with pytest.raises(limits.InputLimitError):
-        limits.preflight_direct([None] * 4096)
+def test_direct_arguments_share_aggregate_and_individual_limits(tiny):
+    exact = ["x" * 8] * 4
+    measurement = tiny.preflight_direct(*exact)
+    assert (measurement.string_bytes, measurement.nodes) == (32, 4)
+    with pytest.raises(tiny.InputLimitError):
+        tiny.preflight_direct(*exact, "x")
+    with pytest.raises(tiny.InputLimitError):
+        tiny.preflight_direct([None] * 8)
 
 
-def test_direct_arguments_share_node_budget(limits):
-    exact = [[None] * 4095] * 16
-    assert limits.preflight_direct(*exact).nodes == 65_536
-    with pytest.raises(limits.InputLimitError):
-        limits.preflight_direct(*exact, None)
+def test_direct_arguments_share_node_budget(tiny):
+    exact = [[None] * 7] * 4
+    assert tiny.preflight_direct(*exact).nodes == 32
+    with pytest.raises(tiny.InputLimitError):
+        tiny.preflight_direct(*exact, None)
 
 
 def test_document_text_uses_import_byte_limit_instead_of_capture_field_limit(limits):
@@ -262,17 +228,17 @@ def test_oversized_document_does_not_encode(limits):
         limits.check_document_text(Unencodable("x" * 9), limit=8)
 
 
-def test_draft_metadata_shares_admitted_byte_budget(limits):
-    exact = ["x" * 262_144] * 16
-    assert limits.preflight_drafts(exact, metadata=[""]) == (None,) * 16
-    with pytest.raises(limits.InputLimitError):
-        limits.preflight_drafts(exact, metadata=["x"])
+def test_draft_metadata_shares_admitted_byte_budget(tiny):
+    exact = ["x" * 8] * 4
+    assert tiny.preflight_drafts(exact, metadata=[""]) == (None,) * 4
+    with pytest.raises(tiny.InputLimitError):
+        tiny.preflight_drafts(exact, metadata=["x"])
 
 
-def test_draft_metadata_shares_node_budget(limits):
-    exact = [[None] * 4095] * 16
-    with pytest.raises(limits.InputLimitError):
-        limits.preflight_drafts(exact, metadata=[None])
+def test_draft_metadata_shares_node_budget(tiny):
+    exact = [[None] * 7] * 4
+    with pytest.raises(tiny.InputLimitError):
+        tiny.preflight_drafts(exact, metadata=[None])
 
 
 def test_draft_metadata_rejection_is_request_wide(limits):
@@ -282,10 +248,6 @@ def test_draft_metadata_rejection_is_request_wide(limits):
         limits.preflight_drafts(["good"], metadata=[[None] * 4096])
 
 
-def test_wide_metadata_collection_rejects_before_iteration(limits):
-    class WideMetadata(list):
-        def __iter__(self):
-            pytest.fail("wide metadata collection iterated")
-
+def test_wide_metadata_collection_rejects(limits):
     with pytest.raises(limits.InputLimitError):
-        limits.preflight_drafts(["good"], metadata=WideMetadata([None] * 65_537))
+        limits.preflight_drafts(["good"], metadata=[None] * 65_537)

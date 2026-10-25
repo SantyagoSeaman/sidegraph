@@ -47,7 +47,7 @@ accepts them.
   [keeping the graph fresh](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
 - *Auto-ratify low-risk records?* Yes means the lessons, gotchas and facts the agent proposes
   are accepted without review; ADRs, constraints and domains still wait for a person. The
-  answer is saved in `.claude/settings.json`, which you commit. Sidegraph applies it in all four MCP integrations unless an explicit
+  answer is saved in `.claude/settings.json`, which you commit. Sidegraph applies it in every MCP integration unless an explicit
   `SIDEGRAPH_RATIFY_POLICY` overrides it, so teammates use the same project policy. See
   [`sidegraph-init`](../reference/cli.md#sidegraph-init).
 
@@ -122,7 +122,7 @@ Commit the whole `.sidegraph/` directory (`git add .sidegraph`), the root `.giti
 `.claude/settings.json` if step 1 created or changed it. The store's own `.gitignore` already
 leaves out `index.db` (the derived index, with its SQLite sidecar files) and `*.tmp` files, so what
 gets staged is what should travel: the `format` marker, `stamping_live_since`, `.gitignore` and the
-record directories. A store file left uncommitted for a day is reported by
+record files (and, once maintenance has packed records, `shards/` and `.gitattributes`). A store file left uncommitted for a day is reported by
 [`store-uncommitted`](../guides/troubleshooting.md#store-uncommitted).
 
 The loop is now working. After cloning, each teammate builds the graph, runs `sidegraph-init`

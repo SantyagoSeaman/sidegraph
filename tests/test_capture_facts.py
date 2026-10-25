@@ -1,11 +1,22 @@
 """Facts through the deterministic propose pipeline.
 see design/superpowers/specs/2026-07-10-facts-layer-design.md"""
 
+import pytest
+
+from sidegraph import capture
 from sidegraph.capture import propose, propose_facts
 from sidegraph.schema import DecisionStatus
 from sidegraph.store import Store
 
 SECRET = "api_key=hunter2secret"
+
+
+@pytest.fixture(autouse=True)
+def _no_git_discovery(monkeypatch):
+    """Nothing here asserts a git-derived initiative or commit stamp; the real discovery
+    stays covered in test_capture_initiative and the commit tests in test_capture_propose."""
+    monkeypatch.setattr(capture, "_derive_initiative", lambda store: None)
+    monkeypatch.setattr(capture, "_capture_commit", lambda store: None)
 
 
 def _draft(**kw):
@@ -217,6 +228,10 @@ def test_standalone_fact_without_a_graph_reports_its_orphaned_anchor(tmp_path):
     )
     assert ok.status == "written"
     assert [e["canonical_name"] for e in ok.anchors_orphaned] == ["sync.py"]
+    # The no-reader branch has its own cause: nothing is wrong with the anchor, there is
+    # simply no graph to resolve against. ``file-not-in-graph`` would send the author to
+    # re-check a name that is probably fine.
+    assert [e["reason"] for e in ok.anchors_orphaned] == ["no-graph"]
 
 
 # -- I1 (R1 improvement wave §1): _propose_fact_one's own D7.3 session_id fallback --------
@@ -299,22 +314,3 @@ def test_standalone_fact_ignores_stale_telemetry_session_marker(tmp_path, curren
         reader=None,
     )
     assert store.get_fact(ok.fact_id).provenance.session_id is None
-
-
-def test_standalone_fact_without_a_graph_reasons_no_graph(tmp_path):
-    """The no-reader branch has its own cause: nothing is wrong with the anchor, there is
-    simply no graph to resolve against. Reporting it as ``file-not-in-graph`` would send the
-    author to re-check a name that is probably fine."""
-    store = Store(tmp_path / "s")
-    [ok] = propose_facts(
-        [
-            {
-                "statement": "s",
-                "source": "src",
-                "anchors": [{"name": "sync.py", "file_path": "src/sync.py"}],
-            }
-        ],
-        store,
-        reader=None,
-    )
-    assert [e["reason"] for e in ok.anchors_orphaned] == ["no-graph"]

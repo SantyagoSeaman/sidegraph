@@ -219,6 +219,17 @@ jobs:
 `Store`, and therefore cannot migrate the store or rebuild `index.db`. See
 [`reference/cli.md#sidegraph-verify`](../reference/cli.md#sidegraph-verify).
 
+**On a packed (format 2) store**, the same recipe judges each record on its own: a fold,
+a moved shard line and an edited per-record file are each checked against the target branch's
+tip. `HEAD` on GitHub's pull-request checkout is the merge ref, whose first parent is that tip,
+so the merge base computed above is the target's tip whether or not the target was merged into
+the branch. (That holds on that checkout; on your own machine the merge base is the
+target's tip only after you merged the target into your branch.) Run `sidegraph-verify` against that value: a local run against the fork point can
+differ, and CI's answer is the one that gates the merge. Findings and their remedies:
+[migrating to 0.17](migrating-to-0.17.md). A job that runs `sidegraph-doctor --check` exits `2`
+on the `store-not-migrated` and `maintenance-due` notices until the store is migrated or
+maintained.
+
 ## Recipe 3: scheduled triage
 
 Runs the [`heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md) playbook
@@ -311,7 +322,7 @@ jobs:
             --model "$SIDEGRAPH_TRIAGE_MODEL" \
             --mcp-config mcp-config.json --strict-mcp-config \
             --allowedTools "mcp__sidegraph__sync_anchors mcp__sidegraph__find_entity mcp__sidegraph__query_structure mcp__sidegraph__query_decisions mcp__sidegraph__add_anchors mcp__sidegraph__propose_decisions mcp__sidegraph__list_proposed mcp__sidegraph__retrieve_decisions mcp__sidegraph__get_entity_history mcp__sidegraph__list_facts mcp__sidegraph__verify_store" \
-            --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__ratify_decisions,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact" \
+            --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__ratify_decisions,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact,mcp__sidegraph__record_drift_check,mcp__sidegraph__propose_domains" \
             --output-format stream-json --verbose \
             > triage.jsonl
 
@@ -343,8 +354,9 @@ gate. The command passes the repository variable explicitly instead of inheritin
 CLI default.
 
 Do not add `--permission-mode bypassPermissions`: it disables both tool lists. The
-`--disallowedTools` list is the load-bearing ratification guard; the allowlist only narrows
-normal MCP access and can be widened by ambient host settings. Keep both. Read-only built-in
+`--disallowedTools` list is the ratification guard: it names the tools that ratify or write a
+record directly and the one that records a drift check. The allowlist only narrows normal MCP
+access and can be widened by ambient host settings. Keep both. Read-only built-in
 tools can still inspect the checkout in a headless run; the troubleshooting note below states
 that boundary explicitly. The matching
 [`heal-anchors` headless example](../../plugin/sidegraph/skills/heal-anchors/SKILL.md#running-this-playbook-headlessly-ci)
@@ -388,8 +400,8 @@ drafts. Proposed content stays below accepted memory and may be hidden by regula
   `Read` running, alongside one `Bash` call the same static command classification denied —
   its shape didn't read as safely read-only). What the two flags together guarantee is
   narrower and still sufficient for hard rule 1: the run cannot **write** anything except
-  through the allowlisted MCP tools, and the deny list blocks every write-gate tool
-  (`ratify`, `add_decision`, `supersede_*`, ...) outright. If you see "no Bash/Edit/Write
+  through the allowlisted MCP tools, and the deny list blocks the ratification and
+  direct-write tools (`ratify`, `add_decision`, `supersede_*`, `record_drift_check`, ...) outright. If you see "no Bash/Edit/Write
   reachable" claimed anywhere for this setup, that's wrong — treat repo contents as
   readable by the run and scope secrets accordingly.
 

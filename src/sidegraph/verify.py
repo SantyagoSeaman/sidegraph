@@ -45,11 +45,13 @@ a separate finding, :data:`FILENAME_ID_MISMATCH` — the store always writes
 from __future__ import annotations
 
 import json
+import operator
 import os
 import re
 import stat
 import subprocess
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, NamedTuple, overload
@@ -69,6 +71,7 @@ from .schema import (
     Fact,
     Initiative,
     is_safe_record_id,
+    validate_record_body,
 )
 from .store import (
     _FORMAT_MARKER_NAME,
@@ -80,11 +83,25 @@ from .store import (
     _archive_payload_problem,
     symlinked_internals,
 )
+from .store_format import (
+    FORMAT2_MARKER_VERSION,
+    SYMLINK_REASON,
+    Inventory,
+    MalformedMarker,
+    Marker,
+    Occurrence,
+    ShardListing,
+    has_shard_files,
+    inventory_from_disk,
+    inventory_from_git_tree,
+    parse_marker,
+)
 from .store_layout import (
     DOMAIN_SNAPSHOT_NAME,
     MAX_FORMAT_MARKER_BYTES,
     NOT_A_FILE_REASON,
     REQUIREMENT_MARKER_VERSION,
+    SHARDS_SUBDIR,
     VERIFICATIONS_SUBDIR,
     StoreRequirementError,
     hot_matches_archive,
@@ -95,7 +112,42 @@ from .store_layout import (
     running_version,
     same_modulo_absent,
     stat_entry,
+    store_marker,
     store_requirement,
+)
+
+# Re-exported under the same names: the transition code lives in store_rules (pydantic-free).
+from .store_rules import (  # noqa: F401
+    _DECISION_STATUS_TRANSITIONS,
+    _DOMAIN_STATUS_TRANSITIONS,
+    _FACT_STATUS_TRANSITIONS,
+    ABSENT,
+    DECISION_MUTABLE_FIELDS,
+    DOMAIN_MUTABLE_FIELDS,
+    ENTITY_MUTABLE_FIELDS,
+    FACT_MUTABLE_FIELDS,
+    ILLEGAL_DELETION,
+    ILLEGAL_FIELD_CHANGE,
+    ILLEGAL_STATUS_JUMP,
+    VALID_TO_CHANGED,
+    VALID_TO_UNSET,
+    Effective,
+    IdentityDiff,
+    Violation,
+    _same_body,
+    _strict_equal,
+    _synthetic_path,
+    _violation,
+    classify_transition,
+    compatible,
+    deletable,
+    diff_occurrences,
+    effective_all,
+    is_derived_entity_body,
+    keeps_keys,
+    kind_of,
+    same_raw_body,
+    superseding,
 )
 
 # Violation codes — pinned constants (design ruling 2). The CLI's --json output and every
@@ -119,17 +171,23 @@ BAD_ARCHIVE_SEGMENT = "bad-archive-segment"
 FILENAME_ID_MISMATCH = "filename-id-mismatch"
 UNSAFE_RECORD_ID = "unsafe-record-id"
 SYMLINKED_STORE_ENTRY = "symlinked-store-entry"
+# At least one ``shards/*.shard`` beside a marker whose major is below 2.
+SHARDS_WITHOUT_FORMAT2 = "shards-without-format2"
+BAD_SHARD_LINE = "bad-shard-line"
+SHARD_CONFLICT = "shard-conflict"
+DUPLICATE_PACKED_RECORD = "duplicate-packed-record"
+SHADOW_DIVERGENCE = "shadow-divergence"
+BINDING_ENTRY_DROPPED = "binding-entry-dropped"
+SHARD_NAME_CASE = "shard-name-case"
+# The ``--against`` layer's findings for a packed store (§7.1): a shard line whose body no REF
+# occurrence of the identity holds, and a marker that went from major 2 to below it.
+SHARD_BODY_WITHOUT_SOURCE = "shard-body-without-source"
+FORMAT_DOWNGRADE = "format-downgrade"
 # The one line the CLIs print when a symlinked store entry stops the run at the links.
 SYMLINK_STOP_NOTE = (
     "remaining checks skipped (the store has symlinked entries — remove the links and rerun)"
 )
 
-# Transition-layer codes (design ruling 2, "Transition layer" — see that section below).
-ILLEGAL_FIELD_CHANGE = "illegal-field-change"
-ILLEGAL_STATUS_JUMP = "illegal-status-jump"
-VALID_TO_UNSET = "valid-to-unset"
-VALID_TO_CHANGED = "valid-to-changed"
-ILLEGAL_DELETION = "illegal-deletion"
 
 # A store's default committed ``format`` marker (see ``store._ensure_format_marker``)
 # carries the running code's CURRENT ``SCHEMA_VERSION`` at creation. An explicit requirement
@@ -144,7 +202,12 @@ _KNOWN_SCHEMA_VERSIONS = frozenset(
 
 # A ``1.0.0`` marker carries a minimum Sidegraph version (D6 of
 # design/superpowers/specs/2026-10-14-graphify-upgrade-design.md).
-_KNOWN_MARKER_VERSIONS = _KNOWN_SCHEMA_VERSIONS | {REQUIREMENT_MARKER_VERSION}
+# A ``2.0.0`` marker is the packed store.
+# see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.5)
+_KNOWN_MARKER_VERSIONS = _KNOWN_SCHEMA_VERSIONS | {
+    REQUIREMENT_MARKER_VERSION,
+    FORMAT2_MARKER_VERSION,
+}
 
 # Substring pydantic's wrapped ``ValueError`` carries for the ``Decision``/``Fact``
 # validity-window ``model_validator`` (see schema.py) — see ``_check_temporal_dir``.
@@ -154,20 +217,6 @@ _VALIDITY_WINDOW_MSG = "valid_to must be >= valid_from"
 # (see schema.py) — the supersedes-chain check is generic across decisions/facts/domains, so
 # it compares against the raw string rather than importing either enum.
 _SUPERSEDED = "superseded"
-
-
-@dataclass(frozen=True)
-class Violation:
-    """One integrity finding. ``path`` is always a string (a file path, or a synthetic
-    ``dir/<id>.json`` for an id that only exists inside an archive segment)."""
-
-    code: str
-    path: str
-    detail: str
-
-
-def _violation(code: str, path: Path | str, detail: str) -> Violation:
-    return Violation(code=code, path=str(path), detail=detail)
 
 
 # -- generic file loading -----------------------------------------------------------------
@@ -613,6 +662,28 @@ def _check_format_marker(store_dir: Path) -> list[Violation]:
     return []
 
 
+def _check_shards_without_format2(store_dir: Path) -> list[Violation]:
+    """A marker major below 2 (or no marker) beside at least one ``shards/*.shard`` file, found
+    by the case-insensitive shard listing: every reader refuses such a store, since serving it
+    would hide the packed records. An empty ``shards/``, or one holding only ``*.tmp``, is not
+    packed data. A marker that does not parse is the marker check's finding.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.5, §7.1)"""
+    try:
+        found = store_marker(store_dir)
+    except StoreRequirementError:
+        return []
+    if (found is not None and found.major >= 2) or not has_shard_files(store_dir):
+        return []
+    return [
+        _violation(
+            SHARDS_WITHOUT_FORMAT2,
+            store_dir / SHARDS_SUBDIR,
+            "shard files beside a format marker below major 2: run sidegraph-migrate, or "
+            "restore the major-2 marker (a format conflict resolved toward the older branch)",
+        )
+    ]
+
+
 def _check_domain_snapshot(store_dir: Path) -> list[Violation]:
     """``<store_dir>/domain-snapshot.json``, when present: it validates as a format-1
     snapshot, and the format marker requires at least the first Sidegraph that reads it (an
@@ -653,7 +724,10 @@ def _check_domain_snapshot(store_dir: Path) -> list[Violation]:
 
 
 def _check_supersedes(
-    combined: dict[str, dict], path_by_id: dict[str, Path], skipped: dict[str, dict]
+    combined: dict[str, dict],
+    path_by_id: Mapping[str, Path | str],
+    skipped: dict[str, dict],
+    extra_successors: frozenset[str] | set[str] = frozenset(),
 ) -> list[Violation]:
     """Generic across decisions/facts/domains — mirrors the real write-path rule
     (``store.add_decision``/``add_fact``/``supersede_domain``): a successor's ``supersedes``
@@ -672,7 +746,7 @@ def _check_supersedes(
         payload["supersedes"]
         for payload in (*combined.values(), *skipped.values())
         if isinstance(payload.get("supersedes"), str) and payload["supersedes"]
-    }
+    } | set(extra_successors)  # a packed store: links of every readable occurrence
     for rid, payload in combined.items():
         supersedes = payload.get("supersedes")
         if (
@@ -710,7 +784,7 @@ def _cycle_text(cycle: list[str]) -> str:
 
 
 def _check_domain_parents(
-    combined: dict[str, dict], path_by_id: dict[str, Path], skipped: dict[str, dict]
+    combined: dict[str, dict], path_by_id: Mapping[str, Path | str], skipped: dict[str, dict]
 ) -> list[Violation]:
     """Mirrors ``Store._check_domain_parent_acyclic``: a domain's ``parent_id`` must name an
     existing domain (:data:`DANGLING_PARENT`) and the parent chain must not loop
@@ -758,7 +832,7 @@ def _check_domain_parents(
 
 def _check_binding_entities(
     bindings_by_record: dict[str, list[dict]],
-    path_by_record: dict[str, Path],
+    path_by_record: Mapping[str, Path | str],
     entity_ids: set[str],
 ) -> list[Violation]:
     """Every ``bindings/<record_id>.json`` entry's ``entity_id`` must resolve to a real
@@ -780,7 +854,7 @@ def _check_binding_entities(
 
 
 def _check_fact_supports(
-    facts_raw: dict[str, dict], path_by_id: dict[str, Path], decision_ids: set[str]
+    facts_raw: dict[str, dict], path_by_id: Mapping[str, Path | str], decision_ids: set[str]
 ) -> list[Violation]:
     """Every id in a ``Fact.supports`` list must resolve to a real decision (hot or archived)
     — mirrors ``store.add_fact``'s own existence check."""
@@ -803,8 +877,10 @@ def _check_fact_supports(
 
 
 def _check_duplicate_ulids(
-    hot_paths_by_id: dict[str, list[Path]],
+    hot_paths_by_id: Mapping[str, Sequence[Path | str]],
     archive_entries_by_id: dict[str, list[tuple[Path, dict]]],
+    *,
+    strict: bool = False,
 ) -> list[Violation]:
     """An id's canonical locations must be unique, with exactly ONE sanctioned exception
     (design amendment, Task-2 review): two or more archive segments carrying byte-IDENTICAL
@@ -818,7 +894,8 @@ def _check_duplicate_ulids(
     id actually DIFFER (corruption-shaped, not a legitimate merge, regardless of how it arose).
     The exemption is byte-equality (payload-dict equality, mirroring
     ``store._reload_index_from_canonical``'s own ``json.loads(...) != payload`` comparison),
-    never id-equality alone.
+    never id-equality alone. On a packed store (``strict``) the comparison keeps JSON types, so
+    ``1``, ``1.0`` and ``true`` differ; format 1 keeps Python's ``==``.
     """
     violations: list[Violation] = []
     all_ids = set(hot_paths_by_id) | set(archive_entries_by_id)
@@ -829,12 +906,422 @@ def _check_duplicate_ulids(
             continue
         if not hot_locs:
             payloads = [payload for _, payload in archive_locs]
-            if all(payload == payloads[0] for payload in payloads):
+            same = _strict_equal if strict else operator.eq  # format 1 keeps Python's ``==``
+            if all(same(payload, payloads[0]) for payload in payloads):
                 continue  # sanctioned cross-branch archive merge -- exempt
         locations = list(hot_locs) + [path for path, _ in archive_locs]
         detail = "present in " + "; ".join(str(p) for p in locations)
         violations.append(_violation(DUPLICATE_ULID, locations[0], detail))
     return violations
+
+
+# -- packed (format 2) snapshot layer ---------------------------------------------------------
+#
+# One occurrence inventory of the store (``store_format.inventory_from_disk``) read beside the
+# per-record and archive walks above, which stay as they are so a format-1 report is unchanged.
+# Shard lines join the reference pools, and the findings below are the ones only a packed store
+# can have. Verify keeps one severity: every finding is an error.
+# see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.1)
+
+_Identity = tuple[str, str]
+_POOLED_TYPES = ("decision", "fact", "domain", "entity", "bindings")
+_REFERENCED_TYPES = ("decision", "fact", "domain")
+
+
+@dataclass
+class _Packed:
+    """The inventory of a format-2 store and what the reference pools take from it.
+
+    ``reps[record_type][id]`` is ``(body, where)`` for a record with no per-record file: the
+    body of its effective READABLE shard line, ``where`` being ``shards/NN.shard:<line>``. An
+    unreadable line never enters a pool (its model failure is ``bad-shard-line``; a body that
+    failed the model may hold ids of the wrong type), but its identity is kept in ``held`` so a
+    reference to it does not dangle. ``pooled`` holds the ids of the occurrences the pools carry.
+    ``eff`` is the effective record of every identity, computed once."""
+
+    inv: Inventory
+    eff: dict[_Identity, Effective]
+    by_id: dict[_Identity, list[Occurrence]]
+    reps: dict[str, dict[str, tuple[object, str]]]
+    held: dict[str, dict[str, dict]]
+    entity_ids: set[str]
+    pooled: set[int]
+    archive_carried: set[int]
+    unreadable: list[tuple[str, OSError]]
+
+    def bodies(self, record_type: str) -> dict[str, dict]:
+        return {i: b for i, (b, _) in self.reps[record_type].items() if isinstance(b, dict)}
+
+    def paths(self, record_type: str) -> dict[str, str]:
+        return {i: w for i, (_, w) in self.reps[record_type].items()}
+
+    def successor_links(self) -> dict[str, set[str]]:
+        """The ids some READABLE occurrence names in ``supersedes`` (a file, a shard line, an
+        archive line), per record type: the one successor set of every per-record check of a
+        packed snapshot, so a link held by a shadowed occurrence still counts."""
+        links: dict[str, set[str]] = {t: set() for t in _REFERENCED_TYPES}
+        for occ in self.inv.occurrences:
+            if occ.readable and occ.record_type in links and isinstance(occ.raw, dict):
+                target = occ.raw.get("supersedes")
+                if isinstance(target, str) and target:
+                    links[str(occ.record_type)].add(target)
+        return links
+
+    def uncovered(self, file_ids: dict[str, set[str]]) -> list[Occurrence]:
+        """Readable occurrences no pool carries, so the per-record checks of the walks above
+        never saw them: a shard line shadowed by a per-record file or a second copy, and an
+        archive line other than the one the archive pool kept for its id, or one a file or
+        shard line overrides in the pools. ``file_ids`` are the ids the per-record walk holds."""
+        out: list[Occurrence] = []
+        for occ in self.inv.occurrences:
+            if not occ.readable or occ.in_conflict or occ.record_type is None:
+                continue
+            if occ.kind == "shard":
+                if occ.record_type in self.reps and id(occ) not in self.pooled:
+                    out.append(occ)
+            elif occ.kind == "archive" and occ.record_id is not None:
+                carried = (
+                    id(occ) in self.archive_carried
+                    and occ.record_id not in file_ids.get(occ.record_type, set())
+                    and occ.record_id not in self.reps.get(occ.record_type, {})
+                )
+                if not carried:
+                    out.append(occ)
+        return out
+
+
+def _where(occ: Occurrence) -> str:
+    return f"{occ.path}:{occ.line_no}"
+
+
+def _right_shape(record_type: str, raw: object) -> bool:
+    return isinstance(raw, list) if record_type == "bindings" else isinstance(raw, dict)
+
+
+def _packed_inventory(store_dir: Path) -> _Packed | None:
+    """The inventory when the marker is major 2, else ``None``: a store below major 2 has no
+    shard layer to read (``shards-without-format2`` is the marker check's finding). A marker
+    that does not parse is the marker check's finding too. A shard file that cannot be read is
+    kept in ``unreadable`` and becomes a finding; the other checks still run."""
+    unreadable: list[tuple[str, OSError]] = []
+    try:
+        found = store_marker(store_dir)
+        if found is None or found.major != 2:
+            return None
+        inv = inventory_from_disk(
+            store_dir,
+            validate=validate_record_body,
+            on_unreadable=lambda rel, exc: unreadable.append((rel, exc)),
+        )
+    except (StoreRequirementError, ValueError):
+        return None
+    eff = effective_all(inv)
+    by_id = inv.by_identity()
+    reps: dict[str, dict[str, tuple[object, str]]] = {t: {} for t in _POOLED_TYPES}
+    held: dict[str, dict[str, dict]] = {t: {} for t in _REFERENCED_TYPES}
+    entity_ids: set[str] = set()
+    pooled: set[int] = set()
+    for (record_type, record_id), occs in by_id.items():
+        if record_type not in reps:
+            continue
+        shards = [o for o in occs if o.kind == "shard"]
+        if record_type == "entity" and shards:
+            entity_ids.add(record_id)
+        if any(o.kind == "file" for o in occs):
+            continue  # the file wins; its pool entry comes from the per-record walk
+        usable = [o for o in shards if o.readable and not o.in_conflict]
+        if not usable:
+            if shards and record_type in held:
+                first = shards[0].raw
+                held[record_type][record_id] = first if isinstance(first, dict) else {}
+            continue
+        chosen = eff[(record_type, record_id)]
+        if chosen.source is not None and chosen.source.kind == "archive":
+            continue  # the archive pool already holds the effective body
+        rep = chosen.source if chosen.source is not None else usable[0]
+        reps[record_type][record_id] = (rep.raw, _where(rep))
+        pooled.add(id(rep))
+    # The archive walk pools the first PARSED line of an id (a line that failed its model too),
+    # so the occurrence it carries is the first one with an identity, readable or not.
+    archive_carried: set[int] = set()
+    archive_seen: set[_Identity] = set()
+    for occ in inv.occurrences:
+        if occ.kind == "archive" and occ.archive_type_known and occ.record_id is not None:
+            identity = (str(occ.record_type), occ.record_id)
+            if identity not in archive_seen:
+                archive_seen.add(identity)
+                archive_carried.add(id(occ))
+    return _Packed(inv, eff, by_id, reps, held, entity_ids, pooled, archive_carried, unreadable)
+
+
+def _shard_line_findings(packed: _Packed) -> list[Violation]:
+    """``bad-shard-line`` for a line that is not a readable record (envelope, JSON, model or
+    body-id failure: the test ``parse-error`` applies to a file), ``shard-conflict`` for a line
+    inside a git conflict region."""
+    out: list[Violation] = [
+        _violation(BAD_SHARD_LINE, rel, f"unreadable: {exc}")
+        for rel, exc in packed.unreadable
+        if rel.startswith(f"{SHARDS_SUBDIR}/")
+    ]  # an unreadable record file or archive segment is the per-record walk's finding
+    for occ in packed.inv.occurrences:
+        if occ.kind != "shard":
+            continue
+        if occ.in_conflict:
+            out.append(_violation(SHARD_CONFLICT, _where(occ), "line inside a git conflict region"))
+        elif occ.error is not None:
+            out.append(_violation(BAD_SHARD_LINE, _where(occ), occ.error))
+    return out
+
+
+def _distinct_shards(occs: list[Occurrence]) -> list[Occurrence]:
+    """Readable shard lines of one identity, one per differing parsed body."""
+    distinct: list[Occurrence] = []
+    for occ in occs:
+        readable = occ.kind == "shard" and occ.readable and not occ.in_conflict
+        if readable and not any(_same_body(occ, seen) for seen in distinct):
+            distinct.append(occ)
+    return distinct
+
+
+def _duplicate_packed_findings(packed: _Packed) -> list[Violation]:
+    out: list[Violation] = []
+    for (record_type, record_id), occs in packed.by_id.items():
+        distinct = _distinct_shards(occs)
+        if len(distinct) > 1:
+            where = ", ".join(str(_where(o)) for o in distinct)
+            out.append(
+                _violation(
+                    DUPLICATE_PACKED_RECORD,
+                    _where(distinct[0]),
+                    f"{record_type} {record_id!r} has differing shard lines: {where}",
+                )
+            )
+    return out
+
+
+def _shadow_findings(store_dir: Path, packed: _Packed) -> list[Violation]:
+    """A per-record file whose record is not a legal transition of its shard copy
+    (``classify_transition``). Bindings are machine-managed lists and exempt, as they are from
+    transition checks."""
+    out: list[Violation] = []
+    for (record_type, _record_id), occs in packed.by_id.items():
+        if record_type == "bindings":
+            continue
+        files = [o for o in occs if o.kind == "file" and o.readable and not o.in_conflict]
+        distinct = _distinct_shards(occs)
+        if not files or len(distinct) != 1:
+            continue
+        old, new = distinct[0].raw, files[0].raw
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            continue
+        problems = classify_transition(kind_of(record_type), old, new)
+        if problems:
+            detail = "; ".join(sorted({p.code for p in problems}))
+            out.append(
+                _violation(
+                    SHADOW_DIVERGENCE,
+                    store_dir / files[0].path,
+                    f"not a legal successor of the shard copy at {_where(distinct[0])}: {detail}",
+                )
+            )
+    return out
+
+
+def _entries(body: object) -> list[dict]:
+    return [e for e in body if isinstance(e, dict)] if isinstance(body, list) else []
+
+
+def _entity_of(entry: dict) -> str | None:
+    value = entry.get("entity_id")
+    return value if isinstance(value, str) else None
+
+
+def _binding_entry_findings(store_dir: Path, packed: _Packed) -> list[Violation]:
+    """A bindings file that lacks an entity its owner's shard line has. Judged on the tree
+    itself, so it fires on a merge result whatever the merge base was. Entries of a derived
+    entity (``is_derived_entity_body``) are excluded; an entity that does not resolve is not
+    derived.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.1)"""
+    eff = packed.eff
+
+    def derived(entity_id: str) -> bool:
+        found = eff.get(("entity", entity_id))
+        return found is not None and is_derived_entity_body(found.raw)
+
+    out: list[Violation] = []
+    for (record_type, _record_id), occs in packed.by_id.items():
+        if record_type != "bindings":
+            continue
+        files = [o for o in occs if o.kind == "file" and o.readable and not o.in_conflict]
+        distinct = _distinct_shards(occs)
+        if not files or not distinct:
+            continue
+        have = {_entity_of(e) for e in _entries(files[0].raw)}
+        # the union over the owner's differing lines: a dispute does not hide a dropped entry
+        packed_at: dict[str, str] = {}
+        for line in reversed(distinct):
+            for entry in _entries(line.raw):
+                entity_id = _entity_of(entry)
+                if entity_id is not None:
+                    packed_at[entity_id] = _where(line)
+        for entity_id in sorted(set(packed_at) - have):
+            if derived(entity_id):
+                continue
+            out.append(
+                _violation(
+                    BINDING_ENTRY_DROPPED,
+                    store_dir / files[0].path,
+                    f"lacks entity {entity_id!r} that the shard line at "
+                    f"{packed_at[entity_id]} binds: add the anchor back",
+                )
+            )
+    return out
+
+
+def _check_shard_name_case(listing: ShardListing | None) -> list[Violation]:
+    """Two files of ``shards/`` whose names are equal lower-cased, or a ``*.shard`` file whose
+    lower-cased name is a bucket name while the name is not: git writes both into one file on
+    a case-insensitive filesystem, and the other's records go missing."""
+    if listing is None:
+        return []
+    return [
+        _violation(
+            SHARD_NAME_CASE,
+            f"{SHARDS_SUBDIR}/{name}",
+            "shard file name differs only in case from a bucket name or another shard file; "
+            "a case-insensitive checkout merges them: rename or remove one",
+        )
+        for name in listing.case_collisions
+    ]
+
+
+def _own_parent_cycle(own_id: str, parent: str, bodies: Mapping[str, dict]) -> list[str]:
+    """The cycle the parent chain of one occurrence of domain ``own_id`` closes: the chain starts
+    at ``parent``, follows the pooled bodies, and loops when it reaches ``own_id`` again (the
+    occurrence stands for that id's own edge). Empty when it does not loop through ``own_id``."""
+    path = [own_id]
+    current: object = parent
+    while isinstance(current, str):
+        if current == own_id:
+            first = min(path)
+            at = path.index(first)
+            return path[at:] + path[:at]
+        if current in path or current not in bodies:
+            return []
+        path.append(current)
+        current = bodies[current].get("parent_id")
+    return []
+
+
+def _unpooled_reference_findings(
+    store_dir: Path,
+    occurrences: list[Occurrence],
+    *,
+    exist: dict[str, set[str]],
+    successors: dict[str, set[str]],
+    entities: set[str],
+    domain_bodies: Mapping[str, dict],
+) -> list[Violation]:
+    """The per-record reference checks of the walks above on every readable occurrence the pools
+    do not carry (:meth:`_Packed.uncovered`), each reported where it lies: a shard line at
+    ``shards/NN.shard:<line>``, an archive line at its segment. ``exist`` holds the ids of each
+    record type that resolve, ``successors`` the ids some record's ``supersedes`` names."""
+    out: list[Violation] = []
+    for occ in occurrences:
+        record_type = str(occ.record_type)
+        where = _where(occ) if occ.kind == "shard" else str(store_dir / occ.path)
+        body = occ.raw
+        if record_type == "bindings":
+            for entry in _entries(body):
+                entity_id = _entity_of(entry)
+                if entity_id not in entities:
+                    out.append(
+                        _violation(
+                            DANGLING_BINDING_ENTITY,
+                            where,
+                            f"binding references unknown entity {entity_id!r}",
+                        )
+                    )
+            continue
+        if not isinstance(body, dict) or record_type not in exist:
+            continue
+        target = body.get("supersedes")
+        if isinstance(target, str) and target and target not in exist[record_type]:
+            out.append(
+                _violation(DANGLING_SUPERSEDES, where, f"supersedes unknown record {target!r}")
+            )
+        if body.get("status") == _SUPERSEDED and occ.record_id not in successors[record_type]:
+            out.append(
+                _violation(
+                    SUPERSEDED_WITHOUT_SUCCESSOR,
+                    where,
+                    f"status is superseded but no record's supersedes references {occ.record_id!r}",
+                )
+            )
+        parent = body.get("parent_id")
+        if record_type == "domain" and isinstance(parent, str) and parent not in exist["domain"]:
+            out.append(
+                _violation(
+                    DANGLING_PARENT, where, f"parent_id references unknown domain {parent!r}"
+                )
+            )
+        if record_type == "domain" and isinstance(parent, str):
+            cycle = _own_parent_cycle(str(occ.record_id), parent, domain_bodies)
+            if cycle:
+                out.append(
+                    _violation(
+                        PARENT_CYCLE,
+                        where,
+                        "parent_id chain loops back on itself: " + _cycle_text(cycle),
+                    )
+                )
+        supports = body.get("supports")
+        if record_type == "fact" and isinstance(supports, list):
+            out.extend(
+                _violation(DANGLING_FACT_SUPPORT, where, f"supports unknown decision {did!r}")
+                for did in supports
+                if isinstance(did, str) and did not in exist["decision"]
+            )
+    return out
+
+
+def _packed_archive_overlap(
+    kind: str,
+    packed: _Packed,
+    files_by_id: Mapping[str, Sequence[Path | str]],
+    file_raw: dict[str, dict],
+    archive_by_id: dict[str, list[tuple[Path, dict]]],
+) -> tuple[dict[str, list[Path | str]], dict[str, list[tuple[Path, dict]]]]:
+    """The hot and archive location maps :func:`_check_duplicate_ulids` should judge on a
+    packed store. A per-record file beside an archive line is legal when the file holds the
+    line's state or a legal successor of it (``compatible``); a shard line beside an archive
+    line when it is ``compatible`` or the line is ``superseding`` it. A legal archive copy is
+    dropped from the map; an illegal one beside a shard line gets that line added as a hot
+    location, so the overlap is reported. Differing archive lines of one identity are left
+    alone: they are ``duplicate-ulid`` as before. A file and a shard line of one identity are
+    the normal pre-maintenance pair (``shadow-divergence`` judges them) and never count.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.1)"""
+    hot = {rid: list(paths) for rid, paths in files_by_id.items()}
+    archive = dict(archive_by_id)
+    for rid, entries in archive_by_id.items():
+        payloads = [payload for _, payload in entries]
+        if any(not _strict_equal(payload, payloads[0]) for payload in payloads):
+            continue
+        a = payloads[0]
+        if hot.get(rid):
+            raw = file_raw.get(rid)
+            if len(hot[rid]) == 1 and raw is not None and compatible(kind, a, raw):
+                del archive[rid]
+            continue
+        distinct = _distinct_shards(packed.by_id.get((kind, rid), []))
+        if len(distinct) != 1 or not isinstance(distinct[0].raw, dict):
+            continue
+        s = distinct[0].raw
+        if compatible(kind, a, s) or superseding(kind, a, s):
+            del archive[rid]
+        else:
+            hot[rid] = [_where(distinct[0])]
+    return hot, archive
 
 
 # -- entry point ------------------------------------------------------------------------
@@ -899,6 +1386,7 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
         # link lints foreign files (or the same files as the wrong type), and a pool that is
         # cut off makes every cross-reference into it dangle. Stop at the links.
         return violations
+    violations += _check_shards_without_format2(store_dir)
     violations += _check_domain_snapshot(store_dir)
     require_listable_record_dirs(store_dir)
 
@@ -927,358 +1415,140 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
     archive = _check_archive_dir(store_dir / "archive")
     violations += archive.violations
 
+    # A format-2 store: shard lines join the reference pools below as the records that have no
+    # per-record file; on any other store ``packed`` is None and every pool is as it was.
+    packed = _packed_inventory(store_dir)
+    file_ids = {
+        "decision": set(decisions_raw),
+        "fact": set(facts_raw),
+        "domain": set(domains_raw),
+        "bindings": set(bindings_by_record),
+    }
+    fact_paths_all: dict[str, Path | str] = {**fact_paths}
+    binding_paths_all: dict[str, Path | str] = {**binding_paths}
+    decision_paths_all: dict[str, Path | str] = {}
+    domain_paths_all: dict[str, Path | str] = {}
+    if packed is not None:
+        # an identity known only from an unreadable shard line still resolves a reference to it
+        decisions_skipped = {**packed.held["decision"], **decisions_skipped}
+        facts_skipped = {**packed.held["fact"], **facts_skipped}
+        domains_skipped = {**packed.held["domain"], **domains_skipped}
+        facts_raw = {**packed.bodies("fact"), **facts_raw}
+        fact_paths_all = {**packed.paths("fact"), **fact_paths_all}
+        bindings_by_record = {
+            **{
+                rid: _entries(body)
+                for rid, (body, _) in packed.reps["bindings"].items()
+                if isinstance(body, list)
+            },
+            **bindings_by_record,
+        }
+        binding_paths_all = {**packed.paths("bindings"), **binding_paths_all}
+        decision_paths_all = {**packed.paths("decision")}
+        domain_paths_all = {**packed.paths("domain")}
+
     entity_ids = set(entities_raw) | set(entities_skipped)
+    if packed is not None:
+        entity_ids |= packed.entity_ids
 
     # Decisions/domains: a superseded record's successor (or the dangling-supersedes target
     # itself) may live only in the archive, so the cross-reference checks run against the
     # union of hot + archived payloads; hot wins on an id present in both (mirrors
     # ``store._reload_index_from_canonical``'s own hot-always-wins precedent) -- the
     # id itself is ALSO reported separately as ``duplicate-ulid`` below.
-    combined_decisions = {**archive.decisions, **decisions_raw}
-    decision_path_by_id = {
+    shard_decisions = packed.bodies("decision") if packed is not None else {}
+    shard_domains = packed.bodies("domain") if packed is not None else {}
+    combined_decisions = {**archive.decisions, **shard_decisions, **decisions_raw}
+    decision_path_by_id: Mapping[str, Path | str] = {
         **{did: entries[0][0] for did, entries in archive.decision_entries.items()},
+        **decision_paths_all,
         **decision_paths,
     }
-    violations += _check_supersedes(combined_decisions, decision_path_by_id, decisions_skipped)
+    links = packed.successor_links() if packed is not None else {}
+    violations += _check_supersedes(
+        combined_decisions, decision_path_by_id, decisions_skipped, links.get("decision", set())
+    )
     violations += _check_drift_checks(store_dir, set(combined_decisions) | set(decisions_skipped))
 
     # Facts are never archived (see docs/reference/store-format.md) -- hot only.
-    violations += _check_supersedes(facts_raw, fact_paths, facts_skipped)
+    violations += _check_supersedes(
+        facts_raw, fact_paths_all, facts_skipped, links.get("fact", set())
+    )
 
-    combined_domains = {**archive.domains, **domains_raw}
-    domain_path_by_id = {
+    combined_domains = {**archive.domains, **shard_domains, **domains_raw}
+    domain_path_by_id: Mapping[str, Path | str] = {
         **{dmid: entries[0][0] for dmid, entries in archive.domain_entries.items()},
+        **domain_paths_all,
         **domain_paths,
     }
-    violations += _check_supersedes(combined_domains, domain_path_by_id, domains_skipped)
+    violations += _check_supersedes(
+        combined_domains, domain_path_by_id, domains_skipped, links.get("domain", set())
+    )
     violations += _check_domain_parents(combined_domains, domain_path_by_id, domains_skipped)
 
-    violations += _check_binding_entities(bindings_by_record, binding_paths, entity_ids)
+    violations += _check_binding_entities(bindings_by_record, binding_paths_all, entity_ids)
     violations += _check_fact_supports(
-        facts_raw, fact_paths, set(combined_decisions) | set(decisions_skipped)
+        facts_raw, fact_paths_all, set(combined_decisions) | set(decisions_skipped)
     )
 
     # duplicate-ulid: decisions/domains compare hot against BOTH archive pools (the only two
     # archived record types); facts/entities/initiatives are never archived, so only hot-hot
     # duplication is possible for them.
-    violations += _check_duplicate_ulids(decision_all_paths, archive.decision_entries)
-    violations += _check_duplicate_ulids(domain_all_paths, archive.domain_entries)
+    decision_hot: Mapping[str, Sequence[Path | str]]
+    domain_hot: Mapping[str, Sequence[Path | str]]
+    if packed is not None:
+        # A file or shard line beside a compatible archive line is the state a packed store
+        # legitimately holds; the relaxation is format 2 only.
+        decision_hot, decision_archive = _packed_archive_overlap(
+            "decision", packed, decision_all_paths, decisions_raw, archive.decision_entries
+        )
+        domain_hot, domain_archive = _packed_archive_overlap(
+            "domain", packed, domain_all_paths, domains_raw, archive.domain_entries
+        )
+    else:
+        decision_hot, decision_archive = decision_all_paths, archive.decision_entries
+        domain_hot, domain_archive = domain_all_paths, archive.domain_entries
+    strict = packed is not None
+    violations += _check_duplicate_ulids(decision_hot, decision_archive, strict=strict)
+    violations += _check_duplicate_ulids(domain_hot, domain_archive, strict=strict)
     violations += _check_duplicate_ulids(fact_all_paths, {})
     violations += _check_duplicate_ulids(entity_all_paths, {})
     violations += _check_duplicate_ulids(initiative_all_paths, {})
 
+    if packed is not None:
+        violations += _shard_line_findings(packed)
+        violations += _duplicate_packed_findings(packed)
+        violations += _shadow_findings(store_dir, packed)
+        violations += _binding_entry_findings(store_dir, packed)
+        violations += _check_shard_name_case(packed.inv.listing)
+        pools = {
+            "decision": (combined_decisions, decisions_skipped),
+            "fact": (facts_raw, facts_skipped),
+            "domain": (combined_domains, domains_skipped),
+        }
+        successors = {
+            t: links[t]
+            | {
+                body["supersedes"]
+                for body in (*pool.values(), *skipped.values())
+                if isinstance(body.get("supersedes"), str) and body["supersedes"]
+            }
+            for t, (pool, skipped) in pools.items()
+        }  # the one set the pooled checks use, too
+        violations += _unpooled_reference_findings(
+            store_dir,
+            packed.uncovered(file_ids),
+            exist={
+                "decision": set(combined_decisions) | set(decisions_skipped),
+                "fact": set(facts_raw) | set(facts_skipped),
+                "domain": set(combined_domains) | set(domains_skipped),
+            },
+            successors=successors,
+            entities=entity_ids,
+            domain_bodies=combined_domains,
+        )
+
     return violations
-
-
-# -- transition layer (--against <git-ref>) ------------------------------------------------
-#
-# design/superpowers/specs/2026-07-11-ci-integrity-design.md ruling 2, "Transition layer":
-# for each store file changed vs a git ref, classify the modification against the STORE'S
-# OWN write rules rather than a blanket "committed files never change" lint (which would be
-# wrong -- supersede legally closes a predecessor, ratify legally flips statuses, sync
-# legally refreshes entity/domain engine-mapping fields, compact legally deletes a hot file
-# once its content is durably archived). The mutable-field tables below are DERIVED from
-# store.py's write methods, not invented -- see each table's own comment for exactly which
-# write path was read. Two disagreements surfaced between the design ruling's plan and the
-# actual code while deriving these tables (code wins, per the task brief):
-#
-# 1. ``Domain`` has NO ``valid_to`` field at all (see schema.py's ``Domain`` -- only
-#    ``Decision``/``Fact`` carry temporal validity). The design ruling's domain table lists
-#    ``valid_to`` as mutable; dropped here -- there is no such key to ever diff.
-# 2. The design ruling's domain table names ``parent_slug`` as an immutable field; the
-#    actual schema field is ``parent_id`` (``parent_slug`` is an MCP-tool PARAMETER name in
-#    ``server.supersede_domain``/``_add_domain_impl``, resolved to ``parent_id`` before a
-#    ``Domain`` is ever constructed). Corrected here — immutable by omission either way
-#    (this module classifies via a mutable allow-list, so the exact immutable spelling only
-#    matters for this comment, not for behavior), but worth flagging as a real inaccuracy.
-#
-# Two further store.py facts worth flagging even though they don't change the tables below:
-#
-# - ``Entity.last_seen_node_id``/``last_seen_graph_version``/``last_seen_community`` and
-#   ``Domain.communities`` are *index-only* — ``_entity_identity_payload``/
-#   ``_domain_canonical_payload`` (store.py) strip them before a canonical file is ever
-#   written, so sync's routine refresh of these fields never touches a committed file at all
-#   (design §1: "sync never writes a committed file again" — confirmed by inspection: a
-#   freshly upserted entity's ``entities/<id>.json`` contains only ``entity_id``/
-#   ``canonical_name``/``kind``/``descriptor``; a domain's ``domains/<id>.json`` never
-#   contains ``communities``). They stay in the MUTABLE tables below anyway, matching the
-#   design ruling's intent (these are engine-mapping, never content, so a hand-edit touching
-#   them should be tolerated, not flagged) — but in practice no LEGITIMATE diff ever
-#   exercises that branch: a real committed file never carries these keys to begin with, so
-#   classifying them mutable is inert bookkeeping, not a load-bearing behavior.
-# - ``Initiative`` has NO append-only guard at all (``Store.upsert_initiative`` is a bare,
-#   unconditional upsert — see store.py) — so field-level mutation is never checked for
-#   initiatives here (:func:`classify_transition` has no ``"initiative"`` kind;
-#   :func:`verify_against` handles the type directly, deletion-only — see its docstring).
-#
-# Two more legal rewrites, beyond the mutable-field tables, that this module must not flag
-# (design/superpowers/specs/2026-09-23-verify-ratifier-stamp-design.md): ``Store.ratify``,
-# ``Store.ratify_fact`` and ``Store.ratify_domains`` stamp ``ratified_at``/``ratified_by`` on a
-# decision, fact or domain the moment it is accepted — see :func:`_check_ratifier_stamp`, which
-# allows exactly that one move (unset on a still-``proposed`` record, landing on any status
-# reached through ``accepted`` within the diffed range) and flags every other change to those
-# two fields. Separately, a field added to a schema after some records were already written
-# (``Provenance.commit``, or ``Domain.seed_anchors``/``path_prefixes``, whose defaults are the
-# empty list) is absent from an old file's JSON and appears back in as that default the next
-# time anything rewrites the file — a ratify, a drop, a supersede-close, or a domain
-# drop/supersede all do this incidentally, not because the field itself changed.
-# :func:`same_modulo_absent` treats an absent key as equal to ``null``/``[]``/``{}``,
-# recursing into nested objects and into the items of a list, so this never reads as an
-# ``illegal-field-change`` on its own; a key that actually changes value, or that is removed
-# while holding a non-empty value, still does. A field whose default is a non-empty value is
-# not covered by this (see :func:`same_modulo_absent`'s own docstring).
-
-# Decisions/facts (store.py's ``add_decision``, ``add_fact``, ``ratify``, ``drop``,
-# ``ratify_fact``, ``drop_fact``): the only fields any write path ever changes on an EXISTING
-# record are ``status`` (along a real transition) and ``valid_to`` (null -> a value, once,
-# when a record closes). Everything else is written once, at creation, and never touched
-# again by any of those methods.
-_DECISION_STATUS_TRANSITIONS = frozenset(
-    {
-        ("proposed", "accepted"),  # ratify
-        ("proposed", "rejected"),  # drop
-        ("proposed", "superseded"),  # add_decision/ratify closing a still-proposed predecessor
-        ("accepted", "superseded"),  # add_decision/ratify closing an accepted predecessor
-        # No live write path sets DEPRECATED today -- store.py's own comment on
-        # _TERMINAL_DECISION_STATUSES calls it a "dead enum value ... included for
-        # forward-compat rather than silently left hot forever the day something does start
-        # setting it." Allowed here for that same documented forward-compat reason, not a
-        # gap this module papers over.
-        ("accepted", "deprecated"),
-    }
-)
-_FACT_STATUS_TRANSITIONS = frozenset(
-    {
-        ("proposed", "accepted"),  # ratify_fact, or ratify's decision-supports cascade
-        ("proposed", "rejected"),  # drop_fact, or drop's all-supporters-rejected cascade
-        ("proposed", "superseded"),  # add_fact closing a still-proposed predecessor
-        ("accepted", "superseded"),  # add_fact closing an accepted predecessor
-        # schema.py: "DEPRECATED unused for facts" -- no forward-compat carve-out here,
-        # unlike decisions above.
-    }
-)
-DECISION_MUTABLE_FIELDS = frozenset({"status", "valid_to"})
-FACT_MUTABLE_FIELDS = frozenset({"status", "valid_to"})
-
-# Domains (store.py's ``add_domain`` [creation only], ``supersede_domain``,
-# ``ratify_domains``, ``refresh_domain_communities``): status moves along
-# ratify_domains'/supersede_domain's transitions; ``communities`` is
-# sync's engine-mapping refresh (see the module-level note above -- never actually present
-# in the canonical file).
-_DOMAIN_STATUS_TRANSITIONS = frozenset(
-    {
-        ("proposed", "accepted"),  # ratify_domains(accept=...)
-        ("proposed", "dropped"),  # ratify_domains(drop=...)
-        ("accepted", "dropped"),  # ratify_domains(drop=...) -- extended beyond proposed-only
-        # (review round 3, design §6: cross-branch slug-conflict resolution)
-        ("proposed", "superseded"),  # supersede_domain
-        ("accepted", "superseded"),  # supersede_domain
-        # Fix-round review (Important-1): supersede_domain (store.py) flips
-        # old.status to SUPERSEDED with NO gate on old's current status at all -- unlike
-        # ratify_domains, it never checks old is proposed/accepted first. find_domain_by_slug
-        # deliberately keeps a DROPPED domain resolvable by slug ("accepted > proposed >
-        # dropped" preference order, store.py's own docstring) specifically so a dropped
-        # domain can still be superseded/revived later. Reviewer reproduced dropped ->
-        # superseded via the real MCP entry points (ratify drop, then supersede_domain) --
-        # code wins over my earlier {proposed,accepted}-only restriction.
-        ("dropped", "superseded"),  # supersede_domain, from a previously-dropped domain
-    }
-)
-DOMAIN_MUTABLE_FIELDS = frozenset({"status", "communities"})
-
-# Entities (store.py's ``upsert_entity``, ``_entity_identity_payload``):
-# the canonical file holds ONLY entity_id/canonical_name/kind/descriptor -- upsert_entity
-# rewrites the file solely when the IDENTITY payload changes (i.e. ``descriptor`` -- a
-# "moved" rebind, see ``sync._adopt``). ``entity_id``/``canonical_name``/``kind`` are minted
-# once (or, for ``kind``, fixed at construction) and never rewritten by any write path.
-ENTITY_MUTABLE_FIELDS = frozenset(
-    {"descriptor", "last_seen_node_id", "last_seen_graph_version", "last_seen_community"}
-)
-
-_KIND_DIRS = {
-    "decision": "decisions",
-    "fact": "facts",
-    "domain": "domains",
-    "entity": "entities",
-    "binding": "bindings",
-}
-_KIND_ID_FIELDS = {"decision": "id", "fact": "id", "domain": "domain_id", "entity": "entity_id"}
-
-
-def _synthetic_path(kind: str, payload: dict) -> str:
-    """A best-guess ``<dir>/<id>.json`` path built from the payload alone —
-    :func:`classify_transition` is pure and never receives the real filesystem/git path.
-    In every legitimate case this matches the real path exactly (the store always names a
-    file after its own id — see :data:`FILENAME_ID_MISMATCH`); :func:`verify_against`
-    overwrites it with the actual changed git path regardless, so a mismatch here is never
-    user-visible."""
-    rid = payload.get(_KIND_ID_FIELDS[kind], "?")
-    return f"{_KIND_DIRS[kind]}/{rid}.json"
-
-
-def _check_status_transition(
-    old: dict, new: dict, legal: frozenset[tuple[str, str]], path: str
-) -> list[Violation]:
-    old_status, new_status = old.get("status"), new.get("status")
-    # A malformed NEW status is the snapshot layer's parse-error, so stay silent. A malformed
-    # OLD status that is now a string is a repair of a value the ref never legitimised, so it
-    # is a jump like any other unlisted pair (as for title or valid_to) -- but an unhashable
-    # old value must never reach the ``legal`` lookup.
-    if not isinstance(new_status, str):
-        return []
-    if old_status == new_status or (
-        isinstance(old_status, str) and (old_status, new_status) in legal
-    ):
-        return []
-    return [
-        _violation(
-            ILLEGAL_STATUS_JUMP,
-            path,
-            f"status {old_status!r} -> {new_status!r} is not a real transition",
-        )
-    ]
-
-
-def _check_valid_to_transition(old: dict, new: dict, path: str) -> list[Violation]:
-    """``valid_to``: null -> a value, exactly once, is the only legal move — mirrors every
-    ``add_decision``/``add_fact``/``ratify``/``drop`` call site's own
-    ``predecessor.valid_to = predecessor.valid_to or max(...)`` idiom (store.py): it is
-    ALWAYS an or-assignment onto a currently-``None`` field, never onto an already-set one.
-    """
-    old_vt, new_vt = old.get("valid_to"), new.get("valid_to")
-    if old_vt == new_vt:
-        return []
-    if old_vt is None:
-        return []  # null -> value: legal
-    if new_vt is None:
-        return [_violation(VALID_TO_UNSET, path, "valid_to reverted from a value to null")]
-    return [_violation(VALID_TO_CHANGED, path, f"valid_to changed {old_vt!r} -> {new_vt!r}")]
-
-
-# The ratifier stamp (store.py's ``ratify``/``ratify_fact``/``ratify_domains``, design D4) —
-# see the module comment above the mutable-field tables for why this pair needs its own rule
-# rather than a plain mutable-field entry: unlike ``status``/``valid_to``, a stamp may be set
-# only once, and only alongside a specific status move.
-_RATIFIER_STAMP = ("ratified_at", "ratified_by")
-
-
-def _check_ratifier_stamp(old: dict, new: dict, path: str) -> list[Violation]:
-    """Rule A: ``ratified_at``/``ratified_by`` may change in exactly one way — both unset on
-    a still-``proposed`` old side, ``ratified_at`` newly set, and the new status anything
-    reached through ``accepted`` within the diffed range (not ``proposed`` or ``rejected`` —
-    ``drop``/``drop_fact`` stamp nothing). Any other change to either field — appearing on a
-    record that wasn't proposed, appearing alongside a drop, ``ratified_by`` set without
-    ``ratified_at``, or an edit/removal of an already-set stamp — stays
-    :data:`ILLEGAL_FIELD_CHANGE`."""
-    old_stamp = {k: old.get(k) for k in _RATIFIER_STAMP}
-    new_stamp = {k: new.get(k) for k in _RATIFIER_STAMP}
-    if old_stamp == new_stamp:
-        return []
-    stamping = (
-        old.get("status") == "proposed"
-        and all(v is None for v in old_stamp.values())
-        and new_stamp["ratified_at"] is not None
-        and new.get("status") not in ("proposed", "rejected")
-    )
-    if stamping:
-        return []
-    return [
-        _violation(ILLEGAL_FIELD_CHANGE, path, f"field {k!r} changed")
-        for k in _RATIFIER_STAMP
-        if old_stamp[k] != new_stamp[k]
-    ]
-
-
-def _check_immutable_fields(
-    old: dict, new: dict, mutable: frozenset[str], path: str, exempt: tuple[str, ...] = ()
-) -> list[Violation]:
-    """Every key present in ``old`` or ``new`` but not in ``mutable`` or ``exempt`` must be
-    the same value on both sides (:func:`same_modulo_absent`, Rule B — an absent key counts as
-    equal to ``null`` or an empty list/object) — covers a changed value, a field that
-    disappeared, AND a field that newly appeared (all three are "this immutable field
-    changed"). One violation per offending field (design ruling 2: "detail names the
-    field"), in sorted key order for a deterministic report.
-    ``exempt`` (the ratifier stamp, for decisions/facts/domains) is
-    skipped here entirely — its own rule is :func:`_check_ratifier_stamp`, run alongside this
-    one by :func:`classify_transition`, never by this function."""
-    violations: list[Violation] = []
-    for key in sorted(set(old) | set(new)):
-        if key in mutable or key in exempt:
-            continue
-        if not same_modulo_absent(old.get(key), new.get(key)):
-            violations.append(_violation(ILLEGAL_FIELD_CHANGE, path, f"field {key!r} changed"))
-    return violations
-
-
-def classify_transition(kind: str, old: dict | None, new: dict | None) -> list[Violation]:
-    """Classify one record's before/after payload against the store's OWN write-path rules
-    (design ruling 2, "Transition layer"). Pure: no filesystem/git access, so every case is
-    directly unit-testable without a git repo — :func:`verify_against` is the thin,
-    I/O-doing wrapper that feeds this real ``(old, new)`` pairs pulled from ``git show``/the
-    working tree.
-
-    ``kind`` is one of ``{"decision", "fact", "domain", "entity", "binding"}``.
-
-    ``old=None`` means the file was ADDED — always legal (a brand-new record can carry any
-    content; every write-path invariant on ITS shape is the snapshot layer's job, not this
-    one's).
-
-    ``new=None`` means the file was DELETED:
-
-    - ``kind == "binding"``: always legal, unconditionally (see the ``kind == "binding"``
-      branch below — bindings are never classified here at all, added/modified/deleted
-      alike; referential integrity of the new state is the snapshot layer's job).
-    - every other kind: this function ALONE always reports :data:`ILLEGAL_DELETION` — it
-      has no I/O access to check whether the id is safely archived. The one sanctioned
-      exception (a decision/domain compacted into an archive segment present in the new
-      tree) is applied by :func:`verify_against` as a post-hoc filter over this function's
-      raw output, never by this function itself. A pure test exercising ``new=None``
-      directly is therefore always the "id absent from any archive" scenario, by
-      construction.
-
-    Neither payload is ever a real filesystem/git path, so a returned :class:`Violation`'s
-    ``path`` is a best-effort ``<dir>/<id>.json`` guess (:func:`_synthetic_path`) that
-    :func:`verify_against` overwrites with the actual changed path.
-    """
-    if kind not in _KIND_DIRS:
-        raise ValueError(f"unknown kind {kind!r}")
-
-    if kind == "binding":
-        # Referential-only, machine-managed payload (design ruling 2): a dropped entry or a
-        # deleted bindings/<record_id>.json file is derived-community decay or record
-        # compaction, never flagged here regardless of shape.
-        return []
-
-    if old is None:
-        return []  # added -- always legal
-
-    if new is None:
-        return [
-            _violation(
-                ILLEGAL_DELETION,
-                _synthetic_path(kind, old),
-                "record deleted (no archive segment consulted at this pure layer)",
-            )
-        ]
-
-    path = _synthetic_path(kind, new)
-    if kind in ("decision", "fact"):
-        legal = _DECISION_STATUS_TRANSITIONS if kind == "decision" else _FACT_STATUS_TRANSITIONS
-        mutable = DECISION_MUTABLE_FIELDS if kind == "decision" else FACT_MUTABLE_FIELDS
-        return (
-            _check_status_transition(old, new, legal, path)
-            + _check_valid_to_transition(old, new, path)
-            + _check_immutable_fields(old, new, mutable, path, exempt=_RATIFIER_STAMP)
-            + _check_ratifier_stamp(old, new, path)
-        )
-    if kind == "domain":
-        return (
-            _check_status_transition(old, new, _DOMAIN_STATUS_TRANSITIONS, path)
-            + _check_immutable_fields(old, new, DOMAIN_MUTABLE_FIELDS, path, exempt=_RATIFIER_STAMP)
-            + _check_ratifier_stamp(old, new, path)
-        )
-    # entity
-    return _check_immutable_fields(old, new, ENTITY_MUTABLE_FIELDS, path)
 
 
 def _classify_archive_transfer(kind: str, old: dict, archived: dict) -> list[Violation]:
@@ -1529,6 +1799,639 @@ def _classify_store_relative_path(store_relative: str) -> str | None:
     return _DIR_TO_KIND.get(parts[0])
 
 
+# -- the packed (format 2) transition layer ----------------------------------------------
+#
+# ``--against REF`` on a store that is, or was, packed: both trees are read as occurrence
+# inventories and judged identity by identity, in the dispatch order of the spec (rule 8, the
+# path-status rules 6 and 7, provenance for every added shard line, then per identity rule 2
+# unchanged, rule 1 file-only bindings, rule 3 edit, rule 5 sanctions, rule 4 relocation). A
+# store that is format 1 on both sides keeps the path-status walk of :func:`verify_against`
+# unchanged.
+# see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.1)
+
+_Shaped = dict | list
+
+
+def _loc(prefix: str, occ: Occurrence) -> str:
+    where = f"{prefix}{occ.path}"
+    return f"{where}:{occ.line_no}" if occ.line_no else where
+
+
+def _readable(occ: Occurrence) -> bool:
+    return occ.readable and not occ.in_conflict
+
+
+def _body_of(occ: Occurrence) -> _Shaped | None:
+    """The parsed body of an occurrence, readable or not (a model-invalid but parseable body is
+    a raw body for the transition rules), when it has the shape of its record type."""
+    if not occ.parseable or occ.record_type is None:
+        return None
+    return occ.raw if _right_shape(occ.record_type, occ.raw) else None  # type: ignore[return-value]
+
+
+def _dict_body(occ: Occurrence) -> dict | None:
+    body = _body_of(occ)
+    return body if isinstance(body, dict) else None
+
+
+class _Against:
+    """One ``--against`` pass over two inventories (the work is in the methods; ``run`` is the
+    dispatch order)."""
+
+    def __init__(self, prefix: str, ref_inv: Inventory, new_inv: Inventory) -> None:
+        self.prefix = prefix
+        self.ref_inv, self.new_inv = ref_inv, new_inv
+        self.ref_eff = effective_all(ref_inv)
+        self.new_eff = effective_all(new_inv)
+        self.diff = diff_occurrences(ref_inv, new_inv)
+        self.out: list[Violation] = []
+        # REF occurrences whose removal a rule 5 sanction covers (a deleted segment's line)
+        self.covered: set[int] = set()
+        self._ref_ids = {id(o) for o in ref_inv.occurrences}
+
+    # -- helpers ---------------------------------------------------------------------------
+
+    def loc(self, occ: Occurrence) -> str:
+        """Where an occurrence is: ``<store>/<path>:<line>`` for the new tree; a baseline
+        occurrence has the path only, as REF's line number means nothing in the work tree."""
+        if id(occ) in self._ref_ids:
+            return f"{self.prefix}{occ.path}"
+        return _loc(self.prefix, occ)
+
+    def flag(self, code: str, where: str, detail: str) -> None:
+        self.out.append(Violation(code, where, detail))
+
+    def _derived(self, entity_id: str) -> bool:
+        return any(
+            (found := eff.get(("entity", entity_id))) is not None
+            and is_derived_entity_body(found.raw)
+            for eff in (self.ref_eff, self.new_eff)
+        )
+
+    def _all_derived(self, occs: list[Occurrence]) -> bool:
+        for occ in occs:
+            body = _body_of(occ)
+            if not isinstance(body, list):
+                return False
+            if any(not (isinstance(e, dict) and _derived_entry_id(e, self._derived)) for e in body):
+                return False
+        return True
+
+    def _survives(self, record_type: str, x: _Shaped, d: IdentityDiff, y: object) -> bool:
+        """``keeps_keys(x, y)``, or ``keeps_keys(x, S)`` for some shard occurrence S of the
+        identity in the new tree, added or unchanged (a verbatim survivor keeps the keys)."""
+        bind = record_type == "bindings"
+        if keeps_keys(x, y, bindings=bind, is_derived=self._derived):
+            return True
+        for occ in d.new:
+            body = _body_of(occ)
+            if (
+                occ.kind == "shard"
+                and body is not None
+                and keeps_keys(x, body, bindings=bind, is_derived=self._derived)
+            ):
+                return True
+        return False
+
+    def _shadow_pair(self, d: IdentityDiff) -> tuple[Occurrence, Occurrence] | None:
+        """(file, shard line) of a REF ``shadow-divergence`` of this identity, else ``None``."""
+        record_type = d.identity[0]
+        if record_type == "bindings":
+            return None
+        files = [o for o in d.ref if o.kind == "file" and _readable(o) and _dict_body(o)]
+        shards = _distinct_shards(d.ref)
+        if len(files) != 1 or len(shards) != 1 or _dict_body(shards[0]) is None:
+            return None
+        if classify_transition(kind_of(record_type), shards[0].raw, files[0].raw):  # type: ignore[arg-type]
+            return files[0], shards[0]
+        return None
+
+    def _ref_duplicate_ulid(self, d: IdentityDiff) -> bool:
+        """The REF identity is a ``duplicate-ulid`` of a packed store: differing archive lines,
+        or an archive line beside a file it is not ``compatible`` with, or beside a shard line
+        it is neither ``compatible`` nor ``superseding``."""
+        kind = kind_of(d.identity[0])
+        lines = [
+            o
+            for o in d.ref
+            if o.kind == "archive" and o.archive_type_known and _readable(o) and _dict_body(o)
+        ]
+        if not lines:
+            return False
+        if any(not same_raw_body(lines[0], o) for o in lines[1:]):
+            return True
+        a = lines[0].raw
+        assert isinstance(a, dict)
+        files = [o for o in d.ref if o.kind == "file" and _readable(o) and _dict_body(o)]
+        if files:
+            return not compatible(kind, a, files[0].raw)  # type: ignore[arg-type]
+        shards = _distinct_shards(d.ref)
+        if len(shards) == 1 and _dict_body(shards[0]) is not None:
+            s = shards[0].raw
+            assert isinstance(s, dict)
+            return not (compatible(kind, a, s) or superseding(kind, a, s))
+        return False
+
+    # -- the dispatch ----------------------------------------------------------------------
+
+    def run(self) -> list[Violation]:
+        self.provenance()
+        for d in self.diff.identities.values():
+            self.judge(d)
+        kept = {o.path for o in self.new_inv.occurrences if o.kind == "archive"}
+        gone = {o.path for o in self.ref_inv.occurrences if o.kind == "archive"} - kept
+        for path in sorted(gone):
+            self.deleted_segment(path)
+        return self.out
+
+    def provenance(self) -> None:
+        """Decision 14: every added or modified shard line holds the raw body of some REF
+        occurrence of the same identity (a file, a shard line, or an archive line compared
+        without ``record_type``), new identities included."""
+        for d in self.diff.identities.values():
+            for occ in d.added:
+                if occ.kind != "shard" or not occ.parseable:
+                    continue
+                if any(o.parseable and same_raw_body(o, occ) for o in d.ref):
+                    continue
+                self.flag(
+                    SHARD_BODY_WITHOUT_SOURCE,
+                    self.loc(occ),
+                    f"{d.identity[0]} {d.identity[1]!r}: no occurrence of it in the baseline "
+                    "holds this body (maintenance only writes bodies it read)",
+                )
+
+    def judge(self, d: IdentityDiff) -> None:
+        record_type = d.identity[0]
+        kind = kind_of(record_type)
+        if not d.changed:
+            return  # rule 2
+        if d.new and all(o.error in (NOT_A_FILE_REASON, SYMLINK_REASON) for o in d.new):
+            return  # only non-regular or unreadable entries: the snapshot layer reports them
+        file_only = all(o.kind == "file" for o in d.ref)
+        if record_type == "bindings" and not d.new and (file_only or self._all_derived(d.ref)):
+            return  # rule 1: a file-only (or all-derived) bindings deletion
+        if not d.ref:
+            return  # a new identity: provenance was its only rule
+        ref_eff = self.ref_eff[d.identity]
+        new_eff = self.new_eff.get(d.identity)
+        if ref_eff.raw is not None and (new_eff is None or new_eff.raw is None):
+            gone = ref_eff.source if ref_eff.source is not None else d.ref[0]
+            self.flag(
+                ILLEGAL_DELETION,
+                self.loc(gone),
+                f"{record_type} {d.identity[1]!r}: the effective record of the baseline has no "
+                "effective record in the new tree",
+            )
+            return  # rule 1
+        if ref_eff.raw is None:
+            if not self._repaired_file_edit(d, kind):
+                self._no_effective(d, kind, new_eff)
+            return
+        if not d.removed and d.added and all(o.kind == "file" for o in d.added):
+            self._edit(d, kind, ref_eff.raw)  # rule 3
+            return
+        if self._sanctioned(d, new_eff):  # rule 5
+            return
+        self._relocation(d, kind, ref_eff, new_eff)  # rule 4
+
+    # -- rule 3 ----------------------------------------------------------------------------
+
+    def _edit(self, d: IdentityDiff, kind: str, base: object) -> None:
+        """Each added or modified per-record file against ``base``, as an edited file is judged
+        on format 1; key survival is not checked."""
+        if not isinstance(base, dict) and kind != "binding":
+            return
+        for occ in d.added:
+            new = _dict_body(occ)
+            if new is None or occ.kind != "file":
+                continue
+            for v in classify_transition(kind, base if isinstance(base, dict) else None, new):
+                self.flag(v.code, self.loc(occ), v.detail)
+
+    def _repaired_file_edit(self, d: IdentityDiff, kind: str) -> bool:
+        """A REF identity whose only unreadable occurrence is a conflicted or unparseable
+        per-record file, beside readable shard lines of one body, repaired by rewriting the file:
+        a rule 3 edit against that shard body. The destroyed file body keeps its keys only when it
+        parsed, and only over keys whose value has the shape the shard body gives them.
+        # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§28 Opus 3)"""
+        unreadable = [o for o in d.ref if not _readable(o)]
+        if len(unreadable) != 1 or unreadable[0].kind != "file":
+            return False
+        damaged = unreadable[0]
+        if not (damaged.in_conflict or not damaged.parseable):
+            return False
+        if d.removed or not d.added or any(o.kind != "file" for o in d.added):
+            return False
+        shards = _distinct_shards(d.ref)
+        if len(shards) != 1 or _body_of(shards[0]) is None:
+            return False
+        base = shards[0].raw
+        self._edit(d, kind, base)
+        old = _dict_body(damaged)
+        if old is not None and isinstance(base, dict):
+            shaped = {k: v for k, v in old.items() if k in base and type(v) is type(base[k])}
+            for occ in d.added:
+                new = _dict_body(occ)
+                if new is not None and not keeps_keys(shaped, new):
+                    self.flag(ILLEGAL_FIELD_CHANGE, self.loc(occ), "repair lost raw keys")
+        return True
+
+    # -- rule 5 ----------------------------------------------------------------------------
+
+    def _sanctioned(self, d: IdentityDiff, new_eff: Effective | None) -> bool:
+        """The sanctioned removals for an identity that was a ``shadow-divergence`` or a
+        ``duplicate-ulid`` in REF (the no-effective resolution is :meth:`_no_effective`)."""
+        if new_eff is None or new_eff.raw is None:
+            return False
+        pair = self._shadow_pair(d)
+        if pair is not None:
+            file_occ, shard = pair
+            if any(o is file_occ for o in d.removed) and _strict_equal(new_eff.raw, shard.raw):
+                return True
+        if self._ref_duplicate_ulid(d) and len(d.removed) == 1 and not d.modified:
+            gone = d.removed[0]
+            if any(
+                o is not gone and o.parseable and _strict_equal(o.raw, new_eff.raw) for o in d.ref
+            ):
+                if gone.kind == "archive":
+                    self.covered.add(id(gone))
+                return True
+        return False
+
+    # -- rule 4 ----------------------------------------------------------------------------
+
+    def _relocation(
+        self, d: IdentityDiff, kind: str, ref_eff: Effective, new_eff: Effective | None
+    ) -> None:
+        record_type = d.identity[0]
+        new_raw = new_eff.raw if new_eff is not None else None
+        where = self.loc(new_eff.source if new_eff and new_eff.source else d.new[0])
+        if isinstance(ref_eff.raw, dict) and isinstance(new_raw, dict):  # rule 1
+            for v in classify_transition(kind, ref_eff.raw, new_raw):
+                self.flag(v.code, where, v.detail)
+        for occ in d.removed:
+            if occ.kind == "file":
+                for v in self._file_removal(d, kind, occ, new_eff):
+                    self.flag(v.code, self.loc(occ), v.detail)
+        self._added_archive(d, kind, ref_eff, new_eff)
+        if new_raw is not None:  # an identity left without a record is the snapshot layer's
+            for occ in d.destroyed:
+                body = _body_of(occ)
+                if body is not None and not self._survives(record_type, body, d, new_raw):
+                    self.flag(
+                        ILLEGAL_FIELD_CHANGE,
+                        self.loc(occ),
+                        f"{record_type} {d.identity[1]!r}: the body loses raw keys",
+                    )
+        if record_type != "bindings" and isinstance(ref_eff.raw, dict):
+            for occ in d.added:
+                body = _dict_body(occ)
+                if occ.kind != "shard" or body is None:
+                    continue
+                if any(o.kind == "shard" and same_raw_body(o, occ) for o in d.ref):
+                    continue  # a verbatim copy between shards is judged against its source
+                for v in classify_transition(kind, ref_eff.raw, body):
+                    self.flag(v.code, self.loc(occ), v.detail)
+        pair = self._shadow_pair(d)
+        if pair is not None and isinstance(new_raw, dict):
+            shard = pair[1]
+            if any(o is shard for o in d.removed):  # the evidence survives its own removal
+                for v in classify_transition(kind, shard.raw, new_raw):  # type: ignore[arg-type]
+                    self.flag(v.code, where, v.detail)
+
+    def _file_removal(
+        self, d: IdentityDiff, kind: str, file_occ: Occurrence, new_eff: Effective | None
+    ) -> list[Violation]:
+        """A removed per-record file is legal onto an equal shard line (the fold), or, for a
+        decision or domain, onto an archive line that passes the transfer check and is the
+        effective record (or the only copy left). Otherwise it is an ``illegal-deletion``."""
+        body = _dict_body(file_occ)
+        for occ in d.new:
+            if occ.kind == "shard" and occ.parseable and same_raw_body(file_occ, occ):
+                return []
+        if kind in ("decision", "domain") and body is not None:
+            lines = [
+                o for o in d.new if o.kind == "archive" and o.archive_type_known and _dict_body(o)
+            ]
+            archive_effective = (
+                new_eff is not None
+                and new_eff.source is not None
+                and new_eff.source.kind == "archive"
+            )
+            if lines and (archive_effective or not any(o.kind == "shard" for o in d.new)):
+                found: list[Violation] = []
+                for line in lines:
+                    found += _classify_archive_transfer(kind, body, line.raw)  # type: ignore[arg-type]
+                return found
+        return [
+            _violation(
+                ILLEGAL_DELETION,
+                file_occ.path,
+                f"{d.identity[0]} {d.identity[1]!r}: file removed and no shard line or archive "
+                "copy of the same body takes its place",
+            )
+        ]
+
+    def _added_archive(
+        self, d: IdentityDiff, kind: str, ref_eff: Effective, new_eff: Effective | None
+    ) -> None:
+        """An added archive line: judged as a transfer when it becomes the effective record
+        (the file-removal check judges one that replaces a removed file); beside a per-record
+        file that stays it still gets the payload and terminal checks."""
+        if kind not in ("decision", "domain") or any(o.kind == "file" for o in d.removed):
+            return
+        for occ in d.added:
+            body = _dict_body(occ)
+            if occ.kind != "archive" or not occ.archive_type_known or body is None:
+                continue
+            if new_eff is not None and new_eff.source is occ and isinstance(ref_eff.raw, dict):
+                found = _classify_archive_transfer(kind, ref_eff.raw, body)
+                for v in found:
+                    self.flag(v.code, self.loc(occ), v.detail)
+            elif _archive_payload_problem(kind, body) or _archive_compaction_problem(kind, body):
+                self.flag(
+                    ILLEGAL_DELETION,
+                    self.loc(occ),
+                    "archive copy is not a valid compactable record",
+                )
+
+    # -- an identity with no effective record in REF ------------------------------------------
+
+    def _no_effective(self, d: IdentityDiff, kind: str, new_eff: Effective | None) -> None:
+        """A REF identity with no effective record (a ``duplicate-packed-record``, a conflict
+        region, an unreadable copy): its new effective record must be the raw body of one
+        readable REF occurrence X, no destroyed parseable occurrence may be a legal successor of
+        X that X is not a successor of, and every destroyed readable body keeps its keys.
+        # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.1 rule 4)"""
+        record_type = d.identity[0]
+        readable = [o for o in d.ref if _readable(o) and _body_of(o) is not None]
+        destroyed = d.destroyed
+        new_raw = new_eff.raw if new_eff is not None else None
+        if not readable:
+            self._sole_unreadable(d, kind, new_raw, new_eff)
+            return
+        if not d.new:
+            self.flag(
+                ILLEGAL_DELETION,
+                self.loc(destroyed[0]),
+                f"{record_type} {d.identity[1]!r}: no occurrence is left in the new tree",
+            )
+            return
+        if new_raw is None:
+            return  # still without a record: the snapshot layer reports it
+        where = self.loc(new_eff.source if new_eff and new_eff.source else d.new[0])
+        matches = [o for o in readable if _strict_equal(o.raw, new_raw)]
+        if not matches and not self._union(d, new_eff, readable):
+            self.flag(
+                ILLEGAL_FIELD_CHANGE,
+                where,
+                f"{record_type} {d.identity[1]!r}: the resolution is a body no baseline copy holds",
+            )
+        if matches and isinstance(matches[0].raw, dict):
+            chosen = matches[0].raw
+            for occ in d.ref:  # every parseable copy, the retained ones too
+                other = _dict_body(occ)
+                if other is None or classify_transition(kind, chosen, other):
+                    continue
+                for v in classify_transition(kind, other, chosen):
+                    self.flag(v.code, where, v.detail)
+        for occ in destroyed:
+            body = _body_of(occ)
+            if (
+                _readable(occ)
+                and body is not None
+                and not self._survives(record_type, body, d, new_raw)
+            ):
+                self.flag(ILLEGAL_FIELD_CHANGE, self.loc(occ), "the resolution loses raw keys")
+        self.covered.update(id(o) for o in destroyed if o.kind == "archive")
+
+    def _union(
+        self, d: IdentityDiff, new_eff: Effective | None, readable: list[Occurrence]
+    ) -> bool:
+        """A bindings resolution: a per-record file that keeps the keys of every readable REF
+        copy, beside at most one shard line, which is a REF line."""
+        if d.identity[0] != "bindings" or new_eff is None or new_eff.source is None:
+            return False
+        if new_eff.source.kind != "file":
+            return False
+        shards = [o for o in d.new if o.kind == "shard"]
+        if len(shards) > 1 or any(not any(o is s for o in d.unchanged) for s in shards):
+            return False
+        return all(
+            keeps_keys(o.raw, new_eff.raw, bindings=True, is_derived=self._derived)
+            for o in readable
+        )
+
+    def _sole_unreadable(
+        self, d: IdentityDiff, kind: str, new_raw: object, new_eff: Effective | None
+    ) -> None:
+        """No readable REF occurrence at all. Unparseable content is waived; a model-invalid
+        object is judged as a parseable baseline is: ``classify_transition`` and ``keeps_keys``.
+        A sole unreadable archive line stays (rule 6 keeps its segment)."""
+        record_type = d.identity[0]
+        parsed = [o for o in d.destroyed if o.kind != "archive" and _body_of(o) is not None]
+        if not d.new:
+            # an unreadable copy may be repaired INTO a per-record file; removing it alone is
+            # granted only to a shard line with no recoverable identity, which is in no diff
+            for occ in [o for o in d.destroyed if o.kind != "archive"]:
+                if record_type == "bindings" and self._all_derived([occ]):
+                    continue
+                self.flag(
+                    ILLEGAL_DELETION,
+                    self.loc(occ),
+                    f"{record_type} {d.identity[1]!r}: removed and no copy is left",
+                )
+            return
+        if new_raw is None:
+            return
+        where = self.loc(new_eff.source if new_eff and new_eff.source else d.new[0])
+        damaged = [o for o in d.destroyed if o.kind != "archive"]
+        if damaged and (new_eff is None or new_eff.source is None or new_eff.source.kind != "file"):
+            # the exception repairs an unreadable copy INTO a per-record file
+            self.flag(
+                ILLEGAL_DELETION,
+                self.loc(damaged[0]),
+                f"{record_type} {d.identity[1]!r}: an unreadable copy is repaired into a "
+                "per-record file, not into a shard line or an archive segment",
+            )
+        for occ in parsed:
+            body = _body_of(occ)
+            if isinstance(body, dict) and isinstance(new_raw, dict):
+                for v in classify_transition(kind, body, new_raw):
+                    self.flag(v.code, where, v.detail)
+            if body is not None and not self._survives(record_type, body, d, new_raw):
+                self.flag(ILLEGAL_FIELD_CHANGE, where, "the repair loses raw keys")
+
+    # -- rule 6: a deleted segment -----------------------------------------------------------
+
+    def deleted_segment(self, path: str) -> None:
+        """A segment is deleted only when every line is readable, of a known ``record_type``
+        and either ``deletable`` against a shard line of its identity in the new tree or covered
+        by a rule 5 sanction."""
+        lines = [o for o in self.ref_inv.occurrences if o.kind == "archive" and o.path == path]
+        for occ in lines:
+            body = _dict_body(occ)
+            if not (_readable(occ) and occ.archive_type_known and occ.record_id and body):
+                self.flag(  # no sanction covers a line that is not a readable record
+                    ILLEGAL_DELETION,
+                    self.loc(occ),
+                    "archive segment deleted while a line is not a readable record of a known "
+                    "type (the segment stays)",
+                )
+                continue
+            if id(occ) in self.covered:
+                continue
+            identity = (str(occ.record_type), occ.record_id)
+            diff = self.diff.identities.get(identity)
+            kind = kind_of(identity[0])
+            shards = [] if diff is None else [o for o in diff.new if o.kind == "shard"]
+            if not any(
+                (s_body := _dict_body(s)) is not None and deletable(kind, body, s_body)
+                for s in shards
+            ):
+                self.flag(
+                    ILLEGAL_DELETION,
+                    self.loc(occ),
+                    f"archive segment deleted but {identity[0]} {identity[1]!r} has no shard "
+                    "line that is compatible with it and keeps every key",
+                )
+
+
+def _derived_entry_id(entry: dict, is_derived: Callable[[str], bool]) -> bool:
+    entity_id = entry.get("entity_id")
+    return isinstance(entity_id, str) and is_derived(entity_id)
+
+
+def _marker_at_ref(repo_root: Path, oid: str, store_rel: str) -> Marker | None:
+    """The parsed ``format`` marker of the store in REF's tree, or ``None`` when it is absent or
+    does not parse."""
+    name = f"{store_rel}/{_FORMAT_MARKER_NAME}" if store_rel else _FORMAT_MARKER_NAME
+    result = _run_git(["show", f"{oid}:{name}"], cwd=repo_root, text=False)
+    if result.returncode != 0:
+        return None
+    try:
+        return parse_marker(
+            result.stdout.decode("utf-8"), Path(name), malformed=lambda _p, d: ValueError(d)
+        )
+    except ValueError:
+        return None
+
+
+def _marker_on_disk(store_dir: Path) -> Marker | None:
+    try:
+        return store_marker(store_dir)
+    except (StoreRequirementError, ValueError, OSError):
+        return None
+
+
+def _packed_against(
+    store_dir: Path,
+    repo_root: Path,
+    store_rel: str,
+    baseline_oid: str,
+    changed: list[tuple[str, str]],
+    ref_marker: Marker | None,
+    new_marker: Marker | None,
+) -> list[Violation]:
+    """The format-2 transition layer: ``verify_against`` for a store that is packed in REF or in
+    the work tree."""
+    prefix = f"{store_rel}/" if store_rel else ""
+    ref_inv = inventory_from_git_tree(
+        repo_root, baseline_oid, store_rel, validate=validate_record_body
+    )
+    violations: list[Violation] = []
+    # A committed symlink named like a record is read by git as the link's text, not as a
+    # record: it is the snapshot layer's symlinked-store-entry, never a deletion.
+    links = [o for o in ref_inv.occurrences if o.error == SYMLINK_REASON]
+    if links:
+        ref_inv.occurrences = [o for o in ref_inv.occurrences if o.error != SYMLINK_REASON]
+        for occ in links:
+            if (store_dir / occ.path).is_symlink():
+                violations.append(
+                    _violation(
+                        SYMLINKED_STORE_ENTRY,
+                        f"{prefix}{occ.path}",
+                        "store-owned entry is a symlink; the store refuses to use one",
+                    )
+                )
+    shard_count = (
+        new_marker.shards
+        if new_marker is not None and new_marker.major == 2
+        else ref_marker.shards
+        if ref_marker is not None
+        else None
+    )
+    packed_now = (new_marker is not None and new_marker.major == 2) or has_shard_files(store_dir)
+    marker_problem: str | None = None
+    read = dict(
+        validate=validate_record_body,
+        assume_major=2 if packed_now else None,
+        assume_shards=shard_count,
+        on_unreadable=lambda _rel, _exc: None,  # the snapshot layer reports an unreadable file
+    )
+    try:
+        new_inv = inventory_from_disk(store_dir, **read)  # type: ignore[arg-type]
+    except MalformedMarker as exc:
+        # a marker that does not parse is the snapshot layer's finding; under a major-2 baseline
+        # it is also a downgrade (rule 8). The independent checks go on over an inventory read
+        # as major 2.
+        marker_problem = str(exc)
+        read.update(assume_major=2, assume_shards=shard_count or 64)
+        new_inv = inventory_from_disk(store_dir, lenient_marker=True, **read)  # type: ignore[arg-type]
+    engine = _Against(prefix, ref_inv, new_inv)
+    # rules 6 and 7: path rules outside the walk (a segment's deletion is judged in the walk)
+    for status, repo_path in changed:
+        inner = repo_path[len(prefix) :] if prefix and repo_path.startswith(prefix) else repo_path
+        kind = _classify_store_relative_path(inner)
+        if kind == "initiative" and status == "D":
+            violations.append(
+                _violation(
+                    ILLEGAL_DELETION,
+                    repo_path,
+                    "initiative deleted (no compaction/archive path exists for initiatives)",
+                )
+            )
+        elif kind == "verification" and status != "A":
+            violations.append(
+                _violation(
+                    ILLEGAL_DELETION if status == "D" else ILLEGAL_FIELD_CHANGE,
+                    repo_path,
+                    (
+                        "verification deleted (write-once; no pruning path exists)"
+                        if status == "D"
+                        else "write-once verification modified"
+                    ),
+                )
+            )
+        elif kind == "archive" and status not in ("A", "D"):
+            violations.append(
+                _violation(ILLEGAL_FIELD_CHANGE, repo_path, "write-once archive segment modified")
+            )
+    violations += engine.run()
+    # rule 8: a marker that went from major 2 to below it, unless every record is back in a
+    # per-record file (the rollback the guide prescribes): no shard file left, every rule passing
+    downgraded = ref_marker is not None and ref_marker.major == 2
+    downgraded = downgraded and (new_marker is None or new_marker.major < 2)
+    if downgraded and (violations or marker_problem or has_shard_files(store_dir)):
+        violations.append(
+            _violation(
+                FORMAT_DOWNGRADE,
+                f"{prefix}{_FORMAT_MARKER_NAME}",
+                marker_problem
+                or "the format marker went from major 2 to below it; only the full rollback "
+                "(no shard file left, every record in its per-record file) is legal",
+            )
+        )
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[Violation] = []
+    for v in violations:
+        if (v.code, v.path, v.detail) not in seen:
+            seen.add((v.code, v.path, v.detail))
+            unique.append(v)
+    return unique
+
+
 def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
     """Classify every store file that differs between ``ref`` and the current working tree
     against the store's OWN write-path rules (design ruling 2, "Transition layer") — the
@@ -1585,6 +2488,15 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
         # repo and the ref are resolved first, so a bad ref stays an operational error.
         return []
     require_listable_record_dirs(store_dir)
+
+    ref_marker = _marker_at_ref(repo_root, baseline_oid, store_rel)
+    new_marker = _marker_on_disk(store_dir_abs)
+    if (ref_marker is not None and ref_marker.major == 2) or (
+        new_marker is not None and new_marker.major == 2
+    ):
+        return _packed_against(
+            store_dir_abs, repo_root, store_rel, baseline_oid, changed, ref_marker, new_marker
+        )
 
     # The NEW tree's archive contents (on-disk, right now) -- what deletion legality
     # consults. Preserve every raw occurrence: selecting the first ID match could hide an

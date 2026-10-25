@@ -519,7 +519,8 @@ def test_refresh_single_community_claim_never_capped_even_on_tiny_graph(tmp_path
 
 def test_refresh_claim_at_or_below_cap_is_written_normally(tmp_path):
     """Boundary: the cap is "> 20%", not ">= 20%" -- a claim sitting exactly at the
-    threshold must still be written."""
+    threshold must still be written. The cap only judges a claim of more than one community
+    (a single matched one is never overbroad), so the claim sits at 2 of 10."""
     store = Store(tmp_path / "t.db")
     _accept(
         store,
@@ -532,7 +533,7 @@ def test_refresh_claim_at_or_below_cap_is_written_normally(tmp_path):
             provenance=Provenance(source="manual"),
         ),
     )
-    # 5 communities total; "payments/" matches exactly 1 of them (1/5 = 20%, not > 20%).
+    # 10 communities total; "payments/" matches exactly 2 of them (2/10 = 20%, not > 20%).
     nodes = [
         {
             "id": "n1",
@@ -541,6 +542,14 @@ def test_refresh_claim_at_or_below_cap_is_written_normally(tmp_path):
             "file_type": "code",
             "source_file": "payments/a.py",
             "community": 1,
+        },
+        {
+            "id": "n2",
+            "label": "Beta",
+            "norm_label": "beta",
+            "file_type": "code",
+            "source_file": "payments/b.py",
+            "community": 2,
         },
     ] + [
         {
@@ -551,14 +560,14 @@ def test_refresh_claim_at_or_below_cap_is_written_normally(tmp_path):
             "source_file": f"domain{c}/f.py",
             "community": c,
         }
-        for c in range(2, 6)
+        for c in range(3, 11)
     ]
     graph = {"built_at_commit": "v9", "nodes": nodes, "links": []}
     reader = _reader(tmp_path, "g.json", graph)
 
     report = sync(store, reader)
 
-    assert store.find_domain_by_slug("payments").communities == ["1"]
+    assert store.find_domain_by_slug("payments").communities == ["1", "2"]
     assert report.overbroad_domains == []
 
 

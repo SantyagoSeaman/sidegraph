@@ -8,7 +8,6 @@ is deleted. The reader gives such a node its basename back and keeps the engine 
 from __future__ import annotations
 
 from sidegraph.doc_import import _file_node_descriptor
-from sidegraph.engine.reader import RESOLVER_REVISION
 from sidegraph.schema import Descriptor
 from tests.graph_fixtures import BOOT_CLI, CLI, node, reader_of, two_cli_graph
 
@@ -124,11 +123,6 @@ def test_a_full_path_name_resolves_on_a_0_9_90_graph(tmp_path):
     assert two_cli_graph(tmp_path).resolve(Descriptor(name=CLI, file_path=CLI)).node_id == (
         "src_sidegraph_cli"
     )
-
-
-def test_the_resolver_revision_moved_so_each_store_resyncs_once():
-    """Path names moved the revision to 3; the type-split moved it to 4."""
-    assert RESOLVER_REVISION == 4
 
 
 def test_a_package_specifier_anchor_stays_live_across_a_sync(tmp_path):

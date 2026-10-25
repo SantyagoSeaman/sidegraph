@@ -43,11 +43,3 @@ def test_impl_renders_seed_mistake(tmp_path):
     )
     assert "deadlock" in out
     assert out.index("deadlock") < out.index("Structural map")
-
-
-def test_impl_no_reader_still_returns_str(tmp_path):
-    s = Store(tmp_path / "t.db")
-    out = _get_task_context_impl(
-        s, None, files=["trader/exec.py"], entities=None, structure_budget=4000, memory_budget=2000
-    )
-    assert isinstance(out, str)

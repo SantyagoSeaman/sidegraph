@@ -85,7 +85,7 @@ in its own context: `Sidegraph X.Y.Z`, where `X.Y.Z` is the running version. It 
 
 Both renderers also inject:
 
-- **Initiatives** — named work threads decisions have been grouped under, if any.
+- **Initiatives** — the stored `Initiative` records (named work threads), if any. Capturing a decision with an `initiative` name binds it to that initiative but does not create an `Initiative` record, so it is not listed here.
 - **Global mistakes & constraints** — the most recent `gotcha`/`lesson`/`constraint`
   decisions scoped `global` (not tied to one entity), capped at 10.
 - **Unratified proposals** — proposed records inside the surfacing window, after everything
@@ -110,8 +110,8 @@ the drift line. The texts, the order and the notice rules are in
 [`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start); each check is explained
 in [troubleshooting](../guides/troubleshooting.md).
 
-If the store is empty and no graph exists, this renders a short stub: the instruction, the
-version line, the header and a line saying there is no code graph. That's expected on a fresh
+If the store was initialized but is empty and no graph exists, this renders a short stub: the instruction, the
+version line, the header and a line saying there is no code graph. That's expected on a freshly initialized
 repo, not an error.
 
 ### `Stop` — `sidegraph-stop`
@@ -119,7 +119,7 @@ repo, not an error.
 A **guarded block-to-distill**, gated on the session actually looking substantial: the first
 nudge comes once per session (a per-session capture ledger in the store, plus Claude Code's own
 `stop_hook_active` re-entrancy flag), and only once the transcript has produced **>= 2 real
-user prompts** (counting actual typed prompts, not tool-result noise — a session's very first
+user prompts** (or, in a one-shot Claude `sdk-cli` session, one prompt and at least 5 tool calls; counting actual typed prompts, not tool-result noise — a session's very first
 `Stop` no longer triggers it; see [`reference/hooks.md`](../reference/hooks.md#sidegraph-stop)
 for the exact counting rule). Once both gates clear, it returns:
 
@@ -231,7 +231,8 @@ nothing anchored to code to describe, prints `{}` (the subagent starts with no b
 graph degrades to file-path anchors and a shorter map; after a new store or canonical index
 reload, hot-hook record delivery and briefs remain withheld until sync can run with a reader.
 A missing store is not an error either:
-`SessionStart` creates an empty one, so memory starts empty (the other hooks never create it). An
+`SessionStart` creates nothing: it sends a `systemMessage` that names the expected path and asks for
+an explicit `sidegraph-init` there, and no hook creates the store, so memory stays off until you run it. An
 env var that points at the wrong path gives an empty store there, so that session has no
 memory. None of these breaks the session.
 
@@ -285,7 +286,7 @@ is off by default, so enable it deliberately or use the explicit update commands
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SIDEGRAPH_DIR` | `.sidegraph` | Path to the decision store directory (file-per-record, git-committed). Point it at a path inside the target repo, e.g. `.sidegraph`, so it can be committed as the repo's memory. `SIDEGRAPH_DB` is honored for back-compat (deprecated) — see [`reference/configuration.md`](../reference/configuration.md#store-path-resolution). |
+| `SIDEGRAPH_DIR` | `.sidegraph` | Path to the decision store directory (per-record files and, once packed, shard files; git-committed). Point it at a path inside the target repo, e.g. `.sidegraph`, so it can be committed as the repo's memory. `SIDEGRAPH_DB` is honored for back-compat (deprecated) — see [`reference/configuration.md`](../reference/configuration.md#store-path-resolution). |
 | `SIDEGRAPH_GRAPH` | `graphify-out/graph.json` | Path to Graphify's output graph, read-only. |
 | `SIDEGRAPH_CAPTURE_NUDGE` | unset | Set to `off` to disable the `Stop` hook's block-to-distill nudge entirely (no other value has any effect). |
 | `SIDEGRAPH_GREP_NUDGE` | unset | Set to `off` to turn off `PreToolUse` delivery of records at the point of reading, on every tool including Bash (no other value has any effect; touch recording is separate). It does not touch the records added to a subagent's brief on an `Agent` call: that is `SIDEGRAPH_AGENT_BRIEF`. |

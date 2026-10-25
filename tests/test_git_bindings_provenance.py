@@ -11,25 +11,39 @@ sites) + the outside-a-repo twin (declared exception: still ``None``).
 
 from __future__ import annotations
 
+import atexit
+import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 from sidegraph.capture import propose_facts
 from sidegraph.server import _add_decision_impl, _add_fact_impl, _supersede_fact_impl
 from sidegraph.store import Store
 
+_TEMPLATE: list[tuple[Path, str]] = []
+
 
 def _git_repo(root):
+    """``root/repo``: one commit holding ``f.txt``. Built once per process, copied per test."""
+    if not _TEMPLATE:
+        holder = Path(tempfile.mkdtemp(prefix="sidegraph-provenance-template-"))
+        atexit.register(shutil.rmtree, holder, ignore_errors=True)
+        repo = holder / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("x")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        _TEMPLATE.append((repo, head))
+    template, head = _TEMPLATE[0]
     repo = root / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
-    (repo / "f.txt").write_text("x")
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
-    ).stdout.strip()
+    shutil.copytree(template, repo, symlinks=True)
     return repo, head
 
 

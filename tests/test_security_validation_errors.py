@@ -1,7 +1,6 @@
 """Useful schema diagnostics must contain only bounded static vocabulary."""
 
 import importlib
-import importlib.util
 
 import pytest
 from pydantic_core import PydanticCustomError, ValidationError
@@ -10,9 +9,7 @@ MARKER = "opaque" + "S3Probe"
 
 
 def formatter():
-    module = "sidegraph.validation_errors"
-    assert importlib.util.find_spec(module) is not None, "safe formatter is not implemented"
-    return importlib.import_module(module).format_validation_error
+    return importlib.import_module("sidegraph.validation_errors").format_validation_error
 
 
 def error(loc=(), code="value_error", count=1):
@@ -81,15 +78,12 @@ def test_displayed_error_count_and_path_depth_are_bounded():
     assert "truncated" in text
     assert len(text) <= 1024
     assert MARKER not in text
-
-
-def test_long_schema_paths_use_deterministic_character_cap():
-    format_error = formatter()
+    # A long schema path hits the character cap deterministically.
     failure = error(("old_decision_id",) * 8, "missing_argument", count=50)
-    text = format_error(failure)
-    assert len(text) <= 1024
-    assert text == format_error(failure)
-    assert "truncated" in text
+    long_path = formatter()(failure)
+    assert len(long_path) <= 1024
+    assert long_path == formatter()(failure)
+    assert "truncated" in long_path
 
 
 def test_invalid_relation_names_the_static_schema_choices_without_the_input():

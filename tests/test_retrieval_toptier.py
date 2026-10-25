@@ -3,7 +3,14 @@ from pathlib import Path
 
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import top_tier_map
-from sidegraph.schema import Decision, DecisionKind, Initiative, Provenance, Scope
+from sidegraph.schema import (
+    Decision,
+    DecisionKind,
+    DecisionStatus,
+    Initiative,
+    Provenance,
+    Scope,
+)
 from sidegraph.store import Store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
@@ -19,6 +26,7 @@ def test_top_tier_map_lists_communities_and_global_mistakes(tmp_path):
         context="c",
         choice="use async",
         scope=Scope.GLOBAL,
+        status=DecisionStatus.ACCEPTED,
         valid_from=datetime.now(UTC),
         provenance=Provenance(source="manual"),
     )
@@ -30,6 +38,7 @@ def test_top_tier_map_lists_communities_and_global_mistakes(tmp_path):
     # renderer itself only needs to still emit its own header.
     assert "# Sidegraph — project memory" in text
     assert "Trading Core" in text  # initiative
+    assert "## Global mistakes & constraints" in text
     assert "never block the event loop" in text  # global mistake
     assert "Communities" in text  # community section
 
@@ -103,10 +112,12 @@ def test_top_tier_map_does_not_repeat_a_record_it_already_listed(tmp_path):
         context="c",
         choice="use async",
         scope=Scope.GLOBAL,
+        status=DecisionStatus.ACCEPTED,
         valid_from=datetime.now(UTC),
         provenance=Provenance(source="manual"),
     )
     s._write_decision(g)
     s._conn.commit()
     text = top_tier_map(s, None)
+    assert "## Global mistakes & constraints" in text
     assert text.count("never block the event loop") == 1

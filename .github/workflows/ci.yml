@@ -59,7 +59,12 @@ jobs:
         env:
           SIDEGRAPH_SECRET_SCAN_INTEGRATION: "1"
         run: |
-          uv run pytest tests/test_secret_scan_gate.py -q --junitxml="$RUNNER_TEMP/secret-scan.xml"
+          # The test file is release-only (tests/private); the public snapshot has no copy.
+          if [ ! -f tests/private/test_secret_scan_gate.py ]; then
+            echo "tests/private is not shipped here; scanner integration tests skipped"
+            exit 0
+          fi
+          uv run pytest tests/private/test_secret_scan_gate.py -q --junitxml="$RUNNER_TEMP/secret-scan.xml"
           python3 - <<'PY'
           import os
           from pathlib import Path
@@ -175,15 +180,10 @@ jobs:
       - name: Test portable core and MCP contracts
         shell: pwsh
         run: |
+          # The wheel-smoke tests are release-only (tests/private); the public snapshot has no copy.
           $privateTests = @()
-          if (Test-Path "tools/desktop_e2e_probe.py") {
-            $privateTests = @("tests/test_desktop_e2e_probe.py", "tests/test_desktop_e2e_session.py")
-            # Later modules' tests join only when present; the snapshot excludes all of them.
-            foreach ($name in "appserver", "lifecycle", "preflight", "aggregate", "codex", "receipt") {
-              if (Test-Path "tests/test_desktop_e2e_$name.py") {
-                $privateTests += "tests/test_desktop_e2e_$name.py"
-              }
-            }
+          if (Test-Path "tests/private/test_installed_wheel_smoke.py") {
+            $privateTests = @("tests/private/test_installed_wheel_smoke.py")
           }
           uv run pytest -q --junitxml="$env:RUNNER_TEMP/windows-core.xml" `
             tests/test_store_mutation_guard.py `
@@ -192,6 +192,9 @@ jobs:
             tests/test_portable_json.py tests/test_bootstrap_descriptor_cleanup.py `
             tests/test_server_result_contract.py tests/test_server_invocation_policy.py `
             tests/test_verify_git_stdin.py tests/test_seed_paths_portable.py `
+            tests/test_verify_format2_snapshot.py `
+            tests/test_store_format.py tests/test_store_rules.py `
+            tests/test_maintenance_publish.py tests/test_migrate.py `
             tests/test_repo_relative_paths_portable.py `
             tests/test_command_windows.py `
             tests/test_hook_payload_encoding.py tests/test_hook_failure_diagnostics.py `
@@ -199,8 +202,7 @@ jobs:
             tests/test_delivery_evidence.py tests/test_delivery_stats.py tests/test_delivery_surfaces.py `
             tests/test_git_output_utf8.py `
             tests/test_health_check_skill.py `
-            $privateTests `
-            tests/test_installed_wheel_smoke.py
+            $privateTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Validate installed wheel over native stdio

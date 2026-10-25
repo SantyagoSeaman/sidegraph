@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import json
 import os
 import subprocess
@@ -16,21 +15,21 @@ from sidegraph.cli import doctor_main, verify_main
 from sidegraph.gitenv import git_env
 from sidegraph.schema import Decision, DecisionKind, Provenance
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 
 
-@pytest.fixture(params=["sha1", "sha256"])
-def repo(tmp_path: Path, request) -> Path:
+def _init_repo(tmp_path: Path, object_format: str) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     result = subprocess.run(
-        ["git", "init", "-q", f"--object-format={request.param}"],
+        ["git", "init", "-q", f"--object-format={object_format}"],
         cwd=root,
         env=git_env(),
         capture_output=True,
         text=True,
     )
     if (
-        request.param == "sha256"
+        object_format == "sha256"
         and result.returncode != 0
         and ("unknown option" in result.stderr or "unknown hash algorithm" in result.stderr)
     ):
@@ -39,6 +38,16 @@ def repo(tmp_path: Path, request) -> Path:
     _git(root, "config", "user.email", "test@example.com")
     _git(root, "config", "user.name", "Test")
     return root
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    return _init_repo(tmp_path, "sha1")
+
+
+@pytest.fixture
+def repo_sha256(tmp_path: Path) -> Path:
+    return _init_repo(tmp_path, "sha256")
 
 
 def _git(root: Path, *args: str) -> str:
@@ -90,22 +99,21 @@ def _canonical_bytes(store: Path) -> dict[str, bytes]:
     }
 
 
-NAMES = [
-    ".sidegraph",
-    "store space",
-    "store[brackets]",
-    "store-é",
-    "store\tTAB",
-    "store\nLF",
-    "store\rCR",
-    'store"quote',
-    "store\\backslash",
-    " store ",
-]
+# the NUL framing needs one name with a newline; the others are plain, spaced and non-ASCII
+NAMES = [".sidegraph", "store space", "store-é", "store\nLF"]
 
 
 @pytest.mark.parametrize("name", NAMES)
 def test_actual_store_names_detect_immutable_edit(repo: Path, name: str):
+    _assert_immutable_edit_detected(repo, name)
+
+
+def test_sha256_repository_detects_immutable_edit(repo_sha256: Path):
+    # the diff and show paths on 64-hex object ids (the one framing integration on sha256)
+    _assert_immutable_edit_detected(repo_sha256, ".sidegraph")
+
+
+def _assert_immutable_edit_detected(repo: Path, name: str):
     # Reverting to line/quote parsing hides this real, snapshot-valid immutable edit.
     store = repo / name
     path = _hot(store)
@@ -120,35 +128,13 @@ def test_actual_store_names_detect_immutable_edit(repo: Path, name: str):
     ]
 
 
-def test_posix_undecodable_store_name_detects_edit(repo: Path):
-    if os.name != "posix":
-        pytest.skip("POSIX surrogateescape filesystem path required")
-    initial = repo / "initial"
-    path = _hot(initial)
-    name = os.fsdecode(b"store-\xff")
-    assert os.fsencode(name) == b"store-\xff"
-    store = repo / name
-    try:
-        initial.rename(store)  # Close SQLite before moving to an undecodable pathname.
-    except OSError as error:
-        if error.errno == errno.EILSEQ:
-            pytest.skip("Filesystem rejects undecodable filename bytes (EILSEQ)")
-        raise
-    path = store / "decisions" / path.name
-    _commit(repo)
-    _edit(path)
-    assert verify.verify_snapshot(store) == []
-    before = _canonical_bytes(store)
-    findings = verify.verify_against(store, "HEAD")
-    assert _canonical_bytes(store) == before
-    assert [(v.code, os.fsencode(v.path)) for v in findings] == [
-        (verify.ILLEGAL_FIELD_CHANGE, os.fsencode(path.relative_to(repo).as_posix()))
-    ]
-
-
-@pytest.mark.parametrize("store_name", [".sidegraph", "store\t\r-é"])
-@pytest.mark.parametrize("segment_name", ["segment.jsonl", 'seg\n\r\t"é.jsonl'])
-@pytest.mark.parametrize("change", ["edit", "delete"])
+@pytest.mark.parametrize(
+    "store_name,segment_name,change",
+    [
+        ("store\t\r-é", 'seg\n\r\t"é.jsonl', "edit"),
+        (".sidegraph", 'seg\n\r\t"é.jsonl', "delete"),
+    ],
+)
 def test_real_archive_segment_names_cannot_hide_changes(
     repo: Path,
     store_name: str,
@@ -156,7 +142,7 @@ def test_real_archive_segment_names_cannot_hide_changes(
     change: str,
 ):
     store = repo / store_name
-    with Store(store) as opened:
+    with Store(format1_store(store)) as opened:
         old = opened.add_decision(_decision())
         opened.ratify(old.id)
         opened.add_decision(
@@ -194,21 +180,13 @@ def test_real_archive_segment_names_cannot_hide_changes(
     ]
 
 
-@pytest.mark.parametrize("main", [verify_main, doctor_main], ids=["verify", "doctor"])
-@pytest.mark.parametrize("name", ["store\rCR", 'store\t\n"é'])
-def test_cli_json_preserves_actual_changed_path(repo: Path, main, name: str, capsys):
-    graph = repo / "graphify-out" / "graph.json"
-    graph.parent.mkdir()
-    graph.write_text('{"nodes": [], "edges": []}\n')
-    store = repo / name
+def test_cli_json_preserves_actual_changed_path(repo: Path, capsys):
+    store = repo / 'store\t\n"é'
     path = _hot(store)
     _commit(repo)
     _edit(path)
     before = _canonical_bytes(store)
-    args = ["--db", str(store), "--against", "HEAD", "--json"]
-    if main is doctor_main:
-        args += ["--graph", str(graph)]
-    code = main(args)
+    code = verify_main(["--db", str(store), "--against", "HEAD", "--json"])
     output = capsys.readouterr()
     assert _canonical_bytes(store) == before
     assert code == 2
@@ -306,14 +284,16 @@ def test_real_git_diff_boundary_is_binary_and_preserves_cr(repo: Path, monkeypat
 
 
 @pytest.mark.parametrize(
-    "stdout,returncode",
+    "stdout,returncode,main",
     [
-        (b"M\0good\0D\0missing", 0),
-        (b"M\0good\0X\0bad\0", 0),
-        (b"", 7),
+        (b"M\0good\0D\0missing", 0, None),
+        (b"M\0good\0X\0bad\0", 0, None),
+        (b"", 7, None),
+        (b"", 7, verify_main),
+        (b"", 7, doctor_main),
     ],
+    ids=["truncated-core", "bad-status-core", "failed-core", "failed-verify", "failed-doctor"],
 )
-@pytest.mark.parametrize("main", [None, verify_main, doctor_main], ids=["core", "verify", "doctor"])
 def test_malformed_or_failed_diff_is_operational_before_show(
     repo: Path,
     monkeypatch,

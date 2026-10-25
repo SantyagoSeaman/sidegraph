@@ -13,7 +13,7 @@ task-aware retrieval + decision memory riding on the engine's entity graph.
 continuing participant in the project. A core feature must preserve, organize, or deliver
 accumulated project understanding. Document search by itself is not the product.
 
-Sidegraph is pre-1.0 (v0.16.0) — the full loop (capture, ratification, mistakes-first
+Sidegraph is pre-1.0 (v0.17.0) — the full loop (capture, ratification, mistakes-first
 retrieval, refactor-surviving re-anchoring, semantic docs layer, mind-model domains, and the
 facts evidence layer) ships and is exercised end-to-end, but interfaces may still move before
 a stable release. See
@@ -35,7 +35,8 @@ away for convenience.
    index, entity mappings, binding status, the TOC cache), never a committed record file
    (community labels are derived state, never committed). The one exception: a confirmed
    leaf-file move may update that entity's committed descriptor.
-3. **The store format is a public contract.** File-per-record JSON, a stamped
+3. **The store format is a public contract.** Per-record JSON files (packed into shards in
+   format 2), a stamped
    `schema_version`, and the append-only/merge rules are specified in
    [`docs/reference/store-format.md`](docs/reference/store-format.md) — that page is the
    source of truth for the on-disk layout, not this file.
@@ -51,7 +52,7 @@ Keep these boundaries clean; they are what make the project OSS-friendly and chu
 ```
 src/sidegraph/
 ├── schema.py        # Pydantic models: Entity, Decision, Fact, AnchorBinding, Domain, Initiative
-├── store.py         # owned append-only store (file-per-record JSON); enforces invariants on write
+├── store.py         # owned append-only store (per-record JSON files, packed into shards by maintenance); enforces invariants on write
 ├── retrieval.py     # multi-altitude, budget-bounded, task-aware read path (mistakes first)
 ├── domain_snapshot.py  # committed domain-membership snapshot: format and matching rules
 ├── hot_index.py     # raw-sqlite handle on index.db for the hook hot path (no Store, no pydantic)
@@ -86,7 +87,8 @@ See [`docs/concepts/data-model.md`](docs/concepts/data-model.md) for the record 
 
 - **Python 3.13+** (`.python-version` pins it). Managed with `uv`.
 - **Pydantic v2** for schema/validation. **FastMCP** for the MCP server. The store itself is
-  **file-per-record JSON** (see [`docs/reference/store-format.md`](docs/reference/store-format.md))
+  **file-per-record JSON, optionally packed into shard files by maintenance (format 2)** (see
+  [`docs/reference/store-format.md`](docs/reference/store-format.md))
   — no server, repo-committable, merges like code — with a derived, gitignored **SQLite**
   (stdlib `sqlite3`) index rebuilt from those files for fast queries. `python-ulid` for ids.
 - **Type hints everywhere.** Public functions get docstrings explaining the invariant or

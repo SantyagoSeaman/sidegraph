@@ -12,8 +12,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from sidegraph.server import (
     _add_anchors_impl,
     _add_decision_impl,
@@ -96,9 +94,12 @@ def test_t15_the_hint_names_the_store_relative_to_the_repository_root(tmp_path):
     assert result["commit_hint"] == HINT.format(prefix="apps/web/.sidegraph/")
 
 
-@pytest.mark.parametrize("name", DICT_TOOLS)
-def test_t15_no_dict_write_tool_has_the_hint_outside_a_git_repository(tmp_path, name):
-    assert "commit_hint" not in run_dict_tools(plain_store(tmp_path))[name]
+def test_t15_no_dict_write_tool_has_the_hint_outside_a_git_repository(tmp_path):
+    results = run_dict_tools(plain_store(tmp_path))
+
+    assert {name: "commit_hint" in r for name, r in results.items()} == dict.fromkeys(
+        DICT_TOOLS, False
+    )
 
 
 def test_t15_add_anchors_error_dict_has_no_hint(tmp_path):

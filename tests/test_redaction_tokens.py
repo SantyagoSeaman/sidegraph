@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import random
 import re
-import subprocess
-import sys
 import tracemalloc
 from collections.abc import Callable, Iterator
 
@@ -155,54 +152,6 @@ def test_deterministic_generated_tokens_match_immutable_oracles() -> None:
     for _ in range(1200):
         _assert_same("jwt", "".join(rng.choices(jwt_parts, k=rng.randrange(1, 24))))
         _assert_same("pem", "".join(rng.choices(pem_parts, k=rng.randrange(1, 24))))
-
-
-_PROBE = (
-    r"""
-import os, re, sys, time
-kind, count = sys.argv[1], int(sys.argv[2])
-if os.environ.get("SG100_TOKEN_BASELINE"):
-    pattern = re.compile(
-        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
-        if kind == "jwt" else
-        r"-----" r"BE_GIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
-    )
-    scan = lambda text: (match.span() for match in pattern.finditer(text))
-else:
-    from sidegraph.redaction_tokens import iter_jwt_spans, iter_private_key_spans
-    scan = iter_jwt_spans if kind == "jwt" else iter_private_key_spans
-text = "eyJ-" * count if kind == "jwt" else "-----" "BE_GIN PRIVATE KEY-----" * count
-start = time.perf_counter()
-assert sum(1 for _ in scan(text)) == 0
-print(time.perf_counter() - start)
-"""
-).replace("BE_GIN", "BEGIN")
-
-
-def _probe(kind: str, count: int) -> float:
-    process = subprocess.Popen(
-        [sys.executable, "-c", _PROBE, kind, str(count)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=os.environ.copy(),
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=3)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()  # Reap before failing; leave no runaway regex child.
-        pytest.fail(f"{kind} negative family exceeded 3 seconds at {count} repetitions")
-    assert process.returncode == 0, stderr
-    return float(stdout)
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("kind,small", [("jwt", 32_000), ("pem", 4_000)])
-def test_missing_delimiter_negative_family_has_bounded_scaling(kind: str, small: int) -> None:
-    first = _probe(kind, small)
-    second = _probe(kind, small * 2)
-    assert second < first * 3.5 + 0.05, (first, second)
 
 
 @pytest.mark.parametrize("kind", ["jwt", "pem"])

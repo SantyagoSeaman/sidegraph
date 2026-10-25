@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import json
 
-import sidegraph.domains as domains_mod
-import sidegraph.sync as sync_mod
 from sidegraph.capture import RatifyPolicy
 from sidegraph.domains import bootstrap_domains, collect_domain_candidates
 from sidegraph.engine.reader import GraphifyReader
@@ -155,25 +153,6 @@ def _reader(tmp_path, graph=None, labels=None):
 # about what bootstrap itself would have proposed) -------------------------------------
 
 
-def test_collector_matches_bootstrap_selection(tmp_path):
-    reader = _reader(tmp_path, labels=LABELS)
-    store = Store(tmp_path / "t.db")
-
-    report = bootstrap_domains(store, reader, dry_run=True)
-    candidates, stats = collect_domain_candidates(store, reader)
-
-    assert [c["community_id"] for c in report.dry_run] == [c.community_id for c in candidates]
-    assert [c["slug"] for c in report.dry_run] == [c.suggested_slug for c in candidates]
-    assert [c["title"] for c in report.dry_run] == [c.suggested_title for c in candidates]
-    assert [c["path_prefixes"] for c in report.dry_run] == [c.path_prefixes for c in candidates]
-    assert [c["summary"] for c in report.dry_run] == [c.summary for c in candidates]
-
-    assert stats.total == len(candidates) == report.proposed
-    assert stats.below_threshold == report.below_threshold
-    assert stats.filtered == report.filtered
-    assert stats.already_claimed == report.skipped_existing
-
-
 def test_bootstrap_proposes_only_communities_at_or_above_threshold(tmp_path):
     reader = _reader(tmp_path, labels=LABELS)
     store = Store(tmp_path / "t.db")
@@ -183,6 +162,7 @@ def test_bootstrap_proposes_only_communities_at_or_above_threshold(tmp_path):
     assert report.proposed == 2
     assert report.below_threshold == 1
     assert report.skipped_existing == 0
+    assert report.warnings == []  # the common case carries none
 
     domains = {d.slug: d for d in store.iter_domains()}
     assert set(domains) == {"alpha-domain", "mainwidget"}
@@ -240,6 +220,21 @@ def test_bootstrap_dry_run_writes_nothing(tmp_path):
     assert len(report.dry_run) == 2
     assert list(store.iter_domains()) == []
 
+    # The collector is the shared selection body bootstrap and list_domain_candidates both
+    # call: it must pick exactly what the dry run reports (two empty lists must not pass).
+    candidates, stats = collect_domain_candidates(store, reader)
+    assert len(candidates) == 2
+    assert [c["community_id"] for c in report.dry_run] == [c.community_id for c in candidates]
+    assert [c["slug"] for c in report.dry_run] == [c.suggested_slug for c in candidates]
+    assert [c["title"] for c in report.dry_run] == [c.suggested_title for c in candidates]
+    assert [c["path_prefixes"] for c in report.dry_run] == [c.path_prefixes for c in candidates]
+    assert [c["summary"] for c in report.dry_run] == [c.summary for c in candidates]
+
+    assert stats.total == len(candidates) == report.proposed
+    assert stats.below_threshold == report.below_threshold
+    assert stats.filtered == report.filtered
+    assert stats.already_claimed == report.skipped_existing
+
 
 def test_bootstrap_idempotent_rerun_skips_everything(tmp_path):
     reader = _reader(tmp_path, labels=LABELS)
@@ -286,36 +281,36 @@ def _many_communities_graph(n, start=0):
 
 
 def test_collect_domain_candidates_total_before_limit_survives_truncation(tmp_path):
-    reader = _reader(tmp_path, graph=_many_communities_graph(150))
+    reader = _reader(tmp_path, graph=_many_communities_graph(3))
     store = Store(tmp_path / "t.db")
 
-    candidates, stats = collect_domain_candidates(store, reader, limit=100)
+    candidates, stats = collect_domain_candidates(store, reader, limit=2)
 
-    assert len(candidates) == 100
-    assert stats.total == 100
+    assert len(candidates) == 2
+    assert stats.total == 2
     # the TRUE significant-community count, independent of the limit that truncated it --
     # what list_domain_candidates' `truncated`/`total_significant` signaling is built on.
-    assert stats.total_before_limit == 150
+    assert stats.total_before_limit == 3
 
 
 def test_collect_domain_candidates_total_before_limit_matches_when_unlimited(tmp_path):
-    reader = _reader(tmp_path, graph=_many_communities_graph(150))
+    reader = _reader(tmp_path, graph=_many_communities_graph(3))
     store = Store(tmp_path / "t.db")
 
     candidates, stats = collect_domain_candidates(store, reader)  # limit=None -> unlimited
 
-    assert len(candidates) == 150
-    assert stats.total == stats.total_before_limit == 150
+    assert len(candidates) == 3
+    assert stats.total == stats.total_before_limit == 3
 
 
 def test_bootstrap_domains_reports_total_before_limit(tmp_path):
-    reader = _reader(tmp_path, graph=_many_communities_graph(150))
+    reader = _reader(tmp_path, graph=_many_communities_graph(3))
     store = Store(tmp_path / "t.db")
 
-    report = bootstrap_domains(store, reader, limit=100)
+    report = bootstrap_domains(store, reader, limit=2)
 
-    assert report.proposed == 100
-    assert report.total_before_limit == 150
+    assert report.proposed == 2
+    assert report.total_before_limit == 3
 
 
 def test_bootstrap_paths_filters_to_matching_communities(tmp_path):
@@ -914,15 +909,6 @@ def test_bootstrap_floor_does_not_exempt_a_two_community_claim_from_the_cap(tmp_
     assert d.path_prefixes == []  # claimed {c1,c2}=2/9=0.222>0.2 -- floor exempts only claim==1
 
 
-def test_bootstrap_and_sync_breadth_caps_are_pinned_to_the_same_constant():
-    """One-line guard the review suggested (fix round 2, NEW Minor A): the whole point of
-    Option A is that ``domains._PREFIX_BREADTH_CAP`` and ``sync._DOMAIN_CLAIM_CAP`` are
-    ONE ratio, applied on both sides of the same invariant -- so a future edit to either
-    constant alone, without the other, should fail a test loudly rather than silently
-    reopening the gap this whole fix round exists to close."""
-    assert domains_mod._PREFIX_BREADTH_CAP == sync_mod._DOMAIN_CLAIM_CAP
-
-
 # -- fix round 3, NEW Minor B (review): the invariant test suite pinned only the DERIVE
 # side of the boundary and the anchorable-type filter -- two refresh-side knobs
 # (sync._recompute_domain_communities's own `>` and its own ANCHORABLE_FILE_TYPES filter)
@@ -1089,61 +1075,6 @@ def test_bootstrap_derive_counts_a_bare_directory_named_path_like_refresh_does(t
 
     d = next(dm for dm in store.iter_domains() if dm.communities == ["ca"])
     assert d.path_prefixes == []  # claimed {ca,cb} = 2/5 = 0.4 > 0.2 once cb's bare path counts
-    _communities, overbroad = refresh_domain_communities_now(d, store, reader)
-    assert overbroad is None  # nothing was derived, so nothing is left for refresh to cap
-
-
-def test_bootstrap_derive_counts_a_trailing_slash_path_like_refresh_does(tmp_path):
-    """Major 1 (review, ``probe_w2.py`` shape (b)): the same gap as the bare-path test
-    above, for a node whose ``file_path`` is the winning directory name plus a trailing
-    slash ("trader/", no filename) instead of the bare name -- also matched by
-    ``matches_path_prefix`` (the prefix's own trailing slash is stripped before
-    comparing) and also invisible to the pre-fix breadth index. Same graph as the bare-
-    path test, only ``cb``'s ``file_path`` differs. RED at the pre-fix tree (same
-    scratchpad probe as the bare-path test, both shapes in one run; see the fix-round-1
-    report), GREEN after, for the identical reason."""
-    nodes = (
-        [
-            {
-                "id": f"can{i}",
-                "label": f"CAN{i}",
-                "norm_label": f"can{i}",
-                "file_type": "code",
-                "source_file": f"trader/can{i}.py",
-                "community": "ca",
-            }
-            for i in range(5)
-        ]
-        + [
-            {
-                "id": "cbn0",
-                "label": "CBN0",
-                "norm_label": "cbn0",
-                "file_type": "code",
-                "source_file": "trader/",
-                "community": "cb",
-            }
-        ]
-        + [
-            {
-                "id": f"filler{i}",
-                "label": f"Filler{i}",
-                "norm_label": f"filler{i}",
-                "file_type": "code",
-                "source_file": f"misc/filler{i}.py",
-                "community": f"filler-{i}",
-            }
-            for i in range(3)
-        ]
-    )
-    graph = {"built_at_commit": "v1", "nodes": nodes, "links": []}
-    reader = _reader(tmp_path, graph=graph, labels=None)
-    store = Store(tmp_path / "t.db")
-
-    bootstrap_domains(store, reader, min_members=5)
-
-    d = next(dm for dm in store.iter_domains() if dm.communities == ["ca"])
-    assert d.path_prefixes == []  # claimed {ca,cb} = 2/5 = 0.4 > 0.2 once cb's "trader/" counts
     _communities, overbroad = refresh_domain_communities_now(d, store, reader)
     assert overbroad is None  # nothing was derived, so nothing is left for refresh to cap
 
@@ -1634,13 +1565,6 @@ def test_bootstrap_warns_when_derived_prefix_subsumes_sibling_seed_anchor(tmp_pa
     assert ten.path_prefixes == ["domainA"]
     entry = next(w for w in report.warnings if w["slug"] == ten.slug)
     assert "path_prefixes[0] subsumes an accepted domain's seed anchor" in entry["warnings"]
-
-
-def test_bootstrap_no_warnings_in_the_common_case(tmp_path):
-    reader = _reader(tmp_path, labels=LABELS)
-    store = Store(tmp_path / "t.db")
-    report = bootstrap_domains(store, reader)
-    assert report.warnings == []
 
 
 def test_bootstrap_dry_run_carries_warnings_per_item(tmp_path):

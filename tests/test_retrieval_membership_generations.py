@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from sidegraph import domain_snapshot
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import (
@@ -45,8 +43,7 @@ def test_lazy_membership_refresh_does_not_join_an_entity_by_its_old_community(tm
         assert decision.id not in {d.id for d in _domain_decisions(domain, store, reader)}
 
 
-@pytest.mark.parametrize("surface", ["members", "decisions", "related", "structure"])
-def test_failed_snapshot_refresh_does_not_expand_retained_communities(tmp_path, surface):
+def test_failed_snapshot_refresh_does_not_expand_retained_communities(tmp_path):
     with _frozen(tmp_path) as store:
         decision = _decision(store, "Lonely only")
         _bind(store, decision, _leaf(store, "lonely", "src/misc/lonely.py", "lonely_fn", "4"))
@@ -66,16 +63,17 @@ def test_failed_snapshot_refresh_does_not_expand_retained_communities(tmp_path, 
         assert store.domain_member_ids(domain.domain_id) == before
         assert "lonely_fn" not in before
         out = _drill_down_impl(store, reader, "docs")
-        if surface == "members":
-            assert all("src/misc/lonely.py" not in line for line in out["members"])
-        elif surface == "decisions":
-            assert not any("Lonely only" in line for line in out["decisions"])
-            assert decision.id not in {d.id for d in _domain_decisions(domain, store, reader)}
-        elif surface == "related":
-            context = rank_decisions(
-                [], [], ["3"], store, RetrievalBudget(), seed_node_ids=["lonely_fn"]
-            )
-            assert not any("Docs only" in line for line in context.related)
-        else:
-            lines = _structure_fallback_lines(["3"], store, 1000, ["lonely_fn"])
-            assert not any("[domain] Docs" in line for line in lines)
+
+        # members
+        assert all("src/misc/lonely.py" not in line for line in out["members"])
+        # decisions
+        assert not any("Lonely only" in line for line in out["decisions"])
+        assert decision.id not in {d.id for d in _domain_decisions(domain, store, reader)}
+        # related
+        context = rank_decisions(
+            [], [], ["3"], store, RetrievalBudget(), seed_node_ids=["lonely_fn"]
+        )
+        assert not any("Docs only" in line for line in context.related)
+        # structure
+        lines = _structure_fallback_lines(["3"], store, 1000, ["lonely_fn"])
+        assert not any("[domain] Docs" in line for line in lines)

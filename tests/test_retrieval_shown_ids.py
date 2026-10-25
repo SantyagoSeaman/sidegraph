@@ -8,10 +8,6 @@ from __future__ import annotations
 from sidegraph.retrieval import TaskContext
 
 
-def test_shown_ids_defaults_empty():
-    assert TaskContext().shown_ids == []
-
-
 def test_render_is_unaffected_by_the_new_field():
     """Additive by design: every existing consumer of render() must be untouched."""
     ctx = TaskContext(mistakes=["- [gotcha] x"])

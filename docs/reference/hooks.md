@@ -297,7 +297,7 @@ raises costs only its own line.
 
 9. **Stray-store line.** An older Sidegraph opened a second, empty store in the directory a
    session was started in. When the store this session uses holds no record (no file under
-   `decisions/`, `facts/` or `domains/`) and the repository's own store, found by the same
+   `decisions/`, `facts/` or `domains/`, and no `.shard` file under `shards/`) and the repository's own store, found by the same
    lookup, sits above it and does hold records, one more line is appended (own `try/except`,
    same never-cost-the-map guard as step 6). It names both paths and removes nothing. Verbatim,
    with `X` the empty store and `Y` the repository's:
@@ -771,8 +771,9 @@ the record files when they changed); it never rebuilds, repairs or creates anyth
 cannot use the index it prints `{}` and writes nothing, whichever of these holds: the index is
 missing; a store-owned entry (`index.db`, its `-journal`, `-wal` and
 `-shm` files, or a record directory) is a symlink, the same refusal `Store` makes; the store's format marker refuses this version; its
-`schema_version` stamp is neither of the two this version writes (`0.6.0`, or
-`0.6.0+requires` for a store with a minimum Sidegraph version); `retrieval_events` has no `agent` column (an
+`schema_version` stamp is not the one its store's marker calls for (`0.6.0`, or
+`0.6.0+requires` for a format-1 store with a minimum Sidegraph version; `0.7.0+format2` for a
+[format-2 store](store-format.md#format-2-packed-shards)); `retrieval_events` has no `agent` column (an
 index created before per-agent hook state); or opening it fails. Until a `Store` opens and
 repairs it, the hook keeps printing `{}`. `Store` repairs some of these and refuses the rest:
 
@@ -781,7 +782,7 @@ repairs it, the hook keeps printing `{}`. `Store` repairs some of these and refu
   column, and an index stamped `0.4.0` or `0.5.0`.
 - **Refused**, with an error: a symlinked store-owned entry (the message names it; replace the link
   with a real file or directory); a store whose format marker requires a newer Sidegraph; an index stamped with any
-  `schema_version` outside those two, such as a newer
+  `schema_version` its store does not accept (see above), such as a newer
   release's, while the record files are unchanged ("use a fresh store"); and an unreadable
   `index.db` ("file is not a database"). The index is derived, so deleting `index.db` is safe, and
   the next open rebuilds it.
@@ -796,8 +797,9 @@ target; unrelated startup, graph and filesystem work can still take time.
 Two consequences are visible:
 
 - A `Read` or `Edit` in a project with **no store no longer creates `.sidegraph/`**. It used to,
-  and the nudge path also printed "creating new store" on stderr. `SessionStart` and the MCP
-  server still create the store.
+  and the nudge path also printed "creating new store" on stderr. `SessionStart` does not
+  create one either: it prints a `systemMessage` that names `sidegraph-init`. The MCP server can
+  still create a missing store, only in the cases [configuration.md](configuration.md) lists.
 - A record that arrives mid-session (a `git pull`) can be missing from the block until the next
   MCP tool call, which re-checks the record files before it runs, or the next session.
   `get_task_context` sees it.

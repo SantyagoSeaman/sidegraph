@@ -153,10 +153,10 @@ the decision store empty on a codebase or doc corpus that already has months of 
 reasoning in it.
 
 **Always dry-run first** — it costs nothing and shows you the volume before any record is
-written (it still creates a fresh store's own files if none existed, but no decision):
+written (it still creates a fresh store's own files if none existed, but no decision). Commands are shown by name; without the CLI on your PATH, run them with the `uvx` prefix described in [running the CLIs](../reference/cli.md#running-the-clis-beside-the-plugin).
 
 ```bash
-uv run sidegraph-import --dry-run
+sidegraph-import --dry-run
 ```
 
 This lists every candidate rationale (file, title), a summary line (`would import N
@@ -169,8 +169,8 @@ nodes from docstrings and comments. That's a lot in one sitting; on a repo that 
 before importing for real:
 
 ```bash
-uv run sidegraph-import --dry-run                 # see the volume first
-uv run sidegraph-import --path src/execution/ --limit 50
+sidegraph-import --dry-run                 # see the volume first
+sidegraph-import --path src/execution/ --limit 50
 ```
 
 `--path PREFIX` is repeatable (only rationales whose `file_path` is under one of the given
@@ -184,7 +184,7 @@ produced **20** rationale nodes — so a full unfiltered import is usually fine:
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
 $env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify extract . --backend claude
-uv run sidegraph-import
+sidegraph-import
 ```
 
 **Ratification.** Imported decisions land `accepted` by default. Pass `--propose` if you want
@@ -229,8 +229,8 @@ specs that were never going through Graphify's semantic pass at all.
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
 $env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .                              # make sure the graph is current first
-uv run sidegraph-import --docs docs/adr --dry-run
-uv run sidegraph-import --docs docs/adr
+sidegraph-import --docs docs/adr --dry-run
+sidegraph-import --docs docs/adr
 ```
 
 Each document has an independent 8 MiB byte limit, checked before hashing, decoding,

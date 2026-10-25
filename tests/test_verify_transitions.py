@@ -53,6 +53,7 @@ from sidegraph.verify import (
     verify_against,
     verify_snapshot,
 )
+from tests.store_format2_support import format1_store
 
 
 def _codes(violations: list[Violation]) -> list[str]:
@@ -466,13 +467,13 @@ def _domain(**overrides) -> Domain:
 
 def test_verify_against_clean_on_legal_supersede_commit(git_repo):
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         old = s.add_decision(_decision())
         s.ratify(old.id)
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
 
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         s.add_decision(
             Decision(
                 title="v2",
@@ -492,7 +493,7 @@ def test_verify_against_clean_on_legal_supersede_commit(git_repo):
 
 def test_verify_against_catches_hand_edit(git_repo):
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         path = store_dir / "decisions" / f"{d.id}.json"
     _git(["add", "-A"], cwd=git_repo)
@@ -511,7 +512,7 @@ def test_verify_against_catches_hand_edit(git_repo):
 
 def test_verify_against_operational_error_outside_git_repo(tmp_path):
     store_dir = tmp_path / ".sidegraph"
-    with Store(store_dir):
+    with Store(format1_store(store_dir)):
         pass
     with pytest.raises(ValueError):
         verify_against(store_dir, "HEAD")
@@ -519,7 +520,7 @@ def test_verify_against_operational_error_outside_git_repo(tmp_path):
 
 def test_verify_against_operational_error_on_unknown_ref(git_repo):
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir):
+    with Store(format1_store(store_dir)):
         pass
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
@@ -530,7 +531,7 @@ def test_verify_against_operational_error_on_unknown_ref(git_repo):
 
 def test_verify_against_legal_compact_deletion(git_repo):
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         s.ratify(d.id)
         s.add_decision(
@@ -547,7 +548,7 @@ def test_verify_against_legal_compact_deletion(git_repo):
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
 
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         s.compact()
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "compact"], cwd=git_repo)
@@ -558,7 +559,7 @@ def test_verify_against_legal_compact_deletion(git_repo):
 def _compacted_store_and_segment(store_dir: Path) -> Path:
     """Build a store with one already-compacted (superseded, then archived) decision;
     return the resulting archive segment's path. Shared by the two write-once tests below."""
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         s.ratify(d.id)
         s.add_decision(
@@ -620,7 +621,7 @@ def test_verify_against_catches_deleted_archive_segment(git_repo):
 
 def test_verify_against_illegal_deletion_without_archive(git_repo):
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         path = store_dir / "decisions" / f"{d.id}.json"
     _git(["add", "-A"], cwd=git_repo)
@@ -636,7 +637,7 @@ def test_verify_against_illegal_deletion_without_archive(git_repo):
 
 def test_verify_against_ignores_bindings_and_initiatives_deletion_is_illegal(git_repo):
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         entity = s.upsert_entity(
             Entity(
@@ -670,7 +671,7 @@ def test_verify_against_from_repo_subdirectory_with_relative_store_path(git_repo
     sub = git_repo / "sub"
     sub.mkdir()
     store_dir = sub / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         path = store_dir / "decisions" / f"{d.id}.json"
     _git(["add", "-A"], cwd=git_repo)
@@ -783,13 +784,13 @@ def test_ratifier_stamp_ratify_cascade_over_committed_files(git_repo, monkeypatc
     # the stamp onto the fact too.
     monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         s.add_fact(_fact(supports=[d.id]))
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
 
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         s.ratify(d.id)
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "ratify"], cwd=git_repo)
@@ -801,12 +802,12 @@ def test_ratifier_stamp_ratify_domains_over_committed_files(git_repo, monkeypatc
     # T10 -- git-backed: a proposed domain, ratified via ratify_domains.
     monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         dm = s.add_domain(_domain())
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
 
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         s.ratify_domains(accept=[dm.domain_id])
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "ratify domain"], cwd=git_repo)
@@ -841,12 +842,12 @@ def test_ratifier_stamp_ratify_then_supersede_in_one_range(git_repo, monkeypatch
     # reached through accepted within the range.
     monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d1 = s.add_decision(_decision())
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
 
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         s.ratify(d1.id)
         s.add_decision(
             Decision(
@@ -911,7 +912,7 @@ def test_absent_equals_null_old_format_file_superseded_through_store(git_repo, m
     # reappears as null.
     monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d1 = s.add_decision(_decision())
         s.ratify(d1.id)
         path = store_dir / "decisions" / f"{d1.id}.json"
@@ -922,7 +923,7 @@ def test_absent_equals_null_old_format_file_superseded_through_store(git_repo, m
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "initial (old-format provenance)"], cwd=git_repo)
 
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         s.add_decision(
             Decision(
                 title="v2",
@@ -959,7 +960,7 @@ def test_absent_equals_null_old_format_domain_rewrite_is_clean(git_repo, monkeyp
     # alone must not read as a changed field.
     monkeypatch.setattr("sidegraph.store._ratifier_identity", lambda actor=None: "Tester")
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         dm = s.add_domain(_domain())
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
@@ -972,7 +973,7 @@ def test_absent_equals_null_old_format_domain_rewrite_is_clean(git_repo, monkeyp
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "old-format domain (no seed_anchors/path_prefixes)"], cwd=git_repo)
 
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         s.ratify_domains(accept=[dm.domain_id])
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "ratify"], cwd=git_repo)
@@ -1047,7 +1048,7 @@ def test_against_non_string_new_status_is_left_to_the_snapshot_parse_error(git_r
     ``--against`` crashed (exit 1). The snapshot layer already reports the malformed status
     as parse-error, so the transition layer stays silent and the run exits 2."""
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
         dom = s.add_domain(_domain())
     _commit_all(git_repo, "initial")
@@ -1068,7 +1069,7 @@ def test_against_non_string_old_status_repaired_to_a_string_is_an_illegal_jump(
     repair is checked like every other field's (title, valid_to), and the unhashable old
     value is never looked up in the legal table."""
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d = s.add_decision(_decision())
     path = store_dir / "decisions" / f"{d.id}.json"
     _edit(path, status=old_status)
@@ -1093,7 +1094,7 @@ def test_against_deleting_a_record_with_a_non_string_id_is_illegal_not_a_crash(
     """Unfixed, ``old.get(rid_field) in archived_ids[kind]`` hashed the raw id and crashed.
     Only a string id can be an archived one, so the deletion is simply illegal."""
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         rec = s.add_decision(_decision()) if kind_dir == "decisions" else s.add_domain(_domain())
         rid = rec.id if kind_dir == "decisions" else rec.domain_id
     path = store_dir / kind_dir / f"{rid}.json"
@@ -1112,7 +1113,7 @@ def test_against_with_a_symlinked_store_dir_reports_only_the_link(git_repo, tmp_
     walk, so a cut-off archive turns every compacted record into an ``illegal-deletion``): with
     a symlinked internal it reports nothing and the snapshot's link finding is the whole report."""
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir) as s:
+    with Store(format1_store(store_dir)) as s:
         d1 = s.add_decision(_decision())
         s.ratify(d1.id)
         s.add_decision(
@@ -1154,7 +1155,7 @@ def test_against_with_a_symlinked_store_dir_reports_only_the_link(git_repo, tmp_
 
 
 def _hot_record(store_dir: Path, kind: str, *, terminal: bool = True) -> Path:
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         if kind == "decision":
             record = store.add_decision(_decision())
             if terminal:
@@ -1197,19 +1198,50 @@ def test_archive_transfer_rejects_changed_immutable_payload(git_repo, kind, fiel
     assert findings[0].path == hot.relative_to(git_repo).as_posix()
 
 
-@pytest.mark.parametrize("kind", ["decision", "domain"])
-@pytest.mark.parametrize("value", [None, [], {}, "future content"])
-@pytest.mark.parametrize("nested", [False, True, "list"])
-def test_archive_transfer_preserves_baseline_only_raw_keys(git_repo, kind, value, nested):
-    store_dir = git_repo / ".sidegraph"
-    hot = _hot_record(store_dir, kind)
-    payload = json.loads(hot.read_text())
+def _baseline_with_future_field(payload: dict, value: object, nested: object):
+    """``payload`` with a future ``future_field`` of ``value`` (top level, in ``provenance`` or in
+    a list element), and the container it sits in."""
     if nested == "list":
         payload["future_list"] = [{}]
         target = payload["future_list"][0]
     else:
         target = payload["provenance"] if nested else payload
     target["future_field"] = value
+    return target
+
+
+@pytest.mark.parametrize("kind", ["decision", "domain"])
+@pytest.mark.parametrize("value", [None, [], {}, "future content"])
+@pytest.mark.parametrize("nested", [False, True, "list"])
+def test_archive_transfer_classifier_preserves_baseline_only_raw_keys(
+    tmp_path, kind, value, nested
+):
+    # the classifier (no git): an archive copy missing a baseline-only key, at any depth, loses it
+    from sidegraph.verify import _classify_archive_transfer
+
+    payload = json.loads(_hot_record(tmp_path / ".sidegraph", kind).read_text())
+    target = _baseline_with_future_field(payload, value, nested)
+    old = json.loads(json.dumps(payload))
+    del target["future_field"]
+    assert [v.code for v in _classify_archive_transfer(kind, old, payload)] == [
+        ILLEGAL_FIELD_CHANGE
+    ]
+
+
+@pytest.mark.parametrize(
+    "kind,value,nested",
+    [
+        ("decision", None, False),
+        ("domain", [], True),
+        ("decision", {}, "list"),
+        ("domain", "future content", False),
+    ],
+)
+def test_archive_transfer_preserves_baseline_only_raw_keys(git_repo, kind, value, nested):
+    store_dir = git_repo / ".sidegraph"
+    hot = _hot_record(store_dir, kind)
+    payload = json.loads(hot.read_text())
+    target = _baseline_with_future_field(payload, value, nested)
     hot.write_text(json.dumps(payload) + "\n", encoding="utf-8")
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "baseline with future field"], cwd=git_repo)
@@ -1288,11 +1320,11 @@ def test_archive_transfer_allows_supersede_and_compact_in_one_diff(git_repo, rat
     store_dir = git_repo / ".sidegraph"
     hot = _hot_record(store_dir, "decision", terminal=False)
     if ratify_first:
-        with Store(store_dir) as store:
+        with Store(format1_store(store_dir)) as store:
             store.ratify(hot.stem)
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         if not ratify_first:
             store.ratify(hot.stem)
         store.add_decision(
@@ -1324,7 +1356,7 @@ def test_archive_transfer_allows_drop_and_compact_in_one_diff(git_repo, kind):
     hot = _hot_record(store_dir, kind, terminal=False)
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         if kind == "decision":
             store.drop(hot.stem)
         else:
@@ -1351,7 +1383,7 @@ def test_archive_transfer_allows_older_absent_defaults(git_repo, kind):
     hot.write_text(json.dumps(payload) + "\n", encoding="utf-8")
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "older baseline"], cwd=git_repo)
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         store.compact()
     assert not hot.exists()
     _git(["add", "-A"], cwd=git_repo)
@@ -1366,7 +1398,7 @@ def test_archive_transfer_allows_identical_merge_copies(git_repo, kind):
     _hot_record(store_dir, kind)
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         store.compact()
     segment = next((store_dir / "archive").glob("*.jsonl"))
     (segment.parent / "2026-10-09-2-0123456789ab.jsonl").write_bytes(segment.read_bytes())
@@ -1381,12 +1413,12 @@ def test_archive_transfer_allows_crash_cleanup(git_repo, kind):
     store_dir = git_repo / ".sidegraph"
     hot = _hot_record(store_dir, kind)
     original = hot.read_bytes()
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         store.compact()
     hot.write_bytes(original)  # archive publication completed, hot unlink did not
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "crash-window baseline"], cwd=git_repo)
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         report = store.compact()
     assert report.cleaned_up_hot_files == 1
     assert report.segment_path is None
@@ -1399,12 +1431,12 @@ def test_archive_transfer_allows_crash_cleanup(git_repo, kind):
 @pytest.mark.parametrize("kind", ["decision", "domain"])
 def test_archive_transfer_allows_new_terminal_records(git_repo, kind):
     store_dir = git_repo / ".sidegraph"
-    with Store(store_dir):
+    with Store(format1_store(store_dir)):
         pass
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "empty baseline"], cwd=git_repo)
     _hot_record(store_dir, kind)
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         store.compact()
     _git(["add", "-A"], cwd=git_repo)
 
@@ -1441,7 +1473,7 @@ def test_archive_transfer_rejects_illegal_lifecycle(git_repo, changes, codes):
 def test_archive_transfer_preserves_existing_ratifier_stamp(git_repo):
     store_dir = git_repo / ".sidegraph"
     hot = _hot_record(store_dir, "domain", terminal=False)
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         store.ratify_domains(accept=[hot.stem], actor="reviewer")
         store.ratify_domains(drop=[hot.stem])
     payload = json.loads(hot.read_text())
@@ -1458,7 +1490,7 @@ def test_archive_transfer_preserves_existing_ratifier_stamp(git_repo):
 def test_archive_transfer_rejects_superseded_domain_becoming_dropped(git_repo):
     store_dir = git_repo / ".sidegraph"
     hot = _hot_record(store_dir, "domain", terminal=False)
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         store.supersede_domain(hot.stem, _domain(supersedes=hot.stem))
     payload = json.loads(hot.read_text())
     _git(["add", "-A"], cwd=git_repo)
@@ -1475,7 +1507,7 @@ def test_archive_transfer_allows_domain_supersede_and_compact(git_repo):
     hot = _hot_record(store_dir, "domain", terminal=False)
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
-    with Store(store_dir) as store:
+    with Store(format1_store(store_dir)) as store:
         store.supersede_domain(hot.stem, _domain(supersedes=hot.stem))
         store.compact()
     _git(["add", "-A"], cwd=git_repo)

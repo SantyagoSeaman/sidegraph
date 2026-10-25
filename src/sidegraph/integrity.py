@@ -48,10 +48,11 @@ from typing import Any, Literal
 from pydantic import ValidationError
 from ulid import ULID
 
-from . import githooks
+from . import githooks, maintenance
 from .config import _store_project_root, path_state
 from .freshness import GraphFreshness, staleness_phrase
 from .gitenv import git_env
+from .schema import validate_record_body
 from .store import (
     _TERMINAL_DECISION_STATUSES,
     _TERMINAL_DOMAIN_STATUSES,
@@ -62,7 +63,22 @@ from .store import (
     parse_skip_list,
     skipped_segment_text,
 )
-from .store_layout import VERIFICATIONS_SUBDIR, StoreRequirementError, store_requirement
+from .store_format import (
+    FORMAT_MARKER_NAME,
+    Inventory,
+    inventory_from_disk,
+    inventory_from_git_tree,
+    parse_marker,
+)
+from .store_layout import (
+    GITATTRIBUTES_NAME,
+    SHARDS_SUBDIR,
+    VERIFICATIONS_SUBDIR,
+    StoreRequirementError,
+    store_marker,
+    store_requirement,
+)
+from .store_view import SUBDIR_OF, effective_bodies, effective_records
 
 Severity = Literal["broken", "degraded", "advisory"]
 Surface = Literal["session", "notice", "doctor", "stats"]
@@ -115,15 +131,23 @@ _STORE_DIRS = (
     "bindings",
     "entities",
     "archive",
+    SHARDS_SUBDIR,
     VERIFICATIONS_SUBDIR,
 )
+_RECORD_DIRS = (*_HOT_RECORD_DIRS, "bindings", "entities")  # the dirs maintenance empties
 _ULID_NAMED_DIRS = (
     *_HOT_RECORD_DIRS,
     "initiatives",
     "entities",
     VERIFICATIONS_SUBDIR,
 )  # named by the id minted at write
-_ROOT_FILES = ("format", ".gitignore", "stamping_live_since", "domain-snapshot.json")
+_ROOT_FILES = (
+    "format",
+    ".gitignore",
+    GITATTRIBUTES_NAME,
+    "stamping_live_since",
+    "domain-snapshot.json",
+)
 
 # A record is stranded unless it is terminal: a decision or fact superseded, rejected or
 # deprecated, or a domain superseded or dropped.
@@ -572,6 +596,27 @@ def binding_statuses_computed(index: sqlite3.Connection) -> bool:
     return row is None or row[0] != "1"
 
 
+def _record_locations(store_dir: Path) -> Callable[[str, str], str]:
+    """``(table, record id) -> path`` of where the record is stored: ``<table>/<id>.json`` on a
+    per-record store, the file, shard or archive segment that holds its effective record on a
+    packed one (a packed record has no file to name).
+
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
+    packed = effective_records(store_dir)
+
+    def where(table: str, record_id: str) -> str:
+        if packed is not None:
+            rec = packed.get((_TABLE_TYPES[table], record_id))
+            if rec is not None:
+                return str(rec.source_path(store_dir))
+        return str(store_dir / table / f"{record_id}.json")
+
+    return where
+
+
+_TABLE_TYPES = {subdir: record_type for record_type, subdir in SUBDIR_OF.items()}
+
+
 def _detect_orphaned_records(inputs: Inputs) -> Problem | None:
     """Open decisions and facts whose every Tier-2 binding is orphaned: retrieval reaches them
     only through their file or domain. The rule of ``sync._stale_decisions``, extended to facts.
@@ -607,9 +652,10 @@ def _detect_orphaned_records(inputs: Inputs) -> Problem | None:
         "heal-anchors skill repairs them."
     )
     degraded = recent >= _ORPHANED_RECENT_COUNT
+    where = _record_locations(inputs.store_dir)
     findings = tuple(
         (
-            str(inputs.store_dir / table / f"{record_id}.json"),
+            where(table, record_id),
             f"every code anchor of this record is orphaned ({leaves} leaf anchor(s)); "
             "retrieval reaches it only through its file or domain — re-anchor it with "
             "add_anchors or the heal-anchors skill, or supersede it if the code is gone",
@@ -910,11 +956,26 @@ def _stranded_age(
 
 def _stranded_kinds(entries: list[_Stranded]) -> str:
     """The kinds the text lists. Deleted hot files beside a new archive segment are a
-    compaction (``Store.compact``, the only legitimate deletion); any other deletion is a
-    deleted file."""
+    compaction (``Store.compact``, the only legitimate deletion of a per-record store). On a
+    packed store the only writer of a shard is maintenance, so a changed shard file means a
+    maintenance run: the record files it deleted and the archive segments it removed or
+    wrote are part of it. Any other deletion is a deleted file.
+
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
     deleted_hot = [e for e in entries if e.deleted and e.first in _HOT_RECORD_DIRS]
     archive = [e for e in entries if not e.deleted and e.first == "archive"]
-    compaction = bool(deleted_hot and archive)
+    shards = [e for e in entries if not e.deleted and e.first == SHARDS_SUBDIR]
+    maintenance = bool(shards)
+    compaction = bool(deleted_hot and archive) and not maintenance
+    absorbed: list[_Stranded] = []
+    if maintenance:
+        absorbed = [
+            e
+            for e in entries
+            if e in shards or e.first == "archive" or (e.deleted and e.first in _RECORD_DIRS)
+        ]
+    elif compaction:
+        absorbed = [*deleted_hot, *archive]
     by_dir = {
         "decisions": "decision",
         "facts": "fact",
@@ -926,7 +987,7 @@ def _stranded_kinds(entries: list[_Stranded]) -> str:
     counts: dict[str, int] = {kind: 0 for kind in by_dir.values()}
     other = deleted = 0
     for e in entries:
-        if compaction and (e in deleted_hot or e in archive):
+        if any(e is a for a in absorbed):
             continue
         if e.deleted:
             deleted += 1
@@ -934,7 +995,8 @@ def _stranded_kinds(entries: list[_Stranded]) -> str:
             counts[by_dir[e.first]] += 1
         else:
             other += 1
-    parts = [f"{n} {kind} file(s)" for kind, n in counts.items() if n]
+    parts = ["a maintenance run"] if maintenance else []
+    parts += [f"{n} {kind} file(s)" for kind, n in counts.items() if n]
     if other:
         parts.append(f"{other} other")
     if deleted:
@@ -1053,7 +1115,103 @@ class _BranchHit:
     proposed: int  # ... of which await ratification
 
 
-def _branch_records(ref: str, default: str, cwd: Path, deadline: float) -> dict[str, str]:
+def _marker_blob(ref: str, prefix: str, cwd: Path, deadline: float) -> str:
+    """The object id of the format marker in ``ref``'s tree, ``""`` when it has none."""
+    return _text(
+        _git(
+            ["rev-parse", "--verify", "-q", f"{ref}:{prefix}{FORMAT_MARKER_NAME}"],
+            cwd,
+            deadline,
+            ok=(0, 1),
+        )
+    ).strip()
+
+
+def _marker_major(blob: str, cwd: Path, deadline: float) -> int:
+    """The marker major a marker blob says (``1`` when there is none or it does not parse)."""
+    if not blob:
+        return 1
+    text = _text(_git(["cat-file", "-p", blob], cwd, deadline))
+    try:
+        return parse_marker(
+            text, Path(FORMAT_MARKER_NAME), malformed=lambda _p, detail: ValueError(detail)
+        ).major
+    except ValueError:
+        return 1
+
+
+def _tree_inventory(top: Path, tree: str, store_rel: str, deadline: float) -> Inventory:
+    """``inventory_from_git_tree`` under the detector's budget: each git call gets what is left
+    of it, and one that outlives it is ``_BudgetExhausted``, as for every other call here."""
+
+    def remaining() -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise _BudgetExhausted
+        return left
+
+    try:
+        return inventory_from_git_tree(
+            top, tree, store_rel, validate=validate_record_body, remaining=remaining
+        )
+    except subprocess.TimeoutExpired:
+        raise _BudgetExhausted from None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise _NotRun from None
+
+
+def _packed_branch_records(
+    ref: str, default: str, cwd: Path, deadline: float, scan: dict[str, Any]
+) -> dict[str, str] | None:
+    """``_branch_records`` for a store whose tree on either side is format 2, else ``None``.
+
+    A record counts per identity over the two trees' inventories, not per file: a packed record
+    has no file on the default branch, so a branch that edits it (a new per-record file) adds no
+    record, and a branch that adds a new identity does. Each side's record is its effective one
+    (``store_rules.effective``). The key is the identity's per-record path, as the callers only
+    need it to tell records apart.
+
+    ``scan`` is the one scan's memory: where the store is, and the default branch's marker and
+    inventory, built once however many branches are looked at. A branch whose marker blob is the
+    default branch's needs no marker read of its own.
+
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
+    if "where" not in scan:
+        where = _text(_git(["rev-parse", "--show-toplevel", "--show-prefix"], cwd, deadline))
+        lines = where.split("\n")
+        if len(lines) != 3 or lines[2]:
+            raise _NotRun
+        scan["where"] = (Path(lines[0]), lines[1])
+        scan["default_blob"] = _marker_blob(default, lines[1], cwd, deadline)
+        scan["default_major"] = _marker_major(scan["default_blob"], cwd, deadline)
+    top, prefix = scan["where"]
+    blob = _marker_blob(ref, prefix, cwd, deadline)
+    major = (
+        scan["default_major"]
+        if blob == scan["default_blob"]
+        else _marker_major(blob, cwd, deadline)
+    )
+    if 2 not in (major, scan["default_major"]):
+        return None
+    store_rel = prefix.rstrip("/") or "."
+    if "default_inventory" not in scan:
+        scan["default_inventory"] = _tree_inventory(top, default, store_rel, deadline)
+    mine = effective_bodies(_tree_inventory(top, ref, store_rel, deadline), lenient=True)
+    theirs = scan["default_inventory"].by_identity()  # any occurrence: a quarantined one exists
+    records: dict[str, str] = {}
+    for (record_type, record_id), rec in mine.items():
+        subdir = SUBDIR_OF.get(record_type)  # a record type this version does not know: not ours
+        if subdir not in _HOT_RECORD_DIRS or (record_type, record_id) in theirs:
+            continue
+        status = rec.raw.get("status") if isinstance(rec.raw, dict) else None
+        if isinstance(status, str):
+            records[f"{subdir}/{record_id}.json"] = status
+    return records
+
+
+def _branch_records(
+    ref: str, default: str, cwd: Path, deadline: float, scan: dict[str, Any] | None = None
+) -> dict[str, str]:
     """``{path: status}`` for each record ``ref`` adds that the default branch lacks.
 
     Three dots count only the branch's own additions. The diff is told ``--no-renames`` (a
@@ -1066,6 +1224,9 @@ def _branch_records(ref: str, default: str, cwd: Path, deadline: float) -> dict[
     with their top-level status, terminal ones included: the caller lets the newest branch that
     holds a record decide its status. A file that does not parse is skipped.
     # see design/superpowers/specs/2026-10-02-stranded-store-writes-design.md (D2 per branch)"""
+    packed = _packed_branch_records(ref, default, cwd, deadline, {} if scan is None else scan)
+    if packed is not None:
+        return packed
     added = _git(
         [
             "diff",
@@ -1155,9 +1316,10 @@ def _detect_branch_only_records(inputs: Inputs) -> Problem | None:
     # first, so a later branch overwrites), and that branch's copy decides its status.
     owner: dict[str, tuple[int, str, str]] = {}
     partial = False
+    scan: dict[str, Any] = {}
     try:
         for tip_unix, ref in branches:
-            for path, status in _branch_records(ref, default, cwd, deadline).items():
+            for path, status in _branch_records(ref, default, cwd, deadline, scan).items():
                 owner[path] = (tip_unix, ref, status)
     except _BudgetExhausted:
         partial = True
@@ -1221,6 +1383,156 @@ def _detect_branch_only_records(inputs: Inputs) -> Problem | None:
 #: passes ``CHECKS[:5] + host_checks(location) + CHECKS[5:]``.
 STORE_UNREADABLE = Check("store-unreadable", frozenset({"session"}), _detect_store_unreadable)
 
+# -- store-not-migrated and maintenance-due ------------------------------------------------
+
+# More per-record files than this makes the soft notice due: the number is the author's choice,
+# and the packed-format benchmark may move it.
+_MAINTENANCE_FILE_THRESHOLD = 200
+
+# The public guide, in the URL form README.md uses for user-facing pointers: a repo-relative
+# path does not exist in a user's repository.
+_MIGRATION_GUIDE = (
+    "https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.17.md"
+)
+
+# The directories that hold per-record files, and the one that holds legacy archive segments.
+_PER_RECORD_DIRS = ("decisions", "facts", "domains", "entities", "bindings")
+
+
+def _count_record_files(
+    store_dir: Path, limit: int, dirs: tuple[str, ...] = _PER_RECORD_DIRS
+) -> int:
+    """How many per-record files the store holds, counting stops once it passes ``limit``. A
+    directory listing only: no file is opened, and only regular files count (a directory or a
+    symlink named ``x.json`` is not a record)."""
+    count = 0
+    for name in dirs:
+        try:
+            with os.scandir(store_dir / name) as entries:
+                for entry in entries:
+                    if entry.name.endswith(".json") and entry.is_file(follow_symlinks=False):
+                        count += 1
+                        if count > limit:
+                            return count
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+    return count
+
+
+def _holds_any_record(store_dir: Path) -> bool:
+    """Whether the store holds any record: a per-record file, or a non-empty archive segment."""
+    if _count_record_files(store_dir, 0, (*_PER_RECORD_DIRS, "initiatives")) > 0:
+        return True
+    try:
+        with os.scandir(store_dir / "archive") as entries:
+            return any(
+                e.name.endswith(".jsonl")
+                and e.is_file(follow_symlinks=False)
+                and e.stat(follow_symlinks=False).st_size > 0
+                for e in entries
+            )
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+def _marker_or_not_run(store_dir: Path) -> Any:
+    """The parsed format marker (``None`` when there is none); a marker that does not parse is
+    ``store-unreadable``'s to report, so these checks are not run."""
+    try:
+        return store_marker(store_dir)
+    except (StoreRequirementError, OSError):
+        raise _NotRun from None
+
+
+def _detect_store_not_migrated(inputs: Inputs) -> Problem | None:
+    """A store in the pre-0.17 layout (marker major below 2, or no marker) that holds a record:
+    the packed format is the one 0.17 is built for, and the migration is the owner's decision on
+    the default branch, so this is the urgent notice, ``degraded`` (the highest tier short of
+    ``broken``: the store works). An empty store has nothing to migrate and says nothing, and a
+    directory with no marker file is not read as a layout (the first ``Store`` open stamps the
+    major-0 marker, and SessionStart opens the store before it runs the checks).
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.3)"""
+    marker = _marker_or_not_run(inputs.store_dir)
+    if marker is None or marker.major >= 2:
+        return None  # no marker: ``Store`` backfills one on its first open, SessionStart's
+    if not _holds_any_record(inputs.store_dir):
+        return None
+    text = (
+        "Sidegraph: the store uses the pre-0.17 layout, one file per record. Run "
+        "`sidegraph-migrate` on the default branch (or the `sidegraph:compact` skill) after "
+        f"the team checklist in {_MIGRATION_GUIDE}."
+    )
+    return Problem(
+        check="store-not-migrated",
+        severity="degraded",
+        summary="store not migrated to the packed layout",
+        fix="sidegraph-migrate",
+        line=text,
+        notice=text,
+        findings=((str(inputs.store_dir), text),),
+    )
+
+
+def _maintenance_reasons(store_dir: Path, shards: int) -> list[str]:
+    """Why maintenance has work to do on a format-2 store, in the order the notice names them.
+    Counting files is a directory listing; the rest reads the shards once under the model check
+    and plans a run in which no per-record file may fold (no git call at SessionStart, so
+    "settled" cannot be known): only a segment already covered by existing shard lines counts,
+    which maintenance would delete whatever the clock says."""
+    reasons: list[str] = []
+    files = _count_record_files(store_dir, _MAINTENANCE_FILE_THRESHOLD)
+    if files > _MAINTENANCE_FILE_THRESHOLD:
+        reasons.append(f"more than {_MAINTENANCE_FILE_THRESHOLD} per-record files")
+        return reasons  # enough to be due: the shards need not be read
+    inv = inventory_from_disk(store_dir, validate=validate_record_body, on_unreadable=_ignore)
+    nothing_folds = maintenance.Eligibility(0, int(time.time()), {}, frozenset(), "")
+    plan = maintenance.plan_maintenance(inv, nothing_folds, shards)
+    if plan.segment_deletions:
+        reasons.append(f"{len(plan.segment_deletions)} archive segment(s) it can remove")
+    healing = maintenance.self_healing_counts(inv, shards)
+    if healing["misplaced"] or healing["equal_duplicate"]:
+        reasons.append(
+            f"{healing['misplaced'] + healing['equal_duplicate']} misplaced or duplicated "
+            "shard line(s)"
+        )
+    if healing["stray"]:
+        reasons.append(f"{healing['stray']} stray shard file(s)")
+    return reasons
+
+
+def _ignore(_path: str, _error: OSError) -> None:
+    """``on_unreadable`` for a read that only counts: the file counts as not regular."""
+
+
+def _detect_maintenance_due(inputs: Inputs) -> Problem | None:
+    """A packed store that maintenance would tidy: more than ``_MAINTENANCE_FILE_THRESHOLD``
+    per-record files, or a legacy archive segment it would delete, or a misplaced or duplicated
+    shard line, or a stray shard file (verify does not report these: maintenance heals them).
+    A segment kept because a line is not ``deletable`` does not count. Advisory: nothing is
+    broken, and running maintenance is the human's choice.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.3)"""
+    marker = _marker_or_not_run(inputs.store_dir)
+    if marker is None or marker.major < 2 or marker.shards is None:
+        return None
+    reasons = _maintenance_reasons(inputs.store_dir, marker.shards)
+    if not reasons:
+        return None
+    text = (
+        f"Sidegraph: the store has work for maintenance ({'; '.join(reasons)}). Run "
+        "`sidegraph-compact` on the default branch (or the `sidegraph:compact` skill); nothing "
+        "is broken."
+    )
+    return Problem(
+        check="maintenance-due",
+        severity="advisory",
+        summary="store maintenance is due",
+        fix="sidegraph-compact",
+        line=text,
+        notice=text,
+        findings=((str(inputs.store_dir), text),),
+    )
+
+
 CHECKS: tuple[Check, ...] = (
     STORE_UNREADABLE,
     Check("pending-ratification", frozenset({"session"}), _detect_pending_ratification),
@@ -1241,6 +1553,8 @@ CHECKS: tuple[Check, ...] = (
         "store-uncommitted", frozenset({"session", "doctor", "stats"}), _detect_store_uncommitted
     ),
     Check("branch-only-records", frozenset({"session"}), _detect_branch_only_records),
+    Check("store-not-migrated", frozenset({"session", "doctor"}), _detect_store_not_migrated),
+    Check("maintenance-due", frozenset({"session", "doctor"}), _detect_maintenance_due),
 )
 
 

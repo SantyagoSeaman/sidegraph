@@ -150,7 +150,7 @@ def test_t12_a_missing_graph_never_fails_check(tmp_path, capsys, monkeypatch):
 
 
 def test_t12_a_present_graph_prints_no_skipped_line(tmp_path, capsys, monkeypatch):
-    from tests.test_graph_freshness import make_repo
+    from tests.graph_repo_support import make_repo
 
     fx = make_repo(tmp_path)
     db = _settled_healthy(tmp_path)

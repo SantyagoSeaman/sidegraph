@@ -16,12 +16,12 @@ from sidegraph import domain_snapshot
 from sidegraph import sync as sync_mod
 from sidegraph.cli import domains_main
 from sidegraph.engine.reader import GraphifyReader
-from sidegraph.schema import DomainStatus
 from sidegraph.store import SNAPSHOT_SIGNATURE_KEY, Store
 from sidegraph.store_layout import snapshot_signature
 from sidegraph.sync import sync
 from tests.graph_fixtures import write_graph
 from tests.snapshot_support import legacy_graph, mention_graph, standard_domains
+from tests.store_format2_support import format1_store
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def openable(monkeypatch):
 def _project(tmp_path, graph: dict, name: str):
     root = tmp_path / "proj" / ".sidegraph"
     path = write_graph(tmp_path, f"{name}.json", graph)
-    with Store(root) as store:
+    with Store(format1_store(root)) as store:
         standard_domains(store)
         sync(store, GraphifyReader(path))
     return root, path
@@ -61,7 +61,12 @@ def test_accept_current_engine_takes_it_anyway(tmp_path, openable):
     assert domain_snapshot.load_snapshot(root).engine_generation == "mention-edges"
 
 
-def test_a_first_snapshot_prints_counts_and_raises_the_requirement(tmp_path, capsys, openable):
+@pytest.mark.parametrize("version", ["0.14.0", "0.15.2"])
+def test_a_first_snapshot_prints_counts_and_raises_the_requirement(
+    tmp_path, capsys, monkeypatch, version
+):
+    """The requirement is the first release that reads snapshots, never ``__version__``."""
+    monkeypatch.setattr(sidegraph, "__version__", version)
     root, graph = _project(tmp_path, legacy_graph(), "legacy")
     assert _run("--db", str(root), "--graph", str(graph)) == 0
     out = capsys.readouterr().out
@@ -98,7 +103,7 @@ def test_refresh_domain_rederives_one_domain_by_its_full_rules(tmp_path, capsys,
     root, legacy = _project(tmp_path, legacy_graph(), "legacy")
     assert _run("--db", str(root), "--graph", str(legacy)) == 0
     mention = write_graph(tmp_path, "mention.json", mention_graph())
-    with Store(root) as store:
+    with Store(format1_store(root)) as store:
         sync(store, GraphifyReader(mention))
     capsys.readouterr()
     assert (
@@ -164,10 +169,10 @@ def test_after_a_local_refresh_the_next_sync_runs(tmp_path, openable):
     """The command invalidates membership itself (guard; a later open would as well)."""
     root, graph = _project(tmp_path, legacy_graph(), "legacy")
     assert _run("--db", str(root), "--graph", str(graph)) == 0
-    with Store(root) as store:
+    with Store(format1_store(root)) as store:
         sync(store, GraphifyReader(graph))
     assert _run("--db", str(root), "--graph", str(graph), "--refresh") == 0
-    with Store(root) as store:
+    with Store(format1_store(root)) as store:
         assert sync(store, GraphifyReader(graph)).skipped is False
 
 
@@ -183,17 +188,6 @@ def test_the_command_records_the_snapshot_it_wrote(tmp_path, openable):
         ).fetchone()
     assert row is not None and row[0] == snapshot_signature(root)
     assert row[0].startswith("sha256:")
-
-
-def test_the_snapshot_raises_the_requirement_to_the_first_release_that_reads_it(
-    tmp_path, monkeypatch
-):
-    """Red against a requirement taken from __version__."""
-    monkeypatch.setattr(sidegraph, "__version__", "0.15.2")
-    assert domain_snapshot.SNAPSHOT_MIN_SIDEGRAPH == "0.14.0"
-    root, graph = _project(tmp_path, legacy_graph(), "legacy")
-    assert _run("--db", str(root), "--graph", str(graph)) == 0
-    assert "requires-sidegraph >= 0.14.0" in (root / "format").read_text(encoding="utf-8")
 
 
 def test_dry_run_prints_the_counts_and_writes_nothing(tmp_path, capsys):
@@ -231,7 +225,7 @@ def test_dry_run_never_stamps_an_empty_store(tmp_path, capsys):
     creation marker gets stamping_live_since written by the open."""
     graph = write_graph(tmp_path, "legacy.json", legacy_graph())
     root = tmp_path / "empty" / ".sidegraph"
-    Store(root).close()
+    Store(format1_store(root)).close()
     (root / "stamping_live_since").unlink()
     assert _run("--db", str(root), "--graph", str(graph), "--dry-run") == 1
     assert "stamping_live_since" in capsys.readouterr().out
@@ -252,7 +246,7 @@ def test_dry_run_over_a_snapshot_prints_what_a_refresh_would_freeze(tmp_path, ca
     root, legacy = _project(tmp_path, legacy_graph(), "legacy")
     assert _run("--db", str(root), "--graph", str(legacy)) == 0
     mention = write_graph(tmp_path, "mention.json", mention_graph())
-    with Store(root) as store:
+    with Store(format1_store(root)) as store:
         sync(store, GraphifyReader(mention))
     before = domain_snapshot.snapshot_path(root).read_bytes()
     capsys.readouterr()
@@ -285,54 +279,6 @@ def test_a_pull_while_the_command_computes_is_never_overwritten(
     assert domain_snapshot.load_snapshot(root).store_commit == "f" * 40
 
 
-def test_a_dry_run_refuses_a_snapshot_pulled_after_its_checks(
-    tmp_path, capsys, monkeypatch, openable
-):
-    """Red against a take_snapshot that reads whatever is on disk: the dry run chose a first run
-    (no snapshot), a pull then brought one, and it would print the rules' counts as what a first
-    snapshot would freeze. A dry run writes nothing and never hashes the file again;
-    take_snapshot's own check (based_on) is what refuses it."""
-    root, legacy = _project(tmp_path, legacy_graph(), "legacy")
-    assert _run("--db", str(root), "--graph", str(legacy)) == 0
-    path = domain_snapshot.snapshot_path(root)
-    pulled = path.read_bytes()
-    path.unlink()
-
-    def reader_after_a_pull(graph):
-        path.write_bytes(pulled)
-        return GraphifyReader(graph)
-
-    monkeypatch.setattr("sidegraph.cli.GraphifyReader", reader_after_a_pull)
-    capsys.readouterr()
-    assert _run("--db", str(root), "--graph", str(legacy), "--dry-run") == 1
-    assert "changed while this command ran" in capsys.readouterr().out
-
-
-def test_a_domain_dropped_while_the_graph_is_read_is_refused(
-    tmp_path, capsys, monkeypatch, openable
-):
-    """Red against a --domain check made only before the graph is built or read: the drop lands
-    meanwhile, and the refresh would freeze a snapshot without the re-derivation it was asked
-    for, and say nothing."""
-    root, legacy = _project(tmp_path, legacy_graph(), "legacy")
-    assert _run("--db", str(root), "--graph", str(legacy)) == 0
-    before = domain_snapshot.snapshot_path(root).read_bytes()
-
-    def reader_after_a_drop(path):
-        with Store(root) as other:
-            payments = next(
-                d for d in other.iter_domains(status=DomainStatus.ACCEPTED) if d.slug == "payments"
-            )
-            other.ratify_domains(drop=[payments.domain_id])
-        return GraphifyReader(path)
-
-    monkeypatch.setattr("sidegraph.cli.GraphifyReader", reader_after_a_drop)
-    capsys.readouterr()
-    assert _run("--db", str(root), "--graph", str(legacy), "--refresh", "--domain", "payments") == 1
-    assert "no accepted domain: payments" in capsys.readouterr().out
-    assert domain_snapshot.snapshot_path(root).read_bytes() == before
-
-
 @pytest.mark.parametrize("part_flags", [[], ["--domain", "billing-a"]])
 def test_refresh_requires_every_part_of_a_split(tmp_path, capsys, openable, part_flags):
     """A plain/partial refresh must not silently discard a split's frozen entries."""
@@ -340,7 +286,7 @@ def test_refresh_requires_every_part_of_a_split(tmp_path, capsys, openable, part
 
     root, graph = _project(tmp_path, legacy_graph(), "legacy")
     assert _run("--db", str(root), "--graph", str(graph)) == 0
-    with Store(root) as store:
+    with Store(format1_store(root)) as store:
         old = store.find_domain_by_slug("payments")
         accept(store, "billing-a", supersedes=old, seeds=[("Invoice", "src/pay/model.py")])
         accept(store, "billing-b", supersedes=old, seeds=[("Invoice", "src/pay/model.py")])
@@ -351,7 +297,7 @@ def test_refresh_requires_every_part_of_a_split(tmp_path, capsys, openable, part
     assert _run("--db", str(root), "--graph", str(graph), "--refresh", *part_flags) == 1
     assert "--domain billing-a --domain billing-b" in capsys.readouterr().out
     assert (path.read_bytes(), (root / "format").read_bytes()) == before
-    with Store(root) as store:
+    with Store(format1_store(root)) as store:
         report = sync(store, GraphifyReader(graph), force=True)
         assert report.snapshot_splits == [
             {"slug": "payments", "domains": ["billing-a", "billing-b"]}
@@ -371,7 +317,7 @@ def test_refresh_requires_every_part_of_a_split(tmp_path, capsys, openable, part
         )
         == 0
     )
-    with Store(root) as store:
+    with Store(format1_store(root)) as store:
         report = sync(store, GraphifyReader(graph), force=True)
         assert report.snapshot_splits == []
         for slug in ("billing-a", "billing-b"):

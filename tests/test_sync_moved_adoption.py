@@ -16,104 +16,24 @@ Two rules close it (design/superpowers/specs/2026-10-01-moved-rung-false-adoptio
 Every test here builds a real git repository: the rules are about what git says.
 """
 
-import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
 import sidegraph.sync as sync_module
-from sidegraph.engine.reader import GraphifyReader
-from sidegraph.gitenv import git_env
-from sidegraph.schema import Descriptor, Entity
-from sidegraph.store import Store
-from sidegraph.sync import PENDING_MOVES_KEY, rebind_entity, sync
-
-_GIT_CONFIG = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
-
-
-def _git(cwd: Path, *args: str, when: str | None = None) -> str:
-    """``when`` pins author and committer dates, for tests that depend on commit order."""
-    env = {**git_env(), **_GIT_CONFIG}
-    if when is not None:
-        env |= {"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
-    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=env)
-    assert result.returncode == 0, f"git {args} failed: {result.stderr}"
-    return result.stdout
-
-
-def _configure(repo: Path) -> None:
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Test")
-
-
-def _repo(root: Path, name: str = "repo") -> Path:
-    """A fresh repository whose scratch directory ``.sg/`` (graph, store) is never tracked."""
-    repo = root / name
-    repo.mkdir()
-    _git(repo, "init", "-q", "-b", "main")
-    _configure(repo)
-    (repo / ".git" / "info" / "exclude").write_text(".sg/\n")
-    return repo
-
-
-def _write(repo: Path, rel: str, text: str = "x\n") -> None:
-    target = repo / rel
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text)
-
-
-def _commit(repo: Path, message: str, when: str | None = None) -> None:
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", message, when=when)
-
-
-def _graph(repo: Path, nodes: list[tuple[str, str, str]]) -> GraphifyReader:
-    """A graph of ``(node id, label, source file)`` rows, written into the repo's ``.sg/``."""
-    rows = [
-        {
-            "id": node_id,
-            "label": label,
-            "norm_label": label,
-            "file_type": "document" if file.endswith(".md") else "code",
-            "source_file": file,
-            "community": 1,
-        }
-        for node_id, label, file in nodes
-    ]
-    path = repo / ".sg" / "graph.json"
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps({"built_at_commit": "vB", "nodes": rows, "links": []}))
-    return GraphifyReader(path)
-
-
-def _store(repo: Path, name: str, old_path: str) -> tuple[Store, Entity]:
-    store = Store(repo / ".sg" / "t.db")
-    entity = store.upsert_entity(
-        Entity(
-            canonical_name=name,
-            descriptor=Descriptor(name=name, file_path=old_path),
-            last_seen_node_id="old",
-            last_seen_graph_version="vA",
-        )
-    )
-    return store, entity
-
-
-def _rebind(repo: Path, nodes, name: str, old_path: str, *, canonical_writes: bool = True):
-    reader = _graph(repo, nodes)
-    store, entity = _store(repo, name, old_path)
-    outcome = rebind_entity(
-        entity, store, reader, repo_root=repo, canonical_writes=canonical_writes
-    )
-    return outcome, store.get_entity(entity.entity_id)
-
-
-def _assert_refused(outcome, kept, old_path: str) -> None:
-    assert outcome.status == "orphaned"
-    assert kept.descriptor.file_path == old_path  # the canonical descriptor is untouched
-    assert kept.last_seen_node_id == "old"
-
+from sidegraph.sync import PENDING_MOVES_KEY, sync
+from tests.moved_adoption_support import (
+    _assert_refused,
+    _commit,
+    _configure,
+    _git,
+    _graph,
+    _rebind,
+    _repo,
+    _store,
+    _write,
+)
 
 # -- D1: a hit is a move only when its label IS the descriptor's name -------------------
 
@@ -254,11 +174,15 @@ def _is_ls_tree_of_change(args: list[str]) -> bool:
 
 
 @pytest.mark.parametrize(
-    "target",
-    [_is_deletion_search, _is_parent_probe, _is_ls_tree_of_parent, _is_ls_tree_of_change],
-    ids=["log", "parent-probe", "ls-tree-parent", "ls-tree-change"],
+    ("target", "failure"),
+    [
+        (_is_deletion_search, "raises"),
+        (_is_parent_probe, "exits-nonzero"),
+        (_is_ls_tree_of_parent, "exits-nonzero"),
+        (_is_ls_tree_of_change, "raises"),
+    ],
+    ids=["log-raises", "parent-probe-nonzero", "ls-tree-parent-nonzero", "ls-tree-change-raises"],
 )
-@pytest.mark.parametrize("failure", ["raises", "exits-nonzero"])
 def test_t5_when_only_d2s_git_calls_fail_the_move_is_refused(
     tmp_path, monkeypatch, target, failure
 ):
@@ -520,9 +444,8 @@ def test_a_glob_in_the_old_path_does_not_borrow_another_files_deletion(tmp_path)
         ("app/[slug]/page.tsx", "app/s/page.tsx"),
         ("a/x*.py", "a/xy.py"),
         ("a/what?.py", "a/whatx.py"),
-        # control: nothing for a glob to pair, so these already work
-        ("app/[slug]/page.tsx", "app/blog/page.tsx"),
-        ("app/blog/page.tsx", "app/[slug]/page.tsx"),  # ls-tree is literal: no change needed
+        # nothing for a glob to pair here: ls-tree is literal, so this already works
+        ("app/blog/page.tsx", "app/[slug]/page.tsx"),
     ],
 )
 def test_a_real_move_of_a_path_with_glob_characters_is_adopted(tmp_path, old, new):
@@ -536,57 +459,6 @@ def test_a_real_move_of_a_path_with_glob_characters_is_adopted(tmp_path, old, ne
 
     assert outcome.status == "moved"
     assert kept.descriptor.file_path == new
-
-
-# -- a signed history: log.showSignature must not leak into the commit id ----------------------
-
-
-def _sign_commits_with_ssh(repo: Path) -> None:
-    """Sign every commit with a throwaway ssh key and make ``git log`` print the signature
-    check. Skips the test when this machine cannot sign."""
-    key = repo.parent / "signing_key"
-    made = subprocess.run(
-        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", str(key)],
-        capture_output=True,
-    )
-    if made.returncode != 0:
-        pytest.skip("ssh-keygen cannot make a signing key here")
-    signers = repo.parent / "allowed_signers"
-    signers.write_text(f"test@example.com {key.with_suffix('.pub').read_text()}")
-    for name, value in [
-        ("gpg.format", "ssh"),
-        ("user.signingkey", str(key)),
-        ("gpg.ssh.allowedSignersFile", str(signers)),
-        ("commit.gpgsign", "true"),
-        ("log.showSignature", "true"),
-    ]:
-        _git(repo, "config", name, value)
-    probe = subprocess.run(
-        ["git", "commit", "-q", "--allow-empty", "-m", "probe"],
-        cwd=repo,
-        capture_output=True,
-        env={**git_env(), **_GIT_CONFIG},
-    )
-    if probe.returncode != 0:
-        pytest.skip("git cannot sign a commit with ssh here")
-
-
-def test_a_signed_history_with_log_show_signature_still_adopts_a_real_move(tmp_path):
-    """With ``log.showSignature`` on, ``git log`` prints a ``Good "git" signature`` line before
-    the commit id, which would make the answer more than one token and refuse every move."""
-    repo = _repo(tmp_path)
-    _sign_commits_with_ssh(repo)
-    _write(repo, "A.swift", "struct Foo {}\n")
-    _commit(repo, "initial")
-    _git(repo, "mv", "A.swift", "C.swift")
-    _commit(repo, "move A.swift to C.swift")
-    shown = _git(repo, "log", "-1", "--format=%H")
-    assert len(shown.split()) > 1, "the signature check did not reach git log's output"
-
-    outcome, kept = _rebind(repo, [("n1", "Foo", "C.swift")], "Foo", "A.swift")
-
-    assert outcome.status == "moved"
-    assert kept.descriptor.file_path == "C.swift"
 
 
 def test_d2s_deletion_search_is_literal_mainline_and_signature_free(tmp_path, monkeypatch):

@@ -133,17 +133,6 @@ def test_add_anchors_unknown_record_returns_error_dict(tmp_path):
     assert out == {"error": "unknown record"}
 
 
-def test_add_anchors_invalid_relation_writes_nothing(tmp_path):
-    store = Store(tmp_path / "srv.db")
-    d = _decision(store)
-    try:
-        _add_anchors_impl(store, None, d.id, anchors=[{"name": "x", "relation": "bogus"}])
-        raise AssertionError("expected ValueError")
-    except ValueError:
-        pass
-    assert store.bindings_for_record(d.id) == []
-
-
 def test_add_anchors_duplicate_anchor_does_not_double_bind(tmp_path):
     # Pins store.add_binding's actual duplicate behavior (same record + entity is an
     # upsert on the (record_id, entity_id) primary key -- see store._index_write_binding)

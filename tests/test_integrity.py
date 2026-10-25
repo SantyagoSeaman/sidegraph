@@ -205,6 +205,8 @@ def test_registry_order_is_the_sessionstart_line_order():
         "refresh-hook-missing",
         "store-uncommitted",
         "branch-only-records",
+        "store-not-migrated",
+        "maintenance-due",
     ]
 
 

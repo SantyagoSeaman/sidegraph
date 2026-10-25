@@ -429,7 +429,7 @@ def _file_bound_records(store: Store, entity_id: str) -> tuple[list[Decision], l
     decisions: list[Decision] = []
     facts: list[Fact] = []
     now = datetime.now(UTC)
-    for binding in store.bindings_for_entity(entity_id):
+    for binding in store.bindings_for_entity_group(entity_id):
         record = store.get_decision(binding.record_id) or store.get_fact(binding.record_id)
         if record is None or (record.valid_to is not None and record.valid_to <= now):
             continue

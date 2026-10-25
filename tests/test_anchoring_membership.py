@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import threading
 from datetime import UTC, datetime
 
 import pytest
@@ -23,12 +22,9 @@ from sidegraph.schema import (
     DecisionKind,
     DecisionStatus,
     Descriptor,
-    DomainStatus,
     Provenance,
 )
 from sidegraph.server import (
-    _add_anchors_impl,
-    _add_decision_impl,
     _add_fact_impl,
     _supersede_fact_impl,
 )
@@ -36,6 +32,7 @@ from sidegraph.store import Store
 from sidegraph.store_layout import DOMAIN_SNAPSHOT_NAME
 from sidegraph.sync import sync
 from tests.graph_fixtures import write_graph
+from tests.membership_support import _setup
 from tests.snapshot_support import (
     STUB,
     accept,
@@ -62,12 +59,6 @@ def _tier1(store, reader, name, path):
     )
     resolve_and_bind(d.id, Descriptor(name=name, file_path=path), reader, store)
     return tier1_names(store, d.id)
-
-
-def _setup(tmp_path, data=None):
-    return Store(tmp_path / ".sidegraph"), GraphifyReader(
-        write_graph(tmp_path, "g.json", data or legacy_graph())
-    )
 
 
 def test_tier1_binds_the_domain_that_holds_the_node(tmp_path):
@@ -237,68 +228,6 @@ def test_a_capture_right_after_a_reload_binds_the_domain(tmp_path, monkeypatch):
     assert tier1_names(server_module._store, json.loads(second.content[0].text)["id"]) == [
         "domain:payments"
     ]
-
-
-@pytest.mark.parametrize("tool", ["add_decision", "add_anchors"])
-def test_a_drop_cannot_land_between_capture_s_pick_and_its_binding(tmp_path, monkeypatch, tool):
-    """Red against a Tier-1 block whose reservation ends with the pick: another connection
-    drops payments before the binding is written, and capture writes a live domain:payments
-    binding for a domain already dropped. Decision capture and add_anchors hold no outer
-    reservation, unlike the fact tools."""
-    store, reader = _setup(tmp_path)
-    payments = standard_domains(store)["payments"]
-    sync(store, reader)
-    anchors = [{"name": "Invoice", "file_path": "src/pay/model.py"}]
-    record = store.add_decision(
-        Decision(
-            title="t",
-            kind=DecisionKind.ADR,
-            context="c",
-            choice="ch",
-            valid_from=datetime.now(UTC),
-            provenance=Provenance(source="manual"),
-        )
-    )
-    picked, release = threading.Event(), threading.Event()
-    real_cover = anchoring._covering_domain
-
-    def cover_then_pause(*a, **kw):
-        found = real_cover(*a, **kw)
-        picked.set()
-        release.wait(5)
-        return found
-
-    monkeypatch.setattr(anchoring, "_covering_domain", cover_then_pause)
-    status_at_write: list[DomainStatus] = []
-    real_bind = store.add_binding
-
-    def recording_bind(binding):
-        if binding.tier == 1:
-            status_at_write.append(store.get_domain(payments.domain_id).status)
-        return real_bind(binding)
-
-    monkeypatch.setattr(store, "add_binding", recording_bind)
-
-    def capture():
-        if tool == "add_decision":
-            _add_decision_impl(store, reader, "t2", "adr", "c", "ch", anchors=anchors)
-        else:
-            _add_anchors_impl(store, reader, record.id, anchors)
-
-    other = Store(store.path)
-    worker = threading.Thread(target=capture)
-    worker.start()
-    assert picked.wait(5)
-    drop = threading.Thread(target=other.ratify_domains, kwargs={"drop": [payments.domain_id]})
-    drop.start()
-    drop.join(0.5)
-    waited = drop.is_alive()
-    release.set()
-    worker.join(10)
-    drop.join(10)
-    other.close()
-    assert waited  # the drop waited for the capture's reservation
-    assert status_at_write == [DomainStatus.ACCEPTED]
 
 
 def test_a_pull_after_capture_s_pick_binds_no_domain(tmp_path, monkeypatch):

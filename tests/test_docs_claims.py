@@ -16,6 +16,7 @@ a guard would fight the suite rather than protect it -- see the sweep doc's §3 
 from __future__ import annotations
 
 import ast
+import functools
 import inspect
 import re
 from pathlib import Path
@@ -311,6 +312,13 @@ def _entry_point_targets() -> dict[str, tuple[str, str]]:
     return {name: (mod, func) for name, mod, func in pairs}
 
 
+@functools.cache
+def _module_tree(module: str) -> ast.Module:
+    """The parsed source of ``module``; each entry point of one module shares a parse."""
+    path = _ROOT.joinpath("src", *module.split(".")).with_suffix(".py")
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
 def _parser_option_strings(module: str, func: str) -> set[str]:
     """Every ``--flag`` literal the named entry point's parser defines.
 
@@ -326,8 +334,7 @@ def _parser_option_strings(module: str, func: str) -> set[str]:
     ``sidegraph-bootstrap``'s build_parser() delegation working while correctly reporting
     zero flags for one with none.
     """
-    path = _ROOT.joinpath("src", *module.split(".")).with_suffix(".py")
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = _module_tree(module)
 
     def flags_under(node: ast.AST) -> set[str]:
         found: set[str] = set()
@@ -447,10 +454,11 @@ def test_every_relative_doc_link_and_anchor_resolves():
     # README links into docs/ by anchor too, and it is the first page a reader opens.
     docs.append(_ROOT / "README.md")
 
-    anchors: dict[Path, set[str]] = {}
-    for path in _ROOT.rglob("*.md"):
-        headings = re.findall(r"^#{1,6}\s+(.*)$", path.read_text(encoding="utf-8"), re.M)
-        anchors[path.resolve()] = {_heading_anchor(h) for h in headings}
+    @functools.cache
+    def anchors_of(dest: Path) -> set[str]:
+        # Read lazily: only the pages some link actually points into.
+        headings = re.findall(r"^#{1,6}\s+(.*)$", dest.read_text(encoding="utf-8"), re.M)
+        return {_heading_anchor(h) for h in headings}
 
     broken: list[str] = []
     for path in docs:
@@ -470,7 +478,7 @@ def test_every_relative_doc_link_and_anchor_resolves():
                 dest = (_ROOT / "design" / "whitepaper" / "draft.md").resolve()
             if not dest.exists():
                 broken.append(f"{where}: missing file -> {target}")
-            elif fragment and dest.suffix == ".md" and fragment not in anchors.get(dest, set()):
+            elif fragment and dest.suffix == ".md" and fragment not in anchors_of(dest):
                 broken.append(f"{where}: missing anchor -> {target}")
     assert not broken, "broken links:\n" + "\n".join(broken)
 

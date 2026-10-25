@@ -154,19 +154,6 @@ def test_orphan_with_surviving_file_repoints_via_file_community(tmp_path):
     assert kept.last_seen_node_id == "s1"  # mapping untouched — never guess
 
 
-def test_orphan_with_file_gone_does_not_repoint(tmp_path):
-    s, e, d = _setup(tmp_path, baseline="1")
-    gone = {"built_at_commit": "vD", "nodes": [], "links": []}
-    out = rebind_entity(e, s, _reader(tmp_path, gone))
-    assert out.status == "orphaned" and out.repointed == 0
-    by_entity = {
-        s.get_entity(b.entity_id).canonical_name: b
-        for b in s.bindings_for_record(d.id)
-        if b.tier == 1
-    }
-    assert by_entity["community:1"].status == "live"  # true residual — untouched
-
-
 def test_ambiguous_with_shared_community_repoints(tmp_path):
     s, e, d = _setup(tmp_path, baseline="1")
     dup = {

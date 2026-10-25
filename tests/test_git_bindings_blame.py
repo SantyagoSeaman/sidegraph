@@ -10,7 +10,7 @@ import json
 import subprocess
 from datetime import UTC, datetime
 
-from sidegraph import __version__
+from sidegraph import __version__, gitio
 from sidegraph.cli import blame_main
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Fact, Provenance
 from sidegraph.store import Store
@@ -206,12 +206,13 @@ def test_json_output_shape(tmp_path, monkeypatch):
 
 
 def test_cap_declared_when_row_cap_hit(tmp_path, monkeypatch):
-    """55 distinct single-line commits -> 55 hunk rows, over the 50-row cap -- the last
-    line (human output) / the `cap` field (--json) must declare it, never silently
-    truncate."""
+    """More single-line commits than the row cap -> more hunk rows than it allows -- the last
+    line (human output) / the `cap` field (--json) must declare it, never silently truncate.
+    The cap is patched down so the repo needs 5 commits, not 55."""
+    monkeypatch.setattr(gitio, "BLAME_ROW_CAP", 3)
     repo = _init_repo(tmp_path)
     lines = []
-    for i in range(55):
+    for i in range(5):
         lines.append(f"line{i}")
         (repo / "f.txt").write_text("\n".join(lines) + "\n")
         _git(["add", "-A"], repo)
@@ -220,14 +221,13 @@ def test_cap_declared_when_row_cap_hit(tmp_path, monkeypatch):
     rc, out = _run(["f.txt", "--json"], monkeypatch, repo)
     assert rc == 0
     payload = json.loads(out)
-    assert len(payload["hunks"]) <= 50
-    assert payload["omitted"] > 0
-    assert payload["cap"] == {"rows": 50, "chars": 6000}
+    assert len(payload["hunks"]) == 3
+    assert payload["omitted"] == 2
+    assert payload["cap"] == {"rows": 3, "chars": 6000}
 
     rc2, out2 = _run(["f.txt"], monkeypatch, repo)
     assert rc2 == 0
-    assert "omitted" in out2
-    assert "50" in out2
+    assert "2 more hunk row(s) omitted (cap: 3 rows / 6000 chars)" in out2
 
 
 # -- G9: gitio failures -> clean CLI error, exit 1 -------------------------------------------

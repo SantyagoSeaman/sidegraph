@@ -76,9 +76,7 @@ def install(sb, repo: Path) -> None:
     githooks.install(info, graphify=str(sb.fake_bin / "graphify"))
 
 
-def test_the_check_precedes_the_stranded_write_checks_and_is_for_the_session_only():
-    ids = [c.id for c in CHECKS]
-    assert ids.index(CHECK) + 1 == ids.index("store-uncommitted")
+def test_the_check_is_for_the_session_only():  # its slot is pinned by test_integrity's order test
     assert detector().surfaces == frozenset({"session"})
 
 
@@ -328,9 +326,7 @@ def write_old_helper(sb, repo: Path) -> githooks.RepoInfo:
     return info
 
 
-def test_the_outdated_check_runs_just_before_refresh_hook_missing_for_session_and_doctor():
-    ids = [c.id for c in CHECKS]
-    assert ids.index(OUTDATED) + 1 == ids.index(CHECK)
+def test_the_outdated_check_is_for_session_and_doctor():  # slot: test_integrity's order test
     assert outdated_detector().surfaces == frozenset({"session", "doctor"})
 
 

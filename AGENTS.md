@@ -16,7 +16,8 @@ Tests/fixtures: `tests/`; plugin skills/configuration in `plugin/sidegraph/`.
 ## Storage Invariants
 
 - Treat `graphify-out/graph.json` as read-only input.
-- JSON records and immutable archives in `.sidegraph/` are authoritative;
+- Per-record JSON files and, in a packed (format 2) store, `shards/*.shard` lines are
+  authoritative, as are immutable legacy archives in `.sidegraph/`;
   `index.db` is derived and gitignored. Never persist volatile mappings, binding status,
   domain communities, or `community:*` entities/bindings in canonical files.
 - Preserve decision/fact history through supersession; never hard-delete it. Respect format

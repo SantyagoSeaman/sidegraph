@@ -110,7 +110,7 @@ from .schema import (
     file_anchor_descriptors,
     is_safe_record_id,
 )
-from .store import VOLATILE_STALE_KEY, Store, skipped_refusal_text
+from .store import VOLATILE_STALE_KEY, Store
 from .sync import (
     activate_accepted_domain,
     ensure_domain_membership,
@@ -1099,7 +1099,7 @@ def _supersede_decision_impl(
         # Inheritance reads the predecessor's bindings from the index, and a bindings file the
         # reload left out has no rows there, so the successor would be written with no anchors.
         # see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D5
-        raise ValueError(skipped_refusal_text("bindings", old_decision_id))
+        raise ValueError(store.skipped_refusal("bindings", old_decision_id))
     # See _add_decision_impl: title/context/choice are required, redacted directly (stays
     # `str`); only the optional pair goes through `_redact_fields` (returns `str | None`).
     title, n1 = redact(title)
@@ -1471,7 +1471,7 @@ def _supersede_fact_impl(
         _validate_anchors(anchors)
         if not anchors and store.is_skipped("bindings", old_fact_id):
             # As in _supersede_decision_impl, skipped bindings cannot be inherited.
-            raise ValueError(skipped_refusal_text("bindings", old_fact_id))
+            raise ValueError(store.skipped_refusal("bindings", old_fact_id))
         effective_supports = supports if supports is not None else predecessor.supports
         if not anchors and not store.bindings_for_record(old_fact_id):
             _require_fact_reachability(store, anchors, effective_supports)
@@ -2191,7 +2191,7 @@ def _decision_listing(
         entity_ids, unresolved = _listing_entities(store, reader, wanted_files, borrowed_from)
         # Any binding counts, an orphaned one too: the question is where the record was
         # anchored, not whether it is still delivered there.
-        anchored = {b.record_id for e in entity_ids for b in store.bindings_for_entity(e)}
+        anchored = {b.record_id for e in entity_ids for b in store.bindings_for_entity_group(e)}
         pool = [d for d in pool if d["id"] in anchored]
     if terms:
         pool = [
@@ -2425,7 +2425,7 @@ def _fact_listing(
     unresolved: list[dict] = []
     if wanted_files:
         entity_ids, unresolved = _listing_entities(store, reader, wanted_files, borrowed_from)
-        anchored = {b.record_id for e in entity_ids for b in store.bindings_for_entity(e)}
+        anchored = {b.record_id for e in entity_ids for b in store.bindings_for_entity_group(e)}
         pool = [f for f in pool if f["id"] in anchored]
     if terms:
         pool = [
@@ -5635,7 +5635,7 @@ def _add_anchors_impl(
     # and committed one mutation at a time and would stay behind as orphans.
     # see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D5
     if store.is_skipped("bindings", record_id):
-        raise ValueError(skipped_refusal_text("bindings", record_id))
+        raise ValueError(store.skipped_refusal("bindings", record_id))
     _validate_anchors(anchors)
     anchors = _anchor_dicts(anchors or [], reader, store)
 

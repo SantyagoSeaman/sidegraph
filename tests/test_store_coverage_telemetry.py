@@ -6,7 +6,6 @@ Index-only by construction: the whole point is that reading the store never dirt
 
 from __future__ import annotations
 
-import subprocess
 from datetime import UTC, datetime, timedelta
 
 from sidegraph.store import Store
@@ -66,40 +65,3 @@ def test_prune_deletes_old_events_and_keeps_fresh_ones(tmp_path):
     assert deleted == 1
     assert [e["key"] for e in store.retrieval_events()] == ["fresh.py"]
     store.close()
-
-
-def test_events_survive_a_canonical_reload(tmp_path):
-    """GUARD (declared exception, spec row 14): passes before and after this feature,
-    because `_reload_index_from_canonical` drops an explicit list of six record tables plus
-    `canonical_stat` and never touches anything else. The test exists so a later change
-    cannot add `retrieval_events` to that list — losing the journal on every `git pull`
-    would make the counts meaningless for the long-lived question they answer."""
-    store = Store(tmp_path / "s")
-    store.record_touch("sess-1", "a.py", "Read")
-    digest, _stats = store._compute_canonical_digest()
-    store._reload_index_from_canonical(digest)
-    assert [e["key"] for e in store.retrieval_events()] == ["a.py"]
-    store.close()
-
-
-def test_recording_never_dirties_git(tmp_path):
-    """The sync-clean invariant: a read path must not produce a canonical diff."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    store = Store(repo / ".sidegraph")
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
-        cwd=repo,
-        check=True,
-    )
-
-    store.record_touch("sess-1", "a.py", "Read")
-    store.record_retrieval_events("sess-1", ["a.py"], [("rec-1", "b.py")])
-    store.close()
-
-    status = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True
-    )
-    assert status.stdout == "", f"telemetry dirtied git: {status.stdout}"

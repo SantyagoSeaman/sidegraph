@@ -8,6 +8,7 @@ import pytest
 
 from sidegraph.schema import AnchorBinding, Decision, Descriptor, Entity, Fact, Provenance
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 
 NOW = datetime(2026, 10, 18, tzinfo=UTC)
 
@@ -15,7 +16,7 @@ NOW = datetime(2026, 10, 18, tzinfo=UTC)
 def seed(root: Path) -> Path:
     """Tiny synthetic canonical store with independent trust and kind controls."""
     db = root / ".sidegraph"
-    with Store(db) as store:
+    with Store(format1_store(db)) as store:
         entity = store.upsert_entity(
             Entity(
                 canonical_name="Cache",
@@ -121,7 +122,7 @@ def test_archived_predecessor_keeps_a_pointer_to_cross_kind_successor(tmp_path):
     from sidegraph.profiles import get_profile
 
     db = seed(tmp_path)
-    with Store(db) as store:
+    with Store(format1_store(db)) as store:
         store.add_decision(
             Decision(
                 id="LATER",
@@ -207,7 +208,7 @@ def test_archive_duplicate_admission_respects_existing_verifier_rules(tmp_path):
     from sidegraph.adr import read_snapshot
 
     db = seed(tmp_path)
-    with Store(db) as store:
+    with Store(format1_store(db)) as store:
         store.add_decision(
             Decision(
                 id="NEXT",

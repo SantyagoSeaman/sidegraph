@@ -20,6 +20,9 @@ import pytest
 from sidegraph.store import Store
 
 # Marked per test: the tests that spawn a console script are `slow`; the in-process ones are not.
+# The full installed-script matrix (every script, every hook, every argument shape) lives in
+# tests/private/test_entry_point_arguments.py; here a representative subset spawns real scripts:
+# one hook entry, the MCP server and one argparse CLI.
 
 HOOKS = (
     "sidegraph-session-start",
@@ -34,6 +37,7 @@ HOOK_FUNCTIONS = {
     "sidegraph-subagent-start": ("sidegraph.host.subagent", "subagent_start"),
 }
 TIMEOUT_SECONDS = 30
+SAMPLE_SCRIPTS = ("sidegraph-session-start", "sidegraph-mcp", "sidegraph-stats")
 
 
 def _console_scripts() -> list[str]:
@@ -142,7 +146,7 @@ def test_discovery_finds_the_hooks_and_every_script() -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", _console_scripts())
+@pytest.mark.parametrize("name", SAMPLE_SCRIPTS)
 def test_help_prints_usage_and_touches_nothing(name: str, sandbox: Sandbox) -> None:
     before = sandbox.snapshot()
     result = _run(name, ["--help"], sandbox)
@@ -153,7 +157,7 @@ def test_help_prints_usage_and_touches_nothing(name: str, sandbox: Sandbox) -> N
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", _console_scripts())
+@pytest.mark.parametrize("name", ("sidegraph-session-start", "sidegraph-stats"))
 def test_short_help_prints_usage_and_touches_nothing(name: str, sandbox: Sandbox) -> None:
     before = sandbox.snapshot()
     result = _run(name, ["-h"], sandbox)
@@ -164,10 +168,9 @@ def test_short_help_prints_usage_and_touches_nothing(name: str, sandbox: Sandbox
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", HOOKS)
-def test_hook_treats_help_anywhere_in_the_arguments_as_help(name: str, sandbox: Sandbox) -> None:
+def test_hook_treats_help_anywhere_in_the_arguments_as_help(sandbox: Sandbox) -> None:
     before = sandbox.snapshot()
-    result = _run(name, ["extra", "--help"], sandbox)
+    result = _run(HOOKS[0], ["extra", "--help"], sandbox)
     assert result.returncode == 0, result.stderr
     assert "usage" in result.stdout.lower()
     assert sandbox.snapshot() == before
@@ -189,9 +192,8 @@ def test_prepare_commit_msg_bad_argument_is_fail_open(sandbox: Sandbox) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", HOOKS)
-@pytest.mark.parametrize("args", [["--bogus"], ["extra"], ["--help-me", "extra"]])
-def test_hook_refuses_an_unexpected_argument(name: str, args: list[str], sandbox: Sandbox) -> None:
+def test_hook_refuses_an_unexpected_argument(sandbox: Sandbox) -> None:
+    name, args = HOOKS[0], ["--bogus"]
     before = sandbox.snapshot()
     result = _run(name, args, sandbox)
     assert result.returncode == 2
@@ -202,7 +204,10 @@ def test_hook_refuses_an_unexpected_argument(name: str, args: list[str], sandbox
 
 
 @pytest.mark.parametrize("name", HOOKS)
-@pytest.mark.parametrize("args", [["--help"], ["-h"], ["--bogus"]])
+@pytest.mark.parametrize(
+    "args",
+    [["--help"], ["-h"], ["--bogus"], ["extra"], ["--help-me", "extra"], ["extra", "--help"]],
+)
 def test_hook_function_never_reads_stdin_for_an_argument(
     name: str,
     args: list[str],
@@ -240,11 +245,10 @@ def test_hook_function_never_reads_stdin_for_an_argument(
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", HOOKS)
-def test_hook_without_arguments_still_reads_the_payload(name: str, sandbox: Sandbox) -> None:
+def test_hook_without_arguments_still_reads_the_payload(sandbox: Sandbox) -> None:
     """The hot path is unchanged: no argument, empty stdin, a JSON answer, exit 0."""
     process = subprocess.run(
-        [str(_script_path(name))],
+        [str(_script_path(HOOKS[0]))],
         cwd=sandbox.repo,
         env=sandbox.env,
         input="",

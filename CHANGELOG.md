@@ -7,6 +7,44 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-10-24
+
+### Changed (Contract change)
+
+- **Store format 2: packed shards.** A store can now hold its settled records in 16, 64 (the
+  default) or 256 shard files (`shards/NN.shard`, one JSON line per record) instead of one
+  file per record. The `format` marker for it is `sidegraph-store 2.0.0` with a
+  `requires-sidegraph` line and a `shards N` line. A fresh store is created in format 2 and
+  requires `>= 0.17.0`. New and edited records are still written as one file each; shards
+  change only in maintenance. Format 1 stays fully served, so a store keeps working until you
+  migrate. 0.14–0.16 refuse a format-2 store, with a message that says "use a fresh store":
+  upgrade instead. See [Migrate to Sidegraph 0.17](docs/guides/migrating-to-0.17.md) and the
+  [store format](docs/reference/store-format.md#format-2-packed-shards).
+
+### Added
+
+- `sidegraph-migrate`: switch a store to format 2 and fold every per-record file and archive
+  segment into the shards, on the default branch; it never commits. `--dry-run`, `--shards`,
+  `--any-branch`.
+- `sidegraph-compact` on a format-2 store is maintenance: it folds settled per-record files and
+  archive segments into the shards, moving bodies verbatim (`--settled-days`, default 7;
+  `--any-branch`). `--older-than` stays for format 1.
+- `sidegraph-verify` findings for packed stores: `bad-shard-line`, `shard-conflict`,
+  `duplicate-packed-record`, `shadow-divergence`, `binding-entry-dropped`, `shard-name-case`,
+  `shards-without-format2`, and, with `--against`, `shard-body-without-source` and
+  `format-downgrade`.
+- `sidegraph-doctor` and SessionStart notices: `store-not-migrated` (a store with records in the
+  older layout) and `maintenance-due` (a packed store with work for maintenance). `--check`
+  exits `2` on either.
+- The `/sidegraph:compact` skill runs the dry run, asks, runs maintenance or migration and
+  verifies, without committing.
+
+### Changed
+
+- The shipped test suite is about three times faster: duplicate and coverage-only tests are
+  gone, expensive setup is shared, and slow rare-case tests (crash and kill matrices, stress
+  races, fault injection) no longer ship; the maintainers run them before each release.
+
 ## [0.16.0] — 2026-10-20
 
 See [Using Sidegraph 0.16](docs/guides/using-0.16.md) for update, compatibility, and

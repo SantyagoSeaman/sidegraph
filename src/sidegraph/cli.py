@@ -55,7 +55,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import domain_snapshot, githooks, gitio
+from . import domain_snapshot, githooks, gitio, maintenance_clock
 from .capture import (
     RatifyPolicy,
     format_domain_proposal,
@@ -83,7 +83,12 @@ from .doc_import import (
     _glob_repo_root_info,
     import_docs,
 )
-from .doctor import curate, open_curation_index, ratification_info_lines, spelling_twin_lines
+from .doctor import (
+    curate,
+    open_curation_index,
+    ratification_info_lines,
+    spelling_twin_lines,
+)
 from .domains import DEFAULT_CANDIDATE_LIMIT, bootstrap_domains, collect_domain_candidates
 from .engine.reader import GraphBuildError, GraphifyReader, build_graph_at_head
 from .host.claude_settings import (
@@ -98,24 +103,32 @@ from .host.claude_settings import (
 from .importer import import_rationales
 from .input_limits import InputLimitError
 from .integrity import binding_statuses_computed
+from .maintenance import render_report
 from .okf import build_bundle, write_bundle
 from .profiles import PROFILES, get_profile
 from .retrieval import TOC_CACHE_KEY, build_toc, proposal_surfaces
 from .schema import Decision, DecisionKind, DecisionStatus, Domain, DomainStatus, Fact, Provenance
 from .stats.model import UnreadableRecordError, build_report
 from .stats.render import render_json, render_text
-from .store import VOLATILE_STALE_KEY, Store
+from .store import VOLATILE_STALE_KEY, Store, StoreBusyError
+from .store_format import has_shard_files
 from .store_layout import (
     ARCHIVE_SUBDIR,
     CANONICAL_SUBDIRS,
     FORMAT_MARKER_NAME,
+    GITIGNORE_NAME,
+    SHARDS_SUBDIR,
+    STAMPING_MARKER_NAME,
     StoreRequirementError,
     check_store_requirement,
+    index_stamp_note,
     is_release_version,
     open_would_write,
     require_listable_record_dirs,
     requirement_met,
     snapshot_signature,
+    store_has_any_records,
+    store_marker,
     store_requirement,
     symlinked_internals,
 )
@@ -202,7 +215,7 @@ def _is_empty_store_for_init(path: Path) -> bool:
         or not path_exists(path / FORMAT_MARKER_NAME)
     ):
         return False
-    pending = [path / name for name in (*CANONICAL_SUBDIRS, ARCHIVE_SUBDIR)]
+    pending = [path / name for name in (*CANONICAL_SUBDIRS, ARCHIVE_SUBDIR, SHARDS_SUBDIR)]
     while pending:
         directory = pending.pop()
         try:
@@ -2203,12 +2216,20 @@ def compact_main(argv: list[str] | None = None) -> int:
     would keep on mismatch, and leftover hot files from an interrupted prior run it would
     clean up, without writing an archive segment or removing hot files; opening the store may
     still initialise or migrate it, or rebuild ``index.db``.
+
+    On a format-2 store (marker major 2) the command runs maintenance (``Store.maintain``)
+    instead: ``--settled-days`` and ``--any-branch`` apply there, ``--older-than`` is refused;
+    on format 1 the reverse holds. # see
+    design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.2)
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-compact",
         description="Pack terminal-status decisions and domains into an immutable archive "
         "segment, freeing them from the git-committed record-per-file directories. "
-        "Append-only: records MOVE to the archive, never lost or mutated.",
+        "Append-only: records MOVE to the archive, never lost or mutated. On a format-2 "
+        "(packed) store the command is maintenance instead: it folds settled per-record "
+        "files and archive segments into the shard files verbatim (--settled-days), on the "
+        "default branch unless --any-branch, and never commits.",
     )
     parser.add_argument(
         "--db",
@@ -2227,23 +2248,239 @@ def compact_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="list what would be compacted; write no segment and remove no hot file (opening the "
-        "store may still initialise or migrate it, or rebuild index.db)",
+        help="list what would be compacted; write no segment and remove no hot file (a "
+        "legacy store may still be migrated on open, and index.db rebuilt). On a format-2 store "
+        "it writes nothing tracked: it lists what maintenance would fold, move, delete and "
+        "write. A path holding no store is refused, never created",
+    )
+    parser.add_argument(
+        "--settled-days",
+        type=int,
+        default=None,
+        metavar="DAYS",
+        help="format 2 only: fold a per-record file once its current content landed on the "
+        "current branch at least DAYS days ago (default 7); 0 folds everything and is the "
+        "only value that works outside a git work tree",
+    )
+    parser.add_argument(
+        "--any-branch",
+        action="store_true",
+        help="format 2 only: run on a branch other than the repository's default branch",
     )
     args = parser.parse_args(argv)
 
+    args.db = resolve_store_path(args.db)
+
+    # The flow follows the marker's major, read without opening the store: opening one writes
+    # (a missing marker, .gitignore, stamping marker), which a refusal and a dry run must not.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.2)
+    try:
+        marker = store_marker(args.db)
+    except Exception as e:
+        print(f"store not readable ({args.db}): {e}")
+        return 1
+    if marker is not None and marker.major == 2:
+        return _compact_format2(args)
     if args.older_than is not None and args.older_than < 0:
         print(f"--older-than must be >= 0 (got {args.older_than})")
         return 1
-
-    args.db = resolve_store_path(args.db)
-
+    if marker is None and _not_a_store(Path(args.db)):
+        print(f"no store at {args.db}: sidegraph-compact never creates one")
+        return 2
+    if args.settled_days is not None or args.any_branch:
+        flag = "--settled-days" if args.settled_days is not None else "--any-branch"
+        print(
+            f"{flag} applies to a format 2 store only; this store uses the pre-0.17 layout "
+            "(use --older-than to limit what is archived)"
+        )
+        return 2
     try:
         store = Store(args.db)
     except Exception as e:
         print(f"store not readable ({args.db}): {e}")
         return 1
+    code = _compact_format1(args, store)
+    if code == 0:
+        print(
+            "This store uses the pre-0.17 layout: run `sidegraph-migrate --dry-run` on the "
+            "default branch to pack it into shards."
+        )
+    return code
 
+
+def migrate_main(argv: list[str] | None = None) -> int:
+    """``sidegraph-migrate`` — switch a store to format 2 (the packed layout), then run
+    maintenance with no age limit. The format marker is published first and durably, so every
+    later interruption leaves a store ``sidegraph-migrate`` (while ``HEAD``'s marker is below 2)
+    or ``sidegraph-compact --settled-days 0`` completes. Run it on the default branch with the
+    store committed; it never commits. Exit 0 on a completed run, 2 on a refusal (nothing
+    written, a store that does not open included) or a stop, 1 when another writer holds the
+    store or reading or writing it fails (an I/O error).
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.1)
+    """
+    from .maintenance import render_report
+    from .migrate import MigrationRefused, migrate
+
+    parser = argparse.ArgumentParser(
+        prog="sidegraph-migrate",
+        description="Switch a store to format 2 (packed shard files), then fold every "
+        "per-record file and archive segment into the shards. Publishes the format marker "
+        "first, so an interrupted run is finished by running this again or "
+        "`sidegraph-compact --settled-days 0`. Run on the default branch with .sidegraph/ "
+        "committed; it never commits.",
+    )
+    parser.add_argument("--db", default=None, help=_DB_HELP)
+    parser.add_argument(
+        "--shards",
+        type=int,
+        choices=(16, 64, 256),
+        default=64,
+        help="number of shard files for a store that has none yet (default 64); a store that "
+        "already holds shard files keeps the count they show",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="check the entry conditions and list what the migration would do; write "
+        "nothing, the format marker included",
+    )
+    parser.add_argument(
+        "--any-branch",
+        action="store_true",
+        help="run on a branch other than the repository's default branch",
+    )
+    args = parser.parse_args(argv)
+    args.db = resolve_store_path(args.db)
+    root = Path(args.db)
+    if not (root / "format").exists() and _not_a_store(root) and not has_shard_files(root):
+        print(f"no store at {args.db}: sidegraph-migrate never creates one")
+        return 2
+    try:
+        report = migrate(root, shards=args.shards, dry_run=args.dry_run, any_branch=args.any_branch)
+    except MigrationRefused as e:
+        for reason in e.reasons:
+            print(f"refused: {reason}")
+        return 2
+    except maintenance_clock.ClockError as e:
+        print(f"refused: {e}")
+        return 2
+    except (OSError, ValueError, sqlite3.Error) as e:
+        if _is_busy(e):
+            print(f"cannot migrate ({args.db}): the store is busy, try again")
+        else:
+            print(f"cannot migrate ({args.db}): {e}")
+            if _marker_switched(root):
+                print(
+                    "The format marker is already switched: run sidegraph-migrate again to finish."
+                )
+        return 1
+    print(render_report(report), end="")
+    return 2 if report.stopped else 0
+
+
+def _marker_switched(root: Path) -> bool:
+    """Whether the store's marker is major 2 (a run that failed after step 1 left it so)."""
+    try:
+        marker = store_marker(root)
+    except Exception:
+        return False
+    return marker is not None and marker.major == 2
+
+
+def _not_a_store(root: Path) -> bool:
+    """A path that holds no store and no legacy data: missing, or a directory with no marker
+    and no record. ``sidegraph-compact`` refuses it instead of creating a store there."""
+    if root.is_file():
+        return False  # a legacy single-file store: opening it migrates it, as before
+    if not root.is_dir():
+        return True
+    return not (root / "decisions.db").is_file() and not store_has_any_records(root)
+
+
+def _format2_dry_run_blocker(root: Path) -> str | None:
+    """Why a dry run on this format-2 store could not leave tracked content untouched: opening
+    a ``Store`` writes a missing ``.gitignore`` or stamping marker. The derived ``index.db*``
+    and empty record directories are not tracked content and are not a reason."""
+    if not (root / GITIGNORE_NAME).exists():
+        return f"{root} lacks {GITIGNORE_NAME}, and opening it would create it"
+    if not (root / STAMPING_MARKER_NAME).is_file() and not store_has_any_records(root):
+        return f"{root} holds no record yet, and opening it would write {STAMPING_MARKER_NAME}"
+    return None
+
+
+def _is_busy(exc: BaseException) -> bool:
+    """Whether ``exc`` says another writer holds the store: ``StoreBusyError`` or SQLite's
+    locked/busy ``OperationalError``."""
+    return isinstance(exc, StoreBusyError) or (
+        isinstance(exc, sqlite3.OperationalError)
+        and ("locked" in str(exc).lower() or "busy" in str(exc).lower())
+    )
+
+
+def _compact_format2(args: argparse.Namespace) -> int:
+    """The format-2 flow of ``sidegraph-compact``: ``Store.maintain`` plus the default-branch
+    condition, which this command owns. Exit 0 on a completed run, 2 on a refusal or a stop
+    (the reason is printed), 1 when the store cannot be opened or written or is busy. Every
+    refusal happens before the store is opened.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.2)
+    """
+    if args.older_than is not None:
+        print(
+            "--older-than applies to the pre-0.17 layout only; this store is format 2: "
+            "use --settled-days DAYS"
+        )
+        return 2
+    settled_days = 7 if args.settled_days is None else args.settled_days
+    if settled_days < 0:
+        print(f"--settled-days must be >= 0 (got {settled_days})")
+        return 2
+    try:
+        wt = maintenance_clock.resolve_work_tree(args.db)
+        if wt is not None and not args.any_branch:
+            refusal = maintenance_clock.branch_refusal(wt)
+            if refusal is not None:
+                print(f"refused: {refusal}")
+                return 2
+    except maintenance_clock.ClockError as e:
+        print(f"refused: {e}")
+        return 2
+    if args.dry_run:
+        blocker = _format2_dry_run_blocker(Path(args.db))
+        if blocker is not None:
+            print(f"refused: a dry run writes nothing, and {blocker}")
+            return 2
+    try:
+        store = Store(args.db)
+    except Exception as e:
+        if _is_busy(e):
+            print(f"cannot compact ({args.db}): the store is busy, try again")
+        else:
+            print(f"store not readable ({args.db}): {e}")
+        return 1
+    try:
+        report = store.maintain(
+            settled_days=settled_days, dry_run=args.dry_run, any_branch=args.any_branch
+        )
+    except maintenance_clock.ClockError as e:
+        print(f"refused: {e}")
+        return 2
+    except sqlite3.Error as e:
+        if _is_busy(e):
+            print(f"cannot compact ({args.db}): the store is busy, try again")
+        else:
+            print(f"cannot compact ({args.db}): {e}")
+        return 1
+    except (OSError, ValueError) as e:
+        print(f"cannot compact ({args.db}): {e}")
+        return 1
+    finally:
+        store.close()
+    print(render_report(report), end="")
+    return 2 if report.stopped else 0
+
+
+def _compact_format1(args: argparse.Namespace, store: Store) -> int:
+    """The format-1 flow of ``sidegraph-compact``, unchanged: terminal-only archive segments."""
     # A compaction is a mutation and stays strict about the archive: the store opens over a
     # segment with an unreadable line, so the refusal (naming the segment and the line)
     # arrives here and not from ``Store()``.
@@ -2670,6 +2907,9 @@ def doctor_main(argv: list[str] | None = None) -> int:
             print(f"{v.code}  {v.path}  {v.detail}")
         for f in report.findings:
             print(f"{f.code}  {f.path}  {f.detail}")
+        stamp_note = None if index_usable else index_stamp_note(args.db)
+        if stamp_note is not None:
+            print(f"index checks withheld: {stamp_note}")
         for name in skipped:
             if index_usable and name in _STATUS_CHECKS:
                 # A status check skipped over a usable index can only be the cold case; the
@@ -3078,6 +3318,10 @@ def blame_main(argv: list[str] | None = None) -> int:
         print(f"sidegraph-blame: {e} No records are joined.", file=sys.stderr)
     except OSError:
         pass  # an unreadable store degrades to unjoined records, as it always has
+    else:
+        stamp_note = index_stamp_note(db_path)
+        if stamp_note is not None:
+            print(f"sidegraph-blame: {stamp_note}. No records are joined.", file=sys.stderr)
     hunks = gitio.blame_report(args.file, cwd, db_path, line_range)
     if hunks is None:
         print(

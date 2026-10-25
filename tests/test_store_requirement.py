@@ -28,6 +28,7 @@ from sidegraph.store_layout import (
     check_store_requirement,
     store_requirement,
 )
+from tests.store_format2_support import legacy_store
 
 
 def running_release() -> str:
@@ -120,17 +121,17 @@ def test_no_marker_and_a_one_line_marker_are_not_refused(tmp_path):
     """Guard, red against nothing: a store from before the marker (Store backfills it), no
     store at all, and today's one-line marker all pass."""
     assert check_store_requirement(tmp_path / "nowhere") is None
-    Store(tmp_path / "s").close()
+    Store(legacy_store(tmp_path / "s")).close()
     assert check_store_requirement(tmp_path / "s") is None
 
 
 def test_an_unknown_major_keeps_the_upgrade_wording(tmp_path):
     """Red against unfixed code (a plain ValueError). It guards the wording SessionStart's fix
     text keys on."""
-    Store(tmp_path / "s").close()
-    (tmp_path / "s" / "format").write_text("sidegraph-store 2.0.0\n", encoding="utf-8")
+    Store(legacy_store(tmp_path / "s")).close()
+    (tmp_path / "s" / "format").write_text("sidegraph-store 99.0.0\n", encoding="utf-8")
     with pytest.raises(StoreRequirementError, match="migration tooling is deferred") as raised:
-        Store(tmp_path / "s")
+        Store(legacy_store(tmp_path / "s"))
     assert raised.value.kind == "major"
 
 
@@ -139,7 +140,7 @@ def test_store_requirement_reads_the_line_and_compares_nothing(tmp_path):
     (discarded): the domain snapshot command and the engine-version advisory need the
     requirement of a store this version may not even open."""
     store_dir = tmp_path / "s"
-    Store(store_dir).close()
+    Store(legacy_store(store_dir)).close()
     assert store_requirement(store_dir) is None
     write_requirement_marker(store_dir, above_running())
     assert store_requirement(store_dir) == above_running()
@@ -162,7 +163,7 @@ def test_refresh_checks_the_marker_again_only_when_it_changed(tmp_path, monkeypa
         return real(path, **kwargs)
 
     monkeypatch.setattr(store_module, "check_store_requirement", counting)
-    with Store(tmp_path / "s") as store:
+    with Store(legacy_store(tmp_path / "s")) as store:
         calls.clear()
         store.refresh_if_stale()
         store.refresh_if_stale()
@@ -199,13 +200,13 @@ def test_refresh_detects_a_replaced_marker_with_the_same_size_and_mtime(tmp_path
 
 def test_raising_the_requirement_stamps_the_marker_and_the_store_still_opens(tmp_path):
     """Red against unfixed code: no writer."""
-    with Store(tmp_path / "s") as store:
+    with Store(legacy_store(tmp_path / "s")) as store:
         change = store.raise_requirement(running_release())
     assert change == RequirementChange(tmp_path / "s" / "format", None, running_release())
     assert (tmp_path / "s" / "format").read_text(encoding="utf-8") == (
         f"sidegraph-store 1.0.0\nrequires-sidegraph >= {running_release()}\n"
     )
-    Store(tmp_path / "s").close()
+    Store(legacy_store(tmp_path / "s")).close()
 
 
 def test_a_requirement_above_this_version_is_refused_and_nothing_is_written(tmp_path):
@@ -240,7 +241,7 @@ def test_the_marker_rewrite_is_atomic(tmp_path, monkeypatch):
     """Red against a bare write_text (discarded): a crash between the tmp write and the rename
     leaves the old marker whole."""
     marker = tmp_path / "s" / "format"
-    with Store(tmp_path / "s") as store:
+    with Store(legacy_store(tmp_path / "s")) as store:
         before = marker.read_bytes()
 
         def _boom(src, dst):
@@ -259,17 +260,20 @@ def test_two_raises_at_once_never_lower_the_requirement(tmp_path, monkeypatch):
     and its publish, then publishes last. Here the lower raise waits for the reservation, reads
     the higher requirement, and refuses."""
     store_dir = tmp_path / "s"
-    Store(store_dir).close()
+    Store(legacy_store(store_dir)).close()
     high, low = running_release(), "0.0.0"  # "0.0.0" is below every release
-    first, second = Store(store_dir), Store(store_dir)
-    high_writing, low_checked, high_published = (threading.Event() for _ in range(3))
+    first, second = Store(legacy_store(store_dir)), Store(legacy_store(store_dir))
+    high_writing, low_started, low_checked, high_published = (threading.Event() for _ in range(4))
     real_write = store_module._atomic_write_text
     real_check = store_module.check_store_requirement
 
     def write(path, text):
         if f">= {high}\n" in text:
             high_writing.set()
-            low_checked.wait(timeout=2)  # serialized: the low raise cannot check yet
+            assert low_started.wait(timeout=5)
+            # serialized: the low raise cannot check yet. The unserialized design checks within
+            # microseconds of starting, so a short wait for that is enough to tell the two apart.
+            low_checked.wait(timeout=0.3)
             stat = real_write(path, text)
             high_published.set()
             return stat
@@ -288,6 +292,8 @@ def test_two_raises_at_once_never_lower_the_requirement(tmp_path, monkeypatch):
     errors: dict[str, BaseException] = {}
 
     def raise_on(store: Store, version: str) -> None:
+        if threading.current_thread().name == "low":
+            low_started.set()
         try:
             store.raise_requirement(version)
         except BaseException as e:  # reported below
@@ -309,7 +315,7 @@ def test_two_raises_at_once_never_lower_the_requirement(tmp_path, monkeypatch):
 
 
 def test_sidegraph_require_prints_the_commit_command(tmp_path, capsys):
-    Store(tmp_path / "s").close()
+    Store(legacy_store(tmp_path / "s")).close()
     assert require_main(["--db", str(tmp_path / "s"), "--sidegraph", running_release()]) == 0
     out = capsys.readouterr().out
     marker = (tmp_path / "s" / "format").as_posix()
@@ -386,7 +392,7 @@ def test_raising_the_requirement_stamps_this_machine_s_index_at_once(tmp_path):
     """Red against code before this task: the stamp would change only at the next full
     reload, and an older hot hook on this machine would read the index until then."""
     store_dir = tmp_path / "s"
-    with Store(store_dir) as store:
+    with Store(legacy_store(store_dir)) as store:
         store.raise_requirement(running_release())
         assert _index_stamp(store_dir) == REQUIRED_INDEX_STAMP
 
@@ -528,7 +534,7 @@ def test_a_legacy_backfill_never_overwrites_a_completed_raise(tmp_path, monkeypa
         nonlocal interrupted
         if Path(target) == store_dir / "format" and not interrupted:
             interrupted = True
-            with Store(store_dir) as other:
+            with Store(legacy_store(store_dir)) as other:
                 other.raise_requirement(required, running=required)
             assert store_requirement(store_dir) == required
         return real(source, target)
@@ -540,10 +546,10 @@ def test_a_legacy_backfill_never_overwrites_a_completed_raise(tmp_path, monkeypa
         store_module.os, "replace", lambda src, dst: before_publish(real_replace, src, dst)
     )
     if required == running_release():
-        Store(store_dir).close()
+        Store(legacy_store(store_dir)).close()
     else:
         with pytest.raises(StoreRequirementError):
-            Store(store_dir)
+            Store(legacy_store(store_dir))
     assert interrupted
     assert store_requirement(store_dir) == required
     assert _index_stamp(store_dir) == REQUIRED_INDEX_STAMP
@@ -551,7 +557,7 @@ def test_a_legacy_backfill_never_overwrites_a_completed_raise(tmp_path, monkeypa
 
 def test_a_cold_open_cannot_cache_an_unchecked_later_marker(tmp_path, monkeypatch):
     store_dir = tmp_path / "s"
-    with Store(store_dir) as writer:
+    with Store(legacy_store(store_dir)) as writer:
         real_ensure = Store._ensure_format_marker
 
         def ensure_then_raise(reader):
@@ -561,7 +567,7 @@ def test_a_cold_open_cannot_cache_an_unchecked_later_marker(tmp_path, monkeypatc
 
         monkeypatch.setattr(Store, "_ensure_format_marker", ensure_then_raise)
         try:
-            reader = Store(store_dir)
+            reader = Store(legacy_store(store_dir))
         except StoreRequirementError:
             pass
         else:
@@ -574,7 +580,7 @@ def test_a_cold_open_cannot_cache_an_unchecked_later_marker(tmp_path, monkeypatc
 
 
 def test_an_explicit_raise_caches_its_own_publication(tmp_path, monkeypatch):
-    with Store(tmp_path / "s") as store:
+    with Store(legacy_store(tmp_path / "s")) as store:
         real_write = store_module._atomic_write_text
         marker = store.path / "format"
 
@@ -594,7 +600,7 @@ def test_an_explicit_raise_caches_its_own_publication(tmp_path, monkeypatch):
 
 
 def test_outer_rollback_leaves_the_marker_raised_and_next_refresh_repairs_the_stamp(tmp_path):
-    with Store(tmp_path / "s") as store:
+    with Store(legacy_store(tmp_path / "s")) as store:
         assert _index_stamp(store.path) == SCHEMA_VERSION
         with (
             pytest.raises(RuntimeError, match="snapshot publication failed"),

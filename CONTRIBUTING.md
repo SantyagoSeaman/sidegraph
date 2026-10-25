@@ -32,14 +32,11 @@ CI additionally scans all history reachable from HEAD with the same pinned scann
 
 ```bash
 uv run pre-commit run gitleaks-history --hook-stage manual --all-files
-SIDEGRAPH_SECRET_SCAN_INTEGRATION=1 uv run pytest tests/test_secret_scan_gate.py -q
 ```
 
 The history scanner includes merge changes and traverses every commit reachable from HEAD.
 Use a full checkout; CI rejects shallow history before scanning.
 
-The second command runs real scanner integration tests; they are skipped in ordinary Python
-test runs to avoid implicit scanner installation. The opt-in is read at collection time.
 Findings are redacted. The history command needs a full Git checkout to cover earlier commits.
 
 A passing test's `tmp_path` tree is removed; a failing test's is kept for inspection

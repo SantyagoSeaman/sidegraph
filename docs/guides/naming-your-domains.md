@@ -53,7 +53,8 @@ result is durable. It is *not* rebuilt from scratch each time, and you do not re
 session.
 
 - **Domains are committed records.** Once ratified they live in
-  `.sidegraph/domains/<id>.json`, versioned with your repo and surviving a fresh clone. Naming
+  `.sidegraph/domains/<id>.json` (or, once maintenance has packed the store into format 2,
+  in a `.sidegraph/shards/` file), versioned with your repo and surviving a fresh clone. Naming
   them again does not regenerate them.
 - **Membership stays fresh automatically.** As code moves, `sidegraph-sync` (which runs lazily
   on every `SessionStart` / `get_task_context`) re-resolves each domain's `seed_anchors` to its
@@ -90,10 +91,10 @@ Domains are proposed from the graph's own Leiden communities, so a graph has to 
 
 **Scripted/CI alternative to [the skill above](#the-fast-path-ask-your-agent).** Use this path
 when there's no agent session to ask — a CI job, a batch pass over many repos, or you just want
-the raw candidate list yourself.
+the raw candidate list yourself. Commands are shown by name; without the CLI on your PATH, run them with the `uvx` prefix described in [running the CLIs](../reference/cli.md#running-the-clis-beside-the-plugin).
 
 ```bash
-uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-domains bootstrap --dry-run
+sidegraph-domains bootstrap --dry-run
 ```
 
 This lists every community at or above the member-count threshold (`--min-members`, default
@@ -116,8 +117,8 @@ for the full, unbounded list when you genuinely want it, or a higher `--limit N`
 partway.
 
 ```bash
-uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-domains bootstrap --dry-run --min-members 15
-uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-domains bootstrap --dry-run --paths src/execution
+sidegraph-domains bootstrap --dry-run --min-members 15
+sidegraph-domains bootstrap --dry-run --paths src/execution
 ```
 
 ### Guardrails against an over-broad path rule
@@ -178,15 +179,15 @@ already expanded it.
 ## 3. Run it for real, then ratify selectively
 
 ```bash
-uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-domains bootstrap --min-members 15
-uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-ratify
+sidegraph-domains bootstrap --min-members 15
+sidegraph-ratify
 ```
 
 The second command lists everything pending — decisions *and* domains, in separate sections —
 human-readably. Accept by id:
 
 ```bash
-uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-ratify --accept 01J... 01J... 01J...
+sidegraph-ratify --accept 01J... 01J... 01J...
 ```
 
 **This is where the CLI path stops scaling.** On anything but a small, tightly-scoped
@@ -208,7 +209,7 @@ bootstrap run, even after a `--drop`.
 
 **Mass-dropping a large batch therefore permanently claims those communities** against any
 future bootstrap run — the community isn't "returned" for reconsideration just because you
-dropped the domain that claimed it. If you `--all`-accept (or `--all`-drop) 80 auto-generated
+dropped the domain that claimed it. If you `--all`-accept (or `--drop` every id of) 80 auto-generated
 domains and only 12 of them turn out to be meaningful, the other 68 communities are now stuck:
 neither named usefully nor available for a future, better-tuned bootstrap pass to reconsider.
 
@@ -262,7 +263,7 @@ the [`sidegraph:manage-domains`](../../plugin/sidegraph/skills/manage-domains/SK
 Or add one manually at any time from the CLI:
 
 ```bash
-uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-domains add \
+sidegraph-domains add \
   --slug risk-gate --title "Risk gate" \
   --summary "Pre-trade checks that block an order before it reaches the exchange." \
   --path src/risk
@@ -300,7 +301,7 @@ anything more specific than "the whole corpus."
 rather than relying on bootstrap's community-based proposal:
 
 ```bash
-uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-domains add \
+sidegraph-domains add \
   --slug adr-003 --title "ADR-003: Metadata control plane" \
   --summary "Why the control plane owns metadata instead of each service owning its own." \
   --path ADR-003-metadata-control-plane.md

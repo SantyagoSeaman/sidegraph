@@ -12,7 +12,9 @@ from pydantic import BaseModel, ValidationError
 from sidegraph.bootstrap.model import FrozenModel
 from sidegraph.schema import Decision, DecisionStatus, Domain, Fact
 from sidegraph.store import _archive_line_problem, _record_identity_problem
+from sidegraph.store_format import SYMLINK_REASON, Occurrence
 from sidegraph.store_layout import NOT_A_FILE_REASON, is_regular_file, stat_entry
+from sidegraph.store_view import effective_bodies, inventory_of, is_packed_store
 
 
 class CanonicalCatalog(FrozenModel):
@@ -70,10 +72,78 @@ def _load_identified[ModelT: BaseModel](
         raise ValueError(f"invalid canonical file {path}: {exc}") from exc
 
 
+def _identity_problem(error: str) -> bool:
+    """Whether an occurrence error is the kind format 1 skips with a warning (the record is not
+    one by the store's identity rule, or is not a regular file), rather than refuses."""
+    return (
+        error.startswith(("missing ", "unsafe ", NOT_A_FILE_REASON, SYMLINK_REASON))
+        or error == "line is not a JSON object"
+        or "does not match the identity" in error
+    )
+
+
+def _refuse_or_warn(store_dir: Path, occ: Occurrence) -> None:
+    """The format-1 rules for one unreadable occurrence of a packed store: an identity problem
+    is skipped with a warning, anything else (not JSON, a model error, a conflict) refuses the
+    catalog, naming the file (and the line of a shard or archive line). An archive line of a
+    record type this version does not know is not an error.
+
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
+    where = store_dir / occ.path
+    if occ.kind == "archive" and not occ.archive_type_known and occ.error is None:
+        return
+    error = (
+        occ.error if occ.error is not None else ("in a merge conflict" if occ.in_conflict else None)
+    )
+    if error is None:
+        return
+    if _identity_problem(error):
+        print(f"sidegraph: WARNING skipping {where}: {error}.", file=sys.stderr)
+        return
+    what = "file" if occ.kind == "file" else ("archive" if occ.kind == "archive" else "shard")
+    at = where if occ.kind == "file" else f"{where}:{occ.line_no}"
+    raise ValueError(f"invalid canonical {what} {at}: {error}")
+
+
 def load_canonical_catalog(store_dir: Path) -> CanonicalCatalog:
-    """Read canonical files directly, without constructing ``Store`` or derived state."""
+    """Read canonical files directly, without constructing ``Store`` or derived state.
+
+    A format-2 store is read through the inventory and ``effective()`` like every other reader;
+    an identity the rules quarantine (unreadable, conflicted) has no record here.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
     if not store_dir.is_dir():
         return CanonicalCatalog()
+    if is_packed_store(store_dir):
+
+        def unreadable(rel: str, exc: OSError) -> None:
+            kind = {"shards": "shard", "archive": "archive"}.get(rel.split("/", 1)[0], "file")
+            raise ValueError(f"invalid canonical {kind} {store_dir / rel}: {exc}") from exc
+
+        inv = inventory_of(store_dir, unreadable)
+        for occ in inv.occurrences:
+            _refuse_or_warn(store_dir, occ)
+        for segment in sorted((store_dir / "archive").glob("*.jsonl")):
+            if not _is_regular(segment):  # the inventory drops it without an occurrence
+                print(
+                    f"sidegraph: WARNING skipping {segment}: {NOT_A_FILE_REASON}.",
+                    file=sys.stderr,
+                )
+        packed = effective_bodies(inv)
+        return CanonicalCatalog(
+            decisions=tuple(
+                Decision.model_validate(rec.raw)
+                for (kind, _), rec in packed.items()
+                if kind == "decision"
+            ),
+            facts=tuple(
+                Fact.model_validate(rec.raw) for (kind, _), rec in packed.items() if kind == "fact"
+            ),
+            domains=tuple(
+                Domain.model_validate(rec.raw)
+                for (kind, _), rec in packed.items()
+                if kind == "domain"
+            ),
+        )
 
     decisions: dict[str, Decision] = {}
     domains: dict[str, Domain] = {}
@@ -82,7 +152,8 @@ def load_canonical_catalog(store_dir: Path) -> CanonicalCatalog:
             print(f"sidegraph: WARNING skipping {segment}: {NOT_A_FILE_REASON}.", file=sys.stderr)
             continue
         try:
-            lines = segment.read_text(encoding="utf-8").splitlines()
+            # ``\n`` only: a U+2028 or U+0085 inside a JSON string is data, not a line end
+            lines = segment.read_text(encoding="utf-8").split("\n")
         except (OSError, UnicodeError) as exc:
             raise ValueError(f"invalid canonical archive {segment}: {exc}") from exc
         for lineno, line in enumerate(lines, 1):

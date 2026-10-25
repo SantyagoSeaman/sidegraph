@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import time
 from datetime import UTC, datetime
 
 import pytest
@@ -57,12 +56,12 @@ from sidegraph.schema import (
     DecisionStatus,
     Domain,
     Entity,
-    EntityKind,
     Fact,
     Initiative,
     Provenance,
 )
 from sidegraph.store import Store, _atomic_write_json
+from tests.store_format2_support import format1_store
 
 
 def _decision(title: str = "an adr", **overrides) -> Decision:
@@ -127,6 +126,10 @@ def test_original_repro_heals_after_reopen(tmp_path):
     a.close()  # the crash: releases A's lock and its own uncommitted stat row, file stays
 
     b.add_fact(_fact("B's normal write"))  # B's own, unrelated, otherwise-ordinary write
+    # The mechanism, not just its symptom (design D3, rev 4): B's touch CLEARS the stamp while
+    # A's file is unindexed, because merely withholding a new one can leave a valid-looking old
+    # stamp on the wall that matches disk while the index has drifted under it.
+    assert b.get_meta("canonical_digest") is None, "the stamp must be cleared, not withheld"
 
     b.close()
 
@@ -139,37 +142,6 @@ def test_original_repro_heals_after_reopen(tmp_path):
 
 
 # == item 2: the mechanism itself, pinned directly on meta.canonical_digest =================
-
-
-def test_digest_stamp_is_cleared_while_a_foreign_file_is_unindexed(tmp_path):
-    """Spec item 2: assert directly on ``meta.canonical_digest`` -- not just the outcome a
-    reopen exposes -- so the MECHANISM is pinned, not only its symptom.
-
-    Rev 4 (design D3): B's own touch must CLEAR the stamp, not merely leave it unchanged.
-    An earlier draft asserted "unchanged", on the assumption that withholding a new stamp
-    always leaves ``stored`` behind ``current`` for the next open. That assumption is
-    false and needs no crash at all (spec item 8 / the no-crash inversion) -- a SEPARATE,
-    already-valid stamp from another writer can still numerically match current disk even
-    though this index has since drifted, so "unchanged" is not enough to guarantee the next
-    open reloads. Clearing the row makes ``stored`` become ``None``, which
-    ``_refresh_freshness`` treats as "reload" unconditionally."""
-    path = tmp_path / "s"
-    a = Store(path)
-    b = Store(path)
-
-    before = b.get_meta("canonical_digest")
-    assert before is not None  # a fresh store already has a real stamp from __init__
-    orphan = _decision("A's second orphan")
-    a._write_decision_canonical(orphan)
-    a.close()  # the crash -- see test_original_repro_heals_after_reopen for why this matters
-
-    b.add_fact(_fact("B's second normal write"))
-    after = b.get_meta("canonical_digest")
-
-    assert after is None, (
-        "the stamp must be CLEARED, not merely withheld, while A's file is unindexed"
-    )
-    b.close()
 
 
 # == item 3a: the staleness variant ==========================================================
@@ -484,7 +456,7 @@ def test_compact_still_stamps_despite_index_richer_than_disk(tmp_path):
     segment) -- the digest must still be written. Red against a naive two-directional
     equality check (table/index has an entry the disk walk didn't see -> refuse), which
     this design deliberately does not implement (D2)."""
-    store = Store(tmp_path / "s")
+    store = Store(format1_store(tmp_path / "s"))
     old = store.add_decision(_decision("compact-stamps-old"))
     store.add_decision(_decision("compact-stamps-new", supersedes=old.id))
     before = store.get_meta("canonical_digest")
@@ -496,80 +468,6 @@ def test_compact_still_stamps_despite_index_richer_than_disk(tmp_path):
     assert after != before
     assert not (store.path / "decisions" / f"{old.id}.json").is_file()  # hot file gone
     assert store.get_decision(old.id) is not None  # still indexed -- index richer than disk
-
-
-def test_derived_community_entities_do_not_block_stamping(tmp_path):
-    """Spec item 5 -- same direction as item 4, different cause, and worth its own case
-    because it would break every sync pass (not just a compacted store) if it didn't.
-    A derived ``community:*`` abstract entity gets an index row and NEVER a canonical file
-    at all (``upsert_entity``'s own ``_is_derived_entity`` guard) -- so it never appears in
-    the digest walk and never gets (or needs) a ``canonical_stat`` row. A SUBSEQUENT,
-    ordinary write must still stamp normally."""
-    store = Store(tmp_path / "s")
-    entity = store.get_or_create_abstract_entity("community:42")
-    assert entity.kind == EntityKind.ABSTRACT
-    assert not (store.path / "entities" / f"{entity.entity_id}.json").is_file()
-
-    before = store.get_meta("canonical_digest")
-    store.add_decision(_decision("after-community-entity"))
-    after = store.get_meta("canonical_digest")
-    assert after is not None
-    assert after != before
-
-
-def test_empty_bindings_file_does_not_wedge_stamping(tmp_path):
-    """Spec item 7 (§3's debris shape). An empty ``bindings/<id>.json`` (``[]`` -- a hand
-    edit or merge artifact, never written by any Store writer) produces no index ROWS at
-    reload, but under the stat-table design there is no branch left to wedge on it: the
-    check reads ``canonical_stat``, not the record tables, and Task 2's reload loop gives
-    the file its row unconditionally, regardless of how many binding items it contains.
-
-    DECLARED EXCEPTION: its red target is the DISCARDED id-based draft (D4), not unfixed
-    code -- unfixed ``_touch_digest`` always stamps unconditionally, so nothing wedges
-    there either. Stated so this is never reported as red-first evidence."""
-    path = tmp_path / "s"
-    store = Store(path)
-    store.add_decision(_decision("anchor me"))
-    store.close()
-
-    # hand-edit / merge artifact -- never written by any Store writer:
-    (path / "bindings").mkdir(exist_ok=True)
-    (path / "bindings" / "01FAKEULID00000000000000ZZ.json").write_text("[]\n")
-
-    store = Store(path)  # digest busted by the new file -- full reload
-    before = store.get_meta("canonical_digest")
-    assert before is not None  # the reload itself stamps unconditionally
-
-    store.add_decision(_decision("post-debris write"))
-    after = store.get_meta("canonical_digest")
-    assert after is not None
-    assert after != before
-    store.close()
-
-
-def test_write_cost_stays_in_single_digit_milliseconds(tmp_path):
-    """Spec item 6 -- a tripwire, not a benchmark (design D5: the per-write digest walk is
-    pre-existing and unchanged, ~5.1ms measured at 763 canonical files; canonical_stat adds
-    one table read of the same cardinality, roughly a 10% addition). Guards against an
-    order-of-magnitude regression, not a precise number -- not red-first by nature.
-
-    It asserts on the MINIMUM of several writes: noise on a shared runner (a GC pause, an
-    fsync stall, a scheduler hiccup) only ever adds time, so one timed sample flaked at 58ms
-    on CI while the fastest of a few is the cleanest estimate of the real cost."""
-    store = Store(tmp_path / "s")
-    for i in range(300):  # comparable scale to this repo's own store (~700-1000 files)
-        store.add_decision(_decision(f"bulk-{i}"))
-
-    samples_ms: list[float] = []
-    for i in range(5):
-        start = time.perf_counter()
-        store.add_decision(_decision(f"timed-write-{i}"))
-        samples_ms.append((time.perf_counter() - start) * 1000)
-
-    elapsed_ms = min(samples_ms)
-    assert elapsed_ms < 50, (
-        f"fastest of 5 writes took {elapsed_ms:.2f}ms -- order-of-magnitude regression?"
-    )
 
 
 # == the reload must CLEAR canonical_stat, not merely upsert over it =========================

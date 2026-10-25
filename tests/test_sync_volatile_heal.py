@@ -193,18 +193,7 @@ def test_a_reload_heals_on_the_next_ORDINARY_sync(tmp_path):
     assert report.skipped is False
     assert reopened.find_domain_by_slug("d1").communities == ["1"]
     assert reopened.get_meta(VOLATILE_STALE_KEY) == "0"
-
-
-def test_the_pass_after_a_heal_is_gated_again(tmp_path):
-    """It heals once per reload, not on every call: the completed pass clears the flag."""
-    store, reader = _store_and_reader(tmp_path)
-    sync(store, reader, force=True)
-    store_dir = store.path
-    store.close()
-    _bust_the_digest(store_dir)
-    reopened = Store(store_dir)
-    assert sync(reopened, reader).skipped is False
-    assert sync(reopened, reader).skipped is True
+    assert sync(reopened, reader).skipped is True  # it heals once per reload, then is gated again
 
 
 def test_a_reload_heals_the_other_two_slices_too(tmp_path):

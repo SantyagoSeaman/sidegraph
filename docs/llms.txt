@@ -29,12 +29,18 @@ and exact contracts; it does not replace their version-specific requirements.
 - [integrations/claude-code.md](integrations/claude-code.md) — the host seam: MCP server + SessionStart/Stop/PreToolUse/SubagentStart hooks
 - [integrations/codex.md](integrations/codex.md) — Codex integration
 
+- [integrations/grok.md](integrations/grok.md) — experimental MCP/skills-only Grok Build installation through its plugin marketplace
 - [integrations/muse.md](integrations/muse.md) — experimental MCP/skills-only Muse installation and process-directory limits
 - [integrations/opencode.md](integrations/opencode.md) — OpenCode V2 MCP and shared skills; native Git install/update guide
 
 ## Guides
 
 - [guides/migrating-to-0.14.md](guides/migrating-to-0.14.md) — coordinated client upgrade, domain snapshot, Graphify upgrade, verification and rollback
+- [guides/migrating-to-0.17.md](guides/migrating-to-0.17.md) — packing a store into shards (format 2): team checklist, the migration command, notices and rollback
+- [guides/using-0.15.md](guides/using-0.15.md) — what Sidegraph 0.15 adds: ADR export, delivery statistics, drift inspections, and how to update
+- [guides/using-0.16.md](guides/using-0.16.md) — what Sidegraph 0.16 adds: bounded domain listings, honest stats, the installation health report, and how to update
+- [guides/health-check.md](guides/health-check.md) — the read-only installation health report: plugin wiring, versions, Graphify, store integrity
+- [guides/adr-export.md](guides/adr-export.md) — exporting stored decisions as Markdown ADRs with `sidegraph-export-adr`
 - [guides/capturing-decisions.md](guides/capturing-decisions.md) — human-requested capture, agent proposals, ratification policies, and attached or standalone facts
 - [guides/naming-your-domains.md](guides/naming-your-domains.md) — conversational and CLI paths for naming domains; membership guardrails and recovery
 - [guides/retrieval-in-sessions.md](guides/retrieval-in-sessions.md) — reading SessionStart and task-context output, evidence, and unratified proposals

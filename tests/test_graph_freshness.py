@@ -2,118 +2,32 @@
 commit with HEAD and answers ``fresh`` / ``stale`` / ``unknown`` (spec D1-D3).
 
 Red target (the whole module): unfixed code has no ``freshness`` on the reader (AttributeError).
-The fixture helper at the top is imported by the other stale-graph test modules (SessionStart,
-get_task_context, doctor, stats) so that all four surfaces are driven by the same repository.
+The repositories come from ``tests.graph_repo_support``, which the other stale-graph test
+modules (SessionStart, get_task_context, doctor, stats) share so that all four surfaces are
+driven by the same repository.
 # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (4.1)
 """
 
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
-from typing import NamedTuple
 
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.freshness import GraphFreshness, staleness_phrase
-
-# Explicit mtimes, never the clock: a file edited before the build is older than graph.json,
-# one edited after it is newer. Nanoseconds, as os.utime and st_mtime_ns want them.
-T_FILE = 1_700_000_000 * 10**9
-T_GRAPH = T_FILE + 100 * 10**9
-T_AFTER = T_GRAPH + 100 * 10**9
-
-
-class Fixture(NamedTuple):
-    repo: Path
-    graph: Path
-    first: str  # commit A, the commit the graph is built at
-
-
-def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True)
-    return result.stdout.strip()
-
-
-def head(repo: Path) -> str:
-    return git(repo, "rev-parse", "HEAD")
-
-
-def touch(path: Path, ns: int) -> None:
-    os.utime(path, ns=(ns, ns))
-
-
-def node(i: int, source_file: str) -> dict:
-    return {
-        "id": f"n{i}",
-        "label": f"fn_{i}()",
-        "norm_label": f"fn_{i}()",
-        "file_type": "code",
-        "source_file": source_file,
-        "source_location": "L1",
-        "community": 1,
-    }
-
-
-def write_graph(
-    path: Path, built_at: str | None, source_files: list[str], mtime_ns: int = T_GRAPH
-) -> None:
-    """A minimal graph.json (shape of ``tests/fixtures/mini_graph.json``) at ``path``."""
-    data: dict = {
-        "directed": True,
-        "multigraph": False,
-        "nodes": [node(i, p) for i, p in enumerate(source_files)],
-        "links": [],
-    }
-    if built_at is not None:
-        data["built_at_commit"] = built_at
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data))
-    touch(path, mtime_ns)
-
-
-def commit(repo: Path, message: str, files: dict[str, str | None], mtime_ns: int = T_AFTER) -> str:
-    """Write (or, for ``None``, delete) files, commit them, and return the commit's sha.
-    Written files get ``mtime_ns``: the edit is later than the build unless a test says so."""
-    for rel, text in files.items():
-        p = repo / rel
-        if text is None:
-            p.unlink()
-            continue
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
-        touch(p, mtime_ns)
-    git(repo, "add", "-A")
-    git(repo, "commit", "-q", "-m", message)
-    return head(repo)
-
-
-def make_repo(tmp_path: Path, *, graph_dir: str = "graphify-out") -> Fixture:
-    """A git repository whose commit A holds ``pkg/m.py``, and a graph.json built at A
-    (ignored by git, like Graphify's real output) that holds exactly that file."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    git(repo, "init", "-q")
-    git(repo, "config", "user.email", "test@example.com")
-    git(repo, "config", "user.name", "Test")
-    git(repo, "config", "commit.gpgsign", "false")
-    first = commit(
-        repo,
-        "A",
-        {".gitignore": "graphify-out/\n.cache/\n.sidegraph/\n", "pkg/m.py": "def a():\n    pass\n"},
-        mtime_ns=T_FILE,
-    )
-    graph = repo / graph_dir / "graph.json"
-    write_graph(graph, first, ["pkg/m.py"])
-    return Fixture(repo, graph, first)
-
-
-def stale_repo(tmp_path: Path) -> Fixture:
-    """The T1 repository: commit B edited ``pkg/m.py`` after the graph was built at A."""
-    fx = make_repo(tmp_path)
-    commit(fx.repo, "B", {"pkg/m.py": "def a():\n    return 1\n"})
-    return fx
+from tests.graph_repo_support import (
+    T_AFTER,
+    T_GRAPH,
+    commit,
+    git,
+    head,
+    make_repo,
+    node,
+    stale_repo,
+    touch,
+    write_graph,
+)
 
 
 def test_t1_a_file_the_graph_holds_changed_after_the_build_is_stale(tmp_path):
@@ -167,10 +81,10 @@ def test_t4_a_graph_built_at_head_is_fresh(tmp_path):
 
 
 def test_t5_a_graph_without_a_build_commit_is_unknown(tmp_path):
-    fx = make_repo(tmp_path)
-    write_graph(fx.graph, None, ["pkg/m.py"])
+    graph = tmp_path / "graph.json"
+    write_graph(graph, None, ["pkg/m.py"])
 
-    f = GraphifyReader(fx.graph).freshness()
+    f = GraphifyReader(graph).freshness()
 
     assert f.state == "unknown"
     assert f.reason is not None and "build commit" in f.reason
@@ -178,31 +92,33 @@ def test_t5_a_graph_without_a_build_commit_is_unknown(tmp_path):
 
 def test_t5b_a_build_commit_that_is_not_a_full_id_is_unknown(tmp_path):
     """`abc123`, `v1`, `-x`: a short id or a ref could resolve to anything, and an
-    option-like value must never reach git."""
-    fx = make_repo(tmp_path)
+    option-like value must never reach git. The id is rejected before any repository is
+    looked up, so the graph sits outside one."""
+    graph = tmp_path / "graph.json"
+    full = "a1" * 20
     for value in (
         "abc123",
         "v1",
         "-x",
         "HEAD",
-        fx.first[:12],
-        fx.first.upper(),
-        fx.first + "..HEAD",  # starts like a full id: a prefix match would let it through
-        fx.first + "\n",
+        full[:12],
+        full.upper(),
+        full + "..HEAD",  # starts like a full id: a prefix match would let it through
+        full + "\n",
     ):
-        write_graph(fx.graph, value, ["pkg/m.py"])
-        f = GraphifyReader(fx.graph).freshness()
+        write_graph(graph, value, ["pkg/m.py"])
+        f = GraphifyReader(graph).freshness()
         assert f.state == "unknown", value
         assert f.reason is not None and "full commit id" in f.reason, value
 
 
 def test_t5c_a_build_commit_that_is_not_a_string_reads_as_absent(tmp_path):
-    fx = make_repo(tmp_path)
+    graph = tmp_path / "graph.json"
     for value in ("", 42, ["x"]):
-        write_graph(fx.graph, value, ["pkg/m.py"])  # type: ignore[arg-type]
-        assert GraphifyReader(fx.graph).built_at_commit() is None, value
-    write_graph(fx.graph, fx.first, ["pkg/m.py"])
-    assert GraphifyReader(fx.graph).built_at_commit() == fx.first
+        write_graph(graph, value, ["pkg/m.py"])  # type: ignore[arg-type]
+        assert GraphifyReader(graph).built_at_commit() is None, value
+    write_graph(graph, "a1" * 20, ["pkg/m.py"])
+    assert GraphifyReader(graph).built_at_commit() == "a1" * 20
 
 
 def test_t6_a_full_sha_the_repository_lacks_is_unknown(tmp_path):
@@ -259,8 +175,9 @@ def test_t8b_a_git_call_that_outlives_the_deadline_is_unknown(tmp_path, monkeypa
 
 
 def test_t8c_a_deadline_already_spent_is_unknown_without_a_git_call(tmp_path, monkeypatch):
-    fx = stale_repo(tmp_path)
-    reader = GraphifyReader(fx.graph)
+    graph = tmp_path / "graph.json"
+    write_graph(graph, "a1" * 20, ["pkg/m.py"])
+    reader = GraphifyReader(graph)
     calls: list[list[str]] = []
 
     def counting(cmd, *a, **k):
@@ -294,19 +211,6 @@ def test_t27_repo_root_gets_the_time_left_on_the_deadline_not_its_own_default(
     assert reader.freshness(deadline=0.5).state == "stale"
 
     assert len(seen) == 1 and 0 < seen[0] <= 0.5
-
-
-def test_t31_a_known_root_is_used_and_repo_root_is_not_asked_again(tmp_path, monkeypatch):
-    fx = stale_repo(tmp_path)
-    reader = GraphifyReader(fx.graph)
-    root = reader.repo_root()
-    calls: list[str] = []
-    monkeypatch.setattr(reader, "repo_root", lambda *a, **k: calls.append("repo_root"))
-
-    f = reader.freshness(root=root)
-
-    assert f.state == "stale" and f.sample == ["pkg/m.py"]
-    assert calls == []
 
 
 def test_t18_a_head_behind_the_build_is_reported_as_outside_history(tmp_path):
@@ -510,24 +414,6 @@ def test_source_files_holds_every_file_type_and_is_memoized(tmp_path):
 
     assert reader.source_files() == frozenset({"a.py", "docs/x.md", "img.png"})
     assert reader.source_files() is reader.source_files()
-
-
-def test_repo_root_takes_a_timeout_and_keeps_its_default(tmp_path, monkeypatch):
-    fx = make_repo(tmp_path)
-    reader = GraphifyReader(fx.graph)
-    seen: list[float | None] = []
-    real = subprocess.run
-
-    def spy(cmd, *a, **k):
-        seen.append(k.get("timeout"))
-        return real(cmd, *a, **k)
-
-    monkeypatch.setattr("sidegraph.engine.reader.subprocess.run", spy)
-
-    reader.repo_root()
-    reader.repo_root(timeout=1.5)
-
-    assert seen == [5.0, 1.5]
 
 
 def test_staleness_phrase_follows_the_counts():

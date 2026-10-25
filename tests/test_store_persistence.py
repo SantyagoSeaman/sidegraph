@@ -22,6 +22,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from tests.store_format2_support import legacy_store
 
 
 def _decision(**overrides) -> Decision:
@@ -263,7 +264,7 @@ def test_cyrillic_and_em_dash_round_trip_and_appear_verbatim_on_disk(tmp_path):
 
 
 def test_fresh_store_writes_format_marker(tmp_path):
-    store = Store(tmp_path / "s")
+    store = Store(legacy_store(tmp_path / "s"))
     try:
         marker = store.path / "format"
         assert marker.is_file()
@@ -275,14 +276,14 @@ def test_fresh_store_writes_format_marker(tmp_path):
 def test_missing_marker_on_existing_layout_is_backfilled(tmp_path):
     """N1-era stores predate the format marker -- opening one must write it rather than
     reject it."""
-    store = Store(tmp_path / "s")
+    store = Store(legacy_store(tmp_path / "s"))
     store.close()
 
     marker = tmp_path / "s" / "format"
     marker.unlink()
     assert not marker.exists()
 
-    reopened = Store(tmp_path / "s")
+    reopened = Store(legacy_store(tmp_path / "s"))
     try:
         assert marker.read_text() == f"sidegraph-store {SCHEMA_VERSION}\n"
     finally:
@@ -318,12 +319,12 @@ def test_format_marker_first_write_is_atomic_and_exclusive(tmp_path, monkeypatch
     with monkeypatch.context() as patch:
         patch.setattr(store_module.os, "link", fail_publication)
         with pytest.raises(OSError, match="simulated crash"):
-            Store(tmp_path / "s")
+            Store(legacy_store(tmp_path / "s"))
     marker = tmp_path / "s" / "format"
     assert len(attempts) == 1
     assert attempts[0].name.startswith("format.") and attempts[0].suffix == ".tmp"
     assert not marker.exists()
-    with Store(tmp_path / "s"):
+    with Store(legacy_store(tmp_path / "s")):
         assert marker.read_text(encoding="utf-8") == expected
     assert list((tmp_path / "s").glob("format.*.tmp")) == []
 
@@ -386,7 +387,7 @@ def test_format_marker_write_tolerates_lost_concurrent_first_open_race(tmp_path,
         return real_link(src, dst)
 
     monkeypatch.setattr(store_module.os, "link", race_once)
-    with Store(tmp_path / "s") as store:
+    with Store(legacy_store(tmp_path / "s")) as store:
         assert raced
         assert (store.path / "format").read_text(encoding="utf-8") == (
             f"sidegraph-store {SCHEMA_VERSION}\n"
@@ -469,59 +470,14 @@ def test_gitignore_backfilled_on_existing_layout_missing_it(tmp_path):
 def test_gitignore_write_leaves_no_tmp_file_on_success(tmp_path):
     store = Store(tmp_path / "s")
     try:
-        assert not (store.path / ".gitignore.tmp").exists()
+        assert (store.path / ".gitignore").is_file()  # the write happened ...
+        # ... through a per-call unique `.gitignore.<pid>.<random>.tmp`, none left behind.
+        assert list(store.path.glob(".gitignore*.tmp")) == []
     finally:
         store.close()
 
 
 # -- tmp hygiene: stale *.tmp files swept on open -----------------------------------------
-
-
-def test_stale_tmp_file_swept_on_open(tmp_path):
-    store = Store(tmp_path / "s")
-    d = store.add_decision(_decision())
-    store.close()
-
-    # This fixture never actually simulated staleness -- only a stale-looking NAME -- and
-    # the sweep is now age-gated (design D4), so a fresh mtime would survive the reopen
-    # below. Ageing it is this test finally checking what its name claims.
-    stale_tmp = tmp_path / "s" / "decisions" / "leftover-from-a-crash.json.tmp"
-    stale_tmp.write_text("{}")
-    _age(stale_tmp, 3600)
-    assert stale_tmp.exists()
-
-    reopened = Store(tmp_path / "s")
-    try:
-        assert not stale_tmp.exists()
-        assert reopened.get_decision(d.id) is not None
-    finally:
-        reopened.close()
-
-
-def test_stale_tmp_file_in_store_root_swept_on_open(tmp_path):
-    """The sweep covers the store ROOT too, not just the canonical record dirs -- the
-    format marker and .gitignore are atomic-written there (see
-    test_format_marker_first_write_is_atomic_and_exclusive). Uses a realistic per-attempt
-    unique tmp name (``format.<pid>.<random>.tmp``, matching what
-    ``_atomic_write_text_race_tolerant`` actually produces), not the old fixed
-    ``format.tmp``."""
-    store = Store(tmp_path / "s")
-    store.close()
-
-    # This fixture never actually simulated staleness -- only a stale-looking NAME -- and
-    # the sweep is now age-gated (design D4), so a fresh mtime would survive the reopen
-    # below. Ageing it is this test finally checking what its name claims.
-    stale_tmp = tmp_path / "s" / "format.12345.deadbeef0000.tmp"
-    stale_tmp.write_text("garbage")
-    _age(stale_tmp, 3600)
-    assert stale_tmp.exists()
-
-    reopened = Store(tmp_path / "s")
-    try:
-        assert not stale_tmp.exists()
-        assert (tmp_path / "s" / "format").is_file()
-    finally:
-        reopened.close()
 
 
 def test_foreign_root_tmp_file_survives_open(tmp_path):

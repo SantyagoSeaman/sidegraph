@@ -13,6 +13,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 
 
 @pytest.fixture
@@ -35,28 +36,11 @@ def make_decision():
     return _make
 
 
-def test_store_stamped_0_4_0_reloads_index_instead_of_raising(tmp_path, make_decision):
-    # A pre-facts store must survive the 0.5.0 upgrade: the derived index is rebuilt
-    # from canonical files and re-stamped, never hard-failed.
-    # see design/superpowers/specs/2026-07-10-facts-layer-design.md
-    with Store(tmp_path / "s") as store:
-        d = store.add_decision(make_decision(title="pre-upgrade decision"))
-    import sqlite3
-
-    conn = sqlite3.connect(tmp_path / "s" / "index.db")
-    conn.execute("UPDATE meta SET value = '0.4.0' WHERE key = 'schema_version'")
-    conn.commit()
-    conn.close()
-    with Store(tmp_path / "s") as reopened:
-        assert reopened.schema_version == SCHEMA_VERSION
-        assert reopened.get_decision(d.id) is not None
-
-
 def test_store_stamped_0_5_0_reloads_index_instead_of_raising(tmp_path, make_decision):
     # A pre-derived-community-bindings store must survive the 0.6.0 upgrade: the derived
     # index is rebuilt from canonical files and re-stamped, never hard-failed.
     # see design/superpowers/specs/2026-07-10-derived-community-bindings-design.md
-    with Store(tmp_path / "s") as store:
+    with Store(format1_store(tmp_path / "s")) as store:
         d = store.add_decision(make_decision(title="pre-upgrade decision"))
     import sqlite3
 
@@ -64,7 +48,7 @@ def test_store_stamped_0_5_0_reloads_index_instead_of_raising(tmp_path, make_dec
     conn.execute("UPDATE meta SET value = '0.5.0' WHERE key = 'schema_version'")
     conn.commit()
     conn.close()
-    with Store(tmp_path / "s") as reopened:
+    with Store(format1_store(tmp_path / "s")) as reopened:
         assert reopened.schema_version == SCHEMA_VERSION
         assert reopened.get_decision(d.id) is not None
 
@@ -79,7 +63,7 @@ def test_store_stamped_0_4_0_with_real_old_ddl_reloads_instead_of_crashing(tmp_p
     #   sqlite3.OperationalError: table anchor_bindings has no column named record_id
     # see design/superpowers/specs/2026-07-10-facts-layer-design.md
     session_id = "session-real-0.4.0"
-    with Store(tmp_path / "s") as store:
+    with Store(format1_store(tmp_path / "s")) as store:
         entity = store.upsert_entity(Entity(canonical_name="Widget", kind=EntityKind.CONCRETE))
         decision = store.add_decision(make_decision(title="pre-upgrade decision"))
         store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=1))
@@ -105,7 +89,7 @@ def test_store_stamped_0_4_0_with_real_old_ddl_reloads_instead_of_crashing(tmp_p
 
     # RED (pre-fix): this raises sqlite3.OperationalError: table anchor_bindings has no
     # column named record_id. GREEN (post-fix): it must not raise at all.
-    with Store(tmp_path / "s") as reopened:
+    with Store(format1_store(tmp_path / "s")) as reopened:
         assert reopened.schema_version == SCHEMA_VERSION
         assert reopened.get_decision(decision.id) is not None
         bindings = reopened.bindings_for_record(decision.id)

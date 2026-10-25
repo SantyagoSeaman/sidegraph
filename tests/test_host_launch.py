@@ -11,11 +11,11 @@ cache directory.
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import io
 import json
 import os
-import sys
 import threading
 from importlib import metadata
 from pathlib import Path
@@ -210,17 +210,29 @@ def test_t3_a_fifo_at_the_path_does_not_block_the_writer(
 
 
 class _OpenedPaths:
-    """Every path ``open`` was called on while armed (a PEP 578 audit hook: a hook cannot be
-    removed, so it records only between ``arm`` and ``disarm``)."""
+    """Every path opened through ``Path.open`` (which ``read_bytes`` uses) or ``open`` while
+    armed. Both patches are undone with the test's ``monkeypatch``."""
 
-    def __init__(self) -> None:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.paths: list[str] = []
         self._armed = False
-        sys.addaudithook(self._hook)
+        real_path_open = Path.open
+        real_open = builtins.open
 
-    def _hook(self, event: str, args: tuple[Any, ...]) -> None:
-        if self._armed and event == "open" and isinstance(args[0], str | bytes | os.PathLike):
-            self.paths.append(os.fsdecode(args[0]))
+        def path_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+            self._note(path)
+            return real_path_open(path, *args, **kwargs)
+
+        def open_(file: Any, *args: Any, **kwargs: Any) -> Any:
+            self._note(file)
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", path_open)
+        monkeypatch.setattr(builtins, "open", open_)
+
+    def _note(self, target: Any) -> None:
+        if self._armed and isinstance(target, str | bytes | os.PathLike):
+            self.paths.append(os.fsdecode(target))
 
     def arm(self) -> None:
         self.paths.clear()
@@ -230,23 +242,23 @@ class _OpenedPaths:
         self._armed = False
 
 
-def test_t3_a_huge_file_at_the_path_is_replaced_without_being_read(
+def test_t3_a_file_of_another_size_at_the_path_is_replaced_without_being_read(
     cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The existing value is read only when the file is exactly 40 bytes: a 10 MB file is
+    """The existing value is read only when the file is exactly 40 bytes: a 41-byte file is
     "differs" without being opened, and the atomic write replaces it."""
     _install(monkeypatch, _git_direct_url())
     record = cache / "launch-commit"
     cache.mkdir(parents=True)
-    record.write_bytes(b"x" * (10 * 1024 * 1024))
-    spy = _OpenedPaths()
+    record.write_bytes(b"x" * (len(COMMIT) + 1))
+    spy = _OpenedPaths(monkeypatch)
     spy.arm()
     try:
         returned = _run_with_deadline(2)
     finally:
         spy.disarm()
     assert returned, "record_launch_commit did not return within 2 s"
-    assert str(record) not in spy.paths, "the writer opened a 10 MB record to read it"
+    assert str(record) not in spy.paths, "the writer opened a 41-byte record to read it"
     assert record.read_bytes() == COMMIT.encode("ascii")
 
 

@@ -51,16 +51,3 @@ def test_no_sidegraph_env_leaks_into_a_test():
         f"SIDEGRAPH_ variable(s) leaked into the test environment: {leaked}. "
         "A hermetic conftest.py fixture should have stripped them before this test ran."
     )
-
-
-def test_a_variable_a_test_sets_via_monkeypatch_does_not_leak_into_the_next_test(
-    monkeypatch,
-):
-    monkeypatch.setenv("SIDEGRAPH_RATIFY_POLICY", "auto-low-risk")
-    assert os.environ["SIDEGRAPH_RATIFY_POLICY"] == "auto-low-risk"
-
-
-def test_previous_tests_monkeypatch_setenv_did_not_survive():
-    # Runs after the test above in file order. Proves function scope: what one test
-    # sets via monkeypatch is gone by the time the next test's fixtures re-clear.
-    assert "SIDEGRAPH_RATIFY_POLICY" not in os.environ

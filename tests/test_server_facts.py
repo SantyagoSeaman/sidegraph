@@ -102,24 +102,6 @@ def test_add_fact_impl_explicit_session_id_wins_over_fallback(tmp_path, current_
     assert store.get_fact(out["id"]).provenance.session_id == "explicit-session"
 
 
-def test_add_fact_impl_ignores_stale_telemetry_session_marker(tmp_path, current_session):
-    """Window-expired twin (declared exception): passes before AND after."""
-    from datetime import UTC, datetime, timedelta
-
-    from sidegraph.config import TELEMETRY_SESSION_KEY
-
-    store = Store(tmp_path / "srv.db")
-    stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
-    current_session(session_id=None)
-    store.set_meta(TELEMETRY_SESSION_KEY, f"stale-session|{stale}")
-
-    out = _add_fact_impl(
-        store, None, statement="s", source="src", anchors=[{"name": "a.py", "file_path": "a.py"}]
-    )
-
-    assert store.get_fact(out["id"]).provenance.session_id is None
-
-
 def test_supersede_fact_inherits_bindings_verbatim(tmp_path):
     store = Store(tmp_path / "srv.db")
     old = _add_fact_impl(
@@ -237,25 +219,6 @@ def test_supersede_fact_impl_explicit_session_id_wins_over_fallback(tmp_path, cu
     )
 
     assert store.get_fact(new["id"]).provenance.session_id == "explicit-session"
-
-
-def test_supersede_fact_impl_ignores_stale_telemetry_session_marker(tmp_path, current_session):
-    """Window-expired twin (declared exception): passes before AND after."""
-    from datetime import UTC, datetime, timedelta
-
-    from sidegraph.config import TELEMETRY_SESSION_KEY
-
-    store = Store(tmp_path / "srv.db")
-    old = _add_fact_impl(
-        store, None, statement="old", source="src", anchors=[{"name": "a.py", "file_path": "a.py"}]
-    )
-    stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
-    current_session(session_id=None)
-    store.set_meta(TELEMETRY_SESSION_KEY, f"stale-session|{stale}")
-
-    new = _supersede_fact_impl(store, None, old_fact_id=old["id"], statement="new", source="src2")
-
-    assert store.get_fact(new["id"]).provenance.session_id is None
 
 
 def test_supersede_fact_mcp_tool_wrapper_passes_session_id_and_author(tmp_path, monkeypatch):

@@ -127,13 +127,32 @@ def test_unreadable_store_is_reported_not_raised(cmd, world, tmp_path, monkeypat
         assert rc == 1 and "store not writable (" in text, (rc, text)
 
 
+# What each command prints when its graph cannot be read (it carries on as if the graph were
+# absent).
+_GRAPH_UNREADABLE_SAYS = {
+    "sync": "no tracked entities",
+    "init": "missing graph:",
+    "import": "would import 0 decision(s)",
+    "import-docs": "would import 0 decision(s)",
+    "domains-bootstrap": "would propose 0 domain(s)",
+    "doctor": "clean",
+    "stats": "HEALTH",
+    "ratify": "No proposed decisions",
+}
+
+
 @pytest.mark.parametrize("cmd", list(RUNS))
 def test_unreadable_graph_is_reported_not_raised(cmd, world, tmp_path, monkeypatch, capsys):
     db, g = world
     _eacces_on(monkeypatch, g)
     rc = RUNS[cmd](db, tmp_path)
-    assert isinstance(rc, int)
-    capsys.readouterr()
+    out = capsys.readouterr()
+    text = out.out + out.err
+    # An unreadable graph reads as an absent one: every command finishes cleanly and says
+    # what it did, instead of raising or dying on the unreadable path.
+    assert rc == 0, (rc, text)
+    assert "Traceback" not in text and "Permission denied" not in text, text
+    assert _GRAPH_UNREADABLE_SAYS[cmd] in text, text
 
 
 def test_helper_survives_an_unreadable_store(world, monkeypatch):
@@ -142,19 +161,13 @@ def test_helper_survives_an_unreadable_store(world, monkeypatch):
     assert config.graph_path_for_store("graphify-out/graph.json", db) == g
 
 
-def test_hint_survives_an_unreadable_graph(world, monkeypatch):
-    db, g = world
-    _eacces_on(monkeypatch, g)
-    cli._graph_hint(None, g)
-
-
 def test_ratify_reader_survives_unreadable_paths(world, monkeypatch):
     db, g = world
     _eacces_on(monkeypatch, g)
     assert cli._ratify_reader("graphify-out/graph.json", db) is None
     monkeypatch.undo()
     _eacces_on(monkeypatch, db)
-    cli._ratify_reader("graphify-out/graph.json", db)
+    assert cli._ratify_reader("graphify-out/graph.json", db) is not None  # the graph is readable
 
 
 @pytest.mark.skipif(ROOT, reason="root ignores modes")

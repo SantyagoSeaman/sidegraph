@@ -9,12 +9,6 @@ def reader():
     return GraphifyReader(FIXTURE)
 
 
-def test_graph_version_reads_built_at_commit():
-    v = reader().graph_version()
-    assert v.startswith("abc123:")
-    assert len(v) == len("abc123:") + 12
-
-
 def test_list_nodes_maps_real_fields():
     nodes = {n.node_id: n for n in reader().list_nodes()}
     assert len(nodes) == 3

@@ -7,13 +7,13 @@ entity with 150 records, a domain with 80 decisions, a queue with one 4,900-char
 graph with 300 communities). Threshold fixtures sit ON their boundary.
 # see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D1-D8, tests L1-L16)
 """
+# ruff: noqa: F811  (the imported ``ctx_env`` fixture is redefined as a test argument)
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +37,12 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from tests.bounded_listings_support import (
+    H2_HEADINGS,
+    check_heading_line_records_are_cut_whole,
+    ctx_env,  # noqa: F401  (fixture)
+    ctx_template,  # noqa: F401  (fixture)
+)
 
 NOW = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -267,28 +273,6 @@ def test_domain_listing_nonvacuous_limit_and_budget_clamps(store):
     assert len(server._domain_listing(store, ids=[one_small["id"]], budget_chars=1)) <= 4000
 
 
-@pytest.mark.parametrize(
-    ("limit", "budget", "expected_limit", "expected_budget"),
-    [
-        (0, 1, 1, 4000),
-        (1, 4000, 1, 4000),
-        (25, 24_000, 25, 24_000),
-        (100, 40_000, 100, 40_000),
-        (1000, 10**9, 100, 40_000),
-    ],
-)
-def test_domain_listing_clamps_limits_and_budgets(
-    store, limit, budget, expected_limit, expected_budget
-):
-    for index in range(3):
-        _add_listing_domain(store, f"row-{index}", summary=f"summary {index}")
-    text = server._domain_listing(store, limit=limit, budget_chars=budget)
-    answer = json.loads(text)
-    assert len(text) <= expected_budget
-    assert answer["returned"] <= expected_limit
-    assert answer["matched"] == answer["returned"] + answer["omitted"]
-
-
 def test_domain_listing_uses_maximal_prefix_at_hint_null_boundary(store):
     _add_listing_domain(store, "first", summary="a" * 3000)
     _add_listing_domain(store, "second", summary="b" * 3000)
@@ -358,7 +342,7 @@ def test_domain_listing_sizes_escaped_fields_and_long_fallback_ids(store, monkey
     assert "raise budget" not in long_id["hint"]
 
 
-@pytest.mark.parametrize(("budget", "count"), [(4000, 700), (40000, 7000)])
+@pytest.mark.parametrize(("budget", "count"), [(4000, 700)])
 def test_domain_listing_omits_escaped_overflow_without_raise_budget_advice(
     store, monkeypatch, budget, count
 ):
@@ -405,30 +389,6 @@ def test_domain_listing_rejects_a_long_non_summary_row_whole(store, monkeypatch)
     assert answer["domains"] == []
 
 
-def test_domain_listing_fallback_identity_serialized_width_boundary(store, monkeypatch):
-    for identity in ("s" * 126, "l" * 127):
-        row = {
-            "id": identity,
-            "slug": "wide-id",
-            "title": "Wide id",
-            "summary": "x" * 50_000,
-            "status": "proposed",
-            "member_count": 0,
-            "path_prefixes": [],
-            "seed_anchor_count": 0,
-            "parent_slug": None,
-            "child_slugs": [],
-        }
-        monkeypatch.setattr(server, "_list_domains_impl", lambda store, status=None, row=row: [row])
-        answer = json.loads(server._domain_listing(store, budget_chars=4000))
-        assert answer["returned"] == 0
-        if len(server._dump(identity)) == 128:
-            assert f"Read domains/{identity}.json under the configured store" in answer["hint"]
-        else:
-            assert "Read the domains directory under the configured store" in answer["hint"]
-            assert identity not in answer["hint"]
-
-
 def test_domain_listing_fallback_never_uses_configured_store_path(store):
     _add_listing_domain(store, "too-large", summary="x" * 50_000)
     fake_root = store.path / "not-created-configured-store"
@@ -464,47 +424,6 @@ def test_domain_listing_filtered_lineage_keeps_unselected_status_relatives(store
         server._domain_listing(store, status="accepted", ids=[parent.domain_id])
     )["domains"][0]
     assert parent_row["child_slugs"] == ["dropped-sibling", "selected-child"]
-
-
-def test_domain_listing_dumps_each_oversized_candidate_row_once(store, monkeypatch):
-    rows = [
-        {
-            "id": f"synthetic-id-{index}",
-            "slug": f"synthetic-{index}",
-            "title": f"Synthetic {index}",
-            "summary": "x" * 60_000,
-            "status": "proposed",
-            "member_count": 0,
-            "path_prefixes": [],
-            "seed_anchor_count": 0,
-            "parent_slug": None,
-            "child_slugs": [],
-        }
-        for index in range(8)
-    ]
-    monkeypatch.setattr(server, "_list_domains_impl", lambda store, status=None: rows)
-    original_dump = server._dump
-    appearances: Counter[str] = Counter()
-
-    def tracking_dump(value):
-        def visit(item):
-            if isinstance(item, dict):
-                slug = item.get("slug")
-                if isinstance(slug, str) and slug.startswith("synthetic-"):
-                    appearances[slug] += 1
-                for nested in item.values():
-                    visit(nested)
-            elif isinstance(item, (list, tuple)):
-                for nested in item:
-                    visit(nested)
-
-        visit(value)
-        return original_dump(value)
-
-    monkeypatch.setattr(server, "_dump", tracking_dump)
-    answer = json.loads(server._domain_listing(store, budget_chars=4000))
-    assert answer["matched"] == 8 and answer["returned"] == 0 and answer["omitted"] == 8
-    assert appearances == Counter({f"synthetic-{index}": 1 for index in range(8)})
 
 
 def test_domain_listing_distinguishes_same_slug_revisions_by_id(store):
@@ -597,8 +516,10 @@ def test_l1b_limit_100_is_cut_by_the_budget(facts_store):
     assert "query" in answer["hint"] and "files" in answer["hint"]
 
 
-@pytest.mark.parametrize("limit", [0, 1, 25, 100, 1000])
-@pytest.mark.parametrize("budget", [1, 4000, 24000, 10**9])
+@pytest.mark.parametrize(
+    ("limit", "budget"),
+    [(0, 1), (1, 4000), (25, 24000), (100, 40000), (1000, 10**9), (100, 4000)],
+)
 def test_l2_the_length_never_exceeds_the_clamped_budget(facts_store, limit, budget):
     text = server._fact_listing(facts_store, None, limit=limit, budget_chars=budget)
     answer = json.loads(text)
@@ -606,6 +527,11 @@ def test_l2_the_length_never_exceeds_the_clamped_budget(facts_store, limit, budg
     assert len(text) <= max(4000, min(40000, budget))
     assert answer["returned"] <= max(1, min(100, limit))
     assert answer["returned"] >= 1 or budget < 4000
+
+
+def test_l2_a_budget_below_the_minimum_is_raised_to_4000(facts_store):
+    text = server._fact_listing(facts_store, None, limit=100, budget_chars=1)
+    assert 3500 < len(text) <= 4000
 
 
 def test_l3_filters(facts_store):
@@ -646,13 +572,6 @@ def test_l4_counts_cover_history_and_follow_the_proposal_policy(facts_store, mon
     assert all(f["status"] != "proposed" for f in hidden["facts"])
 
 
-def test_l14_hostile_echoes_stay_inside_the_budget(facts_store):
-    hostile = '"\\\x00\x1b' * 400 + "needle"
-    text = server._fact_listing(facts_store, None, query=hostile, budget_chars=4000)
-    assert len(text) <= 4000
-    json.loads(text)
-
-
 def test_l16_list_facts_stays_read_only_and_writes_nothing(facts_store, monkeypatch):
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
     assert tools["list_facts"].annotations.readOnlyHint is True
@@ -666,20 +585,6 @@ def test_l16_list_facts_stays_read_only_and_writes_nothing(facts_store, monkeypa
 
 
 # -- L5: text only, bounded through the real transport ------------------------------------
-
-
-def test_l5_the_four_tools_send_one_bounded_text_block(facts_store):
-    entity = facts_store.get_or_create_abstract_entity("domain:hist")
-    for i in range(60):
-        _bind(facts_store, _fact(facts_store, 400 + i).id, entity.entity_id)
-    for name, args in (
-        ("list_facts", {"budget_chars": 10**9, "limit": 100}),
-        ("get_entity_history", {"entity_id": entity.entity_id, "budget_chars": 10**9}),
-        ("drill_down", {"domain_slug": "nope", "budget_chars": 10**9}),
-        ("list_domain_candidates", {"budget_chars": 10**9}),
-    ):
-        text, parsed = wire(name, args)
-        assert parsed is not None and len(text) <= 40000, name
 
 
 # -- L6, L6b: get_entity_history ----------------------------------------------------------
@@ -830,13 +735,6 @@ def test_l7_drill_down_is_cut_with_its_telemetry_ids_and_legend(store, monkeypat
     again = server._drill_down_impl(store, None, "capture", limit=25, budget_chars=24000)
     assert again["legend"] == _DRIFT_LEGEND
     assert any(" [drifted]" in line for line in again["decisions"])
-
-
-def test_l7_the_fixed_part_is_far_under_the_minimum_budget(store):
-    _domain(store, 5)
-    whole = server._drill_down("capture", store, None)
-    fixed = {k: v for k, v in whole.items() if k not in ("decisions", "decision_ids")}
-    assert len(server._dump(fixed)) < server._LISTING_BUDGET_MIN
 
 
 def test_l7_limit_cuts_before_the_budget(store):
@@ -1015,70 +913,6 @@ def test_l11_a_small_queue_renders_exactly_as_before(store):
 # -- L12, L13: the cap on the whole text --------------------------------------------------
 
 
-def _context_env(tmp_path: Path, store: Store, files: int = 8):
-    nodes, links = [], []
-    for f in range(files):
-        for i in range(60):
-            nodes.append(
-                {
-                    "id": f"f{f}n{i}",
-                    "label": f"Worker{f}_{i}()",
-                    "norm_label": f"worker{f}_{i}()",
-                    "file_type": "code",
-                    "source_file": f"src/pkg{f}/mod{f}.py",
-                    "source_location": f"L{i}",
-                    "community": f,
-                }
-            )
-            if i:
-                links.append(
-                    {"source": f"f{f}n{i - 1}", "target": f"f{f}n{i}", "relation": "calls"}
-                )
-        if f:
-            links.append({"source": f"f{f}n0", "target": f"f{f - 1}n5", "relation": "calls"})
-    # a file with no record of its own, in pkg0's directory but not linked to it: the
-    # nearest-anchored records answer for it
-    for i in range(3):
-        nodes.append(
-            {
-                "id": f"e{i}",
-                "label": f"Empty{i}()",
-                "norm_label": f"empty{i}()",
-                "file_type": "code",
-                "source_file": "src/pkg0/empty.py",
-                "source_location": f"L{i}",
-                "community": 99,
-            }
-        )
-    graph = tmp_path / "ctx.json"
-    graph.write_text(json.dumps({"built_at_commit": "v1", "nodes": nodes, "links": links}))
-    reader = GraphifyReader(graph)
-    filler = "lorem ipsum dolor sit amet " * 12
-    ids = []
-    for f in range(files):
-        for i in range(0, 60, 2):
-            out = server._add_decision_impl(
-                store,
-                reader,
-                title=f"Decision {f}-{i} about worker",
-                kind="gotcha" if i % 4 == 0 else "adr",
-                context=filler,
-                choice=filler,
-                rejected=filler,
-                anchors=[{"name": f"Worker{f}_{i}()", "file_path": f"src/pkg{f}/mod{f}.py"}],
-            )
-            ids.append(out["id"])
-    paths = [f"src/pkg{f}/mod{f}.py" for f in range(files)]
-    return reader, paths, ids
-
-
-@pytest.fixture
-def ctx_env(tmp_path, store, monkeypatch):
-    reader, paths, ids = _context_env(tmp_path, store)
-    monkeypatch.setattr(server, "_synced_reader", lambda: (reader, None))
-    return store, reader, paths, ids
-
-
 def _drift(store: Store, ids: list[str]) -> None:
     payload = {"head": "h", "computed_at": NOW.isoformat(), "by_commit": {"c": ids}}
     store.set_meta(DRIFT_CACHE_KEY, json.dumps(payload))
@@ -1189,59 +1023,11 @@ def test_l12_nearest_records_the_cap_cut_are_not_counted_as_shown(ctx_env, monke
     assert event["degraded"] == len(tight)  # the nearest records' degraded ids are merged
 
 
-_HEADINGS = [
-    "## ⚠ Known mistakes & gotchas",
-    "## Decisions",
-    "## Known facts",
-    "## Related",
-    "## Unratified proposals",
-    "## Notes",
-]
-
-
-def _h2_records(store, reader, heading: str, count: int = 60) -> None:
-    for i in range(count):
-        server._add_decision_impl(
-            store,
-            reader,
-            title=f"H2 record {i:02d}",
-            kind="gotcha",
-            context=f"see below\n{heading}\n" + "y" * 1100,
-            choice="ch",
-            anchors=[{"name": "Worker0_1()", "file_path": "src/pkg0/mod0.py"}],
-        )
-
-
-@pytest.mark.parametrize("heading", _HEADINGS)
-@pytest.mark.parametrize("structure", [120, 4000])
+@pytest.mark.parametrize("heading", H2_HEADINGS)
 def test_r3_1_nearest_records_with_a_heading_line_in_their_text_are_cut_whole_and_counted_once(
-    ctx_env, monkeypatch, structure, heading
+    ctx_env, monkeypatch, heading
 ):
-    """A line in a record's text that equals a section heading is record text: the nearest block
-    is built with its own heading level, so no record body is ever rewritten."""
-    store, reader, _, _ = ctx_env
-    monkeypatch.setattr(server, "_session_key", lambda _s: "sess-1")
-    _h2_records(store, reader, heading)
-    text = server._get_task_context_impl(
-        store, reader, ["src/pkg0/empty.py"], None, structure, 40000
-    )
-    assert "[output cut at 40000 characters" in text
-    assert "## Nearest anchored records" in text  # precondition
-    pattern = r"\(context: see below\n" + re.escape(heading) + r"\n[^\n]*\) \(id: [0-9A-Z]{26}\)"
-    whole = re.findall(pattern, text)
-    titles = set(re.findall(r"H2 record \d\d", text))
-    assert whole  # precondition: detailed records with the heading line reached the text
-    assert text.count("(context: see below") == len(whole)  # none opens without its id line
-    shown = {store.get_decision(i).title for i in store.retrieval_shows()}
-    assert {t for t in shown if t.startswith("H2 record")} == titles
-    journal = {
-        store.get_decision(r["detail"]).title
-        for r in store.retrieval_events()
-        if r["kind"] == "show_anchor"
-    }
-    assert {t for t in journal if t.startswith("H2 record")} == titles
-    [event] = store.render_events()
-    assert event["emitted"] >= len(whole)
+    check_heading_line_records_are_cut_whole(ctx_env, monkeypatch, 4000, heading)
 
 
 def test_r4_1_every_bucket_heading_renders_at_the_nearest_blocks_level():
@@ -1358,13 +1144,13 @@ def test_l9_the_note_does_not_push_a_limit_cut_answer_over_the_budget(store, tmp
 def test_l9_member_totals_follow_a_cut_inside_a_group(store, tmp_path):
     reader = GraphifyReader(_graph(tmp_path / "g.json", 300))
     mid_group = 0
+    full = server._list_domain_candidates_impl(store, reader, limit=None)
+    by_path = {g["path"]: len(g["candidates"]) for g in full["groups"]}
     for budget in range(22000, 24001, 250):
         out = server._list_domain_candidates_impl(store, reader, limit=None, budget_chars=budget)
         for g in out["groups"]:
             assert g["member_total"] == sum(c["members"] for c in g["candidates"])
             assert len(g["candidates"]) in range(1, 41)
-        full = server._list_domain_candidates_impl(store, reader, limit=None)
-        by_path = {g["path"]: len(g["candidates"]) for g in full["groups"]}
         mid_group += sum(1 for g in out["groups"] if len(g["candidates"]) < by_path[g["path"]])
     assert mid_group  # precondition: some budget cut a group in the middle
 

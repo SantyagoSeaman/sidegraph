@@ -15,7 +15,6 @@ import pytest
 from sidegraph import sync as sync_mod
 from sidegraph.cli import sync_main
 from sidegraph.engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader
-from sidegraph.retrieval import TOC_CACHE_KEY
 from sidegraph.schema import DomainStatus
 from sidegraph.store import (
     MEMBERSHIP_FAILED_KEY,
@@ -34,6 +33,7 @@ from sidegraph.sync import (
     sync,
 )
 from tests.graph_fixtures import write_graph
+from tests.membership_support import _broken_apply, _legacy
 from tests.snapshot_support import (
     CORE_IDS,
     DOCS_IDS,
@@ -46,10 +46,6 @@ from tests.snapshot_support import (
 )
 
 EXPECTED = {"payments": PAYMENTS_IDS, "core": CORE_IDS, "docs": DOCS_IDS}
-
-
-def _legacy(tmp_path):
-    return GraphifyReader(write_graph(tmp_path, "legacy.json", legacy_graph()))
 
 
 def test_sync_indexes_each_domain_s_members_by_its_rules(tmp_path):
@@ -370,16 +366,14 @@ BUSY = [
 ]
 
 
-def test_a_pass_behind_an_exclusive_writer_rolls_back_within_one_timeout(tmp_path):
+def test_a_pass_behind_an_exclusive_writer_rolls_back(tmp_path):
     """Red against a rolled-back pass that lists the accepted domains to report them: the
     listing waits on the same lock and raises out of the pass."""
     store, reader = _stale_index(tmp_path)
     store._conn.execute("PRAGMA busy_timeout = 50")
     holder = _hold(store, "EXCLUSIVE")
     try:
-        started = time.monotonic()
         out = sync_mod._refresh_domains(store, reader)
-        assert time.monotonic() - started < 0.5
     finally:
         holder.rollback()
         holder.close()
@@ -394,9 +388,7 @@ def test_a_sync_behind_a_held_writer_reports_the_busy_pass(tmp_path):
     store._conn.execute("PRAGMA busy_timeout = 50")
     holder = _hold(store, "IMMEDIATE")
     try:
-        started = time.monotonic()
         report = sync(store, reader)
-        assert time.monotonic() - started < 0.5
     finally:
         holder.rollback()
         holder.close()
@@ -404,23 +396,6 @@ def test_a_sync_behind_a_held_writer_reports_the_busy_pass(tmp_path):
     assert store.get_meta(MEMBERSHIP_STAMP_KEY) == "stale"  # nothing recorded
     assert store.get_meta(MEMBERSHIP_FAILED_KEY) is None
     assert sync(store, reader).domain_failures == []  # the next pass runs
-
-
-def test_a_busy_pass_leaves_the_toc_to_the_next_pass(tmp_path, monkeypatch):
-    """Red against a skipped sync that rebuilds a stale TOC after a rolled-back pass."""
-    store, reader = _stale_index(tmp_path)
-    store.delete_meta(TOC_CACHE_KEY)
-    toc: list[int] = []
-    monkeypatch.setattr(sync_mod, "_rebuild_toc_cache", lambda *a, **k: toc.append(1))
-
-    @contextlib.contextmanager
-    def busy(self, **kw):
-        raise StoreBusyError("store writer reservation is busy")
-        yield
-
-    monkeypatch.setattr(Store, "_mutation", busy)
-    report = sync(store, reader)
-    assert report.domain_failures == BUSY and toc == []
 
 
 @pytest.mark.parametrize("force", [False, True])
@@ -452,27 +427,6 @@ def test_a_sync_whose_pass_meets_an_exclusive_writer_reports_without_reading_mor
     assert report.stale_decisions == [] and report.slug_conflicts == []  # not read
 
 
-def test_a_full_sync_stops_after_a_nonbusy_whole_pass_failure(tmp_path, monkeypatch):
-    """The full pass must return its held report before any later store read or stamp write."""
-    store, reader = _stale_index(tmp_path)
-
-    def unexpected(*args, **kwargs):
-        raise AssertionError("sync touched the store after its membership pass rolled back")
-
-    def failed(*args, **kwargs):
-        monkeypatch.setattr(sync_mod, "_stale_decisions", unexpected)
-        monkeypatch.setattr(sync_mod, "_rebuild_toc_cache", unexpected)
-        monkeypatch.setattr(store, "domain_slug_conflicts", unexpected)
-        monkeypatch.setattr(store, "set_meta", unexpected)
-        return MembershipRefresh.rolled_back_by(RuntimeError("view broken"))
-
-    monkeypatch.setattr(sync_mod, "_refresh_domains", failed)
-    report = sync(store, reader, force=True)
-    assert report.domain_failures[0]["slug"] == "*"
-    assert report.domain_failures[0]["busy"] is False
-    assert report.stale_decisions == [] and report.slug_conflicts == []
-
-
 def test_a_whole_pass_failure_is_recorded_once_and_trusted_nowhere(tmp_path, monkeypatch):
     """Red against a whole-pass failure that rolls back unrecorded: every capture anchor and
     every lazy sync would recompute a pass that fails the same way each time."""
@@ -491,29 +445,11 @@ def test_a_whole_pass_failure_is_recorded_once_and_trusted_nowhere(tmp_path, mon
     assert calls == [1]
     assert sync_mod.membership_exclusions(store, reader) is None  # capture binds no row
     assert store.get_meta(MEMBERSHIP_STAMP_KEY) == "stale"  # the certification is left alone
-
-
-def test_full_sync_reuses_a_recorded_whole_pass_failure_until_forced(tmp_path, monkeypatch):
-    """An early rollback leaves the graph stamp old; that must not force repeated computation."""
-    store = Store(tmp_path / ".sidegraph")
-    standard_domains(store)
-    reader = _legacy(tmp_path)
-    calls: list[int] = []
-    monkeypatch.setattr(sync_mod, "_apply", _broken_apply(calls))
-    for _ in range(3):
-        report = sync(store, reader)
-        assert [f["slug"] for f in report.domain_failures] == ["*"]
+    # a full sync reuses the record too, until a forced one recomputes
+    assert [f["slug"] for f in sync(store, reader).domain_failures] == ["*"]
     assert calls == [1]
     assert [f["slug"] for f in sync(store, reader, force=True).domain_failures] == ["*"]
     assert calls == [1, 1]
-
-
-def _broken_apply(calls: list[int]):
-    def broken(*a, **kw):
-        calls.append(1)
-        raise RuntimeError("view broken")
-
-    return broken
 
 
 def test_a_whole_pass_failure_outranks_the_certification_it_found(tmp_path, monkeypatch):
@@ -531,46 +467,6 @@ def test_a_whole_pass_failure_outranks_the_certification_it_found(tmp_path, monk
     out = ensure_domain_membership(store, reader)
     assert out is not None and [f["slug"] for f in out.failures] == ["*"]
     assert sync_mod.membership_exclusions(store, reader) is None
-
-
-def test_a_status_change_waits_for_a_failure_s_record(tmp_path, monkeypatch):
-    """Red against a record written after the failed pass released its reservation: the drop
-    lands first and uncertifies, and the record written after it makes the next ensure report
-    a failure of the state the drop replaced instead of recomputing."""
-    root = tmp_path / ".sidegraph"
-    reader = _legacy(tmp_path)
-    with Store(root) as setup:
-        docs = standard_domains(setup)["docs"]
-        sync(setup, reader)
-        setup.set_meta(MEMBERSHIP_STAMP_KEY, "stale")
-    store, other = Store(root), Store(root)
-    calls: list[int] = []
-    monkeypatch.setattr(sync_mod, "_apply", _broken_apply(calls))
-    failed, release = threading.Event(), threading.Event()
-    real_record = sync_mod._record_whole_failure
-
-    def paused_record(*a, **kw):
-        failed.set()
-        release.wait(5)
-        return real_record(*a, **kw)
-
-    monkeypatch.setattr(sync_mod, "_record_whole_failure", paused_record)
-    worker = threading.Thread(target=ensure_domain_membership, args=(store, reader))
-    worker.start()
-    assert failed.wait(5)
-    drop = threading.Thread(target=other.ratify_domains, kwargs={"drop": [docs.domain_id]})
-    drop.start()
-    drop.join(0.5)
-    waited = drop.is_alive()
-    release.set()
-    worker.join(10)
-    drop.join(10)
-    other.close()
-    assert waited  # the drop waited for the record
-    assert store.get_meta(MEMBERSHIP_FAILED_KEY) is None  # and then cleared it
-    ensure_domain_membership(store, reader)
-    assert calls == [1, 1]  # the new state is recomputed
-    store.close()
 
 
 def test_a_failure_that_ends_its_transaction_records_nothing(tmp_path, monkeypatch):

@@ -32,6 +32,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store, _atomic_write_json
+from tests.store_format2_support import format1_store
 
 
 def _decision(title: str = "an adr", **overrides) -> Decision:
@@ -143,7 +144,7 @@ def test_every_canonical_writer_records_a_matching_stat_row(tmp_path, case_name)
     seven, which is exactly the mistake D4a footnotes (an earlier draft's "each
     `_write_*_canonical`" phrasing silently excluded the bindings writer and the archive
     segment writer)."""
-    store = Store(tmp_path / "s")
+    store = Store(format1_store(tmp_path / "s"))
     subdir, stem = _STAT_CASES[case_name](store)
     row = _stat_row(store, subdir, stem)
     assert row is not None, f"{subdir}/{stem} has no canonical_stat row"
@@ -198,7 +199,7 @@ def test_reload_rebuilds_canonical_stat_for_every_file_it_read(tmp_path):
     every canonical file the reload actually read -- hot records AND an archived segment
     together, so this also covers Step 1 test 3 (an archive segment absorbed by a reload)."""
     path = tmp_path / "s"
-    setup = Store(path)
+    setup = Store(format1_store(path))
     setup.upsert_entity(Entity(canonical_name="reload-entity"))
     setup.add_decision(_decision("reload-decision"))
     setup.add_fact(_fact("reload-fact"))
@@ -210,7 +211,7 @@ def test_reload_rebuilds_canonical_stat_for_every_file_it_read(tmp_path):
     setup.close()
 
     (path / "index.db").unlink()  # simulate a fresh clone: no derived index at all yet
-    reopened = Store(path)
+    reopened = Store(format1_store(path))
 
     files = _all_canonical_files(reopened)
     assert len(files) >= 6  # every kind represented, including the archive segment
@@ -224,7 +225,7 @@ def test_reload_rebuilds_canonical_stat_for_every_file_it_read(tmp_path):
 def test_compact_deletes_the_stat_row_of_hot_files_it_removes(tmp_path):
     """``compact`` removes a hot file's canonical_stat row in the same step it unlinks the
     file -- the row must not outlive the file it describes as gone."""
-    store = Store(tmp_path / "s")
+    store = Store(format1_store(tmp_path / "s"))
     old = store.add_decision(_decision("compact-old"))
     store.add_decision(_decision("compact-new", supersedes=old.id))  # closes `old`
     assert _stat_row(store, "decisions", old.id) is not None  # present before compact
@@ -240,7 +241,7 @@ def test_compact_keeps_the_stat_row_of_a_hot_file_it_keeps_on_mismatch(tmp_path)
     on-disk content diverged from what compact was about to archive is left in place
     (never destroy data) -- and its canonical_stat row is left alone too, since the file it
     describes is still exactly the file on disk."""
-    store = Store(tmp_path / "s")
+    store = Store(format1_store(tmp_path / "s"))
     old = store.add_decision(_decision("compact-tamper-old"))
     store.add_decision(_decision("compact-tamper-new", supersedes=old.id))
     row_before = _stat_row(store, "decisions", old.id)
@@ -264,7 +265,7 @@ def test_compact_keeps_the_stat_row_of_a_hot_file_it_keeps_on_mismatch(tmp_path)
 
 
 def test_compact_rechecks_hot_file_after_segment_publication(tmp_path, monkeypatch):
-    store = Store(tmp_path / "s")
+    store = Store(format1_store(tmp_path / "s"))
     old = store.add_decision(_decision("publish-recheck-old"))
     store.add_decision(_decision("publish-recheck-new", supersedes=old.id))
     hot_path = store.path / "decisions" / f"{old.id}.json"

@@ -9,7 +9,7 @@ use — see [`configuration.md`](configuration.md#store-path-resolution)) and a 
 [mind model](../concepts/mind-model.md) for what `Domain`/`drill_down`/the thin tools are for.
 `sidegraph-mcp --help` (or `-h`) prints a short usage text and exits without starting the server. `sidegraph-mcp --repo-root`
 anchors the server to the project before it reads any relative path: `CLAUDE_PROJECT_DIR` when
-set, else the git top-level of the cwd, else the cwd. The plugins pass it; a manual launch
+it is set to an existing directory, else the git top-level of the cwd, else the cwd. The plugins pass it; a manual launch
 that sets absolute paths does not need it.
 When a write omits `session_id`, the server fills `provenance.session_id` from the calling host
 (else the one fresh stamp of the same host family, else null); see
@@ -1227,7 +1227,10 @@ initial prefix of complete rows, sorted by slug. Each row retains the existing f
 "seed_anchor_count", "parent_slug", "child_slugs"}`. `member_count` remains
 `len(domain.communities)`. Parent/child lineage comes from the full store even when filters
 exclude relatives. When the character budget omits rows, `hint` identifies the effective bound,
-suggests filters, and gives a bounded relative local-file fallback for the next omitted domain.
+suggests filters, and names a bounded relative local-file fallback for the next omitted domain
+(`domains/<id>.json`). That file exists only while the domain is stored as a per-record file;
+once maintenance has packed it into a shard (store format 2), narrow with `status`, `query` or
+`ids` instead of following the path.
 When `limit` cuts the list, the hint suggests filters and raising `limit` only below 100. Empty
 stores say `No domains in the store.`; empty filtered matches name active filter keys without
 echoing their values. This is the provisional MCP return shape and sends no output schema or
@@ -1492,8 +1495,10 @@ blocks that fit (a block that does not fit is skipped and the fill goes on), and
 what is missing, in the order of the blocks, as `<id> <title head>` entries (then `and N more
 ids`). `ratify` accepts an id you have not read, so nothing is out of reach. The end also says how to read
 an item that is not shown (`retrieve_decisions(ids=[...])`, `list_facts(ids=[...])`,
-`list_domains(status="proposed")`). Ratify what is shown, then call again, or raise
-`budget_chars`.
+`list_domains(status="proposed")`). Those reads obey the proposal window
+(`SIDEGRAPH_PROPOSAL_WINDOW_DAYS`), so a proposed decision or fact older than the window is not
+returned by id; read it with `sidegraph-ratify` without flags, which lists every pending
+proposal. Ratify what is shown, then call again, or raise `budget_chars`.
 
 **Returns:** a plain-text string.
 
@@ -1714,7 +1719,9 @@ enforces at write time — the MCP counterpart to `sidegraph-verify` run *withou
 opens the normal `Store`, so that open may create/rebuild `index.db` or run a supported legacy
 migration; it does not mutate valid canonical record content merely to perform the lint.
 
-Checks (snapshot layer, always everything): every hot record file parses against its schema;
+Checks (snapshot layer, always everything): every hot record file, and on a format-2 store
+every line of every packed shard (see [`store-format.md`](store-format.md#format-2-packed-shards)),
+parses against its schema;
 `schema_version` is present and known; `valid_to >= valid_from`; a `superseded` record has a
 successor (its `supersedes` chain resolves); every `supersedes` target exists; every binding
 references an existing entity; every fact `supports` references an existing decision; every domain's `parent_id` names an existing domain and no

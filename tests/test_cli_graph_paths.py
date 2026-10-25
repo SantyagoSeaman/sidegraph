@@ -467,24 +467,17 @@ def _stamp(store_path: Path) -> str | None:
         store.close()
 
 
-def test_a_migrated_legacy_store_still_reads_the_project_graph(tmp_path, monkeypatch):
+def test_a_migrated_legacy_store_reads_the_project_graph_and_ignores_one_in_dot_sidegraph(
+    tmp_path, monkeypatch
+):
     proj = tmp_path / "proj"
     graph = _write_graph(proj, "commitProj", 2)
     legacy = _legacy_db_store(proj)
     monkeypatch.chdir(tmp_path)
-
     assert sync_main(["--db", str(legacy)]) == 0  # migrates: the file becomes a directory
     assert legacy.is_dir()
     assert sync_main(["--db", str(legacy)]) == 0  # the same path, now a `.db` directory
     assert _stamp(legacy) == _version(graph)
-
-
-def test_a_migrated_legacy_store_ignores_a_graph_inside_dot_sidegraph(tmp_path, monkeypatch):
-    proj = tmp_path / "proj"
-    graph = _write_graph(proj, "commitProj", 2)
-    legacy = _legacy_db_store(proj)
-    monkeypatch.chdir(tmp_path)
-    assert sync_main(["--db", str(legacy)]) == 0
     _write_graph(proj / ".sidegraph", "commitWrong", 3)  # a different graph, wrong place
 
     assert sync_main(["--db", str(legacy)]) == 0
@@ -515,21 +508,14 @@ def _deny_getcwd(monkeypatch) -> None:
     monkeypatch.setattr(os, "getcwd", denied)
 
 
-def test_graph_hint_is_silent_when_the_cwd_is_unreadable(two_projects, monkeypatch, capsys):
-    _, _, graph_a, _ = two_projects
-    monkeypatch.delenv("SIDEGRAPH_GRAPH", raising=False)
-    _deny_getcwd(monkeypatch)
-
-    cli._graph_hint(None, graph_a)
-
-    assert capsys.readouterr().err == ""
-
-
-def test_sync_survives_an_unreadable_cwd(two_projects, monkeypatch):
+def test_sync_survives_an_unreadable_cwd_and_the_hint_stays_silent(
+    two_projects, monkeypatch, capsys
+):
     a, _, graph_a, _ = two_projects
     monkeypatch.delenv("SIDEGRAPH_GRAPH", raising=False)
     _deny_getcwd(monkeypatch)
 
     assert sync_main(["--db", str(a / ".sidegraph")]) == 0
 
+    assert capsys.readouterr().err == ""  # the hint cannot tell where the shell is: no hint
     assert Store(a / ".sidegraph").get_meta(LAST_SYNCED_KEY) == _version(graph_a)

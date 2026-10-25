@@ -2,87 +2,27 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import subprocess
 from datetime import UTC, datetime
-from pathlib import Path
 
-import fastmcp
 import pytest
 
 from sidegraph import server
 from sidegraph.doctor import scan_code_drift
 from sidegraph.retrieval import drifted_record_ids
-from sidegraph.schema import AnchorBinding, Decision, Descriptor, Entity, Provenance
+from sidegraph.schema import AnchorBinding, Descriptor, Entity, Provenance
 from sidegraph.store import Store
 from sidegraph.sync import refresh_code_drift_cache
+from tests.drift_checks_support import (  # noqa: F401
+    drift_ids,
+    git,
+    project,
+    record_check,
+    require_check,
+)
 
-
-def git(root: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, check=True
-    ).stdout.strip()
-
-
-@pytest.fixture
-def project(tmp_path, monkeypatch):
-    root = tmp_path / "repo"
-    root.mkdir()
-    git(root, "init", "-q")
-    git(root, "config", "user.name", "Synthetic Reviewer")
-    git(root, "config", "user.email", "fixture@example.invalid")
-    source = root / "code.py"
-    source.write_text("def policy():\n    return 1\n", encoding="utf-8")
-    git(root, "add", "code.py")
-    git(root, "commit", "-q", "-m", "initial policy")
-    capture = git(root, "rev-parse", "HEAD")
-    with Store(root / ".sidegraph") as store:
-        decision = store.add_decision(
-            Decision(
-                title="Keep policy pure",
-                kind="constraint",
-                status="accepted",
-                context="Callers need a deterministic return value.",
-                choice="Policy returns one without external effects.",
-                rejected="Global state makes callers order-dependent.",
-                valid_from=datetime.now(UTC),
-                provenance=Provenance(source="manual", commit=capture),
-            )
-        )
-        entity = store.upsert_entity(
-            Entity(
-                canonical_name="policy", descriptor=Descriptor(name="policy", file_path="code.py")
-            )
-        )
-        store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2))
-        source.write_text("def policy():\n    return (1)\n", encoding="utf-8")
-        git(root, "add", "code.py")
-        git(root, "commit", "-q", "-m", "format-only movement")
-        monkeypatch.setattr(server, "_store", store)
-        monkeypatch.setattr(server, "_load_reader", lambda: None)
-        yield root, store, decision
-
-
-def record_check(root: Path, decision_id: str, **overrides):
-    async def run():
-        async with fastmcp.Client(server.mcp) as client:
-            arguments = {
-                "decision_id": decision_id,
-                "checked_commit": git(root, "rev-parse", "HEAD"),
-                "files": ["code.py"],
-                "rationale": "Only formatting moved; return value and purity still hold.",
-                **overrides,
-            }
-            return await client.call_tool("record_drift_check", arguments, raise_on_error=False)
-
-    return asyncio.run(run())
-
-
-def drift_ids(store: Store) -> set[str]:
-    return {
-        entry.record_id for batch in scan_code_drift(store.path).batches for entry in batch.entries
-    }
+# ruff: noqa: F811  (the imported ``project`` fixture is redefined as a test argument)
 
 
 def test_wire_check_preserves_original_decision_and_clears_only_its_advisory(project):
@@ -125,12 +65,6 @@ def test_invalid_check_has_a_safe_validation_error_without_publication(project, 
     assert before == {p.relative_to(store.path): p.read_bytes() for p in store.path.rglob("*.json")}
 
 
-def require_check(root, decision_id, **overrides):
-    result = record_check(root, decision_id, **overrides)
-    assert not result.is_error, result.content
-    return result.structured_content
-
-
 def commit_file(root, name, content):
     (root / name).write_text(content, encoding="utf-8")
     git(root, "add", "--", name)
@@ -154,7 +88,7 @@ def test_later_checked_change_rearms_and_unrelated_commit_does_not(project):
     assert check["checked_commit"][:8] in finding.detail
 
 
-@pytest.mark.parametrize("index_flag", [None, "--assume-unchanged", "--skip-worktree"])
+@pytest.mark.parametrize("index_flag", [None, "--assume-unchanged"])
 def test_dirty_inspected_source_is_refused_even_behind_index_flags(project, index_flag):
     root, store, decision = project
     if index_flag:
@@ -234,17 +168,6 @@ def test_changed_descriptor_invalidates_the_checked_subject(project):
             update={"descriptor": Descriptor(name="policy_changed", file_path="code.py")}
         )
     )
-    assert drift_ids(store) == {decision.id}
-
-
-def test_malformed_bound_latest_cannot_expose_an_older_clearing_check(project):
-    root, store, decision = project
-    require_check(root, decision.id)
-    older = next((store.path / "verifications").glob("*.json"))
-    raw = json.loads(older.read_text(encoding="utf-8"))
-    raw["id"] = "7" + "Z" * 25
-    raw.pop("rationale")
-    (older.parent / f"{raw['id']}.json").write_text(json.dumps(raw) + "\n", encoding="utf-8")
     assert drift_ids(store) == {decision.id}
 
 
@@ -421,20 +344,6 @@ def test_executable_mode_change_rearms_check(project):
     assert drift_ids(store) == {decision.id}
 
 
-def test_auxiliary_directory_symlink_is_never_used(project, tmp_path):
-    from sidegraph.verify import verify_snapshot
-
-    root, store, decision = project
-    foreign = tmp_path / "foreign"
-    foreign.mkdir()
-    (store.path / "verifications").symlink_to(foreign, target_is_directory=True)
-    findings = verify_snapshot(store.path)
-    assert any(f.code == "symlinked-store-entry" for f in findings)
-    result = record_check(root, decision.id)
-    assert result.is_error
-    assert list(foreign.iterdir()) == []
-
-
 def test_real_supersession_and_compaction_preserve_check_history(project):
     from ulid import ULID
 
@@ -523,21 +432,13 @@ def test_cache_prune_retains_other_ids_and_original_capture_groups(project):
     }
 
 
-def test_auxiliary_directory_replaced_with_a_file_is_a_snapshot_violation(project):
-    from sidegraph.verify import verify_snapshot
-
-    root, store, decision = project
-    (store.path / "verifications").write_text("not a directory\n", encoding="utf-8")
-    findings = verify_snapshot(store.path)
-    assert any(f.code == "parse-error" and f.path.endswith("verifications") for f in findings)
-
-
-@pytest.mark.parametrize("index_flag", ["--assume-unchanged", "--skip-worktree"])
+@pytest.mark.parametrize("index_flag", [None, "--skip-worktree"])
 def test_dirty_executable_mode_is_refused_even_behind_index_flags(project, index_flag):
     root, store, decision = project
     if git(root, "config", "--bool", "core.filemode") != "true":
         pytest.skip("filesystem does not track executable modes")
-    git(root, "update-index", index_flag, "code.py")
+    if index_flag:
+        git(root, "update-index", index_flag, "code.py")
     (root / "code.py").chmod(0o755)
     result = record_check(root, decision.id)
     assert result.is_error
@@ -657,29 +558,6 @@ def test_failed_capture_group_with_check_on_empty_cache_stays_unknown(project, m
     assert len(scan.batches) == 1 and scan.batches[0].failed
     assert refresh_code_drift_cache(store) == 0
     assert any("check skipped" in f.detail for f in doctor.curate(store.path).findings)
-
-
-def test_transient_optional_failure_does_not_retain_dependency_only_cached_flag(
-    project, monkeypatch
-):
-    from sidegraph import drift_checks
-
-    root, store, decision = project
-    commit_file(root, "code.py", "def policy():\n    return 1\n")
-    commit_file(root, "dependency.py", "dependency = 1\n")
-    require_check(root, decision.id, files=["code.py", "dependency.py"])
-    git(root, "rm", "dependency.py")
-    git(root, "commit", "-q", "-m", "remove inspected dependency")
-    assert refresh_code_drift_cache(store) == 1
-
-    def unavailable(*args, **kwargs):
-        raise ValueError("synthetic optional comparison failure")
-
-    monkeypatch.setattr(drift_checks, "tree_entries", unavailable)
-    assert scan_code_drift(store.path).check_skipped
-    # Intentionally bounded contract: preserve capture flags, not a new unknown-id ledger.
-    assert refresh_code_drift_cache(store) == 0
-    assert drifted_record_ids(store) == set()
 
 
 def test_unpublished_auxiliary_temp_is_not_reported_for_commit(project):

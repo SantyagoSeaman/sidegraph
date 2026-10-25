@@ -234,15 +234,6 @@ def test_init_bare_run_with_sidegraph_db_set_still_emits_deprecation_note_once(
 # -- honest "already initialized" for an un-migrated legacy directory (review Minor 5) --
 
 
-def test_looks_already_initialized_detects_unmigrated_legacy_directory(tmp_path):
-    from sidegraph.cli import _looks_already_initialized
-
-    db_dir = tmp_path / "legacy-store"
-    db_dir.mkdir()
-    (db_dir / "decisions.db").write_text("not a real sqlite file; presence alone matters")
-    assert _looks_already_initialized(db_dir) is True
-
-
 def test_init_reports_already_initialized_for_unmigrated_legacy_directory(tmp_path, capsys):
     """A directory holding an un-migrated legacy decisions.db (no format marker yet --
     migration hasn't run) is a REAL pre-existing store: Store(...) migrates it in place a
@@ -302,6 +293,7 @@ def test_init_interactive_prompt_accepted_by_bare_enter_writes_auto_low_risk(
     assert (
         f"wrote .claude/settings.json: env.{RATIFY_POLICY_ENV_VAR}={RATIFY_POLICY_DEFAULT}" in out
     )
+    assert _RESTART_HINT in out  # an interactive answer writes the policy too
 
 
 def test_init_interactive_prompt_accepted_by_yes_writes_auto_low_risk(
@@ -462,16 +454,6 @@ def test_init_written_policy_tells_the_user_to_restart_the_session(tmp_path, cap
     assert _RESTART_HINT in capsys.readouterr().out
 
 
-def test_init_interactive_answer_tells_the_user_to_restart_the_session(
-    tmp_path, capsys, monkeypatch
-):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("sys.stdin", _FakeTTY("\n"))
-    db = tmp_path / ".sidegraph"
-    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
-    assert _RESTART_HINT in capsys.readouterr().out
-
-
 def test_init_existing_policy_prints_no_restart_hint(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     settings_path = tmp_path / ".claude" / "settings.json"
@@ -545,14 +527,6 @@ def test_init_ratify_policy_flag_rejects_an_unknown_value(capsys):
         init_main(["--ratify-policy", "sometimes"])
     err = capsys.readouterr().err
     assert "invalid choice" in err
-
-
-def test_init_help_documents_settings_flags(capsys):
-    with contextlib.suppress(SystemExit):
-        init_main(["--help"])
-    out = capsys.readouterr().out
-    assert "--no-settings" in out
-    assert "--ratify-policy" in out
 
 
 # -- a symlinked or unwritable settings.json is reported, never a traceback ---------------

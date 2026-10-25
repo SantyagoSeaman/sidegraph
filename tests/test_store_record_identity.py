@@ -22,6 +22,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 
 UNSAFE_IDS = [
     "../escaped",
@@ -105,7 +106,7 @@ SKIP_KEY = "skipped_canonical_files"
 def _seed(tmp_path) -> tuple:
     """A store directory holding one real decision, closed. Returns ``(db, decision)``."""
     db = tmp_path / "proj" / ".sidegraph"
-    s = Store(db)
+    s = Store(format1_store(db))
     d = s.add_decision(_decision())
     s.close()
     return db, d
@@ -304,7 +305,7 @@ def test_unsafe_or_nonstring_archived_id_is_skipped(tmp_path, capsys, bad):
         "".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8"
     )
     _drop_index(db)
-    s = Store(db)
+    s = Store(format1_store(db))
     assert "archive" in capsys.readouterr().err
     assert _count(s, "decisions") == 2  # the hot one plus the segment's one good line
     s.compact(dry_run=True)
@@ -391,7 +392,7 @@ def test_compact_ignores_a_hot_file_the_reload_skipped(tmp_path, capsys):
     segment.write_text(json.dumps({"record_type": "decision", **payload}) + "\n", encoding="utf-8")
     _put(db, "decisions", f"{real.id}.json", {**payload, "id": "OTHER"})
     _drop_index(db)
-    s = Store(db)
+    s = Store(format1_store(db))
     hot = db / "decisions" / f"{real.id}.json"
     hot_bytes, segment_bytes = hot.read_bytes(), segment.read_bytes()
     capsys.readouterr()

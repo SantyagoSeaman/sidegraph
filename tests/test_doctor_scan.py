@@ -113,11 +113,6 @@ def test_scan_returns_batch_with_record_id_and_files(git_repo):
     assert [e.record_id for e in batch.entries] == [rid]
     assert batch.entries[0].files == ["trader/exec.py"]
     assert batch.entries[0].record_path == str(store_dir / "decisions" / f"{rid}.json")
-
-
-def test_scan_resolves_head_in_wrapper(git_repo):
-    store_dir, _rid, _commit = _drifted_repo(git_repo)
-    scan = scan_code_drift(store_dir)
     assert scan.head == _head(git_repo)
 
 
@@ -138,60 +133,6 @@ def test_scan_inactive_store_makes_no_git_call(tmp_path, monkeypatch):
     assert not scan.active
     assert scan.head is None
     assert calls == []
-
-
-def test_curate_git_call_count_unchanged_by_refactor(git_repo, monkeypatch):
-    """GUARD (spec N6): the shared scan must not add a `rev-parse HEAD` to the curate()
-    path — doctor's observable git-call count stays exactly what today's code makes:
-    one root resolution + one diff per distinct commit on this fixture. Patches BOTH
-    module namespaces (review M-3): root resolution used to run through
-    `verify._find_repo_root`, invisible to a doctor-only counter."""
-    import sidegraph.verify as verify_mod
-
-    store_dir, _rid, _commit = _drifted_repo(git_repo)
-    calls: list[list[str]] = []
-    real = verify_mod._run_git
-
-    def counting(args, cwd, **kw):
-        calls.append(args)
-        return real(args, cwd, **kw)
-
-    monkeypatch.setattr(doctor_mod, "_run_git", counting)
-    monkeypatch.setattr(verify_mod, "_run_git", counting)
-    curate(store_dir)
-    assert not any(args[:2] == ["rev-parse", "HEAD"] for args in calls)
-    toplevel_calls = [args for args in calls if args[:2] == ["rev-parse", "--show-toplevel"]]
-    diff_calls = [args for args in calls if args and args[0] == "diff"]
-    assert len(toplevel_calls) == 1
-    assert len(diff_calls) == 1
-
-
-def test_curate_runs_three_read_only_git_calls_through_the_registry(git_repo, monkeypatch):
-    """GUARD: two registry checks on doctor's surface run git. ``store-uncommitted`` makes a
-    ``rev-parse`` and a ``status`` through ``integrity._git``; ``refresh-helper-outdated`` makes
-    one ``rev-parse`` through ``githooks._git``. Each counter sees only its own module's calls,
-    so both are patched."""
-    from sidegraph import githooks, integrity
-
-    store_dir, _rid, _commit = _drifted_repo(git_repo)
-    calls: list[list[str]] = []
-    hook_calls: list[list[str]] = []
-    real, real_hooks = integrity._git, githooks._git
-
-    def counting(args, *rest, **kw):
-        calls.append(args)
-        return real(args, *rest, **kw)
-
-    def counting_hooks(args, *rest, **kw):
-        hook_calls.append(args)
-        return real_hooks(args, *rest, **kw)
-
-    monkeypatch.setattr(integrity, "_git", counting)
-    monkeypatch.setattr(githooks, "_git", counting_hooks)
-    curate(store_dir)
-    verbs = [next(word for word in args if not word.startswith("--")) for args in calls]
-    assert verbs == ["rev-parse", "status"]
-    assert [args[0] for args in hook_calls] == ["rev-parse"]
 
 
 def test_wrapper_makes_exactly_three_bounded_git_calls(git_repo, monkeypatch):

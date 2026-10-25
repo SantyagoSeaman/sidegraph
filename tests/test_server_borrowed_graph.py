@@ -4,7 +4,7 @@
 missing it opens the main checkout's and syncs it index-only: the worktree's cold index is
 derived, and no tracked file of its store is rewritten. ``get_task_context`` words what the
 borrowed graph cannot hold (D3) and says so when there is no graph at all (D4). The repositories
-are real ones from ``tests.test_config_borrowed_graph``.
+are real ones from ``tests.graph_repo_support``.
 see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2-D4, T6-T11)
 """
 
@@ -25,76 +25,36 @@ from sidegraph.engine.reader import GraphifyReader
 from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.retrieval import RetrievalBudget
 from sidegraph.schema import (
-    AnchorBinding,
     Decision,
     DecisionKind,
     DecisionStatus,
-    Descriptor,
     Domain,
-    Entity,
     Fact,
     Provenance,
     Scope,
 )
 from sidegraph.store import Store
 from sidegraph.sync import LAST_SYNCED_KEY
-from tests.test_config_borrowed_graph import GRAPH, add_worktree, make_main
-from tests.test_graph_freshness import commit, git, head, write_graph
+from tests.graph_repo_support import (
+    GRAPH,
+    _block,
+    _impl,
+    add_worktree,
+    commit,
+    git,
+    head,
+    make_main,
+    porcelain,
+    remember,
+    serve,
+    write_graph,
+)
 
 BORROWED = (
     "This worktree reads the main checkout's graph, which does not hold files that exist "
     "only on this branch."
 )
 NO_GRAPH = "## No code graph"
-
-
-def remember(
-    store_path: Path,
-    title: str,
-    file_path: str,
-    name: str = "m_py",
-    scope: Scope = Scope.GLOBAL,
-) -> None:
-    """One accepted gotcha anchored to ``name`` in ``file_path``, in the store at
-    ``store_path``."""
-    store = Store(store_path)
-    try:
-        d = store.add_decision(
-            Decision(
-                title=title,
-                kind=DecisionKind.GOTCHA,
-                status=DecisionStatus.ACCEPTED,
-                context="c",
-                choice="ch",
-                scope=scope,
-                valid_from=datetime.now(UTC),
-                provenance=Provenance(source="manual"),
-            )
-        )
-        e = store.upsert_entity(
-            Entity(
-                canonical_name=name,
-                descriptor=Descriptor(name=name, file_path=file_path),
-            )
-        )
-        store.add_binding(
-            AnchorBinding(record_id=d.id, entity_id=e.entity_id, tier=2, status="live")
-        )
-    finally:
-        store.close()
-
-
-def porcelain(repo: Path) -> str:
-    return git(repo, "status", "--porcelain")
-
-
-def serve(monkeypatch, checkout: Path) -> Store:
-    """The MCP server started in ``checkout``: its store, its cwd."""
-    monkeypatch.chdir(checkout)
-    monkeypatch.setenv("SIDEGRAPH_DIR", str(checkout / ".sidegraph"))
-    store = Store(checkout / ".sidegraph")
-    monkeypatch.setattr(server, "_store", store)
-    return store
 
 
 @pytest.fixture
@@ -130,17 +90,6 @@ def worktree(main: Path, monkeypatch) -> Path:
     serve(monkeypatch, w)
     assert porcelain(w) == ""
     return w
-
-
-def _impl(store, reader, files=None, entities=None, **kwargs) -> str:
-    return server._get_task_context_impl(
-        store, reader, files, entities, structure_budget=4000, memory_budget=6000, **kwargs
-    )
-
-
-def _block(out: str, heading: str) -> list[str]:
-    assert heading in out, out
-    return out.split(heading + "\n", 1)[1].split("\n\n", 1)[0].splitlines()
 
 
 # -- the read tools borrow, and sync index-only -------------------------------------------
@@ -583,7 +532,10 @@ def test_t4f_a_worktree_of_a_bare_dot_git_is_not_told_to_build_in_a_main_checkou
     assert "main checkout" not in out and str(holder / GRAPH) not in out
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs POSIX permissions; root bypasses them",
+)
 def test_t10c_an_unreadable_graph_is_not_called_missing(tmp_path, main, monkeypatch):
     """Red against rev 1 (every failure was "No code graph at")."""
     clone = _plain_clone(tmp_path, main, monkeypatch)
@@ -599,7 +551,10 @@ def test_t10c_an_unreadable_graph_is_not_called_missing(tmp_path, main, monkeypa
     assert "No code graph at" not in out
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs POSIX permissions; root bypasses them",
+)
 def test_an_unreadable_main_graph_is_named_with_its_own_path(main, worktree):
     original = stat.S_IMODE((main / GRAPH).stat().st_mode)
     (main / GRAPH).chmod(0)

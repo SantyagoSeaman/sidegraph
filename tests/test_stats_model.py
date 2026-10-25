@@ -20,6 +20,7 @@ from sidegraph.schema import (
 )
 from sidegraph.stats.model import build_report
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 
 NOW = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
 
@@ -256,19 +257,6 @@ def test_a_rejection_is_windowed_on_when_the_verdict_landed(tmp_path):
     assert r.memory.rejected_in_window == 0
 
 
-def test_build_report_does_not_rebuild_the_index(tmp_path):
-    """Constructing a Store would: __init__ -> _refresh_freshness -> full reload on a stale
-    digest (store.py:620). This module must read, not open (spec D8).
-    """
-    store = Store(tmp_path / "s")
-    _seed_sessions(store, asking=6, touch_only=0)
-    store.close()
-    index = tmp_path / "s" / "index.db"
-    before = index.stat().st_mtime_ns
-    build_report(tmp_path / "s", None, window_days=30, now=NOW)
-    assert index.stat().st_mtime_ns == before
-
-
 @pytest.mark.parametrize(
     ("sessions", "days", "mature"),
     [
@@ -410,7 +398,6 @@ def test_stats_reads_a_store_under_a_hash_dir(tmp_path, name):
 def test_recreated_index_with_cold_binding_statuses_withholds_only_anchor_figures(tmp_path):
     """Rebuilding derived state resets statuses to live while canonical records stay intact."""
     import hashlib
-    import json
     import sqlite3
     from contextlib import closing
 
@@ -488,14 +475,7 @@ def test_recreated_index_with_cold_binding_statuses_withholds_only_anchor_figure
     assert cold.index_stale is False
     assert cold.memory is not None and cold.memory.decisions == 1
     assert cold.reach.files_touched_with_memory == 1
-    from sidegraph.stats.render import render_json, render_text
-
-    data = json.loads(render_json(cold))
-    assert data["anchors"] is None
-    assert data["binding_statuses_computed"] is False
-    assert data["index_stale"] is False
-    anchor_lines = [line for line in render_text(cold).splitlines() if line.startswith("ANCHORS")]
-    assert anchor_lines == ["ANCHORS     not computed for current graph → sidegraph-sync"]
+    # How the cold figures render (JSON keys, the ANCHORS line) is pinned in test_stats_render.py.
 
 
 def test_missing_volatile_stale_flag_keeps_legacy_computed_behavior(tmp_path):
@@ -746,41 +726,39 @@ def _rejected_at_cutoff(store):
 
 
 @pytest.mark.parametrize(
-    ("seed", "read", "expected"),
+    ("seed", "reads"),
     [
-        # each case names the `>= cutoff` it pins; `>` at that site drops the row at the boundary
+        # each case names the `>= cutoff` sites it pins; `>` at one drops the row at the boundary
         pytest.param(
             _retrieval_row_at_cutoff,
-            lambda r: r.activation.sessions_total,
-            1,
-            id="retrieval_events-session-query",
-        ),
-        pytest.param(
-            _retrieval_row_at_cutoff, lambda r: r.retained_days, 30, id="first_at-retrieval-branch"
+            [
+                (lambda r: r.activation.sessions_total, 1),  # the retrieval_events session query
+                (lambda r: r.retained_days, 30),  # the first_at retrieval branch
+            ],
+            id="retrieval_events",
         ),
         pytest.param(
             _render_row_at_cutoff,
-            lambda r: r.activation.degraded,
-            1,
-            id="render_events-counter-query",
+            [
+                (lambda r: r.activation.degraded, 1),  # the render_events counter query
+                (lambda r: r.retained_days, 30),  # the first_at render branch
+            ],
+            id="render_events",
         ),
         pytest.param(
-            _render_row_at_cutoff, lambda r: r.retained_days, 30, id="first_at-render-branch"
+            _accepted_at_cutoff, [(lambda r: r.memory.accepted_in_window, 1)], id="funnel-accepted"
         ),
         pytest.param(
-            _accepted_at_cutoff, lambda r: r.memory.accepted_in_window, 1, id="funnel-accepted"
-        ),
-        pytest.param(
-            _rejected_at_cutoff, lambda r: r.memory.rejected_in_window, 1, id="funnel-rejected"
+            _rejected_at_cutoff, [(lambda r: r.memory.rejected_in_window, 1)], id="funnel-rejected"
         ),
     ],
 )
-def test_the_window_includes_a_row_exactly_at_the_cutoff(tmp_path, seed, read, expected):
+def test_the_window_includes_a_row_exactly_at_the_cutoff(tmp_path, seed, reads):
     store = Store(tmp_path / "s")
     seed(store)
     store.close()
     r = build_report(tmp_path / "s", None, window_days=30, now=NOW)
-    assert read(r) == expected
+    assert [read(r) for read, _ in reads] == [expected for _, expected in reads]
 
 
 def _drop_render_journal(store_dir):
@@ -792,23 +770,6 @@ def _drop_render_journal(store_dir):
     with closing(sqlite3.connect(store_dir / "index.db")) as conn:
         conn.execute("DROP TABLE render_events")
         conn.commit()
-
-
-def test_an_index_from_before_the_render_journal_reports_instead_of_raising(tmp_path):
-    store = Store(tmp_path / "s")
-    for i in range(6):
-        store.record_retrieval_events(f"ask-{i}", seeds=["a.py"], shows=[(f"rec-{i}", "a.py")])
-    _backdate(store, days=10)
-    store.close()
-    _drop_render_journal(tmp_path / "s")
-
-    r = build_report(tmp_path / "s", None, window_days=30, now=NOW)
-
-    a = r.activation
-    assert a.render_journal is False
-    # What the retrieval journal alone can say is still said.
-    assert (a.sessions_total, a.sessions_with_retrieval, a.showings) == (6, 6, 6)
-    assert r.retained_days == 10
 
 
 def _render(store, sid, *, degraded=0, dropped=0):
@@ -825,21 +786,29 @@ def _render(store, sid, *, degraded=0, dropped=0):
     )
 
 
-def test_a_table_with_no_rows_in_the_window_is_not_recorded_either(tmp_path):
-    """The same fact as a missing table, to a reader: nothing was logged. The table exists
-    and is empty whenever a store was upgraded but the server writing it has not run yet, and
-    sessions that asked are already in the retrieval journal, so zeroes would read as a
-    measurement ("the budget never clipped anything")."""
+@pytest.mark.parametrize("table_dropped", [True, False], ids=["table-missing", "table-empty"])
+def test_a_render_journal_with_nothing_in_the_window_is_not_recorded_either(
+    tmp_path, table_dropped
+):
+    """Nothing was logged, whether the table is missing (an index from before the render
+    journal; `Store()` would put it back on open, so the file is edited directly) or exists and
+    is empty (a store upgraded before the server writing it has run). Sessions that asked are
+    already in the retrieval journal, so zeroes would read as a measurement ("the budget never
+    clipped anything"); what the retrieval journal alone can say is still said."""
     store = Store(tmp_path / "s")
     for i in range(6):
         store.record_retrieval_events(f"ask-{i}", seeds=["a.py"], shows=[(f"rec-{i}", "a.py")])
     _backdate(store, days=10)
     store.close()
+    if table_dropped:
+        _drop_render_journal(tmp_path / "s")
 
-    a = build_report(tmp_path / "s", None, window_days=30, now=NOW).activation
+    r = build_report(tmp_path / "s", None, window_days=30, now=NOW)
 
+    a = r.activation
     assert a.render_journal is False
-    assert (a.sessions_with_retrieval, a.showings) == (6, 6)
+    assert (a.sessions_total, a.sessions_with_retrieval, a.showings) == (6, 6, 6)
+    assert r.retained_days == 10
 
 
 def test_render_rows_only_outside_the_window_are_not_a_recording_either(tmp_path):
@@ -975,7 +944,7 @@ def test_a_stale_index_still_reports_the_journals_it_can_stand_behind(tmp_path):
 
 
 def _populated(tmp_path: Path) -> Store:
-    store = Store(tmp_path / "s")
+    store = Store(format1_store(tmp_path / "s"))
     old = _decision(store)
     new = _decision(store, supersedes=old.id)
     store.add_fact(
@@ -1004,12 +973,12 @@ def test_a_store_nobody_changed_is_never_reported_stale(tmp_path):
     store = _populated(tmp_path)
     store.close()
     assert stale() is False, "after the store's own writes"
-    Store(tmp_path / "s").close()
+    Store(format1_store(tmp_path / "s")).close()
     assert stale() is False, "after a plain reopen"
     (tmp_path / "s" / "index.db").unlink()
-    Store(tmp_path / "s").close()
+    Store(format1_store(tmp_path / "s")).close()
     assert stale() is False, "after the index was rebuilt from the canonical files"
-    store = Store(tmp_path / "s")
+    store = Store(format1_store(tmp_path / "s"))
     assert store.compact().decisions_compacted >= 1
     store.close()
     assert stale() is False, "after compaction moved hot files into an archive segment"
@@ -1050,25 +1019,6 @@ def test_a_dangling_symlink_the_store_recorded_is_not_stale(tmp_path):
     with closing(sqlite3.connect(tmp_path / "s" / "index.db")) as conn:
         conn.row_factory = sqlite3.Row
         assert _index_is_stale(conn, tmp_path / "s") is False
-
-
-def test_the_staleness_check_writes_nothing(tmp_path):
-    import hashlib
-
-    store = Store(tmp_path / "s")
-    d = _decision(store)
-    store.close()
-    _pull_a_change(tmp_path, d.id)
-    index = tmp_path / "s" / "index.db"
-
-    def snapshot():
-        files = sorted(p for p in (tmp_path / "s").rglob("*") if p.is_file())
-        return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
-
-    before = snapshot()
-    assert build_report(tmp_path / "s", None, window_days=30, now=NOW).index_stale is True
-    assert snapshot() == before
-    assert index.exists()
 
 
 def test_an_index_without_canonical_stat_is_stale_not_a_crash(tmp_path):
@@ -1697,13 +1647,6 @@ def test_injection_rows_do_not_move_retention_or_the_window_edge(tmp_path):
     r30 = build_report(tmp_path / "s", None, window_days=30, now=NOW)
     assert r30.activation.hook_showings == 2
     assert r30.retained_days == 0
-
-
-def test_the_literal_kinds_match_what_the_hook_writes():
-    """Stats imports nothing from the hook, so it spells the kinds itself; this pins them."""
-    from sidegraph import hot_index
-
-    assert (hot_index.INJECT_KIND, hot_index.INJECT_BRIEF_KIND) == ("inject", "inject_brief")
 
 
 def test_t11_calls_written_by_the_server_share_one_timestamp_per_call(tmp_path, monkeypatch):

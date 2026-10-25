@@ -9,9 +9,13 @@ that govern writing to it. Implemented in
 
 ## Layout: file-per-record JSON, plus a derived local index
 
+This is the layout of **format 1**, and still the layout every writer uses for a new or edited
+record in both formats. A store may additionally be **packed** (format 2): see
+[Format 2: packed shards](#format-2-packed-shards). A fresh store created by 0.17 is format 2.
+
 ```
 .sidegraph/
-├── format                  # committed marker: "sidegraph-store 0.6.0", or 1.0.0 plus a requires-sidegraph line
+├── format                  # committed marker: "sidegraph-store 0.6.0"; 1.0.0 plus a requires-sidegraph line; or, format 2, 2.0.0 plus requires-sidegraph and shards N lines
 ├── stamping_live_since      # committed, ONLY on a genuinely new store: an aware UTC ISO-8601 timestamp
 ├── domain-snapshot.json     # committed, optional: frozen domain membership (sidegraph-domains snapshot)
 ├── .gitignore               # committed, written by the store: ignores index.db* and *.tmp
@@ -21,15 +25,19 @@ that govern writing to it. Implemented in
 ├── entities/<ulid>.json     # one file per Entity — identity only (no last_seen_* fields)
 ├── bindings/<record_ulid>.json  # one file per record (decision or fact): its durable anchor set (community bindings excluded), no status
 ├── initiatives/<ulid>.json  # one file per Initiative — full row (nothing volatile on this model)
+├── verifications/<id>.json  # committed, optional: scoped drift checks (see "Scoped drift checks" below)
+├── shards/                  # format 2 only, once maintenance has run: 00.shard … (N−1).shard, packed records
+├── .gitattributes           # format 2 only, written with the shards: the line `*.shard -text`
 ├── archive/                 # optional — only exists once `sidegraph-compact` has run
 │   └── <date>-<seq>-<hash12>.jsonl  # immutable segments of terminal (closed) records
 └── index.db                 # DERIVED, gitignored: fast queries + every volatile field
                              # (+ index.db-journal, a 0-byte rollback journal kept beside it)
 ```
 
-Every directory except `archive/` and `index.db` is created empty the first time a `Store`
-opens a fresh path — a brand-new `.sidegraph/` has all six subdirectories present even before
-the first decision is written.
+The six record directories (`decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`,
+`initiatives/`) are created empty the first time a `Store` opens a fresh path — a brand-new
+`.sidegraph/` has all six present even before the first decision is written. `archive/`,
+`verifications/` and `shards/` appear only when something is first written to them.
 
 A record's id **is** its filename, so an id must be a single path segment: it starts with a
 letter or digit, continues with letters, digits, `.`, `_` or `-`, and is at most 128
@@ -40,9 +48,9 @@ different from its filename is not a record at all: see
 
 **Symlinks inside the store are refused.** A `Store` will not open a directory any of whose
 subdirectories (`decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`, `initiatives/`,
-`archive/`) or store files (`format`, `stamping_live_since`, `domain-snapshot.json`,
-`.gitignore`, `index.db`, and
-SQLite's `index.db-journal`, `-wal` and `-shm`) is a symlink, live or dangling: a linked
+`archive/`, `verifications/`, `shards/`), store files (`format`, `stamping_live_since`,
+`domain-snapshot.json`, `.gitignore`, `.gitattributes`, `index.db`, and
+SQLite's `index.db-journal`, `-wal` and `-shm`) or shard files (`shards/*.shard`) is a symlink, live or dangling: a linked
 `decisions/` would send every record write to the link's target, and a linked `index.db` would
 make SQLite write there. The error names the entry (`… inside the store is a symlink`);
 replace it with a real directory or file. `sidegraph-verify` reports each such entry as
@@ -167,10 +175,103 @@ gets another leaf-identity change keeps its stale committed binding entry indefi
 as the untouched entity file. Revisit with a dedicated cleanup command if this residual turns
 out to matter in practice.
 
+## Format 2: packed shards
+
+Format 2 exists because a store with years of history is thousands of small files. Records are
+still **written** one file each. A manual maintenance command, `sidegraph-compact`, later
+**folds** settled per-record files into 16, 64 (the default) or 256 shard files, moving each
+body verbatim and deleting the file only once a shard line holds exactly its content. The
+explicit command that switches a format-1 store is [`sidegraph-migrate`](cli.md#sidegraph-migrate);
+the [migration guide](../guides/migrating-to-0.17.md) is the team procedure.
+
+**The marker** is three lines: `sidegraph-store 2.0.0`, `requires-sidegraph >= X.Y.Z`,
+`shards N` with N in 16, 64 or 256, in that order. Any other shape is refused as malformed,
+and no default count is assumed. A store whose marker is below major 2 but which holds a
+`shards/*.shard` file is refused by 0.17 (verify reports `shards-without-format2`), because
+serving it would hide every packed record; `sidegraph-migrate` completes that shape.
+`sidegraph-require` and `sidegraph-domains snapshot` keep the major and the `shards` line of
+the marker they raise.
+
+**A shard line** is one JSON object, one record, newline-terminated, UTF-8, LF only:
+
+```
+{"type":"decision","id":"01K…","body":{…}}
+```
+
+The envelope keys come in that order. `type` is `decision`, `fact`, `entity`, `domain` or
+`bindings` (for `bindings`, `id` is the owning record's id and `body` is a list). `body` is the
+record's raw JSON exactly as found in its per-record file (or an archive line without
+`record_type`), serialised with sorted keys and compact separators; unknown keys are kept.
+Identity is `(type, id)`. Lines are sorted by `(type, id)`. The bucket of an id is
+`int(sha256(id)[:2], 16) * N // 256`, file `f"{bucket:02x}.shard"`; a record and its bindings
+share a shard. After any maintenance run all N files exist (an empty bucket is a 0-byte file).
+`.gitattributes` carries `*.shard -text`, so git never rewrites line endings. A line sitting in
+the wrong shard, or twice with an equal body, is healed by the next maintenance; a stray
+`*.shard` file is read and healed the same way.
+
+**The effective record.** A record can exist in several places: a per-record file, a shard
+line, an archive line. First, when no copy can be trusted there is no effective record at all:
+an identity with an unreadable per-record file or shard line, or with two shard lines whose
+parsed bodies differ, or whose lines sit inside a git conflict region of a shard, is
+unavailable **even beside a valid copy**. It is reported, retrieval does not serve it, and
+writers refuse to write it. (A line from which no identity can be recovered quarantines nothing by itself, but it blocks maintenance until it is repaired.) A conflicted per-record file is a gap in the same way, not a
+fall-through to a stale shard copy; two shard lines with equal bodies count as one. An
+unreadable archive line is reported and ignored. Otherwise readers pick one: a per-record file wins over a shard line (it is the
+newer edit, and is judged against the shard line by `sidegraph-verify`, as `shadow-divergence`
+when it is not a legal successor); an archive line wins only when it is a legal successor
+of the shard line. A bindings file is the full anchor list and wins over the shard's list.
+Entities identical in every field are read as one when the index is built; their files are
+never rewritten.
+
+**Writes.** Every writer writes a per-record file, as in format 1, for a new record and for
+an edit of a packed one. Shards change only in maintenance, so two people editing different
+packed records never touch one shared file.
+
+**Maintenance** (`sidegraph-compact` on a format-2 store; see [cli.md](cli.md#sidegraph-compact))
+runs on the default branch, never commits, and folds a file only when it is tracked, unmodified
+against `HEAD` and **settled**: its current content landed on the current branch at least
+`--settled-days` (default 7) ago. It is idempotent and resumable: files are published in a
+fixed order and a file is deleted only when its shard line holds it. An identity that is a
+`shadow-divergence`, `duplicate-ulid` or `binding-entry-dropped` is skipped and reported, with
+all its copies left where they are.
+
+**Merge behaviour.** Shards are not edited by writers, so ordinary merges stay clean: two
+branches adding records, or editing different packed records, merge without conflict. There
+is no merge driver: GitHub ignores `.gitattributes merge=union` for pull-request merges, so
+none would be honoured. Cases that conflict or need a recipe: two edits of one record
+(add/add on its file, as in format 1); an edit on a branch whose record main has folded
+(modify/delete: keep the file if main folded it unchanged; if main edited and then folded it, delete the kept file or rewrite it as a legal edit of main's version, since keeping it is a `shadow-divergence`); two branches adding different anchors to one record
+(add/add on the bindings file: keep the union); two maintenance runs folding neighbouring
+records (conflict in a shard: drop one run and repeat); a `format` conflict (resolve to the
+major-2 marker). One case merges clean and can lose an edit: main edited a record and folded
+it after the settled window, and an older branch that also edited it merges afterwards. The
+branch's version wins; a lost bindings entry fails `sidegraph-verify` (`binding-entry-dropped`),
+an illegal status move fails it (`shadow-divergence`), a legal-but-different edit is not
+detected. Every statement about "the target branch" means its tip as CI computes it
+(`git merge-base origin/<target> HEAD` on GitHub's pull-request checkout); a local run against
+the fork point can differ, and CI's answer is the one that gates the merge. All recipes:
+[migration guide](../guides/migrating-to-0.17.md).
+
+**Older readers.**
+
+| reader | on a format-2 store |
+|---|---|
+| ≤ 0.13, new process | refuses (it reads only major 0) |
+| ≤ 0.13, MCP server already running | not protected: it can rebuild once from the emptied per-record directories and serve near-empty memory, then errors on the stamp. Restart it |
+| ≤ 0.13 hot hooks | deliver nothing once a 0.17 process rebuilt the index |
+| ≤ 0.13 `sidegraph-stats`, `sidegraph-blame`, commit hook | read `index.db` as it is |
+| 0.14–0.16 Store, MCP server, hooks, doctor, stats, blame | refuse, or degrade to "no records joined" (hooks print no message). Where a message appears it says `migration tooling is deferred — use a fresh store`, which here means "upgrade to 0.17" |
+| 0.14–0.16 after a rollback | the `Store` opens and re-stamps the local `index.db`; the `HotIndex` (hooks) refuses a `0.7.0+format2` stamp and serves nothing until a `Store` has re-stamped it or the file is deleted |
+| 0.17 on format 1 | works fully, plus the `store-not-migrated` notice |
+
+**Limits.** The pull window: while git checks out a maintenance commit it unlinks folded files
+before the new shard lands, and a writer touching such a record in that moment builds it from
+a half-checked-out tree. Accepted and unguarded; do not pull while agents are writing.
+
 ## The format marker
 
 `.sidegraph/format` is a committed marker, written the first time a `Store` creates the layout.
-On most stores it is one line, `sidegraph-store 0.6.0`, and nothing rewrites it. It exists
+On most format-1 stores it is one line, `sidegraph-store 0.6.0` (a store without a requirement). Only `sidegraph-require`, `sidegraph-migrate` and `sidegraph-domains snapshot` (which raises the minimum version only when the snapshot needs it) rewrite it: a format-1 store with a requirement has two lines; a store created by 0.17 is format 2 (three lines, above). It exists
 **outside** the gitignored `index.db` specifically so a teammate on an incompatible store format
 is rejected the moment they open the repo's `.sidegraph/`, not just when their own local index
 happens to disagree. An existing layout from before this marker existed gets one backfilled
@@ -209,8 +310,9 @@ After a newer version stamps the index, the old server's next and later tool cal
 a `schema_version` error until its session restarts. After pulling a raised marker, update every
 installation and restart running sessions; move CI pins first.
 
-A major other than 0 or 1 is a hard `ValueError` on open — there is no migration path beyond the
-one legacy step described below; the fix is a fresh store, not a coerced read.
+A major other than 0, 1 or 2 is a hard `ValueError` on open — there is no generic migration
+path; the fix is a fresh store, not a coerced read. The one explicit transition this release
+adds is [`sidegraph-migrate`](cli.md#sidegraph-migrate), from format 1 to format 2.
 
 The requirement marker is canonical; its index stamp commits with the outermost SQLite
 transaction. If a composed operation raises the requirement and then fails, the marker stays
@@ -302,8 +404,8 @@ the server keeps one `Store` open for the life of the process):
 
 - **Digest matches** the stamped value → fast path, index used as-is (after one guard: the
   index's `schema_version` must match the stamp expected from the marker: `0.6.0` without a
-  requirement, `0.6.0+requires` with one. The other accepted stamp triggers a reload; an
-  unknown stamp is refused).
+  requirement, `0.6.0+requires` with one, `0.7.0+format2` on a format-2 store. The other
+  accepted stamp triggers a reload; an unknown stamp is refused).
 - **Digest missing or stale** (a fresh store, an index that was deleted, or — the common case —
   a `git pull` that brought new/changed/removed record files) → a full reload: every committed
   file is re-read into the index, and every volatile field resets to its cold default
@@ -560,10 +662,12 @@ no hook-attempt denominator, global invocation census or evidence of memory bein
 ## Archive segments (`sidegraph-compact`)
 
 Terminal-status records — decisions `superseded`/`rejected`/`deprecated`, domains
-`superseded`/`dropped` — can never change again under the append-only rules, so once a record
-reaches one of those statuses it no longer needs individual-file mergeability or PR-diff
-review. `sidegraph-compact` (an explicit, human-run maintenance command — never invoked by
-sync/retrieval/ratify) packs every eligible terminal record into a new segment under
+`superseded`/`dropped` — are done changing under the append-only rules (the one exception is a
+`dropped` domain, which can still become `superseded` when a successor replaces it), so once a
+record reaches one of those statuses it no longer needs individual-file mergeability or PR-diff
+review. `sidegraph-compact` on a format-1 store (an explicit, human-run maintenance command — never
+invoked by sync/retrieval/ratify; on a format-2 store it folds into shards instead, see
+[Format 2](#format-2-packed-shards)) packs every eligible terminal record into a new segment under
 `archive/` and removes its now-redundant hot file in the same operation. `proposed`/`accepted`
 records of either kind are never touched — a decision has to actually close before it's
 eligible.
@@ -611,7 +715,7 @@ upgrade alone does not promise to reconcile an existing immutable archive entry.
 digest (above) covers `archive/*.jsonl` too, so a segment absorbed from a teammate's branch via
 `git pull` is picked up on the next open exactly like any other new committed file.
 
-`sidegraph-compact --older-than N` additionally requires a record to have been terminal for at
+On a format-1 store, `sidegraph-compact --older-than N` additionally requires a record to have been terminal for at
 least `N` days; domains are always excluded from that filter (nothing on `Domain` records when
 it became terminal, so age can't be evaluated — see
 [`reference/cli.md`](cli.md#sidegraph-compact) for the exact reporting shape). Everything
@@ -670,7 +774,9 @@ happen on open when such a store's stamp is merely older than the running code's
 on the major component and on any `requires-sidegraph` line. The index's `schema_version`
 inside `meta` is checked against the marker's expected stamp on the fast (digest-matches)
 freshness path: `0.6.0` without a requirement, `0.6.0+requires` with one. The record/table
-layout is unchanged, and this version understands both stamps. A mismatch between those two
+layout is unchanged, and this version understands both stamps. A format-2 store's index is
+stamped `0.7.0+format2`; a format-1 store keeps today's stamps, so a 0.16 client sharing the
+checkout keeps working. A mismatch between those two
 triggers a full reload; an unknown stamp normally raises immediately. The other reloadable
 versions are `_RELOADABLE_SCHEMA_VERSIONS` (currently
 `{0.4.0, 0.5.0}`): both a 0.4.0 and a 0.5.0 store's canonical files are fully forward-compatible
@@ -729,8 +835,8 @@ engine-coupling state — specifically, community labels — could still touch g
 ## Append-only write rules
 
 - **No hard deletes, anywhere, ever.** No code path in `store.py` issues a file delete for a
-  live record (only compaction removes a hot file, and only after the same content is durably
-  archived — see above).
+  live record (only compaction and `sidegraph-migrate` remove a hot file, and only after the
+  same content is durably archived or held by a shard line — see above).
 - **Supersede = append successor, then close predecessor.** `add_decision(decision)`, when
   `decision.supersedes` is set, validates the predecessor and writes the successor first. It
   then sets the still-open predecessor's `valid_to` and flips it to `superseded`. Both writes
@@ -785,9 +891,10 @@ engine-coupling state — specifically, community labels — could still touch g
   slug-conflict duplicate) or `supersede_domain` (close + link, like a decision reversal).
 - Refresh an `Entity`'s engine-mapping fields or a `Domain`'s `communities` field — index-only,
   never touches a committed file.
-- Pack terminal records into a new `archive/` segment and remove their now-redundant hot files
-  (`sidegraph-compact`) — append-only holds because the record *moves*, byte-for-byte, into the
-  segment before its hot file is removed.
+- Pack terminal records into a new `archive/` segment, or fold settled records into `shards/`
+  (format 2), and remove their now-redundant hot files (`sidegraph-compact`,
+  `sidegraph-migrate`) — append-only holds because the record *moves*, byte-for-byte, into the
+  segment or shard line before its hot file is removed.
 
 **May not:**
 - Hard-delete any record, hot or archived.
@@ -798,8 +905,8 @@ engine-coupling state — specifically, community labels — could still touch g
 - Rewrite a `Domain`'s substantive fields (`title`, `summary`, `parent_id`, `path_prefixes`)
   after creation — only `communities` is ever refreshed, and only index-only, by sync.
 - Overwrite `.sidegraph/format` once stamped, except to raise the store's minimum Sidegraph
-  version through an explicit command such as `sidegraph-require`; a requirement is never
-  lowered.
+  version through `sidegraph-require` (or `sidegraph-domains snapshot`), or to switch a store
+  to format 2 through `sidegraph-migrate`; a requirement is never lowered.
 - Set the index's `schema_version` stamp other than from the code's version and the marker: a
   full reload sets it, and so may the command that raises a requirement; `set_meta("schema_version",
   ...)` raises.

@@ -19,13 +19,13 @@ rebuild), two equivalent paths:
   data instead of stdout text (see
   [`reference/mcp-tools.md`](../reference/mcp-tools.md#sync_anchors)) — this is what the
   [`heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md) skill leads with.
-- **CLI fallback**, for scripted/CI use or outside a session:
+- **CLI fallback**, for scripted/CI use or outside a session (commands are shown by name; see [running the CLIs](../reference/cli.md#running-the-clis-beside-the-plugin) for the `uvx` form):
 
   ```bash
   export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
   $env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
   graphify update .            # rebuild graphify-out/graph.json (LLM-free, incremental)
-  uv run sidegraph-sync        # re-resolve every tracked entity; prints the report
+  sidegraph-sync        # re-resolve every tracked entity; prints the report
   ```
 
   `--force` for the same unconditional re-run. Like `sidegraph-ratify`, a bare
@@ -135,8 +135,9 @@ Each ends `orphaned`, and `heal-anchors` re-anchors it:
 
 If an earlier release adopted a false move, it rewrote an entity's `descriptor.file_path`.
 List those rewrites with
-`git log -p --diff-filter=M -- .sidegraph/entities/ | grep -E '^(commit |[-+]\s+"file_path")'`
-and check each one against the rule above.
+`git log -p --diff-filter=M -- .sidegraph/entities/ .sidegraph/shards/ | grep -E '^(commit |[-+].*"file_path")'`
+and check each one against the rule above. The second path covers a format-2 store, where
+maintenance has packed entities into one-line records inside shard files.
 
 ## Community re-pointing
 

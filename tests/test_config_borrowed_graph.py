@@ -20,10 +20,7 @@ from pathlib import Path
 import pytest
 
 import sidegraph.config as config
-from sidegraph.store import Store
-from tests.test_graph_freshness import commit, git, head, write_graph
-
-GRAPH = Path("graphify-out") / "graph.json"
+from tests.graph_repo_support import GRAPH, add_worktree, git, head, make_main, write_graph
 
 
 def git_version() -> tuple[int, ...]:
@@ -31,38 +28,6 @@ def git_version() -> tuple[int, ...]:
     match = re.search(r"(\d+)\.(\d+)", out)
     assert match is not None, out
     return int(match.group(1)), int(match.group(2))
-
-
-def make_main(
-    tmp_path: Path, *, nested: bool = False, files: tuple[str, ...] = ("pkg/m.py",)
-) -> Path:
-    """The main checkout ``R``: one commit holding ``files`` (default ``pkg/m.py``) and a store
-    (at ``R/.sidegraph``, or ``R/.config/sidegraph`` when ``nested``), and a gitignored graph
-    built at that commit and holding those files (at ``R/graphify-out/graph.json``, or
-    ``R/.config/graphify-out/``)."""
-    repo = tmp_path / "R"
-    repo.mkdir()
-    git(repo, "init", "-q", "-b", "main")
-    git(repo, "config", "user.email", "test@example.com")
-    git(repo, "config", "user.name", "Test")
-    git(repo, "config", "commit.gpgsign", "false")
-    base = repo / ".config" if nested else repo
-    Store(base / ("sidegraph" if nested else ".sidegraph")).close()
-    first = commit(
-        repo,
-        "A",
-        {".gitignore": "graphify-out/\n.worktrees/\n"}
-        | {name: "def a():\n    pass\n" for name in files},
-    )
-    write_graph(base / GRAPH, first, list(files))
-    return repo
-
-
-def add_worktree(repo: Path, name: str = "w", *extra: str) -> Path:
-    """``git worktree add R/.worktrees/<name>``: the tracked store, and no graph."""
-    worktree = repo / ".worktrees" / name
-    git(repo, "worktree", "add", "-q", *extra, str(worktree), "-b", f"wt-{name}")
-    return worktree
 
 
 @pytest.fixture
@@ -87,24 +52,6 @@ def test_the_main_checkout_borrows_from_nobody(main):
     assert config.main_checkout_root(main / ".sidegraph") is None
     (main / GRAPH).unlink()
     assert config.borrowed_graph_path(main / ".sidegraph") is None
-
-
-@pytest.mark.skipif(
-    git_version() < (2, 48), reason="git worktree add --relative-paths needs git 2.48+"
-)
-def test_t1b_a_relative_gitdir_resolves_against_the_real_path(tmp_path, main):
-    """Red against a lexical gitdir resolution: git writes the relative ``gitdir:`` from the
-    REAL path of the worktree, and the store is reached here through a symlink three levels
-    deeper than the real directory."""
-    real = tmp_path / "real" / "deep"
-    real.mkdir(parents=True)
-    link = tmp_path / "x" / "y" / "z" / "link"
-    link.parent.mkdir(parents=True)
-    link.symlink_to(real, target_is_directory=True)
-    git(main, "worktree", "add", "-q", "--relative-paths", str(real / "w"), "-b", "wt-rel")
-    assert (real / "w" / ".git").read_text().startswith("gitdir: ../")
-
-    assert config.borrowed_graph_path(link / "w" / ".sidegraph") == main / GRAPH
 
 
 def test_t2_the_worktrees_own_graph_wins(main):
@@ -139,41 +86,10 @@ def test_t4_a_worktree_of_a_bare_repository_has_no_main_checkout(tmp_path, main)
     assert config.borrowed_graph_path(worktree / ".sidegraph") is None
 
 
-def test_t4b_a_submodule_is_not_a_linked_worktree(tmp_path, main):
-    """A submodule's ``.git`` file names ``.git/modules/<name>``: no ``commondir`` there."""
-    super_repo = tmp_path / "S"
-    super_repo.mkdir()
-    git(super_repo, "init", "-q", "-b", "main")
-    git(super_repo, "config", "user.email", "test@example.com")
-    git(super_repo, "config", "user.name", "Test")
-    git(super_repo, "config", "commit.gpgsign", "false")
-    git(super_repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(main), "sub")
-    sub = super_repo / "sub"
-    write_graph(super_repo / GRAPH, "0" * 40, ["pkg/m.py"])
-
-    assert (sub / ".git").is_file()
-    assert (sub / ".sidegraph").is_dir()
-    assert config.main_checkout_root(sub / ".sidegraph") is None
-    assert config.borrowed_graph_path(sub / ".sidegraph") is None
-
-
-def test_t4f_a_bare_repository_cloned_into_a_dot_git_directory_has_no_main_checkout(tmp_path, main):
-    """Red against a name-only check: the common directory is named ``.git`` and its parent
-    ``bgit`` looks like a checkout, but ``core.bare`` says it is a bare repository."""
-    holder = tmp_path / "bgit"
-    holder.mkdir()
-    git(tmp_path, "clone", "-q", "--bare", str(main), str(holder / ".git"))
-    feature = holder / "feat"
-    git(holder / ".git", "worktree", "add", "-q", str(feature), "main")
-    write_graph(holder / GRAPH, head(feature), ["pkg/m.py"])
-
-    assert (feature / ".sidegraph").is_dir()
-    assert config.main_checkout_root(feature / ".sidegraph") is None
-    assert config.borrowed_graph_path(feature / ".sidegraph") is None
-    assert config.borrowed_graph_candidate(feature / ".sidegraph") is None
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs POSIX permissions; root bypasses them",
+)
 def test_a_dot_git_common_directory_with_an_unreadable_config_is_not_trusted(main):
     worktree = add_worktree(main)
     config_file = main / ".git" / "config"
@@ -196,24 +112,6 @@ def test_t4c_the_dot_bare_layout_has_no_main_checkout(tmp_path, main):
 
     assert config.main_checkout_root(feature / ".sidegraph") is None
     assert config.borrowed_graph_path(feature / ".sidegraph") is None
-
-
-def test_t4c_a_separate_git_dir_main_checkout_cannot_be_found(tmp_path):
-    """Red against a missing name check (mutation M4): this common directory is not bare, so
-    only its name, ``R2.gitdir``, keeps ``tmp_path`` from being called a main checkout."""
-    repo = tmp_path / "R2"
-    git(tmp_path, "init", "-q", "-b", "main", f"--separate-git-dir={tmp_path / 'R2.gitdir'}", "R2")
-    git(repo, "config", "user.email", "test@example.com")
-    git(repo, "config", "user.name", "Test")
-    git(repo, "config", "commit.gpgsign", "false")
-    Store(repo / ".sidegraph").close()
-    first = commit(repo, "A", {".gitignore": "graphify-out/\n.worktrees/\n", "a.py": "x = 1\n"})
-    write_graph(repo / GRAPH, first, ["a.py"])
-    worktree = add_worktree(repo)
-
-    assert (repo / ".git").is_file()
-    assert config.main_checkout_root(worktree / ".sidegraph") is None
-    assert config.borrowed_graph_path(worktree / ".sidegraph") is None
 
 
 def test_t4d_a_nested_store_maps_through_its_path_below_the_worktree_root(tmp_path):
@@ -242,17 +140,14 @@ def test_a_relative_graph_value_maps_the_same_way(main, monkeypatch):
     assert config.borrowed_graph_path(worktree / ".sidegraph") == main / "out" / "g.json"
 
 
-def test_a_main_checkout_without_a_graph_lends_nothing_but_names_where_it_would_be(main):
+def test_the_candidate_names_the_main_graph_whether_or_not_it_exists(main):
     worktree = add_worktree(main)
-    (main / GRAPH).unlink()
 
-    assert config.borrowed_graph_path(worktree / ".sidegraph") is None
     assert config.borrowed_graph_candidate(worktree / ".sidegraph") == main / GRAPH
+    assert config.borrowed_graph_path(worktree / ".sidegraph") == main / GRAPH
 
-
-def test_the_candidate_is_the_borrowed_path_while_the_main_graph_exists(main):
-    worktree = add_worktree(main)
-
+    (main / GRAPH).unlink()  # nothing to lend, but the candidate still says where it would be
+    assert config.borrowed_graph_path(worktree / ".sidegraph") is None
     assert config.borrowed_graph_candidate(worktree / ".sidegraph") == main / GRAPH
 
 

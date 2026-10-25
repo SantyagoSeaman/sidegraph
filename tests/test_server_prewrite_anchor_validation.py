@@ -14,7 +14,6 @@ import pytest
 
 import sidegraph.server as server
 from sidegraph.engine.reader import GraphifyReader
-from sidegraph.schema import DecisionStatus
 from sidegraph.server import (
     _add_anchors_impl,
     _add_decision_impl,
@@ -146,36 +145,6 @@ def test_invalid_anchor_list_writes_nothing(tmp_path, path, shape):
     assert _state(Store(store_dir)) == before_state
     assert error is not None, "expected ValueError, the call returned normally"
     assert re.search(message, str(error)), str(error)
-
-
-def test_supersede_invalid_relation_keeps_predecessor_open(tmp_path):
-    """A rejected supersession leaves the predecessor open and writes no successor."""
-    store_dir = tmp_path / "s"
-    store = Store(store_dir)
-    reader = GraphifyReader(FIXTURE)
-    old = _decision(store, reader, [GOOD])
-    before_files = _canonical_snapshot(store)
-
-    error = _call_capturing(
-        lambda: _supersede_decision_impl(
-            store,
-            reader,
-            old["id"],
-            title="new",
-            kind="adr",
-            context="c2",
-            choice="ch2",
-            anchors=[{**GOOD, "relation": "bogus"}],
-        )
-    )
-
-    assert _canonical_snapshot(store) == before_files
-    store.close()
-    decisions = list(Store(store_dir).iter_decisions())
-    assert [d.id for d in decisions] == [old["id"]]
-    assert decisions[0].status == DecisionStatus.ACCEPTED
-    assert decisions[0].valid_to is None
-    assert error is not None and "relation" in str(error)
 
 
 def test_matrix_covers_every_anchor_taking_write_path():

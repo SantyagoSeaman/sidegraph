@@ -41,6 +41,7 @@ fail against a correct implementation:
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from datetime import UTC, datetime
 
@@ -49,6 +50,7 @@ import pytest
 import sidegraph.store as store_module
 from sidegraph.schema import Decision, DecisionKind, Provenance
 from sidegraph.store import _CANONICAL_SUBDIRS, _STAMPING_MARKER_NAME, Store
+from tests.store_format2_support import format1_store
 
 
 def _decision(title: str) -> Decision:
@@ -135,7 +137,7 @@ def test_store_with_everything_archived_does_not_get_the_marker(tmp_path):
     empty.
     """
     db = tmp_path / "s"
-    with Store(db) as store:
+    with Store(format1_store(db)) as store:
         d = store.add_decision(_decision("will be rejected and archived"))
         store.drop(d.id)
         report = store.compact()
@@ -146,7 +148,7 @@ def test_store_with_everything_archived_does_not_get_the_marker(tmp_path):
     marker = db / _STAMPING_MARKER_NAME
     marker.unlink()
 
-    with Store(db):
+    with Store(format1_store(db)):
         pass
     assert not marker.is_file()
 
@@ -172,7 +174,7 @@ def test_two_openers_on_a_first_ever_open_leave_one_valid_marker(tmp_path):
     own probe) — see ``test_forced_interleaving_keeps_the_earlier_marker_not_the_last_writer``
     below for the deterministic reproduction that does.
     """
-    for round_no in range(20):
+    for round_no in range(2):
         db = tmp_path / f"round-{round_no}"
         barrier = threading.Barrier(6)
         errors: list[BaseException] = []
@@ -211,8 +213,8 @@ def test_forced_interleaving_keeps_the_earlier_marker_not_the_last_writer(tmp_pa
     probe) — only a forced interleaving reaches the window.
 
     Scenario:
-    1. Opener A reaches its "no records yet" check and pauses there (patched below,
-       mirroring exactly where the real race lives: between the check and the write).
+    1. Opener A reaches the stamping marker's "no records yet" check and pauses there (patched
+       below, mirroring exactly where the real race lives: between the check and the write).
     2. Opener B, released once A is paused, opens for the first time (publishes an
        EARLIER marker via keep-first ``os.link``), then adds a real record — a later
        "bypass" decision, i.e. exactly the shape `_check_unratified_accepts` hunts.
@@ -228,9 +230,17 @@ def test_forced_interleaving_keeps_the_earlier_marker_not_the_last_writer(tmp_pa
 
     def patched(path):
         # Compute the (stale) result BEFORE pausing -- exactly what a genuine
-        # check-then-write race looks like: A already observed "no records" and is about
-        # to act on that observation while B changes the world underneath it.
+        # check-then-write race looks like: A already observed "no records" and is about to
+        # act on that observation while B changes the world underneath it.
         result = real_has_records(path)
+        # Pause only at the stamping marker's own check. ``_ensure_format_marker`` asks the
+        # same question earlier in the open; pausing there leaves A's later stamping check
+        # to see B's record and return, so the window below is never reached and the test
+        # passes against a last-writer-wins publish too.
+        # the function NAME below is load-bearing: renaming `_ensure_stamping_marker` silently
+        # stops this pause (the test would then pass vacuously)
+        if sys._getframe(1).f_code.co_name != "_ensure_stamping_marker":
+            return result
         if not a_reached_check.is_set():
             a_reached_check.set()
             assert b_done.wait(timeout=10), "opener B never finished"

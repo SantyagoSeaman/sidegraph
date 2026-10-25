@@ -12,7 +12,7 @@ import pytest
 from sidegraph import integrity
 from sidegraph.cli import doctor_main
 from sidegraph.doctor import ENGINE_VERSION, _registry_findings
-from sidegraph.integrity import CHECKS, Inputs, _engine_untested_sentence
+from sidegraph.integrity import CHECKS, Inputs
 from sidegraph.store import Store
 from tests.graph_fixtures import reader_of
 from tests.test_host_integrity import context, start
@@ -30,14 +30,8 @@ def detector():
     return next(c for c in CHECKS if c.id == "engine-version")
 
 
-def test_registered_after_graph_missing_for_session_and_doctor():
-    ids = [c.id for c in CHECKS]
-    assert ids.index("engine-version") == ids.index("graph-missing") + 1
+def test_registered_for_session_and_doctor():  # its slot is pinned by test_integrity's order test
     assert detector().surfaces == frozenset({"session", "doctor"})
-
-
-def test_the_sentence_is_one_definition():
-    assert _engine_untested_sentence("0.9.95") == TEXT
 
 
 def test_an_untested_release_gives_a_line_and_a_doctor_finding(tmp_path):

@@ -9,11 +9,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from sidegraph import capture
 from sidegraph.capture import propose
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.store import Store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
+
+
+@pytest.fixture(autouse=True)
+def _no_git_discovery(monkeypatch):
+    """Nothing here asserts a git-derived initiative or commit stamp; the real discovery
+    stays covered in test_capture_initiative and the commit tests in test_capture_propose."""
+    monkeypatch.setattr(capture, "_derive_initiative", lambda store: None)
+    monkeypatch.setattr(capture, "_capture_commit", lambda store: None)
 
 
 def _draft(**over):

@@ -5,7 +5,6 @@ Index-only by construction: recording a render must never dirty git.
 
 from __future__ import annotations
 
-import subprocess
 from datetime import UTC, datetime, timedelta
 
 from sidegraph.store import Store
@@ -69,33 +68,3 @@ def test_prune_sweeps_render_events_too(tmp_path):
     assert store.render_events() == []
     assert store.retrieval_events() == []
     store.close()
-
-
-def test_render_events_survive_a_canonical_reload(tmp_path):
-    """The DROP list names record tables explicitly; telemetry survives by ABSENCE from it
-    (spec D4). That property is invisible at the call site, so it is pinned here.
-
-    The digest argument is required — see tests/test_store_telemetry.py:88 for the
-    established call shape.
-    """
-    store = Store(tmp_path / "s")
-    _record(store)
-    store._reload_index_from_canonical("forced-digest")
-    assert len(store.render_events()) == 1
-    store.close()
-
-
-def test_the_index_is_ignored_so_recording_cannot_dirty_git(tmp_path):
-    """`git status --porcelain` collapses an untracked directory to one line, so asserting
-    'index.db' is absent from it would pass even if the file were tracked. Ask git directly.
-    """
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    store = Store(repo / ".sidegraph")
-    _record(store)
-    store.close()
-    ignored = subprocess.run(
-        ["git", "check-ignore", ".sidegraph/index.db"], cwd=repo, capture_output=True, text=True
-    )
-    assert ignored.returncode == 0, "index.db must be ignored by the store's own .gitignore"

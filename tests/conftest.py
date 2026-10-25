@@ -202,3 +202,13 @@ def _path_probe_sees_no_foreign_install(monkeypatch: pytest.MonkeyPatch) -> None
     from sidegraph.host import hooks
 
     monkeypatch.setattr(hooks, "_path_install", lambda: None)
+
+
+def pytest_terminal_summary(terminalreporter) -> None:  # type: ignore[no-untyped-def]
+    """Print the git version the run used: the clock tests (``test_maintenance_clock``) depend
+    on git's own behaviour, and a CI log should say which git that was."""
+    from sidegraph.maintenance_clock import git_version
+
+    version = git_version()
+    if version:
+        terminalreporter.write_line(f"sidegraph clock tests ran on {version}")

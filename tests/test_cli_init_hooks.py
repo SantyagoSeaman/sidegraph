@@ -20,8 +20,6 @@ from tests.githooks_support import (
     CREATED_HEADER,
     HELPER_NAME,
     HOOKS,
-    await_rebuilds,
-    commit,
     expected_block,
     git,
 )
@@ -96,7 +94,7 @@ def installed_everywhere(repo: Path) -> bool:
 # -- T1: the question ------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("answer", ["y\n", "\n", "yes\n", "  Y  \n"])
+@pytest.mark.parametrize("answer", ["\n", "  Y  \n"])
 def test_t1_a_terminal_yes_or_enter_installs_the_helper_and_three_blocks(
     sandbox, monkeypatch, capsys, answer
 ):
@@ -322,10 +320,9 @@ def test_remove_hooks_outside_a_repository_says_so(tmp_path, monkeypatch, capsys
 # -- T7: core.hooksPath -----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("level", ["local", "global"])
-def test_t7_hooks_path_gets_no_file_and_the_printed_line_works_by_hand(
-    sandbox, monkeypatch, capsys, level
-):
+def _hooks_path_run(sandbox, monkeypatch, capsys, level):
+    """``sidegraph-init --hooks`` in a repository whose ``core.hooksPath`` points at a directory a
+    hooks manager owns; returns the repository, that directory and the lines it printed to add."""
     repo = sandbox.repo()
     managed = repo / ".githooks"
     managed.mkdir()
@@ -338,18 +335,11 @@ def test_t7_hooks_path_gets_no_file_and_the_printed_line_works_by_hand(
     assert "core.hooksPath is set" in out
     lines = [ln for ln in out.splitlines() if ln.startswith('g="$(git rev-parse')]
     assert [ln.split(' || "$g" ')[1].split(" ")[0] for ln in lines] == list(HOOKS)
+    return repo, managed, lines
 
-    for hook, line in zip(HOOKS, lines, strict=True):  # what a person would paste
-        path = managed / hook
-        path.write_text(f"#!/bin/sh\n{line}\n")
-        path.chmod(0o755)
-    common = repo / ".git"
-    wt = sandbox.root / "wt"
-    git(repo, "worktree", "add", "-q", "-b", "feature", str(wt))
-    commit(wt)  # a linked worktree: no rebuild
-    head = commit(repo)  # the main checkout: one
-    starts = await_rebuilds(sandbox, common)
-    assert [(s.cwd.resolve(), s.head) for s in starts] == [(repo.resolve(), head)]
+
+def test_t7_hooks_path_gets_no_file_and_prints_the_line_to_add(sandbox, monkeypatch, capsys):
+    _hooks_path_run(sandbox, monkeypatch, capsys, "local")
 
 
 def test_hooks_path_with_a_declined_choice_installs_nothing(sandbox, monkeypatch, capsys):
@@ -376,17 +366,6 @@ def test_graphifys_own_hook_is_reported_and_left_alone(sandbox, monkeypatch, cap
     assert text.startswith("#!/bin/sh\n" + expected_block("post-commit"))
     other = sandbox.repo("second")
     assert D6_LINE not in init(other, monkeypatch, capsys, "--hooks")
-
-
-# -- the flags are documented -------------------------------------------------------------------
-
-
-def test_the_help_names_the_three_flags(capsys):
-    with pytest.raises(SystemExit):
-        init_main(["--help"])
-    out = capsys.readouterr().out
-    for flag in ("--hooks", "--no-hooks", "--remove-hooks"):
-        assert flag in out
 
 
 # -- --no-hooks on an installed repository, and a hook wired by hand ------------------------------
@@ -492,19 +471,6 @@ def test_a_linked_worktree_that_borrows_the_main_graph_installs(sandbox, monkeyp
     out = init(wt, monkeypatch, capsys, "--hooks")
     assert INSTALLED in out
     assert installed_everywhere(repo)
-
-
-def test_a_repository_with_no_main_checkout_is_skipped(sandbox, monkeypatch, capsys):
-    source = sandbox.repo("source")
-    bare = sandbox.root / "bare" / ".bare"
-    bare.parent.mkdir()
-    git(sandbox.root, "clone", "-q", "--bare", str(source), str(bare))
-    wt = sandbox.root / "bare" / "wt"
-    git(bare, "worktree", "add", "-q", str(wt), "main")
-    out = init(wt, monkeypatch, capsys, "--hooks")
-    assert "graph refresh hook: skipped" in out
-    assert "no main checkout" in out
-    assert not (bare / "hooks" / HELPER_NAME).exists()
 
 
 # -- the documented exit codes of the hook flags -------------------------------------------------

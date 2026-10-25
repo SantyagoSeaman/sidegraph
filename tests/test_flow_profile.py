@@ -138,9 +138,14 @@ def test_portable_core_never_mentions_bootstrap_literally():
 
 
 def test_portable_core_never_imports_a_seam_runtime():
-    """Mechanism (b): import each core module alone, in a brand-new Python process (so
-    sys.modules starts empty — not polluted by whatever the rest of the test suite already
-    imported), and assert no sidegraph.bootstrap* key ever lands in sys.modules.
+    """Mechanism (b): import every core module, in sorted order, inside ONE brand-new Python
+    process (so sys.modules starts empty — not polluted by whatever the rest of the test suite
+    already imported), and assert no sidegraph.bootstrap* key lands in sys.modules.
+
+    One process instead of one per module: before each import the probe drops every
+    sidegraph.bootstrap* entry (and the `bootstrap` attribute on the package), so a module
+    imported late in the order that pulls the seam in is attributed to that module even when an
+    earlier module already loaded it. Every offender is listed, not just the first.
 
     Honest scope (corrected fix round 1, review finding 2 — the original docstring overclaimed
     this): this only catches a dynamic import that actually EXECUTES at import time — an
@@ -155,21 +160,28 @@ def test_portable_core_never_imports_a_seam_runtime():
     )
     assert core_modules  # sanity: the glob actually found the flat core
     probe = (
-        "import sys\n"
-        "import {module}\n"
-        "leaked = sorted(\n"
-        "    m for m in sys.modules\n"
-        "    if m == 'sidegraph.bootstrap' or m.startswith('sidegraph.bootstrap.')\n"
-        ")\n"
-        "assert not leaked, leaked\n"
+        "import importlib, sys\n"
+        "def seam(m):\n"
+        "    return m == 'sidegraph.bootstrap' or m.startswith('sidegraph.bootstrap.')\n"
+        "offenders = {}\n"
+        "for name in sys.argv[1:]:\n"
+        "    for m in [m for m in sys.modules if seam(m)]:\n"
+        "        del sys.modules[m]\n"
+        "    pkg = sys.modules.get('sidegraph')\n"
+        "    if pkg is not None and hasattr(pkg, 'bootstrap'):\n"
+        "        delattr(pkg, 'bootstrap')\n"
+        "    importlib.import_module(name)\n"
+        "    leaked = sorted(m for m in sys.modules if seam(m))\n"
+        "    if leaked:\n"
+        "        offenders[name] = leaked\n"
+        "assert not offenders, offenders\n"
     )
-    for module in core_modules:
-        result = subprocess.run(
-            [sys.executable, "-c", probe.format(module=module)],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, f"{module} pulled in bootstrap: {result.stderr}"
+    result = subprocess.run(
+        [sys.executable, "-c", probe, *core_modules],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"core modules pulled in bootstrap: {result.stderr}"
 
 
 # -- mechanism boundary tests (fix round 1, code review) --------------------------------------

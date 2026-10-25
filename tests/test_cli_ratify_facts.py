@@ -3,6 +3,8 @@ see design/superpowers/specs/2026-07-10-facts-layer-design.md"""
 
 from datetime import UTC, datetime
 
+import pytest
+
 from sidegraph.cli import ratify_main
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Fact, Provenance
 from sidegraph.store import Store
@@ -63,47 +65,29 @@ def test_cli_all_includes_standalone_fact(tmp_path, capsys):
         assert reopened.get_fact(f.id).status == DecisionStatus.ACCEPTED
 
 
-def test_cli_cascade_reported(tmp_path, capsys):
+@pytest.mark.parametrize(
+    "argv", [["--accept", "{d}"], ["--accept", "{d}", "{f}"], ["--all"]], ids=["d", "d+f", "all"]
+)
+def test_cli_cascade_reports_the_nested_fact_once(tmp_path, capsys, argv):
+    """Accepting a decision reports its nested fact as evidence, once, whether the fact was
+    left to the cascade, named too (order-independence, fix pass), or swept up by ``--all``."""
     store_path = tmp_path / "s"
     store = Store(store_path)
     d = store.add_decision(_decision())
     f = store.add_fact(_fact(supports=[d.id]))
-    assert ratify_main(["--db", str(store_path), "--accept", d.id]) == 0
+    args = [a.format(d=d.id, f=f.id) for a in argv]
+    assert ratify_main(["--db", str(store_path), *args]) == 0
     out = capsys.readouterr().out
-    assert f"accepted (evidence of {d.id}) {f.id}" in out
-
-
-def test_cli_all_reports_nested_fact_once_via_cascade(tmp_path, capsys):
-    store_path = tmp_path / "s"
-    store = Store(store_path)
-    d = store.add_decision(_decision())
-    f = store.add_fact(_fact(supports=[d.id]))
-    assert ratify_main(["--db", str(store_path), "--all"]) == 0
-    out = capsys.readouterr().out
-    cascade_line = f"accepted (evidence of {d.id}) {f.id}"
-    assert out.count(cascade_line) == 1
+    assert out.count(f"accepted (evidence of {d.id}) {f.id}") == 1
     assert out.count(f.id) == 1  # reported exactly once, never double
     assert "error" not in out.lower()
     with Store(store_path) as reopened:
         assert reopened.get_fact(f.id).status == DecisionStatus.ACCEPTED
+        assert reopened.get_decision(d.id).status == DecisionStatus.ACCEPTED
 
 
 # -- fix pass: accepting a decision AND its nested fact together must not yield a spurious
 # error (mirrors test_server_ratify_facts.py's order-independence coverage).
-
-
-def test_cli_accept_decision_and_nested_fact_together_exits_clean(tmp_path, capsys):
-    store_path = tmp_path / "s"
-    store = Store(store_path)
-    d = store.add_decision(_decision())
-    f = store.add_fact(_fact(supports=[d.id]))
-    assert ratify_main(["--db", str(store_path), "--accept", d.id, f.id]) == 0
-    out = capsys.readouterr().out
-    assert f"accepted (evidence of {d.id}) {f.id}" in out
-    assert "error" not in out.lower()
-    with Store(store_path) as reopened:
-        assert reopened.get_fact(f.id).status == DecisionStatus.ACCEPTED
-        assert reopened.get_decision(d.id).status == DecisionStatus.ACCEPTED
 
 
 def test_cli_drop_decision_and_nested_fact_together_exits_clean(tmp_path, capsys):

@@ -16,6 +16,7 @@ from sidegraph.retrieval import _live_facts
 from sidegraph.schema import DecisionKind, Fact, Provenance
 from sidegraph.store import Store
 from sidegraph.store_layout import VOLATILE_STALE_KEY
+from tests.store_format2_support import format1_store
 from tests.test_hot_index import _Seeder
 
 
@@ -44,7 +45,7 @@ def _fact(
     source=None,
     fixed_id=None,
 ):
-    store = Store(root / ".sidegraph")
+    store = Store(format1_store(root / ".sidegraph"))
     try:
         seed = _Seeder(store)
         supports = (

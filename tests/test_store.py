@@ -16,11 +16,12 @@ from sidegraph import (
     Provenance,
     Store,
 )
+from tests.store_format2_support import format1_store
 
 
 @pytest.fixture
 def store(tmp_path) -> Store:
-    with Store(tmp_path / "test.db") as s:
+    with Store(format1_store(tmp_path / "test.db")) as s:
         yield s
 
 

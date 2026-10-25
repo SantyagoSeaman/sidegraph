@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.16.0"
+version = "0.17.0"
 description = "Own the memory, rent the graph — a durable decision/lessons layer as a sidecar over a code-graph engine."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -61,6 +61,7 @@ sidegraph-sync = "sidegraph.cli:sync_main"
 sidegraph-import = "sidegraph.cli:import_main"
 sidegraph-domains = "sidegraph.cli:domains_main"
 sidegraph-compact = "sidegraph.cli:compact_main"
+sidegraph-migrate = "sidegraph.cli:migrate_main"
 sidegraph-require = "sidegraph.cli:require_main"
 sidegraph-verify = "sidegraph.cli:verify_main"
 sidegraph-doctor = "sidegraph.cli:doctor_main"
@@ -109,6 +110,9 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 pythonpath = ["."]
+# tests/private is the release-only slow set: PR runs skip it, `pytest tests/private` runs it.
+# Setting the option replaces pytest's defaults, so they are listed again.
+norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "private"]
 markers = [
     "integration: spawns real git repositories and subprocesses (release-script contract)",
     "slow: creates thousands of files or spawns subprocesses",

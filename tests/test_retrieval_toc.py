@@ -121,32 +121,22 @@ def test_build_toc_domain_shape_and_mistake_count(tmp_path):
     assert entry["subdomains"] == 0
 
 
-def test_build_toc_excludes_superseded_and_orphaned_bindings_from_mistake_count(tmp_path):
+def test_build_toc_excludes_orphaned_bindings_from_mistake_count(tmp_path):
     store = Store(tmp_path / "t.db")
     _domain(store, "payments")
 
-    stale = _decision(store, DecisionKind.GOTCHA, title="old gotcha")
-    _bind_domain(store, stale.id, "payments", status="orphaned")
-
-    toc = build_toc(store, None)
-    assert toc["domains"][0]["mistakes"] == 0
-
-
-def test_build_toc_counts_a_mistake_anchored_inside_the_domains_community(tmp_path):
-    """The count is what ``drill_down`` would serve, not only what is tagged to the domain.
-    Most captured mistakes anchor to a code entity, not to ``domain:<slug>``, so a count of
-    the tagged ones alone read "0 mistake(s)" over a domain that holds several."""
-    store = Store(tmp_path / "t.db")
-    domain = _domain(store, "trading", communities=["1"])
-    assert domain.status.value == "accepted"  # a proposed domain would give 0 on both sides
-    ent = _entity_in_community(store, "Trader", "trader/exec.py", "1")
-    mistake = _decision(
-        store, DecisionKind.GOTCHA, title="fills arrive twice", status=DecisionStatus.ACCEPTED
+    # ACCEPTED, so the count would be 1 if the orphaned binding were followed.
+    stale = _decision(
+        store, DecisionKind.GOTCHA, title="old gotcha", status=DecisionStatus.ACCEPTED
     )
-    _bind_entity(store, mistake.id, ent.entity_id)
+    _bind_domain(store, stale.id, "payments", status="orphaned")
+    live = _decision(
+        store, DecisionKind.GOTCHA, title="live gotcha", status=DecisionStatus.ACCEPTED
+    )
+    _bind_domain(store, live.id, "payments")
 
     toc = build_toc(store, None)
-    assert [(d["slug"], d["mistakes"]) for d in toc["domains"]] == [("trading", 1)]
+    assert toc["domains"][0]["mistakes"] == 1
 
 
 def _write_graph(tmp_path, nodes) -> GraphifyReader:

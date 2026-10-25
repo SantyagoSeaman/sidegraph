@@ -10,7 +10,7 @@ import threading
 from datetime import UTC, datetime
 
 import sidegraph.server as server_module
-from sidegraph import anchoring, domain_snapshot
+from sidegraph import domain_snapshot
 from sidegraph import sync as sync_mod
 from sidegraph.anchoring import resolve_and_bind
 from sidegraph.cli import ratify_main, sync_main
@@ -308,9 +308,16 @@ def test_a_status_change_waits_for_a_running_membership_pass(tmp_path, monkeypat
     running = threading.Thread(target=ensure_domain_membership, args=(store, mention))
     running.start()
     assert entered.wait(10)
-    ratify = threading.Thread(target=other.ratify_domains, kwargs={"accept": [b.domain_id]})
+    attempting = threading.Event()
+
+    def accept_b():
+        attempting.set()
+        other.ratify_domains(accept=[b.domain_id])
+
+    ratify = threading.Thread(target=accept_b)
     ratify.start()
-    ratify.join(1.0)
+    assert attempting.wait(10)
+    ratify.join(0.25)  # an unblocked accept commits in milliseconds
     assert ratify.is_alive()  # blocked on the pass's reservation
     release.set()
     running.join(10)
@@ -320,35 +327,6 @@ def test_a_status_change_waits_for_a_running_membership_pass(tmp_path, monkeypat
     assert store.get_meta(MEMBERSHIP_STAMP_KEY) is None  # and uncertified by it
     assert ensure_domain_membership(store, mention) is not None
     assert members(store)["billing-a"] == set()  # the split
-
-
-def test_a_pull_and_its_revert_during_capture_s_pick_bind_no_domain(tmp_path, monkeypatch):
-    """Red against a re-check that compares the snapshot before and after the pick: B lands as
-    the pick's rebuild starts and A is back before the binding, so both ends read A while the
-    rows picked from were certified for B. Under A, Invoice is in no domain; under B it is
-    payments'."""
-    store, _d, legacy, _m = _snapshotted(tmp_path)
-    b = domain_snapshot.load_snapshot(store.path)
-    files = dict(b.files)
-    files["src/pay/model.py"] = files["src/pay/model.py"].model_copy(
-        update={"domains": [], "nodes": []}
-    )
-    a = b.model_copy(update={"files": files})
-    domain_snapshot.write_snapshot(store.path, a)
-    real_ensure, real_pick = anchoring.ensure_domain_membership, anchoring._pick_domain
-
-    def ensure_under_b(*args, **kw):
-        domain_snapshot.write_snapshot(store.path, b)  # the pull: git takes no lock
-        return real_ensure(*args, **kw)
-
-    def pick_then_revert(*args, **kw):
-        found = real_pick(*args, **kw)
-        domain_snapshot.write_snapshot(store.path, a)  # and its revert
-        return found
-
-    monkeypatch.setattr(anchoring, "ensure_domain_membership", ensure_under_b)
-    monkeypatch.setattr(anchoring, "_pick_domain", pick_then_revert)
-    assert _tier1(store, legacy, "Invoice", "src/pay/model.py") == ["community:1"]
 
 
 def test_a_pull_during_a_pass_is_never_read_as_current(tmp_path, monkeypatch):

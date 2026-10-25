@@ -675,7 +675,7 @@ def test_session_start_duplicate_tolerates_a_stamp_one_second_ahead(tmp_path):
 
 
 def _session_context(fx, tmp_path, monkeypatch, capsys) -> str:
-    """Run SessionStart over a repository from ``tests.test_graph_freshness`` and return the
+    """Run SessionStart over a repository from ``tests.graph_repo_support`` and return the
     additionalContext it printed."""
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(fx.repo))
     monkeypatch.setenv("SIDEGRAPH_DIR", str(_existing_store(tmp_path / "store")))
@@ -688,7 +688,7 @@ def _session_context(fx, tmp_path, monkeypatch, capsys) -> str:
 
 def test_session_start_says_the_graph_is_stale(tmp_path, monkeypatch, capsys):
     """T9. Red against unfixed code: no line about the graph at all."""
-    from tests.test_graph_freshness import stale_repo
+    from tests.graph_repo_support import stale_repo
 
     fx = stale_repo(tmp_path)
 
@@ -701,7 +701,7 @@ def test_session_start_says_the_graph_is_stale(tmp_path, monkeypatch, capsys):
 
 def test_session_start_is_silent_about_a_fresh_graph(tmp_path, monkeypatch, capsys):
     """T10. Red against nothing: a guard against a line on every session (mutation M4)."""
-    from tests.test_graph_freshness import make_repo
+    from tests.graph_repo_support import make_repo
 
     fx = make_repo(tmp_path)
 
@@ -712,7 +712,7 @@ def test_session_start_is_silent_about_a_fresh_graph(tmp_path, monkeypatch, caps
 
 
 def test_session_start_is_silent_when_the_comparison_is_unknown(tmp_path, monkeypatch, capsys):
-    from tests.test_graph_freshness import stale_repo, write_graph
+    from tests.graph_repo_support import stale_repo, write_graph
 
     fx = stale_repo(tmp_path)
     write_graph(fx.graph, "abc123", ["pkg/m.py"])  # not a full commit id
@@ -724,7 +724,7 @@ def test_session_start_is_silent_when_the_comparison_is_unknown(tmp_path, monkey
 
 def test_session_start_survives_a_failing_freshness_check(tmp_path, monkeypatch, capsys):
     """The stale line has its own try/except: a failure there must never cost the map."""
-    from tests.test_graph_freshness import stale_repo
+    from tests.graph_repo_support import stale_repo
 
     fx = stale_repo(tmp_path)
 

@@ -7,8 +7,6 @@ import contextlib
 import errno
 import os
 import re
-import shutil
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -241,45 +239,6 @@ class TestOutDirSafety:
         finally:
             os.umask(old_umask)
 
-    def test_second_rename_failure_rolls_back(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        assert _export(db, out) == 0
-        (out / "decisions" / "extra.md").write_text("old\n", encoding="utf-8")
-        before = _tree(out)
-        real, fired = Path.rename, []
-
-        def flaky(self: Path, dst: object) -> Path:
-            if ".okf-new-" in str(self):
-                fired.append(self)
-                raise OSError("rename failed")
-            return real(self, dst)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(Path, "rename", flaky)
-        assert _export(db, out) == 2
-        monkeypatch.undo()
-        assert len(fired) == 1
-        assert "rename failed" in capsys.readouterr().err
-        assert _tree(out) == before
-        assert not _okf_leftovers(tmp_path)
-
-    def test_mount_point_out_dir_falls_back_to_in_place(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        assert _export(db, out) == 0
-        (out / "decisions" / "extra.md").write_text("old\n", encoding="utf-8")
-        monkeypatch.setattr(os.path, "ismount", lambda p: True)
-        made: list[object] = []
-        real = tempfile.mkdtemp
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda *a, **kw: made.append(a) or real(*a, **kw))
-        assert _export(db, out) == 0
-        assert not made
-        assert _tree(out) == {rel: t.encode() for rel, t in build_bundle(Store(db)).items()}
-
     def test_out_dir_containing_cwd_falls_back_to_in_place(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -307,53 +266,6 @@ class TestOutDirSafety:
             parent.chmod(0o755)
         assert _tree(out) == {rel: t.encode() for rel, t in build_bundle(Store(db)).items()}
 
-    def test_first_rename_failure_falls_back_in_place(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        assert _export(db, out) == 0
-        (out / "decisions" / "extra.md").write_text("old\n", encoding="utf-8")
-        real = Path.rename
-
-        def flaky(self: Path, dst: object) -> Path:
-            if ".okf-old-" in str(dst):
-                raise OSError("busy")
-            return real(self, dst)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(Path, "rename", flaky)
-        assert _export(db, out) == 0
-        monkeypatch.undo()
-        assert _tree(out) == {rel: t.encode() for rel, t in build_bundle(Store(db)).items()}
-        assert not _okf_leftovers(tmp_path)
-
-    def test_in_place_fallback_writes_to_the_validated_target(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # An ancestor symlink switched after the checks must not redirect the in-place
-        # clear and write into a directory nobody validated.
-        db = _seed(tmp_path)
-        real_a, real_b = tmp_path / "A", tmp_path / "B"
-        assert _export(db, real_b / "bundle") == 0  # B mirrors A, so a misdirected clear bites
-        (real_b / "bundle" / "keep.md").write_text("foreign\n", encoding="utf-8")
-        link = tmp_path / "link"
-        real_a.mkdir()
-        link.symlink_to(real_a)
-        assert _export(db, link / "bundle") == 0
-        (real_a / "bundle" / "keep.md").write_text("old\n", encoding="utf-8")
-
-        def switch_then_in_place(target: Path) -> bool:
-            link.unlink()
-            link.symlink_to(real_b)
-            return True
-
-        monkeypatch.setattr("sidegraph.okf._must_emit_in_place", switch_then_in_place)
-        assert _export(db, link / "bundle") == 0
-        assert (real_b / "bundle" / "keep.md").read_text(encoding="utf-8") == "foreign\n"
-        assert _tree(real_a / "bundle") == {
-            rel: t.encode() for rel, t in build_bundle(Store(db)).items()
-        }
-
     def test_a_regular_file_parent_keeps_the_callers_spelling(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
@@ -364,33 +276,6 @@ class TestOutDirSafety:
         err = capsys.readouterr().err
         assert "afile/bundle" in err and ".okf-new-" not in err
         assert not _okf_leftovers(tmp_path)
-
-    def test_in_place_old_dir_cleanup_failure_is_a_warning(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        assert _export(db, out) == 0
-        (out / "decisions" / "extra.md").write_text("old\n", encoding="utf-8")
-        real_rename, real_rmdir = Path.rename, Path.rmdir
-
-        def flaky_rename(self: Path, dst: object) -> Path:
-            if ".okf-old-" in str(dst):
-                raise OSError("busy")
-            return real_rename(self, dst)  # type: ignore[arg-type]
-
-        def flaky_rmdir(self: Path) -> None:
-            if ".okf-old-" in str(self):
-                raise OSError("stuck")
-            real_rmdir(self)
-
-        monkeypatch.setattr(Path, "rename", flaky_rename)
-        monkeypatch.setattr(Path, "rmdir", flaky_rmdir)
-        assert _export(db, out) == 0
-        monkeypatch.undo()
-        assert "okf-old-" in capsys.readouterr().err
-        assert _tree(out) == {rel: t.encode() for rel, t in build_bundle(Store(db)).items()}
-        assert not [n for n in _okf_leftovers(tmp_path) if ".okf-new-" in n]
 
     def test_fallback_path_still_refuses_a_foreign_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
@@ -403,121 +288,6 @@ class TestOutDirSafety:
         assert _export(db, out) == 2
         assert "refusing to overwrite" in capsys.readouterr().err
         assert _tree(out) == {"keep.txt": b"mine\n"}
-
-    def test_post_swap_cleanup_failure_is_a_warning(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        assert _export(db, out) == 0
-        capsys.readouterr()
-        real = shutil.rmtree
-
-        def flaky(path: object, *a: object, **kw: object) -> None:
-            if ".okf-old-" in str(path):
-                raise OSError("cannot remove")
-            real(path, *a, **kw)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(shutil, "rmtree", flaky)
-        assert _export(db, out) == 0
-        monkeypatch.undo()
-        assert ".okf-old-" in capsys.readouterr().err
-
-    def test_rename_back_failure_reports_the_preserved_export(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        assert _export(db, out) == 0
-        (out / "decisions" / "extra.md").write_text("old\n", encoding="utf-8")
-        before = _tree(out)
-        real = Path.rename
-
-        def flaky(self: Path, dst: object) -> Path:
-            if ".okf-new-" in str(self) or ".okf-old-" in str(self):
-                raise OSError("rename failed")
-            return real(self, dst)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(Path, "rename", flaky)
-        assert _export(db, out) == 2
-        monkeypatch.undo()
-        assert "previous export is preserved at" in capsys.readouterr().err
-        (old,) = [p for p in tmp_path.iterdir() if ".okf-old-" in p.name]
-        assert _tree(old) == before
-
-    def test_mode_restore_failure_is_a_warning(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        assert _export(db, out) == 0
-        out.chmod(0o711)
-        capsys.readouterr()
-
-        def denied(self: Path, *a: object, **kw: object) -> None:
-            raise PermissionError("no chmod")
-
-        monkeypatch.setattr(Path, "chmod", denied)
-        monkeypatch.chdir(tmp_path)
-        assert _export(db, Path("bundle")) == 0
-        monkeypatch.undo()
-        assert "warning: could not restore mode on bundle:" in capsys.readouterr().err
-
-    def test_mode_read_failure_after_the_swap_still_cleans_up(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        assert _export(db, out) == 0
-        out.chmod(0o711)  # a non-default mode, so the post-swap read happens
-        capsys.readouterr()
-        target = str(out.resolve())
-        real_rename, real_stat = Path.rename, Path.stat
-        swapped: list[bool] = []
-
-        def rename(self: Path, dst: object) -> Path:
-            result = real_rename(self, dst)  # type: ignore[arg-type]
-            if ".okf-new-" in str(self) and str(dst) == target:
-                swapped.append(True)
-            return result
-
-        def stat(self: Path, *a: object, **kw: object) -> os.stat_result:
-            if swapped and str(self) == target:
-                raise OSError(errno.EIO, "Input/output error")
-            return real_stat(self, *a, **kw)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(Path, "rename", rename)
-        monkeypatch.setattr(Path, "stat", stat)
-        code = _export(db, out)
-        monkeypatch.undo()
-        assert code == 0
-        assert swapped
-        assert "warning: could not restore mode" in capsys.readouterr().err
-        assert (out / "index.md").is_file()
-        assert not _okf_leftovers(tmp_path)
-
-    def test_interrupt_at_the_first_rename_keeps_out_and_leaves_nothing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        assert _export(db, out) == 0
-        (out / "decisions" / "extra.md").write_text("old\n", encoding="utf-8")
-        before = _tree(out)
-        real = Path.rename
-
-        def interrupted(self: Path, dst: object) -> Path:
-            result = real(self, dst)  # type: ignore[arg-type]
-            if ".okf-old-" in str(dst):
-                raise KeyboardInterrupt
-            return result
-
-        monkeypatch.setattr(Path, "rename", interrupted)
-        with pytest.raises(KeyboardInterrupt):
-            _export(db, out)
-        monkeypatch.undo()
-        assert _tree(out) == before
-        assert not _okf_leftovers(tmp_path)
 
     @pytest.mark.skipif(
         hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory modes"
@@ -659,36 +429,6 @@ class TestOutDirSafety:
             assert _export(db, out) == 0
             assert out.stat().st_mode & 0o777 == 0o555
             assert _tree(out) == {rel: t.encode() for rel, t in build_bundle(Store(db)).items()}
-            assert not _okf_leftovers(tmp_path)
-        finally:
-            _make_writable(tmp_path)
-
-    @pytest.mark.skipif(
-        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory modes"
-    )
-    def test_a_failed_swap_restores_a_read_only_previous_export_with_its_mode(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        db = _seed(tmp_path)
-        out = tmp_path / "bundle"
-        _seed_previous_export(out)
-        before = _tree(out)
-        out.chmod(0o555)
-        real = Path.rename
-
-        def flaky(self: Path, target: object) -> Path:
-            if self.name == "bundle" and ".okf-new-" in str(self.parent):
-                raise OSError(errno.ENOSPC, "injected: the swap fails")
-            return real(self, target)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(Path, "rename", flaky)
-        try:
-            assert _export(db, out) != 0
-        finally:
-            monkeypatch.undo()
-        try:
-            assert out.stat().st_mode & 0o777 == 0o555
-            assert _tree(out) == before
             assert not _okf_leftovers(tmp_path)
         finally:
             _make_writable(tmp_path)

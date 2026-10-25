@@ -47,7 +47,9 @@ from sidegraph.schema import (
     Entity,
     Fact,
 )
-from sidegraph.store_layout import check_store_requirement, stat_entry
+from sidegraph.store_format import SHARDS_SUBDIR, list_shard_files
+from sidegraph.store_layout import check_store_requirement, index_stamp_problem, stat_entry
+from sidegraph.store_view import is_packed_store
 
 if TYPE_CHECKING:
     from sidegraph.engine.reader import GraphifyReader
@@ -298,6 +300,17 @@ def _canonical_files(store_dir: Path) -> dict[tuple[str, str], tuple[int, int]]:
             except FileNotFoundError:  # removed between the listing and the stat
                 continue
             found[(sub, f.stem)] = (st.st_size, st.st_mtime_ns)
+    if is_packed_store(store_dir):
+        # A format-2 store's shard files, keyed as the store keys them: ``("shards", <lower-cased
+        # file name>)``, buckets and stray files alike.
+        # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2, §7.3)
+        listing = list_shard_files(store_dir / SHARDS_SUBDIR, None)
+        for path in (*listing.buckets.values(), *listing.strays):
+            try:
+                st = stat_entry(path)
+            except FileNotFoundError:  # removed between the listing and the stat
+                continue
+            found[(SHARDS_SUBDIR, path.name.lower())] = (st.st_size, st.st_mtime_ns)
     return found
 
 
@@ -478,6 +491,11 @@ def build_report(
         )
     ) as conn:
         conn.row_factory = sqlite3.Row
+        problem = index_stamp_problem(store_dir, conn)
+        if problem is not None:
+            # The index of another layout is no index: reported like any index SQLite cannot
+            # read. see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.5)
+            raise sqlite3.DatabaseError(problem)
         conn.execute("BEGIN")
 
         delivery_evidence = _delivery_evidence(conn, cutoff)

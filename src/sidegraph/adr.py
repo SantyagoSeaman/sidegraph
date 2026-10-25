@@ -23,7 +23,8 @@ from .schema import (
     EntityKind,
     Fact,
 )
-from .verify import _check_archive_dir, _iter_json_files, _load_raw_json, verify_snapshot
+from .store_view import EffectiveRecord, effective_records
+from .verify import verify_snapshot
 
 DOC_DERIVED_SOURCES = frozenset({"doc-import", "import", "doc", "rationale", "graphify"})
 
@@ -56,26 +57,16 @@ class AdrSnapshot:
         }
 
 
-def _hot[Model: BaseModel](
-    root: Path, kind: str, model: type[Model], key: str
-) -> tuple[dict[str, Model], dict[str, Path]]:
-    values: dict[str, Model] = {}
-    paths: dict[str, Path] = {}
-    for path in _iter_json_files(root / kind):
-        raw, error = _load_raw_json(path)
-        if error is not None:
-            raise ValueError(f"cannot read canonical {kind} file: {path.name}")
-        value = model.model_validate(raw)
-        rid = getattr(value, key)
-        values[rid], paths[rid] = value, path
-    return values, paths
-
-
 def read_snapshot(path: Path) -> AdrSnapshot:
     """Admit and read canonical files without opening Store, index.db or graph.json.
 
-    Admission is deliberately strict. Identical archive/archive rows deduplicate; any
-    hot/archive coexistence is refused by the existing verifier, even if identical.
+    Admission is deliberately strict: the verifier's findings refuse the store. Identical
+    archive/archive rows deduplicate; on a per-record store any hot/archive coexistence is
+    refused, even if identical. A packed store admits the pre-maintenance pairs the verifier
+    calls legal. Every record is then its inventory's effective record, never an archived body
+    laid over a live one.
+
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)
     """
     # The project holding a store symlink owns its relative descriptors.
     root = path.absolute()
@@ -88,26 +79,39 @@ def read_snapshot(path: Path) -> AdrSnapshot:
     if violations:
         first = violations[0]
         raise ValueError(f"store verification failed: {first.code} at {first.path}")
-    decisions, record_paths = _hot(root, "decisions", Decision, "id")
-    facts, fact_paths = _hot(root, "facts", Fact, "id")
-    domains, domain_paths = _hot(root, "domains", Domain, "domain_id")
-    entities, _ = _hot(root, "entities", Entity, "entity_id")
-    archive = _check_archive_dir(root / "archive")
-    for rid, raw in archive.decisions.items():
-        decisions[rid] = Decision.model_validate(raw)
-        record_paths[rid] = archive.decision_entries[rid][0][0]
-    for rid, raw in archive.domains.items():
-        domains[rid] = Domain.model_validate(raw)
-        domain_paths[rid] = archive.domain_entries[rid][0][0]
+    packed = effective_records(root, any_format=True)
+    assert packed is not None
+    return _snapshot_of(root, packed)
+
+
+def _snapshot_of(root: Path, packed: dict[tuple[str, str], EffectiveRecord]) -> AdrSnapshot:
+    """The snapshot of a store: every record is its inventory's effective record
+    (``store_rules.effective``), whichever file, shard line or archive segment holds it, so an
+    archived body never overwrites a live one. A record's path is where it is stored.
+
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
+
+    def of[Model: BaseModel](record_type: str, model: type[Model]) -> tuple[dict[str, Model], dict]:
+        values: dict[str, Model] = {}
+        paths: dict[str, Path] = {}
+        for (kind, rid), rec in packed.items():
+            if kind == record_type:
+                values[rid] = model.model_validate(rec.raw)
+                paths[rid] = rec.source_path(root)
+        return values, paths
+
+    decisions, record_paths = of("decision", Decision)
+    facts, fact_paths = of("fact", Fact)
+    domains, domain_paths = of("domain", Domain)
+    entities, _ = of("entity", Entity)
     bindings: dict[str, list[AnchorBinding]] = {}
-    for file in _iter_json_files(root / "bindings"):
-        binding_payload, error = _load_raw_json(file)
-        if error is not None or not isinstance(binding_payload, list):
-            raise ValueError(f"cannot read canonical binding file: {file.name}")
-        bindings[file.stem] = [
-            AnchorBinding.model_validate({**item, "record_id": file.stem})
-            for item in binding_payload
-        ]
+    for (kind, rid), rec in packed.items():
+        if kind == "bindings":
+            if not isinstance(rec.raw, list):
+                raise ValueError(f"cannot read canonical binding file: {rid}.json")
+            bindings[rid] = [
+                AnchorBinding.model_validate({**item, "record_id": rid}) for item in rec.raw
+            ]
     return AdrSnapshot(
         root, decisions, facts, domains, entities, bindings, record_paths, fact_paths, domain_paths
     )

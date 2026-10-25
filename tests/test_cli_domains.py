@@ -59,8 +59,9 @@ def test_cli_domains_bootstrap_reports_and_writes(tmp_path, capsys):
     graph = _setup_graph(tmp_path, labels=LABELS)
     db = tmp_path / "t.db"
     assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph)]) == 0
-    out = capsys.readouterr().out
+    out, err = capsys.readouterr()
     assert "proposed 2 domain(s) (skipped: 0 existing)" in out
+    assert err == ""  # a small run prints no stderr hint
 
     store = Store(db)
     domains = list(store.iter_domains())
@@ -126,24 +127,12 @@ def test_cli_domains_bootstrap_idempotent_rerun(tmp_path, capsys):
     assert "proposed 0 domain(s) (skipped: 2 existing)" in out
 
 
-def test_cli_domains_bootstrap_negative_limit_rejected(tmp_path, capsys):
+@pytest.mark.parametrize(("flag", "value"), [("--limit", "-1"), ("--min-members", "0")])
+def test_cli_domains_bootstrap_invalid_flag_rejected(tmp_path, capsys, flag, value):
     graph = _setup_graph(tmp_path, labels=LABELS)
     db = tmp_path / "t.db"
-    assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph), "--limit", "-1"]) == 1
-    out = capsys.readouterr().out
-    assert "--limit" in out
-    assert not db.exists()
-
-
-def test_cli_domains_bootstrap_zero_min_members_rejected(tmp_path, capsys):
-    graph = _setup_graph(tmp_path, labels=LABELS)
-    db = tmp_path / "t.db"
-    assert (
-        domains_main(["bootstrap", "--db", str(db), "--graph", str(graph), "--min-members", "0"])
-        == 1
-    )
-    out = capsys.readouterr().out
-    assert "--min-members" in out
+    assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph), flag, value]) == 1
+    assert flag in capsys.readouterr().out
     assert not db.exists()
 
 
@@ -157,21 +146,6 @@ def test_cli_domains_bootstrap_unreadable_graph_exits_one(tmp_path, capsys):
     assert "not readable" in capsys.readouterr().out
 
 
-def test_cli_domains_bootstrap_store_open_failure_exits_one(tmp_path, capsys):
-    graph = _setup_graph(tmp_path, labels=LABELS)
-    db = tmp_path / "bad.db"
-    Store(db)
-    # Store(db) creates `db` as a canonical directory with the derived index at
-    # db/index.db (git-native store — see docs/reference/store-format.md); corrupt THAT
-    # file, not `db` itself.
-    conn = sqlite3.connect(str(db / "index.db"))
-    conn.execute("UPDATE meta SET value = 'bogus' WHERE key = 'schema_version'")
-    conn.commit()
-    conn.close()
-    assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph)]) == 1
-    assert "not readable" in capsys.readouterr().out
-
-
 def test_cli_domains_bootstrap_empty_graph_exits_zero(tmp_path, capsys):
     empty_graph = {"nodes": [], "links": []}
     graph = _write(tmp_path, "g.json", empty_graph)
@@ -181,9 +155,9 @@ def test_cli_domains_bootstrap_empty_graph_exits_zero(tmp_path, capsys):
     assert "proposed 0 domain(s) (skipped: 0 existing)" in out
 
 
-def _many_communities_graph(n):
-    """``n`` distinct significant (5-member) communities, no labels, no links — enough to
-    trip the "large run" stderr hint without needing real community structure."""
+def _many_communities_graph(n, members=5):
+    """``n`` distinct significant (``members``-member) communities, no labels, no links —
+    enough to trip the "large run" stderr hint without needing real community structure."""
     nodes = [
         {
             "id": f"c{c}n{i}",
@@ -194,7 +168,7 @@ def _many_communities_graph(n):
             "community": c,
         }
         for c in range(n)
-        for i in range(5)
+        for i in range(members)
     ]
     return {"built_at_commit": "v1", "nodes": nodes, "links": []}
 
@@ -209,13 +183,6 @@ def test_cli_domains_bootstrap_large_run_prints_stderr_hint(tmp_path, capsys):
     assert "--min-members/--limit" in err
 
 
-def test_cli_domains_bootstrap_small_run_has_no_stderr_hint(tmp_path, capsys):
-    graph = _setup_graph(tmp_path, labels=LABELS)
-    db = tmp_path / "t.db"
-    assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph)]) == 0
-    assert capsys.readouterr().err == ""
-
-
 def test_cli_domains_bootstrap_dry_run_large_has_no_stderr_hint(tmp_path, capsys):
     """The hint is about a large NON-dry-run write; a dry run commits nothing, so it
     shouldn't nag about ratifying selectively."""
@@ -227,41 +194,41 @@ def test_cli_domains_bootstrap_dry_run_large_has_no_stderr_hint(tmp_path, capsys
 
 # -- default --limit + before-write warning (BUG B/C: scale-aware default) ------------
 
+# 101 one-member communities cross the default cap of 100 at a fraction of the nodes.
+ONE_MEMBER = ["--min-members", "1"]
+
 
 def test_cli_domains_bootstrap_default_limit_caps_write(tmp_path, capsys):
     """BUG B mirrored onto the CLI: with no --limit given, a monorepo-scale candidate set
-    (150 significant communities) writes only the default 100, never the full flood."""
-    graph = _write(tmp_path, "g.json", _many_communities_graph(150))
+    (101 significant communities) writes only the default 100, never the full flood."""
+    graph = _write(tmp_path, "g.json", _many_communities_graph(101, members=1))
     db = tmp_path / "t.db"
-    assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph)]) == 0
+    assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph), *ONE_MEMBER]) == 0
     out, err = capsys.readouterr()
 
     store = Store(db)
     assert len(list(store.iter_domains())) == 100
     assert "proposed 100 domain(s)" in out
-    assert "150 significant communities found" in err
+    assert "101 significant communities found" in err
     assert "showing only the top 100" in err
 
 
 def test_cli_domains_bootstrap_limit_zero_is_unlimited(tmp_path, capsys):
     """The "all" convention: --limit 0 writes the FULL candidate set, unflagged."""
-    graph = _write(tmp_path, "g.json", _many_communities_graph(150))
+    graph = _write(tmp_path, "g.json", _many_communities_graph(101, members=1))
     db = tmp_path / "t.db"
-    assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph), "--limit", "0"]) == 0
+    assert (
+        domains_main(
+            ["bootstrap", "--db", str(db), "--graph", str(graph), *ONE_MEMBER, "--limit", "0"]
+        )
+        == 0
+    )
     out, err = capsys.readouterr()
 
     store = Store(db)
-    assert len(list(store.iter_domains())) == 150
-    assert "proposed 150 domain(s)" in out
+    assert len(list(store.iter_domains())) == 101
+    assert "proposed 101 domain(s)" in out
     assert "significant communities found" not in err
-
-
-def test_cli_domains_bootstrap_explicit_limit_still_overrides_default(tmp_path, capsys):
-    graph = _write(tmp_path, "g.json", _many_communities_graph(150))
-    db = tmp_path / "t.db"
-    assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph), "--limit", "40"]) == 0
-    store = Store(db)
-    assert len(list(store.iter_domains())) == 40
 
 
 def test_cli_domains_bootstrap_dry_run_default_limit_notes_the_cap(tmp_path, capsys):
@@ -269,13 +236,18 @@ def test_cli_domains_bootstrap_dry_run_default_limit_notes_the_cap(tmp_path, cap
     the cap rather than silently showing a partial "full picture" (team decision: dry run
     stays capped by default too, just clearly flagged) -- and must NOT print the >50
     "ratify selectively" nag, which is only about a real write."""
-    graph = _write(tmp_path, "g.json", _many_communities_graph(150))
+    graph = _write(tmp_path, "g.json", _many_communities_graph(101, members=1))
     db = tmp_path / "t.db"
-    assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph), "--dry-run"]) == 0
+    assert (
+        domains_main(
+            ["bootstrap", "--db", str(db), "--graph", str(graph), *ONE_MEMBER, "--dry-run"]
+        )
+        == 0
+    )
     out, err = capsys.readouterr()
 
     assert "would propose 100 domain(s)" in out
-    assert "150 significant communities found" in err
+    assert "101 significant communities found" in err
     assert "showing only the top 100" in err
     assert "ratify selectively" not in err
     assert list(Store(db).iter_domains()) == []  # dry-run: nothing written
@@ -289,7 +261,7 @@ def test_cli_domains_bootstrap_warns_before_write_even_if_write_crashes(
     blow up on the very first record and confirming the nag still reached stderr. Under the
     old (buggy) ordering the nag was computed from the finished report AFTER
     `bootstrap_domains` returned, so a write crash would have swallowed it entirely."""
-    graph = _write(tmp_path, "g.json", _many_communities_graph(150))
+    graph = _write(tmp_path, "g.json", _many_communities_graph(101, members=1))
     db = tmp_path / "t.db"
 
     def _boom(self, domain):
@@ -298,10 +270,10 @@ def test_cli_domains_bootstrap_warns_before_write_even_if_write_crashes(
     monkeypatch.setattr("sidegraph.store.Store.add_domain", _boom)
 
     with pytest.raises(RuntimeError):
-        domains_main(["bootstrap", "--db", str(db), "--graph", str(graph)])
+        domains_main(["bootstrap", "--db", str(db), "--graph", str(graph), *ONE_MEMBER])
 
     err = capsys.readouterr().err
-    assert "150 significant communities found" in err
+    assert "101 significant communities found" in err
     assert "showing only the top 100" in err
 
 
@@ -328,6 +300,7 @@ def test_cli_domains_add_lands_proposed(tmp_path, capsys):
     )
     out = capsys.readouterr().out
     assert "proposed 1 domain(s) (skipped: 0 existing)" in out
+    assert "redacted" not in out  # a clean add prints no redaction line
 
     store = Store(db)
     d = store.find_domain_by_slug("payments")
@@ -465,31 +438,23 @@ def test_cli_domains_add_invalid_slug_exits_one(tmp_path, capsys):
     assert not db.exists()
 
 
-def test_cli_domains_add_store_open_failure_exits_one(tmp_path, capsys):
+@pytest.mark.parametrize("subcommand", ["bootstrap", "add"])
+def test_cli_domains_store_open_failure_exits_one(tmp_path, capsys, subcommand):
+    graph = _setup_graph(tmp_path, labels=LABELS)
     db = tmp_path / "bad.db"
     Store(db)
     # Store(db) creates `db` as a canonical directory with the derived index at
-    # db/index.db — corrupt THAT file, not `db` itself (see test above).
+    # db/index.db (git-native store — see docs/reference/store-format.md); corrupt THAT
+    # file, not `db` itself.
     conn = sqlite3.connect(str(db / "index.db"))
     conn.execute("UPDATE meta SET value = 'bogus' WHERE key = 'schema_version'")
     conn.commit()
     conn.close()
-    assert (
-        domains_main(
-            [
-                "add",
-                "--db",
-                str(db),
-                "--slug",
-                "payments",
-                "--title",
-                "Payments",
-                "--summary",
-                "s",
-            ]
-        )
-        == 1
-    )
+    argv = {
+        "bootstrap": ["bootstrap", "--graph", str(graph)],
+        "add": ["add", "--slug", "payments", "--title", "Payments", "--summary", "s"],
+    }[subcommand]
+    assert domains_main([argv[0], "--db", str(db), *argv[1:]]) == 1
     assert "not readable" in capsys.readouterr().out
 
 
@@ -571,11 +536,3 @@ def test_cli_domains_add_redacts_title_and_summary(tmp_path, capsys):
     assert "abc123secret" not in d.summary
     text = "".join(f.read_text() for f in tmp_path.rglob("*.json"))
     assert "AKIAIOSFODNN7EXAMPLE" not in text and "abc123secret" not in text
-
-
-def test_cli_domains_add_prints_no_redaction_line_when_clean(tmp_path, capsys):
-    db = tmp_path / "t.db"
-    domains_main(
-        ["add", "--db", str(db), "--slug", "payments", "--title", "Payments", "--summary", "ok."]
-    )
-    assert "redacted" not in capsys.readouterr().out

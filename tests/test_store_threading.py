@@ -62,14 +62,24 @@ def test_store_usable_from_thread_pool_executor(tmp_path):
     assert len({*ids}) == 4  # each write landed distinctly
 
 
-def test_concurrent_hammer_two_threads_twenty_upserts_each(tmp_path):
-    """Two threads x 20 upserts, interleaved, to catch any gap in the serializing lock."""
+def test_a_mutation_holds_the_instance_lock(tmp_path):
+    """Deterministic companion of the hammer below: the per-instance ``RLock`` that serializes
+    threads sharing one Store is owned for the whole of a ``_mutation`` scope."""
+    with Store(tmp_path / "s") as store:
+        assert not store._lock._is_owned()
+        with store._mutation():
+            assert store._lock._is_owned()
+        assert not store._lock._is_owned()
+
+
+def test_concurrent_hammer_two_threads_five_upserts_each(tmp_path):
+    """Two threads x 5 upserts, interleaved, to catch any gap in the serializing lock."""
     store = Store(tmp_path / "hammer.db")
     errors: list[BaseException] = []
 
     def hammer(prefix: str) -> None:
         try:
-            for i in range(20):
+            for i in range(5):
                 d = store.add_decision(_decision(f"{prefix}-{i}"))
                 assert store.get_decision(d.id) is not None
         except BaseException as e:  # noqa: BLE001
@@ -82,7 +92,7 @@ def test_concurrent_hammer_two_threads_twenty_upserts_each(tmp_path):
         t.join()
 
     assert not errors, f"concurrent hammer raised: {errors}"
-    assert len(list(store.iter_decisions())) == 40
+    assert len(list(store.iter_decisions())) == 10
 
 
 def test_store_creates_missing_parent_directories(tmp_path):

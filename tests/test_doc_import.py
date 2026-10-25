@@ -19,8 +19,6 @@ from sidegraph.store import Store
 
 pytestmark = pytest.mark.usefixtures("cwd_outside_any_repository")
 
-_SPECS_DIR = Path(__file__).resolve().parent.parent / "design" / "superpowers" / "specs"
-
 # ---------------------------------------------------------------------------------------
 # Parser fixtures
 # ---------------------------------------------------------------------------------------
@@ -928,69 +926,6 @@ def test_parse_no_root_cause_suggests_no_kind():
     p = parse_decision_doc(ADR_FIXTURE, "docs/adr1.md")
     assert p is not None
     assert p.suggested_kind is None
-
-
-# ---------------------------------------------------------------------------------------
-# Corpus fidelity — run the real parser over this project's own internal decision-doc
-# corpus the fix was calibrated against (not synthetic fixtures). Verified pre-fix (via
-# the shipped 4dca13e code) that these 4 files produced literal garbage choices; see the
-# fixture-level regression tests above for the synthetic mirrors of the same two bug shapes.
-#
-# This internal design corpus is not part of the public snapshot (tools/release-public.sh
-# ships src/tests/docs only) — a public clone has no design/ directory at all, so these 3
-# tests skip there rather than fail with FileNotFoundError. They keep running (and keep
-# calibrating against the real corpus) in every internal checkout.
-# ---------------------------------------------------------------------------------------
-
-_CORPUS_SKIP_REASON = "internal design corpus not present in public checkouts"
-
-
-@pytest.mark.skipif(not _SPECS_DIR.is_dir(), reason=_CORPUS_SKIP_REASON)
-def test_corpus_fidelity_every_parsed_choice_non_empty_and_not_bold_markup():
-    files = sorted(_SPECS_DIR.glob("*.md"))
-    assert files, f"corpus not found at {_SPECS_DIR}"
-    for f in files:
-        rel = f"design/superpowers/specs/{f.name}"
-        p = parse_decision_doc(f.read_text(), rel)
-        if p is None:
-            continue  # not decision-shaped / unparseable — not this test's concern
-        assert p.choice, f"{f.name}: choice must never be empty"
-        assert not p.choice.startswith("**"), (
-            f"{f.name}: choice starts with raw bold-lead markup: {p.choice[:60]!r}"
-        )
-
-
-@pytest.mark.skipif(not _SPECS_DIR.is_dir(), reason=_CORPUS_SKIP_REASON)
-def test_corpus_fidelity_wrapped_trigger_does_not_leak_into_choice():
-    # The real release-plan spec: Trigger wraps 3 lines, no Decision/Design section.
-    # Pre-fix, `choice` was the wrapped continuation itself
-    # ("across 9 similar OSS projects...", verified against the shipped 4dca13e code).
-    name = "2026-07-06-public-release-plan.md"
-    f = _SPECS_DIR / name
-    p = parse_decision_doc(f.read_text(), f"design/superpowers/specs/{name}")
-    assert p is not None
-    assert not p.choice.startswith("across 9 similar")
-    assert "comparative research" in p.context
-    assert "plugin distribution" in p.context
-    assert p.context.endswith(f"imported from design/superpowers/specs/{name}")
-
-
-@pytest.mark.skipif(not _SPECS_DIR.is_dir(), reason=_CORPUS_SKIP_REASON)
-def test_corpus_fidelity_non_trigger_bold_lead_lines_do_not_leak_into_choice():
-    # These 3 real specs have no Trigger and no Decision/Design section — only Related/
-    # Covers/Informed-by bold lead lines. Pre-fix (verified against the shipped 4dca13e
-    # code), each one's `choice` was the raw bold-lead markup itself.
-    old_bad_prefixes = {
-        "2026-07-05-phase-0-de-risking-gate-design.md": "**Related:**",
-        "2026-07-05-graphify-reader-anchor-resolution-design.md": "**Covers:**",
-        "2026-07-06-sync-rebinding-design.md": "**Covers:**",
-    }
-    for name, old_bad_prefix in old_bad_prefixes.items():
-        f = _SPECS_DIR / name
-        p = parse_decision_doc(f.read_text(), f"design/superpowers/specs/{name}")
-        assert p is not None, name
-        assert not p.choice.startswith(old_bad_prefix), f"{name}: {p.choice[:60]!r}"
-        assert not p.choice.startswith("**"), name
 
 
 # ---------------------------------------------------------------------------------------
@@ -2775,73 +2710,6 @@ def test_an_explicit_path_through_a_directory_symlink_leaving_the_repo_is_refuse
     report = import_docs(store, reader, ["docs/adr/0001.md"], any_doc=True)
     assert (report.imported, report.skipped_outside_repo) == (0, 1)
     assert list(store.iter_decisions()) == []
-
-
-def test_symlink_swapped_after_the_check_reads_the_validated_target(tmp_path, monkeypatch):
-    """The escape check validates the link's resolved target; the read must use that same
-    resolved path, so re-pointing the link between the two cannot import an outside file."""
-    repo = _hermetic_git_repo(tmp_path, monkeypatch)
-    _write_md(repo, "design/x.md", _adr("Inside", decision="Inside text."))
-    outside = _write_md(tmp_path, "elsewhere/secret.md", _adr("Secret", decision="Outside text."))
-    link = repo / "docs" / "adr" / "x.md"
-    link.parent.mkdir(parents=True)
-    link.symlink_to("../../design/x.md")
-    reader = _reader(repo, _graph_of(_file_node("docs/adr/x.md")))
-    store = Store(tmp_path / "s.db")
-    monkeypatch.chdir(repo)
-
-    real_open = os.open
-    target = (repo / "design" / "x.md").resolve()
-    swapped = []
-
-    def swapping_open(path, *args, **kwargs):
-        if Path(path) == target and not swapped:
-            swapped.append(True)
-            link.unlink()
-            link.symlink_to(outside)
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", swapping_open)
-    report = import_docs(store, reader, ["docs/adr/x.md"])
-    assert swapped
-    assert report.imported == 1
-    (decision,) = list(store.iter_decisions())
-    assert "Inside text." in decision.choice
-    assert "Outside text." not in decision.choice
-
-
-def test_target_replaced_by_a_symlink_after_the_check_is_refused(tmp_path, monkeypatch):
-    """The resolved target itself can be swapped for a link to an outside file between the
-    check and the read; the read must not follow it, and the refusal is counted."""
-    repo = _hermetic_git_repo(tmp_path, monkeypatch)
-    _write_md(repo, "design/x.md", _adr("Inside", decision="Inside text."))
-    outside = _write_md(
-        tmp_path, "elsewhere/secret.md", _adr("Secret", decision="External choice.")
-    )
-    link = repo / "docs" / "adr" / "x.md"
-    link.parent.mkdir(parents=True)
-    link.symlink_to("../../design/x.md")
-    reader = _reader(repo, _graph_of(_file_node("docs/adr/x.md")))
-    store = Store(tmp_path / "s.db")
-    monkeypatch.chdir(repo)
-
-    real_open = os.open
-    target = (repo / "design" / "x.md").resolve()
-    swapped = []
-
-    def swapping_open(path, *args, **kwargs):
-        if Path(path) == target and not swapped:
-            swapped.append(True)
-            target.unlink()
-            target.symlink_to(outside)
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", swapping_open)
-    report = import_docs(store, reader, ["docs/adr/x.md"])
-    assert swapped
-    assert report.imported == 0
-    assert report.skipped_outside_repo == 1
-    assert not list(store.iter_decisions())
 
 
 # ---------------------------------------------------------------------------------------

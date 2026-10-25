@@ -125,7 +125,7 @@ sidegraph sidegraph-mcp` — see
 for the pinning policy. Use `sidegraph==X.Y.Z` in automation.
 
 The store (`SIDEGRAPH_DIR`) is meant to live **inside the repo it documents** — commit
-`.sidegraph/` alongside your code (its committed record directories, not the gitignored
+`.sidegraph/` alongside your code (its committed record directories and shard files, not the gitignored
 `index.db`), not the Sidegraph source tree.
 
 ### 2. Add the hooks

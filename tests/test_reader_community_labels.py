@@ -38,13 +38,6 @@ def test_community_labels_missing_sidecar_returns_empty_dict(tmp_path):
     assert reader.community_labels() == {}
 
 
-def test_community_labels_reads_sidecar_next_to_graph(tmp_path):
-    graph = _write(tmp_path, "graph.json", _GRAPH)
-    _write(tmp_path, ".graphify_labels.json", {"0": "Alpha Domain", "1": "Beta Domain"})
-    reader = GraphifyReader(graph)
-    assert reader.community_labels() == {"0": "Alpha Domain", "1": "Beta Domain"}
-
-
 def test_community_labels_malformed_json_returns_empty_dict(tmp_path):
     graph = _write(tmp_path, "graph.json", _GRAPH)
     _write(tmp_path, ".graphify_labels.json", "{not valid json")
@@ -80,11 +73,11 @@ def test_community_labels_looked_up_relative_to_graph_directory(tmp_path):
     sub = tmp_path / "graphify-out"
     sub.mkdir()
     graph = _write(sub, "graph.json", _GRAPH)
-    _write(sub, ".graphify_labels.json", {"0": "Nested"})
+    _write(sub, ".graphify_labels.json", {"0": "Alpha Domain", "1": "Beta Domain"})
     # A reader opened via a relative-looking nested path still resolves the sidecar
     # from graph.json's own parent directory, not the cwd.
     reader = GraphifyReader(graph)
-    assert reader.community_labels() == {"0": "Nested"}
+    assert reader.community_labels() == {"0": "Alpha Domain", "1": "Beta Domain"}
 
 
 def test_only_the_pending_sidecar_yields_its_labels(tmp_path):
@@ -123,7 +116,7 @@ def test_a_hub_name_in_path_suffix_form_comes_back_as_the_basename(tmp_path):
     assert GraphifyReader(graph).community_labels() == {"4": "cli.py", "5": "docs/notes"}
 
 
-@pytest.mark.parametrize("source", ["curated", "pending", "node"])
+@pytest.mark.parametrize("source", ["curated", "node"])  # pending: the path-suffix test above
 def test_hub_aliases_are_normalised_for_each_label_source(tmp_path, source):
     nodes = [
         node("boot", "bootstrap/cli.py", "src/sidegraph/bootstrap/cli.py", community=4),
@@ -132,8 +125,7 @@ def test_hub_aliases_are_normalised_for_each_label_source(tmp_path, source):
     if source == "node":
         nodes[0]["community_name"] = "bootstrap/cli.py"
     else:
-        name = ".graphify_labels.json" if source == "curated" else ".graphify_labels.pending.json"
-        _write(tmp_path, name, {"4": "bootstrap/cli.py"})
+        _write(tmp_path, ".graphify_labels.json", {"4": "bootstrap/cli.py"})
     graph = _write(tmp_path, "graph.json", {**_GRAPH, "nodes": nodes})
     assert GraphifyReader(graph).community_labels() == {"4": "cli.py"}
 

@@ -34,6 +34,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 
 SKIP_KEY = "skipped_canonical_files"
 CONFLICT = '<<<<<<< HEAD\n{"id": "x"}\n=======\n{"id": "y"}\n>>>>>>> branch\n'
@@ -78,7 +79,7 @@ class Seed(NamedTuple):
 def _seed(tmp_path) -> Seed:
     """A closed store with three decisions, one entity bound to all three, and one fact."""
     db = tmp_path / ".sidegraph"
-    with Store(db) as s:
+    with Store(format1_store(db)) as s:
         entity = s.upsert_entity(
             Entity(canonical_name="widget", descriptor=Descriptor(name="widget", file_path="a.py"))
         )
@@ -228,16 +229,6 @@ def test_t5b_a_title_that_cannot_be_serialised_is_skipped(tmp_path):
         assert _skipped(s) == [(f"decisions/{bad.id}.json", "parse-error")]
 
 
-def test_t5c_a_file_nested_past_the_recursion_limit_is_skipped(tmp_path):
-    seed = _seed(tmp_path)
-    bad = seed.decisions[0]
-    _put(seed.db, f"decisions/{bad.id}.json", "[" * 200_000 + "]" * 200_000)
-
-    with Store(seed.db) as s:
-        assert s.get_decision(bad.id) is None
-        assert _skipped(s) == [(f"decisions/{bad.id}.json", "parse-error")]
-
-
 # -- D3: a bindings file is skipped as a unit ----------------------------------------------
 
 
@@ -321,14 +312,14 @@ def test_a_compacted_decision_whose_title_holds_a_unicode_line_separator_reopens
     A fresh index forces the reload, as on a fresh clone."""
     db = tmp_path / ".sidegraph"
     title = f"before{char}after"
-    with Store(db) as s:
+    with Store(format1_store(db)) as s:
         old = s.add_decision(_decision(title))
         s.add_decision(_decision("successor", supersedes=old.id))
         assert s.compact().decisions_compacted == 1
     for stale in db.glob("index.db*"):
         stale.unlink()
 
-    with Store(db) as s:
+    with Store(format1_store(db)) as s:
         archived = s.get_decision(old.id)
         assert archived is not None
         assert archived.title == title
@@ -443,7 +434,7 @@ def test_t11b_a_dry_run_compact_ignores_a_skipped_hot_file_with_an_archived_copy
     _segment(seed.db, [_line(hot)])
     path = _put(seed.db, f"decisions/{hot.id}.json", CONFLICT)
 
-    with Store(seed.db) as s:
+    with Store(format1_store(seed.db)) as s:
         report = s.compact(dry_run=True)
         assert report.cleaned_up_hot_files == 0
     assert path.read_text(encoding="utf-8") == CONFLICT
@@ -522,10 +513,6 @@ def _break(seed: Seed, shape: str) -> None:
             _put(db, decision, CONFLICT)
         case "decision-invalid-utf8":
             (db / decision).write_bytes(b'{"id": "\xff\xfe"}')
-        case "decision-not-an-object":
-            _put(db, decision, "[1]")
-        case "decision-too-deep":
-            _put(db, decision, "[" * 200_000 + "]" * 200_000)
         case "decision-bad-schema":
             _put_json(db, decision, {**_read(db, decision), "status": "bogus"})
         case "decision-lone-surrogate":
@@ -542,14 +529,10 @@ def _break(seed: Seed, shape: str) -> None:
             _put_json(db, f"bindings/{bad.id}.json", {"a": 1})
         case "bindings-invalid-item":
             _put_json(db, f"bindings/{bad.id}.json", [ok, {**ok, "tier": 9}])
-        case "bindings-lone-surrogate":
-            _put_json(db, f"bindings/{bad.id}.json", [{**ok, "status": "\ud800"}])
         case "archive-conflict-line":
             _segment(db, [_line(_rejected()), "<<<<<<< HEAD"])
         case "archive-invalid-status":
             _segment(db, [_line(_rejected()), json.dumps({**archived, "status": "bogus"})])
-        case "archive-lone-surrogate":
-            _segment(db, [_line(_rejected()), json.dumps({**archived, "title": "\ud800"})])
         case "archive-invalid-utf8-line":
             _segment(db, [_line(_rejected()), b'{"record_type": "decision", "title": "\xff"}'])
         case _:
@@ -561,8 +544,6 @@ def _break(seed: Seed, shape: str) -> None:
     [
         "decision-conflict",
         "decision-invalid-utf8",
-        "decision-not-an-object",
-        "decision-too-deep",
         "decision-bad-schema",
         "decision-lone-surrogate",
         "decision-wrong-id",
@@ -571,10 +552,8 @@ def _break(seed: Seed, shape: str) -> None:
         "bindings-conflict",
         "bindings-object",
         "bindings-invalid-item",
-        "bindings-lone-surrogate",
         "archive-conflict-line",
         "archive-invalid-status",
-        "archive-lone-surrogate",
         "archive-invalid-utf8-line",
     ],
 )

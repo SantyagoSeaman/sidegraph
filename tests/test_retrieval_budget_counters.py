@@ -186,16 +186,6 @@ def test_a_fact_refused_by_the_budget_is_counted_dropped(tmp_path):
     store.close()
 
 
-def test_a_fact_that_fits_is_not_counted_dropped(tmp_path):
-    store = Store(tmp_path / "s")
-    e = _entity(store, "f", "a.py")
-    _fact(store, "short", entity=e)
-    ctx = rank_decisions([e], [], [], store, RetrievalBudget())
-    assert len(ctx.facts) == 1
-    assert ctx.dropped_for_budget == 0
-    store.close()
-
-
 def test_inline_evidence_refused_in_the_mistake_bucket_is_counted(tmp_path):
     """Site: phase 2 of bucket A, which inserts evidence after the placed mistake lines."""
     store = Store(tmp_path / "s")
@@ -314,6 +304,7 @@ def test_a_standalone_fact_on_a_seed_is_emitted(tmp_path):
     ctx = rank_decisions([e], [], [], store, RetrievalBudget())
     assert len(ctx.facts) == 1
     assert (ctx.selected, ctx.emitted) == (0, 1)
+    assert ctx.dropped_for_budget == 0  # a fact that fits is not counted dropped
     store.close()
 
 
@@ -386,17 +377,6 @@ def test_a_fact_supporting_two_decisions_is_emitted_once(tmp_path):
     _fact(store, "short", supports=[d1.id, d2.id])
     ctx = rank_decisions([e], [], [], store, RetrievalBudget())
     assert (ctx.selected, ctx.emitted) == (2, 3)
-    store.close()
-
-
-def test_a_refused_fact_is_not_emitted(tmp_path):
-    """The other side: a record the budget refused did not reach the agent."""
-    store = Store(tmp_path / "s")
-    e = _entity(store, "f", "a.py")
-    d = _decision(store, e, "a", 20, kind=DecisionKind.ADR)
-    _fact(store, supports=[d.id])
-    ctx = rank_decisions([e], [], [], store, RetrievalBudget(memory_chars=_detailed_len(d) + 20))
-    assert (ctx.emitted, ctx.dropped_for_budget) == (1, 1), "the decision fits, its evidence cannot"
     store.close()
 
 

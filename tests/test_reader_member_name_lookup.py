@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from sidegraph.engine.reader import RESOLVER_REVISION, GraphifyReader
+from sidegraph.engine.reader import GraphifyReader
 
 
 def _graph(tmp_path: Path, nodes: list[dict], links: list[dict] | None = None) -> GraphifyReader:
@@ -185,9 +185,3 @@ def test_a_member_with_two_owner_edges_matches_when_one_of_them_is_the_named_typ
     )
     assert r.resolve_member_name("A.run").node_id == "m"
     assert r.resolve_member_name("B.run").node_id == "m"
-
-
-def test_the_member_name_lookup_did_not_move_the_resolver_revision_alone(tmp_path):
-    """``resolve_member_name`` left the revision at 2; path names (D2 of the Graphify upgrade)
-    moved it to 3; the type-split moved it to 4."""
-    assert RESOLVER_REVISION == 4

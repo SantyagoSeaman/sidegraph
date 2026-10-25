@@ -10,7 +10,8 @@ agent.
 2. Follow the [end-to-end quickstart](getting-started/quickstart.md).
 3. Use the recommended host path for [Claude Code](getting-started/claude-code-setup.md) or
    [Codex](getting-started/codex-setup.md), or the MCP/skills-only paths for
-   [OpenCode V2](../.opencode/INSTALL.md) and experimental [Muse](integrations/muse.md).
+   [OpenCode V2](../.opencode/INSTALL.md), experimental [Muse](integrations/muse.md) and experimental
+   [Grok Build](integrations/grok.md).
 4. Run the [four-case verification checklist](guides/verifying-your-setup.md).
 
 If the repository already has ADRs or specs, use the
@@ -26,6 +27,9 @@ If the repository already has ADRs or specs, use the
 ## Operate and maintain it
 
 - [Migrate an existing store to Sidegraph 0.14](guides/migrating-to-0.14.md).
+- [Pack a store into shards (format 2) with Sidegraph 0.17](guides/migrating-to-0.17.md).
+- [Update to Sidegraph 0.15](guides/using-0.15.md) and [to 0.16](guides/using-0.16.md).
+- [Export decisions as Markdown ADRs](guides/adr-export.md).
 - [Check a Sidegraph installation](guides/health-check.md).
 - [Survive refactors and heal anchors](guides/surviving-refactors.md).
 - [Read what Sidegraph tells you when it needs attention](guides/troubleshooting.md).
@@ -58,4 +62,4 @@ it is optional background on evidence, limits, and repository fit.
 - [Git bindings](reference/git-bindings.md)
 - Integrations: [Claude Code](integrations/claude-code.md),
   [Codex](integrations/codex.md), [OpenCode V2](integrations/opencode.md),
-  experimental [Muse](integrations/muse.md), [Graphify](integrations/graphify.md)
+  experimental [Muse](integrations/muse.md), experimental [Grok Build](integrations/grok.md), [Graphify](integrations/graphify.md)

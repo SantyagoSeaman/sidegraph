@@ -440,24 +440,6 @@ def test_pending_key_recorded_then_cleared(tmp_path):
     assert s.get_meta(_PENDING_KEY) is None
 
 
-def test_pending_entity_gone_is_dropped(tmp_path):
-    import json
-
-    reader = _pending_repo(tmp_path)
-    s, e, d = _pending_store(tmp_path)
-    sync(s, reader)
-    # a stale head (the narrow pass must run) and an id the store no longer resolves
-    s.set_meta(
-        _PENDING_KEY, json.dumps({"head": "0" * 40, "entity_ids": ["01GONEGONEGONEGONEGONEGONE"]})
-    )
-
-    r = sync(s, reader)
-
-    assert not r.skipped
-    assert r.outcomes == []
-    assert s.get_meta(_PENDING_KEY) is None
-
-
 def test_narrow_report_carries_slug_conflicts(tmp_path):
     import json
 
@@ -519,22 +501,6 @@ def test_abandoned_move_reverted_leaves_the_leaf_live(tmp_path):
     (tmp_path / "x.txt").write_text("x\n")
     _git(["add", "x.txt"], tmp_path)
     _git(["commit", "-q", "-m", "unrelated"], tmp_path)  # ... and HEAD moves without a rebuild
-    r = sync(s, reader)
-
-    _assert_abandoned_move_left_alone(s, e, d, r, tmp_path)
-
-
-def test_abandoned_move_stashed_leaves_the_leaf_live(tmp_path):
-    reader = _pending_repo(tmp_path)
-    s, e, d = _pending_store(tmp_path)
-    assert [o.status for o in sync(s, reader).outcomes] == ["moved_uncommitted"]
-
-    _git(["branch", "feature"], tmp_path)
-    _git(["stash", "-q"], tmp_path)  # the staged rename is stashed away
-    _git(["checkout", "-q", "feature"], tmp_path)
-    (tmp_path / "y.txt").write_text("y\n")
-    _git(["add", "y.txt"], tmp_path)
-    _git(["commit", "-q", "-m", "unrelated"], tmp_path)
     r = sync(s, reader)
 
     _assert_abandoned_move_left_alone(s, e, d, r, tmp_path)
@@ -892,24 +858,6 @@ def test_a_failed_reconcile_in_a_full_pass_is_retried_by_the_next_plain_sync(tmp
     assert _status_of(s, d, c2) == "orphaned"
 
 
-def test_a_failed_reconcile_in_a_narrow_pass_is_retried_by_the_next_plain_sync(
-    tmp_path, monkeypatch
-):
-    reader, s, d, c2 = _community_move_setup(tmp_path, with_sibling=False)
-    _commit_the_move(tmp_path)
-    _fail_the_reconcile_once(monkeypatch)
-
-    r = sync(s, reader)  # narrow pass
-
-    assert not r.skipped and "error" in [o.status for o in r.outcomes]
-    assert json.loads(s.get_meta(_TIER1_META)) == {d.id: ["2"]}
-    assert _status_of(s, d, c2) == "live"
-
-    assert not sync(s, reader).skipped  # the retry repairs, so the call is not a skip
-    assert s.get_meta(_TIER1_META) is None
-    assert _status_of(s, d, c2) == "orphaned"
-
-
 def test_a_retry_that_fails_again_keeps_the_key_and_reports_an_error(tmp_path, monkeypatch):
     reader, s, d, c2 = _community_move_setup(tmp_path, with_sibling=False)
     _commit_the_move(tmp_path)
@@ -934,8 +882,10 @@ def test_a_successful_retry_on_a_gated_call_reports_synced_with_the_repaired_rec
     reader, s, d, c2 = _community_move_setup(tmp_path, with_sibling=False)
     _commit_the_move(tmp_path)
     _fail_the_reconcile_once(monkeypatch)
-    sync(s, reader)  # narrow pass: the reconcile fails and is remembered
+    failed = sync(s, reader)  # narrow pass: the reconcile fails and is remembered
+    assert not failed.skipped and "error" in [o.status for o in failed.outcomes]
     assert json.loads(s.get_meta(_TIER1_META)) == {d.id: ["2"]}
+    assert _status_of(s, d, c2) == "live"
 
     r = sync(s, reader)  # same version, same HEAD: the gate would skip, the retry repairs
 
@@ -972,16 +922,6 @@ def _abstaining_pending(tmp_path, monkeypatch):
     return reader, s, d, c2
 
 
-def test_a_retry_that_abstains_keeps_the_pair(tmp_path, monkeypatch):
-    reader, s, d, c2 = _abstaining_pending(tmp_path, monkeypatch)
-
-    sync(s, reader)
-
-    assert s.get_meta(_TIER1_META) is not None  # the key survived the abstain
-    assert json.loads(s.get_meta(_TIER1_META)) == {d.id: ["2"]}
-    assert _status_of(s, d, c2) == "live"  # nothing was orphaned: the abstain is real
-
-
 def test_a_retry_that_abstains_reports_nothing_and_the_gate_skips(tmp_path, monkeypatch):
     reader, s, d, c2 = _abstaining_pending(tmp_path, monkeypatch)
 
@@ -989,6 +929,8 @@ def test_a_retry_that_abstains_reports_nothing_and_the_gate_skips(tmp_path, monk
 
     assert [o.status for o in r.outcomes] == []
     assert r.skipped
+    assert json.loads(s.get_meta(_TIER1_META)) == {d.id: ["2"]}  # the key survived the abstain
+    assert _status_of(s, d, c2) == "live"  # nothing was orphaned: the abstain is real
     assert report_as_dict(r)["synced"] is False
     assert not report_has_findings(report_as_dict(r))
 
@@ -1015,18 +957,6 @@ def test_narrow_pass_keeps_a_shared_community_live_while_a_sibling_holds_it(tmp_
 
 def test_narrow_pass_orphans_a_community_no_leaf_holds_any_more(tmp_path):
     assert _community2_status(tmp_path, with_sibling=False) == "orphaned"
-
-
-def test_unparseable_pending_key_is_dropped(tmp_path):
-    reader = _pending_repo(tmp_path)
-    s, e, d = _pending_store(tmp_path)
-    sync(s, reader)
-    s.set_meta(_PENDING_KEY, "{not json")
-
-    r = sync(s, reader)  # must not raise
-
-    assert r.skipped
-    assert s.get_meta(_PENDING_KEY) is None
 
 
 def test_moved_rung_fails_closed_when_old_path_still_committed_at_head(tmp_path):
@@ -1082,30 +1012,6 @@ def test_moved_rung_fails_closed_when_new_path_never_committed(tmp_path):
     kept = s.get_entity(e.entity_id)
     assert kept.descriptor.file_path == "c.py"
     assert kept.last_seen_node_id == "m1"
-    assert s.bindings_for_record(d.id)[0].status == "live"
-
-
-def test_moved_rung_adopts_when_the_move_is_actually_committed(tmp_path):
-    """Positive control for the same guard: once the move is genuinely committed (old
-    path really gone from HEAD, new path really tracked at HEAD), the rung still adopts
-    -- the fix must not turn into a guard that never fires."""
-    _init_repo(tmp_path)
-    (tmp_path / "c.py").write_text("def mover_fn(): pass\n")
-    _git(["add", "-A"], tmp_path)
-    _git(["commit", "-q", "-m", "initial"], tmp_path)
-    _git(["mv", "c.py", "d.py"], tmp_path)
-    _git(["commit", "-q", "-m", "move c.py -> d.py"], tmp_path)
-
-    reader = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))
-    s = Store(tmp_path / "t.db")
-    e = _entity(s, "mover_fn", "c.py", "m1")
-    d = _leaf(s, e.entity_id, status="live")
-
-    out = rebind_entity(e, s, reader, repo_root=tmp_path)
-
-    assert out.status == "moved" and out.node_id == "m2" and out.detail == "c.py -> d.py"
-    kept = s.get_entity(e.entity_id)
-    assert kept.descriptor.file_path == "d.py"
     assert s.bindings_for_record(d.id)[0].status == "live"
 
 

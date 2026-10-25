@@ -210,6 +210,8 @@ def test_find_domains_by_community_returns_all_accepted_newest_first(store: Stor
 
     found = store.find_domains_by_community("7")
     assert [d.domain_id for d in found] == [newer.domain_id, older.domain_id]
+    # the singular lookup (anchoring's Tier-1 write-time pick) is just [0] of this union
+    assert store.find_domain_by_community("7").domain_id == found[0].domain_id
 
 
 def test_find_domains_by_community_excludes_proposed_and_dropped(store: Store) -> None:
@@ -224,19 +226,6 @@ def test_find_domains_by_community_no_match_returns_empty_list(store: Store) -> 
     d = store.add_domain(_domain(slug="payments", communities=["7"]))
     store.ratify_domains(accept=[d.domain_id])
     assert store.find_domains_by_community("999") == []
-
-
-def test_find_domain_by_community_singular_is_newest_of_the_plural_set(store: Store) -> None:
-    """The singular lookup (anchoring's Tier-1 write-time pick) must stay consistent with
-    the plural one (retrieval's read-time union): same newest-first ordering, just [0]."""
-    older = store.add_domain(_domain(slug="payments-old", communities=["7"]))
-    store.ratify_domains(accept=[older.domain_id])
-    newer = store.add_domain(_domain(slug="payments-new", communities=["7"]))
-    store.ratify_domains(accept=[newer.domain_id])
-
-    singular = store.find_domain_by_community("7")
-    plural = store.find_domains_by_community("7")
-    assert singular.domain_id == plural[0].domain_id
 
 
 # -- slug uniqueness ----------------------------------------------------------
@@ -324,20 +313,6 @@ def test_supersede_domain_against_duplicate_live_holder_deterministically_reject
     # neither duplicate was touched by either rejected attempt
     assert store.get_domain(d1.domain_id).status == DomainStatus.ACCEPTED
     assert store.get_domain(d2.domain_id).status == DomainStatus.ACCEPTED
-
-
-def test_supersede_domain_single_holder_still_unaffected_by_the_all_holders_check(
-    store: Store,
-) -> None:
-    """The fix must not regress the ordinary, single-holder case: exclude_id still excuses
-    the predecessor being superseded, same slug, no other live holder in the way."""
-    old = store.add_domain(_domain(slug="payments", title="Payments v1"))
-    new = store.supersede_domain(
-        old.domain_id,
-        _domain(slug="payments", title="Payments v2", supersedes=old.domain_id),
-    )
-    assert new.slug == "payments"
-    assert store.get_domain(old.domain_id).status == DomainStatus.SUPERSEDED
 
 
 # -- retiring an ACCEPTED domain via ratify_domains(drop=...) (review round 3 fix 3) --------

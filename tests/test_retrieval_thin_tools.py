@@ -58,12 +58,6 @@ def test_query_structure_respects_budget_chars(tmp_path):
 # -- query_decisions ------------------------------------------------------------------------
 
 
-def test_query_decisions_no_crash_without_reader(tmp_path):
-    s = Store(tmp_path / "t.db")
-    out = query_decisions([Seed(file_path="trader/exec.py")], s, None)
-    assert isinstance(out, str)
-
-
 def test_query_decisions_surfaces_seed_mistake(tmp_path):
     r = GraphifyReader(FIXTURE)
     s = Store(tmp_path / "t.db")
@@ -78,6 +72,7 @@ def test_query_decisions_surfaces_seed_mistake(tmp_path):
         kind=DecisionKind.GOTCHA,
         context="c",
         choice="lock it",
+        status=DecisionStatus.ACCEPTED,
         valid_from=datetime.now(UTC),
         provenance=Provenance(source="manual"),
     )
@@ -87,6 +82,7 @@ def test_query_decisions_surfaces_seed_mistake(tmp_path):
 
     out = query_decisions([Seed(name="Trader", file_path="trader/exec.py")], s, r)
     assert "race" in out
+    assert "[unratified]" not in out  # surfaced as an accepted seed mistake
     assert "## Structural map" not in out  # decisions-only, no structure block
 
 

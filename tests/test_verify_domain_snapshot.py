@@ -18,6 +18,7 @@ from sidegraph.verify import (
     verify_against,
     verify_snapshot,
 )
+from tests.store_format2_support import format1_store
 
 _OURS = {BAD_DOMAIN_SNAPSHOT, SNAPSHOT_WITHOUT_REQUIREMENT}
 
@@ -37,7 +38,7 @@ def _snap(commit=None):
 
 def _store(tmp_path, requirement):
     root = tmp_path / ".sidegraph"
-    Store(root).close()
+    Store(format1_store(root)).close()
     if requirement is not None:
         (root / "format").write_text(
             f"sidegraph-store 1.0.0\nrequires-sidegraph >= {requirement}\n", encoding="utf-8"

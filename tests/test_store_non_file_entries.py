@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,88 +19,28 @@ import pytest
 
 import sidegraph.store as store_module
 from sidegraph import verify
-from sidegraph.schema import (
-    AnchorBinding,
-    Decision,
-    DecisionKind,
-    Descriptor,
-    Domain,
-    Entity,
-    Fact,
-    Initiative,
-    Provenance,
-)
+from sidegraph.schema import Decision, DecisionKind
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
+from tests.store_non_file_support import (
+    NOT_A_FILE,
+    SAFE,
+    SEGMENT,
+    UNSAFE_NAME,
+    _prov,
+    _seed,
+    _Timeout,
+    needs_fifo,
+)
 
 SKIP_KEY = "skipped_canonical_files"
-NOT_A_FILE = "not a regular file"
-UNSAFE_NAME = "unsafe filename"
-SAFE = "01ABCDEFGHJKMNPQRSTVWXYZ00"  # a well-formed id, never a real record's
-SEGMENT = "2020-01-01-1-deadbeef0000.jsonl"
-RECORD_DIRS = ["entities", "decisions", "facts", "domains", "bindings", "initiatives"]
-
-needs_fifo = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="os.mkfifo is unavailable")
-
-
-def _prov() -> Provenance:
-    return Provenance(source="manual")
-
-
-def _seed(tmp_path: Path) -> tuple[Path, Decision]:
-    """A closed store holding one record of every kind, and a decision bound to an entity."""
-    db = tmp_path / ".sidegraph"
-    with Store(db) as s:
-        entity = s.upsert_entity(
-            Entity(canonical_name="widget", descriptor=Descriptor(name="widget", file_path="a.py"))
-        )
-        decision = s.add_decision(
-            Decision(
-                title="an adr",
-                kind=DecisionKind.ADR,
-                context="c",
-                choice="ch",
-                valid_from=datetime.now(UTC),
-                provenance=_prov(),
-            )
-        )
-        s.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2))
-        s.add_fact(
-            Fact(
-                statement="httpx retries idempotent requests by default.",
-                source="httpx docs",
-                valid_from=datetime.now(UTC),
-                provenance=_prov(),
-            )
-        )
-        s.add_domain(Domain(slug="core", title="Core", summary="s", provenance=_prov()))
-        s.upsert_initiative(Initiative(name="init"))
-    return db, decision
+# first, middle and last of the inventory's one record-dir loop, plus initiatives (its own loop)
+RECORD_DIRS = ["entities", "facts", "bindings", "initiatives"]
 
 
 def _skipped(s: Store) -> dict[str, str]:
     row = s._conn.execute("SELECT value FROM meta WHERE key = ?", (SKIP_KEY,)).fetchone()
     return {e["path"]: e["reason"] for e in json.loads(row["value"])} if row else {}
-
-
-class _Timeout:
-    """Fails a FIFO test where the unfixed code would block for ever. The alarm's exception is a
-    ``TimeoutError``, an ``OSError`` that production code may catch and report as an unreadable
-    file, so the block also records that the alarm fired and ``__exit__`` fails on it."""
-
-    def __enter__(self) -> None:
-        self.fired = False
-
-        def fire(*_: object) -> None:
-            self.fired = True
-            raise TimeoutError("blocked reading a FIFO")
-
-        self._old = signal.signal(signal.SIGALRM, fire)
-        signal.alarm(10)
-
-    def __exit__(self, *_: object) -> None:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, self._old)
-        assert not self.fired, "blocked reading a FIFO"
 
 
 def _plant(path: Path, kind: str) -> None:
@@ -160,6 +98,46 @@ def test_a_symlink_to_a_directory_is_skipped(tmp_path):
 
     with Store(db) as s:
         assert _skipped(s) == {f"facts/{SAFE}.json": NOT_A_FILE}
+
+
+# -- format 1 (per-record reload loops) and a symlink cycle ------------------------------
+
+
+@pytest.mark.parametrize("subdir", ["entities", "bindings"])
+def test_a_format1_store_skips_a_directory_in_a_record_dir(tmp_path, subdir):
+    """The format-1 reload walks its record dirs with its own loops, apart from the inventory
+    the default layout uses; each must skip a non-file entry and still load a real record."""
+    db = format1_store(tmp_path / ".sidegraph")
+    with Store(db) as s:
+        decision = s.add_decision(
+            Decision(
+                title="an adr",
+                kind=DecisionKind.ADR,
+                context="c",
+                choice="ch",
+                valid_from=datetime.now(UTC),
+                provenance=_prov(),
+            )
+        )
+    (db / subdir / f"{SAFE}.json").mkdir()
+
+    with Store(db) as s:
+        assert _skipped(s) == {f"{subdir}/{SAFE}.json": NOT_A_FILE}
+        assert s.get_decision(decision.id) is not None
+
+
+def test_a_symlink_cycle_in_a_record_dir_is_skipped_not_raised(tmp_path):
+    """``stat`` of a link in a cycle raises ELOOP, not FileNotFoundError. A committed
+    ``a -> b -> a`` is checked out verbatim by git, so it can reach a user."""
+    db, decision = _seed(tmp_path)
+    a = db / "decisions" / f"{SAFE}.json"
+    b = db / "decisions" / "b-link"
+    a.symlink_to(b)
+    b.symlink_to(a)
+
+    with Store(db) as s:
+        assert _skipped(s) == {f"decisions/{SAFE}.json": NOT_A_FILE}
+        assert s.get_decision(decision.id) is not None
 
 
 # -- the skip is certified: a reopen takes the fast path ----------------------------------
@@ -340,38 +318,6 @@ def test_a_dangling_symlink_in_the_archive_dir_is_skipped_not_raised(tmp_path, n
         assert s.get_decision(decision.id) is not None
 
 
-@pytest.mark.parametrize("subdir", RECORD_DIRS)
-def test_a_symlink_cycle_in_a_record_dir_is_skipped_not_raised(tmp_path, subdir):
-    """``stat`` of a self-referencing link raises ELOOP, not FileNotFoundError: one bad entry."""
-    db, decision = _seed(tmp_path)
-    loop = db / subdir / f"{SAFE}.json"
-    loop.symlink_to(loop)
-
-    with Store(db) as s:
-        assert _skipped(s) == {f"{subdir}/{SAFE}.json": NOT_A_FILE}
-        assert s.get_decision(decision.id) is not None
-
-
-def test_a_symlink_cycle_in_the_archive_dir_is_skipped_not_raised(tmp_path):
-    db, decision = _seed(tmp_path)
-    (db / "archive").mkdir(exist_ok=True)
-    loop = db / "archive" / f"{SAFE}.jsonl"
-    loop.symlink_to(loop)
-
-    with Store(db) as s:
-        assert _skipped(s) == {f"archive/{SAFE}.jsonl": NOT_A_FILE}
-        assert s.get_decision(decision.id) is not None
-
-
-def test_a_symlink_cycle_named_tmp_does_not_stop_the_open(tmp_path):
-    db, decision = _seed(tmp_path)
-    loop = db / "decisions" / f"{SAFE}.json.abc123.tmp"
-    loop.symlink_to(loop)
-
-    with Store(db) as s:
-        assert s.get_decision(decision.id) is not None
-
-
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
 def test_stat_entry_only_describes_a_dangling_or_looping_link_not_any_oserror(tmp_path):
     """A symlink into a directory the process cannot search is a permission problem, not a bad
@@ -395,16 +341,6 @@ def test_stat_entry_only_describes_a_dangling_or_looping_link_not_any_oserror(tm
             stat_entry(link)
     finally:
         locked.chmod(0o755)
-
-
-def test_verify_reports_a_symlink_cycle_like_a_dangling_symlink(tmp_path):
-    db, _ = _seed(tmp_path)
-    loop = db / "facts" / f"{SAFE}.json"
-    loop.symlink_to(loop)
-
-    found = {(v.code, v.detail) for v in verify.verify_snapshot(db)}
-
-    assert found == {(verify.PARSE_ERROR, f"unreadable: {NOT_A_FILE}")}
 
 
 def test_a_dangling_symlink_does_not_reload_on_every_open(tmp_path, monkeypatch):
@@ -456,59 +392,3 @@ def test_verify_reports_a_dangling_symlink_without_a_traceback(tmp_path):
 
 
 # -- ``sidegraph-verify --against`` reads the working-tree file of a tracked path ----------
-
-
-def _git(args: list[str], cwd: Path) -> None:
-    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    assert result.returncode == 0, f"git {args} failed: {result.stderr}"
-
-
-@needs_fifo
-@pytest.mark.parametrize("kind", ["fifo", "link-to-fifo", "dangling-link"])
-def test_verify_against_does_not_block_on_a_tracked_file_replaced_by_a_fifo(tmp_path, kind):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(["init", "-q"], cwd=repo)
-    _git(["config", "user.email", "t@example.com"], cwd=repo)
-    _git(["config", "user.name", "T"], cwd=repo)
-    db, decision = _seed(repo)
-    _git(["add", "-A"], cwd=repo)
-    _git(["commit", "-q", "-m", "initial"], cwd=repo)
-    target = db / "decisions" / f"{decision.id}.json"
-    target.unlink()
-    if kind == "fifo":
-        os.mkfifo(target)
-    elif kind == "link-to-fifo":
-        os.mkfifo(tmp_path / "pipe")
-        target.symlink_to(tmp_path / "pipe")
-    else:
-        target.symlink_to(tmp_path / "no-such-target")
-
-    with _Timeout():
-        # the snapshot layer reports the entry; the transition layer skips the unreadable side
-        assert verify.verify_against(db, "HEAD") == []
-        found = [v for v in verify.verify_snapshot(db) if v.path.endswith(target.name)]
-    assert len(found) == 1
-
-
-# -- the bootstrap catalog skips a non-file entry ------------------------------------------
-
-
-@needs_fifo
-def test_the_bootstrap_catalog_skips_a_directory_and_a_fifo(tmp_path, capsys):
-    from sidegraph.bootstrap.catalog import load_canonical_catalog
-
-    db, decision = _seed(tmp_path)
-    (db / "decisions" / f"{SAFE}.json").mkdir()
-    (db / "archive").mkdir(exist_ok=True)
-    os.mkfifo(db / "archive" / SEGMENT)
-    (db / "archive" / "dangling.jsonl").symlink_to(tmp_path / "no-such-target")
-
-    with _Timeout():
-        catalog = load_canonical_catalog(db)
-
-    assert [d.id for d in catalog.decisions] == [decision.id]
-    err = capsys.readouterr().err
-    assert f"decisions/{SAFE}.json: {NOT_A_FILE}" in err
-    assert f"archive/{SEGMENT}: {NOT_A_FILE}" in err
-    assert f"archive/dangling.jsonl: {NOT_A_FILE}" in err

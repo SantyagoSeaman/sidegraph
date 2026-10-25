@@ -18,8 +18,7 @@ import fastmcp
 import pytest
 
 from sidegraph import server
-from tests.test_config_borrowed_graph import make_main
-from tests.test_server_borrowed_graph import remember, serve
+from tests.graph_repo_support import make_main, remember, serve
 
 SEED_TOOLS = ["get_task_context", "query_decisions", "query_structure"]
 FREE_TEXT_LINE = (

@@ -8,6 +8,7 @@ import yaml
 _SKILLS = Path(__file__).resolve().parent.parent / "plugin" / "sidegraph" / "skills"
 _EXPECTED = {
     "check-plan",
+    "compact",
     "explain-why",
     "heal-anchors",
     "health-check",

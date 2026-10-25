@@ -49,12 +49,16 @@ def test_store_refuses_symlinked_subdir(tmp_path, sub):
     assert list(outside.iterdir()) == []
 
 
+@pytest.fixture(scope="module")
+def marker_text(tmp_path_factory) -> str:
+    """The marker text a valid `format` link must point at, written once by a fresh Store."""
+    with Store(tmp_path_factory.mktemp("template") / "s") as fresh:
+        return (fresh.path / "format").read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("live", [True, False], ids=["live", "dangling"])
 @pytest.mark.parametrize("name", _TOP_LEVEL_FILES)
-def test_store_refuses_symlinked_top_level_file(tmp_path, name, live):
-    # A fresh Store writes the marker text a valid `format` link must point at.
-    with Store(tmp_path / "template") as fresh:
-        marker_text = (fresh.path / "format").read_text(encoding="utf-8")
+def test_store_refuses_symlinked_top_level_file(tmp_path, name, live, marker_text):
     root = tmp_path / ".sidegraph"
     root.mkdir()
     target = tmp_path / "elsewhere" / name

@@ -140,7 +140,7 @@ def anchored_files(store: Store, held: frozenset[str]) -> dict[str, int]:
     open_cache: dict[str, bool] = {}
     per_file: dict[str, set[str]] = {}
     for entity_id, path in files.items():
-        for binding in store.bindings_for_entity(entity_id):
+        for binding in store.bindings_for_entity_group(entity_id):
             if binding.status not in _REACHED:
                 continue
             if binding.record_id not in open_cache:
@@ -169,7 +169,7 @@ def bound_records(
         path = entity.descriptor.file_path if entity.descriptor is not None else None
         if path not in wanted:
             continue
-        for binding in store.bindings_for_entity(entity.entity_id):
+        for binding in store.bindings_for_entity_group(entity.entity_id):
             if binding.record_id in skipped:
                 continue
             if binding.record_id not in open_cache:

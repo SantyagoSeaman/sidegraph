@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 import sysconfig
 from collections.abc import Callable, Sequence
@@ -189,15 +190,32 @@ def _agent_identity(payload: dict) -> str | None:
 
 def _store_holds_records(path: Path) -> bool:
     """True when any file sits under ``decisions/``, ``facts/`` or ``domains/`` of the store
-    at ``path``: a few ``listdir`` calls, no ``Store`` opened (opening would create things).
+    at ``path``, or a ``*.shard`` file under ``shards/`` (a packed store keeps its records
+    there): a few ``listdir`` calls, no ``Store`` opened (opening would create things).
     False for a path that is not a directory or cannot be listed — the caller stays silent
-    on what it cannot see."""
-    for sub in ("decisions", "facts", "domains"):
+    on what it cannot see.
+    see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
+    for sub, suffix in (("decisions", ".json"), ("facts", ".json"), ("domains", ".json")):
         try:
-            if any(name.endswith(".json") for name in os.listdir(path / sub)):
+            if any(name.endswith(suffix) for name in os.listdir(path / sub)):
                 return True
         except OSError:
             continue
+    try:
+        names = os.listdir(path / "shards")
+    except OSError:
+        return False
+    for name in names:
+        if not name.lower().endswith(".shard"):
+            continue
+        try:
+            # a regular file only, as ``store_format.has_shard_files``: a directory is not one
+            if stat.S_ISREG(os.lstat(path / "shards" / name).st_mode):
+                return True
+        except FileNotFoundError:
+            continue  # removed between the listing and the stat
+        except OSError:
+            return False
     return False
 
 

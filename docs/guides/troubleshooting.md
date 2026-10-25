@@ -82,18 +82,20 @@ established by core/installed-wheel CI; the native Windows route is verified wit
 | `refresh-hook-missing` | advisory | No git hook keeps the code graph fresh | session line and notice | `sidegraph-init --hooks`, or `--no-hooks` to stop the reminder |
 | `store-uncommitted` | degraded | Store files nobody committed for a day | session line and notice, doctor, stats | commit `.sidegraph/` in a pull request |
 | `branch-only-records` | advisory | Records that exist only on unmerged branches | session line; a notice when a branch is a week old | merge the branch |
+| `store-not-migrated` | degraded | The store uses the pre-0.17 layout and holds records | session line and notice, doctor | `sidegraph-migrate` on the default branch |
+| `maintenance-due` | advisory | A packed store has work for maintenance | session line and notice, doctor | `sidegraph-compact` |
 | `version-skew` | advisory | The running package and the plugin manifest are different versions | session line and notice | update the plugin, or restart the session |
 | `path-skew` | advisory | A `sidegraph-*` on `PATH` is a different version than the session | session line and notice | `uv tool upgrade sidegraph`, or `uv tool uninstall sidegraph` |
 | `plugin-off-in-subdirectories` | advisory | Claude sessions started below the repository root run without the plugin | session line, doctor; a notice only with case (b) | enable it in `.claude/settings.local.json` at the root, or in user settings |
 
 Severity decides who is told. **Broken** means memory does not work now. **Degraded** means it
-works worse than it should, so you get a notice and `sidegraph-stats` shows it. **Advisory**
-means something worth knowing, which the model's line and the commands above report. Six
+works worse than it should, so you get a notice and `sidegraph-stats` shows it (except `store-not-migrated` and `stray-store`, which are on the session line and the notice, and in doctor for `store-not-migrated`). **Advisory**
+means something worth knowing, which the model's line and the commands above report. Eight
 advisory checks also send a notice, because the fix is yours to decide: a proposal queue that
-has waited 30 days, a missing refresh hook, records on a branch that has not moved for a
+has waited 30 days, an outdated refresh helper, a missing refresh hook, records on a branch that has not moved for a
 week, a plugin and a package of different versions, a second Sidegraph on `PATH` of another version,
-and a plugin that is off in a nested
-directory with settings of its own.
+a plugin that is off in a nested
+directory with settings of its own, and a packed store with maintenance due.
 
 ### store-unreadable
 
@@ -111,8 +113,10 @@ that depends on the exception:
 - A store that requires a newer Sidegraph (`This store requires Sidegraph >= X.Y.Z; this is
   A.B.C.`): upgrade to at least that version and start a new session. A teammate raised it
   with `sidegraph-require`.
-- A store written by a different Sidegraph version: upgrade Sidegraph, or use the version that
-  wrote it. Migration tooling is deferred.
+- A store written by a different Sidegraph version, for example a packed (format 2) store opened
+  by 0.14 to 0.16, whose message ends `migration tooling is deferred — use a fresh store`:
+  upgrade Sidegraph, or use the version that wrote it. The message predates `sidegraph-migrate`
+  and does not mean you need a fresh store.
 - Anything else: `sidegraph-verify` gives the details.
 
 A lock that another process holds is not a broken store. The hook stays silent for it, and the
@@ -302,6 +306,27 @@ an accepted record on an unmerged branch is as stranded as a proposed one.
   out of time says "at least" before the count and that the scan ran out of time; a partial scan
   that found nothing is not run, so a recorded notice is kept.
 - It has no doctor finding, because a CI checkout has no local branches, and no stats item.
+
+### store-not-migrated
+
+The store keeps one file per record, the layout before 0.17, and holds at least one record. The
+store works as it is; the packed layout is the one 0.17 is built for. The notice names
+`sidegraph-migrate`, to run on the default branch with `.sidegraph/` committed, or the
+`sidegraph:compact` skill, after the team checklist in the [0.17 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.17.md). An empty store
+has nothing to migrate and says nothing. Doctor lists one finding at the store path, and
+`--check` exits `2` on it.
+
+### maintenance-due
+
+A packed (format 2) store has work for `sidegraph-compact`: more than 200 per-record files, a
+legacy `archive/` segment that maintenance would delete, a shard line in the wrong shard file or
+repeated with an equal body, or a stray shard file. Nothing is broken, and `sidegraph-verify`
+does not report these states. A segment that stays because one of its lines is not safe to
+delete does not count. Run `sidegraph-compact` on the default branch. Doctor lists one finding
+at the store path, and `--check` exits `2` on it. A legacy segment that maintenance would delete counts, whether its records are already in shard
+lines or maintenance would pack them. The check does not consult git, so a record file that
+still has to settle (or is untracked) is not predicted. It reads the shard files once; a store
+with more than 200 per-record files is decided from the directory listing.
 
 ### version-skew
 

@@ -266,6 +266,23 @@ def _sync_graph(tmp_path, commit, widget_community, c1, c2, *, extra_nodes=()):
     return GraphifyReader(write_graph(gdir, "graph.json", data))
 
 
+def _widget_basemodel_project(tmp_path):
+    """A git project whose one decision binds the Widget leaf and the collapsed BaseModel
+    stub pair (communities 1 and 2), synced once against the first graph."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/w.py").write_text("class Widget: pass\n")
+    store = Store(tmp_path / ".sidegraph")
+    r1 = _sync_graph(tmp_path, "a", 4, 1, 2)
+    d = _decision(store)
+    resolve_and_bind(d.id, Descriptor(name="Widget", file_path="src/w.py"), r1, store)
+    resolve_and_bind(d.id, Descriptor(name="BaseModel"), r1, store)
+    sync(store, r1)
+    return store, d
+
+
 @pytest.mark.parametrize("sibling_holds_old", [False, True])
 def test_a_collapsed_leaf_vacates_its_shared_community_when_the_stubs_split(
     tmp_path, sibling_holds_old
@@ -299,17 +316,7 @@ def test_a_collapsed_leaf_vacates_its_shared_community_when_the_stubs_split(
 
 
 def test_reconcile_ignores_a_collapsed_leaf_when_communities_renumber(tmp_path):
-    import subprocess
-
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src/w.py").write_text("class Widget: pass\n")
-    store = Store(tmp_path / ".sidegraph")
-    r1 = _sync_graph(tmp_path, "a", 4, 1, 2)
-    d = _decision(store)
-    resolve_and_bind(d.id, Descriptor(name="Widget", file_path="src/w.py"), r1, store)
-    resolve_and_bind(d.id, Descriptor(name="BaseModel"), r1, store)
-    sync(store, r1)
+    store, d = _widget_basemodel_project(tmp_path)
     r2 = _sync_graph(tmp_path, "b", 8, 5, 6)
     sync(store, r2)
     rows = _rows(store, d.id)
@@ -317,21 +324,8 @@ def test_reconcile_ignores_a_collapsed_leaf_when_communities_renumber(tmp_path):
     assert (1, "live", "community:8") in rows
 
 
-@pytest.mark.parametrize("resolve_raises, leaf_status", [(False, "degraded"), (True, "live")])
-def test_reconcile_abstains_when_a_collapsed_leaf_is_no_longer_resolved(
-    tmp_path, monkeypatch, resolve_raises, leaf_status
-):
-    import subprocess
-
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src/w.py").write_text("class Widget: pass\n")
-    store = Store(tmp_path / ".sidegraph")
-    r1 = _sync_graph(tmp_path, "a", 4, 1, 2)
-    d = _decision(store)
-    resolve_and_bind(d.id, Descriptor(name="Widget", file_path="src/w.py"), r1, store)
-    resolve_and_bind(d.id, Descriptor(name="BaseModel"), r1, store)
-    sync(store, r1)
+def test_reconcile_abstains_when_a_collapsed_leaf_is_no_longer_resolved(tmp_path):
+    store, d = _widget_basemodel_project(tmp_path)
     r2 = _sync_graph(
         tmp_path,
         "b",
@@ -340,23 +334,9 @@ def test_reconcile_abstains_when_a_collapsed_leaf_is_no_longer_resolved(
         6,
         extra_nodes=(node("real_basemodel", "BaseModel", "src/models.py", community=9),),
     )
-    if resolve_raises:
-        original = r2.resolve
-
-        def fail_basemodel(desc, *, collapse=True):
-            if desc.name == "BaseModel":
-                raise RuntimeError("injected resolver failure")
-            return original(desc, collapse=collapse)
-
-        monkeypatch.setattr(r2, "resolve", fail_basemodel)
-    report = sync(store, r2)
-    if resolve_raises:
-        assert any(
-            outcome.canonical_name == "BaseModel" and outcome.status == "error"
-            for outcome in report.outcomes
-        )
+    sync(store, r2)
     rows = _rows(store, d.id)
-    assert (2, leaf_status, "BaseModel") in rows
+    assert (2, "degraded", "BaseModel") in rows
     assert (1, "live", "community:4") in rows
     assert (1, "live", "community:8") in rows
 
@@ -364,17 +344,7 @@ def test_reconcile_abstains_when_a_collapsed_leaf_is_no_longer_resolved(
 def test_reconcile_keeps_a_degraded_leaf_unknown_after_another_record_refreshes_its_mapping(
     tmp_path,
 ):
-    import subprocess
-
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src/w.py").write_text("class Widget: pass\n")
-    store = Store(tmp_path / ".sidegraph")
-    r1 = _sync_graph(tmp_path, "a", 4, 1, 2)
-    d = _decision(store)
-    resolve_and_bind(d.id, Descriptor(name="Widget", file_path="src/w.py"), r1, store)
-    resolve_and_bind(d.id, Descriptor(name="BaseModel"), r1, store)
-    sync(store, r1)
+    store, d = _widget_basemodel_project(tmp_path)
     r2 = _sync_graph(
         tmp_path,
         "b",

@@ -58,9 +58,11 @@ Prepare the release on internal `main`, then run the clean-tree preflight:
    versions already present. Do not add version fields to otherwise unversioned entries.
    Run `uv lock` so the root package version in `uv.lock` agrees with `pyproject.toml`;
    inspect the diff to ensure no unrelated dependency versions changed.
-   Run the host version tests and, in the internal checkout,
-   `uv run python tools/preflight_release.py` before the slower release checks.
-3. `uv run pytest -q`. Full suite green.
+   Run the host version tests before the slower release checks. The release preflight
+   (`tools/preflight_release.py`) refuses a checkout with uncommitted changes, so it runs
+   in step 8, after the commit.
+3. `uv run pytest -q`. Full suite green. Then `uv run pytest tests/private -q` in the development
+   repository: the slow rare-case set that PR CI skips; a release may add tests to it.
 4. `uv run pre-commit run --all-files`. Lint, format, types, and staged secret scanning
    clean, including store-only changes; also zizmor, actionlint, and the shipped-surface/
    public-twin/docs-link checkers described in `CONTRIBUTING.md`. Additionally run

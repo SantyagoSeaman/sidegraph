@@ -5,7 +5,7 @@ or non-destructive and closed-world. The two sets in ``server.py`` say what each
 no tool leaves the machine (``openWorldHint`` false), no tool deletes a record
 (``destructiveHint`` false), and ``readOnlyHint`` is true only for a tool that never changes a
 tracked file. The honesty half of that claim is the moved-symbol test in
-``tests/test_server_borrowed_graph.py``.
+``tests/graph_repo_support.py``.
 see design/superpowers/specs/2026-10-04-tool-annotations-and-argument-names-design.md (D1, T1)
 """
 
@@ -84,4 +84,3 @@ def test_t1_the_three_sets_cover_every_registered_tool():
     assert not (READ_ONLY & LOCAL_WRITE_SYNC or READ_ONLY & LOCAL_WRITE)
     assert not LOCAL_WRITE_SYNC & LOCAL_WRITE
     assert registered == READ_ONLY | LOCAL_WRITE_SYNC | LOCAL_WRITE
-    assert len(registered) == 25

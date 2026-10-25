@@ -21,9 +21,16 @@ from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import TOC_CACHE_KEY
 from sidegraph.store import Store
 from sidegraph.sync import LAST_SYNCED_KEY, PENDING_MOVES_KEY, maybe_sync, rebind_entity, sync
-from tests.test_config_borrowed_graph import GRAPH, make_main
-from tests.test_graph_freshness import commit, git, head, write_graph
-from tests.test_server_borrowed_graph import porcelain, remember
+from tests.graph_repo_support import (
+    GRAPH,
+    commit,
+    git,
+    head,
+    make_main,
+    porcelain,
+    remember,
+    write_graph,
+)
 
 
 @pytest.fixture
@@ -114,6 +121,7 @@ def test_an_index_only_stamp_does_not_stand_in_for_a_normal_sync(repo):
     try:
         assert maybe_sync(store, reader, canonical_writes=False).skipped is False  # type: ignore[union-attr]
         assert maybe_sync(store, reader, canonical_writes=False).skipped is True  # type: ignore[union-attr]
+        assert _entities(repo) == before  # the index-only calls wrote nothing canonical
 
         report = maybe_sync(store, reader)
 
@@ -121,20 +129,6 @@ def test_an_index_only_stamp_does_not_stand_in_for_a_normal_sync(repo):
         assert store.get_meta(LAST_SYNCED_KEY) == reader.sync_stamp()
         assert {o.canonical_name: o.status for o in report.outcomes}["fn_0()"] == "moved"
         assert _entities(repo) != before
-    finally:
-        store.close()
-
-
-def test_maybe_sync_passes_the_keyword_through(repo):
-    store = Store(repo / ".sidegraph")
-    reader = GraphifyReader(repo / GRAPH)
-    before = _entities(repo)
-    try:
-        report = maybe_sync(store, reader, canonical_writes=False)
-
-        assert report is not None and not report.skipped
-        assert _entities(repo) == before
-        assert maybe_sync(None, None, canonical_writes=False) is None  # type: ignore[arg-type]
     finally:
         store.close()
 

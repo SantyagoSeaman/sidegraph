@@ -27,13 +27,6 @@ def _seed(tmp_path):
     return db, store, results[0]["decision_id"]
 
 
-def test_cli_lists_pending(tmp_path, capsys):
-    db, _, did = _seed(tmp_path)
-    assert ratify_main(["--db", str(db)]) == 0
-    out = capsys.readouterr().out
-    assert did in out and "T1" in out and "pending" in out
-
-
 def test_cli_accept_flips_status(tmp_path, capsys):
     db, store, did = _seed(tmp_path)
     assert ratify_main(["--db", str(db), "--accept", did]) == 0
@@ -45,12 +38,6 @@ def test_cli_drop_rejects(tmp_path, capsys):
     db, store, did = _seed(tmp_path)
     assert ratify_main(["--db", str(db), "--drop", did]) == 0
     assert store.get_decision(did).status == DecisionStatus.REJECTED
-
-
-def test_cli_all_accepts_everything(tmp_path, capsys):
-    db, store, did = _seed(tmp_path)
-    assert ratify_main(["--db", str(db), "--all"]) == 0
-    assert store.get_decision(did).status == DecisionStatus.ACCEPTED
 
 
 def test_cli_error_on_unknown_id(tmp_path, capsys):
@@ -88,13 +75,6 @@ def _seed_domain(tmp_path, db=None, slug="payments"):
     store = Store(db)
     out = _add_domain_impl(store, None, slug=slug, title=slug.title(), summary="s.")
     return db, store, out["domain_id"]
-
-
-def test_cli_lists_pending_domains_sectioned(tmp_path, capsys):
-    db, _, domain_id = _seed_domain(tmp_path)
-    assert ratify_main(["--db", str(db)]) == 0
-    out = capsys.readouterr().out
-    assert "Domains:" in out and domain_id in out and "Payments" in out
 
 
 # -- Gate-5 fix 3: the ratify listing shows the membership rule (path_prefixes) and seed
@@ -138,6 +118,7 @@ def test_cli_domain_listing_shows_none_when_rule_empty(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "paths:   (none)" in out
     assert "communities: (none)" in out
+    assert "anchors:" not in out  # no seed anchors: no anchors line
 
 
 def test_cli_domain_listing_truncates_large_communities_sample(tmp_path, capsys):
@@ -191,22 +172,6 @@ def test_cli_domain_listing_shows_seed_anchors_when_paths_and_communities_empty(
     assert "OrderBook@trader/order_book.py" in out
 
 
-def test_cli_domain_listing_omits_anchors_line_when_seed_anchors_empty(tmp_path, capsys):
-    db = tmp_path / "t.db"
-    store = Store(db)
-    store.add_domain(
-        Domain(
-            slug="payments",
-            title="Payments",
-            summary="s.",
-            provenance=Provenance(source="manual"),
-        )
-    )
-    assert ratify_main(["--db", str(db)]) == 0
-    out = capsys.readouterr().out
-    assert "anchors:" not in out
-
-
 def test_cli_domain_listing_truncates_large_seed_anchors_sample(tmp_path, capsys):
     db = tmp_path / "t.db"
     store = Store(db)
@@ -249,8 +214,8 @@ def test_cli_lists_both_decisions_and_domains_sectioned(tmp_path, capsys):
 
     assert ratify_main(["--db", str(db)]) == 0
     out = capsys.readouterr().out
-    assert "Decisions:" in out and did in out
-    assert "Domains:" in out and domain_id in out
+    assert "Decisions:" in out and did in out and "T1" in out and "pending" in out
+    assert "Domains:" in out and domain_id in out and "Payments" in out
     assert "2 pending" in out
 
 
@@ -374,118 +339,7 @@ def test_cli_mixed_accept_decision_and_domain_ids(tmp_path, capsys):
     assert store.get_domain(domain_id).status == DomainStatus.ACCEPTED
 
 
-# -- --db resolution (bare run, no --db / no env): see config.resolve_store_path. Full
-# precedence-matrix coverage (explicit > SIDEGRAPH_DIR > SIDEGRAPH_DB (deprecated,
-# dispatched) > existing .sidegraph/ > default .sidegraph) lives in tests/test_config.py;
-# these are the CLI-level integration checks that ratify_main actually wires through it.
-
-
-def _propose(store, title):
-    results = _propose_decisions_impl(
-        store,
-        None,
-        [
-            {
-                "title": title,
-                "kind": "lesson",
-                "context": "c",
-                "choice": "ch",
-                "anchors": [],
-            }
-        ],
-    )
-    return results[0]["decision_id"]
-
-
-def _reset_deprecation_warning(monkeypatch):
-    import sidegraph.config as config
-
-    monkeypatch.setattr(config, "_deprecation_warned", False)
-
-
-def test_cli_ratify_bare_prefers_existing_dot_sidegraph_store(tmp_path, capsys, monkeypatch):
-    dot_dir = tmp_path / ".sidegraph"
-    store = Store(dot_dir)  # ".sidegraph" IS the store now, not a nested "decisions.db"
-    did = _propose(store, "InDotSidegraph")
-
-    monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
-    monkeypatch.delenv("SIDEGRAPH_DB", raising=False)
-    monkeypatch.chdir(tmp_path)
-    assert ratify_main([]) == 0
-    captured = capsys.readouterr()
-    assert did in captured.out and "InDotSidegraph" in captured.out
-    assert captured.err == ""  # store already existed -> no warning
-
-
-def test_cli_ratify_bare_creates_default_dot_sidegraph_with_warning(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
-    monkeypatch.delenv("SIDEGRAPH_DB", raising=False)
-    monkeypatch.chdir(tmp_path)
-    assert ratify_main([]) == 0
-    captured = capsys.readouterr()
-    assert "No proposed decisions" in captured.out
-    assert (tmp_path / ".sidegraph" / "format").is_file()
-    assert "warning: creating new store at .sidegraph" in captured.err
-    assert "--db or set SIDEGRAPH_DIR" in captured.err
-
-
-def test_cli_ratify_sidegraph_dir_wins_over_dot_sidegraph_and_sidegraph_db(
-    tmp_path, capsys, monkeypatch
-):
-    dot_dir = tmp_path / ".sidegraph"
-    Store(dot_dir)  # exists but must be ignored -- SIDEGRAPH_DIR wins
-
-    via_db_env = tmp_path / "via-db-env.db"
-    Store(via_db_env)  # exists but must be ignored -- SIDEGRAPH_DIR wins over SIDEGRAPH_DB too
-
-    dir_env = tmp_path / "via-dir-env"
-    did = _propose(Store(dir_env), "ViaDirEnv")
-
-    monkeypatch.setenv("SIDEGRAPH_DIR", str(dir_env))
-    monkeypatch.setenv("SIDEGRAPH_DB", str(via_db_env))
-    monkeypatch.chdir(tmp_path)
-    assert ratify_main([]) == 0
-    captured = capsys.readouterr()
-    assert did in captured.out and "ViaDirEnv" in captured.out
-    assert captured.err == ""  # SIDEGRAPH_DIR wins outright -- no deprecation note either
-
-
-def test_cli_ratify_sidegraph_db_back_compat_wins_over_dot_sidegraph(tmp_path, capsys, monkeypatch):
-    """SIDEGRAPH_DB is deprecated but still honored (design §5) -- and still takes
-    precedence over an existing ``.sidegraph/`` when SIDEGRAPH_DIR is unset."""
-    _reset_deprecation_warning(monkeypatch)
-    dot_dir = tmp_path / ".sidegraph"
-    Store(dot_dir)  # exists but must be ignored -- SIDEGRAPH_DB wins
-
-    custom_db = tmp_path / "custom.db"
-    did = _propose(Store(custom_db), "ViaEnv")
-
-    monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
-    monkeypatch.setenv("SIDEGRAPH_DB", str(custom_db))
-    monkeypatch.chdir(tmp_path)
-    assert ratify_main([]) == 0
-    captured = capsys.readouterr()
-    assert did in captured.out and "ViaEnv" in captured.out
-    assert "SIDEGRAPH_DB is deprecated" in captured.err
-    assert "creating new store" not in captured.err  # store already existed -> no such warning
-
-
-def test_cli_ratify_explicit_db_wins_over_everything(tmp_path, capsys, monkeypatch):
-    dot_dir = tmp_path / ".sidegraph"
-    Store(dot_dir)
-    Store(tmp_path / "dir-env")
-    Store(tmp_path / "env.db")
-
-    explicit_db = tmp_path / "explicit.db"
-    did = _propose(Store(explicit_db), "ViaExplicit")
-
-    monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "dir-env"))
-    monkeypatch.setenv("SIDEGRAPH_DB", str(tmp_path / "env.db"))
-    monkeypatch.chdir(tmp_path)
-    assert ratify_main(["--db", str(explicit_db)]) == 0
-    captured = capsys.readouterr()
-    assert did in captured.out and "ViaExplicit" in captured.out
-    assert captured.err == ""
+# -- --db resolution: see tests/test_cli_store_precedence.py --
 
 
 def test_cli_ratify_resolves_domain_membership_immediately(tmp_path, monkeypatch):

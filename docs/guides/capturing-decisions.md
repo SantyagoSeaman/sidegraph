@@ -61,7 +61,7 @@ One anchor orphaning does not take the decision down with it — the other keeps
 [`guides/surviving-refactors.md`](surviving-refactors.md) for what happens to each anchor
 independently when the graph is rebuilt.
 
-One name shape never resolves, and one resolves only with its file:
+Three name shapes need care: a bare constant never resolves, and a type-qualified member resolves only with its file.
 
 - **A bare module-level constant** (`MEMORY_GUARD_LINE`, `_SECRET_PATTERNS`): the engine's
   AST pass indexes functions, classes and files, **not constants** — such an anchor is born
@@ -204,13 +204,13 @@ an existing `.sidegraph/` if present, otherwise the default `.sidegraph` — pri
 warning if the resolved path doesn't exist yet (it's about to create a new, empty store). If
 your store lives at the recommended `.sidegraph/` path, the bare invocations below just
 work; otherwise pass `--db` or set `SIDEGRAPH_DIR` explicitly (full resolution order:
-[`reference/cli.md`](../reference/cli.md)):
+[`reference/cli.md`](../reference/cli.md)). Commands are shown by name; without the CLI on your PATH, run them with the `uvx` prefix described in [running the CLIs](../reference/cli.md#running-the-clis-beside-the-plugin).
 
 ```bash
-uv run sidegraph-ratify                          # list what's pending
-uv run sidegraph-ratify --accept 01J...ULID       # accept one or more ids
-uv run sidegraph-ratify --drop 01J...ULID         # drop one or more ids
-uv run sidegraph-ratify --all                     # accept everything pending
+sidegraph-ratify                          # list what's pending
+sidegraph-ratify --accept 01J...ULID       # accept one or more ids
+sidegraph-ratify --drop 01J...ULID         # drop one or more ids
+sidegraph-ratify --all                     # accept everything pending
 ```
 
 Full exact flags and behavior: [`reference/cli.md`](../reference/cli.md).
@@ -408,7 +408,7 @@ you're about to seed can actually resolve:
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
 $env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
-uv run sidegraph-import --docs docs/adr --dry-run
+sidegraph-import --docs docs/adr --dry-run
 ```
 
 See [`guides/semantic-docs.md`](semantic-docs.md#the-other-importer---docs)

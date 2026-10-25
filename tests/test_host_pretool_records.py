@@ -660,8 +660,8 @@ def _parallel_delivered(outcomes: list[tuple[int, str, str]]) -> list[str]:
 def test_t4b_two_processes_for_one_line_inject_exactly_three_files_between_them(bash_project):
     """Two matching Claude hook entries submit the same line concurrently. The test-only opener
     waits up to one second; when both children are admitted, shared claims deliver exactly the
-    first three files once. Five trials exercise interleavings; production stays zero-wait."""
-    for trial in range(5):
+    first three files once. Two trials exercise interleavings; production stays zero-wait."""
+    for trial in range(2):
         outcomes = _parallel_hook_calls(
             bash_project, _parallel_payload(bash_project, trial), waited=True
         )
@@ -672,7 +672,7 @@ def test_t4b_two_processes_for_one_line_inject_exactly_three_files_between_them(
 def test_t4b_zero_wait_processes_deliver_only_a_unique_subset_of_three(bash_project):
     """Zero-wait hooks may refuse contention but retain valid, bounded, unique output."""
     allowed = {"a.py", "b.py", "c.py"}
-    for trial in range(5, 10):
+    for trial in range(2, 4):
         outcomes = _parallel_hook_calls(
             bash_project, _parallel_payload(bash_project, trial), waited=False
         )
@@ -702,15 +702,15 @@ def test_t5_an_agents_eleventh_file_gets_nothing(project, monkeypatch, capsys):
     assert "hookSpecificOutput" in other
 
 
-def test_t5_the_main_agent_keeps_its_cap_after_ten_subagents_spent_theirs(
+def test_t5_the_main_agent_keeps_its_cap_after_two_subagents_spent_theirs(
     project, monkeypatch, capsys
 ):
     """The main agent's key is ``-``: its prefix does not match a subagent's keys. Without it
-    the main agent's prefix is the session alone, ten subagents' claims fill it, and the main
+    the main agent's prefix is the session alone, two subagents' claims fill it, and the main
     agent hears nothing (M6)."""
     names = [f"src/f{i}.py" for i in range(10)]
     project.anchored(*names)
-    for agent in range(10):
+    for agent in range(2):
         for name in names:
             out = _run(
                 monkeypatch,

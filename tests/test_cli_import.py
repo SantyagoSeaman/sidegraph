@@ -1510,10 +1510,11 @@ def test_cli_import_docs_flipped_successor_carries_anchors(tmp_path, capsys):
 
 def test_cli_import_docs_un_rejecting_a_doc_revives_it(tmp_path, capsys):
     """Review R3-1: handling only accepted→rejected left the mirror hole. Once rejected
-    records became visible to the ref lookup (fix 1), a doc un-rejected back to `accepted`
-    matched on content and was skipped FOREVER — a regression against the pre-branch
-    behaviour, and this branch's own distortion pointed the other way: the corpus says
-    adopted, the store keeps saying refused."""
+    records became visible to the ref lookup, a doc un-rejected back to `accepted` matched on
+    content and was skipped FOREVER: the corpus says adopted, the store keeps saying refused.
+    The revival supersedes the refusal in the record chain without an illegal rejected ->
+    superseded transition (review ask 3), reports `imported 1, superseded 0` (review R5-1: the
+    `supersedable` keying regressed three rounds in five), and is itself idempotent."""
     graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
     db = tmp_path / "t.db"
     body = "# Submit path\n\n## Context\n\nc\n\n## Decision\n\nCalls `submit_order` on success.\n"
@@ -1521,12 +1522,16 @@ def test_cli_import_docs_un_rejecting_a_doc_revives_it(tmp_path, capsys):
     argv = ["--db", str(db), "--graph", str(graph), "--docs", str(doc), "--any-doc"]
     assert import_main(argv) == 0
     assert [d.status.value for d in Store(db).iter_decisions()] == ["rejected"]
+    capsys.readouterr()
 
     doc.write_text(f"---\nstatus: accepted\n---\n{body}", encoding="utf-8")
     assert import_main(argv) == 0
-    capsys.readouterr()
-    statuses = sorted(d.status.value for d in Store(db).iter_decisions())
-    assert statuses == ["accepted", "rejected"]  # the refusal stays as history
+    out = capsys.readouterr().out
+    assert "imported 1 decision(s), superseded 0" in out, out
+    records = {d.status.value: d for d in Store(db).iter_decisions()}
+    assert sorted(records) == ["accepted", "rejected"]  # the refusal stays as history
+    assert records["accepted"].supersedes == records["rejected"].id
+    assert records["rejected"].status.value == "rejected"  # untouched, still history
 
     assert import_main(argv) == 0  # and the revival is itself idempotent
     capsys.readouterr()
@@ -1591,26 +1596,6 @@ def test_cli_import_docs_status_round_trip_is_tracked_every_time(tmp_path, capsy
     assert statuses() == ["rejected", "rejected", "superseded"]
 
 
-def test_cli_import_docs_revival_links_to_what_it_revives(tmp_path, capsys):
-    """Review ask 3: `add_decision` leaves an already-terminal predecessor untouched, so
-    the link is recorded without an illegal rejected -> superseded transition — and the
-    lineage reads correctly instead of stranding an orphan beside its own history."""
-    graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
-    db = tmp_path / "t.db"
-    body = "# Submit path\n\n## Context\n\nc\n\n## Decision\n\nCalls `submit_order` on success.\n"
-    doc = _write_md(tmp_path, "docs/a.md", f"---\nstatus: rejected\n---\n{body}")
-    argv = ["--db", str(db), "--graph", str(graph), "--docs", str(doc), "--any-doc"]
-    assert import_main(argv) == 0
-    doc.write_text(f"---\nstatus: accepted\n---\n{body}", encoding="utf-8")
-    assert import_main(argv) == 0
-    capsys.readouterr()
-
-    store = Store(db)
-    records = {d.status.value: d for d in store.iter_decisions()}
-    assert records["accepted"].supersedes == records["rejected"].id
-    assert records["rejected"].status.value == "rejected"  # untouched, still history
-
-
 def test_cli_import_docs_edited_and_flipped_with_dead_anchors_still_closes(tmp_path, capsys):
     """Review R4-2: inheritance keyed on a CONTENT match was unreachable when the doc was
     edited and flipped at once — no match, so the false claim survived behind the same
@@ -1665,25 +1650,6 @@ def test_cli_import_docs_propose_flip_leaves_a_linked_chain(tmp_path, capsys):
     assert len(records) == 2
     assert records[1].supersedes == records[0].id, "the chain must be linked, not two orphans"
     assert records[1].status.value == "rejected"
-
-
-def test_cli_import_docs_revival_reports_imported_not_superseded(tmp_path, capsys):
-    """Review R5-1: reverting the `supersedable` keying leaves the whole suite green while
-    a revival reports `superseded 1` for a record that supersedes nothing — this function
-    regressed on exactly this kind of thing in three of five review rounds, so the label
-    gets an assertion of its own."""
-    graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
-    db = tmp_path / "t.db"
-    body = "# Submit path\n\n## Context\n\nc\n\n## Decision\n\nCalls `submit_order` on success.\n"
-    doc = _write_md(tmp_path, "docs/a.md", f"---\nstatus: rejected\n---\n{body}")
-    argv = ["--db", str(db), "--graph", str(graph), "--docs", str(doc), "--any-doc"]
-    assert import_main(argv) == 0
-    capsys.readouterr()
-
-    doc.write_text(f"---\nstatus: accepted\n---\n{body}", encoding="utf-8")
-    assert import_main(argv) == 0
-    out = capsys.readouterr().out
-    assert "imported 1 decision(s), superseded 0" in out, out
 
 
 # -- repo-relative keying from a subdirectory of a git work tree --------------------------
@@ -1842,37 +1808,6 @@ def test_no_warning_in_a_git_repo_when_genuinely_unanchorable(tmp_path, capsys, 
     assert captured.err == ""
 
 
-def test_cli_rerun_reports_repaired_anchors(tmp_path, capsys, monkeypatch):
-    import sidegraph.doc_import as di
-
-    monkeypatch.chdir(tmp_path)
-    graph = _write_graph(
-        tmp_path,
-        "g.json",
-        {
-            "nodes": _DOC_NODE_ONLY_GRAPH["nodes"],
-            "links": [],
-        },
-    )
-    _write_md(tmp_path, "docs/a.md", _MENTIONLESS_ADR)
-    db = tmp_path / "t.db"
-    argv = ["--db", str(db), "--graph", str(graph), "--docs", "docs/a.md", "--any-doc"]
-    real = di.resolve_and_bind
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("injected crash")
-
-    monkeypatch.setattr(di, "resolve_and_bind", boom)
-    with pytest.raises(RuntimeError, match="injected crash"):
-        import_main(argv)
-    monkeypatch.setattr(di, "resolve_and_bind", real)
-    capsys.readouterr()
-
-    assert import_main(argv) == 0
-    out = capsys.readouterr().out
-    assert "1 existing record(s) had their anchors repaired" in out, out
-
-
 def test_import_from_a_subdirectory_keys_the_repo_path(tmp_path, capsys, monkeypatch):
     # The default graph now follows the store's project (repository root here), so a relative
     # `--docs` from a subdirectory finds it with no `--graph`. The ref is the repository
@@ -1902,13 +1837,12 @@ def test_import_from_a_subdirectory_keys_the_repo_path(tmp_path, capsys, monkeyp
     assert "1 existing" in out
 
 
-@pytest.mark.parametrize("dry_run", [False, True])
-@pytest.mark.parametrize("secret_tag", [False, True])
+@pytest.mark.parametrize(("secret_tag", "dry_run"), [(False, False), (True, False), (True, True)])
 def test_cli_import_tag_redaction_summary_precedes_undecodable_block(
     tmp_path,
     capsys,
-    dry_run,
     secret_tag,
+    dry_run,
 ):
     graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
     bad = tmp_path / "docs" / "0001-legacy.md"

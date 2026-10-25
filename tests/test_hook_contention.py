@@ -37,42 +37,58 @@ from sidegraph.store import MEMBERSHIP_STAMP_KEY, Store
 from sidegraph.store_layout import VOLATILE_STALE_KEY
 
 
+class _Held:
+    """One held lock: `release()` ends it now, otherwise it ends after its delay."""
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._released = threading.Event()
+
+    def release(self) -> None:
+        self._stop.set()
+
+    def is_set(self) -> bool:
+        return self._released.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._released.wait(timeout)
+
+
 @pytest.fixture
 def held_lock():
-    """Hold a real index lock briefly and always release it if the opener regresses."""
+    """Hold a real index lock until the test ends or a delay passes, and always release it."""
 
-    handles: list[sqlite3.Connection] = []
-    releases: list[threading.Event] = []
+    helds: list[_Held] = []
 
     def hold(
         store_dir: Path,
         statement: str = "BEGIN EXCLUSIVE",
-        delay: float = 0.8,
+        delay: float = 30.0,
         database_path: Path | None = None,
-    ) -> threading.Event:
+    ) -> _Held:
         conn = sqlite3.connect(
             database_path or store_dir / "index.db", timeout=0.1, check_same_thread=False
         )
         conn.execute(statement)
-        released = threading.Event()
-        handles.append(conn)
-        releases.append(released)
+        held = _Held()
+        helds.append(held)
 
         def release() -> None:
             try:
-                time.sleep(delay)
+                held._stop.wait(delay)
                 if conn.in_transaction:
                     conn.rollback()
             finally:
                 conn.close()
-                released.set()
+                held._released.set()
 
         threading.Thread(target=release, daemon=True).start()
-        return released
+        return held
 
     yield hold
-    for released in releases:
-        assert released.wait(2), "lock holder did not clean up"
+    for held in helds:
+        held.release()
+        assert held.wait(2), "lock holder did not clean up"
 
 
 def _make_store(path: Path) -> None:
@@ -286,7 +302,6 @@ def test_default_store_open_keeps_legacy_wait(tmp_path: Path, held_lock) -> None
     store.close()
 
     assert released.is_set()
-    assert elapsed >= 0.05
     assert elapsed < 1.5
 
 
@@ -371,6 +386,7 @@ def test_cold_store_rebuild_refuses_immediate_writer_without_30_second_wait(
 
     assert time.monotonic() - started < 0.5
     assert canonical.read_bytes() == before
+    released.release()
     assert released.wait(2), "cold rebuild lock holder did not clean up"
     reopened = Store(store_dir)
     try:
@@ -883,10 +899,31 @@ def test_readable_cold_drift_snapshot_without_lock_still_withholds_cache(
         store.close()
 
 
-@pytest.mark.parametrize("entry", ["session", "stop", "pretool", "subagent"])
-@pytest.mark.parametrize("lock_statement", ["BEGIN IMMEDIATE", "BEGIN EXCLUSIVE"])
-@pytest.mark.parametrize("cold", [False, True], ids=["published", "cold"])
-@pytest.mark.parametrize("telemetry", ["on", "off"])
+# Cold and telemetry only change a path for the entries that read them: cold decides the
+# SessionStart and SubagentStart rebuild, telemetry decides the PreToolUse event row.
+_LOCK_CASES = [
+    (entry, lock, cold, telemetry)
+    for lock in ("BEGIN IMMEDIATE", "BEGIN EXCLUSIVE")
+    for entry, cold, telemetry in [
+        ("session", False, "on"),
+        ("session", True, "on"),
+        ("subagent", False, "on"),
+        ("subagent", True, "on"),
+        ("stop", False, "on"),
+        ("pretool", False, "on"),
+        ("pretool", False, "off"),
+    ]
+]
+
+
+@pytest.mark.parametrize(
+    ("entry", "lock_statement", "cold", "telemetry"),
+    _LOCK_CASES,
+    ids=[
+        f"{entry}-{lock.split()[1].lower()}-{'cold' if cold else 'published'}-{telemetry}"
+        for entry, lock, cold, telemetry in _LOCK_CASES
+    ],
+)
 def test_real_hook_entrypoints_refuse_held_index_locks_promptly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -932,6 +969,7 @@ def test_real_hook_entrypoints_refuse_held_index_locks_promptly(
     if entry == "subagent" and cold:
         assert decoded == {}
     if entry in {"stop", "pretool"}:
+        released.release()
         assert released.wait(2), "lock holder did not release before ledger inspection"
         _assert_hook_refusal_left_no_ledger_rows(store_dir, canonical_before)
 

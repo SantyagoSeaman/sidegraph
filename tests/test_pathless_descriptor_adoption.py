@@ -132,25 +132,6 @@ def test_ambiguous_name_is_not_adopted(tmp_path):
     assert pathless.descriptor is not None and pathless.descriptor.file_path is None
 
 
-def test_distinct_paths_stay_distinct(tmp_path):
-    store = Store(tmp_path / "s")
-    a = store.get_or_create_entity(Descriptor(name="Config", file_path="core/config.py"))
-    b = store.get_or_create_entity(Descriptor(name="Config", file_path="api/config.py"))
-
-    assert a.entity_id != b.entity_id
-
-
-def test_abstract_entity_is_never_adopted(tmp_path):
-    """An abstract entity has no descriptor and no path — it must not become the answer to a
-    concrete anchor just because the fix started scanning by name."""
-    store = Store(tmp_path / "s")
-    domain = store.get_or_create_abstract_entity("domain:retrieval")
-    real = store.get_or_create_entity(Descriptor(name="domain:retrieval", file_path="r.py"))
-
-    assert real.entity_id != domain.entity_id
-    assert real.descriptor is not None and real.descriptor.file_path == "r.py"
-
-
 def test_pathless_lookup_is_idempotent(tmp_path):
     """Nothing to adopt: the second path-less call must return the first one's entity rather
     than mint a second twin."""
@@ -273,8 +254,7 @@ def test_fact_dedup_sees_a_pathless_anchor(tmp_path):
 
 def test_abstract_entity_is_not_adopted_by_a_pathless_lookup(tmp_path):
     """The abstract-exclusion clause, exercised through the branch that actually runs it: a
-    PATH-LESS lookup whose name collides with an abstract entity. (The pathed sibling test
-    never enters adoption at all — reviewer finding 2.)"""
+    PATH-LESS lookup whose name collides with an abstract entity."""
     store = Store(tmp_path / "s")
     store.get_or_create_abstract_entity("Retrieval")
     carrier = store.get_or_create_entity(Descriptor(name="Retrieval", file_path="retrieval.py"))

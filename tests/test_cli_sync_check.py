@@ -219,12 +219,6 @@ def test_sync_check_exit_0_when_orphan_has_live_sibling(healed_store_env, capsys
     assert out["stale_decisions"] == []
 
 
-def test_sync_check_json_compose(orphaning_store_env, capsys):
-    rc = sync_main(["--json", "--check", "--force"])
-    out = json.loads(capsys.readouterr().out)  # stdout is still pure JSON
-    assert rc == 2 and any(o["status"] == "orphaned" for o in out["outcomes"])
-
-
 def test_sync_check_exit_2_on_domain_failure(domain_failure_store_env, capsys):
     """CLI-level parity with ``test_sync_check_exit_2_on_orphaned`` for the
     ``domain_failures`` finding class (ledger #2). This is the test the whole-branch

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from sidegraph.cli import compact_main
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
+from tests.store_format2_support import format1_store
 
 
 def _decision(**overrides) -> Decision:
@@ -25,14 +26,14 @@ def _decision(**overrides) -> Decision:
 
 def test_cli_compact_nothing_to_compact(tmp_path, capsys):
     db = tmp_path / "t.db"
-    Store(db)
+    Store(format1_store(db))
     assert compact_main(["--db", str(db)]) == 0
     assert "nothing to compact" in capsys.readouterr().out
 
 
 def test_cli_compact_reports_segment_and_counts(tmp_path, capsys):
     db = tmp_path / "t.db"
-    s = Store(db)
+    s = Store(format1_store(db))
     old = s.add_decision(_decision(title="old"))
     s.add_decision(_decision(title="new", supersedes=old.id))
     s.close()
@@ -50,7 +51,7 @@ def test_cli_compact_reports_segment_and_counts(tmp_path, capsys):
 
 def test_cli_compact_dry_run_lists_and_writes_nothing(tmp_path, capsys):
     db = tmp_path / "t.db"
-    s = Store(db)
+    s = Store(format1_store(db))
     old = s.add_decision(_decision(title="old"))
     s.add_decision(_decision(title="new", supersedes=old.id))
     s.close()
@@ -64,7 +65,7 @@ def test_cli_compact_dry_run_lists_and_writes_nothing(tmp_path, capsys):
 
 
 def _compact_fixture_with_extra_hot_field(db):
-    store = Store(db)
+    store = Store(format1_store(db))
     old = store.add_decision(_decision(title="old"))
     store.add_decision(_decision(title="new", supersedes=old.id))
     hot_path = db / "decisions" / f"{old.id}.json"
@@ -128,7 +129,7 @@ def test_cli_compact_reports_kept_only_repeat(tmp_path, capsys):
     # derived index artifacts.
     for index_artifact in db.glob("index.db*"):
         index_artifact.unlink()
-    with Store(db) as reopened:
+    with Store(format1_store(db)) as reopened:
         captured = capsys.readouterr()
         assert (
             "extra fields are not represented in the archive; a newer Sidegraph may have "
@@ -145,7 +146,7 @@ def test_cli_compact_dry_run_reports_kept_fresh_hot_file(tmp_path, capsys):
     hot_bytes = hot_path.read_bytes()
     # Warm open observes the externally-added field and refreshes the derived digest before
     # this dry-run preservation check begins.
-    Store(db).close()
+    Store(format1_store(db)).close()
     conn = sqlite3.connect(str(db / "index.db"))
     digest_before = conn.execute(
         "SELECT value FROM meta WHERE key = 'canonical_digest'"
@@ -179,7 +180,7 @@ def test_cli_compact_dry_run_reports_kept_fresh_hot_file(tmp_path, capsys):
 
 def test_cli_compact_reports_leftover_cleanup_and_kept_counts_together(tmp_path, capsys):
     db = tmp_path / "t.db"
-    store = Store(db)
+    store = Store(format1_store(db))
     kept = store.add_decision(_decision(title="kept leftover"))
     store.add_decision(_decision(title="kept successor", supersedes=kept.id))
     cleaned = store.add_decision(_decision(title="clean leftover"))
@@ -235,7 +236,7 @@ def test_cli_compact_older_than_negative_rejected(tmp_path, capsys):
 
 def test_cli_compact_store_open_failure_exits_nonzero(tmp_path, capsys):
     db = tmp_path / "bad.db"
-    Store(db)
+    Store(format1_store(db))
     conn = sqlite3.connect(str(db / "index.db"))
     conn.execute("UPDATE meta SET value = 'bogus' WHERE key = 'schema_version'")
     conn.commit()
@@ -248,7 +249,7 @@ def test_cli_compact_older_than_skips_too_recent_and_says_so(tmp_path, capsys):
     from datetime import timedelta
 
     db = tmp_path / "t.db"
-    s = Store(db)
+    s = Store(format1_store(db))
     now = datetime.now(UTC)
     d = _decision(
         title="recent",
@@ -272,7 +273,7 @@ def test_cli_compact_over_a_corrupt_archive_segment_exits_nonzero_naming_it(tmp_
     refusal now comes from ``compact()``: the command reports it and exits 1, no traceback.
     see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D4)"""
     db = tmp_path / "t.db"
-    Store(db).close()
+    Store(format1_store(db)).close()
     segment = db / "archive" / "2020-01-01-1-deadbeef0000.jsonl"
     segment.parent.mkdir()
     segment.write_text("not json at all\n", encoding="utf-8")
@@ -288,7 +289,7 @@ def test_cli_compact_dry_run_over_a_corrupt_archive_segment_exits_nonzero_too(tm
     """``docs/reference/cli.md`` says ``--dry-run`` is refused as well: it reads the same
     segments, and a listing built over a segment it cannot read would be a guess."""
     db = tmp_path / "t.db"
-    Store(db).close()
+    Store(format1_store(db)).close()
     segment = db / "archive" / "2020-01-01-1-deadbeef0000.jsonl"
     segment.parent.mkdir()
     segment.write_text("not json at all\n", encoding="utf-8")

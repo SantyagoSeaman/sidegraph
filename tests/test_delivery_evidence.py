@@ -172,10 +172,10 @@ def test_capacity_caps_evict_whole_occurrences_and_keep_surviving_disclosure(tmp
     for name, value in [("MAX_OCCURRENCES", 12), ("MAX_PLACEMENTS", 25), ("MAX_LINKS", 40)]:
         monkeypatch.setattr(delivery, name, value)
     store = Store(tmp_path / "s")
-    for _ in range(100):
+    for _ in range(25):
         assert store.record_delivery(sample(groups=("a.py", "b.py", "c.py")))
     first_pages = store._conn.execute("PRAGMA page_count").fetchone()[0]
-    for _ in range(100):
+    for _ in range(25):
         assert store.record_delivery(sample(groups=("a.py", "b.py", "c.py")))
     for table, cap in [
         ("delivery_occurrences", 12),

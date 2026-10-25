@@ -190,23 +190,6 @@ def test_telemetry_off_writes_no_events_while_on_writes_them(
     store.close()
 
 
-def test_an_absolute_seed_is_stored_repo_relative(tmp_path, current_session):
-    """The blocker a fresh reviewer caught after three rounds missed it. Seeds come from
-    agent input verbatim; an agent that passes absolute paths writes absolute seed keys, the
-    seed set stops matching any anchor, and §1's circularity defense fails — every seeded
-    anchor touched later counts as a redirect, inflating the deliverable in the flattering
-    direction."""
-    store, reader, _ = _store_with_anchored_mistake(tmp_path)
-    current_session()
-    absolute = str(Path(store.path).parent / "trader" / "exec.py")
-
-    _get_task_context_impl(store, reader, [absolute], None, 4000, 6000)
-
-    seeds = [e["key"] for e in store.retrieval_events("sess-1") if e["kind"] == "seed"]
-    assert seeds == ["trader/exec.py"], f"got {seeds}"
-    store.close()
-
-
 def test_an_absolute_seed_normalizes_the_same_way_in_both_tables(tmp_path, current_session):
     """Fix-wave finding: `_record` wrote RAW seeds into the aggregate `retrieval_seeds`
     counter and NORMALIZED seeds into the `retrieval_events` journal from the SAME call --

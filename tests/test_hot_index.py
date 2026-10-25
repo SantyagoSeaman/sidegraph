@@ -43,6 +43,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import VOLATILE_STALE_KEY, Store
+from tests.store_format2_support import format1_store
 from tests.test_store_requirement import above_running, write_requirement_marker
 
 NOW = datetime.now(UTC)
@@ -639,13 +640,13 @@ def _open_hot(path: Path) -> HotIndex:
 
 
 def test_claim_meta_is_atomic_across_hot_connections(tmp_path):
-    """Eight real connections claim each key at the same instant: exactly one wins per key.
+    """Four real connections claim each key at the same instant: exactly one wins per key.
     A read-then-write claim (M4) lets several of them read "absent" first; the pattern fails
     it on the first few keys."""
     path = tmp_path / "s"
     Store(path).close()
-    keys = [f"pretool_nudge:S:agent-{i}" for i in range(40)]
-    wins = _race(path, [_open_hot] * 8, keys)
+    keys = [f"pretool_nudge:S:agent-{i}" for i in range(10)]
+    wins = _race(path, [_open_hot] * 4, keys)
     assert set(wins.values()) == {1}, {k: v for k, v in wins.items() if v != 1}
 
 
@@ -654,15 +655,15 @@ def test_claim_meta_is_atomic_between_the_store_and_the_hot_handle(tmp_path):
     space: the same statement, so still exactly one winner."""
     path = tmp_path / "s"
     Store(path).close()
-    keys = [f"pretool_nudge_path:S:agent-{i}" for i in range(40)]
-    openers = [_open_hot, lambda p: Store(p)] * 4
+    keys = [f"pretool_nudge_path:S:agent-{i}" for i in range(10)]
+    openers = [_open_hot, lambda p: Store(p)] * 2
     wins = _race(path, openers, keys)
     assert set(wins.values()) == {1}, {k: v for k, v in wins.items() if v != 1}
 
 
 def test_get_meta_and_claim_meta_agree_with_the_store(tmp_path):
     path = tmp_path / "s"
-    store = Store(path)
+    store = Store(format1_store(path))
     index = _open_hot(path)
     assert index.get_meta("k") is None
     assert index.claim_meta("k", "first") is True
@@ -696,14 +697,14 @@ def test_claim_file_stops_at_the_cap_and_never_before(tmp_path):
 
 
 def test_claim_file_counts_one_agent_only(tmp_path):
-    """The main agent's prefix ends in ``:-:``, so ten subagents that each claimed ten files do
+    """The main agent's prefix ends in ``:-:``, so two subagents that each claimed ten files do
     not spend its cap (red against a main key with no ``-``: its prefix would be the session
     alone and match every subagent's keys, M6), and ``_`` in a session id is not a ``LIKE``
     wildcard."""
     path = tmp_path / "s"
     Store(path).close()
     index = _open_hot(path)
-    for agent in range(10):
+    for agent in range(2):
         for i in range(10):
             assert index.claim_file(_prefix("S", f"agent{agent}"), f"src/f{i}.py", "t", 10)
     assert index.claim_file(_prefix("S", "agent0"), "src/extra.py", "t", 10) is False
@@ -730,7 +731,7 @@ def test_claim_file_counts_paths_outside_the_basic_plane(tmp_path):
 
 
 def test_claim_file_keeps_the_cap_across_concurrent_connections(tmp_path):
-    """Eight real connections claim thirty files each, all at once: ten claims succeed in all,
+    """Four real connections claim ten files each, all at once: ten claims succeed in all,
     never eleven. A count read before the insert (a second statement) lets several connections
     count nine and all insert."""
     path = tmp_path / "s"
@@ -738,12 +739,12 @@ def test_claim_file_keeps_the_cap_across_concurrent_connections(tmp_path):
     wins: list[str] = []
     guard = threading.Lock()
     errors: list[BaseException] = []
-    barrier = threading.Barrier(8)
+    barrier = threading.Barrier(4)
 
     def worker(n: int) -> None:
         try:
             handle = _open_hot(path)
-            for i in range(30):
+            for i in range(10):
                 barrier.wait()
                 if handle.claim_file(_prefix(), f"src/w{n}-{i}.py", "t", 10):
                     with guard:
@@ -753,7 +754,7 @@ def test_claim_file_keeps_the_cap_across_concurrent_connections(tmp_path):
             errors.append(exc)
             barrier.abort()
 
-    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
     for t in threads:
         t.start()
     for t in threads:

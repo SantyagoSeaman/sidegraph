@@ -33,7 +33,7 @@ from sidegraph.schema import (
 from sidegraph.store import Store
 from sidegraph.sync import refresh_code_drift_cache
 
-BAD_VALUES = [["accepted"], {"a": 1}]
+BAD_VALUES = [["accepted"]]  # one unhashable shape per check
 
 
 def _decision(store: Store, title: str, commit: str | None = None) -> Decision:

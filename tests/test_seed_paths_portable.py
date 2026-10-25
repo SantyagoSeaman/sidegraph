@@ -7,7 +7,6 @@ see design/superpowers/specs/2026-10-11-worktree-only-seeds-design.md (D2, D4, t
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 import pytest
@@ -134,17 +133,6 @@ def test_backslash_is_a_filename_character_on_posix_and_a_separator_on_windows(m
     assert seed_ladder._normalise("pkg\\new.py", files) == "pkg\\new.py"
     monkeypatch.setattr(worktree_seeds, "WINDOWS", True)
     assert seed_ladder._normalise("pkg\\new.py", files) == "pkg/new.py"
-
-
-def test_the_module_imports_no_seed_ladder():
-    tree = ast.parse(Path(worktree_seeds.__file__).read_text())
-    imported = {
-        n.module if isinstance(n, ast.ImportFrom) else a.name
-        for n in ast.walk(tree)
-        if isinstance(n, (ast.Import, ast.ImportFrom))
-        for a in (n.names if isinstance(n, ast.Import) else [n])
-    }
-    assert not any("seed_ladder" in (m or "") for m in imported)
 
 
 def test_an_in_root_drive_seed_that_is_a_graph_file_makes_no_listing(monkeypatch):

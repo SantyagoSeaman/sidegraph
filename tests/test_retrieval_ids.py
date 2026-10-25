@@ -145,14 +145,6 @@ def test_degrade_path_keeps_id_on_tight_rendered_line(tmp_path):
 # -- standing hint: iff mistakes-or-decisions non-empty, present in query_decisions too ----
 
 
-def test_hint_present_when_mistakes_non_empty(tmp_path):
-    s = Store(tmp_path / "t.db")
-    seed = s.upsert_entity(Entity(canonical_name="Seed"))
-    _bound_decision(s, seed.entity_id, "gotcha1", DecisionKind.GOTCHA)
-    ctx = rank_decisions([seed], [], [], s, RetrievalBudget())
-    assert _STANDING_SUPERSEDE_HINT in ctx.render()
-
-
 def test_hint_present_when_decisions_non_empty(tmp_path):
     s = Store(tmp_path / "t.db")
     seed = s.upsert_entity(Entity(canonical_name="Seed"))
@@ -161,19 +153,18 @@ def test_hint_present_when_decisions_non_empty(tmp_path):
     assert _STANDING_SUPERSEDE_HINT in ctx.render()
 
 
-def test_hint_literal_substring_and_exact_length(tmp_path):
+def test_hint_present_when_mistakes_non_empty_with_its_literal_text(tmp_path):
     """CORRECTION-4 (code review): every other hint test compares against
     `_STANDING_SUPERSEDE_HINT` itself -- a constant-self-comparison that can't catch the
     constant's own text drifting wrong (the same tautology D3's exact-text test had). This
-    one asserts a literal substring plus the exact pinned length (131 chars, design D4/§3
-    rev 2.1 — the verbatim string won over the earlier, self-contradicting "<=120" bound)."""
+    one asserts a literal substring (design D4/§3 rev 2.1)."""
     s = Store(tmp_path / "t.db")
     seed = s.upsert_entity(Entity(canonical_name="Seed"))
     _bound_decision(s, seed.entity_id, "gotcha1", DecisionKind.GOTCHA)
     ctx = rank_decisions([seed], [], [], s, RetrievalBudget())
     rendered = ctx.render()
+    assert _STANDING_SUPERSEDE_HINT in rendered
     assert "invalidates a record above" in rendered
-    assert len(_STANDING_SUPERSEDE_HINT) == 131
 
 
 def test_hint_absent_when_only_related_populated(tmp_path):

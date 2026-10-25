@@ -44,14 +44,16 @@ def test_rank_mistakes_before_adrs_before_peripheral(tmp_path):
     s = Store(tmp_path / "t.db")
     seed = s.upsert_entity(Entity(canonical_name="Seed"))
     peri = s.upsert_entity(Entity(canonical_name="Peri"))
-    _bound_decision(s, seed.entity_id, "gotcha1", DecisionKind.GOTCHA)
-    _bound_decision(s, seed.entity_id, "adr1", DecisionKind.ADR)
-    _bound_decision(s, peri.entity_id, "peri-adr", DecisionKind.ADR)
+    gotcha = _bound_decision(s, seed.entity_id, "gotcha1", DecisionKind.GOTCHA)
+    adr = _bound_decision(s, seed.entity_id, "adr1", DecisionKind.ADR)
+    peri_adr = _bound_decision(s, peri.entity_id, "peri-adr", DecisionKind.ADR)
     ctx = rank_decisions([seed], [peri], [], s, RetrievalBudget())
     assert any("gotcha1" in m for m in ctx.mistakes)
     assert any("adr1" in d for d in ctx.decisions)
     assert any("peri-adr" in r for r in ctx.related)
     assert ctx.mistakes and ctx.decisions  # buckets populated distinctly
+    # The ids are what reached the render, or telemetry counts records the agent never saw.
+    assert set(ctx.shown_ids) == {gotcha.id, adr.id, peri_adr.id}
 
 
 def test_rank_mistakes_bucket_carries_rejected_and_consequences(tmp_path):
@@ -99,147 +101,49 @@ def test_rank_memory_budget_keeps_mistakes_first(tmp_path):
     assert total <= 70
 
 
-def test_rank_superseded_renders_without_double_prefix(tmp_path):
-    s = Store(tmp_path / "t.db")
-    seed = s.upsert_entity(Entity(canonical_name="Seed"))
-    d = Decision(
-        title="old approach",
-        kind=DecisionKind.ADR,
-        context="c",
-        choice="do old",
-        status=DecisionStatus.SUPERSEDED,
-        valid_from=datetime.now(UTC),
-        # no valid_to: this fixture exercises _reverted_prefix's D4 fallback branch (the
-        # bare, undated prefix), not the dated one -- see test_rank_superseded_with_
-        # valid_to_renders_dated_prefix below for the dated case.
-        provenance=Provenance(source="manual"),
-    )
-    s._write_decision(d)
-    s._conn.commit()
-    s.add_binding(AnchorBinding(record_id=d.id, entity_id=seed.entity_id, tier=2, status="live"))
-    ctx = rank_decisions([seed], [], [], s, RetrievalBudget())
-    line = next(r for r in ctx.related if "old approach" in r)
-    # Fixture carries no valid_to, so this takes D4's fallback branch -- unchanged by the
-    # temporal-markers dated prefix. Do not "fix" this into the dated form.
-    assert line.startswith("~ tried, reverted: [adr]")
-    assert "~ tried, reverted: - [" not in line
-
-
-def test_rank_superseded_dedupes_title_choice_under_reverted_prefix(tmp_path):
-    s = Store(tmp_path / "t.db")
-    seed = s.upsert_entity(Entity(canonical_name="Seed"))
-    d = Decision(
-        title="single-line rationale",
-        kind=DecisionKind.ADR,
-        context="c",
-        choice="single-line rationale",
-        status=DecisionStatus.SUPERSEDED,
-        valid_from=datetime.now(UTC),
-        # no valid_to: this fixture exercises D4's fallback branch too -- see the note in
-        # test_rank_superseded_renders_without_double_prefix above.
-        provenance=Provenance(source="import"),
-    )
-    s._write_decision(d)
-    s._conn.commit()
-    s.add_binding(AnchorBinding(record_id=d.id, entity_id=seed.entity_id, tier=2, status="live"))
-    ctx = rank_decisions([seed], [], [], s, RetrievalBudget())
-    line = next(r for r in ctx.related if "single-line rationale" in r)
-    # Fixture carries no valid_to, so this takes D4's fallback branch -- unchanged by the
-    # temporal-markers dated prefix. Do not "fix" this into the dated form.
-    assert line == "~ tried, reverted: [adr] single-line rationale"
-    assert ": single-line rationale" not in line
-
-
-def test_rank_superseded_with_valid_to_renders_dated_prefix(tmp_path):
-    # Temporal markers, test 1 (the spec's only genuinely unfixed target): a superseded
-    # record that DOES carry valid_to renders a "YYYY-MM" marker in the prefix. No existing
-    # fixture sets valid_to (both fixtures above are undated), so this is the one new
-    # fixture the change needs.
-    s = Store(tmp_path / "t.db")
-    seed = s.upsert_entity(Entity(canonical_name="Seed"))
-    d = Decision(
-        title="dated old approach",
-        kind=DecisionKind.ADR,
-        context="c",
-        choice="do dated old",
-        status=DecisionStatus.SUPERSEDED,
-        valid_from=datetime(2025, 6, 1, tzinfo=UTC),
-        valid_to=datetime(2026, 1, 15, tzinfo=UTC),
-        provenance=Provenance(source="manual"),
-    )
-    s._write_decision(d)
-    s._conn.commit()
-    s.add_binding(AnchorBinding(record_id=d.id, entity_id=seed.entity_id, tier=2, status="live"))
-    ctx = rank_decisions([seed], [], [], s, RetrievalBudget())
-    line = next(r for r in ctx.related if "dated old approach" in r)
-    assert line.startswith("~ tried, reverted 2026-01: [adr]")
-
-
 def test_rank_superseded_prefix_paired_bare_and_dated(tmp_path):
-    # Temporal markers, test 2 (discarded -- red only against a formatter that prints None,
-    # an empty slot, or raises). Paired in one test so the bare-prefix half is checked
-    # alongside a dated sibling from the SAME render pass, not in isolation -- the absence
-    # half alone already passes today via D4's fallback, which is why the spec pairs it.
+    # Temporal markers: a superseded record without valid_to takes D4's bare "tried, reverted:"
+    # prefix, one with valid_to a "YYYY-MM" marker, rendered side by side in ONE pass. A record
+    # whose title equals its choice collapses to one rationale under either prefix, and no
+    # prefix is doubled.
     s = Store(tmp_path / "t.db")
     seed = s.upsert_entity(Entity(canonical_name="Seed"))
-    bare = Decision(
-        title="bare old approach",
-        kind=DecisionKind.ADR,
-        context="c",
-        choice="do bare old",
-        status=DecisionStatus.SUPERSEDED,
-        valid_from=datetime(2025, 6, 1, tzinfo=UTC),
-        provenance=Provenance(source="manual"),
-    )
-    dated = Decision(
-        title="dated sibling approach",
-        kind=DecisionKind.ADR,
-        context="c",
-        choice="do dated sibling",
-        status=DecisionStatus.SUPERSEDED,
-        valid_from=datetime(2025, 6, 1, tzinfo=UTC),
-        valid_to=datetime(2026, 3, 1, tzinfo=UTC),
-        provenance=Provenance(source="manual"),
-    )
-    for record in (bare, dated):
+
+    def old(title: str, choice: str, valid_to: datetime | None) -> Decision:
+        return Decision(
+            title=title,
+            kind=DecisionKind.ADR,
+            context="c",
+            choice=choice,
+            status=DecisionStatus.SUPERSEDED,
+            valid_from=datetime(2025, 6, 1, tzinfo=UTC),
+            valid_to=valid_to,
+            provenance=Provenance(source="manual"),
+        )
+
+    records = [
+        old("bare old approach", "do bare old", None),
+        old("dated sibling approach", "do dated sibling", datetime(2026, 3, 1, tzinfo=UTC)),
+        old("bare rationale", "bare rationale", None),
+        old("dated rationale", "dated rationale", datetime(2026, 2, 1, tzinfo=UTC)),
+    ]
+    for record in records:
         s._write_decision(record)
     s._conn.commit()
-    for record in (bare, dated):
+    for record in records:
         s.add_binding(
             AnchorBinding(record_id=record.id, entity_id=seed.entity_id, tier=2, status="live")
         )
     ctx = rank_decisions([seed], [], [], s, RetrievalBudget())
-    bare_line = next(r for r in ctx.related if "bare old approach" in r)
-    dated_line = next(r for r in ctx.related if "dated sibling approach" in r)
-    assert bare_line.startswith("~ tried, reverted: [adr]")
-    assert dated_line.startswith("~ tried, reverted 2026-03: [adr]")
 
+    def line_of(needle: str) -> str:
+        return next(r for r in ctx.related if needle in r)
 
-def test_rank_superseded_dedupe_applies_under_dated_prefix(tmp_path):
-    # Temporal markers, test 3: _fmt_decision's title/choice dedup must still collapse
-    # under a COMPUTED dated prefix, not just the old literal one. Red before this change --
-    # the exact-equality assertion below pins the dated "2026-02" prefix, which unfixed code
-    # doesn't produce -- even though the dedup property it exercises (_fmt_decision itself)
-    # is untouched by the change. Kept on as a guard going forward: a future refactor could
-    # bypass the dedup once the prefix is computed rather than literal.
-    s = Store(tmp_path / "t.db")
-    seed = s.upsert_entity(Entity(canonical_name="Seed"))
-    d = Decision(
-        title="dated rationale",
-        kind=DecisionKind.ADR,
-        context="c",
-        choice="dated rationale",
-        status=DecisionStatus.SUPERSEDED,
-        valid_from=datetime(2025, 6, 1, tzinfo=UTC),
-        valid_to=datetime(2026, 2, 1, tzinfo=UTC),
-        provenance=Provenance(source="import"),
-    )
-    s._write_decision(d)
-    s._conn.commit()
-    s.add_binding(AnchorBinding(record_id=d.id, entity_id=seed.entity_id, tier=2, status="live"))
-    ctx = rank_decisions([seed], [], [], s, RetrievalBudget())
-    line = next(r for r in ctx.related if "dated rationale" in r)
-    assert line == "~ tried, reverted 2026-02: [adr] dated rationale"
+    assert line_of("bare old approach").startswith("~ tried, reverted: [adr]")
+    assert line_of("dated sibling approach").startswith("~ tried, reverted 2026-03: [adr]")
+    assert "~ tried, reverted: - [" not in line_of("bare old approach")
+    assert line_of("bare rationale") == "~ tried, reverted: [adr] bare rationale"
+    assert line_of("dated rationale") == "~ tried, reverted 2026-02: [adr] dated rationale"
 
 
 def test_rank_live_decision_lines_carry_no_date(tmp_path):
@@ -678,16 +582,6 @@ def _accepted_domain(store, slug, communities, **overrides):
     return store.get_domain(d.domain_id)
 
 
-def test_rank_related_bucket_learns_domain_for_seed_community(tmp_path):
-    s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "payments", ["7"])
-    domain_entity = s.find_abstract_entity("domain:payments")
-    _bound_decision(s, domain_entity.entity_id, "domain-note", DecisionKind.ADR)
-
-    ctx = rank_decisions([], [], ["7"], s, RetrievalBudget())
-    assert any("domain-note" in r for r in ctx.related)
-
-
 def test_rank_related_bucket_still_surfaces_legacy_community_binding_alongside_domain(tmp_path):
     """A decision bound before the domain existed (still on the bare `community:<id>`
     entity) must keep surfacing even once an accepted domain claims that community."""
@@ -745,19 +639,3 @@ def test_rank_related_bucket_unchanged_without_domains(tmp_path):
 
     ctx = rank_decisions([], [], ["7"], s, RetrievalBudget())
     assert any("legacy-only-note" in r for r in ctx.related)
-
-
-def test_shown_ids_carries_every_rendered_decision(tmp_path):
-    """The ids must match what actually reached the render, or the telemetry counts
-    records the agent never saw."""
-    s = Store(tmp_path / "t.db")
-    seed = s.upsert_entity(Entity(canonical_name="Seed"))
-    peri = s.upsert_entity(Entity(canonical_name="Peri"))
-    gotcha = _bound_decision(s, seed.entity_id, "gotcha1", DecisionKind.GOTCHA)
-    adr = _bound_decision(s, seed.entity_id, "adr1", DecisionKind.ADR)
-    peri_adr = _bound_decision(s, peri.entity_id, "peri-adr", DecisionKind.ADR)
-
-    ctx = rank_decisions([seed], [peri], [], s, RetrievalBudget())
-    rendered = ctx.render()
-    expected = {d.id for d in (gotcha, adr, peri_adr) if d.title in rendered}
-    assert set(ctx.shown_ids) == expected

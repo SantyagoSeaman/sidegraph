@@ -34,6 +34,9 @@ from ulid import ULID
 # sidegraph.schema import SCHEMA_VERSION`` keeps working. The bump history lives beside it.
 from .store_layout import SCHEMA_VERSION as SCHEMA_VERSION
 
+# The safe-id rule lives in store_layout (the pydantic-free inventory needs it); re-exported here.
+from .store_layout import is_safe_record_id as is_safe_record_id
+
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
@@ -187,17 +190,6 @@ def file_anchor_descriptors(descriptors: Iterable[Descriptor]) -> list[Descripto
         name = file_anchor_name(d.name, d.file_path)
         out.append(d if name == d.name else Descriptor(name=name, file_path=d.file_path))
     return out
-
-
-_SAFE_RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-
-
-def is_safe_record_id(value: object) -> bool:
-    """True iff ``value`` can be a record's canonical filename stem: a string that is one
-    path segment (no separator, no traversal, no leading ``.``, no NUL) of bounded length.
-    ``fullmatch``, so a trailing newline fails. Every ULID passes (see
-    design/superpowers/specs/2026-09-29-record-identity-design.md D1)."""
-    return isinstance(value, str) and _SAFE_RECORD_ID.fullmatch(value) is not None
 
 
 class Entity(BaseModel):
@@ -480,3 +472,49 @@ class Initiative(BaseModel):
     name: str
     description: str | None = None
     tags: list[str] = Field(default_factory=list)
+
+
+_BODY_MODELS: dict[str, type[BaseModel]] = {
+    "decision": Decision,
+    "fact": Fact,
+    "entity": Entity,
+    "domain": Domain,
+}
+# ``AnchorBinding.record_id`` is the owning record's id, which a bindings body does not carry
+# (the file stem or the line's ``id`` does); the reload overrides it per item, so any value
+# validates the same way.
+_BINDINGS_RECORD_ID = "-"
+
+
+def validated_model[M: BaseModel](model: type[M], body: object) -> M:
+    """``body`` as ``model``, then serialised: the one validate-and-serialise step every reader
+    applies (a body the index could not store must fail here, where it costs one record, and not
+    inside the unguarded index write). Raises ``ValueError`` (pydantic's ``ValidationError`` is
+    one) or ``RecursionError``. ``Store._parse_record_file`` and :func:`validate_record_body`
+    both call it, so a file and a shard line cannot be judged differently.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.3)"""
+    record = model.model_validate(body)
+    record.model_dump_json()
+    return record
+
+
+def validate_record_body(record_type: str, body: object) -> str | None:
+    """Why ``body`` is not a valid record of ``record_type``, or ``None``: the model test
+    ``Store._parse_record_file`` applies to a per-record file (:func:`validated_model`), for the
+    pydantic-free inventory to call. A bindings body is a list of objects, every item a valid
+    ``AnchorBinding``.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.3)"""
+    try:
+        if record_type == "bindings":
+            if not isinstance(body, list) or not all(isinstance(item, dict) for item in body):
+                return "bindings body is not a list of objects"
+            for item in body:
+                validated_model(AnchorBinding, {**item, "record_id": _BINDINGS_RECORD_ID})
+            return None
+        model = _BODY_MODELS.get(record_type)
+        if model is None:
+            return f"unknown record type {record_type!r}"
+        validated_model(model, body)
+    except (ValueError, RecursionError) as exc:  # pydantic's ValidationError is a ValueError
+        return f"its {record_type} does not validate ({type(exc).__name__})"
+    return None

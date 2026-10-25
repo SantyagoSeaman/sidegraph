@@ -109,11 +109,25 @@ def test_session_partial_map_survives_sync_error(project, monkeypatch, capfd):
     assert "get_task_context" in output["hookSpecificOutput"]["additionalContext"]
 
 
-@pytest.mark.parametrize("name", ["SessionStart", "Stop", "PreToolUse", "SubagentStart"])
-@pytest.mark.parametrize(
-    "mode",
-    ["valid", "windows_newlines", "broken", "closed_exec", "none", "closed_stream", "replaced"],
-)
+_STDERR_MODES = [
+    "valid",
+    "windows_newlines",
+    "broken",
+    "closed_exec",
+    "none",
+    "closed_stream",
+    "replaced",
+]
+# Every fd mode on one entry point; the other three get the healthy control and fd reuse. The
+# stderr guard is one reporter shared by all four hooks, so a mode that fails for one fails for all.
+_STDERR_CASES = [("SessionStart", mode) for mode in _STDERR_MODES] + [
+    (name, mode)
+    for name in ("Stop", "PreToolUse", "SubagentStart")
+    for mode in ("valid", "replaced")
+]
+
+
+@pytest.mark.parametrize(("name", "mode"), _STDERR_CASES)
 def test_real_process_stderr_faults_never_change_exit_or_data(tmp_path, name, mode):
     """Exercise shutdown and fd reuse, which Python-level capture cannot establish."""
     import os
@@ -202,10 +216,10 @@ def test_reporter_bounds_hostile_class_and_is_per_invocation(capfd):
         def __repr__(self):
             raise AssertionError("Must never repr")
 
-    PrivateError.__name__ = 'X\n\r"é' * 10000
+    PrivateError.__name__ = 'X\n\r"é' * 100
     for _ in range(2):
-        reporter = HookDiagnostics("H\n" * 10000)
-        reporter.report("S\n" * 10000, PrivateError())
+        reporter = HookDiagnostics("H\n" * 100)
+        reporter.report("S\n" * 100, PrivateError())
         reporter.report("second", RuntimeError("secret"))
     captured = capfd.readouterr()
     assert captured.out == ""

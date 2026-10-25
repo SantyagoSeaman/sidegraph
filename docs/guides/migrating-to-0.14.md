@@ -247,16 +247,17 @@ operation, not a way to make a failed migration check pass.
 
 A project with no old domains has no membership to preserve. After installing the tested
 Graphify version and setting the protection in step 1, build its graph, initialize the
-store and explicitly require the new Sidegraph:
+store (current `@main` releases write the minimum-Sidegraph requirement themselves):
 
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # PowerShell/cmd: use the step 1 process setting
 graphify update .
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-require --sidegraph 0.14.0
 ```
 
-This clears the migration advisory without taking a snapshot. Once you have accepted
+A fresh store already requires the Sidegraph release that created it, which clears the
+migration advisory without taking a snapshot. Do not run `sidegraph-require --sidegraph 0.14.0`
+on such a store: a requirement is never lowered, so the command fails. Once you have accepted
 domains, `sidegraph-domains snapshot --accept-current-engine` through the same `uvx` source
 can instead freeze those new-engine memberships and raise the requirement. Do not use
 this new-project shortcut for a store whose old domains you want to preserve.

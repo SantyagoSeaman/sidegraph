@@ -13,6 +13,7 @@ import os
 import time
 
 from sidegraph.store import Store
+from tests.store_record_support import _decision
 
 
 def _age(path, seconds: float) -> None:
@@ -67,8 +68,9 @@ def test_a_fresh_archive_tmp_survives_a_concurrent_open(tmp_path):
 
 def test_aged_debris_is_still_swept(tmp_path):
     """The gate must not turn the sweep off: real crash debris still goes, at all three
-    call sites."""
+    call sites, and the store's own records and format marker are left alone."""
     store = Store(tmp_path / "s")
+    d = store.add_decision(_decision())
     store.close()
 
     archive = tmp_path / "s" / "archive"
@@ -83,8 +85,16 @@ def test_aged_debris_is_still_swept(tmp_path):
         path.write_text("{}")
         _age(path, 3600)
 
+    # old real files must not be mistaken for debris either: only ``*.tmp`` names go
+    _age(tmp_path / "s" / "decisions" / f"{d.id}.json", 3600)
+    _age(tmp_path / "s" / "format", 3600)
+
     reopened = Store(tmp_path / "s")
-    reopened.close()
+    try:
+        assert reopened.get_decision(d.id) is not None
+    finally:
+        reopened.close()
 
     for path in debris:
         assert not path.exists(), path
+    assert (tmp_path / "s" / "format").is_file()

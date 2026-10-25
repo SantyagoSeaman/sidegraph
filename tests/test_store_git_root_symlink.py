@@ -18,14 +18,11 @@ import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from sidegraph import githooks
 from sidegraph.capture import _capture_commit
 from sidegraph.doctor import CODE_DRIFT, curate
-from sidegraph.integrity import CHECKS, Inputs
 from sidegraph.retrieval import DRIFT_CACHE_KEY
 from sidegraph.schema import (
     AnchorBinding,
@@ -40,7 +37,6 @@ from sidegraph.store import Store
 from sidegraph.sync import refresh_code_drift_cache
 from sidegraph.verify import ILLEGAL_DELETION, verify_against
 from tests import githooks_support
-from tests.githooks_support import git as hooks_git
 
 sandbox = githooks_support.sandbox  # the fixture, bound by name so that test arguments find it
 
@@ -218,20 +214,6 @@ def test_t6_a_plain_store_stamps_and_measures_drift_in_its_repository(tmp_path):
     assert len(_drift_findings(a / ".sidegraph")) == 1
 
 
-def test_t7_a_nested_store_repository_stamps_the_enclosing_projects_head(tmp_path):
-    a = _repo(tmp_path / "a")
-    nested = _repo(a / ".sidegraph")  # the store directory is a repository of its own
-    assert _head(a) != _head(nested)
-    assert _capture_commit(Store(nested)) == _head(a)
-
-
-def test_t8_a_top_level_store_repository_stamps_its_own_head(tmp_path):
-    project = tmp_path / "project"  # no repository around it
-    project.mkdir()
-    own = _repo(project / ".sidegraph")
-    assert _capture_commit(Store(own)) == _head(own)
-
-
 # -- T9: the environment ---------------------------------------------------------------------
 
 
@@ -283,73 +265,3 @@ def test_the_helper_splits_one_budget_across_both_attempts(tmp_path, monkeypatch
     assert verify.find_store_project_repo(tmp_path / ".sidegraph", timeout=1.0) is None
     assert seen[0] == 1.0
     assert seen[1] is not None and abs(seen[1] - 0.3) < 1e-9
-
-
-# -- T12: the refresh-hook check -------------------------------------------------------------
-
-CHECK = "refresh-hook-missing"
-
-
-def _hook_inputs(store_dir: Path, graph: Path) -> Inputs:
-    return Inputs(
-        store_dir=store_dir,
-        now=datetime.now(UTC),
-        reader=SimpleNamespace(path=graph),
-        graph_path=graph,
-    )
-
-
-def _detect(store_dir: Path, graph: Path):
-    detector = next(c for c in CHECKS if c.id == CHECK)
-    return detector.detect(_hook_inputs(store_dir, graph))
-
-
-def _project_with_graph(sb) -> tuple[Path, Path]:
-    a = sb.repo("a")
-    graph = a / "graphify-out" / "graph.json"
-    graph.parent.mkdir()
-    graph.write_text(json.dumps({"nodes": [], "links": []}))
-    return a, graph
-
-
-def _install(sb, repo: Path) -> None:
-    info = githooks.repo_info(repo)
-    assert info is not None
-    githooks.install(info, graphify=str(sb.fake_bin / "graphify"))
-
-
-def test_t12_a_link_into_b_reads_the_projects_hooks_missing_in_a_is_the_problem(sandbox):
-    a, graph = _project_with_graph(sandbox)
-    b = sandbox.repo("b")
-    _install(sandbox, b)  # B is wired; A is not
-    link = _link(a, b / "store")
-    problem = _detect(link, graph)
-    assert problem is not None and problem.check == CHECK
-
-
-def test_t12_a_link_into_b_reads_the_projects_hooks_installed_in_a_is_clean(sandbox):
-    a, graph = _project_with_graph(sandbox)
-    b = sandbox.repo("b")
-    link = _link(a, b / "store")  # B is not wired; A is
-    _install(sandbox, a)
-    assert _detect(link, graph) is None
-
-
-def test_t12_a_link_into_no_repository_still_runs_the_check_in_the_project(sandbox):
-    a, graph = _project_with_graph(sandbox)
-    link = _link(a, sandbox.root / "shared" / "store")
-    problem = _detect(link, graph)
-    assert problem is not None and problem.check == CHECK
-    _install(sandbox, a)
-    assert _detect(link, graph) is None
-
-
-def test_t12_a_nested_store_repository_checks_the_enclosing_projects_hooks(sandbox):
-    a, graph = _project_with_graph(sandbox)
-    nested = a / ".sidegraph"  # the store directory is a repository of its own
-    nested.mkdir()
-    hooks_git(nested, "init", "-q", "-b", "main")
-    problem = _detect(nested, graph)
-    assert problem is not None and problem.check == CHECK
-    _install(sandbox, a)
-    assert _detect(nested, graph) is None

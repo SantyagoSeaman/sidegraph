@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from sidegraph.anchoring import resolve_and_bind
 from sidegraph.engine.reader import ResolveResult
-from sidegraph.schema import Decision, DecisionKind, Descriptor, Entity, Provenance
+from sidegraph.schema import Decision, DecisionKind, Descriptor, Provenance
 from sidegraph.store import Store
 
 
@@ -28,11 +28,6 @@ def _decision(store):
             provenance=Provenance(source="manual"),
         )
     )
-
-
-def test_entity_field_defaults_none():
-    e = Entity(canonical_name="X")
-    assert e.last_seen_community is None
 
 
 def test_resolved_capture_records_community_baseline(tmp_path):

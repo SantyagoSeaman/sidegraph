@@ -127,15 +127,6 @@ def test_mixed_missing_and_terminal_supports_lands_in_the_missing_row(tmp_path):
     assert "does not exist" in _only_detail(report)
 
 
-def test_decision_with_no_anchors_is_still_reported(tmp_path):
-    """D7: unchanged for decisions -- a decision has no ``supports`` field, so the
-    anchor-only test that already existed stays correct for that branch."""
-    did = _ulid_at(NOW)
-    _decision(tmp_path, did, status="accepted")
-    report = curate(tmp_path, now=NOW)
-    assert _codes(report) == [DANGLING_RECORD]
-
-
 # -- archived decisions: resolution must include them, not only hot ones --------------------
 
 

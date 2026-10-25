@@ -1,10 +1,6 @@
 import pytest
 
-from sidegraph.schema import SCHEMA_VERSION, Descriptor, canonicalize
-
-
-def test_schema_version_is_0_6_0():
-    assert SCHEMA_VERSION == "0.6.0"
+from sidegraph.schema import Descriptor, canonicalize
 
 
 def test_descriptor_fields_are_name_and_file():
@@ -19,30 +15,6 @@ def test_canonicalize_lowercases_and_strips_decoration():
     assert canonicalize("_t()") == "_t"
     assert canonicalize(".__init__()") == "__init__"
     assert canonicalize("  place_order( self ) ") == "place_order"
-
-
-def test_store_rejects_mismatched_schema_version(tmp_path):
-    """A legacy single-file store (see store._migrate_legacy) whose stamped
-    schema_version isn't in store._MIGRATABLE_SCHEMA_VERSIONS is a hard rejection — no
-    migration path beyond the one forward step from 0.2.x/0.3.x (see
-    tests/test_store_migration.py for the versions that DO migrate)."""
-    import sqlite3
-
-    from sidegraph.store import Store
-
-    db = tmp_path / "old.db"
-    # simulate a store stamped with an older version
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    conn.execute("INSERT INTO meta VALUES ('schema_version', '0.1.0')")
-    conn.commit()
-    conn.close()
-    with pytest.raises(ValueError, match="schema_version"):
-        Store(db)
-    # nothing was migrated: the original file is untouched, no backup/canonical dirs appear
-    assert db.exists()
-    assert not (tmp_path / "old.db.migrated-backup").exists()
-    assert not (tmp_path / "decisions").exists()
 
 
 _PRE_0_3_SCHEMA_SQL = """
@@ -62,16 +34,19 @@ CREATE TABLE capture_sessions (session_id TEXT PRIMARY KEY, captured_at TEXT NOT
 """
 
 
-def test_store_still_rejects_0_1_0_even_though_0_2_0_and_0_3_0_migrate(tmp_path):
-    """0.2.0/0.3.0 (the two immediately-prior releases) are the only forward-migratable
-    versions — anything older/unknown stays a hard rejection (see
-    store._MIGRATABLE_SCHEMA_VERSIONS; tests/test_store_migration.py covers the
-    versions that DO migrate)."""
+def test_store_rejects_mismatched_schema_version(tmp_path):
+    """A legacy single-file store (see store._migrate_legacy) whose stamped
+    schema_version isn't in store._MIGRATABLE_SCHEMA_VERSIONS is a hard rejection — no
+    migration path beyond the one forward step from 0.2.x/0.3.x (see
+    tests/test_store_migration.py for the versions that DO migrate). 0.2.0/0.3.0 (the two
+    immediately-prior releases) are the only forward-migratable versions; a real 0.1.0 store
+    (the full pre-0.3 schema) stays a hard rejection."""
     import sqlite3
 
     from sidegraph.store import Store
 
-    db = tmp_path / "ancient.db"
+    db = tmp_path / "old.db"
+    # simulate a store stamped with an older version
     conn = sqlite3.connect(db)
     conn.executescript(_PRE_0_3_SCHEMA_SQL)
     conn.execute("INSERT INTO meta VALUES ('schema_version', '0.1.0')")
@@ -79,6 +54,10 @@ def test_store_still_rejects_0_1_0_even_though_0_2_0_and_0_3_0_migrate(tmp_path)
     conn.close()
     with pytest.raises(ValueError, match="schema_version"):
         Store(db)
+    # nothing was migrated: the original file is untouched, no backup/canonical dirs appear
+    assert db.exists()
+    assert not (tmp_path / "old.db.migrated-backup").exists()
+    assert not (tmp_path / "decisions").exists()
 
 
 def test_decision_rejects_naive_datetime():

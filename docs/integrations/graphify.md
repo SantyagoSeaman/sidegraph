@@ -57,14 +57,17 @@ graphify-out/
 
 This is what the **LLM-free `graphify update .`** build above produces — no `wiki/` directory.
 Community-article generation (`wiki/`, agent-crawlable `index.md` + one article per community)
-is a separate, explicit export that needs an LLM pass: run `graphify export wiki` (or the
-initial non-`--update` build with `--wiki`) to add it. Don't expect `wiki/` after a plain
+is a separate, explicit export: run `graphify export wiki` (or the
+initial non-`--update` build with `--wiki`) to add it. The export itself runs locally from the
+finished graph and its communities and needs no LLM call; only the semantic pass below (or an
+LLM-enriched build) does. Don't expect `wiki/` after a plain
 `graphify update .` — its absence there is correct, not a broken build.
 
 A third build mode, `graphify extract . --backend <claude|gemini|openai|deepseek|ollama>`,
 adds the **semantic pass**: it reads prose instead of just structure, producing `concept` and
-`rationale` nodes (plus thematic Leiden communities) in the same `graph.json`. It needs one
-API key and costs real money per run (cached per file, so re-runs only pay for changed docs).
+`rationale` nodes (plus thematic Leiden communities) in the same `graph.json`. Every backend
+except a local `ollama` needs an API key and costs real money per run; `ollama` talks to a local
+server and needs no real key. Runs are cached per file, so re-runs only pay for changed docs.
 Anchoring and `sidegraph-import` both treat its output identically to the AST pass's nodes —
 see [`guides/semantic-docs.md`](../guides/semantic-docs.md) for the full two-pass workflow,
 cost/cache expectations, and the bootstrap-import walkthrough.
@@ -78,7 +81,8 @@ store's project, not under `$CLAUDE_PROJECT_DIR`. See [Graph path resolution](..
 ## Linked worktrees read the main checkout's graph
 
 `graphify-out/` is gitignored, so a `git worktree add` checkout has the tracked store and no
-graph. Without one nothing resolves: `get_task_context` finds no entity for any seed. When the
+graph. Without one nothing resolves through the graph: `get_task_context` finds no entity for a seed
+unless it matches an anchor stored on a live binding. When the
 store's own graph is missing and its repository is a linked worktree of a main checkout, the
 read tools (`get_task_context`, `query_structure`, `query_decisions`, `drill_down`) and the
 `SessionStart` hook open the **main checkout's** graph instead. The path is the store's own
@@ -222,8 +226,9 @@ It writes a small helper, `sidegraph-graph-refresh`, into the repository's `hook
 (inside the common git directory, so every worktree shares it), and a marked three-line block
 into `post-commit`, `post-merge` and `post-checkout` that calls it. The helper runs
 `graphify update .`, a **code-only AST rebuild** (no LLM). Prose/ADR extraction is a model pass
-and is not re-run automatically: re-run `graphify update .` (or the `/graphify` skill's
-`--update` form) whenever the docs change.
+and is not re-run automatically: `graphify update .` refreshes the Markdown structure but does not
+repeat the semantic pass, so when the docs change re-run `graphify extract . --backend <name>` (or
+the `/graphify` skill's `--update` form).
 
 - **Which events.** After a commit, after a merge (a fast-forward `git pull` fires
   `post-merge`) and after a branch switch. A file
@@ -302,16 +307,20 @@ any file, so it can hide staleness: use `graphify update .`.
   code entities by name and the LLM's mention-nodes collide with the AST's code nodes;
   the engine keeps whichever arrived first. See the "When your docs reference your code
   heavily" note in [the semantic-docs guide](../guides/semantic-docs.md) for the
-  per-subfolder extract + merge pattern, or force a clean rebuild with
-  `graphify update . --force`.
+  per-subfolder extract + merge pattern. (`graphify update . --force` does not help: it only
+  overwrites `graph.json` when the rebuild has fewer nodes and does not repeat the semantic pass.)
 
 - **Graph looks stale** — re-run `graphify update .`; the git hook only rebuilds the
-  **code** graph, not prose/ADR extraction, so doc changes need a manual re-run.
+  **code** graph, not prose/ADR extraction, so doc changes need a manual
+  `graphify extract . --backend <name>` for the semantic layer.
 - **`graphify` command missing after install** — the `uv tool` bin directory isn't on `PATH`.
   Run `uv tool update-shell`, open a new shell, and retry.
 - **Sidegraph sees no anchors / graph absent** — Sidegraph degrades silently when
   `graphify-out/graph.json` (or the path in `SIDEGRAPH_GRAPH`) doesn't exist yet; decisions
-  still write, just without anchors, until a graph is built.
+  still write, but an anchor that needs the graph cannot resolve: a proposal keeps its code
+  anchors as `orphaned` (reported in `anchors_orphaned` with the reason `no-graph`), and an
+  initiative binding is still made. `add_decision` skips concrete code anchors it cannot
+  resolve.
 - **Sync reports `orphaned` after a rename** — expected and correct: Sidegraph never guesses a
   rebind. Heal it one of two ways: **restore the name** (undo the rename, or re-add the removed
   symbol/heading), then `graphify update .` followed by `sidegraph-sync` — the orphaned anchor

@@ -60,9 +60,11 @@ start. Everything task-scoped is deferred to `get_task_context`.
 
 After the map come the status lines, one for each problem the integrity checks find, in a fixed
 order: records awaiting ratification, code drift, a borrowed or stale code graph, a stray empty
-store, a plugin and package version mismatch, the plugin off in subdirectories, a missing code
-graph, orphaned records, store files left out of the index, no refresh hook, uncommitted store
-files, and records that exist only on unmerged branches. Each line is there only while its
+store, a plugin and package version mismatch, a second Sidegraph on `PATH`, the plugin off in
+subdirectories, a missing code graph, a code graph built by an untested Graphify release,
+orphaned records, store files left out of the index, an outdated refresh helper, no refresh
+hook, uncommitted store files, records that exist only on unmerged branches, a store not yet
+migrated to the packed layout, and packed-store maintenance that is due. Each line is there only while its
 problem is. A problem that needs a person also sends a notice to the user, at most once a day.
 The texts and the notice rules are in the
 [hooks reference](../reference/hooks.md#sidegraph-session-start), and

@@ -1361,7 +1361,7 @@ def test_codex_message_without_an_input_text_block_does_not_count(tmp_path, monk
         monkeypatch,
         capsys,
         {"session_id": _CODEX_UMBRELLA, "stop_hook_active": False, "transcript_path": path},
-        tmp_path / "t3n.db",
+        _existing_store(tmp_path / "t3n.db"),
     )
     assert out == {}, out
 

@@ -42,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from .store_layout import StoreRequirementError, check_store_requirement
+from .store_layout import StoreRequirementError, check_store_requirement, index_stamp_problem
 
 # Per-subprocess ceiling (several git calls run per hook/blame invocation) -- never the
 # unbounded default.
@@ -189,6 +189,11 @@ def open_index_ro(
         conn = sqlite3.connect(uri, uri=True, timeout=busy_timeout_seconds)
         conn.row_factory = sqlite3.Row
         conn.execute("SELECT 1")
+        if index_stamp_problem(store_dir, conn) is not None:
+            # A format-2 store whose index carries another layout's stamp is no index.
+            # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.5)
+            conn.close()
+            return None
         return conn
     except StoreRequirementError:
         return None

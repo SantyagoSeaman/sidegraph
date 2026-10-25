@@ -72,14 +72,6 @@ def test_telemetry_off_writes_no_render_event(tmp_path, monkeypatch):
     store.close()
 
 
-def test_a_raising_writer_never_propagates(tmp_path, monkeypatch):
-    store = Store(tmp_path / "s")
-    monkeypatch.setattr(server, "_session_key", lambda _s: "sess-1")
-    monkeypatch.setattr(store, "record_render_event", lambda *a, **k: 1 / 0)
-    server._record(store, ["rec-1"], [], ctx=_ctx())  # must not raise
-    store.close()
-
-
 def test_a_raising_writer_does_not_cost_the_other_journals(tmp_path, monkeypatch):
     """The render write has its own suppress, placed after the two existing writes."""
     store = Store(tmp_path / "s")

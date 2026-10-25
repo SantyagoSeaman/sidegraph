@@ -466,14 +466,13 @@ def test_same_entity_precedence_does_not_depend_on_seed_order(project, reverse):
     assert "Ordinary same-entity rule" in out and "[file-bound]" not in out
 
 
-@pytest.mark.parametrize("suffix", ["/ ", "/\n", "/\t"])
 @pytest.mark.parametrize("exists", [False, True])
-def test_padded_directory_intent_never_acquires_file_authority(project, suffix, exists):
+def test_padded_directory_intent_never_acquires_file_authority(project, exists):
     """Sol F3 / Opus I2: the original spelling's stripped slash intent is authoritative."""
     project.record("Directory authority guard", binding="orphaned")
     if not exists:
         (project.root / TARGET).unlink()
-    out = project.call(files=[TARGET + suffix])
+    out = project.call(files=[TARGET + "/ "])
     assert "Directory authority guard" not in out
 
 

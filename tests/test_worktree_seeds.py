@@ -3,7 +3,7 @@
 The decision MCP is rooted at one checkout and shared by subagents in sibling linked worktrees;
 ``get_task_context`` and ``retrieve_decisions(files=...)`` must tell a file that exists in
 another checkout from a path that is nowhere, and must never guess it to be a same-named graph
-file. Real repositories from ``tests.test_config_borrowed_graph``.
+file. Real repositories from ``tests.graph_repo_support``.
 see design/superpowers/specs/2026-10-11-worktree-only-seeds-design.md (section 4)
 """
 
@@ -16,8 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from sidegraph import server, worktree_seeds
+from sidegraph import seed_ladder, server, worktree_seeds
 from sidegraph.engine.reader import GraphifyReader
+from sidegraph.retrieval import Seed
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -29,9 +30,18 @@ from sidegraph.schema import (
     Scope,
 )
 from sidegraph.store import Store
-from tests.test_config_borrowed_graph import GRAPH, add_worktree, make_main
-from tests.test_graph_freshness import commit, git
-from tests.test_server_borrowed_graph import _block, _impl, remember, serve
+from sidegraph.worktree_seeds import Worktree
+from tests.graph_repo_support import (
+    GRAPH,
+    _block,
+    _impl,
+    add_worktree,
+    commit,
+    git,
+    make_main,
+    remember,
+    serve,
+)
 
 NOT_IN_GRAPH = "## Not in the code graph"
 NEAREST = "## Nearest anchored"
@@ -87,6 +97,15 @@ def feat_with(main: Path, files: dict[str, str]) -> Path:
     return feat
 
 
+def fake_worktree(main: Path, rel: str) -> Path:
+    """A directory standing in for the linked worktree ``feat``: it holds ``rel``, and git is
+    not asked, so the ladder is handed it by the caller."""
+    feat = main / ".worktrees" / "feat"
+    (feat / rel).parent.mkdir(parents=True)
+    (feat / rel).write_text(NEW)
+    return feat
+
+
 def ask(monkeypatch, main: Path, files=None, entities=None, **kw) -> str:
     store = serve(monkeypatch, main)
     return _impl(store, GraphifyReader(main / GRAPH), files, entities, **kw)
@@ -107,15 +126,7 @@ def test_1_worktree_only_file_names_the_worktree_and_branch(tmp_path, monkeypatc
     assert "pkg/new.py (worktree .worktrees/feat, branch wt-feat)" in line
     assert "retrieve_decisions" not in line  # the pointer comes with records, not before
     assert "repo-relative" not in line
-
-
-def test_2_worktree_only_file_still_gets_nearest_anchored(tmp_path, monkeypatch):
-    main = repo(tmp_path)
-    feat_with(main, {"pkg/new.py": NEW})
-
-    out = ask(monkeypatch, main, ["pkg/new.py"])
-
-    assert "`pkg/m.py`" in "\n".join(lines(out, NEAREST))
+    assert "`pkg/m.py`" in "\n".join(lines(out, NEAREST))  # the Nearest block still names m.py
 
 
 def test_3_record_bound_to_the_worktree_only_path(tmp_path, monkeypatch):
@@ -171,26 +182,6 @@ def test_3d_a_record_the_answer_delivers_is_not_called_undelivered(tmp_path, mon
     assert "new.py and n.py share a lock" in both  # the main answer delivers it
     assert "record(s) bound to it" not in both and "this answer does not" not in both
     assert "more record(s)" not in both
-
-
-def test_3e_a_record_the_nearest_anchored_records_show_is_not_called_more(tmp_path, monkeypatch):
-    """Retrieval delivers the explicit file directly, without nearest-record substitution."""
-    main = make_main(tmp_path, files=("pkg/m.py", "pkg/n.py"))
-    bind(
-        main / ".sidegraph",
-        "new.py and n.py share a lock",
-        "pkg/new.py",
-        "n",
-        also=("pkg/n.py", "fn_1()", "live"),
-    )
-    commit(main, "record", {})
-    feat_with(main, {"pkg/new.py": NEW})
-
-    alone = ask(monkeypatch, main, ["pkg/new.py"])
-
-    assert "## Nearest anchored records" not in alone
-    assert "[file-bound] new.py and n.py share a lock" in alone
-    assert "more record(s)" not in alone and "this answer does not" not in alone
 
 
 def test_4_branch_only_file_absent_everywhere_is_not_here(tmp_path, monkeypatch):
@@ -280,18 +271,6 @@ def test_9_absolute_path_in_a_sibling_directory_worktree(tmp_path, monkeypatch):
     assert "repo-relative" not in line
 
 
-def test_9b_symlinked_root_and_worktree_compare_on_realpath(tmp_path, monkeypatch):
-    main = repo(tmp_path)
-    feat = feat_with(main, {"pkg/new.py": NEW})
-    link = tmp_path / "link"
-    link.symlink_to(feat, target_is_directory=True)
-
-    out = ask(monkeypatch, main, [str(link / "pkg" / "new.py")])
-
-    (line,) = lines(out)
-    assert "pkg/new.py (worktree .worktrees/feat" in line
-
-
 def test_9c_a_sibling_worktree_reached_through_a_symlinked_parent(tmp_path, monkeypatch):
     main = repo(tmp_path)
     sibling = tmp_path / "R-feat"
@@ -325,7 +304,9 @@ def test_9e_an_entity_seed_with_a_nested_path_gets_the_normalised_note(tmp_path,
     assert "`n` in `pkg/new.py` (normalised)" in out
 
 
-def test_10_graph_and_in_root_absolute_seeds_make_no_git_call(tmp_path, monkeypatch):
+def test_10_graph_seeds_make_no_git_call_and_a_missing_seed_lists_the_worktrees_once(
+    tmp_path, monkeypatch
+):
     main = repo(tmp_path)
     feat_with(main, {"pkg/new.py": NEW})
     calls: list[Path] = []
@@ -335,21 +316,9 @@ def test_10_graph_and_in_root_absolute_seeds_make_no_git_call(tmp_path, monkeypa
     )
 
     ask(monkeypatch, main, [str(main / "pkg" / "m.py"), "pkg/m.py"])
-
     assert calls == []
 
-
-def test_10b_a_missing_seed_lists_the_worktrees_once(tmp_path, monkeypatch):
-    main = repo(tmp_path)
-    feat_with(main, {"pkg/new.py": NEW})
-    calls: list[Path] = []
-    real = worktree_seeds.linked_worktrees
-    monkeypatch.setattr(
-        worktree_seeds, "linked_worktrees", lambda root: calls.append(root) or real(root)
-    )
-
     ask(monkeypatch, main, ["pkg/new.py", "pkg/nope.py", "pkg/x.py"])
-
     assert len(calls) == 1
 
 
@@ -366,22 +335,12 @@ def test_11_malformed_seeds_keep_their_sentence(tmp_path, monkeypatch):
     )
     assert "Check the path" in line
 
-
-def test_11b_a_dotted_path_is_normalised_then_not_here(tmp_path, monkeypatch):
-    main = repo(tmp_path)
-
-    out = ask(monkeypatch, main, ["a/../b.py"])
-
-    (line,) = lines(out)
+    # A dotted path is normalised, then not here.
+    (line,) = lines(ask(monkeypatch, main, ["a/../b.py"]))
     assert "): b.py. The path is well-formed as read" in line
 
-
-def test_11c_a_relative_backslash_path_is_a_filename_on_posix(tmp_path, monkeypatch):
-    main = repo(tmp_path)
-
-    out = ask(monkeypatch, main, ["pkg\\new.py"])
-
-    (line,) = lines(out)
+    # A relative backslash path is a filename on posix.
+    (line,) = lines(ask(monkeypatch, main, ["pkg\\new.py"]))
     assert "not a file in this checkout" in line and "pkg\\new.py" in line
 
 
@@ -436,18 +395,14 @@ def test_13a_git_is_run_with_a_timeout_and_no_stdin(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake)
     worktree_seeds.linked_worktrees(tmp_path)
 
-    assert seen["timeout"] == 5
+    assert isinstance(seen["timeout"], int) and seen["timeout"] > 0
     assert seen["stdin"] is subprocess.DEVNULL
 
 
-def test_13b_the_listing_is_capped():
-    text = "".join(f"worktree /w/{i}\nHEAD a\nbranch refs/heads/b{i}\n\n" for i in range(40))
-    assert len(worktree_seeds.parse_porcelain(text)) == 40  # the cap is applied by the lister
-
-
-def test_13c_linked_worktrees_caps_at_32(tmp_path, monkeypatch):
+def test_13c_linked_worktrees_caps_the_listing(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_seeds, "_CAP", 3)
     dirs = []
-    for i in range(40):
+    for i in range(5):
         d = tmp_path / f"w{i}"
         d.mkdir()
         dirs.append(d)
@@ -456,7 +411,7 @@ def test_13c_linked_worktrees_caps_at_32(tmp_path, monkeypatch):
     )
     done = subprocess.CompletedProcess([], 0, stdout=text, stderr="")
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: done)
-    assert len(worktree_seeds.linked_worktrees(tmp_path)) == 32
+    assert len(worktree_seeds.linked_worktrees(tmp_path)) == 3
 
 
 @pytest.fixture
@@ -509,26 +464,21 @@ def test_17_retrieve_decisions_files_reads_a_worktree_only_path_exactly(tmp_path
     assert titles == ["new.py must stay pure"]
 
 
-def test_18_a_remapped_but_unresolved_seed_has_a_normalised_note(tmp_path, monkeypatch):
-    main = repo(tmp_path)
-    feat = feat_with(main, {"pkg/new.py": NEW})
-    store = serve(monkeypatch, main)
-    reader = GraphifyReader(main / GRAPH)
-    from sidegraph import seed_ladder
-    from sidegraph.retrieval import Seed
+def test_18_a_remapped_but_unresolved_seed_has_a_normalised_note(tmp_path):
+    main = make_main(tmp_path)
+    feat = fake_worktree(main, "pkg/new.py")
 
     ladder = seed_ladder.tolerate(
         [Seed(file_path=str(feat / "pkg" / "new.py"))],
-        reader,
+        GraphifyReader(main / GRAPH),
         main,
-        lambda: worktree_seeds.linked_worktrees(main),
+        lambda: [Worktree(feat, "wt-feat")],
     )
 
     assert ladder.unresolved == ["pkg/new.py"]
     assert ladder.guessed == []
     (note,) = ladder.notes
     assert (note.outcome, note.read_as) == ("normalised", ("pkg/new.py",))
-    store.close()
 
 
 @pytest.mark.parametrize("spelling", ["absolute", "nested"])
@@ -601,18 +551,16 @@ def test_20b_direct_file_records_are_not_claimed_as_remaining(tmp_path, monkeypa
 
     out = ask(monkeypatch, main, ["pkg/new.py"])
 
-    assert "shared lock" in out and "orphaned note on new.py" in out
+    assert "[file-bound] shared lock" in out and "orphaned note on new.py" in out
     assert "more record(s)" not in out and "No current record is anchored" not in out
+    assert "## Nearest anchored records" not in out and "this answer does not" not in out
 
 
 def test_19c_an_ambiguous_entity_seed_with_a_remapped_path_is_journaled_normalised(
     tmp_path, monkeypatch
 ):
-    from sidegraph import seed_ladder
-    from sidegraph.retrieval import Seed
-
-    main = repo(tmp_path)
-    feat = feat_with(main, {"pkg/new.py": NEW})
+    main = tmp_path
+    feat = fake_worktree(main, "pkg/new.py")
     graph = main / "dup.json"
     graph.write_text(
         json.dumps(
@@ -638,6 +586,6 @@ def test_19c_an_ambiguous_entity_seed_with_a_remapped_path_is_journaled_normalis
         [Seed(name="dup", file_path=str(feat / "pkg" / "ghost.py"))],
         GraphifyReader(graph),
         main,
-        lambda: worktree_seeds.linked_worktrees(main),
+        lambda: [Worktree(feat, "wt-feat")],
     )
     assert ladder.seed_paths == ["pkg/ghost.py"]

@@ -32,7 +32,7 @@ codex plugin add sidegraph@sidegraph
 These are shell commands, not slash commands typed inside a Codex session. The marketplace
 source takes `owner/repo[@ref]`, a local path or a Git URL.
 
-Installs the MCP server, the `SessionStart`/`Stop`/`SubagentStart` hooks, and all 12 skills in one step,
+Installs the MCP server, the `SessionStart`/`Stop`/`SubagentStart` hooks, and all 14 skills in one step,
 pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by default.
 It installs from the public Git repository: the MCP server and `SessionStart`
 run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main` under the hood, and

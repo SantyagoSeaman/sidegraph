@@ -1,7 +1,7 @@
 """``get_task_context`` says what happened to each seed the graph does not hold (spec D5).
 
 Red target: unfixed code appends nothing, so a seed missing from the graph gets the bare
-render. The repositories come from ``tests.test_graph_freshness``.
+render. The repositories come from ``tests.graph_repo_support``.
 # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D5, T11-T13, T24)
 """
 
@@ -15,7 +15,7 @@ from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.retrieval import RetrievalBudget
 from sidegraph.server import _get_task_context_impl, _retrieve, _seeds_from_args
 from sidegraph.store import Store
-from tests.test_graph_freshness import commit, make_repo, stale_repo, write_graph
+from tests.graph_repo_support import commit, make_repo, stale_repo, write_graph
 
 HEADING = "## Not in the code graph"
 

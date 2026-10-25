@@ -99,8 +99,8 @@ memory holds and in how many files (see the
 disables it). `sidegraph-stop` and `sidegraph-subagent-start` degrade silently on any failure.
 `sidegraph-session-start` does too, with one exception: a store that cannot be opened. It then
 sends a notice (a `systemMessage` that names the cause and the fix) and tells the model that
-memory tools will fail, because a broken store should not go unseen. A missing store is created
-by `SessionStart`, and a missing graph only shortens the map; neither blocks the session.
+memory tools will fail, because a broken store should not go unseen. A missing store is never created by a hook:
+`SessionStart` sends a notice that asks for an explicit `sidegraph-init`, and a missing graph only shortens the map; neither blocks the session.
 
 Each command ends with a guard, `|| printf '{}\n'` on `Stop` and `SubagentStart` and, on `SessionStart`,
 `|| printf '%s\n' '{"systemMessage":"…"}'`. It covers the part the Python entry points cannot:
@@ -255,7 +255,7 @@ This is the same repo-committed manifest set the Claude Code plugin uses, in Cod
 shape: `.agents/plugins/marketplace.json` at the repo root, and
 `plugin/sidegraph/.codex-plugin/plugin.json` naming the MCP config
 (`plugin/sidegraph/codex/mcp.json`), the hooks config
-(`plugin/sidegraph/codex/hooks.json`), and the skills directory (all 12 skills, each with
+(`plugin/sidegraph/codex/hooks.json`), and the skills directory (all 14 skills, each with
 its own `agents/openai.yaml` declaring the `sidegraph` MCP dependency and whether Codex may
 invoke it implicitly). No `PreToolUse` entry ships, for the reason given above.
 

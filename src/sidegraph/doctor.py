@@ -44,6 +44,8 @@ from .store import (
     SKIPPED_CANONICAL_KEY,
     parse_skip_list,
 )
+from .store_layout import index_stamp_problem
+from .store_view import SUBDIR_OF, is_packed_store, records_of, shared_view
 from .verify import (
     _check_archive_dir,
     _iter_json_files,
@@ -71,6 +73,8 @@ ORPHANED_RECORD = "orphaned-record"
 STORE_UNCOMMITTED = "store-uncommitted"
 PLUGIN_OFF_IN_SUBDIRECTORIES = "plugin-off-in-subdirectories"
 REFRESH_HELPER_OUTDATED = "refresh-helper-outdated"
+STORE_NOT_MIGRATED = "store-not-migrated"
+MAINTENANCE_DUE = "maintenance-due"
 
 # The registry's check id -> the finding code doctor prints. They differ where one check yields
 # findings of one record each: check ``orphaned-records`` is one problem, code ``orphaned-record``
@@ -86,6 +90,8 @@ _FINDING_CODE = {
     "store-uncommitted": STORE_UNCOMMITTED,
     "plugin-off-in-subdirectories": PLUGIN_OFF_IN_SUBDIRECTORIES,
     "refresh-helper-outdated": REFRESH_HELPER_OUTDATED,
+    "store-not-migrated": STORE_NOT_MIGRATED,
+    "maintenance-due": MAINTENANCE_DUE,
 }
 
 # Name reported in ``CurationReport.skipped`` when index.db is absent or unusable — the
@@ -157,9 +163,26 @@ def _is_open_decision(d: dict) -> bool:
     return isinstance(status, str) and status in _OPEN_DECISION_STATUSES
 
 
+# The reference inputs doctor reads whatever parses: an entity or bindings file the model check
+# rejects must not make its neighbours look unreferenced. An open decision, fact or domain the
+# rules quarantine is not served at all: judging an unreadable record live or dangling would be
+# a second precedence, and verify reports it.
+_LENIENT_SUBDIRS = frozenset({"entities"})
+_TYPE_OF_SUBDIR = {subdir: record_type for record_type, subdir in SUBDIR_OF.items()}
+
+
 def _iter_records(store_dir: Path, subdir: str) -> list[tuple[Path, dict]]:
     """(path, payload) for every parseable JSON-object file in ``<store>/<subdir>``,
-    sorted by path (findings inherit this order — deterministic output)."""
+    sorted by path (findings inherit this order — deterministic output).
+
+    A format-2 store answers from the inventory's effective records instead: the path is where
+    the record is stored (its file, its shard or its archive segment), the order is by id.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
+    packed = records_of(store_dir, _TYPE_OF_SUBDIR[subdir], lenient=subdir in _LENIENT_SUBDIRS)
+    if packed is not None:
+        return [
+            (rec.source_path(store_dir), rec.raw) for rec in packed if isinstance(rec.raw, dict)
+        ]
     out: list[tuple[Path, dict]] = []
     for path in _iter_json_files(store_dir / subdir):
         payload, err = _load_raw_json(path)
@@ -171,8 +194,15 @@ def _iter_records(store_dir: Path, subdir: str) -> list[tuple[Path, dict]]:
 def _binding_entries(store_dir: Path) -> dict[str, list[dict]]:
     """record_id -> committed anchor entries, from ``bindings/<record_id>.json`` (each a
     JSON LIST of identity dicts, no status — see store-format). Non-list payloads and
-    non-dict entries are skipped under the same silent-skip policy."""
+    non-dict entries are skipped under the same silent-skip policy. A format-2 store answers
+    from the inventory's effective bindings (a bindings file is the whole list and wins)."""
     out: dict[str, list[dict]] = {}
+    packed = records_of(store_dir, "bindings", lenient=True)
+    if packed is not None:
+        for rec in packed:
+            if isinstance(rec.raw, list):
+                out[rec.record_id] = [e for e in rec.raw if isinstance(e, dict)]
+        return out
     for path in _iter_json_files(store_dir / "bindings"):
         payload, err = _load_raw_json(path)
         if err is None and isinstance(payload, list):
@@ -196,7 +226,15 @@ def _skipped_paths(index: sqlite3.Connection | None) -> frozenset[str]:
         ).fetchone()
     except sqlite3.Error:
         return frozenset()
-    return frozenset(e["path"] for e in parse_skip_list(row[0])) if row else frozenset()
+    if not row:
+        return frozenset()
+    paths: set[str] = set()
+    for entry in parse_skip_list(row[0]):
+        paths.add(entry["path"])
+        subdir = SUBDIR_OF.get(str(entry.get("type")))  # a shard line is named by its identity
+        if subdir is not None and isinstance(entry.get("id"), str):
+            paths.add(f"{subdir}/{entry['id']}.json")
+    return frozenset(paths)
 
 
 def _check_dangling_records(
@@ -553,6 +591,8 @@ def _check_binding_statuses(store_dir: Path) -> tuple[list[Finding], list[str]]:
     try:
         conn = sqlite3.connect(f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True)
         try:
+            if index_stamp_problem(store_dir, conn) is not None:
+                return [], [BINDING_STATUS_CHECK]
             # A reload resets every status to live (other causes leave them possibly out of
             # date) and a sync recomputes them; until then the
             # rows below say nothing, so the check is withheld. A missing ``meta`` table (a
@@ -612,6 +652,8 @@ def _check_never_surfaced(store_dir: Path) -> tuple[list[Finding], list[str]]:
     try:
         conn = sqlite3.connect(f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True)
         try:
+            if index_stamp_problem(store_dir, conn) is not None:
+                return [], [NEVER_SURFACED_CHECK]
             shows = dict(conn.execute("SELECT record_id, shows FROM retrieval_shows").fetchall())
             queries = dict(conn.execute("SELECT seed, queries FROM retrieval_seeds").fetchall())
         finally:
@@ -700,6 +742,8 @@ def _binding_status_snapshot(
             timeout=busy_timeout_seconds,
         )
         try:
+            if index_stamp_problem(store_dir, conn) is not None:
+                return _BindingStatusSnapshot({}, True)
             conn.execute("BEGIN")
             try:
                 uncomputed = not integrity.binding_statuses_computed(conn)
@@ -1065,9 +1109,10 @@ def scan_code_drift(
     (N5). Every git call — root resolution, diffs, head — draws on the ONE ``deadline``
     (review I-1/M-1), so hook cost is bounded by the deadline itself."""
     root = Path(store_dir)
-    decisions = _iter_records(root, "decisions")
-    entities = _iter_records(root, "entities")
-    bindings = _binding_entries(root)
+    with shared_view():
+        decisions = _iter_records(root, "decisions")
+        entities = _iter_records(root, "entities")
+        bindings = _binding_entries(root)
     return _scan_code_drift(
         decisions,
         bindings,
@@ -1387,6 +1432,9 @@ def open_curation_index(store_dir: str | Path) -> sqlite3.Connection | None:
     except sqlite3.Error:
         conn.close()
         return None
+    if index_stamp_problem(store_dir, conn) is not None:
+        conn.close()
+        return None
     return conn
 
 
@@ -1627,6 +1675,20 @@ def _hot_plus_archive_records(store_dir: Path) -> dict[str, dict[str, dict]]:
     ``Store()``, no write.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D5
     """
+    if is_packed_store(store_dir):  # format 2: one effective record per id
+
+        def effective_of(subdir: str, key: str) -> dict[str, dict]:
+            return {
+                rec[key]: rec
+                for _p, rec in _iter_records(store_dir, subdir)
+                if isinstance(rec.get(key), str)
+            }
+
+        return {
+            "decisions": effective_of("decisions", "id"),
+            "facts": effective_of("facts", "id"),
+            "domains": effective_of("domains", "domain_id"),
+        }
     archive = _check_archive_dir(store_dir / "archive")
 
     def hot(subdir: str, key: str) -> dict[str, dict]:
@@ -1848,7 +1910,10 @@ def _latency_days(rec: dict) -> float | None:
 
 def ratification_latency_lines(store_dir: str | Path) -> list[str]:
     """The ``time-to-ratify`` informational line (median/max ``ratified_at - valid_from``
-    over hot records that carry the stamp), or ``[]`` when no record qualifies.
+    over hot records that carry the stamp), or ``[]`` when no record qualifies. "Hot" is the
+    per-record files of a format-1 store; a format-2 store has no hot/archive split once its
+    archive is packed, so it counts every effective record, a compacted one included (the line
+    can therefore differ across a migration of a compacted store).
     Pre-stamp records are excluded, never guessed. Informational only: never a finding,
     never affects the exit code, deliberately absent from ``--json`` (pinned key set).
     A record that is unusable is skipped on its own (see ``_latency_days``); an error
@@ -1877,7 +1942,8 @@ def ratification_info_lines(store_dir: str | Path) -> list[str]:
     the ``time-to-ratify`` line, then the D5 auto-share lines (each present only when it
     has something to say). Computed here so the CLI only prints; an unusable record is
     skipped inside each part and any other error propagates."""
-    return [*ratification_latency_lines(store_dir), *_auto_share_lines(store_dir)]
+    with shared_view():
+        return [*ratification_latency_lines(store_dir), *_auto_share_lines(store_dir)]
 
 
 def spelling_twin_lines(store_dir: str | Path) -> list[str]:
@@ -1959,7 +2025,20 @@ def curate(
     # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
     # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
     """
-    root = Path(store_dir)
+    with shared_view():
+        return _curate(Path(store_dir), stale_days, now, repo_root, reader, index, host_checks)
+
+
+def _curate(
+    root: Path,
+    stale_days: int,
+    now: datetime | None,
+    repo_root: Path | None,
+    reader: GraphifyReader | None,
+    index: sqlite3.Connection | None,
+    host_checks: Sequence[integrity.Check],
+) -> CurationReport:
+    """``curate``'s body, run inside one shared view of a format-2 store."""
     now = now or datetime.now(UTC)
     decisions = _iter_records(root, "decisions")
     facts = _iter_records(root, "facts")
@@ -1975,10 +2054,16 @@ def curate(
     # there. The verdict doesn't change (an archived decision is terminal by construction, so
     # such a fact is correctly reported either way) -- only the WORDING does, which is
     # exactly the failure D5's distinct wording exists to prevent.
-    archived = _check_archive_dir(root / "archive")
+    # A format-2 store has no second pool: its decisions and domains above already are the
+    # effective records, archive segments included.
+    archived_decisions: dict[str, dict] = {}
+    archived_domains: dict[str, dict] = {}
+    if not is_packed_store(root):
+        archived = _check_archive_dir(root / "archive")
+        archived_decisions, archived_domains = archived.decisions, archived.domains
     decision_status_by_id: dict[str, str] = {
         did: status
-        for did, payload in archived.decisions.items()
+        for did, payload in archived_decisions.items()
         if isinstance(status := payload.get("status"), str)
     }
     decision_status_by_id.update(
@@ -2021,5 +2106,5 @@ def curate(
     # unchanged: the graph never caught up with HEAD (``graph-stale``, where this module's own
     # check used to be), and records whose every code anchor is orphaned (``orphaned-record``).
     findings += _registry_findings(root, now, reader, index, host_checks)
-    findings += _check_snapshot_splits(root, domains, archived.domains)
+    findings += _check_snapshot_splits(root, domains, archived_domains)
     return CurationReport(findings=findings, skipped=skipped)

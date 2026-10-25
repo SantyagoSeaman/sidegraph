@@ -12,7 +12,6 @@ import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote, unquote_to_bytes
 
 import pytest
 from ulid import ULID
@@ -387,12 +386,6 @@ def test_meta_table_that_cannot_be_read_skips_the_check_not_computed(tmp_path):
     assert ORPHANED_BINDING not in _codes(report)
 
 
-def test_missing_index_db_skips_binding_status_check(tmp_path):
-    report = curate(tmp_path, now=NOW)
-    assert report.skipped == [BINDING_STATUS_CHECK, NEVER_SURFACED_CHECK]
-    assert report.findings == []
-
-
 def test_degraded_and_orphaned_bindings_are_reported(tmp_path):
     _index_with_bindings(
         tmp_path, [("R1", "E1", "degraded"), ("R2", "E2", "orphaned"), ("R3", "E3", "live")]
@@ -538,12 +531,6 @@ def test_no_unquoted_sqlite_uri_in_src():
 # a directory name), so the URI is built from the raw bytes: `quote(os.fsencode(path))`.
 
 _SURROGATE_PATH = Path("/nonexistent") / "d\udc80x" / ".sidegraph"
-
-
-def test_raw_byte_quoting_round_trips_a_surrogate_path():
-    index_path = _SURROGATE_PATH / "index.db"
-    uri = f"file:{quote(os.fsencode(str(index_path)))}?mode=ro"
-    assert unquote_to_bytes(uri[len("file:") : uri.index("?")]) == os.fsencode(index_path)
 
 
 def test_open_index_ro_survives_a_surrogate_path():

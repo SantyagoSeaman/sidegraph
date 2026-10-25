@@ -4,7 +4,7 @@ The worktree has the tracked store and no graph. The hook opens the main checkou
 it index-only (the worktree's index starts cold, and a sync that wrote canonical files would
 rewrite the tracked store from code that is not the branch's), renders the domain map in memory
 from the store, and adds one line saying whose graph it is reading. The repositories are
-real ones from ``tests.test_config_borrowed_graph``.
+real ones from ``tests.graph_repo_support``.
 see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2, T12-T12c)
 """
 
@@ -31,9 +31,7 @@ from sidegraph.schema import (
 )
 from sidegraph.store import Store
 from sidegraph.sync import LAST_SYNCED_KEY
-from tests.test_config_borrowed_graph import GRAPH, add_worktree, make_main
-from tests.test_graph_freshness import commit, git
-from tests.test_server_borrowed_graph import remember
+from tests.graph_repo_support import GRAPH, add_worktree, commit, git, make_main, remember
 
 BORROWED_LINE = "Sidegraph: this worktree has no code graph of its own, so memory reads the main"
 
@@ -254,7 +252,7 @@ def test_t12c_the_main_checkout_gets_no_borrowed_line_and_today_s_wording(
 
 def test_a_worktree_with_its_own_graph_is_not_borrowing(main, monkeypatch, capsys):
     worktree = add_worktree(main)
-    from tests.test_graph_freshness import head, write_graph
+    from tests.graph_repo_support import head, write_graph
 
     write_graph(worktree / GRAPH, head(worktree), ["pkg/m.py"])
 

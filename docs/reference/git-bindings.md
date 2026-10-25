@@ -40,11 +40,18 @@ Or via the [`pre-commit`](https://pre-commit.com) framework — add to `.pre-com
 
 ```yaml
 repos:
-  - repo: https://github.com/<org>/sidegraph
-    rev: <tag>
+  - repo: local
     hooks:
       - id: sidegraph-prepare-commit-msg
+        name: Sidegraph commit trailers
+        entry: sidegraph-prepare-commit-msg
+        language: system
+        stages: [prepare-commit-msg]
+        always_run: true
 ```
+
+(`language: system` runs the `sidegraph-prepare-commit-msg` command found on your `PATH`, so
+install Sidegraph first.)
 
 then `pre-commit install --hook-type prepare-commit-msg` (the framework does not install
 `prepare-commit-msg`-stage hooks with a bare `pre-commit install`). The framework passes the

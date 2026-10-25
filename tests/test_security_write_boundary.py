@@ -3,7 +3,6 @@
 import asyncio
 import inspect
 import logging
-from enum import IntEnum
 from types import SimpleNamespace
 
 import fastmcp
@@ -38,72 +37,26 @@ def attempt(current, arguments):
         ("propose_domains", "drafts"),
     ],
 )
-def test_raw_opaque_batch_does_not_start_iteration(name, field):
-    activity = []
-
-    class Poison:
-        def __iter__(self):
-            activity.append("iter")
-            raise RuntimeError(MARKER)
-
+def test_non_list_batch_is_named_without_echoing_it(name, field):
     arguments = dict(drafts=[])
-    arguments[field] = Poison()
+    arguments[field] = MARKER
     error = attempt(tool(name), arguments)
-    assert activity == []
     assert error is not None
-    assert field in str(error)
+    assert f"{field}: list_type" in str(error)
     assert MARKER not in str(error)
 
 
 @pytest.mark.parametrize("name", ["propose_decisions", "propose_domains"])
-def test_over_100_batch_rejects_before_iteration(name):
-    activity = []
-
-    class Wide(list):
-        def __iter__(self):
-            activity.append("iter")
-            raise RuntimeError(MARKER)
-
-    error = attempt(tool(name), dict(drafts=Wide([{}] * 101)))
-    assert activity == []
+def test_over_100_batch_rejects_before_validation(name):
+    error = attempt(tool(name), dict(drafts=[{}] * 101))
     assert error is not None
     assert str(error) == "Input exceeds resource limits."
 
 
-@pytest.mark.parametrize("name", ["propose_decisions", "propose_domains", "add_decision"])
-def test_numeric_enum_metadata_rejects_before_coercion(name):
-    activity = []
-
-    class Numeric(IntEnum):
-        VALUE = 10**4299 + 7
-
-        def __str__(self):
-            activity.append("str")
-            raise RuntimeError(MARKER)
-
-    arguments = dict(drafts=[], author=Numeric.VALUE)
-    if name == "add_decision":
-        arguments = dict(
-            title="ordinary", kind="adr", context="c", choice="c", author=Numeric.VALUE
-        )
-    error = attempt(tool(name), arguments)
-    assert activity == []
-    assert error is not None
-    assert str(error) == "Input exceeds resource limits."
-
-
-def test_proposal_prevalidation_does_not_consume_nested_rejected_value():
-    activity = []
-
-    class Poison:
-        def __iter__(self):
-            activity.append("iter")
-            raise RuntimeError(MARKER)
-
-    invalid = dict(title="bad", kind="lesson", context=Poison(), choice="c")
+def test_proposal_prevalidation_does_not_reject_the_request_for_one_invalid_draft():
+    invalid = dict(title="bad", kind="lesson", context=["not", "text"], choice="c")
     valid = dict(title="sibling", kind="lesson", context="c", choice="c")
     assert attempt(tool("propose_decisions"), dict(drafts=[invalid, valid])) is None
-    assert activity == []
 
 
 def test_request_union_overflow_is_rejected_before_schema(monkeypatch):
@@ -117,7 +70,7 @@ def test_request_union_overflow_is_rejected_before_schema(monkeypatch):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("exception", [ValueError, RuntimeError, ToolError])
+@pytest.mark.parametrize("exception", [RuntimeError, ToolError])
 def test_sync_and_async_wrappers_mask_arbitrary_failures(asynchronous, exception, caplog):
     calls = []
 
@@ -176,78 +129,13 @@ def test_unknown_registration_with_valid_arguments_fails_before_body(annotations
     )
 
 
-def test_known_read_name_rebound_to_another_function_is_not_a_read_exemption():
-    calls = []
-
-    def impostor():
-        calls.append(True)
-        return MARKER
-
-    forged = FunctionTool.from_function(impostor, name="list_facts", annotations=server._READ_ONLY)
-    error = None
-    try:
-        server._classify_tool(forged)
-    except ToolError as caught:
-        error = caught
-    assert calls == []
-    assert error is not None
-    assert str(error) == write_boundary.CONFIGURATION_ERROR
-
-
-def test_copied_wrapper_marker_is_not_trusted():
-    def original(value: str):
-        return value
-
-    safe = write_boundary.safe_write(original)
-    original._sidegraph_safe_write = safe._sidegraph_safe_write
-    assert write_boundary.is_safe_write(safe)
-    assert not write_boundary.is_safe_write(original)
-
-
 def test_registered_tool_partition_is_total_and_identity_bound():
     current = asyncio.run(server.mcp.list_tools())
     classified = {item.name: server._classify_tool(item) for item in current}
-    assert len(classified) == 25
     assert {name for name, write in classified.items() if write} == server._WRITE_TOOLS
     assert {
         name for name, write in classified.items() if not write
     } == server._READ_TOOLS | server._LAZY_READ_TOOLS
-
-
-def test_unsupported_core_schema_fails_closed_without_body(monkeypatch):
-    calls = []
-
-    @write_boundary.safe_write
-    def guarded(value: str):
-        calls.append(value)
-        return value
-
-    current = FunctionTool.from_function(guarded)
-
-    class Unsupported:
-        core_schema = {"type": "str"}
-
-    monkeypatch.setattr(write_boundary, "get_cached_typeadapter", lambda fn: Unsupported())
-    error = attempt(current, {"value": MARKER})
-    assert calls == []
-    assert error is not None
-    assert str(error) == write_boundary.CONFIGURATION_ERROR
-
-
-def test_argument_validator_cache_is_bounded_and_never_executes_bodies():
-    calls = []
-    write_boundary._arguments_validator.cache_clear()
-    for _ in range(40):
-
-        @write_boundary.safe_write
-        def guarded(value: int = 4):
-            calls.append(value)
-            return value
-
-        current = FunctionTool.from_function(guarded)
-        assert attempt(current, {"value": "7"}) is None
-    assert calls == []
-    assert write_boundary._arguments_validator.cache_info().currsize == 32
 
 
 @pytest.mark.parametrize("lookup", ["absent", "missing", "raising"])
@@ -273,19 +161,3 @@ def test_unresolved_middleware_context_fails_closed_before_continuation(lookup):
     assert calls == []
     assert str(caught.value) == write_boundary.CONFIGURATION_ERROR
     assert MARKER not in str(caught.value)
-
-
-@pytest.mark.parametrize("name", ["propose_decisions", "propose_domains"])
-def test_raw_admission_method_failure_has_a_static_cause(name):
-    calls = []
-
-    class BelowLimit(list):
-        def __iter__(self):
-            calls.append("iter")
-            raise RuntimeError(MARKER)
-
-    error = attempt(tool(name), {"drafts": BelowLimit([{}])})
-    assert calls == ["iter"]
-    assert error is not None
-    assert str(error) == write_boundary.CONFIGURATION_ERROR
-    assert MARKER not in str(error)

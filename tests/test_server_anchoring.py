@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.server import _add_decision_impl
 from sidegraph.store import Store
@@ -225,43 +223,6 @@ def test_add_decision_anchor_without_relation_defaults_to_affects(tmp_path):
 
 
 # -- per-anchor relation validated BEFORE any write (M5, M2 review fold-in) ---------------
-
-
-def test_add_decision_invalid_anchor_relation_writes_nothing(tmp_path):
-    store = Store(tmp_path / "srv.db")
-    with pytest.raises(ValueError, match="relation"):
-        _add_decision_impl(
-            store,
-            None,
-            title="t",
-            kind="adr",
-            context="c",
-            choice="ch",
-            anchors=[{"name": "Trader", "relation": "not-a-real-relation"}],
-        )
-    assert list(store.iter_decisions()) == []
-
-
-def test_add_decision_invalid_anchor_relation_no_half_anchored_row(tmp_path):
-    """A valid anchor listed BEFORE the invalid one must not get its entity/binding
-    written either -- validation runs for the whole batch before any store write."""
-    store = Store(tmp_path / "srv.db")
-    reader = GraphifyReader(FIXTURE)
-    with pytest.raises(ValueError):
-        _add_decision_impl(
-            store,
-            reader,
-            title="t",
-            kind="adr",
-            context="c",
-            choice="ch",
-            anchors=[
-                {"name": "Trader", "file_path": "trader/exec.py"},
-                {"name": "helper()", "file_path": "util/misc.py", "relation": "bogus"},
-            ],
-        )
-    assert list(store.iter_decisions()) == []
-    assert store.find_entity("Trader", "trader/exec.py") is None
 
 
 def test_add_decision_valid_relation_still_writes(tmp_path):

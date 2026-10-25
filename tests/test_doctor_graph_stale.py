@@ -2,7 +2,7 @@
 
 Red target: unfixed code has no ``GRAPH_STALE`` code (ImportError), so a graph that never
 caught up with HEAD is silent in the one health check people run. The repositories come from
-``tests.test_graph_freshness``.
+``tests.graph_repo_support``.
 # see design/superpowers/specs/2026-10-01-stale-graph-visible-design.md (D6, T14-T15)
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from sidegraph.doctor import GRAPH_STALE, curate
 from sidegraph.engine.reader import GraphifyReader
-from tests.test_graph_freshness import make_repo, stale_repo, write_graph
+from tests.graph_repo_support import make_repo, stale_repo, write_graph
 
 
 def _store_dir(tmp_path):
@@ -37,7 +37,7 @@ def test_t14_a_stale_graph_is_one_finding_with_the_rebuild_command(tmp_path):
 
 
 def test_the_example_list_ends_in_an_ellipsis_when_more_files_changed(tmp_path):
-    from tests.test_graph_freshness import commit
+    from tests.graph_repo_support import commit
 
     fx = make_repo(tmp_path)
     commit(fx.repo, "B", {f"new/f{i}.py": "x = 1\n" for i in range(7)})

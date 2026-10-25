@@ -22,19 +22,18 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-@pytest.fixture(params=["sha1", "sha256"])
-def tracked_edit(tmp_path: Path, request):
+def _tracked_edit(tmp_path: Path, object_format: str):
     repo = tmp_path / "repo"
     repo.mkdir()
     result = subprocess.run(
-        ["git", "init", "-q", f"--object-format={request.param}"],
+        ["git", "init", "-q", f"--object-format={object_format}"],
         cwd=repo,
         env=git_env(),
         capture_output=True,
         text=True,
     )
     if (
-        request.param == "sha256"
+        object_format == "sha256"
         and result.returncode != 0
         and ("unknown option" in result.stderr or "unknown hash algorithm" in result.stderr)
     ):
@@ -63,6 +62,11 @@ def tracked_edit(tmp_path: Path, request):
     path.write_text(json.dumps(data) + "\n", encoding="utf-8")
     assert verify_snapshot(store) == []  # The immutable edit is valid within a snapshot.
     return repo, store, path, baseline
+
+
+@pytest.fixture
+def tracked_edit(tmp_path: Path):
+    return _tracked_edit(tmp_path, "sha1")
 
 
 @pytest.mark.parametrize(
@@ -233,6 +237,17 @@ def test_commitish_baselines_detect_immutable_edit(tracked_edit, kind):
     findings = verify_against(store, ref)
     assert path.read_bytes() == before
     assert [(item.code, item.path) for item in findings] == [
+        (ILLEGAL_FIELD_CHANGE, path.relative_to(repo).as_posix())
+    ]
+
+
+def test_sha256_full_oid_baseline_detects_immutable_edit(tmp_path):
+    # the one resolver integration on a 64-hex object id
+    from sidegraph.verify import ILLEGAL_FIELD_CHANGE
+
+    repo, store, path, baseline = _tracked_edit(tmp_path, "sha256")
+    assert len(baseline) == 64
+    assert [(f.code, f.path) for f in verify_against(store, baseline)] == [
         (ILLEGAL_FIELD_CHANGE, path.relative_to(repo).as_posix())
     ]
 

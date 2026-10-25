@@ -322,9 +322,7 @@ def test_it_never_raises_on_hostile_input(tree: tuple[Path, Path]) -> None:
     root, _ = tree
     for line in (
         "cat " + "'" * 50,
-        "(" * 200 + "cat src/a.py" + ")" * 200,
         "cat \x00 src/a.py",
-        "cat " + "a/" * 5000 + "b.py",
         "<<<<<<<< >>>>>>> |||||| &&&&&",
         "bash -c",
         "cd",

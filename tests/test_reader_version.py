@@ -1,6 +1,10 @@
 import json
 
+import pytest
+
 from sidegraph.engine.reader import GraphifyReader
+
+MISSING = object()  # a graph.json without a built_at_commit key
 
 NODE = {
     "id": "d",
@@ -25,25 +29,23 @@ def test_combines_commit_and_content_hash(tmp_path):
     assert len(v) == len("abc123:") + 12
 
 
-def test_fallback_when_key_missing(tmp_path):
-    p = _write(tmp_path, "g.json", {"nodes": [NODE], "links": []})
+@pytest.mark.parametrize("commit", [MISSING, None, ""])
+def test_fallback_when_no_commit_is_recorded(tmp_path, commit):
+    data = {"nodes": [NODE], "links": []}
+    if commit is not MISSING:
+        data["built_at_commit"] = commit
+    p = _write(tmp_path, "g.json", data)
     v = GraphifyReader(p).graph_version()
     assert v.startswith("content:")
     assert len(v) == len("content:") + 12
 
 
-def test_fallback_when_null(tmp_path):
-    p = _write(tmp_path, "g.json", {"built_at_commit": None, "nodes": [], "links": []})
-    assert GraphifyReader(p).graph_version().startswith("content:")
-
-
-def test_fallback_when_empty_string(tmp_path):
-    p = _write(tmp_path, "g.json", {"built_at_commit": "", "nodes": [], "links": []})
-    assert GraphifyReader(p).graph_version().startswith("content:")
-
-
-def test_fallback_stable_across_loads(tmp_path):
-    p = _write(tmp_path, "g.json", {"nodes": [NODE], "links": []})
+@pytest.mark.parametrize("commit", [MISSING, "abc123"])
+def test_a_version_is_stable_across_loads_of_one_file(tmp_path, commit):
+    data = {"nodes": [NODE], "links": []}
+    if commit is not MISSING:
+        data["built_at_commit"] = commit
+    p = _write(tmp_path, "g.json", data)
     assert GraphifyReader(p).graph_version() == GraphifyReader(p).graph_version()
 
 
@@ -52,12 +54,6 @@ def test_fallback_changes_when_content_changes(tmp_path):
     v1 = GraphifyReader(p).graph_version()
     p.write_text(json.dumps({"nodes": [dict(NODE, community=9)], "links": []}))
     assert GraphifyReader(p).graph_version() != v1
-
-
-def test_same_commit_same_content_is_stable(tmp_path):
-    data = {"built_at_commit": "abc123", "nodes": [NODE], "links": []}
-    p = _write(tmp_path, "g.json", data)
-    assert GraphifyReader(p).graph_version() == GraphifyReader(p).graph_version()
 
 
 def test_same_commit_changed_content_changes_version(tmp_path):
