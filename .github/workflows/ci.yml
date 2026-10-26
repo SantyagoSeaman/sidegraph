@@ -201,6 +201,7 @@ jobs:
             tests/test_hot_index_facts.py `
             tests/test_delivery_evidence.py tests/test_delivery_stats.py tests/test_delivery_surfaces.py `
             tests/test_git_output_utf8.py `
+            tests/test_githooks_atomic_lock.py::test_windows_pid_probe_is_never_a_signal_from_python `
             tests/test_health_check_skill.py `
             $privateTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

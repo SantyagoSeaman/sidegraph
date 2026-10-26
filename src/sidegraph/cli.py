@@ -416,11 +416,14 @@ def _hook_graph_problem(
 
 
 def _refresh_outdated_helper(info: githooks.RepoInfo) -> bool:
-    """Rewrite the helper alone when a hook runs it and it runs Graphify without
+    """Rewrite a helper in use with the old directory lock or a Graphify run without
     ``GRAPHIFY_NO_AUTO_REFRESH=1``; ``True`` when it did. The helper is per repository, so this
     holds whatever graph the store reads; the recorded choice and the hook files are not touched.
     see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D7)"""
-    if githooks.helper_is_current(info) is not False or not githooks.helper_in_use(info):
+    old_lock = githooks.helper_uses_directory_lock(info)
+    if (
+        githooks.helper_is_current(info) is not False and not old_lock
+    ) or not githooks.helper_in_use(info):
         return False
     graphify = shutil.which("graphify")
     try:
@@ -428,10 +431,13 @@ def _refresh_outdated_helper(info: githooks.RepoInfo) -> bool:
     except OSError as e:
         print(f"graph refresh hook: could not refresh the helper ({e})")
         return False
-    print(
-        "graph refresh hook: refreshed the helper, which ran Graphify without "
-        f"{githooks.GRAPH_REBUILD_ENV}"
-    )
+    if old_lock:
+        print("graph refresh hook: refreshed the helper, which used directory-based locking")
+    else:
+        print(
+            "graph refresh hook: refreshed the helper, which ran Graphify without "
+            f"{githooks.GRAPH_REBUILD_ENV}"
+        )
     return True
 
 

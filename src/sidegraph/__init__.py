@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     )
     from .store import Store
 
-__version__ = "0.17.2"
+__version__ = "0.17.3"
 
 # name -> the submodule that defines it
 _LAZY = {

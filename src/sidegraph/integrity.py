@@ -735,7 +735,7 @@ def _detect_store_files_skipped(inputs: Inputs) -> Problem | None:
 
 
 def _detect_refresh_helper_outdated(inputs: Inputs) -> Problem | None:
-    """A hook git runs calls a helper that runs Graphify without ``GRAPHIFY_NO_AUTO_REFRESH=1``
+    """A hook calls a helper with directory-based locking or missing ``GRAPHIFY_NO_AUTO_REFRESH=1``
     (an earlier ``sidegraph-init`` wrote it). Not run outside a git repository, with no helper, or
     when no hook calls it (``refresh-hook-missing`` says that); one hook that calls it is enough,
     so a partly wired repository and a recorded decline do not hide it. The fix is plain
@@ -751,8 +751,33 @@ def _detect_refresh_helper_outdated(inputs: Inputs) -> Problem | None:
     current = githooks.helper_is_current(info)
     if current is None or not githooks.helper_in_use(info):
         raise _NotRun
-    if current:
+    old_lock = githooks.helper_uses_directory_lock(info)
+    if current and not old_lock:
         return None
+    if old_lock:
+        return Problem(
+            check="refresh-helper-outdated",
+            severity="advisory",
+            summary="graph refresh helper uses directory-based locking",
+            fix="sidegraph-init",
+            line=(
+                "Sidegraph: the graph refresh helper uses directory-based locking, which can "
+                "allow overlapping rebuilds with uutils mkdir. Ask the user to run "
+                "`sidegraph-init`, which refreshes the helper and keeps their recorded hook "
+                "choice; do not run it unasked."
+            ),
+            notice=(
+                "Sidegraph: the graph refresh helper uses directory-based locking, which can "
+                "allow overlapping rebuilds with uutils mkdir. Refresh it with `sidegraph-init`."
+            ),
+            findings=(
+                (
+                    str(info.helper),
+                    "the installed graph refresh helper uses directory-based "
+                    "locking; run `sidegraph-init` to refresh it",
+                ),
+            ),
+        )
     return Problem(
         check="refresh-helper-outdated",
         severity="advisory",

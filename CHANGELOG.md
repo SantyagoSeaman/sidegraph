@@ -7,6 +7,23 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.17.3] — 2026-10-26
+
+### Fixed
+
+- Graph refresh hooks acquire both the runner lock and stale-breaker gate with exclusive
+  shell PID files. Concurrent hooks remain serialized on systems whose external `mkdir`
+  can report success to two racing callers, while live legacy directory locks are respected.
+- Installer cleanup coordinates with the same breaker gate and preserves a lock whose owner
+  changed during its PID check. Optional native-lock failures no longer prevent publishing
+  an updated helper, and a failed gate PID write no longer leaves a permanent gate.
+- Doctor detects the complete older directory-lock helper; plain `sidegraph-init` repairs
+  it while keeping hook bytes and the recorded choice. Automatic detection conservatively
+  preserves unfamiliar scripts and quoted examples. Run `sidegraph-init` after upgrading
+  in each clone that uses the old helper.
+- Native Windows installer cleanup leaves PID-bearing locks untouched, instead of using
+  Python signal probes on process ids from a potentially different POSIX-shell namespace.
+
 ## [0.17.2] — 2026-10-25
 
 ### Fixed

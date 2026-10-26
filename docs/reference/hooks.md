@@ -402,6 +402,13 @@ raises costs only its own line.
     > installed on the first rebuild after an upgrade. Ask the user to run `sidegraph-init`,
     > which refreshes the helper and keeps their recorded hook choice; do not run it unasked.
 
+    A helper using the old directory-based lock is also reported: uutils `mkdir` can admit
+    overlapping rebuilds. `sidegraph-init` replaces it with exclusive PID-file locking while
+    preserving hook bytes and the recorded choice. The outdated-helper check recognizes concrete defects in simple shell helpers,
+    rather than comparing the whole template. It conservatively skips unfamiliar scripts with
+    heredocs or multiline quotes. This controls automatic defect repair; an ordinary init
+    that refreshes a fully installed hook still rewrites its managed helper.
+
     It also sends a notice for the person. See
     [`refresh-helper-outdated`](../guides/troubleshooting.md#refresh-helper-outdated).
 15. **Refresh-hook line.** When no git hook keeps the graph fresh, one line tells the model to

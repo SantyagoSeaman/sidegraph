@@ -27,8 +27,10 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -76,17 +78,14 @@ _GIT_TIMEOUT = 10.0
 # wrote its pid; only its age says so. The helper breaks one after this long (``-mmin +10``).
 _STALE_LOCK_SECONDS = 600
 
-# The helper, verbatim from the reviewed design (D5): the "want" flag, ``take``, the ``.gate``
-# stale-breaker and ``me=$(exec sh -c 'echo $PPID')`` are the tested locking and are not to be
-# edited. One review amendment: a lock with no pid (its owner died, or could not write, between
-# ``mkdir`` and ``echo``) is broken once it is ten minutes old, the age checked again under the
-# gate; before, it blocked every rebuild for good. ``@GRAPHIFY@`` is the one substitution: the
-# path found at install time, quoted, or ''. A second amendment sets ``GRAPHIFY_NO_AUTO_REFRESH=1``
-# on the rebuild line (design/superpowers/specs/2026-10-14-graphify-upgrade-design.md, D7).
+# D5's want flag, stale-breaker gate and runner PID are preserved. The lock and gate
+# now use the shell's noclobber redirection (O_EXCL), independently of external mkdir.
+# Old directory locks are read during upgrade; fresh incomplete owners are left alone.
+# @GRAPHIFY@ is the install-time fallback, and every rebuild disables skill auto-refresh.
 _HELPER_TEMPLATE = r"""#!/bin/sh
 # Installed by sidegraph-init: keeps graphify-out/graph.json current for Sidegraph.
 # Main checkout only: a linked worktree reads the main checkout's graph. The rebuild runs
-# in the background so git never waits. A "want" flag plus a lock directory run one rebuild
+# in the background so git never waits. A "want" flag plus an exclusive PID file run one rebuild
 # at a time and never miss a request that arrives during one.
 hook=$1; shift
 [ "$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)" = \
@@ -102,19 +101,23 @@ log=$common/sidegraph-graph-refresh.log
 : > "$want" 2>/dev/null || exit 0
 (
   me=$(exec sh -c 'echo $PPID')
-  take() { mkdir "$lock" 2>/dev/null && echo "$me" > "$lock/pid"; }
+  take() { (set -C; echo "$me" > "$lock") 2>/dev/null; }
+  read_pid() {
+    if [ -d "$lock" ]; then cat "$lock/pid" 2>/dev/null; else cat "$lock" 2>/dev/null; fi
+  }
   if ! take; then
-    pid=$(cat "$lock/pid" 2>/dev/null)
+    pid=$(read_pid)
     if [ -n "$pid" ]; then
       kill -0 "$pid" 2>/dev/null && exit 0      # a runner is alive; it will see $want
     else                                        # the owner is mid-write, or died there
       [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ] || exit 0
     fi
-    mkdir "$lock.gate" 2>/dev/null || exit 0    # one stale-breaker at a time
-    [ "$(cat "$lock/pid" 2>/dev/null)" = "$pid" ] &&
+    (set -C; : > "$lock.gate") 2>/dev/null || exit 0
+    (echo "$me" > "$lock.gate") 2>/dev/null || :  # PID write failure must not leak the gate
+    [ "$(read_pid)" = "$pid" ] &&
       { [ -n "$pid" ] || [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; } &&
       rm -rf "$lock"
-    rmdir "$lock.gate"; take || exit 0
+    rm -f "$lock.gate"; take || exit 0
   fi
   cd "$top" || { rm -rf "$lock"; exit 0; }
   while :; do
@@ -466,28 +469,125 @@ def _has_graphify_hook(info: RepoInfo) -> bool:
 
 
 def _lock_is_dead(lock: Path) -> bool:
-    """Whether the helper's lock directory belongs to a job that is gone: its pid no longer runs,
-    or it has no usable pid and is over ten minutes old. A pid that runs, even another user's, and
+    """Whether the helper's PID file or legacy lock directory belongs to a job that is gone:
+    its pid no longer runs, or it has no usable pid and is over ten minutes old. A pid that runs,
+    even another user's, and
     a recent pid-less lock (an owner still writing) are live. A pid can be reused by a live
     process after a reboot, which this cannot tell from the runner."""
     try:
-        age = time.time() - lock.stat().st_mtime
+        before = lock.stat()
+        age = time.time() - before.st_mtime
     except OSError:
         return False
     try:
-        text = (lock / "pid").read_text().strip()
+        text = (lock / "pid" if lock.is_dir() else lock).read_text().strip()
     except OSError:
         text = ""
     pid = int(text) if text.isdigit() else 0
     if pid <= 0:
-        return age > _STALE_LOCK_SECONDS
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:  # PermissionError: the process exists
+        dead = age > _STALE_LOCK_SECONDS
+    else:
+        if sys.platform == "win32":
+            # These are POSIX-shell PIDs. Windows kill(pid, 0) is not a liveness probe,
+            # and MSYS/native PID namespaces differ: leave recovery to the shell helper.
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            dead = True
+        except OSError:  # PermissionError: the process exists
+            return False
+        else:
+            return False
+    if not dead:
         return False
-    return False
+    # A live owner may finish and a fresh runner may acquire the path during kill(0).
+    # Under the breaker gate, only an unchanged dead owner can now safely be removed.
+    try:
+        after = lock.stat()
+    except OSError:
+        return False
+    return (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+
+
+def _remove_lock(path: Path) -> None:
+    """Remove a PID file or legacy directory, without following a symlink."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+@contextlib.contextmanager
+def _repair_guard(info: RepoInfo) -> Iterator[bool]:
+    """Serialize installers while repairing a dead breaker gate; the OS releases on exit.
+
+    Keep the coordination file: unlinking an advisory lock lets another installer lock a
+    different inode. A busy installer skips cleanup; the one holding the guard handles it.
+    """
+    try:
+        handle = (info.common / f"{HELPER_NAME}.repair").open("a+b")
+    except OSError:
+        yield False
+        return
+    with handle:
+        if sys.platform == "win32":
+            import msvcrt
+
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _repair_dead_locks(info: RepoInfo) -> None:
+    """Clear dead locks under the helper's own breaker gate, never from a stale snapshot."""
+    with _repair_guard(info) as held:
+        if not held:
+            return
+        gate = info.common / f"{HELPER_NAME}.lock.gate"
+        if _lock_is_dead(gate):
+            _remove_lock(gate)
+        try:
+            handle = gate.open("x")
+        except FileExistsError:
+            return  # a live/fresh gate, or a legacy breaker still using a directory
+        try:
+            with handle:
+                handle.write(f"{os.getpid()}\n")
+            lock = info.common / f"{HELPER_NAME}.lock"
+            if _lock_is_dead(lock):
+                _remove_lock(lock)
+        finally:
+            gate.unlink()
 
 
 # -- install, remove, status -----------------------------------------------------------------
@@ -499,12 +599,8 @@ def install_helper(info: RepoInfo, *, graphify: str | None) -> None:
     stale-breaker gate. For a repository whose hooks call it by hand.
     # see design/superpowers/specs/2026-10-02-graph-refresh-hook-design.md (D2, D5)"""
     info.own_hooks_dir.mkdir(parents=True, exist_ok=True)
-    lock = info.common / f"{HELPER_NAME}.lock"
-    if _lock_is_dead(lock):  # re-running --hooks is the way out of a lock a dead job left
-        shutil.rmtree(lock, ignore_errors=True)
+    _repair_dead_locks(info)
     _publish_file(info.helper, _encode(helper_script(graphify)), 0o755)
-    with contextlib.suppress(OSError):  # a stale stale-breaker's gate (D5)
-        (info.common / f"{HELPER_NAME}.lock.gate").rmdir()
 
 
 def install(info: RepoInfo, *, graphify: str | None) -> InstallReport:
@@ -524,14 +620,15 @@ def install(info: RepoInfo, *, graphify: str | None) -> InstallReport:
 
 def remove(info: RepoInfo) -> RemoveReport:
     """Take Sidegraph out: the block from each hook, then (once) the helper, the want flag, any
-    lock and gate, and the recorded choice. The rebuild log is left for the owner to read.
+    lock and gate, and the recorded choice. The rebuild log and native repair coordination
+    file stay: unlinking that file could let simultaneous installers lock different inodes.
     # see design/superpowers/specs/2026-10-02-graph-refresh-hook-design.md (D3)"""
     hooks = tuple(_strip(info.own_hooks_dir / hook, hook) for hook in HOOKS)
     helper_removed = info.helper.exists()
     info.helper.unlink(missing_ok=True)
     (info.common / f"{HELPER_NAME}.want").unlink(missing_ok=True)
     for leftover in ("lock", "lock.gate"):
-        shutil.rmtree(info.common / f"{HELPER_NAME}.{leftover}", ignore_errors=True)
+        _remove_lock(info.common / f"{HELPER_NAME}.{leftover}")
     record_choice(info.top, declined=False)
     return RemoveReport(hooks, helper_removed)
 
@@ -604,3 +701,28 @@ def helper_in_use(info: RepoInfo) -> bool:
     ``hooks_dir`` calls it (``_runs_helper``), so a partly wired repository counts. Read-only.
     # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D7)"""
     return info.helper.is_file() and any(_runs_helper(info.hooks_dir / hook) for hook in HOOKS)
+
+
+_DIRECTORY_LOCK = re.compile(
+    r'^\s*(?:take\(\)\s*\{\s*)?mkdir\s+(?:"\$lock(?:\.gate)?"|\$lock(?:\.gate)?)(?=\s|;|$)'
+)
+
+
+def helper_uses_directory_lock(info: RepoInfo) -> bool:
+    """Recognize shipped take()/standalone mkdir acquisitions, not arbitrary shell code.
+
+    Preserve unfamiliar helpers with heredocs/multiline quotes. Known old helpers have
+    simple acquisition lines; there is no need to parse arbitrary command/argument positions.
+    """
+    try:
+        installed = _decode(info.helper.read_bytes())
+    except OSError:
+        return False
+    if "<<" in installed:
+        return False
+    try:
+        if any("\n" in word for word in shlex.split(installed.replace("\\\n", ""), comments=True)):
+            return False
+    except ValueError:
+        return False
+    return any(_DIRECTORY_LOCK.match(line) for line in installed.splitlines())

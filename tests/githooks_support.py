@@ -255,27 +255,6 @@ def have_shell(name: str) -> bool:
     return shutil.which(name) is not None
 
 
-def _mkdir_is_uutils() -> bool:
-    """True when ``mkdir`` on PATH is uutils coreutils, the default on Ubuntu 26.04."""
-    try:
-        out = subprocess.run(
-            ["mkdir", "--version"], capture_output=True, text=True, timeout=5
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return "uutils" in out
-
-
-# uutils ``mkdir`` 0.10 is not atomic under a race: two callers creating one directory can both
-# exit 0, so the helper's mkdir lock lets two rebuilds run at once. The overlap tests are expected
-# to fail there until the helper takes its lock without an external mkdir.
-NON_ATOMIC_MKDIR = pytest.mark.xfail(
-    _mkdir_is_uutils(),
-    reason="uutils mkdir lets two racing callers both succeed; the helper lock relies on mkdir",
-    strict=False,
-)
-
-
 # -- helpers shared by test_githooks and the private lock-race tests ------------------------
 
 SHELLS = [

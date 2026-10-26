@@ -535,3 +535,90 @@ def test_no_hooks_refreshes_an_old_helper_and_records_only_the_decline(
     init(repo, monkeypatch, capsys, "--no-hooks")
     assert not reported(store_dir, graph)
     assert choice_of(repo) == "false"
+
+
+@pytest.mark.parametrize("lock_target", ["$lock", "$lock.gate"])
+def test_directory_lock_helper_is_reported_and_init_repairs_it(
+    sandbox, monkeypatch, capsys, lock_target
+):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = githooks.repo_info(repo)
+    assert info is not None
+    # A hand-edited/older helper: the unsafe primitive must be detected even when the
+    # Graphify environment is already correct and the rest of the template differs.
+    info.helper.write_text(
+        "#!/bin/sh\n"
+        f'mkdir "{lock_target}" 2>/dev/null || exit 0\n'
+        'GRAPHIFY_NO_AUTO_REFRESH=1 "$graphify" update .\n'
+    )
+    git(store_dir, "config", "--local", "sidegraph.graphRefresh", "false")
+    before = {h: (info.hooks_dir / h).read_bytes() for h in githooks.HOOKS}
+    problem = outdated_detector().detect(inputs(store_dir, graph))
+    assert problem is not None
+    assert "lock" in problem.findings[0][1]
+    assert "without GRAPHIFY_NO_AUTO_REFRESH" not in problem.line
+    init(repo, monkeypatch, capsys)
+    assert outdated_detector().detect(inputs(store_dir, graph)) is None
+    assert choice_of(repo) == "false"
+    assert {h: (info.hooks_dir / h).read_bytes() for h in githooks.HOOKS} == before
+
+
+def test_a_directory_lock_mention_does_not_reinstall_a_custom_current_helper(
+    sandbox, monkeypatch, capsys
+):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = githooks.repo_info(repo)
+    assert info is not None
+    with info.helper.open("a") as out:
+        out.write('# Old lock: mkdir "$lock"\necho mkdir "$lock.gate" >/dev/null\n')
+    make_partial(repo, info, "post-merge", "post-checkout")
+    git(store_dir, "config", "--local", "sidegraph.graphRefresh", "false")
+    before = info.helper.read_bytes()
+    assert outdated_detector().detect(inputs(store_dir, graph)) is None
+    init(repo, monkeypatch, capsys)
+    assert info.helper.read_bytes() == before
+
+
+def test_old_lock_examples_in_heredocs_do_not_trigger_helper_repair(sandbox):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = githooks.repo_info(repo)
+    assert info is not None
+    with info.helper.open("a") as out:
+        out.write(
+            ": <<'OLD_LOCK_EXAMPLE'\nmkdir \"$lock\" 2>/dev/null || exit 0\nOLD_LOCK_EXAMPLE\n"
+        )
+    assert outdated_detector().detect(inputs(store_dir, graph)) is None
+
+
+def test_the_complete_released_directory_lock_helper_is_detected_and_repaired(
+    sandbox, monkeypatch, capsys
+):
+    from tests.githooks_legacy_helper import LEGACY_HELPER
+
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = githooks.repo_info(repo)
+    assert info is not None
+    info.helper.write_text(LEGACY_HELPER.replace("@GRAPHIFY@", "''"))
+    make_partial(repo, info, "post-merge", "post-checkout")
+    git(store_dir, "config", "--local", "sidegraph.graphRefresh", "false")
+    assert githooks.helper_is_current(info) is True
+    assert reported(store_dir, graph)
+    init(repo, monkeypatch, capsys)
+    assert not reported(store_dir, graph)
+    assert not githooks.helper_uses_directory_lock(info)
+    assert choice_of(repo) == "false"
+
+
+@pytest.mark.parametrize("word", ["if", "then", "do", "!", "{"])
+def test_shell_keywords_in_echo_arguments_are_not_lock_commands(sandbox, word):
+    repo, store_dir, graph = project(sandbox)
+    install(sandbox, repo)
+    info = githooks.repo_info(repo)
+    assert info is not None
+    with info.helper.open("a") as out:
+        out.write(f'echo {word} mkdir "$lock" >/dev/null\n')
+    assert outdated_detector().detect(inputs(store_dir, graph)) is None

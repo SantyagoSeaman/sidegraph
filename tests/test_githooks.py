@@ -20,7 +20,6 @@ from tests.githooks_support import (
     CREATED_HEADER,
     HELPER_NAME,
     HOOKS,
-    NON_ATOMIC_MKDIR,
     SHELLS,
     STALE_STATES,
     Sandbox,
@@ -462,13 +461,11 @@ def test_the_rebuild_is_graphify_update_with_a_pinned_hash_seed_and_a_log(sandbo
 # tests/private/test_githooks.py; the two cases here keep the lock contract in every PR run.
 
 
-@NON_ATOMIC_MKDIR
 @pytest.mark.slow
 def test_t9_two_simultaneous_calls_never_overlap_on_a_fresh_lock(sandbox, monkeypatch):
     fresh_lock_burst(sandbox, monkeypatch, "sh", 2)
 
 
-@NON_ATOMIC_MKDIR
 @pytest.mark.slow
 def test_t9_two_simultaneous_calls_never_overlap_on_a_dead_pid_lock(sandbox, monkeypatch):
     stale_lock_burst(sandbox, monkeypatch, "sh", 2, "dead pid")
@@ -566,8 +563,8 @@ def test_a_pid_write_that_fails_does_not_block_later_rebuilds(sandbox):
     )
     assert done.returncode == 0
     lock = info.common / f"{HELPER_NAME}.lock"
-    wait_for(lambda: (lock / "pid").exists(), what="the lock the failed write left")
-    assert (lock / "pid").read_bytes() == b""
+    wait_for(lock.is_file, what="the lock the failed write left")
+    assert lock.read_bytes() == b""
     age(lock)
     commit(repo)
     starts = await_rebuilds(sandbox, info.common)

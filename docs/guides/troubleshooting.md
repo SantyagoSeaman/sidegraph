@@ -222,8 +222,11 @@ entity file is skipped, an anchor to the same name mints a second entity; once t
 
 ### refresh-helper-outdated
 
-A git hook runs a graph refresh helper that starts Graphify without `GRAPHIFY_NO_AUTO_REFRESH=1`
-(an older Sidegraph wrote it). Graphify 0.9.87 and later refresh the agent skills they installed,
+A git hook runs an older graph refresh helper that uses directory-based locking, or starts
+Graphify without `GRAPHIFY_NO_AUTO_REFRESH=1`.
+The directory lock can admit overlapping rebuilds with uutils `mkdir`; the replacement uses
+exclusive PID files for both the runner lock and the stale-breaker gate.
+Graphify 0.9.87 and later refresh the agent skills they installed,
 such as `~/.claude/skills/graphify/`, on the first run after a Graphify upgrade unless that
 variable is set. One hook that runs the helper is enough for the check to fire, and a recorded "no"
 does not silence it. Run `sidegraph-init` with no flag: it rewrites the helper and keeps your

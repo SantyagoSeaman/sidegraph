@@ -242,13 +242,25 @@ the `/graphify` skill's `--update` form).
   [above](#linked-worktrees-read-the-main-checkouts-graph)), so a commit in one does nothing.
   Rebuilding there as well costs about 18 MB and 43 s for a cold build on one field corpus with
   25 worktrees, and agents commit in worktrees constantly.
-- **In the background, one at a time.** Git never waits for the rebuild. A lock directory keeps
+- **In the background, one at a time.** Git never waits for the rebuild. An exclusively created PID file keeps
   one rebuild running; a hook that fires while it runs makes it go once more when it finishes, so
   the graph never settles on a tree older than the last request. A lock left by a job that died
   is detected and cleared: by its pid, or, when the job died before writing one (a full disk, a
-  quota), by its age, ten minutes. `sidegraph-init --hooks` clears such a lock at once. One risk
+  quota), by its age, ten minutes. Re-running `sidegraph-init --hooks` refreshes the helper and clears a dead lock;
+  a fresh lock without a PID is kept until the ten-minute grace period expires. One risk
   remains: after a reboot a pid can belong to a live, unrelated process, and the hook then waits
   until that process exits.
+  Plain `sidegraph-init` also repairs an outdated helper in use, keeping the recorded choice.
+  Older helpers used lock directories; the new helper respects a live old runner and can
+  recover its stale directory. Both the lock and the stale-breaker gate now use shell
+  exclusive creation, so locking does not depend on external `mkdir`.
+  Installer cleanup takes the same breaker gate before removing a dead runner lock. A small
+  native OS lock on `sidegraph-graph-refresh.repair` serializes installers while they recover
+  a dead gate; the coordination file stays in the common git directory to keep a stable inode.
+  Where native locks are unsupported, helper publication still proceeds and optional installer
+  cleanup is skipped. On Windows, PID-bearing locks are left to the POSIX helper to recover,
+  because its PIDs need not be native Windows PIDs. Installing or repairing a helper does not
+  itself start a rebuild.
 - **Where the output goes.** The last rebuild's output is `sidegraph-graph-refresh.log` in the
   common git directory (`.git/` in a normal clone).
 - **No `sidegraph-sync` in the hook.** The next memory call notices the new graph version and
