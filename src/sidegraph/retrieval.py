@@ -200,6 +200,9 @@ class TaskContext:
     emitted: int = 0
     degraded: int = 0
     dropped_for_budget: int = 0
+    # Related expansion records left out by `_RELATED_LINE_CAP` (not by the budget): the
+    # count the closing `+N more related` line reports. Not rendered itself.
+    related_overflow: int = 0
     chars_used: int = 0
 
     # Ephemeral occurrence evidence follows individual atoms, including repeated bodies.
@@ -228,8 +231,9 @@ class TaskContext:
 
         Appends :data:`_STANDING_SUPERSEDE_HINT` (design D4) whenever ``mistakes`` or
         ``decisions`` is non-empty — those are the two buckets whose lines carry an
-        ``(id: ...)`` suffix (detailed tier); ``related`` alone does NOT trigger it, since
-        its lines are tight-tier and carry no id for the hint to point at. Shared with
+        ``(id: ...)`` suffix (detailed tier); ``related`` alone does NOT trigger it: its
+        capped lines carry ids so they can be expanded, but they are expansion records the
+        task did not name, not records the hint asks the agent to judge. Shared with
         ``query_decisions`` (``server.py``), which calls this same method — intended: the
         hint belongs to whichever surface rendered ids, not to one specific tool.
         """
@@ -469,7 +473,13 @@ _MISTAKE_KINDS = {DecisionKind(kind) for kind in MISTAKE_KINDS}
 # the original tight one-liner. This also fixes the "same rejected snippet repeats in every
 # unrelated question" regression by construction: a related entry never renders `rejected`/
 # `consequences` at all, so an off-topic decision can't contribute one.
-_LINE_CLIP_CHARS = 240  # related tier: choice snippet only
+_LINE_CLIP_CHARS = 240  # tight tier: choice snippet only
+# The Related bucket proper (expansion records, not the seed's superseded one-liners) is
+# shorter still and capped: a per-record relevance measurement on real task-context calls
+# found most of it off-task (see design/superpowers/specs/2026-10-26-related-cap-design.md).
+# Each line keeps its id so the agent can expand it; the rest is counted, not shown.
+_RELATED_CLIP_CHARS = 80
+_RELATED_LINE_CAP = 5
 _DIRECT_FIELD_CLIP_CHARS = 1200  # direct tier: choice AND context, each
 _DIRECT_SIDE_CLIP_CHARS = 400  # direct tier: rejected AND consequences, each
 # Fix-wave D: a live A/B re-eval found every rendered `(consequences: ...)` suffix showed
@@ -611,6 +621,7 @@ def _fmt_decision(
     detailed: bool = False,
     drifted: bool = False,
     file_bound: bool = False,
+    choice_limit: int | None = None,
 ) -> str:
     """Render one decision line. Imported decisions set ``title`` to (a prefix of) ``choice``'s
     first line, so ``"{title}: {choice}"`` would duplicate it (``"- [adr] X: X"``) -- when
@@ -635,6 +646,10 @@ def _fmt_decision(
     record is now false/too broad has what ``supersede_decision`` needs without a second
     lookup; the tight tier (``detailed=False``, ``TaskContext.related``/the TOC/global
     mistakes) never carries one — no consumer there, and it would cost budget for nothing.
+    The capped Related bucket appends the id itself (see ``rank_decisions.add``).
+
+    ``choice_limit`` overrides the tier's clip; the capped Related bucket passes
+    :data:`_RELATED_CLIP_CHARS`.
     """
     tag = " [unratified]" if d.status == DecisionStatus.PROPOSED else ""
     # Tag cluster, uniform at BOTH tiers (drift→supersede D3/I3): tier policy lives at the
@@ -643,7 +658,8 @@ def _fmt_decision(
     # a position after the id suffix on a degraded line.
     dtag = " [drifted]" if drifted else ""
     ftag = " [file-bound]" if file_bound else ""
-    choice_limit = _DIRECT_FIELD_CLIP_CHARS if detailed else _LINE_CLIP_CHARS
+    if choice_limit is None:
+        choice_limit = _DIRECT_FIELD_CLIP_CHARS if detailed else _LINE_CLIP_CHARS
     if d.choice.strip().startswith(d.title.strip()):
         body = d.title
     else:
@@ -812,6 +828,10 @@ def rank_decisions(
     fact_order: list[str] = []  # same ids, in the order each was actually placed
     direct_proposed_facts: dict[str, Fact] = {}
     related_proposed_facts: dict[str, Fact] = {}
+    # Expansion lines placed in the Related bucket, against `_RELATED_LINE_CAP`; the ids the
+    # cap left out are kept so a record reached twice is counted once.
+    related_placed = 0
+    related_overflowed: set[str] = set()
     used = 0
     # Read ONCE per call (drift→supersede D3): the ` [drifted]` marker applies to
     # detailed-selected records only — the tier that carries the id supersede_decision
@@ -891,10 +911,30 @@ def rank_decisions(
         *,
         evidence: bool = True,
         detailed: bool | None = None,
+        uncapped: bool = False,
     ) -> bool:
+        nonlocal related_placed
         if d.id in seen:
             return False
         ctx.delivery_considered.add(("decision", d.id))
+        # Two kinds of Related line stay outside the cap and keep the plain tight shape: the
+        # seed's superseded one-liners (`uncapped`), its own history rather than expansion,
+        # and global-scope records, repo-wide rules a cap would cut first because they are
+        # placed last — by scope, so one also bound to an expanded entity is never capped.
+        capped = bucket is ctx.related and not uncapped and d.scope != Scope.GLOBAL
+        if capped and related_placed >= _RELATED_LINE_CAP:
+            if d.id not in related_overflowed:
+                related_overflowed.add(d.id)
+                # A record an earlier bucket's budget already refused is a budget drop, so
+                # it is not counted twice.
+                if d.id not in refused:
+                    ctx.related_overflow += 1
+                # The cap hides the line, not the review queue: its proposed facts are
+                # queued exactly as a placed related line's are.
+                for fact in _live_facts(store.facts_for_decision(d.id)):
+                    if fact.status == DecisionStatus.PROPOSED:
+                        related_proposed_facts.setdefault(fact.id, fact)
+            return False
         if d.id not in counted:
             counted.add(d.id)
             ctx.selected += 1
@@ -907,7 +947,11 @@ def rank_decisions(
             detailed=detailed,
             drifted=drifted,
             file_bound=d.id in file_bound_record_ids,
+            choice_limit=_RELATED_CLIP_CHARS if capped else None,
         )
+        if capped:
+            line += _id_suffix(d)
+            evidence = False
         if not add_line(bucket, line):
             if not detailed:
                 refused.add(d.id)
@@ -933,6 +977,8 @@ def rank_decisions(
             ctx.delivery_degraded.add(("decision", d.id))
         if drifted:
             ctx.drift_shown = True
+        if capped:
+            related_placed += 1
         seen.add(d.id)
         if d.id in file_bound_record_ids:
             ctx.file_bound_shown = True
@@ -1081,7 +1127,7 @@ def rank_decisions(
     # evidence to buckets A-D only.
     for e in seed_entities:
         for d in store.superseded_for_entity(e.entity_id):
-            add(ctx.related, d, prefix=_reverted_prefix(d), evidence=False)
+            add(ctx.related, d, prefix=_reverted_prefix(d), evidence=False, uncapped=True)
 
     # Known-facts bucket: standalone facts (never rendered inline above, i.e. not directly
     # supporting a decision that made it into a bucket) bound to a seed or peripheral
@@ -1170,9 +1216,10 @@ def rank_decisions(
     for e in trailing_entities:
         accepted, proposed = partition_by_trust(store.valid_decisions_for_entity(e.entity_id))
         for d in _by_recency(accepted):
-            if add(ctx.related, d):
-                # `add` queued its proposed facts for the related proposals, which were
-                # rendered above: queue them again for the trailing ones.
+            if add(ctx.related, d) or d.id in related_overflowed:
+                # `add` queued its proposed facts for the related proposals (a line the cap
+                # left out included), which were rendered above: queue them again for the
+                # trailing ones.
                 for fact in _live_facts(store.facts_for_decision(d.id)):
                     if fact.status == DecisionStatus.PROPOSED:
                         trailing_proposed_facts.setdefault(fact.id, fact)
@@ -1218,6 +1265,14 @@ def rank_decisions(
     # Known-facts bucket above) — fold it into shown_ids once here rather than duplicating
     # that bookkeeping at each add_line(..., fact_line) call site.
     ctx.shown_ids.extend(fact_order)
+
+    if ctx.related_overflow:
+        # The short form when the budget has no room for the pointer.
+        add_line(
+            ctx.related,
+            f"- (+{ctx.related_overflow} more related not shown: drill_down a domain or "
+            "retrieve_decisions(query=...) to list them)",
+        ) or add_line(ctx.related, f"- (+{ctx.related_overflow} more related not shown)")
 
     ctx.dropped_for_budget = len(refused - seen) + len(refused_facts - rendered_fact_ids)
     ctx.chars_used = used

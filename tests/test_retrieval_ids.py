@@ -82,10 +82,10 @@ def test_tight_tier_line_carries_no_id():
     assert "(id:" not in line
 
 
-# -- rank_decisions: mistakes/decisions (detailed) carry ids, related does not -------------
+# -- rank_decisions: mistakes/decisions (detailed) and related lines carry ids -------------
 
 
-def test_rank_mistakes_and_direct_decisions_carry_ids_related_does_not(tmp_path):
+def test_rank_mistakes_direct_decisions_and_related_lines_carry_ids(tmp_path):
     s = Store(tmp_path / "t.db")
     seed = s.upsert_entity(Entity(canonical_name="Seed"))
     peri = s.upsert_entity(Entity(canonical_name="Peri"))
@@ -96,8 +96,8 @@ def test_rank_mistakes_and_direct_decisions_carry_ids_related_does_not(tmp_path)
     ctx = rank_decisions([seed], [peri], [], s, RetrievalBudget())
     assert f"(id: {mistake.id})" in ctx.mistakes[0]
     assert f"(id: {direct.id})" in ctx.decisions[0]
-    assert "(id:" not in ctx.related[0]
-    assert related.id not in ctx.related[0]
+    # The capped Related bucket keeps ids so its short lines can be expanded.
+    assert ctx.related[0].endswith(f"(id: {related.id})")
 
 
 def test_get_task_context_direct_seeded_records_gain_ids(tmp_path):

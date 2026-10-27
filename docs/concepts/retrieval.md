@@ -250,11 +250,18 @@ unrelated question. The render is tiered instead:
   clipped to ~1200 characters, plus `rejected` and `consequences` (when populated) each
   clipped to ~400 characters, rendered as `"(context: ...)"`/`"(rejected: ...)"`/
   `"(consequences: ...)"` suffixes.
-- **Related tier** (`TaskContext.related` — bucket C/D and superseded one-liners): the
-  original tight one-liner — `choice` clipped to ~240 characters, title + snippet only, no
-  `context`/`rejected`/`consequences` at all, regardless of whether those fields are
-  populated. This is also what stops an off-topic decision's `rejected`/`consequences` from
-  repeating across unrelated questions — a related entry never renders them.
+- **Related tier** (`TaskContext.related` — bucket C/D and superseded one-liners): a
+  short one-liner with no `context`/`rejected`/`consequences` and no inline evidence,
+  regardless of whether those fields are populated. This is also what stops an off-topic
+  decision's `rejected`/`consequences` from repeating across unrelated questions — a
+  related entry never renders them. Records reached through community, domain, peripheral
+  or guessed-seed expansion show at most **5** lines, each with `choice` clipped to ~80
+  characters and the record's `(id: …)` so it can be expanded with
+  `retrieve_decisions(ids=[…])`; any further ones are counted in one closing
+  `- (+N more related not shown: …)` line instead of rendered. Most of these records were
+  measured off-task for the task at hand. Two kinds stay outside that cap and keep the
+  plain one-liner (`choice` clipped to ~240 characters, no id): `scope: global` decisions,
+  which are repo-wide rules, and the seed's own superseded one-liners, which are its history.
 
 Every clip cuts at a word boundary with a trailing ellipsis. The one exception is a single unbroken token longer than the limit (a long identifier or URL), which is cut hard at the limit. The per-field
 clips are applied *before* the `memory_chars` check, not a bypass of it: a single
@@ -291,7 +298,7 @@ already on the line (the `(id: …)` suffix these tiers carry).
 
 Whenever at least one marker renders, one fixed legend line is appended to the context
 (and `drill_down` returns it as a separate `"legend"` key) explaining exactly that. The
-related tight tier never carries the marker — no id, no supersede consumer there. Marker
+related tight tier never carries the marker, even on the capped lines that show an id. Marker
 freshness rides a store-meta cache refreshed by the SessionStart/Stop hooks
 (`sync.refresh_code_drift_cache`, one bounded git scan); records superseded mid-session are
 filtered out at read time, so a marker never outlives its record's liveness. Only

@@ -180,10 +180,13 @@ jobs:
       - name: Test portable core and MCP contracts
         shell: pwsh
         run: |
-          # The wheel-smoke tests are release-only (tests/private); the public snapshot has no copy.
+          # Private acceptance files are absent from the public snapshot.
           $privateTests = @()
           if (Test-Path "tests/private/test_installed_wheel_smoke.py") {
-            $privateTests = @("tests/private/test_installed_wheel_smoke.py")
+            $privateTests += "tests/private/test_installed_wheel_smoke.py"
+          }
+          if (Test-Path "tests/private/test_older_reader_native.py") {
+            $privateTests += "tests/private/test_older_reader_native.py"
           }
           uv run pytest -q --junitxml="$env:RUNNER_TEMP/windows-core.xml" `
             tests/test_store_mutation_guard.py `
@@ -195,6 +198,7 @@ jobs:
             tests/test_verify_format2_snapshot.py `
             tests/test_store_format.py tests/test_store_rules.py `
             tests/test_maintenance_publish.py tests/test_migrate.py `
+            tests/test_store_junctions.py tests/test_format2_windows.py `
             tests/test_repo_relative_paths_portable.py `
             tests/test_command_windows.py `
             tests/test_hook_payload_encoding.py tests/test_hook_failure_diagnostics.py `

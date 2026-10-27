@@ -115,7 +115,8 @@ def test_a11_guessed_seeds_land_in_related_and_every_direct_record_stays(tmp_pat
     assert both.structure == alone.structure
     assert "b/guess.py" not in "\n".join(both.structure)
     related = "".join(both.related)
-    assert any(g.id not in related and g.title in related for g in gotchas)  # tight, no id
+    # A related line is the tight one-liner with its id (the capped Related bucket).
+    assert any(f"{g.title}: " in related and f"(id: {g.id})" in related for g in gotchas)
     assert all(g.title not in "".join(both.decisions) for g in gotchas)
     for g in gotchas:
         assert g.id not in "".join(both.mistakes)

@@ -285,15 +285,21 @@ def require_listable_record_dirs(store_dir: Path) -> None:
             raise PermissionError(e.errno, e.strerror, str(record_dir)) from e
 
 
+def _is_store_link(path: Path) -> bool:
+    """A symlink or Windows junction, without following the redirected directory."""
+    return path.is_symlink() or path.is_junction()
+
+
 def symlinked_internals(store_path: Path) -> list[str]:
-    """Every store-owned entry directly under ``store_path`` that is a symlink, in
-    ``STORE_INTERNAL_NAMES`` order, then each symlinked ``shards/*.shard`` file as
-    ``shards/<name>``. ``is_symlink`` is ``lstat``-based, so a dangling link counts. A symlinked
-    store ROOT is not an internal and is not reported. The shard files are tested by ``lstat``
-    here, not through the shard listing, which leaves a symlink out of every list.
+    """Every store-owned entry directly under ``store_path`` that is a symlink or junction, in
+    ``STORE_INTERNAL_NAMES`` order, then each linked ``shards/*.shard`` entry as
+    ``shards/<name>``. ``is_symlink`` is ``lstat``-based, so a dangling link counts;
+    ``is_junction`` also catches Windows directory junctions. A linked store ROOT is not an
+    internal and is not reported. Shard entries are tested here, not through the shard listing,
+    which leaves a symlink out of every list.
     # see design/superpowers/specs/2026-09-29-store-symlinks-and-bootstrap-guards-design.md D1
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
-    found = [name for name in STORE_INTERNAL_NAMES if (store_path / name).is_symlink()]
+    found = [name for name in STORE_INTERNAL_NAMES if _is_store_link(store_path / name)]
     shards_dir = store_path / SHARDS_SUBDIR
     if SHARDS_SUBDIR not in found and shards_dir.is_dir():
         try:
@@ -303,7 +309,7 @@ def symlinked_internals(store_path: Path) -> list[str]:
         found += [
             f"{SHARDS_SUBDIR}/{name}"
             for name in names
-            if name.lower().endswith(_SHARD_FILE_SUFFIX) and (shards_dir / name).is_symlink()
+            if name.lower().endswith(_SHARD_FILE_SUFFIX) and _is_store_link(shards_dir / name)
         ]
     return found
 

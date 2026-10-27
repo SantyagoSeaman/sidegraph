@@ -7,6 +7,25 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-10-26
+
+### Changed
+
+- `get_task_context` and `query_decisions` show at most 5 lines of related memory reached by
+  expansion. Each line has a short choice snippet and the record's id. The rest are counted
+  in one closing `- (+N more related not shown: …)` line. Global-scope rules and a seed's
+  superseded one-liners are not capped.
+
+### Fixed
+
+- Internal Windows directory junctions are refused by the store's link guard, including
+  junctions added before maintenance. Deliberately linked store roots remain supported.
+
+### Tests
+
+- Native Windows CI exercises packed-store migration, edits, compaction, Git checkout under
+  both autocrlf settings, long paths, busy files, case aliases and older-reader refusal.
+
 ## [0.17.3] — 2026-10-26
 
 ### Fixed

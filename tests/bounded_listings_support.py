@@ -117,6 +117,16 @@ def ctx_env(ctx_template, tmp_path, monkeypatch):
     store.close()
 
 
+@pytest.fixture
+def uncapped_related(monkeypatch):
+    """The Related bucket without its line cap. The whole-text cap tests need a text over 40000
+    characters with Related as a cuttable section; the field-shaped fixture reaches that only
+    while every related record is rendered."""
+    import sidegraph.retrieval as retrieval
+
+    monkeypatch.setattr(retrieval, "_RELATED_LINE_CAP", 10**6)
+
+
 def add_h2_records(store: Store, reader: GraphifyReader, heading: str, count: int = 60) -> None:
     for i in range(count):
         server._add_decision_impl(

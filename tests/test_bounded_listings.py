@@ -42,6 +42,7 @@ from tests.bounded_listings_support import (
     check_heading_line_records_are_cut_whole,
     ctx_env,  # noqa: F401  (fixture)
     ctx_template,  # noqa: F401  (fixture)
+    uncapped_related,  # noqa: F401  (fixture)
 )
 
 NOW = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
@@ -933,7 +934,7 @@ def _note_sections(text: str) -> list[str]:
 
 
 @pytest.mark.parametrize("count", [1, 8])
-def test_l12_get_task_context_is_capped_and_keeps_its_advice(ctx_env, count):
+def test_l12_get_task_context_is_capped_and_keeps_its_advice(ctx_env, uncapped_related, count):
     store, reader, paths, ids = ctx_env
     # a guessed seed (leading ./) puts "How your seeds were read" in the trailer, a missing one
     # "Not in the code graph"
@@ -956,7 +957,7 @@ def test_l12_get_task_context_is_capped_and_keeps_its_advice(ctx_env, count):
     assert "\n\n[output cut" in text
 
 
-def test_l12_the_cut_order_removes_related_before_the_records(ctx_env):
+def test_l12_the_cut_order_removes_related_before_the_records(ctx_env, uncapped_related):
     store, reader, paths, _ = ctx_env
     text = server._get_task_context_impl(store, reader, paths[:1], None, 10**9, 10**9)
     sections = _note_sections(text)
@@ -1005,9 +1006,12 @@ def test_l12_the_legend_goes_when_every_drifted_line_was_cut(ctx_env, monkeypatc
     assert server._STANDING_SUPERSEDE_HINT in cut
 
 
-def test_l12_nearest_records_the_cap_cut_are_not_counted_as_shown(ctx_env, monkeypatch):
+def test_l12_nearest_records_the_cap_cut_are_not_counted_as_shown(
+    ctx_env, uncapped_related, monkeypatch
+):
     """Telemetry follows the delivered text, the nearest-anchored records included. Records are
-    matched by title: the tight lines carry no id."""
+    matched by title. A degraded line is a tight line with an id outside the Related section,
+    whose capped one-liners carry ids too."""
     import re
 
     store, reader, paths, _ = ctx_env
@@ -1019,7 +1023,8 @@ def test_l12_nearest_records_the_cap_cut_are_not_counted_as_shown(ctx_env, monke
     assert in_text and shown == in_text
     [event] = store.render_events()
     assert event["emitted"] == len(in_text)
-    tight = [ln for ln in text.splitlines() if "(id: " in ln and "(context:" not in ln]
+    outside_related = re.sub(r"(?ms)^#+ Related\n.*?(?=^#|\Z)", "", text)
+    tight = [ln for ln in outside_related.splitlines() if "(id: " in ln and "(context:" not in ln]
     assert event["degraded"] == len(tight)  # the nearest records' degraded ids are merged
 
 

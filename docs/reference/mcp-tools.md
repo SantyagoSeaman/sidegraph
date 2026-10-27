@@ -788,7 +788,9 @@ degrades to un-synced retrieval, never an error), resolves `files`/`entities` in
 and returns a rendered Markdown string with up to six sections — accepted mistakes (with
 accepted inline evidence facts), accepted decisions (with accepted inline evidence), accepted
 known facts (standalone), structural map, related accepted memory, and unratified proposals —
-under the given character budgets. See
+under the given character budgets. Related memory reached by expansion shows at most 5 short
+lines with ids, plus a count of the rest; see
+[retrieval: two-tier rendering](../concepts/retrieval.md). See
 [retrieval: facts](../concepts/retrieval.md#facts-inline-evidence-and-the-known-facts-bucket)
 for the inline-vs-standalone split and the guarantee that facts never displace a mistake. The
 structural map omits

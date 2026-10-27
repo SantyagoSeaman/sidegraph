@@ -46,11 +46,12 @@ characters long. Every ULID qualifies. The store refuses to write a record whose
 different from its filename is not a record at all: see
 [Freshness](#freshness-absorbing-a-git-pull) for how a reload treats it.
 
-**Symlinks inside the store are refused.** A `Store` will not open a directory any of whose
+**Symlinks and Windows junctions inside the store are refused.** A `Store` will not open a directory any of whose
 subdirectories (`decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`, `initiatives/`,
 `archive/`, `verifications/`, `shards/`), store files (`format`, `stamping_live_since`,
 `domain-snapshot.json`, `.gitignore`, `.gitattributes`, `index.db`, and
-SQLite's `index.db-journal`, `-wal` and `-shm`) or shard files (`shards/*.shard`) is a symlink, live or dangling: a linked
+SQLite's `index.db-journal`, `-wal` and `-shm`) or shard entries (`shards/*.shard`) is a symlink
+(live or dangling) or Windows directory junction: a linked
 `decisions/` would send every record write to the link's target, and a linked `index.db` would
 make SQLite write there. The error names the entry (`… inside the store is a symlink`);
 replace it with a real directory or file. `sidegraph-verify` reports each such entry as
@@ -58,9 +59,28 @@ replace it with a real directory or file. `sidegraph-verify` reports each such e
 `--against` comparison until the links are removed, and its text output says so in one line.
 An `--against` ref that does not resolve, or a store outside git, is checked before the stop and
 exits `1` without reporting the links.
-`sidegraph-doctor` does the same and skips its advisory checks. A symlinked store **root**
+`sidegraph-doctor` does the same and skips its advisory checks. Junctions use the same
+`symlinked-store-entry` code and existing symlink error wording. A deliberately linked store **root**
 (`.sidegraph -> ../shared/store`) is fine: a deliberately shared store is a real use. Record
 files inside a real subdirectory are still read as they are.
+
+On Windows, format-2 maintenance writes shard bytes in binary mode, avoiding Python's
+newline conversion. The store's `*.shard -text` Git attribute preserves those LF bytes
+across checkout under either `core.autocrlf` setting. If another application holds a shard open
+without delete sharing, replacement can fail with `PermissionError`. The error propagates;
+maintenance does not delete the source files it has not finished publishing. Close the other
+application and rerun the operation. Filesystem path/component limits likewise remain
+operational errors; use a shorter store path if the host or Git cannot handle long paths
+(`core.longpaths=true` enables Git for Windows' long-path support).
+That option does not guarantee every Git operation can start from a directory longer than
+260 characters. If Git refuses the store directory during migration's entry checks, the
+marker and records remain unchanged; use a shorter checkout/store path and retry.
+
+Verify each committed operation against its input commit: migration against the format-1
+commit, a record edit against the migrated commit, and compaction against the commit containing
+the edited hot file. A compaction comparison checks that each published body existed in its
+baseline; comparing an edited, compacted body directly to a ref before the edit does not meet
+that requirement.
 
 **A symlinked store belongs to the project that holds the link.** The code a record is anchored
 to lives in that project, so the repository Sidegraph asks about the store is the project's, not

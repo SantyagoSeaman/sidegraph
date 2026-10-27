@@ -200,8 +200,9 @@ Proposed records use the final quarantine block instead of the accepted sections
 A `Fact` you attached to a decision (its own `facts` list — see
 [`guides/capturing-decisions.md#facts-the-evidence-layer`](capturing-decisions.md#facts-the-evidence-layer))
 rides that decision's line after both records are accepted: the moment an accepted decision is
-rendered in `## ⚠ Known mistakes & gotchas`, `## Decisions`, or `## Related`, its accepted
-supporting facts render right under it, one indented line each. A proposed fact is collected
+rendered in `## ⚠ Known mistakes & gotchas`, `## Decisions`, or as a `scope: global` line in
+`## Related`, its accepted supporting facts render right under it, one indented line each. The
+other `## Related` lines are short capped one-liners and carry no evidence. A proposed fact is collected
 for `## Unratified proposals` instead. The one exception:
 the `~ tried, reverted 2026-01: ...` superseded one-liners also shown under `## Related` never
 get evidence — a reverted decision's evidence isn't useful at that tight, unbudgeted-for-detail
