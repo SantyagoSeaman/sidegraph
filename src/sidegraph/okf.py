@@ -127,12 +127,36 @@ def build_bundle(store: Store) -> dict[str, str]:
     facts = [f for f in facts if is_safe_record_id(f.id)]
     domain_rows = [r for r in store.iter_domains() if r.status is not DomainStatus.PROPOSED]
 
-    # Domains collapse to one concept per slug: greatest domain_id (ULID = creation time)
-    # wins and its status is what the page shows (spec decision 3).
+    # Domains collapse to one concept per slug, and the winner's status is what the page
+    # shows (spec decision 3). ULIDs minted in the same millisecond do not sort by creation,
+    # so id order alone can pick a predecessor. A row loses to every row of its slug with no
+    # later revision under that slug, a later revision being any row reached by following
+    # supersession forward, through any slug (a rename away and back still counts). The
+    # greatest domain_id breaks the remaining ties; a cycle in a damaged store marks every
+    # row on it, so its slug still gets a page.
+    successors: dict[str, list[Domain]] = {}
+    for row in domain_rows:
+        if row.supersedes:
+            successors.setdefault(row.supersedes, []).append(row)
+
+    def _revised_in_slug(row: Domain) -> bool:
+        seen: set[str] = set()
+        stack = list(successors.get(row.domain_id, []))
+        while stack:
+            later = stack.pop()
+            if later.domain_id in seen:
+                continue
+            seen.add(later.domain_id)
+            if later.slug == row.slug:
+                return True
+            stack.extend(successors.get(later.domain_id, []))
+        return False
+
     winning: dict[str, Domain] = {}
+    ranks = {row.domain_id: (not _revised_in_slug(row), row.domain_id) for row in domain_rows}
     for row in domain_rows:
         cur = winning.get(row.slug)
-        if cur is None or row.domain_id > cur.domain_id:
+        if cur is None or ranks[row.domain_id] > ranks[cur.domain_id]:
             winning[row.slug] = row
     slug_by_row_id = {row.domain_id: row.slug for row in domain_rows}
 
@@ -313,7 +337,10 @@ def build_bundle(store: Store) -> dict[str, str]:
             ("type", "domain"),
             ("title", _yaml_str(dm.title)),
             ("description", _yaml_str(_first_line(dm.summary, _DESCRIPTION_LIMIT))),
-            ("timestamp", ULID.from_str(dm.domain_id).datetime.isoformat()),
+        ]
+        with contextlib.suppress(ValueError):  # a hand-written id need not be a ULID
+            fm.append(("timestamp", ULID.from_str(dm.domain_id).datetime.isoformat()))
+        fm += [
             ("id", dm.domain_id.lower()),
             ("slug", dm.slug),
             ("status", dm.status.value),

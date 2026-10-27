@@ -20,9 +20,10 @@ import os
 import re
 import sqlite3
 import stat
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import quote
 
 if TYPE_CHECKING:
@@ -652,6 +653,19 @@ def clip_line(text: str, limit: int) -> str:
     return cut.rstrip() + _LINE_CLIP_MARKER
 
 
+# Immutable fields whose schema default is a NON-empty value (schema.py: ``Decision.scope``,
+# ``Entity.kind``), per record kind. A file written before such a field existed lacks the key;
+# the reader loads it as this default, and the next rewrite of the record (a ratify, a drop, a
+# supersede-close, a compact's archive line) writes the default out. Absent on one side and
+# exactly this value on the other is therefore not a change, in either direction (an older copy
+# can meet a backfilled one through a merge). Top-level keys only. A test pins this table to
+# the schema's actual defaults.
+LEGACY_DEFAULTS: Final[dict[str, dict[str, str]]] = {
+    "decision": {"scope": "repo"},
+    "entity": {"kind": "concrete"},
+}
+
+
 # An absent key (``dict.get`` already turns it into ``None``) and these two defaults are the
 # other information-free shapes a field can serialize back in as, once a rewrite touches the
 # record it lives on — see :func:`same_modulo_absent`.
@@ -672,8 +686,8 @@ def same_modulo_absent(a: object, b: object) -> bool:
     nested dicts key-by-key and into lists element-by-element (so a change buried inside a
     ``seed_anchors`` entry is still caught), and treats two lists of different length as
     different. A field whose default is a NON-empty value (``Decision.scope``, ``"repo"``) is
-    not covered: an absent key there still reads as changed. That is a known, accepted gap —
-    no file in this store lacks ``scope`` today — not something this function papers over.
+    not covered: an absent key there still reads as changed here. Callers that know the
+    record's kind allow exactly that backfill through :data:`LEGACY_DEFAULTS`.
     """
     if isinstance(a, dict) and isinstance(b, dict):
         return all(same_modulo_absent(a.get(k), b.get(k)) for k in set(a) | set(b))
@@ -684,7 +698,9 @@ def same_modulo_absent(a: object, b: object) -> bool:
     return a == b
 
 
-def hot_matches_archive(hot: object, archived: object) -> bool:
+def hot_matches_archive(
+    hot: object, archived: object, defaults: Mapping[str, object] | None = None
+) -> bool:
     """One-directional :func:`same_modulo_absent` for the compact hot-file-vs-archive-line
     match. The archive side is a model dump of the running version, and pydantic drops keys
     it does not know, so a hot file written by a NEWER version can hold a key the archive
@@ -693,11 +709,22 @@ def hot_matches_archive(hot: object, archived: object) -> bool:
     its value; a key absent from ``hot`` still equals ``null``, ``[]`` or ``{}`` in
     ``archived`` (a file older than the field). Leaves compare as in ``same_modulo_absent``,
     so a hot ``[]``/``{}`` against an archived ``null`` (no information either way) matches,
-    while ``""``, ``0`` and ``false`` are values and differ from ``null``."""
+    while ``""``, ``0`` and ``false`` are values and differ from ``null``. ``defaults``
+    (:data:`LEGACY_DEFAULTS` for the record's kind) also lets a top-level key absent from
+    ``hot`` match exactly its schema default in ``archived``."""
     if isinstance(hot, dict) and isinstance(archived, dict):
         if any(k not in archived for k in hot):
             return False
-        return all(hot_matches_archive(hot.get(k), archived[k]) for k in archived)
+        return all(
+            hot_matches_archive(hot.get(k), archived[k])
+            or (
+                defaults is not None
+                and k not in hot
+                and k in defaults
+                and defaults[k] == archived[k]
+            )
+            for k in archived
+        )
     if isinstance(hot, list) and isinstance(archived, list):
         return len(hot) == len(archived) and all(
             hot_matches_archive(h, a) for h, a in zip(hot, archived, strict=True)
@@ -731,7 +758,7 @@ def project_shared(hot_value: object, archived_value: object) -> object:
 
 
 def hot_archive_difference(
-    hot: object, archived: object
+    hot: object, archived: object, defaults: Mapping[str, object] | None = None
 ) -> Literal["extra-fields", "different-values"] | None:
     """Classify a hot/archive mismatch without exposing any raw keys or values.
 
@@ -739,10 +766,10 @@ def hot_archive_difference(
     ``extra-fields`` means dropping only hot-side keys absent from the archive makes that
     predicate accept it; every other mismatch has differing shared values or structure.
     """
-    if hot_matches_archive(hot, archived):
+    if hot_matches_archive(hot, archived, defaults):
         return None
 
-    if hot_matches_archive(project_shared(hot, archived), archived):
+    if hot_matches_archive(project_shared(hot, archived), archived, defaults):
         return "extra-fields"
     return "different-values"
 

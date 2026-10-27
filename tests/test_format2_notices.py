@@ -8,6 +8,7 @@ hook and the real ``sidegraph-doctor``.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -201,6 +202,32 @@ def test_session_start_and_doctor_show_them(tmp_path, monkeypatch, capsys):
     doctor_main(["--db", str(packed)])
     printed = capsys.readouterr().out
     assert any(line.startswith("maintenance-due  ") for line in printed.splitlines())
+
+
+def test_doctor_check_ignores_maintenance_due_but_not_store_not_migrated(tmp_path, capsys):
+    # Closed records only, so maintenance-due (one misplaced line) is the store's one finding.
+    packed = make_store(tmp_path / "new", n=64)
+    (a,) = ids_in_bucket(3, 1, prefix="XA")
+    (b,) = ids_in_bucket(17, 1, prefix="YB")
+    closed = {"status": "rejected", "valid_to": "2026-01-02T00:00:00Z"}
+    put_shard_line(packed, "decision", a, decision_body(a, **closed))
+    put_shard_line(packed, "decision", b, decision_body(b, **closed), bucket=shard_name(3))
+    assert doctor_main(["--db", str(packed)]) == 0
+    assert doctor_main(["--db", str(packed), "--check"]) == 0
+    assert any(
+        line.startswith("maintenance-due  ") for line in capsys.readouterr().out.splitlines()
+    )
+    doctor_main(["--db", str(packed), "--check", "--json"])
+    codes = [f["code"] for f in json.loads(capsys.readouterr().out)["findings"]]
+    assert codes == ["maintenance-due"]
+
+    unmigrated = make_store(tmp_path / "old", fmt=1)
+    put_file(unmigrated, "decision", decision_body("D1", **closed))
+    capsys.readouterr()
+    doctor_main(["--db", str(unmigrated), "--json"])
+    codes = [f["code"] for f in json.loads(capsys.readouterr().out)["findings"]]
+    assert codes == ["store-not-migrated"]
+    assert doctor_main(["--db", str(unmigrated), "--check"]) == 2
 
 
 def test_the_new_checks_run_last_in_the_registry():

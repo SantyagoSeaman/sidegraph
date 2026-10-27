@@ -121,6 +121,7 @@ from .store_rules import (  # noqa: F401
     _DECISION_STATUS_TRANSITIONS,
     _DOMAIN_STATUS_TRANSITIONS,
     _FACT_STATUS_TRANSITIONS,
+    _KIND_ID_FIELDS,
     ABSENT,
     DECISION_MUTABLE_FIELDS,
     DOMAIN_MUTABLE_FIELDS,
@@ -146,8 +147,10 @@ from .store_rules import (  # noqa: F401
     is_derived_entity_body,
     keeps_keys,
     kind_of,
+    same_modulo_legacy_defaults,
     same_raw_body,
     superseding,
+    without_legacy_defaults,
 )
 
 # Violation codes — pinned constants (design ruling 2). The CLI's --json output and every
@@ -305,15 +308,24 @@ def _check_safe_record_id(path: Path, rid: object) -> Violation | None:
 class _WalkResult(NamedTuple):
     """What a record-directory walk hands the cross-reference checks: ``skipped_by_id`` maps
     the id of each file skipped for its STEM (and holding a parseable object with a string id)
-    to its payload. It is kept apart from ``raw_by_id``/``path_by_id``/``all_paths_by_id`` so
-    the file is no duplicate and takes over no record's findings, yet the references into it
-    still resolve."""
+    to its payload, and the safe stem of each file that does not decode to an empty payload.
+    It is kept apart from ``raw_by_id``/``path_by_id``/``all_paths_by_id`` so the file is no
+    duplicate and takes over no record's findings, yet the references into it still resolve."""
 
     raw_by_id: dict[str, dict]
     path_by_id: dict[str, Path]
     all_paths_by_id: dict[str, list[Path]]
     skipped_by_id: dict[str, dict]
     violations: list[Violation]
+
+
+def _is_regular_record_file(path: Path) -> bool:
+    """Whether ``path`` is a regular file; ``False`` when it cannot even be stat-ed, so one
+    entry's file-system error never aborts the report (``_load_raw_json`` reports it)."""
+    try:
+        return is_regular_file(stat_entry(path))
+    except OSError:
+        return False
 
 
 def _check_temporal_dir(dir_path: Path, model: type[BaseModel]) -> _WalkResult:
@@ -333,7 +345,12 @@ def _check_temporal_dir(dir_path: Path, model: type[BaseModel]) -> _WalkResult:
     overwrite. A record stays in ``raw_by_id`` even when it fails full model validation (either
     code) as long as its JSON decodes and carries an ``id`` — its
     ``status``/``supersedes``/``supports`` are still real, checkable data; only a file that
-    fails to decode at all contributes no id anywhere. A file the reload skips for an unsafe
+    fails to decode at all contributes no record, but if it is a regular file its safe stem
+    joins ``skipped_by_id`` with an empty payload (a stem-skipped file's readable payload for
+    the same id wins): a reference to it is not dangling, because fixing or restoring the file
+    is the heal, so one bad file gives one finding. Its own references are unknown, so a
+    predecessor it supersedes may still read as superseded without a successor. A file the
+    reload skips for an unsafe
     stem or an unsafe id gets :data:`UNSAFE_RECORD_ID` and nothing else, and joins no pool, so
     it is no duplicate and takes over no record's findings. A stem-skipped file's id is still
     returned in ``skipped_by_id``: a reference to it is not dangling, because renaming the file
@@ -343,6 +360,7 @@ def _check_temporal_dir(dir_path: Path, model: type[BaseModel]) -> _WalkResult:
     path_by_id: dict[str, Path] = {}
     all_paths_by_id: dict[str, list[Path]] = {}
     skipped_by_id: dict[str, dict] = {}
+    undecodable: dict[str, dict] = {}
     violations: list[Violation] = []
     for path in _iter_json_files(dir_path):
         unsafe = _check_safe_stem(path)
@@ -353,11 +371,12 @@ def _check_temporal_dir(dir_path: Path, model: type[BaseModel]) -> _WalkResult:
                 skipped_by_id.setdefault(*peeked)
             continue
         raw, err = _load_raw_json(path)
-        if err is not None:
-            violations.append(err)
-            continue
-        if not isinstance(raw, dict) or "id" not in raw:
-            violations.append(_violation(PARSE_ERROR, path, "not a record object (missing 'id')"))
+        if err is not None or not isinstance(raw, dict) or "id" not in raw:
+            violations.append(
+                err or _violation(PARSE_ERROR, path, "not a record object (missing 'id')")
+            )
+            if _is_regular_record_file(path):  # a directory named *.json is no record
+                undecodable.setdefault(path.stem, {})  # its stem is safe: see the docstring
             continue
         rid = raw["id"]
         unsafe = _check_safe_record_id(path, rid)
@@ -383,7 +402,9 @@ def _check_temporal_dir(dir_path: Path, model: type[BaseModel]) -> _WalkResult:
                 violations.append(_violation(PARSE_ERROR, path, str(e)))
         except ValueError as e:  # pydantic's serialisation error
             violations.append(_violation(PARSE_ERROR, path, f"cannot be serialised: {e}"))
-    return _WalkResult(raw_by_id, path_by_id, all_paths_by_id, skipped_by_id, violations)
+    # A readable payload under that id (a stem-skipped file) wins over an unknown one.
+    skipped = {**undecodable, **skipped_by_id}
+    return _WalkResult(raw_by_id, path_by_id, all_paths_by_id, skipped, violations)
 
 
 def _check_plain_dir(dir_path: Path, model: type[BaseModel], id_field: str) -> _WalkResult:
@@ -394,6 +415,7 @@ def _check_plain_dir(dir_path: Path, model: type[BaseModel], id_field: str) -> _
     path_by_id: dict[str, Path] = {}
     all_paths_by_id: dict[str, list[Path]] = {}
     skipped_by_id: dict[str, dict] = {}
+    undecodable: dict[str, dict] = {}
     violations: list[Violation] = []
     for path in _iter_json_files(dir_path):
         unsafe = _check_safe_stem(path)
@@ -404,13 +426,12 @@ def _check_plain_dir(dir_path: Path, model: type[BaseModel], id_field: str) -> _
                 skipped_by_id.setdefault(*peeked)
             continue
         raw, err = _load_raw_json(path)
-        if err is not None:
-            violations.append(err)
-            continue
-        if not isinstance(raw, dict) or id_field not in raw:
+        if err is not None or not isinstance(raw, dict) or id_field not in raw:
             violations.append(
-                _violation(PARSE_ERROR, path, f"not a record object (missing {id_field!r})")
+                err or _violation(PARSE_ERROR, path, f"not a record object (missing {id_field!r})")
             )
+            if _is_regular_record_file(path):  # a directory named *.json is no record
+                undecodable.setdefault(path.stem, {})  # its stem is safe: see the docstring
             continue
         rid = raw[id_field]
         unsafe = _check_safe_record_id(path, rid)
@@ -428,7 +449,9 @@ def _check_plain_dir(dir_path: Path, model: type[BaseModel], id_field: str) -> _
             model.model_validate(raw).model_dump_json()  # see _check_temporal_dir
         except ValueError as e:  # ValidationError, or a payload that cannot be serialised
             violations.append(_violation(PARSE_ERROR, path, str(e)))
-    return _WalkResult(raw_by_id, path_by_id, all_paths_by_id, skipped_by_id, violations)
+    # A readable payload under that id (a stem-skipped file) wins over an unknown one.
+    skipped = {**undecodable, **skipped_by_id}
+    return _WalkResult(raw_by_id, path_by_id, all_paths_by_id, skipped, violations)
 
 
 def _check_drift_checks(store_dir: Path, decision_ids: set[str]) -> list[Violation]:
@@ -1881,15 +1904,18 @@ class _Against:
         """``keeps_keys(x, y)``, or ``keeps_keys(x, S)`` for some shard occurrence S of the
         identity in the new tree, added or unchanged (a verbatim survivor keeps the keys)."""
         bind = record_type == "bindings"
-        if keeps_keys(x, y, bindings=bind, is_derived=self._derived):
+        kind = kind_of(record_type)
+
+        def kept(target: object) -> bool:
+            # a legacy default the target lacks is no lost key (store_rules.deletable agrees)
+            body = without_legacy_defaults(kind, x, target)
+            return keeps_keys(body, target, bindings=bind, is_derived=self._derived)
+
+        if kept(y):
             return True
         for occ in d.new:
             body = _body_of(occ)
-            if (
-                occ.kind == "shard"
-                and body is not None
-                and keeps_keys(x, body, bindings=bind, is_derived=self._derived)
-            ):
+            if occ.kind == "shard" and body is not None and kept(body):
                 return True
         return False
 
@@ -2033,7 +2059,9 @@ class _Against:
             shaped = {k: v for k, v in old.items() if k in base and type(v) is type(base[k])}
             for occ in d.added:
                 new = _dict_body(occ)
-                if new is not None and not keeps_keys(shaped, new):
+                if new is not None and not keeps_keys(
+                    without_legacy_defaults(kind, shaped, new), new
+                ):
                     self.flag(ILLEGAL_FIELD_CHANGE, self.loc(occ), "repair lost raw keys")
         return True
 
@@ -2109,6 +2137,14 @@ class _Against:
         body = _dict_body(file_occ)
         for occ in d.new:
             if occ.kind == "shard" and occ.parseable and same_raw_body(file_occ, occ):
+                return []
+            # an older copy folded onto its backfilled twin loses nothing (legacy defaults)
+            if (
+                occ.kind == "shard"
+                and occ.parseable
+                and body is not None
+                and same_modulo_legacy_defaults(kind, body, _dict_body(occ))
+            ):
                 return []
         if kind in ("decision", "domain") and body is not None:
             lines = [
@@ -2325,6 +2361,31 @@ def _marker_on_disk(store_dir: Path) -> Marker | None:
         return None
 
 
+def _baseline_initiative_loaded(repo_root: Path, ref: str, repo_path: str, inner: str) -> bool:
+    """Whether the baseline initiative file counts as a record: anything but a stray the reload
+    never loaded (an unsafe name, or an object with no id or an unsafe one), whose deletion is
+    the cleanup. A file that does not decode is a damaged record, as for the other kinds."""
+    if _check_safe_stem(Path(inner)) is not None:
+        return False
+    try:
+        old = _git_show_json(repo_root, ref, repo_path)
+    except _UnparsableContent:
+        return True  # a damaged record, not a stray: its loss is judged
+    return not isinstance(old, dict) or is_safe_record_id(old.get("id"))
+
+
+def _never_loaded_file(occ: Occurrence) -> bool:
+    """A per-record file of a classified kind whose body decodes to an object holding no id, or
+    an unsafe (or non-string) one: the reload skips it whole, as :func:`verify_against` does
+    for format 1. A file that does not decode is not one of these: rule 1 quarantines its
+    identity, so on a packed store it stands for a damaged record whose loss is judged."""
+    if occ.kind != "file" or occ.record_type not in _KIND_ID_FIELDS:
+        return False
+    if not isinstance(occ.raw, dict):
+        return False
+    return not is_safe_record_id(occ.raw.get(_KIND_ID_FIELDS[occ.record_type]))
+
+
 def _packed_against(
     store_dir: Path,
     repo_root: Path,
@@ -2355,6 +2416,10 @@ def _packed_against(
                         "store-owned entry is a symlink; the store refuses to use one",
                     )
                 )
+    # A per-record file whose body id is missing or unsafe is never loaded by the reload, so it
+    # is no record: deleting or repairing it is no transition (format 1 skips it the same way).
+    ref_never_loaded = {o.path for o in ref_inv.occurrences if _never_loaded_file(o)}
+    ref_inv.occurrences = [o for o in ref_inv.occurrences if not _never_loaded_file(o)]
     shard_count = (
         new_marker.shards
         if new_marker is not None and new_marker.major == 2
@@ -2379,12 +2444,22 @@ def _packed_against(
         marker_problem = str(exc)
         read.update(assume_major=2, assume_shards=shard_count or 64)
         new_inv = inventory_from_disk(store_dir, lenient_marker=True, **read)  # type: ignore[arg-type]
+    # A work-tree file the reload never loads is dropped too, but only where the baseline held
+    # the same kind of never-loaded file at that path: unchanged (or still stray) on both sides,
+    # it changes nothing. A new one, or a real record edited into one, is judged.
+    new_inv.occurrences = [
+        o for o in new_inv.occurrences if not (_never_loaded_file(o) and o.path in ref_never_loaded)
+    ]
     engine = _Against(prefix, ref_inv, new_inv)
     # rules 6 and 7: path rules outside the walk (a segment's deletion is judged in the walk)
     for status, repo_path in changed:
         inner = repo_path[len(prefix) :] if prefix and repo_path.startswith(prefix) else repo_path
         kind = _classify_store_relative_path(inner)
-        if kind == "initiative" and status == "D":
+        if (
+            kind == "initiative"
+            and status == "D"
+            and _baseline_initiative_loaded(repo_root, baseline_oid, repo_path, inner)
+        ):
             violations.append(
                 _violation(
                     ILLEGAL_DELETION,
@@ -2520,7 +2595,9 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
             continue
 
         if kind == "initiative":
-            if status == "D":
+            if status == "D" and _baseline_initiative_loaded(
+                repo_root, baseline_oid, repo_path, inner
+            ):
                 violations.append(
                     _violation(
                         ILLEGAL_DELETION,
@@ -2564,11 +2641,15 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
                 )
             continue
 
+        if _check_safe_stem(Path(inner)) is not None:
+            continue  # never a record: the reload skips it, the snapshot layer reports it
         try:
             old = None if status == "A" else _git_show_json(repo_root, baseline_oid, repo_path)
             new = None if status == "D" else _read_json_object(repo_root / repo_path)
         except _UnparsableContent:
             continue  # the always-on snapshot layer already reports this as parse-error
+        if old is not None and not is_safe_record_id(old.get(_KIND_ID_FIELDS[kind])):
+            continue  # the baseline held no record either: the reload skips an unsafe id
 
         found = classify_transition(kind, old, new)
         if new is None and found and kind in ("decision", "domain"):

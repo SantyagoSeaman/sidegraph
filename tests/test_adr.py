@@ -89,7 +89,8 @@ def test_complete_projection_is_read_only_and_excludes_unratified_evidence(tmp_p
     assert "only12 observations on Python3.13; no general rate." in text
     assert "Synthetic two-worker run; local only." in text
     assert "PENDING:" not in text and "CLOSED:" not in text
-    assert "src/cache.py" in text and "decisions/ADR.json" in text
+    assert "src/cache.py" in text and "Record: `ADR`" in text
+    assert ".sidegraph" not in text  # store records are named by id, never by path
     assert bytes_under(db) == before
 
 
@@ -102,8 +103,8 @@ def test_minimal_custom_prose_cannot_remove_evidence_status_or_source(tmp_path):
         directory="adr", template="$title\n$context\n$choice\n$rejected\n$consequences\n"
     )
     text = render_record(read_snapshot(db), "ADR", {"ADR": "ADR.md"}, config, tmp_path / "adr")
-    assert "accepted" in text and "decisions/ADR.json" in text
-    assert "facts/FACT.json" in text and "only12 observations" in text
+    assert "accepted" in text and "Record: `ADR`" in text
+    assert "- `FACT`: " in text and "only12 observations" in text
     assert "src/cache.py" in text
 
 
@@ -147,7 +148,7 @@ def test_archived_predecessor_keeps_a_pointer_to_cross_kind_successor(tmp_path):
         get_profile("generic-adr").adr_export,
         tmp_path / "adr",
     )
-    assert "archive/" in text and "LATER.json" in text
+    assert "Successors: `LATER`" in text and "archive/" not in text
     assert "LATER.md" not in text
     assert "src/cache.py" in text  # Compaction keeps canonical bindings hot.
     assert bytes_under(db) == before
@@ -285,6 +286,32 @@ def test_domain_index_groups_explicit_intent_without_inferring_from_paths(tmp_pa
     assert "](RULE.md)" not in explicit and "](RULE.md)" in unassigned
 
 
+def test_explicit_domain_is_named_by_title_and_id_with_backticks_escaped(tmp_path):
+    from sidegraph.adr import read_snapshot, render_record
+    from sidegraph.profiles import get_profile
+    from sidegraph.schema import Domain
+
+    db = seed(tmp_path)
+    with Store(db) as store:
+        store.add_domain(
+            Domain(
+                domain_id="AREA",
+                slug="ticks",
+                title="Handling [the] ` and \\` characters",
+                summary="Backticks in titles.",
+                status="accepted",
+                path_prefixes=["src"],
+                provenance=Provenance(source="manual"),
+            )
+        )
+        entity = store.get_or_create_abstract_entity("domain:ticks")
+        store.add_binding(AnchorBinding(record_id="ADR", entity_id=entity.entity_id, tier=1))
+    config = get_profile("generic-adr").adr_export
+    text = render_record(read_snapshot(db), "ADR", {"ADR": "ADR.md"}, config, tmp_path)
+    expected = "Handling \\[the\\] \\` and \\\\\\` characters (`AREA`)"
+    assert f"Domains (explicit intent): {expected}" in text
+
+
 def test_symlinked_store_uses_the_project_holding_the_link(tmp_path):
     from sidegraph.adr import read_snapshot, render_record
     from sidegraph.adr_files import plan_export
@@ -300,7 +327,7 @@ def test_symlinked_store_uses_the_project_holding_the_link(tmp_path):
     config = get_profile("generic-adr").adr_export
     text = render_record(snapshot, "ADR", {"ADR": "ADR.md"}, config, project / "docs/adr")
     assert "](../../src/cache.py)" in text
-    assert "](../../.sidegraph/decisions/ADR.json)" in text
+    assert "Record: `ADR`" in text and ".sidegraph/" not in text
     for out in (linked / "adr", backing / "adr"):
         with pytest.raises(ValueError):
             plan_export(snapshot, out, config)

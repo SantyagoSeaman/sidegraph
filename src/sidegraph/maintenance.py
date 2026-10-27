@@ -63,6 +63,7 @@ from .store_rules import (
     keeps_keys,
     kind_of,
     superseding,
+    without_legacy_defaults,
 )
 
 try:  # not on Windows
@@ -448,7 +449,10 @@ def _plan_identity(
             plan.kept.append((file_occ.path, reason))
             return final
         if shard is not None and not keeps_keys(
-            shard.raw, file_occ.raw, bindings=is_bindings, is_derived=is_derived
+            without_legacy_defaults(kind, shard.raw, file_occ.raw),
+            file_occ.raw,
+            bindings=is_bindings,
+            is_derived=is_derived,
         ):
             plan.kept.append((file_occ.path, "keys would be lost"))
             return final
@@ -470,7 +474,7 @@ def _plan_identity(
     if (
         isinstance(shard.raw, dict)
         and superseding(kind, candidate.raw, shard.raw)
-        and keeps_keys(shard.raw, candidate.raw)
+        and keeps_keys(without_legacy_defaults(kind, shard.raw, candidate.raw), candidate.raw)
     ):
         return write(candidate.raw, candidate.path) or final
     return final

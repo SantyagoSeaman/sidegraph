@@ -154,12 +154,12 @@ needs no other change. Three things to know:
   the target branch's tip, as CI computes it: `git merge-base origin/<target> HEAD` on GitHub's
   pull-request checkout gives that tip. A local `sidegraph-verify --against` run against the
   fork point can differ; CI's answer is the one that gates the merge.
-- **`sidegraph-doctor --check` exits 2 on the new notices.** While a store is unmigrated,
-  doctor reports `store-not-migrated`, and on a packed store with work pending it reports
-  `maintenance-due`; `--check` fails on any finding. A CI job that runs `doctor --check` turns
-  red until you migrate (or run maintenance). Migrate in the same window you upgrade the job,
-  or, since doctor has no flag to exclude a finding, run it with `--json` and filter the two
-  finding names out (for example with `jq`) before deciding.
+- **`sidegraph-doctor --check` exits 2 on an unmigrated store.** While a store is
+  unmigrated, doctor reports `store-not-migrated`, and `--check` fails on it. A CI job that
+  runs `doctor --check` turns red until you migrate. Migrate in the same window you upgrade the
+  job, or, since doctor has no flag to exclude a finding, run it with `--json` and filter that
+  finding name out (for example with `jq`) before deciding. On a packed store with work
+  pending doctor reports `maintenance-due`; since 0.19.0 `--check` does not fail on it.
 - **`sidegraph-verify` has new findings**, all errors: `bad-shard-line`, `shard-conflict`,
   `duplicate-packed-record`, `shadow-divergence`, `binding-entry-dropped`, `shard-name-case`
   and `shards-without-format2` (these on the tree itself), and `shard-body-without-source` and
@@ -168,9 +168,9 @@ needs no other change. Three things to know:
 
 A tool that reads the store files directly, not through Sidegraph, now has to read shard lines
 too: [store format](../reference/store-format.md#format-2-packed-shards) says how. ADR export
-works as before, but each ADR's `Record:` link then points at the shard file (not the
-per-record file), so the first export after the migration rewrites every ADR document, and
-again after maintenance folds a file.
+works as before. Before 0.19.0, each ADR's `Record:` link pointed at the record's file or
+shard, so an export after migration or maintenance rewrote every ADR document; since 0.19.0
+generated documents name store records by id and stay byte-identical.
 
 ## Open branches
 

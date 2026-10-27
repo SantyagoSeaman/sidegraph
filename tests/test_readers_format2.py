@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import io
 import json
-import re
 import sqlite3
 import subprocess
 import time
@@ -121,21 +120,15 @@ def _doctor(store_dir: Path) -> list[tuple[str, str]]:
 
 
 def _adr(world: World, capsys, out: Path) -> dict[str, str]:
-    """The ADR export preview as ``record_id -> diff``, link targets masked: a packed record
-    links to its shard, a file to its file."""
+    """The ADR export preview as ``record_id -> diff``, byte for byte: a document names a store
+    record by id, never by where it is stored, so migration changes nothing in it, header hash
+    included."""
     args = ["--db", str(world.store_dir), "--out", str(out), "--json"]
     code = adr_main(args)
     captured = capsys.readouterr()
     assert code == 0, captured.err
     changes = json.loads(captured.out)["changes"]
-    return {c["record_id"]: _mask_paths(c["diff"]) for c in changes}
-
-
-def _mask_paths(diff: str) -> str:
-    """Only what is derived from where a record is stored: link targets, and the header hash
-    that covers them. Everything else, the record text included, must be equal."""
-    diff = re.sub(r"\]\([^)]*\)", "](link)", diff)
-    return re.sub(r"sha256=[0-9a-f]{64}", "sha256=-", diff)
+    return {c["record_id"]: c["diff"] for c in changes}
 
 
 def _stats(store_dir: Path) -> dict:

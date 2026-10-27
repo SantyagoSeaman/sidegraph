@@ -7,6 +7,39 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-27
+
+### Changed
+
+- `sidegraph-doctor --check` no longer exits `2` on `maintenance-due` alone. The finding is
+  still printed, listed in `--json` and shown as a session notice; `store-not-migrated` and
+  every other finding still fail `--check`.
+- `sidegraph-export-adr` names store records (the ADR's own record, supporting facts,
+  domains, successors without a document) by id instead of linking into `.sidegraph/`.
+  Migrating or maintaining the store no longer rewrites every exported ADR. The first export
+  with this version rewrites each generated document once. The `$record_link` template
+  placeholder is now a code span with the id, not a link target.
+
+### Fixed
+
+- One record file that cannot be read or decoded no longer fans out into findings at every
+  record that refers to it. `sidegraph-verify` reports the one `parse-error`; a fact that
+  supports it, a successor that supersedes it and a binding to such an entity raise nothing
+  more, and `sidegraph-doctor` adds no `dangling-record` for the supporting fact.
+- `sidegraph-verify --against` no longer reports `illegal-deletion` or `illegal-field-change`
+  for a committed file the store never loads: a stray copy under an unsafe name, or a file
+  whose baseline id is unsafe. Deleting such a file is the fix; the snapshot still reports it
+  as `unsafe-record-id` while it exists.
+- Ratifying, dropping or closing a decision written before the `scope` field existed no longer
+  reads as an illegal `scope` change. `sidegraph-verify`, `sidegraph-compact` and maintenance
+  accept the default `repo` that the writer or the archive line adds, so such a record can be
+  compacted and packed again. A real `scope` edit is still refused. Entities without `kind`
+  get the same treatment for its default, `concrete`.
+- `sidegraph-export-okf` no longer exports a domain's superseded row when its successor's id
+  happens to sort lower, which can happen for two ids minted in the same millisecond, or
+  after a domain is renamed away and back. A row with a later revision under the same slug
+  never becomes that slug's page.
+
 ## [0.18.0] — 2026-10-26
 
 ### Changed

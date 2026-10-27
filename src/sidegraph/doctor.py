@@ -44,12 +44,14 @@ from .store import (
     SKIPPED_CANONICAL_KEY,
     parse_skip_list,
 )
-from .store_layout import index_stamp_problem
+from .store_layout import index_stamp_problem, is_safe_record_id
 from .store_view import SUBDIR_OF, is_packed_store, records_of, shared_view
 from .verify import (
     _check_archive_dir,
+    _is_regular_record_file,
     _iter_json_files,
     _load_raw_json,
+    _packed_inventory,
     _run_git,
     find_store_project_repo,
 )
@@ -75,6 +77,10 @@ PLUGIN_OFF_IN_SUBDIRECTORIES = "plugin-off-in-subdirectories"
 REFRESH_HELPER_OUTDATED = "refresh-helper-outdated"
 STORE_NOT_MIGRATED = "store-not-migrated"
 MAINTENANCE_DUE = "maintenance-due"
+# Findings ``--check`` never escalates to exit 2: still printed, still in ``--json``, still a
+# session notice. ``maintenance-due`` is routine upkeep on a healthy packed store, so a CI
+# gate must not go red on it (owner decision, 2026-10-27). ``store-not-migrated`` still counts.
+CHECK_EXEMPT_CODES = frozenset({MAINTENANCE_DUE})
 
 # The registry's check id -> the finding code doctor prints. They differ where one check yields
 # findings of one record each: check ``orphaned-records`` is one problem, code ``orphaned-record``
@@ -194,6 +200,36 @@ def _iter_records(store_dir: Path, subdir: str) -> list[tuple[Path, dict]]:
     return out
 
 
+def _undecodable_stems(store_dir: Path, subdir: str) -> frozenset[str]:
+    """The safe stems of ``<store>/<subdir>`` files that do not decode to a record object.
+    Verify reports each as one ``parse-error``; a reference to one is not dangling, because
+    fixing or restoring the file is the heal (one bad file, one finding)."""
+    out: set[str] = set()
+    for path in _iter_json_files(store_dir / subdir):
+        if not is_safe_record_id(path.stem) or not _is_regular_record_file(path):
+            continue
+        payload, err = _load_raw_json(path)
+        if err is not None or not isinstance(payload, dict) or "id" not in payload:
+            out.add(path.stem)
+    return frozenset(out)
+
+
+def _unreadable_packed_ids(store_dir: Path, record_type: str) -> frozenset[str]:
+    """On a format-2 store, the ids the store refuses to serve although an occurrence exists:
+    rule 1 quarantines an identity with any unreadable, conflicting or duplicated occurrence,
+    even beside a readable copy (verify reports that occurrence). Like an undecodable file, the
+    record exists but its body is unknown, so a reference to it is not dangling."""
+    packed = _packed_inventory(store_dir)
+    if packed is None:
+        return frozenset()
+    quarantined = {
+        record_id
+        for (kind, record_id), eff in packed.eff.items()
+        if kind == record_type and eff.raw is None and eff.reason is not None
+    }
+    return frozenset(packed.held[record_type]) | quarantined
+
+
 def _binding_entries(store_dir: Path) -> dict[str, list[dict]]:
     """record_id -> committed anchor entries, from ``bindings/<record_id>.json`` (each a
     JSON LIST of identity dicts, no status — see store-format). Non-list payloads and
@@ -246,6 +282,7 @@ def _check_dangling_records(
     bindings: dict[str, list[dict]],
     decision_status_by_id: dict[str, str],
     skipped: frozenset[str] = frozenset(),
+    undecodable: frozenset[str] = frozenset(),
 ) -> list[Finding]:
     """dangling-record: an OPEN record (decision proposed|accepted; fact valid_to null)
     whose committed anchor set is absent or empty -- AND, for a fact only, whose
@@ -274,6 +311,8 @@ def _check_dangling_records(
       what a curation check should say.
     - a MIX of a missing id and a terminal id (no live id at all): the missing-id wording
       wins -- a broken reference is worth naming over "merely" terminal.
+    - a supports id naming a decision file that does not decode (``undecodable``): no finding,
+      since its status is unknown and verify already reports that file.
     """
     open_records: list[tuple[Path, dict, str]] = [
         (p, d, "decision") for p, d in decisions if _is_open_decision(d)
@@ -311,6 +350,8 @@ def _check_dangling_records(
             if isinstance(raw_supports, list)
             else []
         )
+        if any(sid in undecodable for sid in supports):
+            continue  # one bad file, one finding: verify's parse-error
         statuses = [decision_status_by_id.get(sid) for sid in supports]
         # D4's "live" is the complement of _TERMINAL_DECISION_STATUS_VALUES, checked
         # directly against it (not a second, separately-maintained "open" set) so the two
@@ -2116,7 +2157,12 @@ def _curate(
 
     findings: list[Finding] = []
     findings += _check_dangling_records(
-        decisions, facts, bindings, decision_status_by_id, _skipped_paths(index)
+        decisions,
+        facts,
+        bindings,
+        decision_status_by_id,
+        _skipped_paths(index),
+        _undecodable_stems(root, "decisions") | _unreadable_packed_ids(root, "decision"),
     )
     status_findings, skipped = _check_binding_statuses(root)
     findings += status_findings

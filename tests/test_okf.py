@@ -231,6 +231,106 @@ class TestDomainMapping:
         assert "slug: auth" in lines
         assert "type: domain" in lines
 
+    @pytest.mark.parametrize(
+        ("old_id", "new_id"),
+        [
+            # Same 48-bit ULID timestamp; the earlier row's random part sorts greater.
+            ("00000000000000000000000002", "00000000000000000000000001"),
+            ("00000000000000000000000001", "00000000000000000000000002"),
+        ],
+    )
+    def test_domain_collapse_follows_supersession_not_id_order(
+        self, tmp_path: Path, old_id: str, new_id: str
+    ) -> None:
+        s = _store(tmp_path)
+        old = s.add_domain(_domain(domain_id=old_id, summary="Old summary."))
+        s.supersede_domain(
+            old.domain_id, _domain(domain_id=new_id, summary="New summary.", supersedes=old_id)
+        )
+        text = build_bundle(s)["domains/auth.md"]
+        assert "New summary." in text
+        assert "Old summary." not in text
+        assert f"id: {new_id.lower()}" in text.splitlines()
+
+    def test_domain_collapse_follows_a_chain_of_supersessions(self, tmp_path: Path) -> None:
+        ids = [
+            "00000000000000000000000003",
+            "00000000000000000000000002",
+            "00000000000000000000000001",
+        ]
+        s = _store(tmp_path)
+        s.add_domain(_domain(domain_id=ids[0], summary="First."))
+        s.supersede_domain(ids[0], _domain(domain_id=ids[1], summary="Second.", supersedes=ids[0]))
+        s.supersede_domain(ids[1], _domain(domain_id=ids[2], summary="Third.", supersedes=ids[1]))
+        text = build_bundle(s)["domains/auth.md"]
+        assert "Third." in text
+        assert "First." not in text and "Second." not in text
+
+    def test_domain_renamed_away_and_back_shows_the_live_row(self, tmp_path: Path) -> None:
+        a, b, c = (
+            "00000000000000000000000003",
+            "00000000000000000000000002",
+            "00000000000000000000000001",
+        )
+        s = _store(tmp_path)
+        s.add_domain(_domain(slug="x", domain_id=a, summary="Row A."))
+        s.supersede_domain(a, _domain(slug="y", domain_id=b, summary="Row B.", supersedes=a))
+        s.supersede_domain(b, _domain(slug="x", domain_id=c, summary="Row C.", supersedes=b))
+        bundle = build_bundle(s)
+        assert "Row C." in bundle["domains/x.md"] and "Row A." not in bundle["domains/x.md"]
+        assert "Row B." in bundle["domains/y.md"]  # the renamed-away slug keeps its page
+
+    def test_domain_revised_then_renamed_away_keeps_its_last_revision(self, tmp_path: Path) -> None:
+        a1, a2, b = (
+            "00000000000000000000000003",
+            "00000000000000000000000002",
+            "00000000000000000000000001",
+        )
+        s = _store(tmp_path)
+        s.add_domain(_domain(slug="x", domain_id=a1, summary="Revision one."))
+        s.supersede_domain(
+            a1, _domain(slug="x", domain_id=a2, summary="Revision two.", supersedes=a1)
+        )
+        s.supersede_domain(a2, _domain(slug="y", domain_id=b, summary="Renamed.", supersedes=a2))
+        page = build_bundle(s)["domains/x.md"]
+        assert "Revision two." in page and "Revision one." not in page
+
+    def test_domain_renamed_away_still_beats_an_older_unrelated_row(self, tmp_path: Path) -> None:
+        old, moved, renamed = (
+            "00000000000000000000000001",
+            "00000000000000000000000003",
+            "00000000000000000000000002",
+        )
+        s = _store(tmp_path)
+        dropped = s.add_domain(_domain(slug="auth", domain_id=old, summary="Unrelated old row."))
+        s.ratify_domains(drop=[dropped.domain_id])
+        s.add_domain(_domain(slug="auth", domain_id=moved, summary="Moved to billing."))
+        s.supersede_domain(
+            moved, _domain(slug="billing", domain_id=renamed, summary="Billing.", supersedes=moved)
+        )
+        page = build_bundle(s)["domains/auth.md"]
+        assert "Moved to billing." in page and "Unrelated old row." not in page
+
+    def test_domain_slug_whose_every_row_is_superseded_keeps_its_page(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        z = s.add_domain(_domain(slug="z", summary="Self-superseding row."))
+        payload = z.model_copy(update={"supersedes": z.domain_id})
+        s._write_domain(payload)
+        s.close()
+        bundle = build_bundle(_store(tmp_path))
+        assert "Self-superseding row." in bundle["domains/z.md"]
+
+    def test_a_non_ulid_domain_id_exports_without_a_timestamp(self, tmp_path: Path) -> None:
+        """Pre-release panel, Grok 2: a hand-written id that wins its slug must not crash."""
+        s = _store(tmp_path)
+        old = s.add_domain(_domain(summary="Old."))
+        s.supersede_domain(
+            old.domain_id, _domain(domain_id="AUTH0", summary="New.", supersedes=old.domain_id)
+        )
+        lines = build_bundle(s)["domains/auth.md"].splitlines()
+        assert "id: auth0" in lines
+        assert not any(line.startswith("timestamp:") for line in lines)
+
     def test_domain_parent_hierarchy_link(self, tmp_path: Path) -> None:
         s = _store(tmp_path)
         parent = s.add_domain(_domain(slug="platform", title="Platform", summary="Base layer."))

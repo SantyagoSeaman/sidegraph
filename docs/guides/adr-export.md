@@ -24,8 +24,10 @@ consequences come from the record. Missing optional reasoning says `Not recorded
 
 A fixed footer retains status, validity, history, source pointers, durable code descriptors
 and complete accepted, unclosed supporting facts. Even a future `valid_to` closes a fact;
-the exporter never infers a sample size or runtime qualifier. A successor of another kind
-links to its source record rather than a nonexistent ADR. `index.md` groups documents by
+the exporter never infers a sample size or runtime qualifier. Store records (the ADR's own
+record, supporting facts, domains, a successor of another kind) are named by id, never by a
+path into `.sidegraph/`, so migrating or maintaining the store changes no generated
+document. `index.md` groups documents by
 explicit accepted domain bindings, otherwise under Unassigned. These are membership
 intent and durable descriptors, not claims of current graph resolution.
 
@@ -68,7 +70,10 @@ A custom template is a regular UTF-8 file up to 64 KiB, using literal text and
 `string.Template` placeholders. It must include `$title`, `$context`, `$choice`, `$rejected`
 and `$consequences`; `$$` prints a dollar sign. Optional fields are `$kind`, `$status`,
 `$valid_from`, `$valid_to`, `$evidence`, `$anchors`, `$domains`, `$supersedes`, `$successors`,
-`$record_link` and `$source`. The fixed footer remains even if the template omits these.
+`$record_link` and `$source`. `$record_link` is the record's id as a code span, not a link
+target (store records are never linked by path, so migrating the store changes no document);
+a template that used it as the target of a markdown link must drop the link syntax. The fixed
+footer remains even if the template omits these.
 Default templates avoid duplicating it. Unknown placeholders or reserved marker lines are
 errors. The generated ownership marker precedes the template, so template YAML frontmatter
 is not at the first byte of the generated file.

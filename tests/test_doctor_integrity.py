@@ -4,7 +4,8 @@ says when it could not look at the graph.
 Doctor is a pure read: it never constructs a ``Store``. It hands the registry a ``mode=ro``
 connection on ``index.db`` (or ``None`` when there is no usable one) and renders the problems'
 ``findings``. A missing graph is a skipped check, never a finding: ``--check`` escalates every
-finding, so a finding would make every CI job that runs doctor without a graph exit 2.
+finding but ``maintenance-due``, so a finding would make every CI job that runs doctor without
+a graph exit 2.
 see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6; T11, T12, T20)
 """
 

@@ -995,3 +995,109 @@ def test_duplicate_archive_payloads_differing_as_1_and_true(tmp_path: Path) -> N
         )  # a compatible shard line beside the segments
         segments(two, other)
         assert DUPLICATE_ULID in codes(verify_snapshot(two))
+
+
+@pytest.mark.parametrize("change", ["deleted", "repaired"])
+@pytest.mark.parametrize("bad_id", ["../x", ["x"], None])
+def test_a_packed_store_file_with_an_unsafe_baseline_id_is_no_record(
+    git_repo: Path, change: str, bad_id: object
+) -> None:
+    """As in format 1: the reload never loaded a file whose body id is unsafe, so deleting it,
+    or repairing its id, is no transition finding."""
+    from tests.store_format2_support import commit_all, make_store, put_file
+
+    store = make_store(git_repo, fmt=2)
+    body = decision_body("D1", id=bad_id)
+    if bad_id is None:
+        del body["id"]  # no id at all
+    path = put_file(store, "decision", body, record_id="D1")
+    commit_all(git_repo, "unsafe id", date=T)
+    if change == "deleted":
+        path.unlink()
+    else:
+        path.write_text(json.dumps(decision_body("D1")), encoding="utf-8")
+    assert codes(verify_against(store, "HEAD")) == set()
+
+
+@pytest.mark.parametrize("edit", ["unchanged", "edited"])
+def test_an_unsafe_id_file_beside_a_valid_shard_line_shadows_nothing(
+    git_repo: Path, edit: str
+) -> None:
+    """The file is no record on either side, so the shard line of the same identity is what
+    both trees hold: nothing was deleted."""
+    from tests.store_format2_support import commit_all, make_store, put_file, put_shard_line
+
+    store = make_store(git_repo, fmt=2)
+    put_shard_line(store, "decision", "D1", decision_body("D1", status="accepted"))
+    path = put_file(store, "decision", decision_body("D1", id="../x"), record_id="D1")
+    commit_all(git_repo, "shard line and a stray", date=T)
+    if edit == "edited":
+        path.write_text(
+            json.dumps(decision_body("D1", id="../x", title="edited")), encoding="utf-8"
+        )
+    assert codes(verify_against(store, "HEAD")) == set()
+
+
+def test_a_real_file_record_edited_to_an_unsafe_id_is_still_judged(git_repo: Path) -> None:
+    """The baseline file held a loaded record D1 (beside its shard line): editing its id to an
+    unsafe one is a change to a real record, not the cleanup of a stray."""
+    from tests.store_format2_support import commit_all, make_store, put_file, put_shard_line
+
+    store = make_store(git_repo, fmt=2)
+    put_shard_line(store, "decision", "D1", decision_body("D1", status="accepted"))
+    path = put_file(store, "decision", decision_body("D1", status="accepted"))
+    commit_all(git_repo, "file and shard copy", date=T)
+    path.write_text(json.dumps(decision_body("D1", id="../x", status="accepted")), encoding="utf-8")
+    assert codes(verify_against(store, "HEAD")) != set()
+
+
+@pytest.mark.parametrize("content", ["not json", "[1]"])
+def test_deleting_an_undecodable_packed_store_file_is_illegal(git_repo: Path, content: str) -> None:
+    """A packed store quarantines the identity of a file that does not decode: it stands for a
+    damaged record, so deleting it is still a judged loss (pre-release panel Opus 2 rejected;
+    the private matrix's sole_unreadable_file_deleted pins the same rule)."""
+    from tests.store_format2_support import commit_all, make_store
+
+    store = make_store(git_repo, fmt=2)
+    path = store / "decisions" / "D1.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    commit_all(git_repo, "undecodable file", date=T)
+    path.unlink()
+    assert "illegal-deletion" in codes(verify_against(store, "HEAD"))
+
+
+@pytest.mark.parametrize("fmt", [1, 2])
+@pytest.mark.parametrize("body", [{"id": "../x", "name": "n"}, {"name": "n"}, "not json", None])
+# "not json" is a damaged initiative, not a stray: its deletion stays illegal like ``None``'s
+def test_deleting_a_never_loaded_initiative_file_is_no_finding(
+    git_repo: Path, fmt: int, body: object
+) -> None:
+    """Pre-release panel, Muse r2: the never-loaded rule covers initiatives too. ``None`` is the
+    control: a real initiative's deletion is still illegal."""
+    from tests.store_format2_support import commit_all, make_store
+
+    store = make_store(git_repo, fmt=fmt)
+    path = store / "initiatives" / "I1.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    real = {"id": "I1", "name": "n"}
+    text = body if isinstance(body, str) else json.dumps(real if body is None else body)
+    path.write_text(text, encoding="utf-8")
+    commit_all(git_repo, "initiative file", date=T)
+    path.unlink()
+    expected = {"illegal-deletion"} if body is None or body == "not json" else set()
+    assert codes(verify_against(store, "HEAD")) == expected
+
+
+def test_a_new_unsafe_id_file_beside_a_valid_shard_line_is_judged(git_repo: Path) -> None:
+    """Rule 1 quarantines the identity once the file appears, so the shard line's record is no
+    longer served: an added never-loaded file is judged, unlike one present on both sides."""
+    from tests.store_format2_support import commit_all, make_store, put_shard_line
+
+    store = make_store(git_repo, fmt=2)
+    put_shard_line(store, "decision", "D1", decision_body("D1", status="accepted"))
+    commit_all(git_repo, "a valid shard line", date=T)
+    path = store / "decisions" / "D1.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(decision_body("D1", id="../x")), encoding="utf-8")
+    assert codes(verify_against(store, "HEAD")) != set()

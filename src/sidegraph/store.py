@@ -100,6 +100,7 @@ from .store_format import (
 from .store_layout import (
     INDEX_JOURNAL_PRAGMA,
     INDEX_STAMPS,
+    LEGACY_DEFAULTS,
     NOT_A_FILE_REASON,
     SHARDS_SUBDIR,
     VOLATILE_STALE_KEY,
@@ -908,13 +909,14 @@ def _parse_segment_seq(stem: str, date_str: str) -> int | None:
 
 
 def _hot_file_comparison(
-    path: Path, expected_payload: dict
+    path: Path, expected_payload: dict, kind: str
 ) -> Literal["match", "extra-fields", "different-values"] | None:
-    """Read and classify the current hot file once; ``None`` means it is absent."""
+    """Read and classify the current hot file once; ``None`` means it is absent. ``kind``
+    (``decision`` or ``domain``) selects the legacy defaults a hot file may lack."""
     if not path.is_file():
         return None
     difference = hot_archive_difference(
-        json.loads(path.read_text(encoding="utf-8")), expected_payload
+        json.loads(path.read_text(encoding="utf-8")), expected_payload, LEGACY_DEFAULTS.get(kind)
     )
     return "match" if difference is None else difference
 
@@ -2746,7 +2748,9 @@ class Store:
             hot_path = _record_file(self.path, "decisions", did)
             if did in hot_decision_ids:
                 difference = hot_archive_difference(
-                    json.loads(hot_path.read_text(encoding="utf-8")), payload
+                    json.loads(hot_path.read_text(encoding="utf-8")),
+                    payload,
+                    LEGACY_DEFAULTS.get("decision"),
                 )
                 if difference is not None:
                     _warn_hot_archive_mismatch("decision", did, reason=difference)
@@ -2756,7 +2760,9 @@ class Store:
             hot_path = _record_file(self.path, "domains", dmid)
             if dmid in hot_domain_ids:
                 difference = hot_archive_difference(
-                    json.loads(hot_path.read_text(encoding="utf-8")), payload
+                    json.loads(hot_path.read_text(encoding="utf-8")),
+                    payload,
+                    LEGACY_DEFAULTS.get("domain"),
                 )
                 if difference is not None:
                     _warn_hot_archive_mismatch("domain", dmid, reason=difference)
@@ -2826,7 +2832,9 @@ class Store:
             ):
                 archived = archive_candidate(by_identity[(record_type, record_id)])
                 if archived is not None:
-                    difference = hot_archive_difference(eff.raw, archived.raw)
+                    difference = hot_archive_difference(
+                        eff.raw, archived.raw, LEGACY_DEFAULTS.get(record_type)
+                    )
                     if difference is not None:
                         _warn_hot_archive_mismatch(record_type, record_id, reason=difference)
 
@@ -4808,7 +4816,7 @@ class Store:
             match = (
                 None
                 if _hot_file_skipped_by_reload(hot, "id", listed)
-                else _hot_file_comparison(hot, archived_payload)
+                else _hot_file_comparison(hot, archived_payload, "decision")
             )
             if match == "match":
                 safe_decisions.add(did)
@@ -4820,7 +4828,7 @@ class Store:
             match = (
                 None
                 if _hot_file_skipped_by_reload(hot, "domain_id", listed)
-                else _hot_file_comparison(hot, archived_payload)
+                else _hot_file_comparison(hot, archived_payload, "domain")
             )
             if match == "match":
                 safe_domains.add(dmid)
@@ -5156,7 +5164,9 @@ class Store:
             if dry_run:
                 for d in new_decisions:
                     comparison = _hot_file_comparison(
-                        _record_file(self.path, "decisions", d.id), d.model_dump(mode="json")
+                        _record_file(self.path, "decisions", d.id),
+                        d.model_dump(mode="json"),
+                        "decision",
                     )
                     if comparison in {"extra-fields", "different-values"}:
                         kept_hot_files += 1
@@ -5167,6 +5177,7 @@ class Store:
                     comparison = _hot_file_comparison(
                         _record_file(self.path, "domains", dom.domain_id),
                         _domain_canonical_payload(dom),
+                        "domain",
                     )
                     if comparison in {"extra-fields", "different-values"}:
                         kept_hot_files += 1
@@ -5198,7 +5209,7 @@ class Store:
             # treated as though this index stopped having loaded it.
             for d in new_decisions:
                 p = _record_file(self.path, "decisions", d.id)
-                comparison = _hot_file_comparison(p, d.model_dump(mode="json"))
+                comparison = _hot_file_comparison(p, d.model_dump(mode="json"), "decision")
                 if comparison in {"extra-fields", "different-values"}:
                     kept_hot_files += 1
                     _warn_hot_archive_mismatch("decision", d.id, reason=comparison)
@@ -5207,7 +5218,7 @@ class Store:
                 self._delete_canonical_stat("decisions", d.id)
             for dom in new_domains:
                 p = _record_file(self.path, "domains", dom.domain_id)
-                comparison = _hot_file_comparison(p, _domain_canonical_payload(dom))
+                comparison = _hot_file_comparison(p, _domain_canonical_payload(dom), "domain")
                 if comparison in {"extra-fields", "different-values"}:
                     kept_hot_files += 1
                     _warn_hot_archive_mismatch("domain", dom.domain_id, reason=comparison)

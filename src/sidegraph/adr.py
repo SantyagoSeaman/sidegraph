@@ -36,7 +36,9 @@ _KINDS = frozenset({DecisionKind.ADR, DecisionKind.CONSTRAINT})
 
 @dataclass(frozen=True)
 class AdrSnapshot:
-    """Owned record values and canonical source locations, not volatile graph mappings."""
+    """Owned record values, not volatile graph mappings. Where a record is stored (a file,
+    a shard line, an archive segment) is not part of it: an exported document names a store
+    record by id, so migration and maintenance never change a generated document."""
 
     root: Path
     decisions: dict[str, Decision]
@@ -44,9 +46,6 @@ class AdrSnapshot:
     domains: dict[str, Domain]
     entities: dict[str, Entity]
     bindings: dict[str, list[AnchorBinding]]
-    record_paths: dict[str, Path]
-    fact_paths: dict[str, Path]
-    domain_paths: dict[str, Path]
 
     @property
     def exported(self) -> dict[str, Decision]:
@@ -87,23 +86,21 @@ def read_snapshot(path: Path) -> AdrSnapshot:
 def _snapshot_of(root: Path, packed: dict[tuple[str, str], EffectiveRecord]) -> AdrSnapshot:
     """The snapshot of a store: every record is its inventory's effective record
     (``store_rules.effective``), whichever file, shard line or archive segment holds it, so an
-    archived body never overwrites a live one. A record's path is where it is stored.
+    archived body never overwrites a live one.
 
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
 
-    def of[Model: BaseModel](record_type: str, model: type[Model]) -> tuple[dict[str, Model], dict]:
-        values: dict[str, Model] = {}
-        paths: dict[str, Path] = {}
-        for (kind, rid), rec in packed.items():
-            if kind == record_type:
-                values[rid] = model.model_validate(rec.raw)
-                paths[rid] = rec.source_path(root)
-        return values, paths
+    def of[Model: BaseModel](record_type: str, model: type[Model]) -> dict[str, Model]:
+        return {
+            rid: model.model_validate(rec.raw)
+            for (kind, rid), rec in packed.items()
+            if kind == record_type
+        }
 
-    decisions, record_paths = of("decision", Decision)
-    facts, fact_paths = of("fact", Fact)
-    domains, domain_paths = of("domain", Domain)
-    entities, _ = of("entity", Entity)
+    decisions = of("decision", Decision)
+    facts = of("fact", Fact)
+    domains = of("domain", Domain)
+    entities = of("entity", Entity)
     bindings: dict[str, list[AnchorBinding]] = {}
     for (kind, rid), rec in packed.items():
         if kind == "bindings":
@@ -112,9 +109,7 @@ def _snapshot_of(root: Path, packed: dict[tuple[str, str], EffectiveRecord]) -> 
             bindings[rid] = [
                 AnchorBinding.model_validate({**item, "record_id": rid}) for item in rec.raw
             ]
-    return AdrSnapshot(
-        root, decisions, facts, domains, entities, bindings, record_paths, fact_paths, domain_paths
-    )
+    return AdrSnapshot(root, decisions, facts, domains, entities, bindings)
 
 
 def _label(text: str) -> str:
@@ -122,7 +117,8 @@ def _label(text: str) -> str:
 
 
 def file_link(label: str, target: Path, out: Path) -> str:
-    """Link from a flat ADR directory, retaining archive ID in the label where needed."""
+    """Link from a flat ADR directory to a project file (a code anchor, a document ref).
+    Store records are never linked by path: see :func:`record_ref`."""
     try:
         path = os.path.relpath(target, out).replace(os.sep, "/")
     except ValueError:  # Windows cross-drive output has no relative spelling.
@@ -160,10 +156,19 @@ def record_domains(snapshot: AdrSnapshot, record_id: str) -> list[Domain]:
     return [current[slug] for slug in sorted(slugs) if slug in current]
 
 
-def _ref(snapshot: AdrSnapshot, rid: str, paths: dict[str, str], out: Path) -> str:
+def record_ref(rid: str) -> str:
+    """A store record named by its id. Never a path: the store's layout (a per-record file,
+    a shard line) changes under migration and maintenance, and the generated document and
+    its header hash must not.
+
+    # see design/superpowers/specs/2026-10-27-adr-record-locator-design.md"""
+    return f"`{_label(rid)}`"
+
+
+def _ref(rid: str, paths: dict[str, str]) -> str:
     if rid in paths:
         return f"[{_label(rid)}]({quote(paths[rid], safe='/')})"
-    return file_link(rid, snapshot.record_paths[rid], out)
+    return record_ref(rid)
 
 
 def render_record(
@@ -171,7 +176,7 @@ def render_record(
 ) -> str:
     """Render complete authored prose plus a mandatory source/status/evidence footer."""
     decision = snapshot.exported[record_id]
-    record_link = file_link(record_id, snapshot.record_paths[record_id], out)
+    record_link = record_ref(record_id)
     evidence_lines = []
     for fact in sorted(snapshot.facts.values(), key=lambda f: f.id):
         if (
@@ -180,8 +185,7 @@ def render_record(
             and record_id in fact.supports
         ):
             evidence_lines.append(
-                f"- {file_link(fact.id, snapshot.fact_paths[fact.id], out)}: {fact.statement}\n"
-                f"  Source: {fact.source}"
+                f"- {record_ref(fact.id)}: {fact.statement}\n  Source: {fact.source}"
             )
     anchors = []
     for binding in snapshot.bindings.get(record_id, []):
@@ -202,8 +206,11 @@ def render_record(
         else:
             detail = _label(descriptor_path) if descriptor_path else "no durable file path"
             anchors.append(f"- {_label(entity.canonical_name)} ({detail}; unlinked, not verified)")
+    # A backtick in a title would pair with the id's code span; escape it. The title's own
+    # backslashes are escaped first, before _label adds its bracket escapes, so neither
+    # cancels nor doubles another escape.
     domains = [
-        file_link(d.title, snapshot.domain_paths[d.domain_id], out)
+        f"{_label(d.title.replace('\\', '\\\\')).replace('`', '\\`')} ({record_ref(d.domain_id)})"
         for d in record_domains(snapshot, record_id)
     ]
     source = f"Recorded source: {decision.provenance.source}."
@@ -238,12 +245,8 @@ def render_record(
         "evidence": "\n".join(evidence_lines) or "None recorded.",
         "anchors": "\n".join(sorted(set(anchors))) or "None recorded.",
         "domains": ", ".join(domains) or "Unassigned",
-        "supersedes": _ref(snapshot, previous, paths, out)
-        if previous in snapshot.decisions
-        else "None",
-        "successors": ", ".join(
-            _ref(snapshot, d.id, paths, out) for d in sorted(successors, key=lambda d: d.id)
-        )
+        "supersedes": _ref(previous, paths) if previous in snapshot.decisions else "None",
+        "successors": ", ".join(_ref(d.id, paths) for d in sorted(successors, key=lambda d: d.id))
         or "None",
         "record_link": record_link,
         "source": source,

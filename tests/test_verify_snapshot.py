@@ -690,6 +690,161 @@ def test_a_reference_to_a_stem_skipped_file_is_not_dangling(store: Store):
     assert _pairs(store) == [(UNSAFE_CODE, str(skipped))]
 
 
+@pytest.mark.parametrize("content", [b"not json", b"\xff\xfe", b"[1]", b"{}", None])
+def test_a_reference_to_an_undecodable_record_file_is_not_dangling(store: Store, content):
+    """One bad file gives one finding: a fact supporting a decision whose file does not decode
+    (or cannot be read) raises nothing at the fact. Fixing or restoring the file is the heal."""
+    paths, raws = _store_with_a_domain(store)
+    broken = store.path / "decisions" / "01JBROKENXXXXXXXXXXXXXXXXX.json"
+    fact = store.path / "facts" / "01JSUPPORTSXXXXXXXXXXXXXXX.json"
+    _write(fact, {**raws["facts"], "id": fact.stem, "supports": [broken.stem]})
+    if content is None:
+        if sys.platform == "win32" or os.geteuid() == 0:
+            pytest.skip("mode 000 is not unreadable here")
+        _write(broken, {**raws["decisions"], "id": broken.stem})
+        broken.chmod(0)
+    else:
+        broken.write_bytes(content)
+    try:
+        assert [code for code, _ in _pairs(store)] == ["parse-error"]
+    finally:
+        broken.chmod(0o644)
+
+
+def test_doctor_adds_no_dangling_record_for_a_fact_supporting_an_undecodable_decision(
+    store: Store, capsys
+):
+    d = store.add_decision(_decision())
+    fact = store.add_fact(_fact(supports=[d.id]))
+    broken = _decision_path(store, d.id)
+    broken.write_text("not json", encoding="utf-8")
+    capsys.readouterr()
+    assert doctor_main(["--db", str(store.path), "--json"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert [v["code"] for v in report["violations"]] == ["parse-error"]
+    assert all(f.get("record_id") != fact.id for f in report["findings"])
+
+
+def test_a_directory_named_like_a_record_file_is_no_record(store: Store):
+    """Only a regular file stands for the record its name names: a directory ``D.json`` is no
+    record, so a fact supporting ``D`` still dangles."""
+    paths, raws = _store_with_a_domain(store)
+    entry = store.path / "decisions" / "01JNOTAFILEXXXXXXXXXXXXXXX.json"
+    entry.mkdir()
+    fact = store.path / "facts" / "01JSUPPORTSXXXXXXXXXXXXXXX.json"
+    _write(fact, {**raws["facts"], "id": fact.stem, "supports": [entry.stem]})
+    assert sorted(_pairs(store)) == sorted(
+        [("dangling-fact-support", str(fact)), ("parse-error", str(entry))]
+    )
+
+
+def test_a_readable_stem_skipped_successor_wins_over_an_undecodable_namesake(store: Store):
+    """``D.json`` does not decode and ``.D.json`` (skipped for its name) holds D superseding P:
+    D's link is known, so P has its successor."""
+    a = store.add_decision(_decision(title="a"))
+    store.ratify(a.id)
+    b = store.add_decision(_decision(title="b", supersedes=a.id))
+    good = _decision_path(store, b.id)
+    stray = good.with_name(f".{good.name}")
+    stray.write_bytes(good.read_bytes())
+    good.write_text("not json", encoding="utf-8")
+    assert sorted(_pairs(store)) == sorted([("parse-error", str(good)), (UNSAFE_CODE, str(stray))])
+
+
+@pytest.mark.parametrize("fmt", [1, 2])
+@pytest.mark.parametrize("content", ["not json", "{}", '{"status": "accepted"}'])
+def test_doctor_matches_verify_on_an_undecodable_supported_decision(tmp_path, capsys, fmt, content):
+    from tests.store_format2_support import decision_body, fact_body, make_store, put_file
+
+    db = make_store(tmp_path, fmt=fmt)
+    put_file(db, "fact", fact_body("F1", supports=["D1"], status="accepted"))
+    put_file(db, "decision", decision_body("D1"))
+    (db / "decisions" / "D1.json").write_text(content, encoding="utf-8")
+    capsys.readouterr()
+    doctor_main(["--db", str(db), "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert [v["code"] for v in report["violations"]] == ["parse-error"]
+    assert [f for f in report["findings"] if f.get("record_id") == "F1"] == []
+
+
+def test_a_record_file_that_cannot_be_stat_ed_does_not_abort_the_report(
+    store: Store, monkeypatch, capsys
+):
+    """A per-entry file-system error (a symlink into an unsearchable directory, say) is that
+    file's parse-error; it must not abort verify or doctor."""
+    import sidegraph.verify as verify_module
+
+    paths, raws = _store_with_a_domain(store)
+    broken = store.path / "decisions" / "01JBROKENXXXXXXXXXXXXXXXXX.json"
+    broken.write_text("not json", encoding="utf-8")
+    real_stat = verify_module.stat_entry
+
+    def failing_stat(path):
+        if Path(path).name == broken.name:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_stat(path)
+
+    monkeypatch.setattr(verify_module, "stat_entry", failing_stat)
+    assert "parse-error" in [code for code, _ in _pairs(store)]
+    capsys.readouterr()
+    assert doctor_main(["--db", str(store.path), "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["violations"]
+
+
+@pytest.mark.parametrize("beside", ["nothing", "a readable file", "a readable shard line"])
+@pytest.mark.parametrize("bad", ["not a record object", "invalid status"])
+def test_doctor_adds_no_dangling_record_for_a_decision_held_only_by_a_bad_shard_line(
+    tmp_path, capsys, bad, beside
+):
+    """Format 2 after maintenance: the decision lives only in a shard line that cannot be read.
+    Verify reports the line; doctor must not add dangling-record for the supporting fact
+    (pre-release panel, Muse 2)."""
+    from tests.store_format2_support import (
+        decision_body,
+        fact_body,
+        make_store,
+        put_file,
+        put_shard_line,
+    )
+
+    db = make_store(tmp_path, fmt=2)
+    put_file(db, "fact", fact_body("F1", supports=["D1"], status="accepted"))
+    body = decision_body("D1", status="NOT-A-STATUS") if bad == "invalid status" else bad
+    put_shard_line(db, "decision", "D1", body)
+    # a readable copy beside the bad line: rule 1 still quarantines the identity (Grok r2)
+    if beside == "a readable file":
+        put_file(db, "decision", decision_body("D1", status="accepted"))
+    elif beside == "a readable shard line":
+        put_shard_line(db, "decision", "D1", decision_body("D1", status="accepted"))
+    capsys.readouterr()
+    doctor_main(["--db", str(db), "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert "bad-shard-line" in [v["code"] for v in report["violations"]]
+    assert [f for f in report["findings"] if f.get("record_id") == "F1"] == []
+
+
+def test_a_binding_to_an_undecodable_entity_file_is_not_dangling(store: Store):
+    d = store.add_decision(_decision())
+    entity = store.upsert_entity(
+        Entity(canonical_name="f_widget", descriptor=Descriptor(name="f_widget", file_path="a.py"))
+    )
+    store.add_binding(AnchorBinding(record_id=d.id, entity_id=entity.entity_id, tier=2))
+    assert verify_snapshot(store.path) == []
+    broken = store.path / "entities" / f"{entity.entity_id}.json"
+    broken.write_text("not json", encoding="utf-8")
+    assert _pairs(store) == [("parse-error", str(broken))]
+
+
+def test_a_successor_of_an_undecodable_predecessor_is_not_dangling(store: Store):
+    a = store.add_decision(_decision(title="a"))
+    store.ratify(a.id)
+    store.add_decision(_decision(title="b", supersedes=a.id))
+    assert verify_snapshot(store.path) == []
+    broken = _decision_path(store, a.id)
+    broken.write_text("not json", encoding="utf-8")
+    assert _pairs(store) == [("parse-error", str(broken))]
+
+
 @pytest.mark.parametrize("skipped_name", ["01JCRAFTEDIDXXXXXXXXXXXXXX.json", ".x.json"])
 def test_a_reference_to_an_unsafe_id_still_dangles(store: Store, skipped_name):
     """An unsafe id is nobody's legitimate target, so the file is not offered as one, whether
@@ -1751,3 +1906,56 @@ def test_doctor_stops_after_the_strict_section_for_a_store_it_may_not_read(store
     assert doctor_main(["--db", str(store.path), "--json"]) == 2
     payload = json.loads(capsys.readouterr().out)
     assert (payload["skipped"], payload["findings"]) == (["advisory-checks"], [])
+
+
+# -- the transition layer skips what the reload skips (unsafe names, unsafe ids) -----------------
+
+
+def _commit(repo: Path, message: str) -> None:
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", message], cwd=repo, check=True, capture_output=True
+    )
+
+
+def _against(store: Store, capsys) -> list[tuple[str, str]]:
+    capsys.readouterr()
+    verify_main(["--db", str(store.path), "--against", "HEAD", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    return sorted((v["code"], Path(v["path"]).name) for v in report["violations"])
+
+
+@pytest.mark.parametrize("change", ["deleted", "edited"])
+@pytest.mark.parametrize("unsafe", ["name", "id"])
+def test_against_ignores_a_committed_file_the_reload_never_indexed(
+    tmp_path, capsys, change, unsafe
+):
+    """A stray copy under an unsafe name, or a file holding an unsafe id, was never a record:
+    deleting it is the fix and editing it changes no record, so the transition layer adds
+    nothing. The snapshot finding stays while the file is there."""
+    store = _store_in_git(tmp_path)
+    real = next((store.path / "decisions").glob("*.json"))
+    payload = json.loads(real.read_text(encoding="utf-8"))
+    if unsafe == "name":
+        stray = real.with_name(f".{real.name}")
+        stray_payload = payload
+    else:
+        stray = real.with_name("01JCRAFTEDIDXXXXXXXXXXXXXX.json")
+        stray_payload = {**payload, "id": "../x"}
+    _write(stray, stray_payload)
+    _commit(tmp_path, "stray copy")
+    if change == "deleted":
+        stray.unlink()
+        assert _against(store, capsys) == []
+    else:
+        _write(stray, {**stray_payload, "title": "edited"})
+        assert _against(store, capsys) == [(UNSAFE_CODE, stray.name)]
+
+
+def test_against_still_flags_a_deleted_real_record(tmp_path, capsys):
+    """Control: a safe-named record file the reload indexes is a record; deleting it is still
+    illegal-deletion (the snapshot also reports the facts and bindings that now dangle)."""
+    store = _store_in_git(tmp_path)
+    real = next((store.path / "decisions").glob("*.json"))
+    real.unlink()
+    assert ("illegal-deletion", real.name) in _against(store, capsys)

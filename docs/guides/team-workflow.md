@@ -54,7 +54,7 @@ local branches, with a notice when such a branch is more than a week old
 `.sidegraph/` in the same pull request as the work that produced the records, and merge the
 branch that holds the rest. Fully staged store files do not count toward `store-uncommitted`,
 so that one check never blocks the commit that fixes it. A pre-commit hook that runs
-`sidegraph-doctor --check` still fails often. `--check` makes every advisory finding exit `2`,
+`sidegraph-doctor --check` still fails often. `--check` makes every advisory finding except `maintenance-due` exit `2`,
 and `code-drift` is one of them: it fires after any commit that touches a file an accepted
 record is anchored to. For a gate on the store itself, use `sidegraph-verify`. It exits `2`
 only for a violation of the store's own write rules, and `0` for a clean store whatever the

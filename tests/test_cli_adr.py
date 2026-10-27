@@ -79,7 +79,7 @@ def test_madr_and_custom_template_keep_full_fixed_evidence_footer(tmp_path, caps
     text = next(
         c["diff"] for c in json.loads(capsys.readouterr().out)["changes"] if c["record_id"] == "ADR"
     )
-    assert "only12 observations" in text and "facts/FACT.json" in text
+    assert "only12 observations" in text and "- `FACT`: " in text
     assert "status: accepted" in text
 
 

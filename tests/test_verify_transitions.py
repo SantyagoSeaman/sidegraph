@@ -1088,11 +1088,12 @@ def test_against_non_string_old_status_repaired_to_a_string_is_an_illegal_jump(
     [("decisions", "id", ["x"]), ("domains", "domain_id", {"a": 1})],
     ids=["decision-list-id", "domain-dict-id"],
 )
-def test_against_deleting_a_record_with_a_non_string_id_is_illegal_not_a_crash(
+def test_against_deleting_a_file_with_a_non_string_id_is_no_finding_and_no_crash(
     git_repo, capsys, kind_dir, id_field, bad
 ):
-    """Unfixed, ``old.get(rid_field) in archived_ids[kind]`` hashed the raw id and crashed.
-    Only a string id can be an archived one, so the deletion is simply illegal."""
+    """Unfixed, ``old.get(rid_field) in archived_ids[kind]`` hashed the raw id and crashed. A
+    baseline with a non-string id was never loaded by the reload (unsafe-record-id), so it was
+    no record, and deleting it is the fix, not an illegal deletion."""
     store_dir = git_repo / ".sidegraph"
     with Store(format1_store(store_dir)) as s:
         rec = s.add_decision(_decision()) if kind_dir == "decisions" else s.add_domain(_domain())
@@ -1102,9 +1103,9 @@ def test_against_deleting_a_record_with_a_non_string_id_is_illegal_not_a_crash(
     _commit_all(git_repo, "malformed id")
     path.unlink()
 
-    assert ILLEGAL_DELETION in _codes(verify_against(store_dir, "HEAD"))
-    assert verify_main(["--db", str(store_dir), "--against", "HEAD"]) == 2
-    assert "illegal-deletion" in capsys.readouterr().out
+    assert verify_against(store_dir, "HEAD") == []
+    assert verify_main(["--db", str(store_dir), "--against", "HEAD"]) == 0
+    assert "illegal-deletion" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("name", ["archive", "decisions", "entities"])

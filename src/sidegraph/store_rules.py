@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Final, cast
 
 from .store_format import Inventory, Occurrence
-from .store_layout import hot_matches_archive, project_shared, same_modulo_absent
+from .store_layout import LEGACY_DEFAULTS, hot_matches_archive, project_shared, same_modulo_absent
 
 # Transition-layer codes (design ruling 2, "Transition layer" — see that section below).
 ILLEGAL_FIELD_CHANGE = "illegal-field-change"
@@ -92,7 +92,8 @@ def _violation(code: str, path: Path | str, detail: str) -> Violation:
 # recursing into nested objects and into the items of a list, so this never reads as an
 # ``illegal-field-change`` on its own; a key that actually changes value, or that is removed
 # while holding a non-empty value, still does. A field whose default is a non-empty value is
-# not covered by this (see :func:`same_modulo_absent`'s own docstring).
+# not covered by that rule (see :func:`same_modulo_absent`'s own docstring); it has its own
+# narrow table, :data:`LEGACY_DEFAULTS`.
 
 # Decisions/facts (store.py's ``add_decision``, ``add_fact``, ``ratify``, ``drop``,
 # ``ratify_fact``, ``drop_fact``): the only fields any write path ever changes on an EXISTING
@@ -255,8 +256,24 @@ def _check_ratifier_stamp(old: dict, new: dict, path: str) -> list[Violation]:
     ]
 
 
+def _absent_vs_default(old: dict, new: dict, key: str, default: object) -> bool:
+    """One side lacks ``key`` and the other holds exactly its legacy ``default``: the reader
+    loads both as that default, so neither a writer's backfill nor an older copy of the record
+    beside a backfilled one is a change."""
+    if key not in old:
+        return key in new and new[key] == default
+    if key not in new:
+        return old[key] == default
+    return False
+
+
 def _check_immutable_fields(
-    old: dict, new: dict, mutable: frozenset[str], path: str, exempt: tuple[str, ...] = ()
+    old: dict,
+    new: dict,
+    mutable: frozenset[str],
+    path: str,
+    exempt: tuple[str, ...] = (),
+    defaults: dict[str, str] | None = None,
 ) -> list[Violation]:
     """Every key present in ``old`` or ``new`` but not in ``mutable`` or ``exempt`` must be
     the same value on both sides (:func:`same_modulo_absent`, Rule B — an absent key counts as
@@ -266,10 +283,14 @@ def _check_immutable_fields(
     field"), in sorted key order for a deterministic report.
     ``exempt`` (the ratifier stamp, for decisions/facts/domains) is
     skipped here entirely — its own rule is :func:`_check_ratifier_stamp`, run alongside this
-    one by :func:`classify_transition`, never by this function."""
+    one by :func:`classify_transition`, never by this function.
+    ``defaults`` (:data:`LEGACY_DEFAULTS` for the kind) allows a key absent on one side to hold
+    exactly its schema default on the other (:func:`_absent_vs_default`)."""
     violations: list[Violation] = []
     for key in sorted(set(old) | set(new)):
         if key in mutable or key in exempt:
+            continue
+        if defaults and key in defaults and _absent_vs_default(old, new, key, defaults[key]):
             continue
         if not same_modulo_absent(old.get(key), new.get(key)):
             violations.append(_violation(ILLEGAL_FIELD_CHANGE, path, f"field {key!r} changed"))
@@ -334,7 +355,9 @@ def classify_transition(kind: str, old: dict | None, new: dict | None) -> list[V
         return (
             _check_status_transition(old, new, legal, path)
             + _check_valid_to_transition(old, new, path)
-            + _check_immutable_fields(old, new, mutable, path, exempt=_RATIFIER_STAMP)
+            + _check_immutable_fields(
+                old, new, mutable, path, exempt=_RATIFIER_STAMP, defaults=LEGACY_DEFAULTS.get(kind)
+            )
             + _check_ratifier_stamp(old, new, path)
         )
     if kind == "domain":
@@ -344,7 +367,9 @@ def classify_transition(kind: str, old: dict | None, new: dict | None) -> list[V
             + _check_ratifier_stamp(old, new, path)
         )
     # entity
-    return _check_immutable_fields(old, new, ENTITY_MUTABLE_FIELDS, path)
+    return _check_immutable_fields(
+        old, new, ENTITY_MUTABLE_FIELDS, path, defaults=LEGACY_DEFAULTS["entity"]
+    )
 
 
 def kind_of(record_type: str) -> str:
@@ -445,11 +470,16 @@ def _empty(value: object) -> bool:
 
 
 def compatible(kind: str, a: dict, b: dict) -> bool:
-    """``b`` holds archive payload ``a``'s state or a legal successor of it.
+    """``b`` holds archive payload ``a``'s state or a legal successor of it. A legacy-default
+    key ``a`` lacks is not a newer version's extra key in ``b``: ``a`` holds that default, so
+    ``b`` holding any other value is a real change, never projected away.
 
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.3)"""
+    for key, default in LEGACY_DEFAULTS.get(kind, {}).items():
+        if key not in a and key in b and b[key] != default:
+            return False
     shared = cast(dict, project_shared(b, a))
-    if hot_matches_archive(shared, a):
+    if hot_matches_archive(shared, a, LEGACY_DEFAULTS.get(kind)):
         return True
     return not classify_transition(kind, a, shared) and all(
         k in b for k, v in a.items() if not _empty(v)
@@ -463,11 +493,33 @@ def superseding(kind: str, a: dict, s: dict) -> bool:
     return not classify_transition(kind, s, a) and not compatible(kind, a, s)
 
 
+def without_legacy_defaults(kind: str, a: object, s: object) -> object:
+    """``a`` minus each top-level key ``s`` lacks while ``a`` holds exactly its
+    :data:`LEGACY_DEFAULTS` value: removing such a key loses nothing, because the reader loads
+    the absent key as that same default. Anything but two dicts comes back unchanged."""
+    if not isinstance(a, dict) or not isinstance(s, dict):
+        return a
+    defaults = LEGACY_DEFAULTS.get(kind, {})
+    return {k: v for k, v in a.items() if not (k not in s and k in defaults and defaults[k] == v)}
+
+
+def same_modulo_legacy_defaults(kind: str, a: object, b: object) -> bool:
+    """Equal bodies once a :data:`LEGACY_DEFAULTS` key one side lacks is read as the default the
+    other side holds (strict JSON equality otherwise): an older copy and its backfilled twin."""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return _strict_equal(a, b)
+    defaults = LEGACY_DEFAULTS.get(kind, {})
+    a2 = {**{k: v for k, v in defaults.items() if k not in a and b.get(k) == v}, **a}
+    b2 = {**{k: v for k, v in defaults.items() if k not in b and a.get(k) == v}, **b}
+    return _strict_equal(a2, b2)
+
+
 def deletable(kind: str, a: dict, s: dict) -> bool:
-    """Removing archive payload ``a`` loses no key: ``s`` is compatible and keeps every key.
+    """Removing archive payload ``a`` loses no key: ``s`` is compatible and keeps every key
+    (:func:`without_legacy_defaults`).
 
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.3)"""
-    return compatible(kind, a, s) and keeps_keys(a, s)
+    return compatible(kind, a, s) and keeps_keys(without_legacy_defaults(kind, a, s), s)
 
 
 # -- the effective record ------------------------------------------------------------------

@@ -326,7 +326,7 @@ legacy `archive/` segment that maintenance would delete, a shard line in the wro
 repeated with an equal body, or a stray shard file. Nothing is broken, and `sidegraph-verify`
 does not report these states. A segment that stays because one of its lines is not safe to
 delete does not count. Run `sidegraph-compact` on the default branch. Doctor lists one finding
-at the store path, and `--check` exits `2` on it. A legacy segment that maintenance would delete counts, whether its records are already in shard
+at the store path; `--check` reports it but does not exit `2` on it. A legacy segment that maintenance would delete counts, whether its records are already in shard
 lines or maintenance would pack them. The check does not consult git, so a record file that
 still has to settle (or is untracked) is not predicted. It reads the shard files once; a store
 with more than 200 per-record files is decided from the directory listing.
@@ -411,7 +411,7 @@ not reported: nothing was switched off.
   `~/.claude/settings.json`.
 - **Where it runs.** The session surface and doctor. Not run outside a git repository, with no
   `git`, or when `git ls-files` takes longer than five seconds. Doctor lists the finding with the
-  code `plugin-off-in-subdirectories`, and `--check` exits `2` on it like any finding.
+  code `plugin-off-in-subdirectories`, and `--check` exits `2` on it.
 - **Why only a root launch tells you.** A session started in a directory where the plugin is off
   runs no SessionStart hook, so nothing speaks there. The line (and the notice, with case (b))
   comes from a session at the root, and the finding from doctor and the setup skill.

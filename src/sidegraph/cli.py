@@ -84,6 +84,7 @@ from .doc_import import (
     import_docs,
 )
 from .doctor import (
+    CHECK_EXEMPT_CODES,
     curate,
     open_curation_index,
     ratification_info_lines,
@@ -2749,7 +2750,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
     (advisory findings alone stay 0 without ``--check``), 1 operational error (including
     a negative ``--stale-days``, rejected before the store is touched — same hard-usage
     treatment as ``sidegraph-import --limit``), 2 strict violations or, with ``--check``,
-    advisory findings.
+    advisory findings other than :data:`doctor.CHECK_EXEMPT_CODES` (``maintenance-due``).
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-doctor",
@@ -2773,7 +2774,8 @@ def doctor_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="advisory findings also exit 2 (default: report only; skipped checks never fail)",
+        help="advisory findings also exit 2, except maintenance-due (default: report only; "
+        "skipped checks never fail)",
     )
     parser.add_argument(
         "--stale-days",
@@ -2955,7 +2957,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
 
     if violations:
         return 2
-    if args.check and report.findings:
+    if args.check and any(f.code not in CHECK_EXEMPT_CODES for f in report.findings):
         return 2
     return 0
 
