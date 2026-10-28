@@ -18,7 +18,7 @@ import posixpath
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import NamedTuple, TypeVar
 
@@ -38,7 +38,7 @@ from .schema import (
 )
 from .store import _TERMINAL_DECISION_STATUSES, DescriptorLookup, Store
 from .store_layout import DRIFT_CACHE_KEY as DRIFT_CACHE_KEY
-from .store_layout import MEMORY_GUARD_LINE, MISTAKE_KINDS
+from .store_layout import MEMORY_GUARD_LINE, MISTAKE_KINDS, parse_stamp
 from .store_layout import clip_line as _clip_line
 from .store_layout import proposal_surfaces as _proposal_surfaces
 from .worktree_seeds import has_drive
@@ -137,7 +137,16 @@ def drifted_record_ids(store: Store) -> frozenset[str]:
         payload = json.loads(raw)
     except json.JSONDecodeError:
         return frozenset()
-    by_commit = payload.get("by_commit") if isinstance(payload, dict) else None
+    return live_drifted_ids(store, payload.get("by_commit") if isinstance(payload, dict) else None)
+
+
+def live_drifted_ids(store: Store, by_commit: object) -> frozenset[str]:
+    """The still-live record ids in a parsed cache's ``by_commit`` (anything else reads empty).
+
+    The loop of `drifted_record_ids`, taking the parsed value so the refresh can count the
+    payload it just wrote instead of re-reading the cache.
+    # see design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.3)
+    """
     if not isinstance(by_commit, dict):
         return frozenset()
     out: set[str] = set()
@@ -151,6 +160,37 @@ def drifted_record_ids(store: Store) -> frozenset[str]:
             if d is not None and d.status not in _TERMINAL_DECISION_STATUSES:
                 out.add(rid)
     return frozenset(out)
+
+
+# The SessionStart drift line says how many drifted records first appeared within this window.
+DRIFT_NEW_WINDOW: timedelta = timedelta(days=7)
+
+
+def recent_drift(live: frozenset[str], payload: dict, now: datetime) -> tuple[int, str] | None:
+    """``(count, span)`` for the recency clause, or None when it cannot be certified.
+
+    ``count`` is the live ids whose first-seen stamp is within `DRIFT_NEW_WINDOW`; an id with
+    no stamp has unknown age and never counts. ``span`` is ``"in the last 7 days"``, or
+    ``"since YYYY-MM-DD"`` while stamping is younger than the window. A zero count on a
+    stamping younger than a day is suppressed.
+    # see design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.5)
+    """
+    since = parse_stamp(payload.get("first_seen_since"))
+    if since is None:
+        return None
+    stamps = payload.get("first_seen")
+    cutoff = now - DRIFT_NEW_WINDOW
+    count = 0
+    if isinstance(stamps, dict):
+        for rid in live:
+            stamp = parse_stamp(stamps.get(rid))
+            if stamp is not None and stamp >= cutoff:
+                count += 1
+    if count == 0 and now - since < timedelta(days=1):
+        return None
+    if since <= cutoff:
+        return count, "in the last 7 days"
+    return count, f"since {since.astimezone(UTC).date().isoformat()}"
 
 
 @dataclass

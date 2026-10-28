@@ -643,3 +643,217 @@ def test_malformed_binding_rows_do_not_abort_drift_status_read(tmp_path, data):
     with sqlite3.connect(tmp_path / "index.db") as conn:
         conn.execute("INSERT INTO anchor_bindings VALUES ('bad', 'bad', ?)", (data,))
     assert _binding_status_by_key(tmp_path) == {("R", "E"): "orphaned"}
+
+
+# --- scan fields for grouped triage (basis, check blobs, root, statuses, compared HEAD) ---
+# see design/superpowers/specs/2026-10-27-grouped-drift-triage-design.md §4.1
+
+from sidegraph import doctor  # noqa: E402
+from sidegraph.doctor import _binding_entries, _iter_records  # noqa: E402
+from sidegraph.schema import AnchorBinding, Descriptor, Entity  # noqa: E402
+from tests.drift_checks_support import git, project, require_check  # noqa: E402, F401
+
+# ruff: noqa: F811  (the imported ``project`` fixture is redefined as a test argument)
+
+
+def _plain_scan(store_dir: Path, **kwargs):
+    """``scan_code_drift`` without ``resolve_head``: the ``curate()`` path."""
+    return doctor._scan_code_drift(
+        _iter_records(store_dir, "decisions"),
+        _binding_entries(store_dir),
+        _iter_records(store_dir, "entities"),
+        store_dir,
+        None,
+        **kwargs,
+    )
+
+
+def _entry(scan):
+    entries = [e for b in scan.batches for e in b.entries]
+    assert len(entries) == 1
+    return entries[0]
+
+
+def _commit(root: Path, name: str, content: str) -> None:
+    (root / name).write_text(content, encoding="utf-8")
+    git(root, "add", "--", name)
+    git(root, "commit", "-q", "-m", f"change {name}")
+
+
+def _anchor(store, decision, file_path: str):
+    entity = store.upsert_entity(
+        Entity(canonical_name=file_path, descriptor=Descriptor(name=file_path, file_path=file_path))
+    )
+    store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2))
+    return entity
+
+
+def test_scan_exposes_repo_root_statuses_and_compared_head(project):
+    root, store, decision = project
+    scan = _plain_scan(store.path)
+    assert scan.repo_root is not None and scan.repo_root.resolve() == root.resolve()
+    assert scan.binding_statuses is not None
+    assert scan.compared_head is None
+
+
+def test_basis_capture_without_check(project):
+    _root, store, _decision = project
+    entry = _entry(_plain_scan(store.path))
+    assert (entry.basis, entry.check_reason, entry.check_blobs) == ("capture", None, None)
+
+
+def test_basis_check_on_checked_files_changed(project):
+    root, store, decision = project
+    require_check(root, decision.id)
+    checked = git(root, "rev-parse", "HEAD:code.py")
+    _commit(root, "code.py", "def policy():\n    return 2\n")
+    entry = _entry(_plain_scan(store.path))
+    assert entry.check_reason == "checked files changed"
+    assert entry.basis == "check"
+    assert entry.check_blobs == {"code.py": (checked, "100644")}
+
+
+def test_basis_scope_for_both_scope_reasons(project):
+    root, store, decision = project
+    # Reason 1: a new anchored file the check never listed; the listed file keeps its blob.
+    require_check(root, decision.id)
+    stored = git(root, "rev-parse", "HEAD:code.py")
+    _commit(root, "dependency.py", "dependency = 1\n")
+    _anchor(store, decision, "dependency.py")
+    entry = _entry(_plain_scan(store.path))
+    assert entry.check_reason == "checked subject or anchor scope changed"
+    assert entry.basis == "scope"
+    assert entry.check_blobs == {"code.py": (stored, "100644")}
+    assert "dependency.py" in entry.files and "dependency.py" not in entry.check_blobs
+
+
+def test_basis_scope_required_anchor_file_scope_changed(project):
+    root, store, decision = project
+    _commit(root, "dependency.py", "dependency = 1\n")
+    _anchor(store, decision, "dependency.py")
+    require_check(root, decision.id, files=["code.py", "dependency.py"])
+    stored = git(root, "rev-parse", "HEAD:dependency.py")
+    git(root, "rm", "-q", "dependency.py")
+    git(root, "commit", "-q", "-m", "remove dependency")
+    entry = _entry(_plain_scan(store.path))
+    assert entry.check_reason == "required anchor file scope changed"
+    assert entry.basis == "scope"
+    assert entry.check_blobs is not None
+    assert entry.check_blobs["dependency.py"] == (stored, "100644")
+
+
+def _apply(scan, store, root, batches=None):
+    """Run the overlay directly, optionally over hand-built capture batches."""
+    batches = scan.batches if batches is None else batches
+    by_commit = {
+        batch.commit: [(Path(e.record_path), e.record_id, set(e.files)) for e in batch.entries]
+        for batch in batches
+    }
+    return doctor._apply_drift_checks(
+        batches,
+        by_commit,
+        _iter_records(store.path, "decisions"),
+        _binding_entries(store.path),
+        _iter_records(store.path, "entities"),
+        scan.binding_statuses or {},
+        store.path,
+        root,
+        None,
+        lambda: None,
+    )
+
+
+def test_basis_capture_for_outside_scope_reason(project):
+    """Test 8: a drifted anchored file the check does not list keeps the capture baseline."""
+    root, store, decision = project
+    _commit(root, "code.py", "def policy():\n    return 1\n")  # back to capture bytes
+    require_check(root, decision.id)
+    scan = _plain_scan(store.path)
+    assert not [e for b in scan.batches for e in b.entries]
+    # Hand-built capture batch: the record also drifted on extra.py, outside the check.
+    commit = decision.provenance.commit
+    batch = doctor.DriftBatch(
+        commit,
+        False,
+        [
+            doctor.DriftEntry(
+                str(store.path / "decisions" / "x.json"), decision.id, ["code.py", "extra.py"]
+            )
+        ],
+    )
+    batches, _skipped, _unreadable, _head = _apply(scan, store, root, [batch])
+    entry = batches[0].entries[0]
+    assert entry.check_reason == "changed anchored file outside checked scope"
+    assert (entry.basis, entry.check_blobs, entry.files) == ("capture", None, ["extra.py"])
+
+
+def test_basis_capture_for_invalid_check_advisory_retained(project, monkeypatch):
+    root, store, decision = project
+    require_check(root, decision.id)
+    _commit(root, "code.py", "def policy():\n    return 2\n")  # drifts the capture entry
+
+    def invalid(*_a, **_k):
+        raise ValueError("invalid")
+
+    monkeypatch.setattr(doctor.drift_checks, "scope_leaves", invalid)
+    entry = _entry(_plain_scan(store.path))
+    assert entry.check_reason == "latest scoped check is invalid; capture advisory retained"
+    assert (entry.basis, entry.check_blobs) == ("capture", None)
+
+
+def test_basis_capture_for_scoped_comparison_unavailable(project, monkeypatch):
+    root, store, decision = project
+    require_check(root, decision.id)
+    _commit(root, "code.py", "def policy():\n    return 2\n")
+
+    def unavailable(*_a, **_k):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(doctor.drift_checks, "tree_entries", unavailable)
+    entry = _entry(_plain_scan(store.path))
+    assert entry.check_reason == "scoped comparison unavailable; capture advisory retained"
+    assert (entry.basis, entry.check_blobs) == ("capture", None)
+
+
+def test_compared_head_is_current_when_overlay_resolved_head(project):
+    root, store, decision = project
+    require_check(root, decision.id)
+    _commit(root, "code.py", "def policy():\n    return 2\n")
+    scan = _plain_scan(store.path)
+    assert scan.compared_head == git(root, "rev-parse", "HEAD")
+
+
+def test_compared_head_falls_back_to_head_argument(project):
+    root, store, decision = project
+    require_check(root, decision.id)
+    scan = _plain_scan(store.path)
+    explicit = "0" * 40
+    by_commit: dict = {}
+    result = doctor._apply_drift_checks(
+        [],
+        by_commit,
+        _iter_records(store.path, "decisions"),
+        _binding_entries(store.path),
+        _iter_records(store.path, "entities"),
+        scan.binding_statuses or {},
+        store.path,
+        root,
+        explicit,
+        lambda: None,
+    )
+    assert result[3] == explicit
+    assert (
+        doctor._apply_drift_checks(
+            [],
+            by_commit,
+            [],
+            {},
+            [],
+            {},
+            store.path,
+            root,
+            None,
+            lambda: None,
+        )[3]
+        is None
+    )

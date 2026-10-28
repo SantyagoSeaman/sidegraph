@@ -24,7 +24,7 @@ from functools import wraps
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path, PurePosixPath
-from typing import Literal, cast, get_args
+from typing import Annotated, Literal, cast, get_args
 
 import anyio.to_thread
 import mcp.types as mt
@@ -32,10 +32,17 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import FunctionTool, Tool, ToolResult
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from . import delivery as delivery_ledger
-from . import domain_snapshot, drift_checks, nearest_anchored, seed_ladder, worktree_seeds
+from . import (
+    domain_snapshot,
+    drift_checks,
+    md_sections,
+    nearest_anchored,
+    seed_ladder,
+    worktree_seeds,
+)
 from .anchoring import anchor_descriptor, anchor_roots, orphan_reason, resolve_and_bind
 from .anchoring import entity_summaries as _entity_summaries
 from .capture import (
@@ -100,6 +107,8 @@ from .schema import (
     Decision,
     DecisionKind,
     DecisionStatus,
+    DeclaredSection,
+    DeclaredSectionFile,
     Descriptor,
     Domain,
     DomainStatus,
@@ -841,11 +850,161 @@ def _resolve_anchors(
     return skipped, orphaned
 
 
+_Heading = Annotated[str, StringConstraints(min_length=1, max_length=200)]
+_Chain = Annotated[list[_Heading], Field(min_length=1, max_length=6)]
+
+
+class SectionFileInput(BaseModel):
+    """One file's declared sections: heading suffixes the agent read, plus siblings to watch."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    file: str = Field(min_length=1, max_length=1024)
+    headings: list[_Chain] = Field(min_length=1, max_length=32)
+    also_watch: list[_Chain] = Field(default_factory=list, max_length=32)
+
+
+class SectionsInput(BaseModel):
+    """The ``sections`` argument of ``record_drift_check``; cross-item rules live elsewhere."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    sections: list[SectionFileInput] = Field(min_length=1, max_length=16)
+
+
+_SECTION_CHECK_MAX_LINES = 20_000
+_SECTION_RESERVE = 1.0  # seconds that must remain for the Git steps after resolution
+_REASON_CODES = {
+    "too_large": "section_file_too_large",
+    "too_many_lines": "section_file_too_large",
+    "scope_cap": "section_scope_too_large",
+    "not_utf8": "section_text_unavailable",
+    "unavailable": "section_text_unavailable",
+}
+
+
+def _check_section_inputs(sections: SectionsInput, files: list[str]) -> None:
+    """Cross-item rules of ``sections`` that need no Git; plain checks, not model validators
+    (a ``ValueError`` raised in a validator would lose its code)."""
+    seen_files: set[str] = set()
+    total = 0
+    for item in sections.sections:
+        if item.file not in files:
+            raise SafeWriteError("sections", "section_file_not_in_files")
+        if not item.file.endswith((".md", ".markdown")):
+            raise SafeWriteError("sections", "section_file_not_markdown")
+        if item.file in seen_files:
+            raise SafeWriteError("sections", "duplicate_section_file")
+        seen_files.add(item.file)
+        chains = [tuple(chain) for chain in (*item.headings, *item.also_watch)]
+        if len(set(chains)) != len(chains):
+            raise SafeWriteError("sections", "duplicate_section")
+        if len(chains) > 32:
+            raise SafeWriteError("sections", "too_many_sections")
+        total += len(chains)
+    if total > 64:
+        raise SafeWriteError("sections", "too_many_sections")
+
+
+def _resolve_declared_sections(
+    root: Path,
+    tree: dict[str, tuple[str, str]],
+    sections: SectionsInput,
+    remaining: Callable[[], float],
+) -> tuple[list[DeclaredSectionFile], list[dict]]:
+    """Resolve the agent's heading suffixes against the HEAD blobs: the capsule entries
+    (hashes only) and the readable echo for the tool result.
+    # see design/superpowers/specs/2026-10-27-declared-section-drift-checks-design.md (5.6)"""
+    oids = {tree[item.file][0] for item in sections.sections}
+    try:
+        reads = drift_checks.read_blob_texts(
+            root,
+            oids,
+            remaining(),
+            file_max_bytes=drift_checks.FILE_MAX_BYTES,
+            file_max_lines=drift_checks.FILE_MAX_LINES,
+            total_max_bytes=drift_checks.SCAN_MAX_BYTES,
+            total_max_lines=_SECTION_CHECK_MAX_LINES,
+        )
+    except ValueError:
+        raise SafeWriteError("sections", "section_text_unavailable") from None
+    for read in reads.values():
+        if read.reason is not None:
+            raise SafeWriteError("sections", _REASON_CODES[read.reason])
+    entries: list[DeclaredSectionFile] = []
+    echo: list[dict] = []
+    docs: dict[str, md_sections.ParsedDoc] = {}  # one parse per distinct blob
+    for item in sections.sections:
+        oid = tree[item.file][0]
+        text = reads[oid].text
+        assert text is not None
+        if remaining() <= 0:
+            raise SafeWriteError("sections", "section_text_unavailable")
+        if oid not in docs:
+            try:
+                docs[oid] = md_sections.parse_md1(text, remaining)
+            except md_sections.Unsupported as unsupported:
+                code = (
+                    "section_text_unavailable"
+                    if unsupported.gate == "budget"
+                    else "section_file_unsupported"
+                )
+                raise SafeWriteError("sections", code) from None
+        doc = docs[oid]
+        declared: list[DeclaredSection] = []
+        shown: list[dict] = []
+        seen: set[str] = set()
+        for role, group in (("declared", item.headings), ("watch", item.also_watch)):
+            for chain in group:
+                try:
+                    heading = md_sections.resolve_suffix(doc, chain)
+                except md_sections.SectionResolveError as error:
+                    raise SafeWriteError("sections", error.code) from None
+                if heading.hash in seen:
+                    raise SafeWriteError("sections", "duplicate_section")
+                seen.add(heading.hash)
+                if remaining() <= 0:
+                    raise SafeWriteError("sections", "section_text_unavailable")
+                if md_sections.footnote_ref(doc, heading):
+                    raise SafeWriteError("sections", "section_file_unsupported")
+                declared.append(
+                    DeclaredSection(
+                        heading_hash=heading.hash,
+                        role=role,
+                        text_hash=md_sections.section_text_hash(doc, heading),
+                    )
+                )
+                shown.append(
+                    {
+                        "heading": " > ".join(segment[:200] for segment in heading.chain),
+                        "role": role,
+                        "first_line": heading.first_line + 1,
+                        "lines": min(heading.end_line, doc.total_lines) - heading.first_line,
+                    }
+                )
+        entries.append(
+            DeclaredSectionFile(
+                path=item.file, scheme="md1", refs_hash=doc.refs_hash, sections=declared
+            )
+        )
+        echo.append(
+            {"path": item.file, "scheme": "md1", "total_lines": doc.total_lines, "sections": shown}
+        )
+    if remaining() < _SECTION_RESERVE:
+        raise SafeWriteError("sections", "section_text_unavailable")
+    return entries, echo
+
+
 def _record_drift_check_impl(
-    store: Store, decision_id: str, checked_commit: str, files: list[str], rationale: str
+    store: Store,
+    decision_id: str,
+    checked_commit: str,
+    files: list[str],
+    rationale: str,
+    sections: list[dict] | None = None,
 ) -> dict:
     """Record one explicit agent assertion, without changing or ratifying its subject."""
-    preflight_direct(decision_id, checked_commit, files, rationale)
+    preflight_direct(decision_id, checked_commit, files, rationale, sections)
     if not is_safe_record_id(decision_id):
         raise SafeWriteError("decision_id")
     if (
@@ -858,6 +1017,10 @@ def _record_drift_check_impl(
         raise SafeWriteError("files")
     for path in files:
         CheckedCodeFile(path=path, blob_id="0" * 40, mode="100644")
+    declared_input: SectionsInput | None = None
+    if sections is not None:
+        declared_input = SectionsInput(sections=sections)  # type: ignore[arg-type]
+        _check_section_inputs(declared_input, files)
     clean, redactions = redact(rationale)
     with store._mutation():
         expires = time.monotonic() + 3.0
@@ -908,6 +1071,10 @@ def _record_drift_check_impl(
             raise SafeWriteError("files", "missing_required_files")
         if not set(files) <= tree.keys():
             raise SafeWriteError("files", "untracked_files")
+        declared_files: list[DeclaredSectionFile] = []
+        echo: list[dict] = []
+        if declared_input is not None:
+            declared_files, echo = _resolve_declared_sections(root, tree, declared_input, remaining)
         check = DriftCheck(
             schema_version=1,
             decision_id=decision_id,
@@ -920,14 +1087,24 @@ def _record_drift_check_impl(
                 CheckedCodeFile(path=p, blob_id=tree[p][0], mode=tree[p][1]) for p in files
             ],
             subject_digest=drift_checks.subject_digest(decision.model_dump(mode="json"), leaves),
+            declared_sections=declared_files,
         )
         # Recheck the inspected source, not unrelated dirty files. This reads real file
         # hashes as well as index differences, so index skip flags cannot certify dirt.
         if not drift_checks.clean_inspected_files(
             root, head, {path: tree[path] for path in files}, remaining()
         ):
+            # A budget that ran out reads as dirty files; tell the agent which it was.
+            if declared_input is not None and remaining() <= 0:
+                raise SafeWriteError("sections", "section_text_unavailable")
             raise SafeWriteError("files")
-        if drift_checks.head_revision(root, remaining()) != head:
+        try:
+            final_head = drift_checks.head_revision(root, remaining())
+        except ValueError:
+            if declared_input is None:
+                raise
+            raise SafeWriteError("sections", "section_text_unavailable") from None
+        if final_head != head:
             raise SafeWriteError("checked_commit")
         # Capture also observes unusual lower-tier descriptors and non-regular/missing
         # anchor paths. Do not prune their cached warning before a normal full refresh.
@@ -941,7 +1118,7 @@ def _record_drift_check_impl(
             and descriptor["file_path"]
         }
         cleared = store.record_drift_check(check, clear_cached_advisory=capture_paths <= set(files))
-    return {
+    result = {
         "id": check.id,
         "decision_id": decision_id,
         "checked_commit": head,
@@ -951,12 +1128,19 @@ def _record_drift_check_impl(
         "cache_cleared": cleared,
         "redactions": redactions,
     }
+    if declared_input is not None:
+        result["declared_sections"] = echo
+    return result
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
 @safe_write
 def record_drift_check(
-    decision_id: str, checked_commit: str, files: list[str], rationale: str
+    decision_id: str,
+    checked_commit: str,
+    files: list[str],
+    rationale: str,
+    sections: list[dict] | None = None,
 ) -> dict:
     """Record that you inspected an existing decision and it still holds at this revision.
 
@@ -964,8 +1148,20 @@ def record_drift_check(
     all required anchored files plus inspected dependencies; source files must be clean.
     The attributed assertion preserves original capture history and does not ratify or
     establish semantic truth. Later checked code/mode/scope changes re-arm the advisory.
+
+    ``sections`` optionally narrows a markdown file in ``files`` to the sections you read:
+    ``[{"file": "docs/spec.md", "headings": [["55.2 Rules"]], "also_watch": [["56.4 Amend"]]}]``.
+    Each chain is the trailing part of a heading chain, outermost first. Afterwards the
+    record re-arms on that file only when a declared or also-watched section, or the file's
+    link definitions, change. Add ``also_watch`` for sections elsewhere in the file that the
+    claim depends on. Never declare a section you did not read. Check the returned
+    ``declared_sections`` echo (``first_line``, ``lines``): a section spanning most of the
+    file gains nothing, and a ``first_line`` that is not where the heading sits in your
+    viewer means you should make a whole-file check instead. Other files compare as before.
     """
-    return _record_drift_check_impl(_get_store(), decision_id, checked_commit, files, rationale)
+    return _record_drift_check_impl(
+        _get_store(), decision_id, checked_commit, files, rationale, sections
+    )
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)

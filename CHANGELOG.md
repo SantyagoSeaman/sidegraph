@@ -7,6 +7,44 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-10-28
+
+### Added
+
+- **Contract change:** `record_drift_check` takes an optional `sections` argument for
+  markdown files: the sections you read, plus sections to also watch. The record then
+  re-arms on that file only when one of them, or the file's link reference definitions,
+  changes. The result echoes `declared_sections` (`first_line`, `lines`) and eleven new
+  fixed error codes name each refusal. The capsule gains an optional `declared_sections`
+  field inside `schema_version` 1 (hashes only, no heading text); plain capsules write an
+  empty list. An older release ignores the field, compares whole blobs and warns more,
+  never less. An unknown scheme or role, or a file whose structure cannot be bounded, still
+  compares by whole blob, and so does a partial clone on Git older than 2.45, where reading
+  section text could fetch objects.
+- `sidegraph-doctor` groups per-record `code-drift` by the drifted file. Each record names the
+  blob it was compared against (a capture, check or scope baseline, with its mode) and shares
+  one `git diff <old blob> <new blob>` per distinct change; a mode-only or type change says so.
+  A record whose anchored Python function or Markdown section is identical at both ends carries
+  `anchored region unchanged; sibling sections of the file may still matter`, a reading aid
+  that never clears or reorders anything. `--json` gains a `drift_groups` key; `findings` is
+  unchanged. `--flat` restores one line per record and skips the grouping.
+- `markdown-it-py>=4,<5` is a direct dependency (Markdown heading spans for the hint and for
+  declared sections).
+
+### Changed
+
+- The SessionStart drift line says how many of the records needing review are recent:
+  `Sidegraph: 190 record(s) need content review (12 new in the last 7 days): …`, or
+  `(none new in the last 7 days)`. A record without a recorded first-seen time counts as
+  unknown age, never as new. An index built before this version prints the line without the
+  clause on its first day, `(none new since <date>)` while its stamping is younger than
+  7 days, and `(none new in the last 7 days)` from then on, until a record newly drifts.
+  `SIDEGRAPH_DRIFT_NUDGE=off` silences it with the rest of the line.
+- `sidegraph-doctor --json` findings carry `first_seen`: the ISO time a `code-drift`
+  record was first seen drifted, otherwise `null`.
+- The default `sidegraph-doctor` text for per-record `code-drift` is the grouped block above
+  instead of one line per record. The summary count, `--check` and the exit codes are unchanged.
+
 ## [0.19.0] — 2026-10-27
 
 ### Changed

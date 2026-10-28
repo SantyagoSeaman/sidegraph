@@ -81,6 +81,8 @@ anchors resurface as noise in someone else's task context later.
   {"name": "ADR-001.md", "file_path": "adr/ADR-001.md"}]`. In the first store maintenance
   pass (2026-08-09), this one rule would have kept 7 of 10 fully-invisible records
   reachable.
+- For a long document, section scope is declared when the record is checked
+  (`record_drift_check` with `sections`), not when it is anchored.
 - **Two name shapes need care.** A bare module-level constant
   (`MEMORY_GUARD_LINE`) never resolves — the engine indexes functions/classes/files, not
   constants; anchor the containing file or function and name the constant in prose. A

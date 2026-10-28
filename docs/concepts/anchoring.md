@@ -133,6 +133,9 @@ Anchoring and sync collapse the stubs; what agents read keeps the ambiguous answ
 
 ## Why multi-anchor matters for doc corpora
 
+Anchoring decides where a record surfaces. Which sections of a long document a later
+`record_drift_check` must watch is declared when the record is checked, not anchored.
+
 On a docs corpus (ADRs/SAD), both a heading and its containing file are anchorable nodes
 (`file_type` in `{code, document, concept, rationale}` — an allowlist that also keeps
 unanchorable types like `image` out, per the same never-guess principle; `concept` and

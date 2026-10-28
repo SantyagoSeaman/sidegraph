@@ -68,6 +68,10 @@ _FIELDS = frozenset(
         "entity_id",
         "tier",
         "include_superseded",
+        "sections",
+        "file",
+        "headings",
+        "also_watch",
     ]
 )
 _CODES = frozenset(
@@ -78,6 +82,7 @@ _CODES = frozenset(
         "string_unicode",
         "string_pattern_mismatch",
         "string_too_short",
+        "string_too_long",
         "too_short",
         "too_long",
         "list_type",
@@ -123,6 +128,52 @@ _MESSAGES = {
     "untracked_files": (
         "invalid draft: files: untracked_files; "
         "inspected files must exist as tracked regular files at HEAD"
+    ),
+    "section_file_not_in_files": (
+        "invalid draft: sections: section_file_not_in_files; each sections file "
+        "must also be listed in files"
+    ),
+    "section_file_not_markdown": (
+        "invalid draft: sections: section_file_not_markdown; sections apply to .md "
+        "and .markdown files only; make a whole-file check for other files"
+    ),
+    "section_file_too_large": (
+        "invalid draft: sections: section_file_too_large; a declared file is over 2"
+        " MiB or 20,000 lines; make a whole-file check for it"
+    ),
+    "section_scope_too_large": (
+        "invalid draft: sections: section_scope_too_large; the declared files "
+        "together are over 8 MiB or 20,000 lines; declare fewer files or make a "
+        "whole-file check"
+    ),
+    "section_text_unavailable": (
+        "invalid draft: sections: section_text_unavailable; a declared file could "
+        "not be read as UTF-8 text within the time budget; retry, or make a whole-"
+        "file check"
+    ),
+    "section_file_unsupported": (
+        "invalid draft: sections: section_file_unsupported; the markdown structure "
+        "of a declared file cannot be bounded (a heading inside a list or quote, or"
+        " a footnote reference in a declared span); make a whole-file check"
+    ),
+    "unknown_section": (
+        "invalid draft: sections: unknown_section; no heading chain ends with the "
+        "given headings; copy the heading text from the file"
+    ),
+    "ambiguous_section": (
+        "invalid draft: sections: ambiguous_section; the given headings match more "
+        "than one section; add the parent heading"
+    ),
+    "duplicate_section": (
+        "invalid draft: sections: duplicate_section; a section is listed twice, or "
+        "in both headings and also_watch"
+    ),
+    "duplicate_section_file": (
+        "invalid draft: sections: duplicate_section_file; list each file once in sections"
+    ),
+    "too_many_sections": (
+        "invalid draft: sections: too_many_sections; declare at most 32 sections "
+        "per file and 64 per check"
     ),
     "no_named_anchor": "anchors: none of the given anchors has a name",
     "no_live_support": (

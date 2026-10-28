@@ -42,6 +42,9 @@ named, is a separate decision-level Tier-0 binding made by the write path, not p
 `name` is a **heading text** or the **file name itself**; for code, a **function/class name**
 or the file — all valid entity names in a Graphify graph.
 
+For a long document, section scope is declared when the record is checked (see
+[`record_drift_check`](../reference/mcp-tools.md#record_drift_check)), not when it is anchored.
+
 **Always add the containing file as a second anchor — for code symbols and doc headings
 alike.** A heading rename or symbol move orphans the precise anchor on the next sync; the
 file anchor survives and keeps the decision retrievable (and its community fallback intact).

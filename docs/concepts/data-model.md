@@ -314,8 +314,9 @@ the shared canonical digest/index record tables. See
 | `required_files` | list[str] | Exact current required anchor-file set, separate from optional inspected dependencies. |
 | `checked_files` | list[`CheckedCodeFile`] | Explicit inspected regular-file snapshots, covering every required file; 1–256 unique safe paths. |
 | `subject_digest` | str | SHA-256 of fixed immutable decision/provenance fields and durable leaf descriptors; excludes lifecycle and volatile mapping/status fields. |
+| `declared_sections` | list[`DeclaredSectionFile`] | Optional per-file section scope for markdown files, `[]` for a plain whole-file check; at most 64 entries, each path one of `checked_files`. |
 
-Changed inspected files/modes or required scope re-arm review. A matching snapshot after
+Changed inspected files/modes or required scope re-arm review; for a file with declared sections, a change to a declared or also-watched section, or to the file's link definitions, re-arms instead of any change to the file. A matching snapshot after
 an unrelated commit remains covered. A mistaken semantic assertion cannot be detected
 from these hashes; a genuine successor corrects the decision and preserves the check as
 history. Optional comparison failure has the bounded behavior described in store-format.
@@ -330,3 +331,25 @@ mappings. The total checked-path budget is 16384 UTF-8 bytes.
 | `path` | str | Safe repository-relative forward-slash path, at most 1024 UTF-8 bytes. |
 | `blob_id` | str | Full Git content address of the inspected file. |
 | `mode` | `100644` \| `100755` | Regular-file Git mode; mode changes participate in applicability. |
+
+## `DeclaredSectionFile` — declared sections of one checked file
+
+Nested in `DriftCheck`; this stores locators and digests, never heading text or source
+bodies. A scheme or role this release does not know is accepted and compared by whole blob.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | str | One of the check's `checked_files`; unique across entries. |
+| `scheme` | token | How sections are located; `md1` (markdown block structure) is the one scheme this release resolves. |
+| `refs_hash` | hex \| `null` | `md1`: digest of the file's link reference definitions. |
+| `sections` | list[`DeclaredSection`] | 1–256 sections; at most 1024 across the check. |
+
+## `DeclaredSection` — one declared or also-watched section
+
+Nested in `DeclaredSectionFile`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `heading_hash` | hex | `md1`: digest of the heading chain that locates the section. |
+| `role` | token | `declared` (the checker read it) or `watch` (a sibling the claim depends on). |
+| `text_hash` | hex | `md1`: digest of the section's text, subsections included. |

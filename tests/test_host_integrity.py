@@ -745,7 +745,7 @@ def test_a_failing_refresh_leaves_the_other_lines(tmp_path, monkeypatch, capsys)
     def boom(store, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(sync_mod, "refresh_code_drift_cache", boom)
+    monkeypatch.setattr(sync_mod, "refresh_code_drift_snapshot", boom)
     store_dir, _store = _pending_store(tmp_path)
 
     out = start(monkeypatch, capsys, store_dir)

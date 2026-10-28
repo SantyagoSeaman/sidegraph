@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.19.0"
+version = "0.20.0"
 description = "Own the memory, rent the graph — a durable decision/lessons layer as a sidecar over a code-graph engine."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -43,6 +43,9 @@ dependencies = [
     # GHSA-84m7-p3x7-pcfv / CVE-2026-59951: MCP 1.30.0 fixes stateful StreamableHTTP.
     "anyio>=4",
     "mcp>=1.30,<2",
+    # Imported directly by drift_groups.py (heading spans for the drift hint)
+    # and lazily by md_sections (declared-section drift scope).
+    "markdown-it-py>=4,<5",
 ]
 
 [project.urls]

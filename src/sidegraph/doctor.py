@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 from urllib.parse import quote
 
 from ulid import ULID
@@ -44,7 +44,7 @@ from .store import (
     SKIPPED_CANONICAL_KEY,
     parse_skip_list,
 )
-from .store_layout import index_stamp_problem, is_safe_record_id
+from .store_layout import DRIFT_CACHE_KEY, index_stamp_problem, is_safe_record_id
 from .store_view import SUBDIR_OF, is_packed_store, records_of, shared_view
 from .verify import (
     _check_archive_dir,
@@ -55,6 +55,9 @@ from .verify import (
     _run_git,
     find_store_project_repo,
 )
+
+if TYPE_CHECKING:
+    from .drift_groups import DriftGroups
 
 # Finding codes — pinned constants (design: "Advisory checks — pinned finding codes").
 # ``--json`` output and every test assert against these exact strings.
@@ -158,6 +161,9 @@ class CurationReport:
 
     findings: list[Finding] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    # Grouped code-drift triage, set only when ``curate(group_drift=True)`` found per-record
+    # drift. Imported under TYPE_CHECKING: a runtime import would pull it into the hook paths.
+    drift_groups: DriftGroups | None = None
 
 
 # -- canonical-file loading (silent-skip: parse errors are verify's territory) -------------
@@ -838,6 +844,35 @@ def _binding_status_snapshot(
     return _BindingStatusSnapshot(out, uncomputed)
 
 
+def drift_first_seen(store_dir: Path) -> dict[str, str]:
+    """Record id -> first-seen stamp from the code-drift cache; ``{}`` on any failure.
+
+    Read-only (``mode=ro``), never a `Store`: doctor stays a pure read, and a missing or
+    unreadable index just means no record has a known age.
+    # see design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.8)
+    """
+    index_path = store_dir / "index.db"
+    if not index_path.is_file():
+        return {}
+    try:
+        conn = sqlite3.connect(
+            f"file:{quote(os.fsencode(str(index_path)))}?mode=ro", uri=True, timeout=0.0
+        )
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (DRIFT_CACHE_KEY,)
+            ).fetchone()
+        finally:
+            conn.close()
+        payload = json.loads(row[0]) if row else None
+    except (sqlite3.Error, ValueError, TypeError, RecursionError):
+        return {}
+    stamps = payload.get("first_seen") if isinstance(payload, dict) else None
+    if not isinstance(stamps, dict):
+        return {}
+    return {k: v for k, v in stamps.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 def _binding_status_by_key(store_dir: Path) -> dict[tuple[str, str], str]:
     """Last-recorded binding statuses; an absent/unusable index yields an empty map."""
     return _binding_status_snapshot(store_dir).statuses
@@ -890,6 +925,11 @@ class DriftEntry(NamedTuple):
     check_reason: str | None = None
     check_id: str | None = None
     checked_commit: str | None = None
+    # How grouped triage names the blob this entry was compared against: "capture" (the
+    # provenance commit), "check" (the stored checked_files) or "scope" (a scope reason).
+    basis: str = "capture"
+    # path -> (blob_id, mode) from the check's stored checked_files, for check and scope basis.
+    check_blobs: dict[str, tuple[str, str]] | None = None
 
 
 class DriftBatch(NamedTuple):
@@ -917,6 +957,128 @@ class CodeDriftScan(NamedTuple):
     head: str | None
     binding_statuses_uncomputed: bool = False
     check_skipped: bool = False
+    checks_unreadable: bool = False  # latest_checks raised: no check could be consulted
+    # Trailing fields grouped triage reads (see drift_groups.py and the grouped-triage design).
+    repo_root: Path | None = None
+    binding_statuses: dict[tuple[str, str], str] | None = None
+    compared_head: str | None = None
+
+
+# Re-arm reasons, in the order a record with several causes reports them (design/superpowers/
+# specs/2026-10-27-declared-section-drift-checks-design.md, section 5.3).
+SECTION_UNAVAILABLE = "section scope unavailable; whole file compared"
+_REASONS = (
+    ("files", "checked files changed"),
+    ("unavailable", SECTION_UNAVAILABLE),
+    ("declared_not_found", "declared section not found"),
+    ("declared_changed", "declared section changed"),
+    ("refs_changed", "referenced link definition changed"),
+    ("watch_changed", "also-watched section changed"),
+)
+_MD1_ROLES = {"declared", "watch"}
+
+
+def _section_text_candidate(entry, stored: tuple[str, str], current) -> bool:
+    """Whether comparing this declared file needs its HEAD text (spec 5.3 steps 1-4)."""
+    return (
+        current is not None
+        and current[1] == stored[1]
+        and current[0] != stored[0]
+        and entry.scheme == "md1"
+        and {section.role for section in entry.sections} <= _MD1_ROLES
+    )
+
+
+def _blobs_needing_text(pending, tree) -> set[str]:
+    oids: set[str] = set()
+    for check, _ in pending.values():
+        declared = {entry.path: entry for entry in check.declared_sections}
+        for checked in check.checked_files:
+            entry = declared.get(checked.path)
+            current = tree.get(checked.path)
+            if entry is not None and _section_text_candidate(
+                entry, (checked.blob_id, checked.mode), current
+            ):
+                oids.add(current[0])
+    return oids
+
+
+class _SectionScope:
+    """HEAD text and parse of each distinct blob a scan compares by section: one read for
+    all of them, one parse per blob, never an exception out of a lookup."""
+
+    def __init__(self, repo_root: Path, oids: set[str], remaining) -> None:
+        self._remaining = remaining
+        self._reads: dict = {}
+        self._docs: dict = {}
+        if oids:
+            try:
+                self._reads = drift_checks.read_blob_texts(
+                    repo_root,
+                    oids,
+                    remaining(),
+                    file_max_bytes=drift_checks.FILE_MAX_BYTES,
+                    file_max_lines=drift_checks.FILE_MAX_LINES,
+                    total_max_bytes=drift_checks.SCAN_MAX_BYTES,
+                    total_max_lines=drift_checks.SCAN_MAX_LINES,
+                )
+            except Exception:  # every failure falls back to the blob verdict
+                self._reads = {}
+
+    def compare(self, oid: str, entry) -> list[str] | None:
+        """Causes for ``entry`` against the blob ``oid`` (``[]`` = unchanged), or None when
+        its scope is unavailable. Once the scan budget is gone nothing more is computed."""
+        left = self._remaining()
+        if left is not None and left <= 0:
+            return None
+        if oid not in self._docs:
+            self._docs[oid] = self._parse(oid)
+        parsed = self._docs[oid]
+        if parsed is None:
+            return None
+        from . import md_sections
+
+        return md_sections.compare_entry(entry, *parsed)
+
+    def _parse(self, oid: str):
+        from . import md_sections
+
+        read = self._reads.get(oid)
+        if read is None or read.text is None:
+            return None
+        try:
+            doc = md_sections.parse_md1(read.text, self._remaining)
+            return doc, md_sections.SectionIndex(doc)
+        except Exception:  # an unsupported or failing parse is never "unchanged"
+            return None
+
+
+def _judge_checked_files(check, tree, scope: _SectionScope) -> dict[str, list[str]]:
+    """``{path: causes}`` for every checked file judged changed; a file with declared
+    sections that provably kept them is not listed (spec 5.3)."""
+    declared = {entry.path: entry for entry in check.declared_sections}
+    judged: dict[str, list[str]] = {}
+    for checked in check.checked_files:
+        stored = (checked.blob_id, checked.mode)
+        current = tree.get(checked.path)
+        if current == stored:
+            continue
+        entry = declared.get(checked.path)
+        if entry is None or not _section_text_candidate(entry, stored, current):
+            judged[checked.path] = ["files"]
+            continue
+        causes = scope.compare(current[0], entry)
+        if causes is None:
+            judged[checked.path] = ["unavailable"]
+            continue
+        if causes:
+            judged[checked.path] = causes
+    return judged
+
+
+def _first_reason(judged: dict[str, list[str]]) -> str:
+    causes = {cause for per_file in judged.values() for cause in per_file}
+    return next(text for key, text in _REASONS if key in causes)
 
 
 def _apply_drift_checks(
@@ -930,14 +1092,20 @@ def _apply_drift_checks(
     repo_root: Path,
     head: str | None,
     remaining,
-) -> tuple[list[DriftBatch], bool]:
-    """Optional per-record overlay AFTER capture scans; it never fails a capture group."""
+) -> tuple[list[DriftBatch], bool, bool, str | None]:
+    """Optional per-record overlay AFTER capture scans; it never fails a capture group.
+
+    Returns ``(batches, check_skipped, checks_unreadable, compared_head)``: the second is set
+    whenever an optional comparison did not run, the third only when the checks could not be
+    read at all, the fourth is the HEAD the overlay compared the tree against (the one it
+    resolved, else the caller's ``head``, else ``None``; grouped triage reuses it).
+    """
     try:
         selected = drift_checks.latest_checks(store_dir)
     except (OSError, ValueError):
-        return batches, True
+        return batches, True, True, head
     if not selected:
-        return batches, False
+        return batches, False, False, head
     records = {raw["id"]: raw for _, raw in decisions if isinstance(raw.get("id"), str)}
     raw_entities = {
         raw["entity_id"]: raw for _, raw in entities if isinstance(raw.get("entity_id"), str)
@@ -975,15 +1143,19 @@ def _apply_drift_checks(
                 "checked subject or anchor scope changed",
                 check.id,
                 check.checked_commit,
+                "scope",
+                _stored_blobs(check, candidates | set(check.required_files)),
             )
             continue
         pending[rid] = (check, candidates)
         union.update(candidates)
         union.update(entry.path for entry in check.checked_files)
     skipped = False
+    compared_head = head
     if pending:
         try:
             current = head or drift_checks.head_revision(repo_root, remaining())
+            compared_head = current
             tree = drift_checks.tree_entries(repo_root, current, union, remaining())
         except (ValueError, OSError):
             skipped = True
@@ -995,19 +1167,20 @@ def _apply_drift_checks(
                         checked_commit=check.checked_commit,
                     )
         else:
+            scope = _SectionScope(repo_root, _blobs_needing_text(pending, tree), remaining)
             for rid, (check, candidates) in pending.items():
                 required = candidates & tree.keys()
-                changed = sorted(
-                    entry.path
-                    for entry in check.checked_files
-                    if tree.get(entry.path) != (entry.blob_id, entry.mode)
-                )
+                judged = _judge_checked_files(check, tree, scope)
+                basis = "capture"
+                blobs = None
                 if required != set(check.required_files):
                     reason = "required anchor file scope changed"
                     files = sorted(required | set(check.required_files))
-                elif changed:
-                    reason = "checked files changed"
-                    files = changed
+                    basis, blobs = "scope", _stored_blobs(check, set(files))
+                elif judged:
+                    reason = _first_reason(judged)
+                    files = sorted(judged)
+                    basis, blobs = "check", _stored_blobs(check, set(files))
                 elif rid in old_entries and (
                     outside := set(old_entries[rid].files)
                     - {entry.path for entry in check.checked_files}
@@ -1018,7 +1191,14 @@ def _apply_drift_checks(
                     updates[rid] = None  # valid snapshot equivalence, not semantic proof
                     continue
                 updates[rid] = DriftEntry(
-                    str(eligible[rid]), rid, files, reason, check.id, check.checked_commit
+                    str(eligible[rid]),
+                    rid,
+                    files,
+                    reason,
+                    check.id,
+                    check.checked_commit,
+                    basis,
+                    blobs,
                 )
     result = []
     for batch in batches:
@@ -1035,7 +1215,16 @@ def _apply_drift_checks(
                     entries[rid] = update
         ordered = [entries[rid] for _, rid, _ in by_commit[batch.commit] if rid in entries]
         result.append(batch._replace(entries=ordered))
-    return result, skipped
+    return result, skipped, False, compared_head
+
+
+def _stored_blobs(check, files: set[str]) -> dict[str, tuple[str, str]]:
+    """The check's stored ``checked_files`` (blob, mode) for each of ``files`` it lists."""
+    return {
+        entry.path: (entry.blob_id, entry.mode)
+        for entry in check.checked_files
+        if entry.path in files
+    }
 
 
 def _scan_code_drift(
@@ -1147,7 +1336,7 @@ def _scan_code_drift(
                     head = result.stdout.strip() or None
             except (ValueError, OSError, subprocess.TimeoutExpired):
                 head = None
-    batches, check_skipped = _apply_drift_checks(
+    batches, check_skipped, checks_unreadable, compared_head = _apply_drift_checks(
         batches,
         by_commit,
         decisions,
@@ -1159,7 +1348,19 @@ def _scan_code_drift(
         head,
         _remaining,
     )
-    return CodeDriftScan(batches, unstamped, True, False, head, snapshot.uncomputed, check_skipped)
+    return CodeDriftScan(
+        batches,
+        unstamped,
+        True,
+        False,
+        head,
+        snapshot.uncomputed,
+        check_skipped,
+        checks_unreadable,
+        repo_root,
+        snapshot.statuses,
+        compared_head,
+    )
 
 
 def scan_code_drift(
@@ -1238,6 +1439,12 @@ def _check_code_drift(
     exact finding shapes and order, which the pre-wave test suite pins unchanged.
     """
     scan = _scan_code_drift(decisions, bindings, entities, store_dir, repo_root)
+    return _render_code_drift(scan, store_dir)
+
+
+def _render_code_drift(scan: CodeDriftScan, store_dir: Path) -> list[Finding]:
+    """The rendering half of :func:`_check_code_drift`: today's finding shapes and order,
+    from an already-run scan (grouped triage renders and groups the same scan)."""
     if not scan.active:
         # Nothing in the store is commit-stamped AND anchored -- the check has literally
         # nothing to say, unstamped count included (see this function's docstring).
@@ -2070,6 +2277,7 @@ def curate(
     reader: GraphifyReader | None = None,
     index: sqlite3.Connection | None = None,
     host_checks: Sequence[integrity.Check] = (),
+    group_drift: bool = False,
 ) -> CurationReport:
     """Run every advisory curation check over the store at ``store_dir``.
 
@@ -2101,13 +2309,20 @@ def curate(
     ``host_checks`` (additive): registry checks the CLI builds from the host seam and hands
     over, so this module stays free of host imports. Empty by default: a direct caller gets no
     host-wiring finding.
+
+    ``group_drift`` (additive): when true, the code-drift scan is also grouped by drifted file
+    into ``CurationReport.drift_groups`` (only ``sidegraph-doctor`` asks). The default makes
+    exactly the calls it always did and never imports ``drift_groups``.
     # see design/superpowers/specs/2026-07-23-sidegraph-doctor-design.md
     # see design/superpowers/specs/2026-07-30-staleness-machinery-design.md (D5)
     # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D6)
     # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)
+    # see design/superpowers/specs/2026-10-27-grouped-drift-triage-design.md
     """
     with shared_view():
-        return _curate(Path(store_dir), stale_days, now, repo_root, reader, index, host_checks)
+        return _curate(
+            Path(store_dir), stale_days, now, repo_root, reader, index, host_checks, group_drift
+        )
 
 
 def _curate(
@@ -2118,6 +2333,7 @@ def _curate(
     reader: GraphifyReader | None,
     index: sqlite3.Connection | None,
     host_checks: Sequence[integrity.Check],
+    group_drift: bool = False,
 ) -> CurationReport:
     """``curate``'s body, run inside one shared view of a format-2 store."""
     now = now or datetime.now(UTC)
@@ -2175,7 +2391,24 @@ def _curate(
     skipped += surfaced_skipped
     findings += _check_unratified_accepts(decisions, facts, root, bindings, entities)
     # Appended LAST (design D5: "appended at the END of curate()'s listing order").
-    findings += _check_code_drift(decisions, bindings, entities, root, repo_root)
+    drift_groups_report: DriftGroups | None = None
+    if not group_drift:
+        findings += _check_code_drift(decisions, bindings, entities, root, repo_root)
+    else:
+        scan = _scan_code_drift(decisions, bindings, entities, root, repo_root)
+        rendered = _render_code_drift(scan, root)
+        findings.extend(rendered)
+        # Function-local: a module-level import would reach the hook paths through sync.py.
+        from . import drift_groups
+
+        drift_groups_report = drift_groups.build(
+            scan,
+            decisions,
+            bindings,
+            entities,
+            root,
+            notes=[f.detail for f in rendered if f.record_id is None],
+        )
     # Instructions files sit beside the store in the standard layout (`<repo>/.sidegraph`),
     # so the store's own parent is the lookup root. Deliberately NOT a git call: curate()'s
     # git-call count is pinned by test_curate_git_call_count_unchanged_by_refactor, and
@@ -2193,4 +2426,4 @@ def _curate(
     # check used to be), and records whose every code anchor is orphaned (``orphaned-record``).
     findings += _registry_findings(root, now, reader, index, host_checks)
     findings += _check_snapshot_splits(root, domains, archived_domains)
-    return CurationReport(findings=findings, skipped=skipped)
+    return CurationReport(findings=findings, skipped=skipped, drift_groups=drift_groups_report)

@@ -63,6 +63,123 @@ SCHEMA_VERSION = "0.6.0"
 # placeholders until then. Shared by Store and the dependency-light hook index.
 VOLATILE_STALE_KEY = "volatile_stale"
 DRIFT_CACHE_KEY = "code_drift_cache"
+# How long a record the refresh stopped seeing keeps its first-seen stamp, so a transient
+# absence (a failed capture group, an orphan then rebind) does not re-announce it as new.
+DRIFT_TOMBSTONE_RETENTION: timedelta = timedelta(days=30)
+
+
+def parse_stamp(value: object) -> datetime | None:
+    """A cache timestamp as an aware datetime, or None when it is not a parsable string."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        # Normalizing is what can overflow (year 1 with a positive offset): unusable, not fatal.
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _stamp_iso(moment: datetime) -> str:
+    return moment.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def stamp_cache(
+    prev: object,
+    ids: frozenset[str] | set[str],
+    retained: frozenset[str] | set[str],
+    now: datetime,
+) -> tuple[str, dict[str, str], dict[str, list[str | None]]]:
+    """First-seen stamps and tombstones for a freshly built code-drift cache.
+
+    Returns ``(first_seen_since, first_seen, first_seen_absent)``. ``prev`` is the parsed
+    previous cache value or anything else (then this is a seed: every present id has unknown
+    age and nothing counts as new). Pure, no I/O, never raises on a malformed ``prev``.
+    An id in ``prev``'s :func:`checked_marks` that a refresh clears leaves no tombstone.
+
+    see design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.2)
+    """
+    now_iso = _stamp_iso(now)
+    since = parse_stamp(prev.get("first_seen_since")) if isinstance(prev, dict) else None
+    if not isinstance(prev, dict) or since is None or since > now:
+        return now_iso, {}, {}
+
+    # A membership history that is not a dict of id lists cannot say which ids were already
+    # drifted, so nothing it names can be called new: seed.
+    prev_by_commit = prev.get("by_commit")
+    if not isinstance(prev_by_commit, dict) or not all(
+        isinstance(commit, str)
+        and isinstance(members, list)
+        and all(isinstance(m, str) for m in members)
+        for commit, members in prev_by_commit.items()
+    ):
+        return now_iso, {}, {}
+    prev_ids: set[str] = set()
+    for members in prev_by_commit.values():
+        prev_ids.update(members)
+    prev_stamps: dict[str, datetime] = {}
+    raw_stamps = prev.get("first_seen")
+    if isinstance(raw_stamps, dict):
+        for rid, value in raw_stamps.items():
+            parsed = parse_stamp(value)
+            if isinstance(rid, str) and parsed is not None:
+                prev_stamps[rid] = parsed
+    # rid -> (stamp or None, absent_since). A tombstone is what keeps a returning id from being
+    # stamped now, so one that cannot be read means the history is unreliable: seed.
+    prev_absent: dict[str, tuple[datetime | None, datetime]] = {}
+    raw_absent = prev.get("first_seen_absent", {})
+    if not isinstance(raw_absent, dict):
+        return now_iso, {}, {}
+    for rid, value in raw_absent.items():
+        if not (isinstance(rid, str) and isinstance(value, list) and len(value) == 2):
+            return now_iso, {}, {}
+        absent_since = parse_stamp(value[1])
+        stamp = parse_stamp(value[0])
+        if absent_since is None or (value[0] is not None and stamp is None):
+            return now_iso, {}, {}
+        prev_absent[rid] = (stamp, absent_since)
+    prev_checked = checked_marks(prev)
+
+    first_seen: dict[str, str] = {}
+    for rid in ids:
+        if rid in prev_ids:
+            if rid in prev_stamps:
+                first_seen[rid] = _stamp_iso(prev_stamps[rid])
+            continue
+        tomb = prev_absent.get(rid)
+        if tomb is not None and now - tomb[1] <= DRIFT_TOMBSTONE_RETENTION:
+            if tomb[0] is not None:
+                first_seen[rid] = _stamp_iso(tomb[0])
+            continue
+        if rid in retained:
+            continue
+        first_seen[rid] = now_iso
+
+    absent: dict[str, list[str | None]] = {}
+    for rid, (stamp, absent_since) in prev_absent.items():
+        if rid not in ids and now - absent_since <= DRIFT_TOMBSTONE_RETENTION:
+            absent[rid] = [None if stamp is None else _stamp_iso(stamp), _stamp_iso(absent_since)]
+    for rid in prev_ids | set(prev_stamps):
+        if rid not in ids and rid not in prev_checked:
+            stamp = prev_stamps.get(rid)
+            absent[rid] = [None if stamp is None else _stamp_iso(stamp), now_iso]
+    return _stamp_iso(since), first_seen, absent
+
+
+def checked_marks(prev: object) -> set[str]:
+    """Ids a check marked since the last refresh: ``record_drift_check`` with
+    ``clear_cached_advisory=False`` kept the advisory for that refresh to judge. The refresh
+    that reads the mark consumes it. If that refresh clears the id, the check ended the
+    episode, so no tombstone is written and a re-drift is new. If the id is still drifted,
+    the check did not end it, and the stamp lives on unmarked, so a later unrelated absence
+    keeps its tombstone. A malformed list reads as empty: a cleared id then keeps its
+    tombstone, the under-count an older client produces anyway, never a false "new".
+
+    see design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.2)
+    """
+    raw = prev.get("first_seen_checked", []) if isinstance(prev, dict) else []
+    return {rid for rid in raw if isinstance(rid, str)} if isinstance(raw, list) else set()
+
 
 # The canonical, git-committed record directories (relative to Store.path). Order matters
 # only for readability; digest/reload iterate them in this order.

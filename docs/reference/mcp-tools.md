@@ -30,7 +30,8 @@ Git commands for provenance, initiative, ratification identity and graph checks 
 EOF on standard input, keeping subprocesses separate from the MCP protocol stream.
 
 The development lockfile selects FastMCP 3.4.11 and MCP Python SDK 1.30.0. Supported package
-dependencies are `fastmcp>=3.4.10,<4` and `mcp>=1.30,<2`, with runtime security floors
+dependencies are `fastmcp>=3.4.10,<4`, `mcp>=1.30,<2` and `markdown-it-py>=4,<5` (it reads
+markdown structure for [declared-section drift checks](#record_drift_check)), with runtime security floors
 `certifi>=2026.10.19` and `opentelemetry-api>=1.45.1`. The locked stack
 uses the `initialize` / `notifications/initialized` lifecycle and negotiates protocol
 versions through **2025-11-25**. The server reports Sidegraph's package version in
@@ -1816,6 +1817,7 @@ record_drift_check(
     checked_commit: str,   # current full inspected Git HEAD
     files: list[str],     # all required anchor files plus inspected dependencies
     rationale: str,       # nonblank, redacted before validation; at most 4000 characters
+    sections: list[dict] | None = None,  # optional: markdown sections you read
 ) -> dict
 ```
 
@@ -1840,8 +1842,49 @@ An unloadable required entity returns `unavailable_anchor_scope`; a failed initi
 scope lookup returns `git_scope_unavailable`. Both refusals occur before check publication.
 Write errors keep their bounded schema vocabulary and do not echo file names or raw causes.
 
+**Declared sections.** For a markdown file in `files`, `sections` narrows the check to the
+sections you read:
+
+```python
+sections=[{"file": "docs/spec.md",
+           "headings": [["55.2 Rules"]],            # 1-32 declared, read at HEAD
+           "also_watch": [["56. Echo", "56.4 Amendments"]]}]  # 0-32 siblings the claim depends on
+```
+
+Each chain is the trailing part of a heading chain, outermost first, 1-6 segments of 1-200
+characters; a suffix matching two sections is `ambiguous_section`. At most 16 files, 32
+sections per file and 64 per check; every `file` must be in `files` and end in `.md` or
+`.markdown`. The writer resolves each chain against the HEAD blob and stores hashes only: no
+heading text reaches the capsule. A section includes its subsections, up to the next heading
+of the same or a higher level. Never declare a section you did not read. Afterwards the record
+re-arms on that file only when a declared or also-watched section, or the file's link
+reference definitions, change; other checked files compare as before. A file whose structure
+cannot be bounded is compared whole, as are unknown schemes and roles. Section parsing uses
+`markdown-it-py` (CommonMark block structure, no inline pass).
+
+The writer refuses with these fixed codes, before anything is published:
+
+| Code | When |
+|---|---|
+| `section_file_not_in_files` | a `sections` file is not in `files` |
+| `section_file_not_markdown` | the extension is not `.md` or `.markdown` |
+| `section_file_too_large` | one declared blob is over 2 MiB or 20,000 lines |
+| `section_scope_too_large` | the distinct declared blobs together exceed 8 MiB or 20,000 lines |
+| `section_text_unavailable` | the text is not UTF-8, could not be read (including any read in a partial clone on Git older than 2.45, which could fetch), or the 3 s budget ran out |
+| `section_file_unsupported` | a heading sits inside a list item or quote, a footnote reference is in a declared span, or a parser cap was hit |
+| `unknown_section` | no heading chain ends with the given segments |
+| `ambiguous_section` | the suffix matches more than one section |
+| `duplicate_section` | the same section twice, or in both lists |
+| `duplicate_section_file` | a `file` appears twice |
+| `too_many_sections` | over 32 sections in a file or 64 in a check |
+
 The result names `id`, `decision_id`, `checked_commit`, `required_files`, `checked_files`,
-`provenance`, `cache_cleared` and `redactions`. `cache_cleared` only says whether an existing
+`provenance`, `cache_cleared` and `redactions`. With `sections` it also carries
+`declared_sections`: per file `{path, scheme, total_lines, sections: [{heading, role,
+first_line, lines}]}`, the readable chain you declared with its 1-based first line and length.
+Check it: a section spanning most of the file gains nothing, and a `first_line` that is not
+where the heading sits in your viewer means the parser disagrees with your renderer, so make a
+whole-file check. The echo is never stored. `cache_cleared` only says whether an existing
 valid derived cache contained and removed this decision; other cached ids stay intact.
 When additional anchor paths lie outside inspected coverage, pruning is deferred to the
 normal refresh so a check cannot hide their capture warning.
@@ -1851,7 +1894,12 @@ retrying; SQLite rollback does not remove an already published immutable file.
 
 A matching check compares current decision/leaf identity, exact required-file coverage,
 and stored file blob ids plus modes. Changed checked dependencies, deletion, mode or
-subject/scope changes re-arm review even if capture's original files match again.
+subject/scope changes re-arm review even if capture's original files match again. For a
+file with declared sections, only a change to a declared or also-watched section or to the
+file's link reference definitions re-arms it; the reasons are `declared section changed`,
+`declared section not found`, `also-watched section changed` and `referenced link definition
+changed`, and `section scope unavailable; whole file compared` when the sections cannot be
+bounded (the whole file then re-arms on any change, as before).
 Unrelated commits and identical bytes after squash/revert do not re-arm. The original
 checked commit remains provenance and need not exist locally after a squash/clone.
 Git/FS edits outside Sidegraph can race the final cleanliness/HEAD check and publication;

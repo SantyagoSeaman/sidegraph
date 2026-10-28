@@ -65,12 +65,17 @@ def test_shared_source_and_commit_findings_keep_distinct_ids(git_repo, packed, c
         if packed:
             assert len({r["path"] for r in rows}) == 1
             assert "/shards/" in rows[0]["path"]
-    assert doctor_main(["--db", str(root)]) == 0
+    assert doctor_main(["--db", str(root), "--flat"]) == 0
     lines = [
         line for line in capsys.readouterr().out.splitlines() if line.startswith("code-drift  ")
     ]
     assert len(lines) == 2 and lines[0] != lines[1]
     assert all(any(f"decision:{rid}" in line for line in lines) for rid in ids)
+    # The default form groups the same records by file under one header.
+    assert doctor_main(["--db", str(root)]) == 0
+    grouped = capsys.readouterr().out
+    assert "code-drift: 2 record(s) in 1 file group(s)" in grouped
+    assert all(rid in grouped for rid in ids)
     # Binding and aggregate orphaned-record checks must retain the record too.
     with Store(root) as store:
         store._conn.execute(

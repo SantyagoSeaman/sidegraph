@@ -46,7 +46,8 @@ north star this razor guards.
   existing `Decision` (any status) or the write is rejected before anything is committed —
   never guessed, never left dangling.
 - **Always pair the precise anchor with its containing file** — code symbol or doc heading
-  alike: a rename/move orphans one anchor, the file anchor keeps the fact retrievable.
+  alike: a rename/move orphans one anchor, the file anchor keeps the fact retrievable. For a
+  long document, section scope is declared when the record is checked, not when it is anchored.
   Never anchor to a bare module-level constant (the engine indexes functions/classes/
   files, not constants — anchor the file and name the constant in the statement), and
   keep `name` bare (`store.py`, `_touch_digest`) — `file_path`, not the name, carries

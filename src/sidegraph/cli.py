@@ -85,7 +85,9 @@ from .doc_import import (
 )
 from .doctor import (
     CHECK_EXEMPT_CODES,
+    CODE_DRIFT,
     curate,
+    drift_first_seen,
     open_curation_index,
     ratification_info_lines,
     spelling_twin_lines,
@@ -2744,7 +2746,8 @@ def doctor_main(argv: list[str] | None = None) -> int:
       for the current graph) affects neither exit code nor
       cleanliness, even under ``--check``.
 
-    ``--json`` prints ``{"clean", "violations", "findings", "skipped"}`` as one JSON
+    ``--json`` prints ``{"clean", "violations", "findings", "skipped"}`` (plus
+    ``drift_groups`` when per-record code-drift is grouped) as one JSON
     object to stdout — nothing else (the sidegraph-verify/-sync convention). ``clean``
     is true only when violations AND findings are both empty. Exit contract: 0 healthy
     (advisory findings alone stay 0 without ``--check``), 1 operational error (including
@@ -2787,8 +2790,14 @@ def doctor_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="print {'clean','violations','findings','skipped'} as one JSON object to "
-        "stdout (nothing else)",
+        help="print {'clean','violations','findings','skipped'} (plus 'drift_groups' when "
+        "per-record code-drift is grouped) as one JSON object to stdout (nothing else)",
+    )
+    parser.add_argument(
+        "--flat",
+        action="store_true",
+        help="one code-drift line per record, as before: restores the flat listing and skips "
+        "the grouping by file",
     )
     parser.add_argument(
         "--graph",
@@ -2881,6 +2890,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
             reader=reader,
             index=index,
             host_checks=host_checks(StoreLocation(str(args.db), None)),
+            group_drift=not args.flat,
         )
         try:
             statuses_known = index is not None and binding_statuses_computed(index)
@@ -2892,34 +2902,49 @@ def doctor_main(argv: list[str] | None = None) -> int:
             index.close()
     skipped = report.skipped + ([] if statuses_known else ["orphaned-records"])
 
+    grouped = report.drift_groups if report.drift_groups and report.drift_groups.groups else None
     if args.json:
+        stamps = drift_first_seen(Path(args.db))
         # Pure JSON on stdout — nothing else — mirrors sidegraph-verify --json.
-        print(
-            json.dumps(
+        document: dict[str, object] = {
+            "clean": not violations and not report.findings,
+            "violations": [
+                {"code": v.code, "path": v.path, "detail": v.detail} for v in violations
+            ],
+            "findings": [
                 {
-                    "clean": not violations and not report.findings,
-                    "violations": [
-                        {"code": v.code, "path": v.path, "detail": v.detail} for v in violations
-                    ],
-                    "findings": [
-                        {
-                            "code": f.code,
-                            "path": f.path,
-                            "detail": f.detail,
-                            "record_id": f.record_id,
-                            "record_type": f.record_type,
-                        }
-                        for f in report.findings
-                    ],
-                    "skipped": skipped + (["graph"] if reader is None else []),
-                },
-                indent=2,
-            )
-        )
+                    "code": f.code,
+                    "path": f.path,
+                    "detail": f.detail,
+                    "record_id": f.record_id,
+                    "record_type": f.record_type,
+                    "first_seen": stamps.get(f.record_id or "") if f.code == CODE_DRIFT else None,
+                }
+                for f in report.findings
+            ],
+            "skipped": skipped + (["graph"] if reader is None else []),
+        }
+        if grouped is not None:
+            document["drift_groups"] = grouped.to_dict()
+        print(json.dumps(document, indent=2))
     else:
         for v in violations:
             print(f"{v.code}  {v.path}  {v.detail}")
+        block_done = False
         for f in report.findings:
+            if grouped is not None and f.code == CODE_DRIFT:
+                # Grouped: the record-less notes keep their exact lines, then one block stands
+                # in for the per-record lines, at the position of the first code-drift finding.
+                if not block_done:
+                    block_done = True
+                    for note in report.findings:
+                        if note.code == CODE_DRIFT and note.record_id is None:
+                            print(f"{note.code}  {note.path}  {note.detail}")
+                    from .drift_groups import render_groups_text
+
+                    for line in render_groups_text(grouped):
+                        print(line)
+                continue
             subject = f"  {f.record_type}:{f.record_id}" if f.record_id is not None else ""
             print(f"{f.code}{subject}  {f.path}  {f.detail}")
         stamp_note = None if index_usable else index_stamp_note(args.db)

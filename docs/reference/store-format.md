@@ -108,7 +108,7 @@ an ordinary, human-readable git conflict in one small JSON file — not a corrup
 | `Fact` — full row, incl. `status`/`valid_to` (non-derivable knowledge; falsification is supersession, same as a `Decision`) | — |
 | `Domain` — everything except `communities` | `AnchorBinding.status` (`live`/`degraded`/`orphaned`) |
 | `Entity` — `entity_id`/`canonical_name`/`kind`/`descriptor`, for every entity EXCEPT a `community:*` abstract entity (index-only — see below) | `Domain.communities` |
-| `AnchorBinding` set per decision or fact — `entity_id`/`tier`/`relation`/`weight`, no `status`, EXCLUDING any binding whose entity is a `community:*` abstract entity | `toc_cache` (the `SessionStart` table-of-contents render) |
+| `AnchorBinding` set per decision or fact — `entity_id`/`tier`/`relation`/`weight`, no `status`, EXCLUDING any binding whose entity is a `community:*` abstract entity | `toc_cache` (the `SessionStart` table-of-contents render), `code_drift_cache` (the drifted record ids per capture commit, with the `first_seen_since`, `first_seen` and `first_seen_absent` stamps and the `first_seen_checked` marks behind the SessionStart recency clause) |
 | `Initiative` — full row | the per-session capture ledger (`capture_sessions`, dedup markers) |
 | `archive/*.jsonl` segments (once compaction has run) | `last_synced_graph_version` (the graph version plus the resolver revision, `<graph version>:r<N>`; raising the revision reruns the first sync after an upgrade), `pending_uncommitted_moves` (the entities a sync left as `moved_uncommitted`, with the git `HEAD` it saw, so the next sync after `HEAD` moves re-verifies them), `pending_tier1_reconcile` (the `(record, vacated community)` pairs whose Tier-1 reconcile failed, as JSON; every sync retries them first; a pair is cleared once its reconcile completes, and kept, silently, while a live or degraded Tier-2 anchor of the record has no recorded community), `schema_version`, the canonical-digest freshness stamp, `skipped_canonical_files` (the files the last reload left out; see [Digest integrity](#digest-integrity)) |
 | `domain-snapshot.json` (once `sidegraph-domains snapshot` has run) | `domain_members` (each accepted domain's effective membership: node id, file, community), with `domain_membership_stamp`, `domain_membership_failed`, `domain_membership_populated` and `domain_snapshot_signature` in `meta` |
@@ -1010,7 +1010,26 @@ revision, agent provenance, redacted rationale, exact `required_files`, inspecte
 `checked_files` (path, Git blob id and regular-file mode), and a SHA-256 `subject_digest`.
 No source text, engine mapping or binding status is stored. The versioned digest enumerates
 immutable Decision/Provenance fields and durable leaf descriptors (`name`, `file_path`);
-ratification/lifecycle fields and volatile mappings are excluded.
+ratification/lifecycle fields and volatile mappings are excluded. Locators and section
+digests are hashes.
+
+A capsule may also carry `declared_sections` (inside `schema_version` 1; plain capsules
+write `"declared_sections": []`). Each entry names one checked markdown file and the sections
+the checker read: `{path, scheme, refs_hash, sections: [{heading_hash, role, text_hash}]}`.
+Scheme `md1` is the block structure markdown-it-py reports in CommonMark mode (`>=4,<5`,
+inline pass off): `heading_hash` is a chained SHA-256 of the heading chain, `text_hash` the
+SHA-256 of the section's lines (CRLF and CR read as LF, nothing else normalised) and
+`refs_hash` the SHA-256 of the file's link reference definitions. Roles are `declared` and
+`watch`. No heading text is stored. A file with an entry is unchanged when its blob and mode
+match, or when its mode matches and every stored heading still resolves to exactly one
+heading with an equal `text_hash` and the `refs_hash` is equal. Everything else re-arms, with
+`checked files changed` for a mode or absence change, an unknown scheme or an unknown role;
+`section scope unavailable; whole file compared` when the file cannot be bounded (over 2 MiB
+or 20,000 lines, over 5,000 headings or 200,000 parser tokens, not UTF-8, a heading inside a
+list item or quote, nesting too deep, a read failure or an exhausted scan budget);
+`declared section not found`; `declared section changed`;
+`referenced link definition changed`; and `also-watched section changed`. A release that does not know the field ignores it, compares whole blobs and warns
+more, never less; an unknown future scheme or role is accepted and compared by whole blob.
 
 Select the highest generated check id for each decision before validation. This is a
 simple deterministic cross-branch ordering rule, not causal ordering or truth authority.

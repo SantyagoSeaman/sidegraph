@@ -134,7 +134,8 @@ notice.
 Records needing content review after code changed or a prior scoped check stopped applying.
 The line says how many. Inspect current code: record an explicit `record_drift_check` if the
 claim still holds, or propose a real successor if it does not. There is no user notice.
-`sidegraph-doctor` lists them as `code-drift` findings, and the `sidegraph:triage-drift` skill walks them.
+`sidegraph-doctor` lists them as `code-drift` findings, grouped by the drifted file with one `git diff` per distinct
+change (`sidegraph-doctor --flat` prints one line per record instead), and the `sidegraph:triage-drift` skill walks them.
 `SIDEGRAPH_DRIFT_NUDGE=off` silences the line.
 
 ### graph-borrowed

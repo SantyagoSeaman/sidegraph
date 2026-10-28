@@ -45,6 +45,7 @@ def test_custom_error_input_message_context_type_location_and_model_are_not_rend
         "enum",
         "string_pattern_mismatch",
         "string_too_short",
+        "string_too_long",
         "too_short",
         "too_long",
     ],

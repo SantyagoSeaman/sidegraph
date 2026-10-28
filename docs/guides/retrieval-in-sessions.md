@@ -297,5 +297,8 @@ Use `sidegraph:triage-drift` to read the claim and current code. If the claim st
 `record_drift_check` can append a justified inspection of the current clean committed
 files without changing the decision. If it no longer holds, propose a real successor.
 The [tool reference](../reference/mcp-tools.md#record_drift_check) describes refusal cases
-and coverage. Changed inspected files or scope re-arm the warning; unrelated commits do
-not. The check is an attributed assertion and can be wrong.
+and coverage. Changed inspected files or scope re-arm the warning, and for a markdown file
+checked with declared sections only a change to a declared or also-watched section or to the
+file's link definitions does; unrelated commits do not. The check is an attributed assertion and can be wrong. `sidegraph-doctor` groups the
+records by drifted file and may note `anchored region unchanged; sibling sections of the file
+may still matter`: that shortens the reading, it does not replace it.

@@ -208,7 +208,8 @@ class Inputs:
     graph_path: Path | None = None  # where the graph was looked for
     borrowed_from: Path | None = None
     open_error: BaseException | None = None  # Store() raised (D3)
-    drift_count: int | None = None  # refresh_code_drift_cache's return (D4 check 2)
+    drift_count: int | None = None  # the refresh's live drifted count (D4 check 2)
+    drift_recent: tuple[int, str] | None = None  # (new count, span) from the same refresh
     known_freshness: GraphFreshness | None = None  # a caller that already computed it
     _freshness: GraphFreshness | None = field(default=None, init=False, repr=False)
 
@@ -345,16 +346,23 @@ def _detect_code_drift(inputs: Inputs) -> Problem | None:
 
     The count is the refresh's own
     return value: when the refresh could not run (outside git) it returns ``None`` and the old
-    cache must not be counted. ``SIDEGRAPH_DRIFT_NUDGE=off`` switches the check off (the host
-    still refreshes the cache). No notice: superseding drifted records is the agent's work.
-    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D4 check 2)"""
+    cache must not be counted. ``drift_recent``, when the refresh could certify it, adds a
+    recency clause after the count; this check only renders it.
+    ``SIDEGRAPH_DRIFT_NUDGE=off`` switches the check off (the host still refreshes the cache).
+    No notice: superseding drifted records is the agent's work.
+    see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D4 check 2)
+    and design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.5)"""
     n = inputs.drift_count
     if n is None or os.environ.get("SIDEGRAPH_DRIFT_NUDGE") == "off":
         raise _NotRun
     if not n:
         return None
+    clause = ""
+    if inputs.drift_recent is not None:
+        new, span = inputs.drift_recent
+        clause = f" ({new} new {span})" if new else f" (none new {span})"
     line = (
-        f"Sidegraph: {n} record(s) need content review: code changed or a prior check "
+        f"Sidegraph: {n} record(s) need content review{clause}: code changed or a prior check "
         "no longer applies — task-relevant ones carry a [drifted] tag in retrieval; "
         "full list: sidegraph-doctor; record_drift_check if still true, "
         "supersede if no longer true."

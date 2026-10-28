@@ -432,6 +432,96 @@ def test_cache_prune_retains_other_ids_and_original_capture_groups(project):
     }
 
 
+def _another_check(store):
+    from ulid import ULID
+
+    from sidegraph.schema import DriftCheck
+
+    first = next((store.path / "verifications").glob("*.json"))
+    return DriftCheck.model_validate(
+        {**json.loads(first.read_text(encoding="utf-8")), "id": str(ULID())}
+    )
+
+
+def test_a_check_that_keeps_the_advisory_marks_the_record_and_keeps_its_stamp(project):
+    """``clear_cached_advisory=False``: ``by_commit`` and the stamp stay for the refresh to
+    judge, the id is marked, and a stale tombstone of it goes; a later clearing check drops
+    the mark with the stamp (design/superpowers/specs/2026-10-27-drift-notice-delta-design.md
+    §4.2)."""
+    root, store, decision = project
+    require_check(root, decision.id)
+    old = "2026-10-01T00:00:00+00:00"
+    before = {
+        "head": "observed-head",
+        "computed_at": "prior",
+        "by_commit": {"capture-a": [decision.id, "keep-a"]},
+        "first_seen_since": old,
+        "first_seen": {decision.id: old, "keep-a": old},
+        "first_seen_absent": {decision.id: [old, old], "gone-b": [old, old]},
+    }
+    store.set_meta("code_drift_cache", json.dumps(before))
+    assert store.record_drift_check(_another_check(store), clear_cached_advisory=False) is False
+    assert json.loads(store.get_meta("code_drift_cache")) == {
+        **before,
+        "first_seen_absent": {"gone-b": [old, old]},
+        "first_seen_checked": [decision.id],
+    }
+    assert store.record_drift_check(_another_check(store)) is True
+    after = json.loads(store.get_meta("code_drift_cache"))
+    assert after["by_commit"] == {"capture-a": ["keep-a"]}
+    assert after["first_seen"] == {"keep-a": old}
+    assert after["first_seen_checked"] == []
+
+
+def test_a_kept_advisory_check_writes_the_mark_alone(project):
+    """A listed id with no tombstone: the mark is the only change, and it is written."""
+    root, store, decision = project
+    require_check(root, decision.id)
+    old = "2026-10-01T00:00:00+00:00"
+    before = {
+        "head": "h",
+        "computed_at": "p",
+        "by_commit": {"c": [decision.id]},
+        "first_seen_since": old,
+        "first_seen": {decision.id: old},
+        "first_seen_absent": {},
+    }
+    store.set_meta("code_drift_cache", json.dumps(before))
+    assert store.record_drift_check(_another_check(store), clear_cached_advisory=False) is False
+    assert json.loads(store.get_meta("code_drift_cache")) == {
+        **before,
+        "first_seen_checked": [decision.id],
+    }
+
+
+def test_a_kept_advisory_check_on_an_unlisted_record_ends_its_tombstone(project):
+    """Not in ``by_commit`` (only a tombstone left): the check ends that episode, as a
+    clearing check would, and marks nothing."""
+    root, store, decision = project
+    require_check(root, decision.id)
+    old = "2026-10-01T00:00:00+00:00"
+    before = {
+        "head": "h",
+        "computed_at": "p",
+        "by_commit": {"c": ["keep-a"]},
+        "first_seen_since": old,
+        "first_seen": {"keep-a": old},
+        "first_seen_absent": {decision.id: [old, old]},
+    }
+    store.set_meta("code_drift_cache", json.dumps(before))
+    assert store.record_drift_check(_another_check(store), clear_cached_advisory=False) is False
+    assert json.loads(store.get_meta("code_drift_cache")) == {**before, "first_seen_absent": {}}
+
+
+def test_a_kept_advisory_on_an_unstamped_cache_writes_nothing(project):
+    root, store, decision = project
+    require_check(root, decision.id)
+    before = {"head": "h", "computed_at": "p", "by_commit": {"c": [decision.id]}}
+    store.set_meta("code_drift_cache", json.dumps(before))
+    assert store.record_drift_check(_another_check(store), clear_cached_advisory=False) is False
+    assert json.loads(store.get_meta("code_drift_cache")) == before
+
+
 @pytest.mark.parametrize("index_flag", [None, "--skip-worktree"])
 def test_dirty_executable_mode_is_refused_even_behind_index_flags(project, index_flag):
     root, store, decision = project
@@ -623,3 +713,216 @@ def test_known_prepublication_scope_failures_get_specific_safe_errors(
     assert "private-git-failure-canary" not in text
     assert not (store.path / "verifications").exists()
     assert before == {p.relative_to(store.path): p.read_bytes() for p in store.path.rglob("*.json")}
+
+
+# --- git helpers for grouped triage -----------------------------------------------------
+
+
+def _capture_run(monkeypatch):
+    """Patch ``drift_checks.subprocess.run`` and return the list of captured kwargs."""
+    from sidegraph import drift_checks
+
+    calls: list[dict] = []
+
+    def fake(argv, **kwargs):
+        calls.append({"argv": argv, **kwargs})
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(drift_checks.subprocess, "run", fake)
+    return calls
+
+
+def test_git_bytes_default_env_is_exactly_git_env(monkeypatch, tmp_path):
+    """Guard (N): existing callers keep ``git_env()`` and gain no new variable."""
+    from sidegraph import drift_checks
+    from sidegraph.gitenv import git_env
+
+    calls = _capture_run(monkeypatch)
+    drift_checks.git_bytes(tmp_path, ["status"], 5.0)
+    assert calls[0]["env"] == git_env()
+    assert "GIT_NO_LAZY_FETCH" not in calls[0]["env"]
+
+
+def test_git_bytes_no_lazy_fetch_sets_the_variable(monkeypatch, tmp_path):
+    from sidegraph import drift_checks
+
+    calls = _capture_run(monkeypatch)
+    drift_checks.git_bytes(tmp_path, ["status"], 5.0, no_lazy_fetch=True)
+    assert calls[0]["env"]["GIT_NO_LAZY_FETCH"] == "1"
+
+
+def test_git_bytes_input_feeds_stdin_and_forces_no_lazy_fetch(monkeypatch, tmp_path):
+    from sidegraph import drift_checks
+
+    calls = _capture_run(monkeypatch)
+    drift_checks.git_bytes_input(tmp_path, ["cat-file", "--batch-check"], b"a\nb\n", 3.0)
+    assert calls[0]["input"] == b"a\nb\n"
+    assert calls[0]["env"]["GIT_NO_LAZY_FETCH"] == "1"
+    assert calls[0]["timeout"] == 3.0
+
+
+@pytest.mark.parametrize("error", [subprocess.TimeoutExpired("git", 1), OSError("boom")])
+def test_git_bytes_input_maps_timeout_and_oserror_to_valueerror(monkeypatch, tmp_path, error):
+    from sidegraph import drift_checks
+
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(drift_checks.subprocess, "run", fail)
+    with pytest.raises(ValueError, match="Git check unavailable"):
+        drift_checks.git_bytes_input(tmp_path, ["cat-file"], b"", 1.0)
+
+
+def test_git_bytes_input_refuses_nonpositive_timeout(monkeypatch, tmp_path):
+    from sidegraph import drift_checks
+
+    calls = _capture_run(monkeypatch)
+    with pytest.raises(ValueError):
+        drift_checks.git_bytes_input(tmp_path, ["cat-file"], b"", 0)
+    assert calls == []
+
+
+def _tree_repo(tmp_path):
+    root = tmp_path / "tree-repo"
+    root.mkdir()
+    git(root, "init", "-q")
+    git(root, "config", "user.email", "t@example.com")
+    git(root, "config", "user.name", "T")
+    (root / "plain.txt").write_text("plain\n")
+    (root / "exec.sh").write_text("#!/bin/sh\n")
+    (root / "exec.sh").chmod(0o755)
+    (root / "link").symlink_to("plain.txt")
+    (root / "dir").mkdir()
+    (root / "dir" / "inner.txt").write_text("inner\n")
+    git(root, "add", "-A")
+    git(
+        root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "160000," + "a" * 40 + ",sub",
+    )
+    git(root, "commit", "-q", "-m", "tree")
+    return root
+
+
+def test_tree_entries_all_returns_every_kind(tmp_path):
+    from sidegraph import drift_checks
+
+    root = _tree_repo(tmp_path)
+    head = git(root, "rev-parse", "HEAD")
+    paths = {"plain.txt", "exec.sh", "link", "sub", "dir", "missing.txt"}
+    got = drift_checks.tree_entries_all(root, head, paths, 10.0)
+    assert {path: mode for path, (_oid, mode) in got.items()} == {
+        "plain.txt": "100644",
+        "exec.sh": "100755",
+        "link": "120000",
+        "sub": "160000",
+        "dir": "040000",
+    }
+    assert all(len(oid) == 40 for oid, _mode in got.values())
+
+
+def test_tree_entries_still_filters_to_regular_blobs(tmp_path):
+    """Guard (N): the overlay's ``tree_entries`` never reports a symlink or directory."""
+    from sidegraph import drift_checks
+
+    root = _tree_repo(tmp_path)
+    head = git(root, "rev-parse", "HEAD")
+    got = drift_checks.tree_entries(root, head, {"plain.txt", "link", "dir", "sub"}, 10.0)
+    assert set(got) == {"plain.txt"}
+
+
+# --- grouped triage review fixes: bounded tree lookups -----------------------------------
+
+
+def test_tree_entries_all_fallback_draws_on_the_remaining_deadline(monkeypatch, tmp_path):
+    """The directory fallback gets what is left of the budget, not the original timeout."""
+    from sidegraph import drift_checks
+
+    clock = [0.0]
+    seen: list[float | None] = []
+
+    def fake(root, args, timeout, *, no_lazy_fetch=False):
+        seen.append(timeout)
+        clock[0] += 9.0  # every call "takes" nine seconds
+        return b""
+
+    monkeypatch.setattr(drift_checks, "git_bytes", fake)
+    deadline = 10.0
+    drift_checks.tree_entries_all(tmp_path, "HEAD", {"a/b"}, lambda: deadline - clock[0])
+    assert seen == [10.0, 1.0]
+
+
+def test_tree_entries_all_chunks_long_path_sets_and_still_finds_a_directory(tmp_path):
+    from sidegraph import drift_checks
+
+    root = tmp_path / "chunky"
+    root.mkdir()
+    git(root, "init", "-q")
+    git(root, "config", "user.email", "t@example.com")
+    git(root, "config", "user.name", "T")
+    nested = root / "src" / "sidegraph"
+    nested.mkdir(parents=True)
+    (nested / "x.py").write_text("x = 1\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "dir")
+    head = git(root, "rev-parse", "HEAD")
+    filler = {f"nonexistent/{'long-name-' * 12}{n}.py" for n in range(200)}
+    got = drift_checks.tree_entries_all(root, head, {"src/sidegraph"} | filler, 30.0)
+    assert got["src/sidegraph"][1] == "040000"
+    assert len(got) == 1
+
+
+@pytest.mark.parametrize(
+    "lines,expected",
+    [
+        ('[remote "o"]\n\tpromisor\n', True),
+        ('[remote "o"]\n\tpromisor = 2\n', True),
+        ('[remote "o"]\n\tpromisor = yes\n', True),
+        ('[remote "o"]\n\tpromisor = on\n', True),
+        ('[remote "o"]\n\tpromisor = true\n', True),
+        ('[remote "o"]\n\tpromisor = false\n', False),
+        ('[remote "o"]\n\tpromisor = 0\n', False),
+        ("[extensions]\n\tpartialClone = origin\n", True),
+        ("", False),
+    ],
+)
+def test_partial_clone_configured_parses_booleans_the_way_git_does(tmp_path, lines, expected):
+    from sidegraph import drift_checks
+
+    root = _tree_repo(tmp_path)
+    with open(root / ".git" / "config", "a", encoding="utf-8") as config:
+        config.write(lines)
+    assert drift_checks.partial_clone_configured(root, 10.0) is expected
+
+
+def test_partial_clone_configured_treats_a_non_boolean_promisor_as_unknown(tmp_path):
+    """Git rejects the value; the caller treats any error as a partial clone."""
+    from sidegraph import drift_checks
+
+    root = _tree_repo(tmp_path)
+    with open(root / ".git" / "config", "a", encoding="utf-8") as config:
+        config.write('[remote "o"]\n\tpromisor = banana\n')
+    with pytest.raises(ValueError):
+        drift_checks.partial_clone_configured(root, 10.0)
+
+
+def test_tree_entries_all_keeps_an_ancestor_directory_beside_its_descendant(tmp_path):
+    from sidegraph import drift_checks
+
+    root = tmp_path / "nested"
+    root.mkdir()
+    git(root, "init", "-q")
+    git(root, "config", "user.email", "t@example.com")
+    git(root, "config", "user.name", "T")
+    (root / "src" / "sidegraph").mkdir(parents=True)
+    (root / "src" / "sidegraph" / "x.py").write_text("x = 1\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "dirs")
+    head = git(root, "rev-parse", "HEAD")
+    got = drift_checks.tree_entries_all(root, head, {"src", "src/sidegraph"}, 10.0)
+    assert {path: mode for path, (_oid, mode) in got.items()} == {
+        "src": "040000",
+        "src/sidegraph": "040000",
+    }

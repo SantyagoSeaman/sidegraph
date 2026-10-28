@@ -47,13 +47,20 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 from pydantic import BaseModel
 
 from . import domain_snapshot
-from .doctor import scan_code_drift
+from .doctor import SECTION_UNAVAILABLE, CodeDriftScan, scan_code_drift
 from .engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader, NodeRef
-from .retrieval import DRIFT_CACHE_KEY, TOC_CACHE_KEY, build_toc, drifted_record_ids
+from .retrieval import (
+    DRIFT_CACHE_KEY,
+    TOC_CACHE_KEY,
+    build_toc,
+    live_drifted_ids,
+    recent_drift,
+)
 from .schema import (
     AnchorBinding,
     DecisionStatus,
@@ -72,7 +79,7 @@ from .store import (
     Store,
     StoreBusyError,
 )
-from .store_layout import snapshot_signature
+from .store_layout import snapshot_signature, stamp_cache
 from .verify import _run_git
 
 LAST_SYNCED_KEY = "last_synced_graph_version"
@@ -2070,13 +2077,77 @@ def maybe_sync(
     return sync(store, reader, canonical_writes=canonical_writes)
 
 
-def refresh_code_drift_cache(
+class DriftRefresh(NamedTuple):
+    """What one refresh published: the live drifted count and the recency pair (or None)."""
+
+    total: int
+    recent: tuple[int, str] | None
+
+
+def build_cache(raw: str | None, scan: CodeDriftScan, now: datetime) -> dict:
+    """The next code-drift cache value from the previous raw value and a finished scan.
+
+    Per capture commit a successful batch replaces its entry and a failed batch retains the
+    previous one; the first-seen stamps and tombstones come from `stamp_cache`. Ids whose
+    optional check comparison did not run (a section scope that could not be bounded
+    included) are `retained`, and never stamped ``now``. Pure:
+    no git, no store reads.
+    # see design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.2, 4.3)
+    """
+    prev: object = None
+    prev_by_commit: dict[str, list[str]] = {}
+    if raw is not None:
+        try:
+            prev = json.loads(raw)
+        except json.JSONDecodeError:
+            prev = None
+        if isinstance(prev, dict) and isinstance(prev.get("by_commit"), dict):
+            prev_by_commit = {
+                c: [r for r in ids if isinstance(r, str)]
+                for c, ids in prev["by_commit"].items()
+                if isinstance(ids, list)
+            }
+
+    by_commit: dict[str, list[str]] = {}
+    retained: set[str] = set()
+    for batch in scan.batches:
+        if batch.failed:
+            if batch.commit in prev_by_commit:
+                by_commit[batch.commit] = prev_by_commit[batch.commit]
+        else:
+            by_commit[batch.commit] = sorted({e.record_id for e in batch.entries})
+            retained.update(
+                e.record_id
+                for e in batch.entries
+                if e.check_reason is not None
+                and (
+                    "capture advisory retained" in e.check_reason
+                    or e.check_reason == SECTION_UNAVAILABLE
+                )
+            )
+    ids = {rid for members in by_commit.values() for rid in members}
+    if scan.checks_unreadable:
+        retained = set(ids)
+    since, first_seen, absent = stamp_cache(prev, ids, retained, now)
+    # No first_seen_checked here: stamp_cache consumed the marks (store_layout.checked_marks).
+    return {
+        "head": scan.head,
+        "computed_at": now.isoformat(),
+        "by_commit": by_commit,
+        "first_seen_since": since,
+        "first_seen": first_seen,
+        "first_seen_absent": absent,
+    }
+
+
+def refresh_code_drift_snapshot(
     store: Store,
     *,
+    now: datetime | None = None,
     repo_root: Path | None = None,
     deadline: float = 10.0,
     busy_timeout_seconds: float = 5.0,
-) -> int | None:
+) -> DriftRefresh | None:
     """Rescan code drift and merge the result into the :data:`~sidegraph.retrieval.
     DRIFT_CACHE_KEY` meta cache — the write half of the drift→supersede affordance (D2).
 
@@ -2093,7 +2164,8 @@ def refresh_code_drift_cache(
     Merge semantics, per capture commit (spec round-2 N1 — a partial git failure must
     neither erase real markers nor freeze the cache forever):
 
-    - inactive scan (nothing commit-stamped and anchored) → return ``0``, write nothing;
+    - inactive scan (nothing commit-stamped and anchored) → return ``DriftRefresh(0, None)``,
+      write nothing;
     - unscanned (repo root resolution failed — no batch ran) → leave any existing cache
       byte-untouched, return ``None``. A failed HEAD resolution alone does NOT discard a
       scan whose batches ran (review M-2: ``head`` is provenance only and gates nothing
@@ -2104,10 +2176,12 @@ def refresh_code_drift_cache(
       commits absent from the scan's batch set drop out entirely (their records left
       the live+stamped+anchored join).
 
-    Returns the live-filtered flattened count (``drifted_record_ids`` — the one filter
-    definition, shared with the render side). Never raises: any unexpected failure
+    Returns a `DriftRefresh`: the live-filtered flattened count (`live_drifted_ids` — the one
+    filter definition, shared with the render side) and the recency pair, both derived from
+    the payload this call published. Never raises: any unexpected failure
     returns ``None`` with the cache untouched (hook-caller contract).
     # see design/superpowers/specs/2026-07-30-drift-supersede-affordance-design.md (D2)
+    # and design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.3)
     """
     try:
         scan = scan_code_drift(
@@ -2117,7 +2191,7 @@ def refresh_code_drift_cache(
             busy_timeout_seconds=busy_timeout_seconds,
         )
         if not scan.active:
-            return 0
+            return DriftRefresh(0, None)
         # A hook that cannot certify binding membership must not read an old drift cache or
         # publish a result filtered against incomplete statuses. With zero wait, this guard
         # wins even when the unreadable snapshot coincides with the ordinary uncomputed state.
@@ -2126,37 +2200,35 @@ def refresh_code_drift_cache(
         if scan.repo_root_failed:
             return None
 
-        prev_by_commit: dict[str, list[str]] = {}
-        raw = store.get_meta(DRIFT_CACHE_KEY)
-        if raw is not None:
-            try:
-                prev = json.loads(raw)
-                if isinstance(prev, dict) and isinstance(prev.get("by_commit"), dict):
-                    prev_by_commit = {
-                        c: [r for r in ids if isinstance(r, str)]
-                        for c, ids in prev["by_commit"].items()
-                        if isinstance(ids, list)
-                    }
-            except json.JSONDecodeError:
-                pass
+        payload: dict = {}
+        stamped_at: list[datetime] = []
 
-        by_commit: dict[str, list[str]] = {}
-        for batch in scan.batches:
-            if batch.failed:
-                if batch.commit in prev_by_commit:
-                    by_commit[batch.commit] = prev_by_commit[batch.commit]
-            else:
-                by_commit[batch.commit] = sorted({e.record_id for e in batch.entries})
-        store.set_meta(
-            DRIFT_CACHE_KEY,
-            json.dumps(
-                {
-                    "head": scan.head,
-                    "computed_at": datetime.now(UTC).isoformat(),
-                    "by_commit": by_commit,
-                }
-            ),
-        )
-        return len(drifted_record_ids(store))
+        def decide(raw: str | None) -> str:
+            # The clock is read under the write lock: a stamp is never older than the publish.
+            instant = now if now is not None else datetime.now(UTC)
+            payload.update(build_cache(raw, scan, instant))
+            stamped_at.append(instant)
+            return json.dumps(payload)
+
+        store.update_meta_if(DRIFT_CACHE_KEY, decide)
+        live = live_drifted_ids(store, payload["by_commit"])
+        return DriftRefresh(len(live), recent_drift(live, payload, stamped_at[0]))
     except Exception:
         return None
+
+
+def refresh_code_drift_cache(
+    store: Store,
+    *,
+    repo_root: Path | None = None,
+    deadline: float = 10.0,
+    busy_timeout_seconds: float = 5.0,
+) -> int | None:
+    """`refresh_code_drift_snapshot`, reduced to the live drifted count (the Stop hook's view)."""
+    snapshot = refresh_code_drift_snapshot(
+        store,
+        repo_root=repo_root,
+        deadline=deadline,
+        busy_timeout_seconds=busy_timeout_seconds,
+    )
+    return None if snapshot is None else snapshot.total

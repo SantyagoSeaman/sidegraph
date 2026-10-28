@@ -7,8 +7,10 @@ what gates each prose surface, and the never-crash / ≤800-bound contracts.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
+import sqlite3
 
 import pytest
 
@@ -61,14 +63,21 @@ def _transcript(tmp_path, real_prompts=2, name="s1"):
     return str(path)
 
 
-def _fake_refresh(monkeypatch, n):
+def _fake_refresh(monkeypatch, n, recent=None):
+    """Stub both refresh entry points: SessionStart reads the snapshot, Stop the wrapper.
+    They share one ``calls`` list so a test counts every refresh a hook ran."""
     calls = []
 
     def fake(store, **kw):
         calls.append(kw)
         return n
 
+    def fake_snapshot(store, **kw):
+        calls.append(kw)
+        return None if n is None else sync_mod.DriftRefresh(n, recent)
+
     monkeypatch.setattr(sync_mod, "refresh_code_drift_cache", fake)
+    monkeypatch.setattr(sync_mod, "refresh_code_drift_snapshot", fake_snapshot)
     return calls
 
 
@@ -90,7 +99,7 @@ def test_session_start_no_line_when_zero_or_none(tmp_path, monkeypatch, capsys):
         _fake_refresh(monkeypatch, n)
         out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / f".sidegraph-{n}"))
         text = out["hookSpecificOutput"]["additionalContext"]
-        assert "need content review:" not in text
+        assert "need content review" not in text
 
 
 def test_session_start_kill_switch_suppresses_line_but_still_refreshes(
@@ -103,7 +112,7 @@ def test_session_start_kill_switch_suppresses_line_but_still_refreshes(
     calls = _fake_refresh(monkeypatch, 3)
     out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"))
     text = out["hookSpecificOutput"]["additionalContext"]
-    assert "need content review:" not in text
+    assert "need content review" not in text
     assert len(calls) == 1
 
 
@@ -120,11 +129,77 @@ def test_session_start_duplicate_call_makes_no_refresh(tmp_path, monkeypatch, ca
     assert len(calls) == 1  # no second refresh
 
 
+def test_session_start_line_carries_the_recency_clause(tmp_path, monkeypatch, capsys):
+    _fake_refresh(monkeypatch, 2, recent=(2, "in the last 7 days"))
+    out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"))
+    text = out["hookSpecificOutput"]["additionalContext"]
+    assert "Sidegraph: 2 record(s) need content review (2 new in the last 7 days): code" in text
+
+
+def test_session_start_clause_is_stable_and_adds_no_meta_keys(tmp_path, monkeypatch, capsys):
+    """Two real SessionStarts over real drift: the same clause both times, and the hook
+    writes no meta key of its own beyond the cache (its per-session bookkeeping aside)."""
+    from datetime import UTC, datetime, timedelta
+
+    from sidegraph.retrieval import DRIFT_CACHE_KEY
+    from sidegraph.store import Store
+    from tests.test_hook_contention import _make_drift_repo
+
+    repo, store_dir, _old = _make_drift_repo(tmp_path, cold=False)
+    store = Store(store_dir)
+    decision = next(store.iter_decisions())
+    since = datetime.now(UTC) - timedelta(days=10)
+    store.set_meta(
+        DRIFT_CACHE_KEY,
+        json.dumps(
+            {
+                "head": "h",
+                "computed_at": "t",
+                "by_commit": {decision.provenance.commit: [decision.id]},
+                "first_seen_since": since.isoformat(timespec="seconds"),
+                "first_seen": {},
+                "first_seen_absent": {},
+            }
+        ),
+    )
+
+    def own_keys() -> set[str]:
+        with contextlib.closing(sqlite3.connect(store_dir / "index.db")) as conn:
+            keys = {row[0] for row in conn.execute("SELECT key FROM meta")}
+        return {
+            k
+            for k in keys
+            if not k.startswith(("telemetry:", "integrity_notice:")) and k != "session_start"
+        }
+
+    before = own_keys()
+    clause = "need content review (none new in the last 7 days):"
+    for session in ("s-one", "s-two"):
+        out = _run_session_start(monkeypatch, capsys, store_dir, {"session_id": session})
+        assert clause in out["hookSpecificOutput"]["additionalContext"]
+    assert own_keys() - before <= {DRIFT_CACHE_KEY}
+    store.close()
+
+
+def test_session_start_kill_switch_still_stamps_the_cache(tmp_path, monkeypatch, capsys):
+    from sidegraph.retrieval import DRIFT_CACHE_KEY
+    from sidegraph.store import Store
+    from tests.test_hook_contention import _make_drift_repo
+
+    monkeypatch.setenv("SIDEGRAPH_DRIFT_NUDGE", "off")
+    _repo, store_dir, _old = _make_drift_repo(tmp_path, cold=False)
+    out = _run_session_start(monkeypatch, capsys, store_dir, {"session_id": "s-off"})
+    assert "need content review" not in out["hookSpecificOutput"]["additionalContext"]
+    store = Store(store_dir)
+    assert "first_seen_since" in json.loads(store.get_meta(DRIFT_CACHE_KEY))
+    store.close()
+
+
 def test_session_start_survives_refresh_raising(tmp_path, monkeypatch, capsys):
     def boom(store, **kw):
         raise RuntimeError("refresh exploded")
 
-    monkeypatch.setattr(sync_mod, "refresh_code_drift_cache", boom)
+    monkeypatch.setattr(sync_mod, "refresh_code_drift_snapshot", boom)
     out = _run_session_start(monkeypatch, capsys, _existing_store(tmp_path / ".sidegraph"))
     # The map is this hook's deliverable — it must render regardless.
     assert "hookSpecificOutput" in out

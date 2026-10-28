@@ -430,6 +430,35 @@ def test_drift_line_is_todays_text_for_the_refresh_s_count(tmp_path):
     assert problem.notice is None
 
 
+_DRIFT_TAIL = (
+    ": code changed or a prior check no longer applies — task-relevant ones carry a "
+    "[drifted] tag in retrieval; full list: sidegraph-doctor; record_drift_check if still "
+    "true, supersede if no longer true."
+)
+
+
+@pytest.mark.parametrize(
+    ("recent", "clause"),
+    [
+        ((12, "in the last 7 days"), " (12 new in the last 7 days)"),
+        ((0, "in the last 7 days"), " (none new in the last 7 days)"),
+        ((3, "since 2026-10-27"), " (3 new since 2026-10-27)"),
+    ],
+)
+def test_drift_line_carries_the_recency_clause(tmp_path, recent, clause):
+    problem = detect(
+        "code-drift", Inputs(store_dir=tmp_path, now=NOW, drift_count=190, drift_recent=recent)
+    )
+    assert problem.line == f"Sidegraph: 190 record(s) need content review{clause}{_DRIFT_TAIL}"
+
+
+def test_drift_line_without_a_recency_pair_is_unchanged(tmp_path):
+    problem = detect(
+        "code-drift", Inputs(store_dir=tmp_path, now=NOW, drift_count=3, drift_recent=None)
+    )
+    assert problem.line == f"Sidegraph: 3 record(s) need content review{_DRIFT_TAIL}"
+
+
 def test_drift_zero_is_clean_and_none_is_not_run(tmp_path, monkeypatch):
     assert detect("code-drift", Inputs(store_dir=tmp_path, now=NOW, drift_count=0)) is None
     with pytest.raises(integrity._NotRun):

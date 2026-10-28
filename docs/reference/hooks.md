@@ -256,9 +256,17 @@ raises costs only its own line.
    `$SIDEGRAPH_DRIFT_NUDGE != "off"`, one more line is appended (own `try/except`, same
    never-cost-the-map guard as step 6). Verbatim, with `N` substituted:
 
-   > Sidegraph: N record(s) need content review: code changed or a prior check no longer applies —
+   > Sidegraph: N record(s) need content review (M new in the last 7 days): code changed or a prior check no longer applies —
    > task-relevant ones carry a [drifted] tag in retrieval; full list: sidegraph-doctor;
    > record_drift_check if still true, supersede if no longer true.
+
+   The parenthesised clause counts the records first seen drifted within the last 7 days; it
+   reads `(none new in the last 7 days)` when there are none and `(M new since YYYY-MM-DD)`
+   while the index is younger than 7 days. A record the store has not stamped counts as unknown
+   age, never as new, and the clause is left out whenever it cannot be certified. An index
+   built before this version prints no clause on its first day (a zero count that early says
+   nothing), `(none new since <date>)` while its stamping is younger than 7 days, and
+   `(none new in the last 7 days)` from then on, until a record newly drifts.
 
    `N` counts the whole store; the `[drifted]` tags (see
    [`concepts/retrieval.md`](../concepts/retrieval.md)) mark only the records a given

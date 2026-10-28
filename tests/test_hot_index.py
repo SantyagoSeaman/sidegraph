@@ -906,3 +906,10 @@ def test_open_returns_none_where_the_store_would_heal(tmp_path, how):
     and a touch into another store."""
     root, store_dir, elsewhere = _broken_project(tmp_path, how)
     assert HotIndex.open(store_dir) is None
+
+
+def test_hot_index_knows_nothing_of_drift_stamps():
+    """The PreToolUse path reads the drift cache for markers only; stamps stay off it."""
+    source = Path(hot_index.__file__).read_text(encoding="utf-8")
+    assert "first_seen" not in source
+    assert "stamp_cache" not in source

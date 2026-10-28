@@ -4,6 +4,7 @@ shape, --check escalation, --stale-days validation, and the executable never-wri
 guarantee. Stores are seeded through Store (tests may write; doctor may not)."""
 
 import json
+import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -140,7 +141,14 @@ def test_json_output_shape_and_purity(tmp_path, capsys):
     assert doc["clean"] is False
     assert doc["violations"] == []
     assert doc["findings"][0]["code"] == "dangling-record"
-    assert set(doc["findings"][0]) == {"code", "path", "detail", "record_id", "record_type"}
+    assert set(doc["findings"][0]) == {
+        "code",
+        "path",
+        "detail",
+        "record_id",
+        "record_type",
+        "first_seen",
+    }
     # An index that no sync has computed the statuses of, and no graph in this test's directory.
     assert doc["skipped"] == ["binding-status", "orphaned-records", "graph"]
 
@@ -387,3 +395,46 @@ def test_spelling_twins_are_informational_and_never_fail_check(tmp_path, capsys)
     assert out.strip().splitlines()[-1] == "clean"
     assert doctor_main(["--db", str(db), "--json"]) == 0
     assert "spelling" not in capsys.readouterr().out
+
+
+# -- first_seen on code-drift findings ----------------------------------------------------
+
+
+def _stamped_drift_store(tmp_path):
+    from datetime import UTC, datetime
+
+    from tests.test_sync_drift_stamps import World
+
+    repo = tmp_path / "drift-repo"
+    repo.mkdir()
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "Test"],
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    world = World(repo)
+    world.drift("b.py")
+    world.refresh(datetime(2026, 10, 1, 12, tzinfo=UTC))
+    world.drift("a.py")
+    world.refresh(datetime(2026, 10, 2, 12, tzinfo=UTC))
+    world.store.close()
+    return world, repo / ".sidegraph"
+
+
+def test_json_code_drift_finding_carries_first_seen(tmp_path, capsys):
+    world, db = _stamped_drift_store(tmp_path)
+    doctor_main(["--db", str(db), "--json"])
+    findings = json.loads(capsys.readouterr().out)["findings"]
+    drift = {f["record_id"]: f for f in findings if f["code"] == "code-drift"}
+    assert drift[world.x.id]["first_seen"] == "2026-10-02T12:00:00+00:00"
+    assert drift[world.y.id]["first_seen"] is None  # present at seeding: unknown age
+    assert all(f["first_seen"] is None for f in findings if f["code"] != "code-drift")
+
+
+def test_json_does_not_touch_the_index(tmp_path, capsys):
+    _world, db = _stamped_drift_store(tmp_path)
+    before = (db / "index.db").read_bytes()
+    doctor_main(["--db", str(db), "--json"])
+    capsys.readouterr()
+    assert (db / "index.db").read_bytes() == before

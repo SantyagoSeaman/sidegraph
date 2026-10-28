@@ -1452,8 +1452,6 @@ class Store:
                 os.link(tmp, path)  # exclusive whole-file publication, never replace history
             finally:
                 tmp.unlink(missing_ok=True)
-            if not clear_cached_advisory:
-                return False
             raw = self.get_meta(store_layout.DRIFT_CACHE_KEY)
             try:
                 payload = json.loads(raw) if raw is not None else None
@@ -1469,8 +1467,50 @@ class Store:
                 for key, ids in groups.items()
             ):
                 return False
-            changed = any(check.decision_id in ids for ids in groups.values())
-            if changed:
+            listed = any(check.decision_id in ids for ids in groups.values())
+            stamped = store_layout.parse_stamp(payload.get("first_seen_since")) is not None
+            if not clear_cached_advisory:
+                # The advisory stays for the next refresh to judge, and so does the stamp: the
+                # record may still be drifted. A listed id is marked: if that refresh clears it,
+                # the check ended the episode, so it leaves no tombstone and a re-drift is new
+                # (the refresh consumes the mark either way). An id no longer listed has only a
+                # tombstone, which the check ends here, as a clearing check would.
+                if not stamped:
+                    return False
+                rewrite = False
+                checked = payload.get("first_seen_checked", [])
+                if listed and isinstance(checked, list) and check.decision_id not in checked:
+                    payload["first_seen_checked"] = sorted(
+                        {rid for rid in checked if isinstance(rid, str)} | {check.decision_id}
+                    )
+                    rewrite = True
+                absent = payload.get("first_seen_absent")
+                if isinstance(absent, dict) and check.decision_id in absent:
+                    del absent[check.decision_id]
+                    rewrite = True
+                if rewrite:
+                    self._conn.execute(
+                        "INSERT INTO meta(key,value) VALUES (?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (store_layout.DRIFT_CACHE_KEY, json.dumps(payload)),
+                    )
+                return False
+            changed = listed
+            # A check ends the record's drift episode: its first-seen stamp, tombstone and
+            # mark go too, so a later re-drift is new. A cache without stamps keeps today's
+            # path.
+            pruned = False
+            if stamped:
+                for stamp_key in ("first_seen", "first_seen_absent"):
+                    stamps = payload.get(stamp_key)
+                    if isinstance(stamps, dict) and check.decision_id in stamps:
+                        del stamps[check.decision_id]
+                        pruned = True
+                marks = payload.get("first_seen_checked")
+                if isinstance(marks, list) and check.decision_id in marks:
+                    payload["first_seen_checked"] = [m for m in marks if m != check.decision_id]
+                    pruned = True
+            if changed or pruned:
                 payload["by_commit"] = {
                     key: [rid for rid in ids if rid != check.decision_id]
                     for key, ids in groups.items()

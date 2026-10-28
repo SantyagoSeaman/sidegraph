@@ -24,9 +24,16 @@ import re
 from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 from ulid import ULID
 
 # The store format version is defined in store_layout.py (the hook hot path needs it without
@@ -254,6 +261,52 @@ class CheckedCodeFile(BaseModel):
         return value
 
 
+# Declared-section scope of a drift check (see
+# design/superpowers/specs/2026-10-27-declared-section-drift-checks-design.md, section 5.1).
+# Locators are hashes: no heading text or source body is stored.
+Token = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$")]
+Hex = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[0-9a-f]+$")]
+_MD1_ROLES = {"declared", "watch"}
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+class DeclaredSection(BaseModel):
+    """One declared or also-watched section: scheme-defined locator and content digest."""
+
+    heading_hash: Hex  # md1: sha256 of the canonical heading chain
+    role: Token  # md1 knows "declared" and "watch"; other roles compare by whole blob
+    text_hash: Hex  # md1: sha256 of the section's text
+
+
+class DeclaredSectionFile(BaseModel):
+    """The sections of one checked file the checker declared (path must be checked)."""
+
+    path: str = Field(min_length=1, max_length=1024)
+    scheme: Token
+    refs_hash: Hex | None = None  # md1: reference-definition digest
+    sections: list[DeclaredSection] = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def _md1_entry_is_well_formed(self) -> DeclaredSectionFile:
+        if self.scheme != "md1":
+            return self
+        if not self.path.endswith((".md", ".markdown")):
+            raise ValueError("md1 sections need a markdown file")
+        roles = {section.role for section in self.sections}
+        if not roles <= _MD1_ROLES:
+            return self  # unknown role: compared by whole blob, never rejected
+        if self.refs_hash is None or not _SHA256_HEX.match(self.refs_hash):
+            raise ValueError("md1 entry needs a 64-hex refs_hash")
+        if "declared" not in roles:
+            raise ValueError("md1 entry needs a declared section")
+        if any(
+            not _SHA256_HEX.match(section.heading_hash) or not _SHA256_HEX.match(section.text_hash)
+            for section in self.sections
+        ):
+            raise ValueError("md1 hashes are 64 hex characters")
+        return self
+
+
 class DriftCheck(BaseModel):
     """Immutable auxiliary assertion that an existing decision was checked at a revision.
 
@@ -271,6 +324,7 @@ class DriftCheck(BaseModel):
     required_files: list[str] = Field(min_length=1, max_length=256)
     checked_files: list[CheckedCodeFile] = Field(min_length=1, max_length=256)
     subject_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    declared_sections: list[DeclaredSectionFile] = Field(default_factory=list, max_length=64)
 
     @field_validator("rationale")
     @classmethod
@@ -294,6 +348,11 @@ class DriftCheck(BaseModel):
             raise ValueError("check does not cover required files")
         if sum(len(path.encode("utf-8")) for path in paths) > 16_384:
             raise ValueError("checked scope is too large")
+        declared_paths = [entry.path for entry in self.declared_sections]
+        if len(set(declared_paths)) != len(declared_paths) or not set(declared_paths) <= set(paths):
+            raise ValueError("declared sections must name distinct checked files")
+        if sum(len(entry.sections) for entry in self.declared_sections) > 1024:
+            raise ValueError("too many declared sections")
         self.required_files = sorted(self.required_files)
         self.checked_files = sorted(self.checked_files, key=lambda entry: entry.path)
         return self

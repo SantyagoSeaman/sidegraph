@@ -1268,10 +1268,13 @@ def session_start() -> None:
         # could not run, which the check treats as "not run", never as the old cache's count.
         # Own try/except: a drift failure must never cost the map.
         drift_count: int | None = None
+        drift_recent: tuple[int, str] | None = None
         try:
             from .. import sync as _sync_drift
 
-            drift_count = _sync_drift.refresh_code_drift_cache(store, busy_timeout_seconds=0.0)
+            snap = _sync_drift.refresh_code_drift_snapshot(store, busy_timeout_seconds=0.0)
+            if snap is not None:
+                drift_count, drift_recent = snap
         except Exception as error:
             diagnostics.report("drift", error)
 
@@ -1304,6 +1307,7 @@ def session_start() -> None:
                         graph_path=graph_path,
                         borrowed_from=borrowed_from,
                         drift_count=drift_count,
+                        drift_recent=drift_recent,
                     ),
                     "session",
                     integrity.CHECKS[:5] + host_checks(location) + integrity.CHECKS[5:],
