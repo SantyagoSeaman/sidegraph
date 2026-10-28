@@ -124,20 +124,28 @@ current-graph anchor proof. Optional domain suggestions do not block that proof.
 | Claude Code | verified | verified | verified | verified | complete v1 flow |
 | Codex | verified when configured | verified when configured | verified when configured | unsupported | best-effort only |
 
-The host check reads the manual registration files only: `.mcp.json` and the `hooks` of
+The host check reads the manual registration files first: `.mcp.json` and the `hooks` of
 `.claude/settings.json` for Claude Code, `.codex/config.toml` and `.codex/hooks.json` for Codex.
-It does not recognise a plugin install, whose MCP server and hooks live in the plugin
-manifest. On a project that uses the plugin, `INTEGRATION` is therefore reported `incomplete`
-and the command exits `2` even though the plugin works. Ignore that result if the plugin is
-installed, or register the entry points by hand as described in the
-[Claude Code](../integrations/claude-code.md) or [Codex](../integrations/codex.md) setup guide.
+When they are not complete, an enabled Sidegraph plugin satisfies the check.
+
+For Claude Code, the `enabledPlugins` merge must enable `sidegraph@<marketplace>` for a session
+launched at the bootstrap root: user settings, that directory's `.claude/settings.json` and
+`.claude/settings.local.json`, then the repository root's `.claude/settings.local.json` when
+launching below it. `$CLAUDE_CONFIG_DIR` replaces `~/.claude` for user settings when set.
+The terminal prints `INTEGRATION  Claude Code plugin sidegraph@sidegraph enabled (MCP + hooks)`.
+For Codex, `[plugins."sidegraph@<marketplace>"]` with `enabled = true` in
+`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) satisfies its supported checks.
+Under `INTEGRATION  Codex best-effort`, it prints
+`plugin sidegraph@sidegraph enabled; its hooks run once trusted in Codex (/hooks)`.
+Bootstrap cannot see Codex hook trust.
 
 Claude Code has the complete v1 flow. Codex has MCP, SessionStart, and Stop support, but no
 Read/Grep PreToolUse equivalent. When store, anchors, all three supported Codex checks, and
 production proof are complete, the command reports `best-effort`. In that state, best-effort completion exits 0
 with an explicit warning. The terminal never prints `fully supported` for Codex (the optional
 `--report` markdown does write `- fully supported: false` for Codex). A missing or invalid
-supported check is actionable incomplete and exits `2`.
+supported check is actionable incomplete and exits `2`, unless an enabled Sidegraph plugin
+provides MCP and hooks for this host.
 
 Exit `0` also covers full Claude Code activation and safe diagnostics with no required write.
 A run whose approved candidates were all skipped as unanchored (see below) is such a

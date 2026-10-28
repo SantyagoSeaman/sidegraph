@@ -295,7 +295,18 @@ On most format-1 stores it is one line, `sidegraph-store 0.6.0` (a store without
 **outside** the gitignored `index.db` specifically so a teammate on an incompatible store format
 is rejected the moment they open the repo's `.sidegraph/`, not just when their own local index
 happens to disagree. An existing layout from before this marker existed gets one backfilled
-silently on next open, never rejected for its absence.
+silently on next open.
+
+Before backfilling, an ordinary open checks whether git may be writing the marker. While git
+holds the repository's index lock, the open waits up to 2 seconds for the file. With git idle
+and `HEAD` recording `format`, it refuses a missing marker at once: restore it with
+`git -C .sidegraph checkout HEAD -- format`, or open again once git finishes. If git remains
+busy past the wait, the open refuses without writing a default over git's marker. A git probe
+that times out is treated as busy and retried within that budget (at most about 3 seconds,
+including one outstanding git call). Outside a git work tree, or where git cannot be run at
+all, the backfill works as before. Explicit creation of a new store can also backfill after an
+unresolved probe timeout: `sidegraph-init` declares creation only when its target path did not
+yet exist. An existing markerless directory takes the ordinary guarded path, even when empty.
 
 **A minimum Sidegraph version.** `sidegraph-require --sidegraph X.Y.Z` rewrites the marker as:
 

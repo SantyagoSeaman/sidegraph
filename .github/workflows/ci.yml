@@ -7,20 +7,33 @@
 #
 # Actions are pinned to commit SHAs (the tag comment records the version): a mutable tag
 # is a supply-chain hole, and this workflow ships to the public repo by snapshot.
+# Draft PRs run lint, store-lint and anchor-health. Ready PRs, main pushes and
+# workflow_call also run test, sdk-compatibility and windows-core. full-ci is the
+# single required check. Ready pushes validate this revision against the full matrix.
+# Draft runs use another name: a skipped job counts as success.
+# A superseded PR run cannot provide a result for a newer revision.
+# Rollback: disable the ruleset first, then revert this workflow through a PR.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_call:   # reused as the pre-publish gate by publish.yml (tag builds)
 
 permissions:
   contents: read
 
+# PR runs only: main, tag and workflow_call runs each get a unique group.
+# This does not apply to session-link-gate.yml. Re-run only the head run.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 15
     steps:
       # zizmor artipacked: this job never pushes, so the checkout's git credentials should not
@@ -42,7 +55,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/pre-commit
-          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          key: pre-commit-ubuntu-slim-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Install dependencies
         run: uv sync --locked
@@ -77,6 +90,7 @@ jobs:
           PY
 
   test:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -100,9 +114,10 @@ jobs:
         run: uv sync --locked
 
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run pytest -q --durations=30 --durations-min=1
 
   sdk-compatibility:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -149,6 +164,7 @@ jobs:
             -k "not t9 and not t14_every and not t14_the_manual and not console_script_is_the_host_entry"
 
   windows-core:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: windows-2022
     timeout-minutes: 30
     strategy:
@@ -188,7 +204,7 @@ jobs:
           if (Test-Path "tests/private/test_older_reader_native.py") {
             $privateTests += "tests/private/test_older_reader_native.py"
           }
-          uv run pytest -q --junitxml="$env:RUNNER_TEMP/windows-core.xml" `
+          uv run pytest -q --durations=30 --durations-min=1 --junitxml="$env:RUNNER_TEMP/windows-core.xml" `
             tests/test_store_mutation_guard.py `
             tests/test_store_mutation_immediate.py tests/test_store_cross_process_mutations.py `
             tests/test_hook_contention.py tests/test_retrieval_seeds.py `
@@ -207,6 +223,7 @@ jobs:
             tests/test_git_output_utf8.py `
             tests/test_githooks_atomic_lock.py::test_windows_pid_probe_is_never_a_signal_from_python `
             tests/test_health_check_skill.py `
+            tests/test_checkout_window.py tests/test_store_marker_checkout_race.py `
             $privateTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -289,7 +306,7 @@ jobs:
   # this workflow ships to the public repo.
   store-lint:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 10
     steps:
       # zizmor artipacked: this job never pushes; do not persist git credentials past checkout.
@@ -352,3 +369,47 @@ jobs:
           uvx --from graphifyy==0.9.90 graphify update .
           uv sync --locked
           uv run sidegraph-sync --json --check
+
+  full-ci:
+    name: "${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) && 'full-ci' || 'full-ci (draft: full matrix not run)' }}"
+    if: ${{ always() }}
+    needs: [lint, test, sdk-compatibility, windows-core, store-lint, anchor-health]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every required job passed on this revision
+        env:
+          FULL: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+          EVENT: ${{ github.event_name }}
+          LINT: ${{ needs.lint.result }}
+          TEST: ${{ needs.test.result }}
+          SDK: ${{ needs.sdk-compatibility.result }}
+          WINDOWS: ${{ needs.windows-core.result }}
+          STORE_LINT: ${{ needs.store-lint.result }}
+          ANCHOR_HEALTH: ${{ needs.anchor-health.result }}
+        run: |
+          status=0
+          need() {  # need <job> <result> <allowed...>
+            job="$1"; result="$2"; shift 2
+            for ok in "$@"; do [ "$result" = "$ok" ] && return 0; done
+            echo "::error::$job: '${result:-none}' (needs: $*)"; status=1
+          }
+          if [ "$FULL" != true ]; then
+            echo "::notice::Draft pull request: the full matrix did not run. Mark it Ready; the required check is full-ci."
+            need lint "$LINT" success
+            need store-lint "$STORE_LINT" success
+            need anchor-health "$ANCHOR_HEALTH" success
+            exit "$status"
+          fi
+          need lint "$LINT" success
+          need test "$TEST" success
+          need sdk-compatibility "$SDK" success
+          need windows-core "$WINDOWS" success
+          if [ "$EVENT" = pull_request ]; then
+            need store-lint "$STORE_LINT" success
+            need anchor-health "$ANCHOR_HEALTH" success
+          else
+            need store-lint "$STORE_LINT" success skipped
+            need anchor-health "$ANCHOR_HEALTH" success skipped
+          fi
+          exit "$status"

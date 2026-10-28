@@ -242,7 +242,7 @@ INDEX_STAMPS = frozenset({SCHEMA_VERSION, REQUIRED_INDEX_STAMP})
 _RELEASE_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _REQUIREMENT_LINE_RE = re.compile(r"requires-sidegraph >= (\d+\.\d+\.\d+)")
 
-RefusalKind = Literal["unrecognized", "major", "malformed", "below", "layout"]
+RefusalKind = Literal["unrecognized", "major", "malformed", "below", "layout", "missing"]
 
 # The committed ``.gitignore`` beside the records (see ``Store._ensure_gitignore``).
 GITIGNORE_NAME = ".gitignore"
@@ -440,13 +440,24 @@ class StoreRequirementError(ValueError):
     """The store's format marker refuses this Sidegraph (spec D6). ``kind`` says why: no
     ``sidegraph-store`` first line (``"unrecognized"``), a major this version does not read
     (``"major"``), a requirement line missing, unknown or unparsable (``"malformed"``), or this
-    version is below ``required`` (``"below"``). A ``ValueError``, so every caller that reported
+    version is below ``required`` (``"below"``), or a missing marker Git may be writing or
+    HEAD records (``"missing"``). A ``ValueError``, so every caller that reported
     a refused marker before reports this one the same way."""
 
-    def __init__(self, message: str, *, kind: RefusalKind, required: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: RefusalKind,
+        required: str | None = None,
+        lock: Path | None = None,
+        busy: bool = False,
+    ) -> None:
         super().__init__(message)
         self.kind: RefusalKind = kind
         self.required = required
+        self.lock = lock
+        self.busy = busy
 
 
 def release_tuple(version: str) -> tuple[int, int, int] | None:

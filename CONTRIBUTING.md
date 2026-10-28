@@ -59,7 +59,9 @@ issue when there is one, keep the patch focused, and update affected documentati
 Use an area-prefixed imperative commit subject, for example `store: preserve history`,
 and sign off each commit as described below.
 
-CI runs the full suite on Linux/Python 3.13 and 3.14 and a selected native Windows
+CI runs lint on every PR push. On a pull request that is ready for review (not a draft),
+on `main` and before publishing, it also runs the full suite on Linux/Python 3.13 and 3.14
+and a selected native Windows
 core/MCP suite on both versions; see [platform coverage](docs/getting-started/installation.md#platform-coverage).
 If your change touches paths, permissions,
 subprocesses, or shell commands, describe any additional platform checks you performed.

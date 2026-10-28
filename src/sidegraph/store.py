@@ -63,8 +63,8 @@ from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, Field
 
+from . import checkout_window, maintenance, maintenance_clock, store_format, store_layout
 from . import delivery as delivery_ledger
-from . import maintenance, maintenance_clock, store_format, store_layout
 from .hot_index import CLAIM_META_SQL, GET_META_SQL, INSERT_EVENT_SQL, SHOW_UPSERT_SQL
 from .schema import (
     SCHEMA_VERSION,
@@ -1310,6 +1310,8 @@ class Store:
     triggers a one-time export to the canonical layout (see ``_migrate_legacy`` and design
     §4). This is a persistence swap, not an API change — every public method, invariant,
     and result shape is unchanged from the pre-0.4.0 single-file store.
+    ``creating=True`` explicitly declares new-store initialization when a Git probe times
+    out. Ordinary opens refuse an unresolved timeout instead of replacing Git's marker.
     """
 
     def __init__(
@@ -1317,6 +1319,7 @@ class Store:
         path: str | Path = ".sidegraph",
         *,
         busy_timeout_seconds: float | None = None,
+        creating: bool = False,
         _allow_unmigrated_shards: bool = False,
     ) -> None:
         # ``_allow_unmigrated_shards`` is private to ``sidegraph.migrate``: it opens the one
@@ -1325,6 +1328,7 @@ class Store:
         # design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.1)
         raw = Path(path)
         self._allow_unmigrated_shards = _allow_unmigrated_shards
+        self._creating = creating
         self._lock = threading.RLock()
         # Depth counter for `_mutation` (design D1/D2): only the OUTERMOST `_mutation` scope
         # commits or rolls back -- see that method's docstring. Lives beside `_lock` since
@@ -1745,20 +1749,24 @@ class Store:
         empty directory both compute format 2 and the first publication stays). Existing
         markers go through the shared requirement check, refusing unknown majors, malformed
         markers, shards under a major below 2 and requirements above this Sidegraph. Returns
-        the requirement, or ``None``.
-        # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.5)
+        the requirement, or ``None``. Backfill never runs while Git may be writing the marker.
+        # see design/superpowers/specs/2026-10-28-format-marker-checkout-race-design.md
+        # and design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.5)
         """
         marker = self.path / _FORMAT_MARKER_NAME
         # Under ``_allow_unmigrated_shards`` (migration) a missing marker is neither refused nor
         # backfilled: `sidegraph-migrate` publishes the format-2 marker itself, atomically.
         if _format_marker_signature(self.path)[0] is None and not self._allow_unmigrated_shards:
-            if has_shard_files(self.path):
-                raise store_layout.unmigrated_shards_error(self.path)
-            if not _store_has_any_records(self.path):
-                text = marker_text(2, FORMAT2_MIN_SIDEGRAPH, DEFAULT_SHARD_COUNT)
-            else:
-                text = f"{_FORMAT_MARKER_PREFIX}{SCHEMA_VERSION}\n"
-            _create_format_marker(marker, text)
+            # A checkout unlinks format before replacing it: never publish into that window.
+            checkout_window.await_marker(self.path, creating=self._creating)
+            if _format_marker_signature(self.path)[0] is None:
+                if has_shard_files(self.path):
+                    raise store_layout.unmigrated_shards_error(self.path)
+                if not _store_has_any_records(self.path):
+                    text = marker_text(2, FORMAT2_MIN_SIDEGRAPH, DEFAULT_SHARD_COUNT)
+                else:
+                    text = f"{_FORMAT_MARKER_PREFIX}{SCHEMA_VERSION}\n"
+                _create_format_marker(marker, text)
         return self._check_requirement(force=True)
 
     def _ensure_stamping_marker(self) -> None:

@@ -670,7 +670,9 @@ def init_main(argv: list[str] | None = None) -> int:
     # which the legacy-file rule no longer applies and init would report another graph than sync.
     graph_path = _resolve_cli_graph(args.graph, args.db)
     try:
-        Store(args.db)  # creates parent dir(s) + schema-stamped store; idempotent itself
+        # A markerless directory can be a checkout window, even when it has no records.
+        creating = not already_initialized and not path_exists(db_path)
+        Store(args.db, creating=creating)
     except Exception as e:
         print(f"store not writable ({db_path}): {e}")
         return 1
@@ -3001,7 +3003,8 @@ def viz_main(argv: list[str] | None = None) -> int:
     ``--no-superseded`` omits terminal-status records (shown dimmed by default). Truncation
     past ``--max-nodes`` is warned on stderr and recorded in ``stats.truncated`` — never
     silent. Exit 0 on success (a store WITH problems still exits 0 — the problems are the
-    output), 2 on an operational error (uninitialized store / unwritable output).
+    output), 2 on an operational error (uninitialized store, a store that cannot be opened,
+    unwritable output).
 
     # see design/superpowers/specs/2026-07-12-decision-graph-viz-design.md
     """
@@ -3053,7 +3056,13 @@ def viz_main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    store = Store(args.db)
+    try:
+        store = Store(args.db)
+    except Exception as e:
+        display_path = " ".join(str(args.db).split())
+        message = " ".join(str(e).split())
+        print(f"store not readable ({display_path}): {message}", file=sys.stderr)
+        return 2
     graph = build_graph(
         store,
         include_superseded=args.include_superseded,
@@ -3202,7 +3211,8 @@ def export_okf_main(argv: list[str] | None = None) -> int:
     or a previous export that cannot be renamed aside is written in place instead, and a
     write failure there can leave a partial export. A symlinked out dir and anything else
     are refused. Exit 0 on success, 2 on an operational error (uninitialized
-    store — never auto-created; refused or unwritable out dir or its parent).
+    store — never auto-created; a store that cannot be opened; refused or unwritable out dir
+    or its parent).
 
     # see design/superpowers/specs/2026-07-23-okf-export-design.md and
     # design/superpowers/specs/2026-09-29-okf-export-safe-write-design.md
@@ -3222,7 +3232,14 @@ def export_okf_main(argv: list[str] | None = None) -> int:
         print(f"no store at {args.db} — run `sidegraph-init` first", file=sys.stderr)
         return 2
 
-    bundle = build_bundle(Store(args.db))
+    try:
+        store = Store(args.db)
+    except Exception as e:
+        display_path = " ".join(str(args.db).split())
+        message = " ".join(str(e).split())
+        print(f"store not readable ({display_path}): {message}", file=sys.stderr)
+        return 2
+    bundle = build_bundle(store)
     out_dir = Path(args.out)
     try:
         write_bundle(bundle, out_dir)

@@ -621,6 +621,7 @@ def render_markdown_report(
                 "## Integration",
                 "",
                 f"- host: {integration.host.value}",
+                f"- via: {'plugin' if integration.plugin is not None else 'manual'}",
                 f"- fully supported: {str(integration.fully_supported).lower()}",
                 f"- mcp: {integration.mcp}",
                 f"- session start: {integration.session_start}",

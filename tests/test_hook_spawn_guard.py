@@ -60,6 +60,20 @@ _EVENT_GUARDS = {
 _ANSWER = '{"decision":"block","reason":"x"}'
 
 
+@pytest.fixture(autouse=True)
+def host_user_config(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """User-level host config is outside the test repo; never read the real home."""
+    base = tmp_path_factory.mktemp("host-user")
+    (base / "claude").mkdir()
+    (base / "codex").mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: base))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(base / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(base / "codex"))
+    return base
+
+
 def _manifest_paths() -> list[Path]:
     """Every hook manifest that exists: the Claude Code ones and the Codex ones."""
     return sorted((_PLUGIN / "hooks").glob("*.json")) + sorted(

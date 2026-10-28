@@ -7,6 +7,39 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-10-28
+
+### Changed
+
+- Draft pull requests run only the quick CI checks. The full test matrix runs when a pull
+  request is marked ready for review, on `main` and before release, behind one aggregate
+  `full-ci` gate.
+
+### Fixed
+
+- `sidegraph-bootstrap` recognises a plugin install. When the manual registration files are
+  not complete, an enabled Sidegraph plugin satisfies the host check: Claude Code prints
+  `INTEGRATION  Claude Code plugin sidegraph@sidegraph enabled (MCP + hooks)`, Codex prints
+  `INTEGRATION  Codex best-effort` with `plugin sidegraph@sidegraph enabled; its hooks run
+  once trusted in Codex (/hooks)`, and a run that is otherwise complete exits `0` instead of
+  `2`. The `--report` integration section gains `- via: plugin` or `- via: manual`, and
+  `--report` refuses the user-level Claude Code settings and Codex config the check now reads.
+
+- `sidegraph-viz` (with or without `--json`) and `sidegraph-export-okf` report a store that
+  cannot be opened, such as a damaged `index.db`, a format marker from another version or a
+  minimum-version requirement this release does not meet, as one
+  `store not readable (<path>): <error>` line on stderr and exit `2`, the documented
+  operational-error code. Before, they ended with a traceback and exit `1`. With `--json`,
+  nothing is printed on stdout in that case.
+
+- Opening a store while git checks out a commit that changes `.sidegraph/format` (a pull of
+  a raised requirement or a migration, a branch switch, a clone) no longer writes a default
+  marker in its place. Git removes the old file before writing the new one. An open in that
+  moment could publish `sidegraph-store 0.6.0`, and git could not create its own file,
+  leaving the default without its `requires-sidegraph` line. The open now waits up to 2 seconds
+  for git's marker and refuses without writing if git stays busy or `HEAD` records a missing
+  marker. The message names the recovery step.
+
 ## [0.20.0] — 2026-10-28
 
 ### Added

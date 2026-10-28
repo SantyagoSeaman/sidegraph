@@ -277,6 +277,7 @@ class IntegrationResult(FrozenModel):
     pretool_read_grep: Literal["verified", "missing", "invalid", "unsupported"]
     fully_supported: bool
     next_action: str | None = None
+    plugin: str | None = None
 
 
 class ProofSelection(FrozenModel):

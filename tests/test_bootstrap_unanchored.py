@@ -21,7 +21,11 @@ from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.profiles import get_profile
 from sidegraph.schema import DecisionStatus
 from sidegraph.store import Store
-from tests.test_bootstrap_cli import write, write_claude_config
+from tests.test_bootstrap_cli import (
+    host_user_config,  # noqa: F401
+    write,
+    write_claude_config,
+)
 
 
 def write_adr(root: Path, name: str, mention: str = "") -> None:

@@ -16,7 +16,8 @@ file- and domain-linked records without a graph; the complete workflow below ins
 
 ### Platform coverage
 
-The automated matrix runs the full suite on Linux with Python 3.13 and 3.14. Native
+On every pull request that is ready for review (not a draft), on `main` and before every
+publish, the automated matrix runs the full suite on Linux with Python 3.13 and 3.14. Native
 Windows x64 (`windows-2022`) runs a selected portable core/MCP suite on both versions:
 Store mutation/rollback and cross-process conflicts, UTF-8 and descriptor cleanup,
 MCP result contracts, invocation admission, and wheel-probe guards. It also builds and

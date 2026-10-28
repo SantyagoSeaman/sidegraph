@@ -49,7 +49,8 @@ schema-fixture references.
 
 ## Pre-release checklist
 
-Prepare the release on internal `main`, then run the clean-tree preflight:
+Prepare the release on a release-prep branch in the development repository, merge it
+through a Ready pull request, then run the clean-tree preflight on merged `main`:
 
 1. Update `CHANGELOG.md`: keep a fresh empty `## [Unreleased]` first and add
    `## [X.Y.Z] — YYYY-MM-DD` beneath it. Group changes using Keep a Changelog headings.
@@ -75,8 +76,11 @@ Prepare the release on internal `main`, then run the clean-tree preflight:
    `uvx --from ./dist/sidegraph-X.Y.Z-py3-none-any.whl sidegraph-doctor --help`. This confirms
    the package actually installs standalone and its console scripts resolve, which `pytest`
    alone (running against the editable checkout) does not exercise.
-7. Commit the release preparation on internal `main`. Both the internal and public checkouts
-   must now be clean.
+7. Commit the release preparation on the release-prep branch, open a Draft pull request,
+   and mark it Ready when final. Wait for `full-ci` to pass on its exact head SHA and settle
+   the Copilot review, then merge the PR and update internal `main`. A direct push to
+   internal `main` is refused by its ruleset. Both checkouts must now be clean; run the
+   remaining steps from the merged internal `main`.
 8. Run `uv run python tools/preflight_release.py --online`. It verifies version agreement,
    changelog shape, clean branches, and target repository, and that `vX.Y.Z` is not already
    tagged in the **internal** checkout or its origin. Run it **after** the release changes are
@@ -130,13 +134,15 @@ configured against `SantyagoSeaman/sidegraph`, so a tag pushed to the internal r
 produces a valid OIDC token with the wrong `repository` claim and the publish job dies on
 `invalid-publisher` — after the whole test matrix has run. The public snapshot is therefore
 cut and pushed *first*, and the tag goes on the commit that snapshot created. Pushing the
-internal `main` is a separate step that triggers no publish at all.
+release-prep branch and merging its Ready PR to internal `main` triggers CI,
+but no publish.
 
 That push triggers [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml),
 three jobs in sequence.
 
-1. **`test`**: reuses `ci.yml` wholesale (pre-commit lint plus the pytest matrix). Build and
-   publish never run if this fails.
+1. **`test`**: reuses `ci.yml` wholesale (pre-commit lint plus the pytest matrix; a tag push
+   is not a pull request, so the full matrix always runs). Build and publish never run if
+   this fails.
 2. **`build`**: checks out the tag, then runs the tag-to-version guard. It reads
    `[project].version` out of `pyproject.toml` with `tomllib`, strips the leading `v` off
    `GITHUB_REF_NAME`, and fails the job if the two strings disagree. This check is

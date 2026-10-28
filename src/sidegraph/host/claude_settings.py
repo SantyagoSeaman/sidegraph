@@ -309,25 +309,39 @@ def _on(*maps: dict[str, object] | None) -> bool:
     """Sidegraph is on under the key-wise merge of ``maps`` (later ones win): some key whose
     plugin part, before ``@``, is ``sidegraph`` holds ``true``.
     see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D3)"""
+    return _enabled_key(*maps) is not None
+
+
+def _enabled_key(*maps: dict[str, object] | None) -> str | None:
+    """First enabled Sidegraph key after the host's key-wise settings merge."""
     merged: dict[str, object] = {}
     for one in maps:
         merged.update(one or {})
-    return any(
-        key.partition("@")[0] == PLUGIN_NAME and value is True for key, value in merged.items()
+    return next(
+        (
+            key
+            for key in sorted(merged)
+            if key.partition("@")[0] == PLUGIN_NAME and merged[key] is True
+        ),
+        None,
     )
 
 
-def _user_map() -> dict[str, object] | None:
-    """The user's ``enabledPlugins``: ``$CLAUDE_CONFIG_DIR/settings.json`` when the variable is
-    set and non-empty, else ``~/.claude/settings.json`` through ``Path.home()`` (``HOME``), which
-    is the directory Claude Code reads its user settings from."""
+def _user_settings_path() -> Path | None:
+    """The host's user settings path, if its config home can be resolved."""
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
     if config_dir:
-        return _settings_map(Path(config_dir) / "settings.json")
+        return Path(config_dir) / "settings.json"
     try:
-        return _settings_map(Path.home() / _USER_SETTINGS_RELATIVE_PATH)
-    except RuntimeError:  # no home directory
+        return Path.home() / _USER_SETTINGS_RELATIVE_PATH
+    except RuntimeError:
         return None
+
+
+def _user_map() -> dict[str, object] | None:
+    """The user's plugin map at the same config home Claude Code reads."""
+    path = _user_settings_path()
+    return None if path is None else _settings_map(path)
 
 
 def _listed_directories(listing: bytes) -> list[str]:
@@ -392,3 +406,37 @@ def plugin_reach(project: Path) -> PluginReach | None:
         if not _on(user, own_project, own_local, root_local):
             off.append(directory)
     return PluginReach(root, project_only=project_only, off=tuple(off))
+
+
+def plugin_settings_paths(directory: Path) -> tuple[Path, ...]:
+    """Settings merged for a launch in ``directory``, lowest precedence first.
+
+    Uses ``plugin_reach``'s launch model; root project settings do not reach children.
+    See design/superpowers/specs/2026-10-28-bootstrap-recognises-plugin-install-design.md (D1).
+    """
+    directory = Path(os.path.abspath(directory))
+    paths: list[Path] = []
+    user = _user_settings_path()
+    if user is not None:
+        paths.append(user)
+    paths.extend((directory / SETTINGS_RELATIVE_PATH, directory / LOCAL_SETTINGS_RELATIVE_PATH))
+    boundary = _repository_boundary(str(directory))
+    if boundary is not None and boundary != str(directory):
+        paths.append(Path(boundary) / LOCAL_SETTINGS_RELATIVE_PATH)
+    return tuple(paths)
+
+
+def _plugin_settings_map(path: Path) -> dict[str, object] | None:
+    """An unusably deep file has no say; other files still decide the plugin evidence."""
+    try:
+        return _settings_map(path)
+    except RecursionError:
+        return None
+
+
+def enabled_plugin_key(directory: Path) -> str | None:
+    """The first enabled Sidegraph key for a launch, or no plugin evidence.
+
+    See design/superpowers/specs/2026-10-28-bootstrap-recognises-plugin-install-design.md (D1).
+    """
+    return _enabled_key(*(_plugin_settings_map(path) for path in plugin_settings_paths(directory)))

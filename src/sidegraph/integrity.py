@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import time
@@ -258,6 +259,25 @@ def _open_error_fix(error: BaseException, store_dir: Path) -> str:
     match wins, and the order matters: ``json.JSONDecodeError`` is a ``ValueError``."""
     if isinstance(error, StoreRequirementError) and error.required is not None:
         return f"Upgrade Sidegraph to >= {error.required}, then start a new session."
+    if isinstance(error, StoreRequirementError) and error.kind == "missing":
+        # The error headline is clipped; keep the full recovery command in this sentence.
+        # see design/superpowers/specs/2026-10-28-format-marker-checkout-race-design.md
+        quoted = f'"{store_dir}"' if os.name == "nt" else shlex.quote(str(store_dir))
+        if error.lock is not None:
+            lock = f'"{error.lock}"' if os.name == "nt" else shlex.quote(str(error.lock))
+            return (
+                "Open again once git finishes. If no git command is running, delete "
+                f"{lock} and open again."
+            )
+        if error.busy:
+            return (
+                "Git did not answer in time. Open again once it finishes. If this repeats with "
+                f"no git command running, check the repository with `git -C {quoted} status`."
+            )
+        return (
+            f"Restore it with `git -C {quoted} checkout HEAD -- format`, or open again once git "
+            "finishes, then start a new session."
+        )
     if isinstance(error, json.JSONDecodeError | ValidationError):
         return (
             "Run `sidegraph-verify` from the repository root to find the file; a merge conflict "

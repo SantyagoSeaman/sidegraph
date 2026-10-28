@@ -113,14 +113,21 @@ that depends on the exception:
 - A store that requires a newer Sidegraph (`This store requires Sidegraph >= X.Y.Z; this is
   A.B.C.`): upgrade to at least that version and start a new session. A teammate raised it
   with `sidegraph-require`.
+- A missing format marker (`the store format marker … is missing`, or
+  `store format marker is missing and git did not answer in time`): if a git command is
+  running (a pull or checkout), start a new session when it finishes. Otherwise restore a
+  committed marker with `git -C .sidegraph checkout HEAD -- format`. If the message names an
+  index lock and no git command is running, remove that named lock and open again. For a
+  repeated timeout with no git command running, check `git -C .sidegraph status`.
 - A store written by a different Sidegraph version, for example a packed (format 2) store opened
   by 0.14 to 0.16, whose message ends `migration tooling is deferred — use a fresh store`:
   upgrade Sidegraph, or use the version that wrote it. The message predates `sidegraph-migrate`
   and does not mean you need a fresh store.
 - Anything else: `sidegraph-verify` gives the details.
 
-A lock that another process holds is not a broken store. The hook stays silent for it, and the
-next session start opens the store.
+An ordinary store write lock held by another process is transient. The hook stays silent for
+it, and the next session start opens the store. The marker-specific git refusal above instead
+names its recovery step.
 
 ### pending-ratification
 

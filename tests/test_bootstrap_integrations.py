@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -6,6 +8,20 @@ import pytest
 from sidegraph.bootstrap.model import HostKind
 
 FIXTURES = Path(__file__).parent / "fixtures" / "bootstrap" / "hosts"
+
+
+@pytest.fixture(autouse=True)
+def host_user_config(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """User-level host config is outside the test repo; never read the real home."""
+    base = tmp_path_factory.mktemp("host-user")
+    (base / "claude").mkdir()
+    (base / "codex").mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: base))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(base / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(base / "codex"))
+    return base
 
 
 @pytest.fixture
@@ -278,3 +294,271 @@ def test_command_strings_survives_deeply_nested_config_without_recursion_error(
     result = verify_integration(tmp_path, HostKind.CLAUDE_CODE)
 
     assert result.mcp == "verified"
+
+
+def _codex_plugin(path: Path, body: str = "enabled = true") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[plugins."sidegraph@sidegraph"]\n' + body + "\n", encoding="utf-8")
+
+
+def test_codex_plugin_in_codex_home_is_best_effort(tmp_path: Path, host_user_config: Path):
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    _codex_plugin(host_user_config / "codex/config.toml")
+    result = verify_integration(tmp_path, HostKind.CODEX)
+    assert result.mcp == result.session_start == result.stop == "verified"
+    assert result.pretool_read_grep == "unsupported"
+    assert result.fully_supported is False
+    assert result.next_action is None
+    assert result.plugin == "sidegraph@sidegraph"
+
+
+def test_codex_plugin_via_home_when_codex_home_unset(tmp_path: Path, monkeypatch):
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("CODEX_HOME")
+    _codex_plugin(home / ".codex/config.toml")
+    result = verify_integration(tmp_path, HostKind.CODEX)
+    assert result.mcp == result.session_start == result.stop == "verified"
+    assert result.plugin == "sidegraph@sidegraph"
+    assert result.next_action is None
+
+
+@pytest.mark.parametrize(
+    "body", ["enabled = false", "", 'enabled = "true"'], ids=["disabled", "absent", "string"]
+)
+def test_codex_plugin_needs_explicit_enabled_true(tmp_path, host_user_config, body):
+    """Over-reach guard; red on truthy/default-enabled plugin evidence."""
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    _codex_plugin(host_user_config / "codex/config.toml", body)
+    result = verify_integration(tmp_path, HostKind.CODEX)
+    assert result.mcp == "missing"
+    assert result.plugin is None
+    assert result.next_action == (
+        "Configure sidegraph-mcp in .codex/config.toml, then rerun sidegraph-bootstrap"
+    )
+
+
+def test_codex_malformed_user_config_is_no_evidence(tmp_path, host_user_config):
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    (host_user_config / "codex/config.toml").write_text("[plugins\n", encoding="utf-8")
+    result = verify_integration(tmp_path, HostKind.CODEX)
+    assert result.mcp == "missing"
+    assert result.plugin is None
+    assert result.next_action == (
+        "Configure sidegraph-mcp in .codex/config.toml, then rerun sidegraph-bootstrap"
+    )
+
+
+def test_codex_manual_ready_wins_over_plugin(codex_fixture, host_user_config):
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    _codex_plugin(host_user_config / "codex/config.toml")
+    result = verify_integration(codex_fixture, HostKind.CODEX)
+    assert result.mcp == result.session_start == result.stop == "verified"
+    assert result.plugin is None
+
+
+def test_codex_host_config_paths_lists_user_config(tmp_path, host_user_config):
+    from sidegraph.bootstrap.integrations import host_config_paths
+
+    assert ("Codex user config", host_user_config / "codex/config.toml") in host_config_paths(
+        tmp_path, HostKind.CODEX
+    )
+
+
+def _deny_config_stat(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Fail beneath Path.is_file so Python 3.14 cannot hide the fixture's error."""
+    real = os.stat
+
+    def blocked(path, *args, **kwargs):
+        if path == target or path == str(target):
+            raise PermissionError("blocked")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", blocked)
+
+
+def test_codex_inaccessible_user_config_is_no_evidence(tmp_path, host_user_config, monkeypatch):
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    _deny_config_stat(monkeypatch, host_user_config / "codex/config.toml")
+    result = verify_integration(tmp_path, HostKind.CODEX)
+    assert result.mcp == "missing"
+    assert result.plugin is None
+
+
+def test_codex_inaccessible_manual_config_still_reaches_plugin(
+    tmp_path, host_user_config, monkeypatch
+):
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    _codex_plugin(host_user_config / "codex/config.toml")
+    _deny_config_stat(monkeypatch, tmp_path / ".codex/config.toml")
+    result = verify_integration(tmp_path, HostKind.CODEX)
+    assert result.mcp == result.session_start == result.stop == "verified"
+    assert result.plugin == "sidegraph@sidegraph"
+
+
+def _claude_plugin(root: Path, plugins: dict[str, object]) -> None:
+    path = root / ".claude/settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"enabledPlugins": plugins}) + "\n", encoding="utf-8")
+
+
+def test_claude_plugin_only_repo_is_fully_supported(tmp_path: Path) -> None:
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    _claude_plugin(tmp_path, {"sidegraph@sidegraph": True})
+    result = verify_integration(tmp_path, HostKind.CLAUDE_CODE)
+    assert result.fully_supported is True
+    assert (
+        result.mcp == result.session_start == result.stop == result.pretool_read_grep == "verified"
+    )
+    assert result.next_action is None
+    assert result.plugin == "sidegraph@sidegraph"
+
+
+def test_claude_partial_manual_falls_back_to_plugin(tmp_path: Path) -> None:
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    (tmp_path / ".mcp.json").write_text("not JSON\n", encoding="utf-8")
+    _claude_plugin(tmp_path, {"sidegraph@sidegraph": True})
+    result = verify_integration(tmp_path, HostKind.CLAUDE_CODE)
+    assert result.fully_supported is True
+    assert result.next_action is None
+    assert result.plugin == "sidegraph@sidegraph"
+
+
+def test_manual_complete_wins_over_plugin(claude_fixture: Path, host_user_config: Path) -> None:
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    (host_user_config / "claude/settings.json").write_text(
+        '{"enabledPlugins": {"sidegraph@sidegraph": true}}\n', encoding="utf-8"
+    )
+    result = verify_integration(claude_fixture, HostKind.CLAUDE_CODE)
+    assert result.fully_supported is True
+    assert result.plugin is None
+
+
+@pytest.mark.parametrize(
+    "plugins",
+    [
+        {},
+        {"sidegraph@sidegraph": False},
+        {"sidegraph@sidegraph": "true"},
+        {"sidegraph-extra@x": True},
+    ],
+)
+def test_claude_plugin_overreach_guard(tmp_path: Path, plugins: dict[str, object]) -> None:
+    """Red against nothing initially; prevents overly broad plugin evidence."""
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    _claude_plugin(tmp_path, plugins)
+    result = verify_integration(tmp_path, HostKind.CLAUDE_CODE)
+    assert result.fully_supported is False
+    assert result.plugin is None
+    assert (
+        result.next_action == "Configure sidegraph-mcp in .mcp.json, then rerun sidegraph-bootstrap"
+    )
+
+
+def test_claude_host_config_paths_lists_plugin_settings(tmp_path: Path, host_user_config: Path):
+    from sidegraph.bootstrap.integrations import host_config_paths
+
+    (tmp_path / ".git").mkdir()
+    root = tmp_path / "pkg"
+    root.mkdir()
+    paths = host_config_paths(root, HostKind.CLAUDE_CODE)
+    assert paths[:2] == (
+        ("Claude Code MCP config", root / ".mcp.json"),
+        ("Claude Code hooks config", root / ".claude/settings.json"),
+    )
+    assert ("Claude Code user settings", host_user_config / "claude/settings.json") in paths
+    assert ("Claude Code local settings", root / ".claude/settings.local.json") in paths
+    assert (
+        "Claude Code repository local settings",
+        tmp_path / ".claude/settings.local.json",
+    ) in paths
+
+
+@pytest.mark.parametrize("kind", ["permission", "too-deep"])
+def test_claude_unreadable_manual_settings_still_reaches_user_plugin(
+    tmp_path: Path, host_user_config: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    (host_user_config / "claude/settings.json").write_text(
+        '{"enabledPlugins": {"sidegraph@sidegraph": true}}\n', encoding="utf-8"
+    )
+    if kind == "permission":
+        _deny_config_stat(monkeypatch, tmp_path / ".claude/settings.json")
+    else:
+        path = tmp_path / ".claude/settings.json"
+        path.parent.mkdir()
+        path.write_text("[" * 50000 + "]" * 50000, encoding="utf-8")
+    result = verify_integration(tmp_path, HostKind.CLAUDE_CODE)
+    assert result.fully_supported is True
+    assert result.plugin == "sidegraph@sidegraph"
+
+
+@pytest.mark.parametrize(
+    ("host", "rel", "field"),
+    [
+        ("claude-code", ".mcp.json", "mcp"),
+        ("claude-code", ".claude/settings.json", "session_start"),
+        ("codex", ".codex/config.toml", "mcp"),
+        ("codex", ".codex/hooks.json", "session_start"),
+    ],
+)
+def test_manual_stat_errors_are_invalid_on_every_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str, rel: str, field: str
+) -> None:
+    """Permission errors stay invalid even when pathlib suppresses them in is_file."""
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURES / ("claude" if host == "claude-code" else "codex"), root)
+    _deny_config_stat(monkeypatch, root / rel)
+    result = verify_integration(root, HostKind(host))
+    assert getattr(result, field) == "invalid"
+    assert result.plugin is None
+    assert result.next_action == f"Repair {rel}, then rerun sidegraph-bootstrap"
+
+
+def test_inaccessible_canonical_hooks_do_not_select_legacy(
+    tmp_path: Path, host_user_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURES / "codex", root)
+    legacy = root / ".codex/hooks/hooks.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    (root / ".codex/hooks.json").write_bytes(legacy.read_bytes())
+    _codex_plugin(host_user_config / "codex/config.toml")
+    _deny_config_stat(monkeypatch, root / ".codex/hooks.json")
+    result = verify_integration(root, HostKind.CODEX)
+    assert result.plugin == "sidegraph@sidegraph"
+    assert result.mcp == result.session_start == result.stop == "verified"
+
+
+def test_inaccessible_legacy_hooks_names_the_legacy_repair_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sidegraph.bootstrap.integrations import verify_integration
+
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURES / "codex", root)
+    (root / ".codex/hooks.json").unlink(missing_ok=True)
+    _deny_config_stat(monkeypatch, root / ".codex/hooks/hooks.json")
+    result = verify_integration(root, HostKind.CODEX)
+    assert result.mcp == "verified"
+    assert result.session_start == result.stop == "invalid"
+    assert result.plugin is None
+    assert result.next_action == ("Repair .codex/hooks/hooks.json, then rerun sidegraph-bootstrap")

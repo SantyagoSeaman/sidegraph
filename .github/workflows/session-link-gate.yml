@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   pr-description-link-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:
       # zizmor artipacked: this job never pushes; do not persist git credentials past checkout.

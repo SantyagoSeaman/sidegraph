@@ -89,14 +89,16 @@ exclusions, review/state table, host matrix, and recovery semantics.
 | `--codex-config` | `.codex/config.toml` | alternate Codex MCP config path |
 | `--candidate` | all candidates | review only the displayed candidate key |
 | `--task` | deterministic proof selection | additional repository path for production retrieval proof |
-| `--report` | none | after a confirmed apply (including the all-unanchored diagnostic), write an aggregate, source-content-free Markdown report; never uploaded. The pre-apply diagnostics (no candidates, every candidate skipped in review, a changed plan with no writes) write none. The destination must not be, or be hard-linked to, the graph, any host's config file (both hosts', whichever `--host` is set) or a scanned source, and must not lie inside the store; the report replaces the file rather than truncating it in place |
+| `--report` | none | after a confirmed apply (including the all-unanchored diagnostic), write an aggregate, source-content-free Markdown report; never uploaded. The pre-apply diagnostics (no candidates, every candidate skipped in review, a changed plan with no writes) write none. The destination must not be, or be hard-linked to, the graph, any host config file the check reads (both hosts', whichever `--host` is set, including the user-level Claude Code settings and Codex config) or a scanned source, and must not lie inside the store; the report replaces the file rather than truncating it in place |
 | `--resume` | off | marker only, for the resume command a failed run prints — it changes no behavior. The scan/review/reconcile flow is idempotent, so reissuing the same command without it behaves identically |
 
 Output keeps `STORE`, `ANCHORS`, `INTEGRATION`, and `PROOF` independent. Claude Code can
 complete the full v1 flow. Codex verifies MCP, SessionStart, and Stop but reports Read/Grep
 PreToolUse as unsupported; a green supported subset plus store, anchor, and proof completion
 is `best-effort` and exits `0`, but is never labeled fully supported. A missing supported
-check exits `2`.
+check exits `2`. An enabled Sidegraph plugin satisfies the host check when the manual
+registration files are not complete; see
+[Completion, recovery, and hosts](../getting-started/bootstrap.md#completion-recovery-and-hosts).
 
 **Exit codes:** `0` for complete activation, Codex best-effort completion, or a safe
 no-write diagnostic; `1` for usage or operational failure, unreachable once anything has been
@@ -1702,9 +1704,10 @@ Rendering does not mutate canonical records or `graph.json`. It opens the ordina
 so startup may migrate supported legacy data or rebuild `index.db`. Binding status
 (live/degraded/orphaned) reflects the last `sidegraph-sync`; run sync first for a fresh view.
 Exit code 0 on success (a store with problems still exits 0 — the problems are the output), 2
-on an operational error (uninitialized store or unwritable output path). A store that cannot be
-opened at all (for example a corrupt `index.db`) is not caught: the command exits 1 with a
-traceback.
+on an operational error: an uninitialized store, a store that cannot be opened (for example
+a corrupt `index.db` or a format marker this version does not read; one
+`store not readable (<path>): <error>` line on stderr, and with `--json` nothing on stdout),
+or an unwritable output path.
 
 ## `sidegraph-export-adr`
 
@@ -1787,9 +1790,9 @@ write failure there can leave a partial export. A killed export can leave `.<out
 or `.<out>.okf-old-*` beside `--out` (the repo root for the default `--out`). The `-old-`
 one holds the previous export: if `--out` is missing, rename it back; if `--out` already holds
 the new bundle, delete it. Exit `0` on success, `2` on an operational error
-(uninitialized store — never auto-created — or a refused/unwritable out dir or its
-parent). A store that cannot be opened at all (for example a corrupt `index.db`) is not
-caught: the command exits 1 with a traceback.
+(uninitialized store — never auto-created — a store that cannot be opened, printed as
+`store not readable (<path>): <error>` on stderr, or a refused/unwritable out dir or its
+parent).
 
 ## `sidegraph-stats`
 

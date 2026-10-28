@@ -10,6 +10,8 @@ see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D1, D4, 
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -218,6 +220,10 @@ VERIFY_SENTENCE = (
 )
 
 
+def _quoted_path(path: Path) -> str:
+    return f'"{path}"' if os.name == "nt" else shlex.quote(str(path))
+
+
 def _validation_error() -> ValidationError:
     try:
         Decision.model_validate({})
@@ -257,6 +263,27 @@ def _validation_error() -> ValidationError:
             f"Upgrade Sidegraph to >= {above_running()}, then start a new session.",
         ),
         (
+            StoreRequirementError("the store format marker x is missing", kind="missing"),
+            "Restore it with `git -C {quoted_dir} checkout HEAD -- format`, or open again once "
+            "git finishes, then start a new session.",
+        ),
+        (
+            StoreRequirementError(
+                "marker missing while git holds a lock",
+                kind="missing",
+                lock=Path("repository with spaces") / "index.lock",
+            ),
+            "Open again once git finishes. If no git command is running, delete {quoted_lock} "
+            "and open again.",
+        ),
+        (
+            StoreRequirementError(
+                "marker missing and git did not answer", kind="missing", busy=True
+            ),
+            "Git did not answer in time. Open again once it finishes. If this repeats with no "
+            "git command running, check the repository with `git -C {quoted_dir} status`.",
+        ),
+        (
             ValueError("something else"),
             "Run `sidegraph-verify` from the repository root for details.",
         ),
@@ -280,9 +307,55 @@ def test_store_unreadable_names_the_cause_and_its_own_fix(tmp_path, error, fix_s
     assert problem.notice.startswith(f"Sidegraph cannot open its store at {store_dir}, so memory")
     first_line = " ".join((str(error).splitlines() or [""])[0].split())[:200]
     assert f"({type(error).__name__}: {first_line})" in problem.notice
-    assert problem.notice.endswith(fix_sentence.format(dir=store_dir))
+    lock = getattr(error, "lock", None)
+    assert problem.notice.endswith(
+        fix_sentence.format(
+            dir=store_dir,
+            quoted_dir=_quoted_path(store_dir),
+            quoted_lock=_quoted_path(lock) if lock is not None else "",
+        )
+    )
     assert problem.line == f"{problem.notice} Sidegraph memory tools will fail until it is fixed."
     assert (problem.summary, problem.fix) == ("store cannot be opened", "sidegraph-verify")
+
+
+@pytest.mark.parametrize("cause", ["idle", "lock", "busy"])
+def test_missing_marker_fix_is_not_clipped_with_a_long_absolute_path(tmp_path, cause):
+    store_dir = (
+        tmp_path / ("directory with spaces " + "a" * 80) / ("nested " + "b" * 80) / ".sidegraph"
+    )
+    lock = store_dir.parent / "repository .git" / "index.lock"
+    marker = store_dir / "format"
+    if cause == "lock":
+        message = f"the store format marker {marker} is missing while git holds {lock}"
+        error = StoreRequirementError(message, kind="missing", lock=lock)
+        expected = (
+            "Open again once git finishes. If no git command is running, delete "
+            f"{_quoted_path(lock)} and open again."
+        )
+    elif cause == "busy":
+        message = f"store format marker is missing and git did not answer in time ({store_dir})"
+        error = StoreRequirementError(message, kind="missing", busy=True)
+        expected = (
+            "Git did not answer in time. Open again once it finishes. If this repeats with no "
+            "git command running, check the repository with "
+            f"`git -C {_quoted_path(store_dir)} status`."
+        )
+    else:
+        message = f"the store format marker {marker} is missing, but HEAD records it"
+        error = StoreRequirementError(message, kind="missing")
+        expected = (
+            f"Restore it with `git -C {_quoted_path(store_dir)} checkout HEAD -- format`, or "
+            "open again once git finishes, then start a new session."
+        )
+    assert store_dir.is_absolute() and len(message) > 200
+    (problem,) = run(
+        Inputs(store_dir=store_dir, now=NOW, open_error=error),
+        "session",
+        (integrity.STORE_UNREADABLE,),
+    ).problems
+    assert problem.notice is not None
+    assert problem.notice.endswith(expected)
 
 
 def test_store_unreadable_cuts_a_long_message_at_200_characters(tmp_path):

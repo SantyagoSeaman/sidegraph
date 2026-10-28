@@ -45,6 +45,20 @@ from sidegraph.schema import (
 from sidegraph.store import Store
 
 
+@pytest.fixture(autouse=True)
+def host_user_config(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Keep every host config read outside the real home."""
+    base = tmp_path_factory.mktemp("host-user")
+    (base / "claude").mkdir()
+    (base / "codex").mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: base))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(base / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(base / "codex"))
+    return base
+
+
 def write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -1578,17 +1592,23 @@ def test_report_cannot_overwrite_the_other_hosts_config(
     assert report.read_bytes() == before
 
 
-@pytest.mark.parametrize("layout", ["canonical", "legacy", "none"])
-@pytest.mark.parametrize("host", ["claude-code", "codex"])
+@pytest.mark.parametrize(
+    ("host", "layout"),
+    [
+        ("claude-code", "canonical"),
+        ("claude-code", "plugin-fallback"),
+        ("codex", "canonical"),
+        ("codex", "legacy"),
+        ("codex", "none"),
+    ],
+)
 def test_guard_covers_every_path_the_verifier_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str, layout: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str, layout: str, host_user_config: Path
 ) -> None:
     from sidegraph.bootstrap.cli import _host_config_inputs
     from sidegraph.bootstrap.integrations import verify_integration
     from sidegraph.bootstrap.model import HostKind
 
-    if host == "claude-code" and layout != "canonical":
-        pytest.skip("Claude has a single layout")
     write(
         tmp_path / ".codex" / "config.toml", '[mcp_servers.sidegraph]\ncommand = "sidegraph-mcp"\n'
     )
@@ -1596,12 +1616,19 @@ def test_guard_covers_every_path_the_verifier_reads(
         write(tmp_path / ".codex" / "hooks.json", "{}\n")
     elif layout == "legacy":
         write(tmp_path / ".codex" / "hooks" / "hooks.json", "{}\n")
-    write_claude_config(tmp_path)
+    if layout == "plugin-fallback":
+        write(tmp_path / ".mcp.json", '{"mcpServers":{"sidegraph":{"command":"sidegraph-mcp"}}}\n')
+    else:
+        write_claude_config(tmp_path)
+    write(host_user_config / "claude/settings.json", "{}\n")
+    write(host_user_config / "codex/config.toml", "")
     root = Path(os.path.realpath(tmp_path))
     touched: list[Path] = []
+    restores = []
 
     def spied(name: str) -> None:
         real = getattr(Path, name)
+        restores.append((name, real))
 
         def spy(self: Path, *args: object, **kwargs: object) -> object:
             touched.append(Path(os.path.realpath(self)))  # not Path.resolve: it may probe
@@ -1612,13 +1639,181 @@ def test_guard_covers_every_path_the_verifier_reads(
     for probe in ("is_file", "exists", "read_text", "open", "stat", "is_dir"):
         spied(probe)
     verify_integration(tmp_path, HostKind(host))
-    monkeypatch.undo()
+
+    user_base = Path(os.path.realpath(host_user_config))
 
     def in_a_host_config_place(path: Path) -> bool:
+        if path.is_relative_to(user_base):
+            return True
         parts = path.relative_to(root).parts if path.is_relative_to(root) else ()
         return parts == (".mcp.json",) or (len(parts) >= 2 and parts[0] in (".codex", ".claude"))
 
     read = [path for path in touched if in_a_host_config_place(path)]
+    for name, real in restores:
+        monkeypatch.setattr(Path, name, real)
     guarded = {path for _label, path in _host_config_inputs(_guard_args(host), tmp_path)}
     assert read
     assert set(read) <= guarded
+    if host == "codex" or layout == "plugin-fallback":
+        assert any(path.is_relative_to(user_base) for path in read)
+
+
+def test_claude_plugin_install_completes_and_exits_zero(tmp_path, monkeypatch, capsys):
+    write_bootstrap_repo(tmp_path, host="claude-code", complete_host=False)
+    write(tmp_path / ".claude/settings.json", '{"enabledPlugins":{"sidegraph@sidegraph":true}}\n')
+    accepted_answers(monkeypatch)
+    report = tmp_path / "bootstrap-report.md"
+    rc = main(
+        [
+            "--root",
+            str(tmp_path),
+            "--profile",
+            "generic-adr",
+            "--host",
+            "claude-code",
+            "--report",
+            str(report),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "INTEGRATION  Claude Code plugin sidegraph@sidegraph enabled (MCP + hooks)" in out
+    assert "incomplete" not in out
+    text = report.read_text(encoding="utf-8")
+    assert "- via: plugin\n" in text
+    assert "- fully supported: true\n" in text
+    assert "sidegraph@sidegraph" not in text
+
+
+def test_codex_plugin_install_is_best_effort_and_exits_zero(
+    tmp_path, monkeypatch, capsys, host_user_config
+):
+    write_bootstrap_repo(tmp_path, host="codex", complete_host=False)
+    write(
+        host_user_config / "codex/config.toml", '[plugins."sidegraph@sidegraph"]\nenabled = true\n'
+    )
+    accepted_answers(monkeypatch)
+    rc = main(["--root", str(tmp_path), "--host", "codex"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "INTEGRATION  Codex best-effort" in out
+    assert "             Read/Grep PreToolUse unsupported" in out
+    assert (
+        "             plugin sidegraph@sidegraph enabled; its hooks "
+        "run once trusted in Codex (/hooks)" in out
+    )
+    assert "fully supported" not in out
+
+
+def test_manual_report_says_via_manual(tmp_path, monkeypatch, capsys):
+    write_bootstrap_repo(tmp_path, host="claude-code")
+    accepted_answers(monkeypatch)
+    report = tmp_path / "bootstrap-report.md"
+    assert main(["--root", str(tmp_path), "--host", "claude-code", "--report", str(report)]) == 0
+    assert "- via: manual\n" in report.read_text(encoding="utf-8")
+    assert "INTEGRATION  Claude Code MCP + hooks verified" in capsys.readouterr().out
+
+
+def test_plugin_key_is_escaped_on_the_terminal(capsys):
+    """Red against a discarded design that prints a user-controlled key literally."""
+    from sidegraph.bootstrap.cli import _render_integration
+
+    _render_integration(
+        IntegrationResult(
+            host=HostKind.CLAUDE_CODE,
+            mcp="verified",
+            session_start="verified",
+            stop="verified",
+            pretool_read_grep="verified",
+            fully_supported=True,
+            plugin="sidegraph@x\x1b[31m",
+        )
+    )
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "\\x1b" in out
+
+
+@pytest.mark.parametrize(
+    ("rel", "label", "content"),
+    [
+        ("claude/settings.json", "Claude Code user settings", '{"keep":true}\n'),
+        ("codex/config.toml", "Codex user config", "keep = true\n"),
+    ],
+)
+def test_report_cannot_overwrite_user_level_host_config(
+    tmp_path, host_user_config, monkeypatch, capsys, rel, label, content
+):
+    """Guard: red on a missing protected-user path; guarded before rendering changes."""
+    target = host_user_config / rel
+    write(target, content)
+    write_bootstrap_repo(tmp_path, host="claude-code")
+    assert_pre_review_report_collision(
+        tmp_path, target, monkeypatch, capsys, "--host", "claude-code", protected_label=label
+    )
+
+
+def test_report_cannot_overwrite_root_local_settings(tmp_path, monkeypatch, capsys):
+    target = tmp_path / ".claude/settings.local.json"
+    write(target, "{}\n")
+    write_bootstrap_repo(tmp_path, host="claude-code")
+    assert_pre_review_report_collision(
+        tmp_path,
+        target,
+        monkeypatch,
+        capsys,
+        "--host",
+        "claude-code",
+        protected_label="Claude Code local settings",
+    )
+
+
+@pytest.mark.parametrize("operation", ["exists", "samefile"])
+def test_report_guard_tolerates_inaccessible_protected_path(
+    tmp_path, host_user_config, monkeypatch, operation
+):
+    from sidegraph.bootstrap.cli import _validate_report_destination
+
+    protected = host_user_config / "claude/settings.json"
+    write(protected, "{}\n")
+    report = tmp_path / "report.md"
+    write(report, "before\n")
+    args = build_parser().parse_args(["--root", str(tmp_path), "--report", str(report)])
+    if operation == "exists":
+        real = Path.exists
+
+        def exists(path):
+            if path == protected:
+                raise PermissionError("blocked")
+            return real(path)
+
+        monkeypatch.setattr(Path, "exists", exists)
+    else:
+        real = os.path.samefile
+
+        def samefile(a, b):
+            if Path(b) == protected:
+                raise PermissionError("blocked")
+            return real(a, b)
+
+        monkeypatch.setattr(os.path, "samefile", samefile)
+    assert (
+        _validate_report_destination(
+            args, tmp_path, tmp_path / ".sidegraph", tmp_path / "graphify-out/graph.json"
+        )
+        == report
+    )
+
+
+def test_deep_manual_settings_still_complete_through_user_plugin(
+    tmp_path, host_user_config, monkeypatch, capsys
+):
+    write_bootstrap_repo(tmp_path, host="claude-code", complete_host=False)
+    write(tmp_path / ".claude/settings.json", "[" * 50000 + "]" * 50000)
+    write(
+        host_user_config / "claude/settings.json",
+        '{"enabledPlugins":{"sidegraph@sidegraph":true}}\n',
+    )
+    accepted_answers(monkeypatch)
+    assert main(["--root", str(tmp_path), "--host", "claude-code"]) == 0
+    assert "Traceback" not in capsys.readouterr().err

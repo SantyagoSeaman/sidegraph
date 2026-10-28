@@ -156,11 +156,17 @@ def _validate_report_destination(
     for label, protected_path in protected_files:
         # samefile catches a hard link: a different name for the same inode, which the
         # resolved-path comparison cannot see.
-        if report_path == protected_path or (
-            report_path.exists()
-            and protected_path.exists()
-            and os.path.samefile(report_path, protected_path)
-        ):
+        same_file = report_path == protected_path
+        if not same_file:
+            try:
+                same_file = (
+                    report_path.exists()
+                    and protected_path.exists()
+                    and os.path.samefile(report_path, protected_path)
+                )
+            except OSError:
+                same_file = False
+        if same_file:
             raise ValueError(
                 f"--report destination conflicts with protected {label}: {protected_path}"
             )
@@ -634,11 +640,25 @@ def _render_unanchored(
 
 
 def _render_integration(integration: IntegrationResult) -> None:
-    if integration.host == HostKind.CLAUDE_CODE and integration.fully_supported:
+    if (
+        integration.host == HostKind.CLAUDE_CODE
+        and integration.fully_supported
+        and integration.plugin is not None
+    ):
+        print(
+            f"INTEGRATION  Claude Code plugin {_terminal_text(integration.plugin)} "
+            "enabled (MCP + hooks)"
+        )
+    elif integration.host == HostKind.CLAUDE_CODE and integration.fully_supported:
         print("INTEGRATION  Claude Code MCP + hooks verified")
     elif integration.host == HostKind.CODEX and integration_ready_for_selected_host(integration):
         print("INTEGRATION  Codex best-effort")
         print("             Read/Grep PreToolUse unsupported")
+        if integration.plugin is not None:
+            print(
+                f"             plugin {_terminal_text(integration.plugin)} enabled; "
+                "its hooks run once trusted in Codex (/hooks)"
+            )
     else:
         print(f"INTEGRATION  {integration.host.value} incomplete")
         if integration.host == HostKind.CODEX:
