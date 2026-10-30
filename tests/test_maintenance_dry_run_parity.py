@@ -20,6 +20,7 @@ from sidegraph.store import Store
 from tests.store_format2_support import (
     archived_decision,
     build,
+    check_body,
     commit_all,
     decision_body,
     fact_body,
@@ -27,8 +28,11 @@ from tests.store_format2_support import (
     git_repo,  # noqa: F401  (pytest fixture)
     ids_in_bucket,
     make_store,
+    pin_version_0_22,  # noqa: F401  (pytest fixture)
     put_archive,
+    put_check,
     put_file,
+    put_packed,
     put_shard_line,
 )
 
@@ -171,3 +175,61 @@ def test_dry_run_wrote_equals_real_wrote_equals_git_changes(git_repo, tmp_path, 
     assert real.stopped is None
     assert dry.wrote == real.wrote
     assert sorted(real.wrote) == porcelain(git_repo)
+
+
+C1 = "01ARZ3NDEKTSV4RRFFQ69G5F01"
+C2 = "01ARZ3NDEKTSV4RRFFQ69G5F02"
+
+
+def _check_store(repo: Path, *, packed: bool) -> Path:
+    store = make_store(repo)
+    put_file(store, "decision", decision_body("D1", status="accepted"))
+    put_check(store, check_body(C1, "D1"))
+    if packed:  # a newer check already packed: C1 is dead, the image is unchanged
+        put_packed(store, [check_body(C2, "D1")])
+    else:
+        put_check(store, check_body(C2, "D1"))
+    Store(store).close()  # writes the .gitignore a first open leaves
+    commit_all(repo, "store", date=OLD)
+    return store
+
+
+@pytest.mark.parametrize("drop_only", [False, True])
+def test_check_fold_dry_wrote_equals_real_wrote_equals_git_changes(
+    git_repo, pin_version_0_22, drop_only
+):  # P8
+    store = _check_store(git_repo, packed=drop_only)
+    with Store(store) as s:
+        dry = s.maintain(settled_days=0, dry_run=True, any_branch=True, fold_checks=True)
+    assert dry.stopped is None and dry.checks_stopped is None
+    assert porcelain(git_repo) == []  # a dry run writes nothing
+    with Store(store) as s:
+        real = s.maintain(settled_days=0, dry_run=False, any_branch=True, fold_checks=True)
+    assert real.stopped is None and real.checks_stopped is None
+    if drop_only:
+        assert real.checks_dropped == [f"verifications/{C1}.json"] and real.checks_packed == []
+        assert f"verifications/{C1}.json" in real.wrote
+        assert "verifications/packed.shard" not in real.wrote
+    else:
+        assert real.checks_packed == [f"verifications/{C2}.json"]
+        assert real.checks_dropped == [f"verifications/{C1}.json"]
+        assert "verifications/packed.shard" in real.wrote
+    assert dry.wrote == real.wrote
+    assert (dry.checks_packed, dry.checks_dropped) == (real.checks_packed, real.checks_dropped)
+    assert dry.checks_kept == real.checks_kept
+    assert dry.requirement_raised == real.requirement_raised == "0.22.0"
+    assert sorted(real.wrote) == porcelain(git_repo)
+
+
+def test_check_fold_dry_run_reports_dropped_lines(git_repo, pin_version_0_22):
+    store = make_store(git_repo)
+    put_file(store, "decision", decision_body("D1", status="accepted"))
+    put_packed(store, [check_body(C1, "D1"), check_body(C2, "D1")])  # C1 is dead
+    Store(store).close()
+    commit_all(git_repo, "store", date=OLD)
+    with Store(store) as s:
+        dry = s.maintain(settled_days=0, dry_run=True, any_branch=True, fold_checks=True)
+    with Store(store) as s:
+        real = s.maintain(settled_days=0, dry_run=False, any_branch=True, fold_checks=True)
+    assert real.checks_dropped_lines == dry.checks_dropped_lines != []
+    assert dry.wrote == real.wrote and "verifications/packed.shard" in real.wrote

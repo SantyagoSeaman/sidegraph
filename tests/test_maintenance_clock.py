@@ -359,3 +359,42 @@ def test_store_at_work_tree_root_is_refused(git_repo: Path) -> None:
     _commit(git_repo, "root store", T2)
     with pytest.raises(ClockError, match="subdirectory"):
         resolve_work_tree(git_repo)
+
+
+def _origin(repo: Path, tmp_path: Path) -> Path:
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    git(repo, "remote", "add", "origin", str(bare))
+    git(repo, "push", "-q", "origin", "main")
+    return bare
+
+
+def test_unlanded_checks_listed(git_repo, tmp_path):  # P9
+    """A path is unlanded when the tree of ``git merge-base origin/<default> HEAD`` lacks it:
+    a commit on local main, a pushed feature branch, and a squash-merged branch that was not
+    rebased (the tip of ``origin/main`` holds the file, the merge base does not)."""
+    _write(git_repo, ".sidegraph/format", "f\n")
+    _commit(git_repo, "base", T1)
+    wt = resolve_work_tree(git_repo / ".sidegraph")
+    assert mc.unlanded_paths(wt, [".sidegraph/verifications/A.json"]) is None  # no origin
+    _origin(git_repo, tmp_path)
+    paths = [f".sidegraph/verifications/{n}.json" for n in "ABC"]
+    assert mc.unlanded_paths(wt, paths) == paths  # nothing landed yet
+    _write(git_repo, paths[0], "a\n")
+    _commit(git_repo, "local main", T2)
+    assert mc.unlanded_paths(wt, paths[:1]) == paths[:1]
+    git(git_repo, "reset", "-q", "--hard", "HEAD~1")
+    git(git_repo, "checkout", "-q", "-b", "feature")
+    _write(git_repo, paths[1], "b\n")
+    _commit(git_repo, "feature", T2)
+    git(git_repo, "push", "-q", "origin", "feature")
+    assert mc.unlanded_paths(wt, paths[1:2]) == paths[1:2]
+    git(git_repo, "checkout", "-q", "main")
+    git(git_repo, "merge", "-q", "--squash", "feature")
+    _commit(git_repo, "squash", T3)
+    git(git_repo, "push", "-q", "origin", "main")
+    git(git_repo, "checkout", "-q", "feature")
+    assert (git_repo / paths[1]).exists()
+    assert mc.unlanded_paths(wt, paths[1:2]) == paths[1:2]  # branch not rebased
+    git(git_repo, "rebase", "-q", "main")
+    assert mc.unlanded_paths(wt, paths[1:2]) == []  # the squash landed it

@@ -26,6 +26,7 @@ record in both formats. A store may additionally be **packed** (format 2): see
 ├── bindings/<record_ulid>.json  # one file per record (decision or fact): its durable anchor set (community bindings excluded), no status
 ├── initiatives/<ulid>.json  # one file per Initiative — full row (nothing volatile on this model)
 ├── verifications/<id>.json  # committed, optional: scoped drift checks (see "Scoped drift checks" below)
+├── verifications/packed.shard  # format 2 only, once maintenance has run: folded drift checks, one per line
 ├── shards/                  # format 2 only, once maintenance has run: 00.shard … (N−1).shard, packed records
 ├── .gitattributes           # format 2 only, written with the shards: the line `*.shard -text`
 ├── archive/                 # optional — only exists once `sidegraph-compact` has run
@@ -200,7 +201,9 @@ out to matter in practice.
 Format 2 exists because a store with years of history is thousands of small files. Records are
 still **written** one file each. A manual maintenance command, `sidegraph-compact`, later
 **folds** settled per-record files into 16, 64 (the default) or 256 shard files, moving each
-body verbatim and deleting the file only once a shard line holds exactly its content. The
+body verbatim and deleting the file only once a shard line holds exactly its content. It also
+folds drift-check files into `verifications/packed.shard` and drops dead checks (see
+[Scoped drift checks](#scoped-drift-checks)). The
 explicit command that switches a format-1 store is [`sidegraph-migrate`](cli.md#sidegraph-migrate);
 the [migration guide](../guides/migrating-to-0.17.md) is the team procedure.
 
@@ -283,6 +286,7 @@ the fork point can differ, and CI's answer is the one that gates the merge. All 
 | 0.14–0.16 Store, MCP server, hooks, doctor, stats, blame | refuse, or degrade to "no records joined" (hooks print no message). Where a message appears it says `migration tooling is deferred — use a fresh store`, which here means "upgrade to 0.17" |
 | 0.14–0.16 after a rollback | the `Store` opens and re-stamps the local `index.db`; the `HotIndex` (hooks) refuses a `0.7.0+format2` stamp and serves nothing until a `Store` has re-stamped it or the file is deleted |
 | 0.17 on format 1 | works fully, plus the `store-not-migrated` notice |
+| 0.17–0.21 after the first drift-check fold | refuse the store ("This store requires Sidegraph >= 0.22.0"); a 0.17–0.21 `sidegraph-verify` reports `requirement-above-verifier`. Upgrade the pins first |
 
 **Limits.** The pull window: while git checks out a maintenance commit it unlinks folded files
 before the new shard lands, and a writer touching such a record in that moment builds it from
@@ -291,7 +295,7 @@ a half-checked-out tree. Accepted and unguarded; do not pull while agents are wr
 ## The format marker
 
 `.sidegraph/format` is a committed marker, written the first time a `Store` creates the layout.
-On most format-1 stores it is one line, `sidegraph-store 0.6.0` (a store without a requirement). Only `sidegraph-require`, `sidegraph-migrate` and `sidegraph-domains snapshot` (which raises the minimum version only when the snapshot needs it) rewrite it: a format-1 store with a requirement has two lines; a store created by 0.17 is format 2 (three lines, above). It exists
+On most format-1 stores it is one line, `sidegraph-store 0.6.0` (a store without a requirement). Only `sidegraph-require`, `sidegraph-migrate`, `sidegraph-domains snapshot` (which raises the minimum version only when the snapshot needs it) and `sidegraph-compact` on a format-2 store (which raises it to 0.22.0 the first time it folds drift checks) rewrite it: a format-1 store with a requirement has two lines; a store created by 0.17 is format 2 (three lines, above). It exists
 **outside** the gitignored `index.db` specifically so a teammate on an incompatible store format
 is rejected the moment they open the repo's `.sidegraph/`, not just when their own local index
 happens to disagree. An existing layout from before this marker existed gets one backfilled
@@ -1015,8 +1019,10 @@ the file it landed in — not a database-level race the store arbitrates for you
 
 ## Scoped drift checks
 
-Optional `.sidegraph/verifications/<generated-id>.json` files are immutable auxiliary
-inspection history. Version 1 stores the decision id, aware UTC check time, full checked
+Optional `.sidegraph/verifications/<generated-id>.json` files are auxiliary inspection
+history. Each file is write-once: a recorded check is never edited, and on a format-1 store it
+is never removed. On a format-2 store `sidegraph-compact` may fold checks into
+`verifications/packed.shard` and drop dead ones (below). Version 1 stores the decision id, aware UTC check time, full checked
 revision, agent provenance, redacted rationale, exact `required_files`, inspected
 `checked_files` (path, Git blob id and regular-file mode), and a SHA-256 `subject_digest`.
 No source text, engine mapping or binding status is stored. The versioned digest enumerates
@@ -1042,19 +1048,43 @@ list item or quote, nesting too deep, a read failure or an exhausted scan budget
 `referenced link definition changed`; and `also-watched section changed`. A release that does not know the field ignores it, compares whole blobs and warns
 more, never less; an unknown future scheme or role is accepted and compared by whole blob.
 
-Select the highest generated check id for each decision before validation. This is a
+Select the highest generated check id for each decision before validation, over check files
+and packed lines together. This is a
 simple deterministic cross-branch ordering rule, not causal ordering or truth authority.
 A bound malformed latest file cannot expose an older clearing check. Unparseable/unbound
 files cannot be used to clear an advisory and are strict-lint findings. Wrong assertions
 stay history; correct a wrong decision through genuine supersession, not deletion or
 capture-stamp rewriting. Terminal or archived subjects remain valid history references.
 
-These files are outside the shared canonical digest/index record tables. They require no
-format/minimum-version bump. Older writers ignore and preserve them; old verifiers do
+These files are outside the shared canonical digest/index record tables. Recording one needs
+no format/minimum-version bump. Older writers ignore and preserve them; old verifiers do
 not validate them and old drift readers still use capture commits. Use the newer verifier
 for their schema/reference checks and `--against` write-once byte checks (even formatting
-an existing file is illegal). Commit the files so other checkouts receive them. Symlinked
+an existing file is illegal). The exception is the first fold into `packed.shard`, which
+raises the store's requirement (below). Commit the files so other checkouts receive them. Symlinked
 auxiliary directories are refused; no directory is required until the first check.
+
+**Packed checks (format 2).** `sidegraph-compact` on a format-2 store also folds check files
+into `verifications/packed.shard`: UTF-8, LF only, one check per line, sorted by `id`. A line is
+the check file's JSON body taken verbatim (sorted keys, compact separators), with no envelope;
+the body carries its own `id`. A check file folds once it is tracked and unmodified against
+`HEAD`; there is no settled-days wait. A check is **dead** when its decision has a check with a
+higher id, or the decision is `superseded`, `rejected` or `deprecated`; compaction drops dead
+checks when it folds, so their bytes survive only in git history. Nothing reads a check that is
+not the selected one, so no reader sees a change. A file that is untracked, modified, damaged
+or whose decision is missing is kept and listed with the reason. Outside a git work tree
+nothing folds. A packed line is equal to the check file with the same id and body, so a crash
+between the publish and the file deletions is harmless. `*.shard` is already `-text` in
+`.gitattributes`, so git never rewrites the line endings.
+
+**The requirement.** The first compaction that packs or drops a check raises
+`requires-sidegraph` to `0.22.0` (never lowers it) and writes the marker before the packed
+file. From then on 0.17 to 0.21 refuse the store ("This store requires Sidegraph >= 0.22.0"),
+and a 0.17 to 0.21 `sidegraph-verify` reports `requirement-above-verifier`: move every
+teammate and CI pin to 0.22.0 or newer first. A run that packs and drops nothing leaves the
+marker alone, and `sidegraph-migrate` never folds checks. `sidegraph-verify` reports a
+`packed.shard` on a store whose marker lacks the requirement as
+`packed-checks-without-requirement`.
 
 Normal drift refresh reads auxiliary history directly, then applies it after successful
 capture batches. Optional comparison failure retains known capture flags; it cannot turn

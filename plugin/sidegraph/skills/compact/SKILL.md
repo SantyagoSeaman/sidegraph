@@ -34,6 +34,10 @@ Summarise in one or two lines what the report says would change, then ask the hu
 confirm. **Never run the real pass without an explicit yes.** A "looks fine" about the report
 is not a yes to the run; ask again plainly.
 
+If the dry run says the store "would require Sidegraph >= 0.22.0", the first fold of drift
+checks will raise the team-wide minimum version: every teammate and CI pin needs 0.22.0 or
+newer once the pull request merges. Say that plainly before asking.
+
 ## 3. Run and verify
 
 Run the same command without `--dry-run`, then `sidegraph-verify`:

@@ -49,7 +49,7 @@ from typing import Any, Literal
 from pydantic import ValidationError
 from ulid import ULID
 
-from . import githooks, maintenance
+from . import drift_checks, githooks, maintenance
 from .config import _store_project_root, path_state
 from .freshness import GraphFreshness, staleness_phrase
 from .gitenv import git_env
@@ -73,6 +73,7 @@ from .store_format import (
 )
 from .store_layout import (
     GITATTRIBUTES_NAME,
+    PACKED_CHECKS_NAME,
     SHARDS_SUBDIR,
     VERIFICATIONS_SUBDIR,
     StoreRequirementError,
@@ -993,6 +994,7 @@ class _Stranded:
     first: str
     deleted: bool
     age: timedelta | None
+    rel: str = ""
 
 
 def _stranded_age(
@@ -1027,18 +1029,45 @@ def _stranded_kinds(entries: list[_Stranded]) -> str:
     maintenance run: the record files it deleted and the archive segments it removed or
     wrote are part of it. Any other deletion is a deleted file.
 
-    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
+    A drift-check fold is a maintenance run too: a changed ``verifications/packed.shard`` or a
+    deleted ``verifications/*.json`` triggers it (a drop-only run changes no packed byte, so the
+    deleted check files alone are enough), and the deleted check files are absorbed into it.
+    Only compaction deletes check files; a hand deletion read as a maintenance run is harmless in
+    an advisory. A changed ``format`` is absorbed into any maintenance run, so a hand-edited
+    marker in the same uncommitted set loses its own label (advisory).
+
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§7)"""
     deleted_hot = [e for e in entries if e.deleted and e.first in _HOT_RECORD_DIRS]
     archive = [e for e in entries if not e.deleted and e.first == "archive"]
     shards = [e for e in entries if not e.deleted and e.first == SHARDS_SUBDIR]
-    maintenance = bool(shards)
+    # A check fold changes ``verifications/packed.shard`` and deletes check files; a drop-only run
+    # deletes them and writes no packed byte, so a deleted check file alone is enough.
+    packed = [
+        e
+        for e in entries
+        if not e.deleted and e.rel == f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}"
+    ]
+    dead_checks = [
+        e
+        for e in entries
+        if e.deleted
+        and e.first == VERIFICATIONS_SUBDIR
+        and drift_checks.is_check_file_name(e.rel.rsplit("/", 1)[-1])
+    ]
+    maintenance = bool(shards or packed or dead_checks)
     compaction = bool(deleted_hot and archive) and not maintenance
     absorbed: list[_Stranded] = []
     if maintenance:
         absorbed = [
             e
             for e in entries
-            if e in shards or e.first == "archive" or (e.deleted and e.first in _RECORD_DIRS)
+            if e in shards
+            or e in packed
+            or e in dead_checks
+            or e.first == "archive"
+            or (e.deleted and e.first in _RECORD_DIRS)
+            or (not e.deleted and e.rel == "format")
         ]
     elif compaction:
         absorbed = [*deleted_hot, *archive]
@@ -1117,7 +1146,7 @@ def _detect_store_uncommitted(inputs: Inputs) -> Problem | None:
             continue
         deleted = xy[1] == "D"
         age = _stranded_age(store_dir, rel, first, xy, deleted, inputs.now)
-        entries.append(_Stranded(first=first, deleted=deleted, age=age))
+        entries.append(_Stranded(first=first, deleted=deleted, age=age, rel=rel))
     ages = [e.age for e in entries if e.age is not None]
     if not ages or max(ages) < timedelta(hours=_UNCOMMITTED_HOURS):
         return None
@@ -1468,7 +1497,9 @@ _PER_RECORD_DIRS = ("decisions", "facts", "domains", "entities", "bindings")
 def _count_record_files(
     store_dir: Path, limit: int, dirs: tuple[str, ...] = _PER_RECORD_DIRS
 ) -> int:
-    """How many per-record files the store holds, counting stops once it passes ``limit``. A
+    """How many per-record files the store holds (``dirs`` names the directories; the maintenance
+    notice passes the record directories plus ``verifications``, so check files count), counting
+    stops once it passes ``limit``. A
     directory listing only: no file is opened, and only regular files count (a directory or a
     symlink named ``x.json`` is not a record)."""
     count = 0
@@ -1544,9 +1575,13 @@ def _maintenance_reasons(store_dir: Path, shards: int) -> list[str]:
     Counting files is a directory listing; the rest reads the shards once under the model check
     and plans a run in which no per-record file may fold (no git call at SessionStart, so
     "settled" cannot be known): only a segment already covered by existing shard lines counts,
-    which maintenance would delete whatever the clock says."""
+    which maintenance would delete whatever the clock says. Drift-check files count toward the
+    file threshold; the packed check file does not (it is not ``*.json``).
+    see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§7)"""
     reasons: list[str] = []
-    files = _count_record_files(store_dir, _MAINTENANCE_FILE_THRESHOLD)
+    files = _count_record_files(
+        store_dir, _MAINTENANCE_FILE_THRESHOLD, (*_PER_RECORD_DIRS, VERIFICATIONS_SUBDIR)
+    )
     if files > _MAINTENANCE_FILE_THRESHOLD:
         reasons.append(f"more than {_MAINTENANCE_FILE_THRESHOLD} per-record files")
         return reasons  # enough to be due: the shards need not be read

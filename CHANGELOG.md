@@ -7,6 +7,23 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-10-30
+
+### Changed (Contract change)
+
+- **Packed drift checks (0.22.0).** On a format-2 store, `sidegraph-compact` now folds the
+  committed scoped drift-check files (`verifications/<id>.json`) into one file,
+  `verifications/packed.shard`, and drops dead checks: a check whose decision has a newer check
+  or is superseded, rejected or deprecated. A check file folds once it is tracked and
+  unmodified against `HEAD`. The first run that packs or drops a check raises
+  `requires-sidegraph` to `0.22.0`: 0.17 to 0.21 then refuse the store, and an older pinned
+  `sidegraph-verify` reports `requirement-above-verifier`, so move every teammate and CI pin
+  first. The dry run says so. `sidegraph-verify` reports `packed-checks-without-requirement`
+  and, with `--against`, `packed-check-without-source`; a deleted check is judged per check
+  instead of always illegal. Drift-check files now count toward the `maintenance-due` threshold.
+  A format-1 store and `sidegraph-migrate` are unchanged. See
+  [Scoped drift checks](docs/reference/store-format.md#scoped-drift-checks).
+
 ## [0.21.1] — 2026-10-30
 
 ### Added

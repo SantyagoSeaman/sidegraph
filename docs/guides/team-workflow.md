@@ -168,7 +168,9 @@ survivor and retire the other:
 
 In a packed (format 2) store, `sidegraph-compact` is maintenance: it folds per-record files that
 have settled (landed on the default branch at least seven days ago) into the shard files, byte
-for byte, and deletes a file only once a shard line holds its exact content. It runs on the
+for byte, and deletes a file only once a shard line holds its exact content. It also folds scoped
+drift-check files into `verifications/packed.shard`, drops dead ones, and on the first such run
+raises the store's minimum version to 0.22.0 for the whole team. It runs on the
 default branch and never commits, so review and commit the result in a pull request. See
 [`reference/cli.md`](../reference/cli.md#sidegraph-compact) and the
 [0.17 migration guide](migrating-to-0.17.md). The rest of this section describes the

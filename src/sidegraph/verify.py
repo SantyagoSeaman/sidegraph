@@ -58,7 +58,8 @@ from typing import Literal, NamedTuple, overload
 
 from pydantic import BaseModel, ValidationError
 
-from . import domain_snapshot
+from . import domain_snapshot, drift_checks
+from .check_fold import _TERMINAL as _CHECK_TERMINAL
 from .config import _store_project_root
 from .gitenv import git_env
 from .schema import (
@@ -100,6 +101,8 @@ from .store_layout import (
     DOMAIN_SNAPSHOT_NAME,
     MAX_FORMAT_MARKER_BYTES,
     NOT_A_FILE_REASON,
+    PACKED_CHECKS_NAME,
+    PACKED_CHECKS_REQUIREMENT,
     REQUIREMENT_MARKER_VERSION,
     SHARDS_SUBDIR,
     VERIFICATIONS_SUBDIR,
@@ -107,6 +110,7 @@ from .store_layout import (
     hot_matches_archive,
     is_regular_file,
     parse_format_marker,
+    release_tuple,
     require_listable_record_dirs,
     requirement_met,
     running_version,
@@ -174,6 +178,11 @@ BAD_ARCHIVE_SEGMENT = "bad-archive-segment"
 FILENAME_ID_MISMATCH = "filename-id-mismatch"
 UNSAFE_RECORD_ID = "unsafe-record-id"
 SYMLINKED_STORE_ENTRY = "symlinked-store-entry"
+# ``verifications/packed.shard`` exists but the marker is not major 2 requiring the release
+# that reads it.
+PACKED_CHECKS_WITHOUT_REQUIREMENT = "packed-checks-without-requirement"
+# A packed check line in the new tree that equals no selectable occurrence in REF.
+PACKED_CHECK_WITHOUT_SOURCE = "packed-check-without-source"
 # At least one ``shards/*.shard`` beside a marker whose major is below 2.
 SHARDS_WITHOUT_FORMAT2 = "shards-without-format2"
 BAD_SHARD_LINE = "bad-shard-line"
@@ -455,7 +464,9 @@ def _check_plain_dir(dir_path: Path, model: type[BaseModel], id_field: str) -> _
 
 
 def _check_drift_checks(store_dir: Path, decision_ids: set[str]) -> list[Violation]:
-    """Lint auxiliary assertions, including terminal/archived subjects as valid history."""
+    """Lint auxiliary assertions, including terminal/archived subjects as valid history, and
+    the packed check file beside them.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§8)"""
     folder = store_dir / VERIFICATIONS_SUBDIR
     try:
         directory_stat = folder.stat()
@@ -464,11 +475,11 @@ def _check_drift_checks(store_dir: Path, decision_ids: set[str]) -> list[Violati
     if not stat.S_ISDIR(directory_stat.st_mode):
         return [_violation(PARSE_ERROR, folder, "verification history is not a directory")]
     links = [path for path in _iter_json_files(folder) if path.is_symlink()]
-    if links:
+    if links:  # the packed file is linted all the same: a link hides no packed finding
         return [
             _violation(SYMLINKED_STORE_ENTRY, path, "verification file is a symlink")
             for path in links
-        ]
+        ] + _check_packed_checks(store_dir, decision_ids)
     raw, paths, all_paths, _, violations = _check_plain_dir(folder, DriftCheck, "id")
     violations += _check_duplicate_ulids(all_paths, {})
     for rid, payload in raw.items():
@@ -477,7 +488,102 @@ def _check_drift_checks(store_dir: Path, decision_ids: set[str]) -> list[Violati
             violations.append(
                 _violation(DANGLING_DRIFT_CHECK, paths[rid], "checked decision does not exist")
             )
-    return violations
+    return violations + _check_packed_checks(store_dir, decision_ids)
+
+
+def _check_packed_checks(store_dir: Path, decision_ids: set[str]) -> list[Violation]:
+    """``verifications/packed.shard``: a damaged line is ``parse-error``, a key held by two
+    differing bodies (two lines, or a line and a check file) is ``duplicate-ulid``, a line
+    naming a missing decision is ``dangling-drift-check``, a link is ``symlinked-store-entry``
+    and any other non-regular file is ``parse-error`` (never opened). The marker must require
+    the release that reads the file.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§4, §8)"""
+    packed_path = store_dir / VERIFICATIONS_SUBDIR / PACKED_CHECKS_NAME
+    try:
+        packed_stat = packed_path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    out = _packed_checks_requirement(store_dir, packed_path)
+    if stat.S_ISLNK(packed_stat.st_mode):
+        return out + [
+            _violation(SYMLINKED_STORE_ENTRY, packed_path, "verification file is a symlink")
+        ]
+    try:
+        inventory = drift_checks.load_check_inventory(store_dir)
+    except ValueError as exc:  # a linked verification directory: reported as a store link
+        return out + [_violation(SYMLINKED_STORE_ENTRY, packed_path, str(exc))]
+    except OSError as exc:  # unreadable, as an unreadable check file is
+        return out + [_violation(PARSE_ERROR, packed_path, f"unreadable: {exc}")]
+    if inventory.packed_problem is not None:
+        return out + [_violation(PARSE_ERROR, packed_path, inventory.packed_problem)]
+    conflicts = drift_checks.conflicting_keys(inventory.occurrences)
+    reported: set[str] = set()
+    for occ in inventory.occurrences:
+        if occ.kind != "line":
+            continue
+        where = f"{packed_path}:{occ.line_no}"
+        problem = _packed_line_problem(occ)
+        if problem is not None:
+            out.append(_violation(PARSE_ERROR, where, problem))
+        if occ.key in conflicts and occ.key not in reported:
+            reported.add(occ.key)
+            holders = [
+                f"{store_dir / o.path}" + (f":{o.line_no}" if o.line_no is not None else "")
+                for o in inventory.occurrences
+                if o.key == occ.key
+            ]
+            out.append(_violation(DUPLICATE_ULID, where, "present in " + "; ".join(holders)))
+        target = occ.raw.get("decision_id") if isinstance(occ.raw, dict) else None
+        if isinstance(target, str) and target not in decision_ids:
+            out.append(_violation(DANGLING_DRIFT_CHECK, where, "checked decision does not exist"))
+    return out
+
+
+def _packed_line_problem(occ: drift_checks.CheckOccurrence) -> str | None:
+    """Why a packed line is damaged, or ``None``: unselectable, failing ``DriftCheck``
+    validation, or not packable."""
+    if not occ.selectable:
+        return "not a drift-check body with a valid id and decision id"
+    try:
+        DriftCheck.model_validate(occ.raw)
+    except ValueError as exc:
+        return str(exc)
+    if not drift_checks.is_packable(occ.raw):
+        return "body does not survive a packed line unchanged"
+    return None
+
+
+def _packed_checks_requirement(store_dir: Path, packed_path: Path) -> list[Violation]:
+    """:data:`PACKED_CHECKS_WITHOUT_REQUIREMENT` unless the marker is major 2 and requires at
+    least :data:`PACKED_CHECKS_REQUIREMENT`; a marker that does not parse requires nothing (it
+    has its own finding)."""
+    try:
+        found = store_marker(store_dir)
+    except StoreRequirementError:
+        found = None
+    missing: list[str] = []
+    if found is None or found.major < 2:
+        missing.append("format major 2")
+    floor = release_tuple(PACKED_CHECKS_REQUIREMENT)
+    have = release_tuple(found.requirement) if found is not None and found.requirement else None
+    if floor is None or have is None or have < floor:
+        missing.append(f"requires-sidegraph >= {PACKED_CHECKS_REQUIREMENT}")
+    if not missing:
+        return []
+    # `sidegraph-require` keeps the major, so it cannot clear the finding below major 2.
+    if found is not None and found.major >= 2:
+        remedy = (
+            f"run `sidegraph-require --sidegraph {PACKED_CHECKS_REQUIREMENT}` and commit the marker"
+        )
+    else:
+        remedy = f"run `sidegraph-migrate`, or remove {VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}"
+    return [
+        _violation(
+            PACKED_CHECKS_WITHOUT_REQUIREMENT,
+            packed_path,
+            "the format marker lacks " + " and ".join(missing) + "; " + remedy,
+        )
+    ]
 
 
 def _check_bindings_dir(
@@ -2386,6 +2492,129 @@ def _never_loaded_file(occ: Occurrence) -> bool:
     return not is_safe_record_id(occ.raw.get(_KIND_ID_FIELDS[occ.record_type]))
 
 
+def _check_occurrences_at_ref(
+    repo_root: Path, oid: str, store_rel: str
+) -> list[drift_checks.CheckOccurrence]:
+    """The check occurrences of REF's tree: every regular ``verifications/*.json`` blob and the
+    packed file, listed with one ``git ls-tree -z`` and read with one ``git cat-file --batch``.
+    A symlink, a directory or a submodule is no check, as on disk.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§9)"""
+    prefix = f"{store_rel}/" if store_rel else ""
+    folder = f"{prefix}{VERIFICATIONS_SUBDIR}"
+    env = drift_checks._env(True)
+    listing = subprocess.run(
+        ["git", "ls-tree", "-z", oid, f"{folder}/"],
+        cwd=repo_root,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    if listing.returncode != 0:  # a missing path exits 0 with no output; this is a real error
+        raise ValueError(f"git ls-tree {oid} failed: {os.fsdecode(listing.stderr).strip()}")
+    wanted: list[tuple[str, str]] = []
+    for item in listing.stdout.split(b"\0"):
+        meta, _, name_bytes = item.partition(b"\t")
+        if not meta:
+            continue
+        mode, otype, blob = meta.decode("ascii").split(" ")
+        name = name_bytes.decode("utf-8", "surrogateescape").rsplit("/", 1)[-1]
+        if otype != "blob" or mode not in ("100644", "100755"):
+            continue
+        if name == PACKED_CHECKS_NAME or drift_checks.is_check_file_name(name):
+            wanted.append((name, blob))
+    if not wanted:
+        return []
+    batch = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=repo_root,
+        input=b"".join(blob.encode("ascii") + b"\n" for _, blob in wanted),
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    if batch.returncode != 0:
+        raise ValueError(f"git cat-file failed in {oid}: {os.fsdecode(batch.stderr).strip()}")
+    out = batch.stdout
+    pos = 0
+    occurrences: list[drift_checks.CheckOccurrence] = []
+    for name, _blob in wanted:
+        end = out.find(b"\n", pos)
+        header = out[pos:end].split(b" ") if end >= 0 else []
+        if len(header) != 3 or header[1] != b"blob":
+            raise ValueError(f"git cat-file did not return blob {_blob}: {out[pos:end]!r}")
+        size = int(header[2])
+        data = out[end + 1 : end + 1 + size]
+        pos = end + 1 + size + 1
+        path = f"{VERIFICATIONS_SUBDIR}/{name}"
+        if name == PACKED_CHECKS_NAME:
+            occurrences += drift_checks.packed_occurrences(data)
+        else:
+            occurrences.append(drift_checks.file_occurrence(path, data))
+    return occurrences
+
+
+def _check_transition(
+    store_dir: Path,
+    repo_root: Path,
+    store_rel: str,
+    baseline_oid: str,
+    new_eff: Mapping[tuple[str, str], Effective],
+    prefix: str,
+) -> list[Violation]:
+    """Rules V2 and V4 of the drift-check fold: every selectable REF occurrence survives in the
+    new tree (or is dead there), and every selectable new packed line has a source in REF.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§9)"""
+    ref_occs = _check_occurrences_at_ref(repo_root, baseline_oid, store_rel)
+    new_occs = drift_checks.load_check_inventory(store_dir).occurrences
+    ref_sel = [o for o in ref_occs if o.selectable]
+    new_sel = [o for o in new_occs if o.selectable]
+    out: list[Violation] = []
+
+    def dead(occ: drift_checks.CheckOccurrence) -> bool:
+        assert occ.key is not None
+        if any(n.decision_id == occ.decision_id and (n.key or "") > occ.key for n in new_sel):
+            return True  # (a) a higher key for the same decision
+        found = new_eff.get(("decision", str(occ.decision_id)))
+        return (
+            found is not None
+            and isinstance(found.raw, dict)
+            and found.raw.get("status") in _CHECK_TERMINAL
+        )  # (b) a terminal decision
+
+    for occ in ref_sel:
+        survives = any(
+            n.key == occ.key and (n.data == occ.data or _strict_equal(n.raw, occ.raw))
+            for n in new_sel
+        )
+        if survives or dead(occ):
+            continue
+        where = f"{prefix}{occ.path}"
+        out.append(
+            _violation(
+                ILLEGAL_DELETION,
+                where,
+                f"drift check {occ.key} is the selected check of an open decision "
+                "(not superseded or closed in the new tree) and is gone"
+                if occ.kind == "file"
+                else f"packed drift check {occ.key} is gone or changed while it is still "
+                "the selected check of an open decision",
+            )
+        )
+    for occ in new_sel:
+        if occ.kind != "line":
+            continue
+        if not any(o.key == occ.key and _strict_equal(o.raw, occ.raw) for o in ref_sel):
+            out.append(
+                _violation(
+                    PACKED_CHECK_WITHOUT_SOURCE,
+                    f"{prefix}{occ.path}:{occ.line_no}",
+                    f"packed check {occ.key} equals no check committed in the baseline",
+                )
+            )
+    return out
+
+
 def _packed_against(
     store_dir: Path,
     repo_root: Path,
@@ -2467,23 +2696,19 @@ def _packed_against(
                     "initiative deleted (no compaction/archive path exists for initiatives)",
                 )
             )
-        elif kind == "verification" and status != "A":
+        elif kind == "verification" and status not in ("A", "D"):
+            # a deletion is judged per occurrence below (V2); only A and D leave this branch
             violations.append(
-                _violation(
-                    ILLEGAL_DELETION if status == "D" else ILLEGAL_FIELD_CHANGE,
-                    repo_path,
-                    (
-                        "verification deleted (write-once; no pruning path exists)"
-                        if status == "D"
-                        else "write-once verification modified"
-                    ),
-                )
+                _violation(ILLEGAL_FIELD_CHANGE, repo_path, "write-once verification modified")
             )
         elif kind == "archive" and status not in ("A", "D"):
             violations.append(
                 _violation(ILLEGAL_FIELD_CHANGE, repo_path, "write-once archive segment modified")
             )
     violations += engine.run()
+    violations += _check_transition(
+        store_dir, repo_root, store_rel, baseline_oid, engine.new_eff, prefix
+    )
     # rule 8: a marker that went from major 2 to below it, unless every record is back in a
     # per-record file (the rollback the guide prescribes): no shard file left, every rule passing
     downgraded = ref_marker is not None and ref_marker.major == 2

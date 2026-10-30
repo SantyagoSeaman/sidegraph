@@ -293,6 +293,41 @@ def default_branch_names(wt: WorkTree) -> tuple[str, ...]:
     return ("main", "master")
 
 
+_UNLANDED_CHUNK = 500
+
+
+def unlanded_paths(wt: WorkTree, paths: list[str]) -> list[str] | None:
+    """The root-relative ``paths`` that the tree of ``git merge-base origin/<default> HEAD``
+    does not hold, in the order given: the baseline CI compares against, so a squash-merged
+    branch that was not rebased still counts its files as unlanded. ``None`` when no
+    ``origin/<default>`` ref exists (or shares no history with ``HEAD``): the comparison cannot
+    be made. A git failure is a :class:`ClockError`.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§6.4)
+    """
+    ref = None
+    for name in default_branch_names(wt):
+        candidate = f"refs/remotes/origin/{name}"
+        if _run(wt.root, ["rev-parse", "-q", "--verify", candidate]).returncode == 0:
+            ref = candidate
+            break
+    if ref is None:
+        return None
+    args = ["merge-base", ref, "HEAD"]
+    proc = _run(wt.root, args)
+    if proc.returncode == 1 and not proc.stderr.strip():
+        return None
+    if proc.returncode != 0:
+        raise _fail(args, proc)
+    base = proc.stdout.decode("ascii").strip()
+    held: set[str] = set()
+    for start in range(0, len(paths), _UNLANDED_CHUNK):
+        chunk = paths[start : start + _UNLANDED_CHUNK]
+        held.update(
+            _names(_git(wt.root, ["ls-tree", "-r", "-z", "--name-only", base, "--", *chunk]))
+        )
+    return [p for p in paths if p not in held]
+
+
 def branch_refusal(wt: WorkTree) -> str | None:
     """Why maintenance may not run on this checkout's branch, or ``None`` when it is the
     default branch. The caller skips this for ``--any-branch`` and outside git.

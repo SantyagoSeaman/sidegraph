@@ -295,17 +295,19 @@ The `Initiative` model below is a separate low-level persisted record supported 
 
 ## `DriftCheck` — attributed auxiliary inspection
 
-An optional immutable file under `.sidegraph/verifications/` records an explicit agent
+An optional file under `.sidegraph/verifications/` records an explicit agent
 judgment that an existing decision still holds. It preserves the decision and original
 capture provenance; it never ratifies a proposal or proves semantic truth. It is outside
-the shared canonical digest/index record tables. See
+the shared canonical digest/index record tables. A check file is never edited, but on a
+format-2 store `sidegraph-compact` may pack it into `verifications/packed.shard` (the same JSON
+body, one line) and drop it once it is dead: its decision has a newer check or is retired. See
 [scoped checks](../reference/store-format.md#scoped-drift-checks) and
 [`record_drift_check`](../reference/mcp-tools.md#record_drift_check).
 
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | literal `1` | Version of the auxiliary assertion and fixed subject-digest definition; independent of the store format version. |
-| `id` | ULID | Generated check identity, also its immutable filename. Highest generated id is the deterministic per-decision selection rule, not causal ordering. |
+| `id` | ULID | Generated check identity, also its immutable filename (or, once packed, its line's key). Highest generated id is the deterministic per-decision selection rule, not causal ordering. |
 | `decision_id` | str | Existing decision id; terminal or archived decisions remain valid history references. |
 | `checked_at` | aware datetime | UTC time at which the assertion was recorded. |
 | `checked_commit` | str | Full inspected Git HEAD object id, retained as provenance even after squash/clone removes the object locally. |

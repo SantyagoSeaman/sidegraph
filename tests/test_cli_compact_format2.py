@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+import sidegraph
 from sidegraph import cli as cli_module
 from sidegraph import maintenance, maintenance_clock
 from sidegraph import store as store_module
@@ -26,6 +27,7 @@ from sidegraph.store import Store
 from tests.store_format2_support import (
     archived_decision,
     build,
+    check_body,
     commit_all,
     decision_body,
     format1_store,
@@ -34,8 +36,11 @@ from tests.store_format2_support import (
     git_repo,  # noqa: F401  (pytest fixture)
     ids_in_bucket,
     make_store,
+    pin_version_0_22,  # noqa: F401  (pytest fixture)
     put_archive,
+    put_check,
     put_file,
+    put_packed,
     put_shard_line,
     shard_bytes,
 )
@@ -329,6 +334,8 @@ def test_help_describes_both_formats(capsys):
     flat = " ".join(out.split())
     assert "On a format-2 (packed) store the command is maintenance" in flat
     assert "--settled-days" in flat and "--any-branch" in flat
+    assert "packs committed drift-check files into verifications/packed.shard" in flat
+    assert "raises the store's requirement to Sidegraph 0.22.0" in flat
 
 
 def packed_repo(repo: Path) -> Path:
@@ -456,3 +463,177 @@ def test_stopped_run_that_already_wrote_says_so(git_repo, capsys, monkeypatch):
     assert "Stopped:" in out and "written or removed" in out
     assert "The run stopped after writing these files" in out
     assert "commit them yourself" not in out
+
+
+# -- the drift-check fold --------------------------------------------------------------------------
+
+C1 = "01ARZ3NDEKTSV4RRFFQ69G5F01"
+C2 = "01ARZ3NDEKTSV4RRFFQ69G5F02"
+C3 = "01ARZ3NDEKTSV4RRFFQ69G5F03"
+
+
+def store_with_checks(repo: Path, checks=((C1, "D1"),), packed=None) -> Path:
+    store = make_store(repo)
+    put_file(store, "decision", decision_body("D1", status="accepted"))
+    for cid, did in checks:
+        put_check(store, check_body(cid, did))
+    if packed is not None:
+        put_packed(store, packed)
+    Store(store).close()  # writes the .gitignore a first open leaves
+    commit_all(repo, "store", date=OLD)
+    return store
+
+
+def test_check_fold_stop_exits_2(git_repo, capsys, monkeypatch):  # P4 CLI half
+    monkeypatch.setattr(sidegraph, "__version__", "0.21.0")
+    store = store_with_checks(git_repo)
+    assert run(store, "--settled-days", "0") == 2
+    out = capsys.readouterr().out
+    assert "Drift checks stopped" in out
+    assert (store / "verifications" / f"{C1}.json").exists()
+
+
+def test_blocked_check_fold_exits_0(git_repo, capsys, pin_version_0_22):
+    store = store_with_checks(git_repo, packed=[b"not json"])
+    assert run(store, "--settled-days", "0") == 0
+    out = capsys.readouterr().out
+    assert "Drift checks not folded" in out
+    assert (store / "verifications" / f"{C1}.json").exists()
+
+
+def test_outside_git_exits_0_with_checks(tmp_path, capsys, pin_version_0_22):  # A10
+    store = make_store(tmp_path)
+    put_file(store, "decision", decision_body("D1", status="accepted"))
+    put_check(store, check_body(C1, "D1"))
+    assert run(store, "--settled-days", "0") == 0
+    out = capsys.readouterr().out
+    assert f"verifications/{C1}.json: outside a git work tree" in out
+    assert (store / "verifications" / f"{C1}.json").exists()
+    assert not (store / "verifications" / "packed.shard").exists()
+
+
+def test_default_settled_days_packs_fresh_check(git_repo, capsys, pin_version_0_22):  # A11
+    store = make_store(git_repo)
+    put_file(store, "decision", decision_body("D1", status="accepted"))
+    put_check(store, check_body(C1, "D1"))
+    commit_all(git_repo, "store", date=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    assert run(store) == 0
+    assert (store / "verifications" / "packed.shard").exists()
+    assert not (store / "verifications" / f"{C1}.json").exists()
+
+
+def test_report_lines(git_repo, capsys, pin_version_0_22):
+    store = store_with_checks(git_repo, checks=((C1, "D1"), (C2, "D1")))
+    put_check(store, check_body(C3, "D1"))  # untracked: kept, and it supersedes nothing
+    assert run(store, "--settled-days", "0") == 0
+    out = capsys.readouterr().out
+    assert f"verifications/{C2}.json" in out and "packed into" in out
+    assert f"verifications/{C1}.json" in out and "dropped" in out
+    assert f"verifications/{C3}.json: untracked or modified" in out
+    assert "0.22.0" in out and "every teammate" in out
+
+
+def test_dry_report_says_would(git_repo, capsys, pin_version_0_22):
+    store = store_with_checks(git_repo)
+    assert run(store, "--settled-days", "0", "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "would be packed" in out
+    assert "would require Sidegraph >= 0.22.0" in out
+    assert (store / "verifications" / f"{C1}.json").exists()
+
+
+def test_no_records_line_with_only_kept_checks(git_repo, capsys, pin_version_0_22):
+    store = store_with_checks(git_repo, checks=())
+    assert run(store, "--settled-days", "0") == 0  # the record fold; nothing left to write
+    commit_all(git_repo, "folded", date=OLD)
+    put_check(store, check_body(C1, "D1"))  # untracked: kept
+    capsys.readouterr()
+    assert run(store, "--settled-days", "0") == 0
+    out = capsys.readouterr().out
+    assert "files written or removed" not in out
+    assert "untracked or modified" in out
+    assert "No records to fold or move." not in out
+
+
+def test_unlanded_checks_warn(git_repo, tmp_path, capsys, pin_version_0_22):
+    store = make_store(git_repo)
+    put_file(store, "decision", decision_body("D1", status="accepted"))
+    commit_all(git_repo, "base", date=OLD)
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    git(git_repo, "remote", "add", "origin", str(bare))
+    git(git_repo, "push", "-q", "origin", "main")
+    put_check(store, check_body(C1, "D1"))
+    commit_all(git_repo, "check", date=OLD)
+    assert run(store, "--settled-days", "0") == 0
+    out = capsys.readouterr().out
+    assert "packed-check-without-source" in out and f"verifications/{C1}.json" in out
+
+
+def _origin_at_head(repo: Path, tmp_path: Path) -> None:
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    git(repo, "remote", "add", "origin", str(bare))
+    git(repo, "push", "-q", "origin", "main")
+
+
+UNCHECKED = "Could not check whether the packed drift checks reached the default branch"
+
+
+def test_unlanded_unchecked_names_a_missing_origin_ref(git_repo, capsys, pin_version_0_22):
+    store = store_with_checks(git_repo)
+    assert run(store, "--settled-days", "0") == 0
+    assert f"{UNCHECKED} (no origin/<default> ref to compare with)." in capsys.readouterr().out
+
+
+def test_unlanded_unchecked_names_a_git_failure(git_repo, capsys, monkeypatch, pin_version_0_22):
+    store = store_with_checks(git_repo)
+
+    def boom(wt, paths):
+        raise maintenance_clock.ClockError("git merge-base failed (128): boom")
+
+    monkeypatch.setattr(maintenance_clock, "unlanded_paths", boom)
+    assert run(store, "--settled-days", "0") == 0
+    out = capsys.readouterr().out
+    assert f"{UNCHECKED} (git merge-base failed (128): boom)." in out
+    assert "no origin/<default>" not in out
+
+
+def test_dry_run_lists_unlanded_checks(git_repo, tmp_path, capsys, pin_version_0_22):
+    store = make_store(git_repo)
+    put_file(store, "decision", decision_body("D1", status="accepted"))
+    Store(store).close()
+    commit_all(git_repo, "base", date=OLD)
+    _origin_at_head(git_repo, tmp_path)
+    put_check(store, check_body(C1, "D1"))
+    commit_all(git_repo, "check", date=OLD)
+    assert run(store, "--settled-days", "0", "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "packed-check-without-source" in out and f"verifications/{C1}.json" in out
+    assert (store / "verifications" / f"{C1}.json").exists()
+
+
+def test_dry_and_real_stop_text_for_a_too_old_runtime_agree(git_repo, capsys, monkeypatch):
+    monkeypatch.setattr(sidegraph, "__version__", "0.21.0")
+    store = store_with_checks(git_repo)
+    assert run(store, "--settled-days", "0", "--dry-run") == 2
+    dry = capsys.readouterr().out
+    assert run(store, "--settled-days", "0") == 2
+    real = capsys.readouterr().out
+    line = next(x for x in dry.splitlines() if x.startswith("Drift checks stopped"))
+    assert line in real.splitlines()
+
+
+def test_verifications_file_blocks_checks_and_records_still_fold(
+    git_repo, capsys, pin_version_0_22
+):
+    """A ``verifications`` that is a regular file blocks the check fold only: the record fold of
+    the same run completes and the run exits 0, as before the check fold existed."""
+    store = committed_store(git_repo)
+    (store / "verifications").write_bytes(b"not a folder\n")
+    commit_all(git_repo, "odd", date=OLD)
+    assert run(store, "--settled-days", "0") == 0
+    out = capsys.readouterr().out
+    assert "Drift checks not folded" in out and "unreadable" in out
+    assert not (store / "decisions" / "D1.json").exists()  # the record fold ran
+    assert shard_bytes(store)

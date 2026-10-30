@@ -309,6 +309,9 @@ def test_stranded_kinds_reads_maintenance_run():
         integrity._stranded_kinds([S("decisions", False, None), S("shards", False, None)])
         == "a maintenance run, 1 decision file(s)"
     )
+    # a changed format marker is absorbed into any maintenance run
+    marker_run = [S("shards", False, None, "shards/x"), S("format", False, None, "format")]
+    assert integrity._stranded_kinds(marker_run) == "a maintenance run"
 
 
 def test_store_uncommitted_counts_a_changed_shard(world, monkeypatch):

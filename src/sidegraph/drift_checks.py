@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -10,12 +11,15 @@ import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from .gitenv import git_env
 from .schema import CheckedCodeFile, Decision, DriftCheck, Entity, is_safe_record_id
-from .store_layout import VERIFICATIONS_SUBDIR, is_regular_file, stat_entry
+from .store_format import encode_body, split_lines
+from .store_layout import NOT_A_FILE_REASON, PACKED_CHECKS_NAME, VERIFICATIONS_SUBDIR
+from .store_rules import _strict_equal
 
 # Fixed v1 vocabulary: future defaulted model fields do not invalidate existing checks.
 _DECISION_FIELDS = (
@@ -44,36 +48,227 @@ SCAN_MAX_BYTES = 8 * 1024 * 1024
 SCAN_MAX_LINES = 60_000
 
 
+@dataclass(frozen=True)
+class CheckOccurrence:
+    """One check file or one packed line, parsed once for every reader of the check store.
+
+    ``key`` orders a selectable occurrence: the file stem for a check file, whatever its body
+    says, and the body ``id`` for a packed line. ``None`` marks an unselectable occurrence,
+    which no reader consults.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§3)"""
+
+    kind: Literal["file", "line"]
+    path: str  # store-relative: verifications/<stem>.json or verifications/packed.shard
+    line_no: int | None
+    data: bytes  # the whole file, or the line without its newline
+    raw: object | None  # parsed JSON, or None when it does not parse
+    key: str | None
+    decision_id: str | None
+    selectable: bool
+
+
+def _parse(data: bytes) -> object | None:
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (ValueError, RecursionError):  # UnicodeDecodeError is a ValueError
+        return None
+
+
+def _occurrence(
+    kind: Literal["file", "line"],
+    path: str,
+    line_no: int | None,
+    data: bytes,
+    key_of: Callable[[dict], object],
+) -> CheckOccurrence:
+    raw = _parse(data)
+    decision_id = raw.get("decision_id") if isinstance(raw, dict) else None
+    key = key_of(raw) if isinstance(raw, dict) else None
+    selectable = (
+        isinstance(key, str)
+        and _CHECK_ID.fullmatch(key) is not None
+        and is_safe_record_id(decision_id)
+    )
+    return CheckOccurrence(
+        kind,
+        path,
+        line_no,
+        data,
+        raw,
+        key if selectable else None,  # type: ignore[arg-type]
+        decision_id if selectable else None,  # type: ignore[arg-type]
+        selectable,
+    )
+
+
+def is_check_file_name(name: str) -> bool:
+    """Whether a ``verifications/`` entry name is a check file's: the platform's glob rule for
+    ``*.json``, so ``<id>.JSON`` counts only where the file system folds case (Windows).
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§3)"""
+    return fnmatch.fnmatch(name, "*.json")
+
+
+def check_stem(name: str) -> str:
+    """A check file name without its ``.json`` suffix in any case, as ``Path.stem`` gave it."""
+    return name[: -len(".json")] if name.lower().endswith(".json") else name
+
+
+def file_occurrence(rel: str, data: bytes) -> CheckOccurrence:
+    """A check file's occurrence; ``rel`` is ``verifications/<stem>.json``. Decoded as the
+    reader always has (strict UTF-8, so a BOM is rejected).
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§3)"""
+    stem = check_stem(rel.rsplit("/", 1)[-1])
+    return _occurrence("file", rel, None, data, lambda _raw: stem)
+
+
+def packed_occurrences(data: bytes) -> list[CheckOccurrence]:
+    """One occurrence per line of ``packed.shard``, split as shard lines are.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§4)"""
+    rel = f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}"
+    return [
+        _occurrence("line", rel, number, line, lambda raw: raw.get("id"))
+        for number, line in split_lines(data)
+    ]
+
+
+def is_packable(body: object) -> bool:
+    """Whether ``body`` survives a packed line unchanged: it encodes, and decoding the result
+    gives a strictly equal body (a lone surrogate fails the first, ``NaN`` the second).
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§4)"""
+    try:
+        return _strict_equal(body, json.loads(encode_body(body)))
+    except (ValueError, RecursionError):  # UnencodableBody is a ValueError
+        return False
+
+
+def seam(label: str) -> None:
+    """A no-op between the listing and the reads of a check inventory; tests patch it to run
+    a writer at exactly that point."""
+
+
+class CheckInventory(NamedTuple):
+    occurrences: list[CheckOccurrence]
+    packed: bytes | None  # the exact bytes the packed occurrences came from (CAS baseline)
+    # "not a regular file" or "unreadable: <reason>" when packed.shard (or the folder holding
+    # it) cannot be read
+    packed_problem: str | None
+    skipped: tuple[str, ...] = ()  # store-relative check files that are not regular files
+
+
+def _unreadable(exc: OSError) -> str:
+    return f"unreadable: {exc.strerror or exc}"
+
+
+def load_check_inventory(store_dir: Path) -> CheckInventory:
+    """Every check file, then the packed file. The order is load-bearing: a fold publishes the
+    packed image before it unlinks files, so a file listed but gone at read time is held by the
+    later packed read, while the reverse order could miss both.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§5)"""
+    folder = store_dir / VERIFICATIONS_SUBDIR
+    if folder.is_symlink():
+        raise ValueError("verification directory is a symlink")
+    # A folder that cannot be listed (a regular file, a FIFO, no read permission) is a problem
+    # of the inventory, not an error: a fold is blocked and the record fold still runs.
+    try:
+        names = sorted(name for name in os.listdir(folder) if is_check_file_name(name))
+    except FileNotFoundError:
+        names = []
+    except OSError as exc:
+        return CheckInventory([], None, _unreadable(exc))
+    seam("checks:before_file_reads")
+    occurrences: list[CheckOccurrence] = []
+    skipped: list[str] = []
+    for name in names:
+        path = folder / name
+        rel = f"{VERIFICATIONS_SUBDIR}/{name}"
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode):  # a link, directory or FIFO is no check
+                skipped.append(rel)
+                continue
+            data = path.read_bytes()
+        except OSError:
+            continue  # gone since the listing, or unreadable: strict snapshot lint reports it
+        occurrences.append(file_occurrence(rel, data))
+    packed_path = folder / PACKED_CHECKS_NAME
+    try:
+        packed_stat = packed_path.lstat()
+    except FileNotFoundError:
+        return CheckInventory(occurrences, None, None, tuple(skipped))
+    except OSError as exc:
+        return CheckInventory(occurrences, None, _unreadable(exc), tuple(skipped))
+    if not stat.S_ISREG(packed_stat.st_mode):
+        return CheckInventory(occurrences, None, NOT_A_FILE_REASON, tuple(skipped))
+    try:
+        packed = packed_path.read_bytes()
+    except FileNotFoundError:
+        return CheckInventory(occurrences, None, None, tuple(skipped))
+    except OSError as exc:
+        return CheckInventory(occurrences, None, _unreadable(exc), tuple(skipped))
+    return CheckInventory([*occurrences, *packed_occurrences(packed)], packed, None, tuple(skipped))
+
+
+def _selectable(occs: Iterable[CheckOccurrence]) -> list[CheckOccurrence]:
+    return [occ for occ in occs if occ.selectable]
+
+
+def conflicting_keys(occs: Iterable[CheckOccurrence]) -> set[str]:
+    """Every key held by two or more selectable occurrences whose bodies are not strictly
+    equal, whatever their decision ids.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§3)"""
+    first: dict[str, CheckOccurrence] = {}
+    conflicts: set[str] = set()
+    for occ in _selectable(occs):
+        assert occ.key is not None
+        seen = first.setdefault(occ.key, occ)
+        if seen is not occ and not _strict_equal(seen.raw, occ.raw):
+            conflicts.add(occ.key)
+    return conflicts
+
+
 class SelectedCheck(NamedTuple):
     path: Path
-    raw: dict
+    raw: object
+    id: str  # the occurrence key: the file stem, or a packed line's body id
+    kind: str  # "file" or "line"
+    conflict: bool = False
 
     def validated(self) -> DriftCheck:
+        if self.conflict:
+            raise ValueError("check key is held by differing bodies")
         check = DriftCheck.model_validate(self.raw)
-        if check.id != self.path.stem:
+        if self.kind == "file" and check.id != self.path.stem:
             raise ValueError("check id does not match its file")
         return check
 
 
+def select_checks(occs: Iterable[CheckOccurrence], store_dir: Path) -> dict[str, SelectedCheck]:
+    """Per decision, the selectable occurrence with the highest key, chosen BEFORE any
+    validation so a malformed newest check never yields to an older valid one. On equal keys
+    the earlier occurrence (a check file) is kept.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§3)"""
+    items = _selectable(occs)
+    conflicts = conflicting_keys(items)
+    best: dict[str, CheckOccurrence] = {}
+    for occ in items:
+        assert occ.key is not None and occ.decision_id is not None
+        held = best.get(occ.decision_id)
+        if held is None or occ.key > (held.key or ""):
+            best[occ.decision_id] = occ
+    return {
+        decision_id: SelectedCheck(
+            store_dir / occ.path, occ.raw, occ.key or "", occ.kind, occ.key in conflicts
+        )
+        for decision_id, occ in best.items()
+    }
+
+
 def latest_checks(store_dir: Path) -> dict[str, SelectedCheck]:
-    """Select a bound highest-id capsule BEFORE full validation, never an older valid one."""
-    folder = store_dir / VERIFICATIONS_SUBDIR
-    if folder.is_symlink():
-        raise ValueError("verification directory is a symlink")
-    out: dict[str, SelectedCheck] = {}
-    for path in sorted(folder.glob("*.json")):
-        if not _CHECK_ID.fullmatch(path.stem):
-            continue
-        try:
-            if path.is_symlink() or not is_regular_file(stat_entry(path)):
-                continue
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):
-            continue  # strict snapshot lint reports malformed/unbound files
-        if not isinstance(raw, dict) or not is_safe_record_id(raw.get("decision_id")):
-            continue
-        out[raw["decision_id"]] = SelectedCheck(path, raw)
-    return out
+    """Select a bound highest-key check BEFORE full validation, never an older valid one.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§5)"""
+    inventory = load_check_inventory(store_dir)
+    if inventory.packed_problem is not None:
+        raise ValueError(f"{PACKED_CHECKS_NAME} is {inventory.packed_problem}")
+    return select_checks(inventory.occurrences, store_dir)
 
 
 def subject_digest(decision: dict, leaf_entities: list[dict]) -> str:

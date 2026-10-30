@@ -329,7 +329,7 @@ has nothing to migrate and says nothing. Doctor lists one finding at the store p
 
 ### maintenance-due
 
-A packed (format 2) store has work for `sidegraph-compact`: more than 200 per-record files, a
+A packed (format 2) store has work for `sidegraph-compact`: more than 200 per-record files (drift-check files count), a
 legacy `archive/` segment that maintenance would delete, a shard line in the wrong shard file or
 repeated with an equal body, or a stray shard file. Nothing is broken, and `sidegraph-verify`
 does not report these states. A segment that stays because one of its lines is not safe to
@@ -337,7 +337,7 @@ delete does not count. Run `sidegraph-compact` on the default branch. Doctor lis
 at the store path; `--check` reports it but does not exit `2` on it. A legacy segment that maintenance would delete counts, whether its records are already in shard
 lines or maintenance would pack them. The check does not consult git, so a record file that
 still has to settle (or is untracked) is not predicted. It reads the shard files once; a store
-with more than 200 per-record files is decided from the directory listing.
+with more than 200 per-record files (drift-check files included) is decided from the directory listing.
 
 ### version-skew
 

@@ -5006,6 +5006,7 @@ class Store:
         settled_days: int,
         dry_run: bool,
         any_branch: bool,
+        fold_checks: bool = False,
     ) -> maintenance.MaintenanceReport:
         """Run maintenance on a format-2 store: fold settled per-record files and archive
         segments into the shards, move misplaced lines, remove what the shards now hold, and
@@ -5025,8 +5026,13 @@ class Store:
         lines dropped); a skipped identity's line keeps its bytes but may move within its file.
         The default-branch condition belongs to the command, which passes ``any_branch`` for
         its message; this method never runs git outside the work tree it was asked about.
+        ``fold_checks`` also plans the drift-check fold (``plan.checks``) and, when the record
+        run completed (``report.stopped`` is ``None``), publishes it after the record deletions:
+        the store requirement is raised and flushed first, the packed image is published, and
+        only then are the check files removed (``maintenance.publish_check_fold``).
 
-        # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.1, §6.2)"""
+        # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.1, §6.2)
+        # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§6.1)"""
         del any_branch  # enforced by sidegraph-compact before it calls
         marker = store_layout.store_marker(self.path)
         if marker is None or marker.major != 2 or marker.shards is None:
@@ -5063,6 +5069,7 @@ class Store:
                 validate=validate_record_body,
                 report=report,
                 head_moved=head_moved,
+                fold_checks=fold_checks,
             )
             if planned is None:
                 return report
@@ -5073,15 +5080,71 @@ class Store:
                 preview.wrote, preview.empty_created = maintenance.simulate_writes(
                     self.path, plan, images
                 )
+                if plan.checks is not None:
+                    maintenance.preview_check_fold(
+                        plan.checks,
+                        held_requirement=marker.requirement,
+                        report=preview,
+                    )
+                    self._note_unlanded(wt, preview, preview.checks_packed)
                 return preview
             maintenance.stage("after_head_reread")
             expected = {self.path / rel: data for rel, data in inv.images.items()}
             report = maintenance.publish_plan(self.path, plan, expected, wt, head0)
+            if plan.checks is not None and report.stopped is None:
+
+                def raise_requirement() -> str | None:
+                    held = store_layout.store_marker(self.path)
+                    if not maintenance.check_requirement_needs_raise(
+                        held.requirement if held is not None else None
+                    ):
+                        return None
+                    if not store_layout.requirement_met(store_layout.PACKED_CHECKS_REQUIREMENT):
+                        raise ValueError(maintenance.too_old_runtime_message())
+                    self.raise_requirement(store_layout.PACKED_CHECKS_REQUIREMENT)
+                    maintenance.fsync_path(self.path / _FORMAT_MARKER_NAME)
+                    maintenance.fsync_dir(self.path)
+                    return store_layout.PACKED_CHECKS_REQUIREMENT
+
+                maintenance.publish_check_fold(
+                    self.path,
+                    plan.checks,
+                    raise_requirement=raise_requirement,
+                    head_changed=lambda: (
+                        wt is not None and maintenance_clock.read_head(wt) != head0
+                    ),
+                    report=report,
+                )
+                self._note_unlanded(wt, report, report.checks_packed)
             digest, _stats = self._compute_canonical_digest()
             self._rebuild_index_in_transaction(
                 inventory_from_disk(self.path, validate=validate_record_body), digest
             )
             return report
+
+    def _note_unlanded(
+        self,
+        wt: maintenance_clock.WorkTree | None,
+        report: maintenance.MaintenanceReport,
+        packed: list[str],
+    ) -> None:
+        """Fill ``checks_unlanded``: the packed check files absent from the tree of the merge
+        base with ``origin/<default>`` (spec section 6.4). Outside git there is nothing to
+        compare; a missing remote ref, or a git failure after the store was written, only sets
+        ``checks_unlanded_unchecked`` to the reason.
+        # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§6.4)"""
+        if wt is None or not packed:
+            return
+        prefix = f"{wt.store_rel}/"
+        try:
+            lost = maintenance_clock.unlanded_paths(wt, [prefix + rel for rel in packed])
+        except maintenance_clock.ClockError as exc:
+            report.checks_unlanded_unchecked = str(exc)
+            return
+        if lost is None:
+            report.checks_unlanded_unchecked = "no origin/<default> ref to compare with"
+        else:
+            report.checks_unlanded = [p.removeprefix(prefix) for p in lost]
 
     def compact(
         self, *, older_than_days: int | None = None, dry_run: bool = False

@@ -1132,7 +1132,7 @@ def _apply_drift_checks(
             if rid in old_entries:
                 updates[rid] = old_entries[rid]._replace(
                     check_reason="latest scoped check is invalid; capture advisory retained",
-                    check_id=capsule.path.stem,
+                    check_id=capsule.id,
                 )
             continue  # strict snapshot lint reports the malformed capsule/record
         if subject != check.subject_digest:

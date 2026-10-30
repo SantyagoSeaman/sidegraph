@@ -420,5 +420,11 @@ drafts. Proposed content stays below accepted memory and may be hidden by regula
 
 Scoped drift checks are committed auxiliary history under `.sidegraph/verifications/`.
 Use the current `sidegraph-verify` for their schema/reference checks and write-once
-`--against` enforcement; older verifiers ignore them. CI should not create semantic
+`--against` enforcement; older verifiers ignore them. On a format-2 store
+`sidegraph-compact` folds them into `verifications/packed.shard` and drops dead ones, and the
+first such run raises the store's requirement to 0.22.0: move the CI pin to 0.22.0 or newer
+before that pull request merges, or a pinned older `sidegraph-verify` fails with
+`requirement-above-verifier`. `--against` accepts a fold only when each line equals a check
+already on the target branch (`packed-check-without-source`), so land newly recorded checks
+before folding them. CI should not create semantic
 inspection assertions automatically merely to obtain fewer drift warnings.

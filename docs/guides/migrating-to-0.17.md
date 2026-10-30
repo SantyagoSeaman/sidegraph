@@ -126,7 +126,7 @@ Maintenance only folds a file that has been on your branch for at least **7 days
 with `--settled-days`), runs on the default branch, and never commits. The 7-day window exists
 so that a record still being ratified or edited stays a plain file where merges handle it
 well. After a run, commit `.sidegraph/` in a pull request. Both SessionStart and
-`sidegraph-doctor` say when maintenance is due: more than 200 per-record files, a legacy
+`sidegraph-doctor` say when maintenance is due: more than 200 per-record files (drift-check files count), a legacy
 `archive/` segment that maintenance would delete, a shard line in the wrong shard file or
 repeated, or a stray shard file.
 

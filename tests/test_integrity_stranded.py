@@ -872,3 +872,69 @@ def test_t1_an_old_uncommitted_domain_snapshot_is_a_stranded_store_write(tmp_pat
     assert only_problem(UNCOMMITTED, store).line == uncommitted_line(
         store, 1, "25 hours", "1 other"
     )
+
+
+# -- drift-check folds ----------------------------------------------------------------------
+# see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§7, §12 N2)
+
+
+def _committed_checks(tmp_path: Path, count: int = 3) -> tuple[Path, Path, list[str]]:
+    """A repository whose store has ``count`` committed check files."""
+    repo, store = project(tmp_path)
+    ids = [ulid_at(100 + i) for i in range(count)]
+    for cid in ids:
+        write(store / "verifications" / f"{cid}.json", {"id": cid})
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "--no-verify", "-m", "checks")
+    return repo, store, ids
+
+
+def test_check_only_fold_is_a_maintenance_run(tmp_path):
+    """N2: packed.shard written, check files deleted, format raised: one maintenance run."""
+    _repo, store, ids = _committed_checks(tmp_path)
+    for cid in ids:
+        (store / "verifications" / f"{cid}.json").unlink()
+    age_file(write(store / "verifications" / "packed.shard", {"id": "x"}), 30.5)
+    (store / "format").write_text("sidegraph-store 0.22.0\n", encoding="utf-8")
+    age_file(store / "format", 30.5)
+    age_file(store / "verifications", 30.5)
+
+    assert only_problem(UNCOMMITTED, store).line == uncommitted_line(
+        store, 5, "30 hours", "a maintenance run"
+    )
+
+
+def test_drop_only_fold_is_a_maintenance_run(tmp_path):
+    """N2: check files deleted and the marker raised, no packed.shard written."""
+    _repo, store, ids = _committed_checks(tmp_path)
+    for cid in ids:
+        (store / "verifications" / f"{cid}.json").unlink()
+    (store / "format").write_text("sidegraph-store 0.22.0\n", encoding="utf-8")
+    age_file(store / "format", 30.5)
+    age_file(store / "verifications", 30.5)
+
+    assert only_problem(UNCOMMITTED, store).line == uncommitted_line(
+        store, 4, "30 hours", "a maintenance run"
+    )
+
+
+def test_a_new_check_file_beside_a_fold_is_still_listed(tmp_path):
+    """An untracked check file is not part of the run; it keeps its own kind."""
+    _repo, store, ids = _committed_checks(tmp_path)
+    (store / "verifications" / f"{ids[0]}.json").unlink()
+    age_file(write(store / "verifications" / f"{ulid_at(30.5)}.json"), 30.5)
+    age_file(store / "verifications", 30.5)
+
+    assert only_problem(UNCOMMITTED, store).line == uncommitted_line(
+        store, 2, "30 hours", "a maintenance run, 1 verification file(s)"
+    )
+
+
+def test_guard_a_new_check_file_alone_is_a_verification_file(tmp_path):
+    """Guard (passes before the change): a lone new check file is no maintenance run."""
+    _repo, store = project(tmp_path)
+    age_file(write(store / "verifications" / f"{ulid_at(30.5)}.json"), 30.5)
+
+    assert only_problem(UNCOMMITTED, store).line == uncommitted_line(
+        store, 1, "30 hours", "1 verification file(s)"
+    )

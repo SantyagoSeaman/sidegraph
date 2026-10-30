@@ -25,7 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import maintenance_clock
+from . import check_fold, drift_checks, maintenance_clock
 from .maintenance_clock import WorkTree
 from .store_format import (
     GITATTRIBUTES_LINE,
@@ -48,7 +48,13 @@ from .store_layout import (
     ARCHIVE_SUBDIR,
     FORMAT_MARKER_NAME,
     GITATTRIBUTES_NAME,
+    PACKED_CHECKS_NAME,
+    PACKED_CHECKS_REQUIREMENT,
     SHARDS_SUBDIR,
+    VERIFICATIONS_SUBDIR,
+    release_tuple,
+    requirement_met,
+    running_version,
     symlinked_internals,
 )
 from .store_rules import (
@@ -228,6 +234,7 @@ class Plan:
     segment_deletions: list[str] = field(default_factory=list)
     skipped: list[Skip] = field(default_factory=list)
     kept: list[tuple[str, str]] = field(default_factory=list)
+    checks: check_fold.CheckPlan | None = None  # set only when the run folds drift checks
 
 
 # -- skips -----------------------------------------------------------------------------------
@@ -680,6 +687,17 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def fsync_path(path: Path) -> None:
+    """Flush the regular file at ``path``; ``FileNotFoundError`` when it is gone. Windows flushes
+    a regular file only through a handle with write access.
+    see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.2)"""
+    fd = os.open(path, (os.O_RDWR if _is_windows() else os.O_RDONLY) | getattr(os, "O_BINARY", 0))
+    try:
+        fsync_fd(fd)
+    finally:
+        os.close(fd)
+
+
 def _read_if_regular(path: Path) -> bytes | None:
     """The bytes of a regular file, ``None`` when absent. A symlink or any other non-regular
     entry raises :class:`StoreChanged`: it is not a file this run may replace or read through."""
@@ -758,6 +776,21 @@ class MaintenanceReport:
     empty_created: list[str] = field(default_factory=list)  # ``wrote`` entries still 0 bytes
     # findings of the store as the command found it that do not stop it, printed after the report
     carried: list[str] = field(default_factory=list)
+    # the drift-check fold (drift-checks design, section 6.4); ``checks_packed`` and
+    # ``checks_dropped`` list the check files a real run actually removed, ``checks_blocked`` is
+    # the planner's blocking problem (the run completes), ``checks_stopped`` only the publisher's
+    # own stops
+    checks_packed: list[str] = field(default_factory=list)
+    checks_dropped: list[str] = field(default_factory=list)
+    checks_kept: list[tuple[str, str]] = field(default_factory=list)
+    checks_blocked: str | None = None
+    checks_stopped: str | None = None
+    requirement_raised: str | None = None
+    checks_unlanded: list[str] = field(default_factory=list)
+    # keys of packed lines dropped as dead; ``checks_unlanded_unchecked`` is the reason the
+    # landed-on-the-default-branch comparison could not be made (packed checks exist)
+    checks_dropped_lines: list[str] = field(default_factory=list)
+    checks_unlanded_unchecked: str | None = None
 
 
 def _planned_folds(plan: Plan) -> list[str]:
@@ -788,11 +821,128 @@ def report_from_plan(plan: Plan, *, shallow: bool, dry_run: bool) -> Maintenance
     )
 
 
+CHECKS_LEFT_AS_THEY_ARE = "; drift checks left as they are"
+
+
+def check_requirement_needs_raise(held_requirement: str | None) -> bool:
+    """Whether a store holding ``held_requirement`` must have its requirement raised to
+    ``PACKED_CHECKS_REQUIREMENT`` before checks are packed (never lowers a higher one).
+    Shared by the dry run and the real run.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§6.3)"""
+    have = release_tuple(held_requirement) if held_requirement else None
+    need = release_tuple(PACKED_CHECKS_REQUIREMENT)
+    return have is None or need is None or have < need
+
+
+def too_old_runtime_message() -> str:
+    """Why a running Sidegraph below ``PACKED_CHECKS_REQUIREMENT`` cannot fold checks: the
+    text of the dry run's stop and of the real run's raise failure.
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§6.3)"""
+    return (
+        f"cannot require Sidegraph >= {PACKED_CHECKS_REQUIREMENT}: this is {running_version()}, "
+        "and a store may only require a version that is already installed where the "
+        "requirement is raised; upgrade first"
+    )
+
+
+def preview_check_fold(
+    plan: check_fold.CheckPlan, *, held_requirement: str | None, report: MaintenanceReport
+) -> None:
+    """The dry run of the drift-check fold (section 6.4): fill the ``checks_*`` fields and
+    append to ``report.wrote`` what ``publish_check_fold`` would write or remove, in its order:
+    the marker when the requirement is raised, the packed file only when its bytes change, then
+    each check file removed. Writes nothing.
+
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§6.4)"""
+    report.checks_kept = list(plan.kept)
+    report.checks_blocked = plan.blocked
+    if not plan.has_work():
+        return
+    wanted = PACKED_CHECKS_REQUIREMENT
+    if check_requirement_needs_raise(held_requirement):
+        if not requirement_met(wanted):
+            report.checks_stopped = f"{too_old_runtime_message()}{CHECKS_LEFT_AS_THEY_ARE}"
+            return
+        report.requirement_raised = wanted
+        _note_wrote(report, FORMAT_MARKER_NAME)
+    if (plan.current is not None or plan.image) and plan.image != plan.current:
+        _note_wrote(report, f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}")
+    report.checks_packed = list(plan.packed)
+    report.checks_dropped = list(plan.dropped)
+    report.checks_dropped_lines = list(plan.dropped_lines)
+    for rel in sorted([*plan.packed, *plan.dropped]):
+        _note_wrote(report, rel)
+
+
 # a few new empty buckets are named; a first fold's many are one line
 _COLLAPSE_EMPTY_ABOVE = 4
 
 
 _CARRIED_SHOWN = 20
+
+
+def _has_check_lines(r: MaintenanceReport) -> bool:
+    return bool(
+        r.checks_packed
+        or r.checks_dropped
+        or r.checks_dropped_lines
+        or r.checks_kept
+        or r.checks_blocked
+        or r.checks_stopped
+        or r.requirement_raised
+    )
+
+
+def _render_checks(r: MaintenanceReport) -> list[str]:
+    """The drift-check lines of the report, printed after the record lines (section 6.4)."""
+    out: list[str] = []
+    packed_name = f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}"
+    if r.checks_stopped:
+        out.append(f"Drift checks stopped: {r.checks_stopped}")
+    if r.checks_blocked:
+        out.append(f"Drift checks not folded: {r.checks_blocked}")
+    for items, done, would in (
+        (
+            r.checks_packed,
+            f"drift check files packed into {packed_name}",
+            f"drift check files would be packed into {packed_name}",
+        ),
+        (
+            r.checks_dropped,
+            "drift check files dropped (their decision has a newer check or is retired)",
+            "drift check files would be dropped (their decision has a newer check or is retired)",
+        ),
+        (
+            r.checks_dropped_lines,
+            f"packed drift checks dropped from {packed_name} (dead)",
+            f"packed drift checks would be dropped from {packed_name} (dead)",
+        ),
+    ):
+        if items:
+            out.append(f"{len(items)} {would if r.dry_run else done}:")
+            out.extend(f"  {item}" for item in items)
+    if r.checks_kept:
+        out.append(f"{len(r.checks_kept)} drift check files kept:")
+        out.extend(f"  {path}: {reason}" for path, reason in r.checks_kept)
+    if r.requirement_raised:
+        verb = "would require" if r.dry_run else "now requires"
+        out.append(
+            f"The store {verb} Sidegraph >= {r.requirement_raised}: every teammate and CI pin "
+            f"then needs {r.requirement_raised} or newer."
+        )
+    if r.checks_unlanded:
+        out.append(
+            f"{len(r.checks_unlanded)} packed drift checks have a file that has not reached the "
+            "default branch; sidegraph-verify --against will report them as "
+            "packed-check-without-source until it does:"
+        )
+        out.extend(f"  {path}" for path in r.checks_unlanded)
+    if r.checks_unlanded_unchecked:
+        out.append(
+            "Could not check whether the packed drift checks reached the default branch "
+            f"({r.checks_unlanded_unchecked})."
+        )
+    return out
 
 
 def render_report(r: MaintenanceReport) -> str:
@@ -836,7 +986,16 @@ def render_report(r: MaintenanceReport) -> str:
     if r.kept:
         out.append(f"{len(r.kept)} files and segments kept:")
         out.extend(f"  {path}: {reason}" for path, reason in r.kept)
-    if not (r.folded or r.moved or r.deleted_files or r.deleted_segments or r.wrote or r.stopped):
+    out.extend(_render_checks(r))
+    if not (
+        r.folded
+        or r.moved
+        or r.deleted_files
+        or r.deleted_segments
+        or r.wrote
+        or r.stopped
+        or _has_check_lines(r)
+    ):
         out.append("No records to fold or move.")
     if r.wrote:
         title = "files would be written or removed" if r.dry_run else "files written or removed"
@@ -852,7 +1011,7 @@ def render_report(r: MaintenanceReport) -> str:
         if len(r.carried) > _CARRIED_SHOWN:
             out.append(f"  and {len(r.carried) - _CARRIED_SHOWN} more")
     if not r.dry_run and r.wrote:
-        if r.stopped:
+        if r.stopped or r.checks_stopped:
             out.append(
                 "The run stopped after writing these files; re-run to finish, or review and "
                 "commit them."
@@ -978,16 +1137,9 @@ def _prepare(run: _Run) -> None:
         return
     for path in [*existing, run.store_dir / FORMAT_MARKER_NAME]:
         try:
-            # Windows flushes a regular file only through a handle with write access
-            fd = os.open(
-                path, (os.O_RDWR if _is_windows() else os.O_RDONLY) | getattr(os, "O_BINARY", 0)
-            )
+            fsync_path(path)
         except FileNotFoundError:
             raise StoreChanged(f"{path.name} vanished under the run") from None
-        try:
-            fsync_fd(fd)
-        finally:
-            os.close(fd)
     run.sync(run.shards_dir)
     run.sync(run.store_dir)
     checkpoint("prep:fsync")
@@ -1299,6 +1451,124 @@ def publish_plan(
     return report
 
 
+def _note_wrote(report: MaintenanceReport, rel: str) -> None:
+    if rel not in report.wrote:
+        report.wrote.append(rel)
+
+
+def publish_check_fold(
+    store_dir: Path,
+    plan: check_fold.CheckPlan,
+    *,
+    raise_requirement: Callable[[], str | None],
+    head_changed: Callable[[], bool],
+    report: MaintenanceReport,
+) -> None:
+    """Carry out the drift-check fold (section 6.3): raise and flush the store requirement,
+    re-read ``HEAD``, publish the packed image against the bytes the plan read, re-read ``HEAD``,
+    then unlink each packed or dropped check file after re-reading the packed file and the check
+    file (and, before a drop, ``HEAD``). Nothing is deleted before the image that holds it is
+    durable. ``raise_requirement`` returns the new version, ``None`` when none was needed, and
+    raises ``ValueError`` when it fails; ``head_changed`` is a pure predicate. The publisher
+    writes only ``checks_*`` fields of ``report`` and never ``report.stopped``.
+
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§6.3, §6.4)"""
+    report.checks_kept = list(plan.kept)
+    report.checks_blocked = plan.blocked
+    if not plan.has_work():
+        return
+    verifications = store_dir / VERIFICATIONS_SUBDIR
+    packed_path = verifications / PACKED_CHECKS_NAME
+    packed_rel = f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}"
+    try:
+        _refuse_links(store_dir)
+        try:
+            raised = raise_requirement()
+        except ValueError as exc:
+            report.checks_stopped = f"{exc}{CHECKS_LEFT_AS_THEY_ARE}"
+            return
+        if raised is not None:
+            report.requirement_raised = raised
+            _note_wrote(report, FORMAT_MARKER_NAME)
+        checkpoint("checks:raise")
+        stage("checks:after_raise")
+        stage("checks:before_publish")
+        if head_changed():
+            report.checks_stopped = "HEAD moved before the drift checks were published"
+            return
+        if plan.current is None and not plan.image:
+            pass  # a drop-only fold of files: no packed file to create, none to flush
+        elif plan.image != plan.current:
+            publish_bytes(packed_path, plan.image, expect=plan.current)
+            _note_wrote(report, packed_rel)
+        else:
+            # An unchanged image may still be only in the page cache. The entry is checked
+            # first: opening a FIFO that replaced the file would block under the reservation.
+            if _read_if_regular(packed_path) != plan.current:
+                raise StoreChanged(f"{PACKED_CHECKS_NAME} changed under the run")
+            try:
+                fsync_path(packed_path)
+            except FileNotFoundError:
+                raise StoreChanged(f"{PACKED_CHECKS_NAME} vanished under the run") from None
+        fsync_dir(verifications)
+        report.checks_dropped_lines = list(plan.dropped_lines)
+        checkpoint("checks:publish")
+        stage("checks:after_publish")
+        if head_changed():
+            report.checks_stopped = "HEAD moved after the drift checks were published"
+            return
+        _refuse_links(store_dir)
+    except StoreChanged as exc:
+        report.checks_stopped = f"the store changed under the run ({exc}); nothing was deleted"
+        return
+
+    witness = None if plan.current is None and not plan.image else plan.image
+    removed = False
+    names = sorted([*plan.packed, *plan.dropped])
+    for position, rel in enumerate(names):
+        stage(f"checks:before_unlink:{rel.rpartition('/')[2]}")
+        # A drop has no line in the image, so a branch switch since step 4 could make it live
+        # again; a packed file's body is in the witnessed image and needs no re-read.
+        if rel in plan.dropped and head_changed():
+            report.checks_stopped = "HEAD moved during the unlinks; remaining files kept"
+            report.checks_kept.extend((r, "HEAD moved") for r in names[position:])
+            break
+        path = store_dir / rel
+        try:
+            packed_ok = _read_if_regular(packed_path) == witness
+        except StoreChanged:
+            packed_ok = False
+        if not packed_ok:
+            report.checks_stopped = (
+                f"{PACKED_CHECKS_NAME} changed since it was published; remaining files kept"
+            )
+            report.checks_kept.extend(
+                (r, "packed file changed since it was written") for r in names[position:]
+            )
+            break
+        try:
+            data = _read_if_regular(path)
+        except StoreChanged:  # a directory, FIFO or link took the file's place
+            report.checks_kept.append((rel, "changed since the plan"))
+            continue
+        if data is None:
+            continue  # already gone
+        if data != plan.read[rel]:
+            report.checks_kept.append((rel, "changed since the plan"))
+            continue
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            continue  # vanished after its witness read: already gone
+        removed = True
+        (report.checks_packed if rel in plan.packed else report.checks_dropped).append(rel)
+        _note_wrote(report, rel)
+        checkpoint(f"checks:unlink:{rel.rpartition('/')[2]}")
+    if removed:
+        fsync_dir(verifications)
+    report.checks_kept.sort()
+
+
 def plan_run(
     store_dir: Path,
     wt: WorkTree | None,
@@ -1312,14 +1582,17 @@ def plan_run(
     report: MaintenanceReport,
     head_moved: Callable[[str], bool],
     assume_major: int | None = None,
+    fold_checks: bool = False,
 ) -> tuple[Inventory, Plan] | None:
     """Steps 1 and 2 of a run, shared by a real run, a dry run and the migration preview: the
     inventory, the entry conditions, the dirty set and the plan. ``None`` when the run stops
     here: ``report.stopped`` says why (an entry condition, ``HEAD`` moving, or a store entry
     that is a symlink). ``assume_major=2`` reads shard files under a marker below major 2,
-    classified with ``n`` (migration only). Writes nothing.
+    classified with ``n`` (migration only). ``fold_checks`` also plans the drift-check fold into
+    ``plan.checks``; migration never asks for it. Writes nothing.
 
-    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.1, §6.2)"""
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.1, §6.2)
+    # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§6.1)"""
     if head_moved("before the run took the store"):
         return None
     inv = inventory_from_disk(
@@ -1333,9 +1606,22 @@ def plan_run(
     stage("after_step1")
     if head_moved("while the inventory was built"):
         return None
+    # The check inventory is read before the dirty set, so the set is never older than the bytes
+    # it judges (drift-checks design, section 6.1).
+    checks_inv = drift_checks.load_check_inventory(store_dir) if fold_checks else None
     dirty = maintenance_clock.dirty_paths(wt, head0 or "") if wt is not None else frozenset()
     elig = Eligibility(settled_days, now, landing, dirty, wt.store_rel if wt is not None else "")
     plan = plan_maintenance(inv, elig, n)
+    if checks_inv is not None:
+        plan.checks = check_fold.plan_check_fold(
+            checks_inv.occurrences,
+            dirty=None if wt is None else dirty,
+            store_rel=wt.store_rel if wt is not None else "",
+            decisions=check_fold.decision_states(inv),
+            packed=checks_inv.packed,
+            packed_problem=checks_inv.packed_problem,
+            skipped=checks_inv.skipped,
+        )
     stage("after_step2")
     if head_moved("while the plan was made"):
         return None

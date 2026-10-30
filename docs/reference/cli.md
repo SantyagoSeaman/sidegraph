@@ -1097,6 +1097,16 @@ verbatim, moves misplaced shard lines into their buckets, deletes a file or segm
 its body is held by a shard line, and rebuilds the index. It transforms nothing and never
 commits: review the changes under `.sidegraph/` and commit them in a pull request.
 
+It also folds the committed scoped drift checks (`verifications/<id>.json`) into one file,
+`verifications/packed.shard`, and drops the dead ones: a check whose decision has a check with a
+higher id, or whose decision is superseded, rejected or deprecated. A check file folds when it
+is tracked and unmodified against `HEAD`; the `--settled-days` clock does not apply to checks.
+Outside a git work tree no check folds. The **first** run that packs or drops a check raises
+`requires-sidegraph` in `.sidegraph/format` to `0.22.0` (a requirement already higher stays):
+after that, 0.17 to 0.21 refuse the store, so every teammate and CI pin needs 0.22.0 or newer
+first. The dry run says so ("The store would require Sidegraph >= 0.22.0"). `sidegraph-migrate`
+never folds checks.
+
 - **Branch.** It runs only on the repository's default branch (the target of `origin/HEAD`, else
   `main` or `master`); on any other branch, or on a detached `HEAD`, it refuses with exit `2`
   unless `--any-branch` is given. The same rule applies to `--dry-run`. Outside a git work tree
@@ -1113,6 +1123,18 @@ commits: review the changes under `.sidegraph/` and commit them in a pull reques
   run wrote or removed (would write or remove, in a dry run), shard files created, republished
   or unlinked included; the commit instruction follows a real run that wrote any, and a run that
   wrote nothing says `No records to fold or move.`
+  After the record lines come the drift-check lines: `N drift check files packed into
+  verifications/packed.shard`, `N drift check files dropped (their decision has a newer check or
+  is retired)`, `N packed drift checks dropped from verifications/packed.shard (dead)` and
+  `N drift check files kept`, with a reason per file (`untracked or modified`, `unselectable`,
+  `invalid check`, `id differs from file name`, `not packable`, `decision missing`, `not a
+  regular file`, `outside a git work tree`, or `HEAD moved` when a branch switch stopped the
+  deletions); `The store now requires Sidegraph >= 0.22.0: …` after a raise; and
+  `Drift checks not folded: …` when a damaged or conflicting packed line or an unreadable
+  `verifications/` blocks the check fold (the record fold still runs and the exit code stays
+  `0`). A packed check whose file has not
+  reached the default branch is listed with a warning that `sidegraph-verify --against` reports
+  it as `packed-check-without-source` until it does.
 - **Exit codes.** `0` after a completed run, a no-op included. `2` when the command refuses
   before it opens the store, with a one-line message: a flag that belongs to the other format
   (`--older-than` here, `--settled-days` or `--any-branch` on format 1), a negative
@@ -1122,7 +1144,9 @@ commits: review the changes under `.sidegraph/` and commit them in a pull reques
   run stops: the report is printed with a `Stopped:` line giving the reason, for a store that
   fails an entry condition (a bad shard line, a shard conflict, an identity with no effective
   record, shard file names that differ only in case) or a `HEAD` or shard file that changed
-  under the run. `1` when the store cannot be opened or written (for example a full disk) or
+  under the run, and for the check fold when the requirement cannot be raised (the running
+  Sidegraph is older than 0.22.0; a dry run predicts this stop) or the packed file
+  or `HEAD` changed under the run (`Drift checks stopped: …`). `1` when the store cannot be opened or written (for example a full disk) or
   another writer holds it (`the store is busy, try again`); an interrupted or busy run is safe
   to repeat. A dry run writes no tracked content: it may only refresh the derived, gitignored
   `index.db`.
@@ -1368,7 +1392,8 @@ plain-text line):
 | `dangling-supersedes` | snapshot | a `supersedes` id doesn't resolve to any record, hot or archived (a file skipped for its unsafe name still counts as the record it holds, so renaming it back is the only heal; a regular file with a safe name that does not decode counts as the record its name names, so it gives one `parse-error` and no finding here; a directory or other entry named like a record file does not) |
 | `dangling-binding-entity` | snapshot | a binding's `entity_id` doesn't resolve to any `entities/<id>.json` (an entity held by a file skipped for its unsafe name still counts, and so does an entity file that does not decode) |
 | `dangling-fact-support` | snapshot | a fact's `supports` id doesn't resolve to any decision (a file skipped for its unsafe name, or one that does not decode, still counts, as for `dangling-supersedes`) |
-| `dangling-drift-check` | snapshot | an auxiliary verification references no hot or archived decision; terminal targets remain valid history (a decision file with a safe name that does not decode counts, as for `dangling-supersedes`) |
+| `packed-checks-without-requirement` | snapshot | `verifications/packed.shard` exists but the `format` marker is not major 2 with `requires-sidegraph >= 0.22.0`; the detail names the missing part. On a major-2 store run `sidegraph-require --sidegraph 0.22.0` and commit the marker; on format 1 run `sidegraph-migrate`, or remove `verifications/packed.shard` |
+| `dangling-drift-check` | snapshot | an auxiliary verification (a check file or a line of `packed.shard`) references no hot or archived decision; terminal targets remain valid history (a decision file with a safe name that does not decode counts, as for `dangling-supersedes`) |
 | `dangling-parent` | snapshot | a domain's `parent_id` doesn't resolve to any domain, hot or archived (a superseded, dropped or archived parent still counts, as the write path only checks that it exists; a file skipped for its unsafe name, or one that does not decode, counts too, as for `dangling-supersedes`) |
 | `parent-cycle` | snapshot | the `parent_id` chain of some domains loops back on itself (a domain that is its own parent included); reported once per cycle, at the domain with the smallest id on it, and not for a domain that merely hangs off the cycle |
 | `duplicate-ulid` | snapshot | the same internal id appears in more than one canonical location — two hot files, a hot file plus any archive copy, or two archive segments whose payloads for that id actually differ. **Exempt:** two or more archive segments carrying byte-*identical* payloads for the same id — a sanctioned cross-branch `sidegraph-compact` merge (independent compaction on two branches, later merged) — see [`reference/store-format.md#archive-segments-sidegraph-compact`](store-format.md#archive-segments-sidegraph-compact). **On a packed (format 2) store** a hot file beside an archive line is not a duplicate when the file holds the line's state or a legal successor of it, and a shard line beside an archive line is not when it does or when the archive line is a legal successor of the shard line; a per-record file beside a shard line is the normal state before maintenance and is judged by `shadow-divergence` |
@@ -1383,11 +1408,12 @@ plain-text line):
 | `binding-entry-dropped` | snapshot | a `bindings/<id>.json` file lacks an entity that the shard line of the same record binds, typically after a merge: add the anchor back. Entries of derived `community:*` entities are not counted |
 | `shard-name-case` | snapshot | two files of `shards/` whose names differ only in case, or a `*.shard` file whose lower-cased name is a bucket name while the name itself is not (`0A.SHARD`); on a case-insensitive checkout git writes both into one file |
 | `shards-without-format2` | snapshot | `shards/*.shard` files beside a `format` marker below major 2: run `sidegraph-migrate`, or restore the major-2 marker |
-| `illegal-field-change` | transition | an immutable field changed between `GIT_REF` and the working tree (the detail names the field); also covers immutable raw keys lost during hot-to-archive transfer, or a modified already-published archive segment or auxiliary verification (write-once) |
+| `illegal-field-change` | transition | an immutable field changed between `GIT_REF` and the working tree (the detail names the field); also covers immutable raw keys lost during hot-to-archive transfer, or a modified already-published archive segment or auxiliary verification check file (write-once) |
 | `illegal-status-jump` | transition | `status` changed to something that isn't a real write-path transition for that record kind |
 | `valid-to-unset` | transition | `valid_to` reverted from a value back to `null` |
 | `valid-to-changed` | transition | `valid_to` changed from one value to a *different* value (only `null → value`, once, is legal) |
-| `illegal-deletion` | transition | a record file — or an already-published archive segment — was deleted with no sanctioned reason. The one exception: a decision/domain preserved by same-kind, same-ID archive copies in the new tree, every copy schema-valid, compactable and a legal raw-payload transition from the baseline (a legitimate `sidegraph-compact`). An ID match alone is insufficient. A file the store never loaded (an unsafe file name, or an unsafe id in the baseline) is not a record: deleting or editing it adds no transition finding, and the snapshot's `unsafe-record-id` covers it while it exists |
+| `illegal-deletion` | transition | a record file — or an already-published archive segment — was deleted with no sanctioned reason (also a drift check, as a file or a line of `verifications/packed.shard`, that is still the selected check of an open decision in the new tree and is gone or changed; the detail names it). The one exception for records: a decision/domain preserved by same-kind, same-ID archive copies in the new tree, every copy schema-valid, compactable and a legal raw-payload transition from the baseline (a legitimate `sidegraph-compact`). An ID match alone is insufficient. A file the store never loaded (an unsafe file name, or an unsafe id in the baseline) is not a record: deleting or editing it adds no transition finding, and the snapshot's `unsafe-record-id` covers it while it exists |
+| `packed-check-without-source` | transition | on a packed (format 2) store, a line of `verifications/packed.shard` that equals no check of the same id committed in `GIT_REF`: a hand-written or edited line, or a check recorded and folded in the same pull request (`sidegraph-compact` warns about it beforehand). Land the check on the target branch first, then fold |
 | `shard-body-without-source` | transition | on a packed (format 2) store, a shard line added or changed since `GIT_REF` whose body is not the body of any occurrence of the same record in `GIT_REF` (a per-record file, a shard line or an archive line). `sidegraph-compact` only ever writes bodies it read, so a hand-forged line, or an edit folded in the same pull request that made it, is reported: land the edit on the target branch first, then fold |
 | `format-downgrade` | transition | the `format` marker went from major 2 in `GIT_REF` to a lower major. The one legal shape is the full rollback: no `shards/*.shard` file is left and every record is back in its per-record file with all its keys |
 
@@ -1448,8 +1474,15 @@ which methods):
   bare, unconditional upsert) — only a *deletion* is flagged (`illegal-deletion`); no
   field-level check runs for initiatives.
 - **Auxiliary verifications** (`verifications/*.json`): write-once, including formatting;
-  additions are schema/reference-checked by the snapshot layer, every later modification
-  or deletion is illegal. Older verifier versions ignore this directory.
+  additions are schema/reference-checked by the snapshot layer, and every later modification
+  is illegal. On a format-1 store a deletion is illegal too. On a packed (format 2) store a
+  deletion is judged per check: a check may go only when the new tree still holds a check with
+  the same id and body (a check file folded into `verifications/packed.shard`), or the check is
+  dead in the new tree (the decision has a check with a higher id, or is superseded, rejected
+  or deprecated); otherwise it is `illegal-deletion`. Removing a check no reader could use
+  (an unselectable one, such as a damaged line) is legal, and so is deleting an older check by hand when a newer one exists.
+  Every line of `packed.shard` must equal a check committed in `GIT_REF`
+  (`packed-check-without-source`). Older verifier versions ignore this directory.
 - **Archive segments** (`archive/*.jsonl`): write-once — a brand-new segment (git status
   `A`) is legal; any modification of an already-published one is always illegal, and so is
   deleting it, except in a format-2 store (see above), where `sidegraph-migrate` may delete a
@@ -1571,7 +1604,7 @@ plain-text line):
 | `refresh-helper-outdated` | a git hook runs an older graph refresh helper that uses directory-based locking (unsafe with uutils `mkdir`), or whose Graphify line lacks `GRAPHIFY_NO_AUTO_REFRESH=1` (Graphify 0.9.87 and later can rewrite installed agent skills after an upgrade). Advisory, per clone (the helper lives in `.git/hooks`); **`--check` exits `2` on it**. `maintenance-due` is the one finding it does not escalate. One hook that runs the helper is enough, and a recorded decline does not silence it. The fix is `sidegraph-init` (no flag), which refreshes the helper and keeps a recorded hook choice. Silent outside a git repository, with no helper, or when no hook runs it |
 | `engine-version` | the graph was built by a Graphify release this Sidegraph was not tested with (its `graph.graphify_version` stamp is neither absent nor in the tested set), so anchors and domains may read differently. Advisory; **`--check` exits `2` on it**. `maintenance-due` is the one finding it does not escalate. Pin Graphify to a tested release listed under [Engine version pinning](../integrations/graphify.md#engine-version-pinning), then rebuild the graph. It also fires for a mention-edge graph (Graphify 0.9.62 or later) over a store without a minimum Sidegraph version; follow the [0.14 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.14.md). A malformed marker leaves this second case silent. Silent without a readable graph |
 | `store-not-migrated` | the store uses the pre-0.17 layout (a format marker below major 2) and holds at least one record of any kind (initiatives included). One finding, at the store path, naming `sidegraph-migrate` (run on the default branch, after the team checklist in the [0.17 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.17.md)) and the `sidegraph:compact` skill. Degraded; **`--check` exits `2` on it**. `maintenance-due` is the one finding it does not escalate. Silent on an empty store and on a store that is already format 2 |
-| `maintenance-due` | a format-2 store that `sidegraph-compact` would tidy: more than 200 per-record files, or a legacy `archive/` segment it would delete, or a misplaced or duplicated shard line, or a stray shard file. `sidegraph-verify` does not report these; maintenance heals them. A segment kept because one of its lines is not safe to delete does not count. Advisory, and the one finding **`--check` does not escalate**: it is printed and listed in `--json`, but the exit code stays `0`. Run `sidegraph-compact` on the default branch. Silent on a store that is not format 2 |
+| `maintenance-due` | a format-2 store that `sidegraph-compact` would tidy: more than 200 per-record files (drift-check files `verifications/*.json` count, the packed file does not), or a legacy `archive/` segment it would delete, or a misplaced or duplicated shard line, or a stray shard file. `sidegraph-verify` does not report these; maintenance heals them. A segment kept because one of its lines is not safe to delete does not count. Advisory, and the one finding **`--check` does not escalate**: it is printed and listed in `--json`, but the exit code stays `0`. Run `sidegraph-compact` on the default branch. Silent on a store that is not format 2 |
 
 `degraded-binding`/`orphaned-binding` come from `index.db`, opened strictly read-only — it
 is the only source for binding status (canonical `bindings/*.json` files carry identity,

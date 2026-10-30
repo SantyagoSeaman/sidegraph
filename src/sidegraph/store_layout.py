@@ -218,6 +218,10 @@ def is_safe_record_id(value: object) -> bool:
 
 # Optional immutable drift assertions; read directly, outside the old/new shared digest.
 VERIFICATIONS_SUBDIR = "verifications"
+# The packed drift-check file inside ``verifications/`` and the release that first requires it.
+# see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (D5, D9)
+PACKED_CHECKS_NAME = "packed.shard"
+PACKED_CHECKS_REQUIREMENT = "0.22.0"
 
 # The format marker: a one-line ``<path>/format`` file (see ``Store._ensure_format_marker``).
 FORMAT_MARKER_NAME = "format"
@@ -414,7 +418,8 @@ def symlinked_internals(store_path: Path) -> list[str]:
     ``shards/<name>``. ``is_symlink`` is ``lstat``-based, so a dangling link counts;
     ``is_junction`` also catches Windows directory junctions. A linked store ROOT is not an
     internal and is not reported. Shard entries are tested here, not through the shard listing,
-    which leaves a symlink out of every list.
+    which leaves a symlink out of every list. A linked ``verifications/packed.shard`` is listed
+    last, as that relative path.
     # see design/superpowers/specs/2026-09-29-store-symlinks-and-bootstrap-guards-design.md D1
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)"""
     found = [name for name in STORE_INTERNAL_NAMES if _is_store_link(store_path / name)]
@@ -423,12 +428,15 @@ def symlinked_internals(store_path: Path) -> list[str]:
         try:
             names = sorted(os.listdir(shards_dir))
         except (FileNotFoundError, NotADirectoryError):
-            return found
+            names = []
         found += [
             f"{SHARDS_SUBDIR}/{name}"
             for name in names
             if name.lower().endswith(_SHARD_FILE_SUFFIX) and _is_store_link(shards_dir / name)
         ]
+    packed = f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}"
+    if VERIFICATIONS_SUBDIR not in found and _is_store_link(store_path / packed):
+        found.append(packed)
     return found
 
 

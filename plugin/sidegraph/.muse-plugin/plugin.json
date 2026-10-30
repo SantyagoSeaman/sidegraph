@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "sidegraph",
-  "version": "0.21.1",
+  "version": "0.22.0",
   "description": "Durable decisions, facts and lessons over your code graph.",
   "compat": {
     "source": "native",

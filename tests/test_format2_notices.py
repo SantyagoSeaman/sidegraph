@@ -20,11 +20,14 @@ from sidegraph.integrity import Inputs, run
 from sidegraph.store import Store
 from tests.store_format2_support import (
     archived_decision,
+    check_body,
     decision_body,
     ids_in_bucket,
     make_store,
     put_archive,
+    put_check,
     put_file,
+    put_packed,
     put_shard_line,
     shard_name,
 )
@@ -314,3 +317,25 @@ def test_untracked_file_beside_a_terminal_archive_is_not_due(tmp_path):
 def test_surfaces_are_session_and_doctor(check):
     found = next(c for c in integrity.CHECKS if c.id == check)
     assert found.surfaces == frozenset({"session", "doctor"})
+
+
+def test_check_files_count_toward_maintenance_due(tmp_path):
+    """N1: 200 check files and one decision file pass the real threshold of 200."""
+    store = make_store(tmp_path, n=64)
+    (a,) = ids_in_bucket(3, 1, prefix="XA")
+    put_file(store, "decision", decision_body(a))
+    for i in range(integrity._MAINTENANCE_FILE_THRESHOLD):
+        put_check(store, check_body(f"C{i:05d}", a))
+    problem = notices(store)["maintenance-due"]
+    assert f"more than {integrity._MAINTENANCE_FILE_THRESHOLD} per-record files" in (
+        problem.line or ""
+    )
+
+
+def test_guard_the_packed_check_file_does_not_count(tmp_path, low_threshold):
+    """Guard (passes before the change): a packed.shard is not a *.json file."""
+    store = make_store(tmp_path, n=64)
+    (a,) = ids_in_bucket(3, 1, prefix="XA")
+    put_shard_line(store, "decision", a, decision_body(a))
+    put_packed(store, [check_body(f"C{i:05d}", a) for i in range(LIMIT + 2)])
+    assert "maintenance-due" not in ids_of(store)

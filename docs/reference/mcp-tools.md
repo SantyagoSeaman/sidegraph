@@ -1822,6 +1822,8 @@ record_drift_check(
 ```
 
 Append one immutable agent assertion that an open, commit-stamped decision still holds.
+On a format-2 store `sidegraph-compact` later packs the check file into
+`verifications/packed.shard` and drops it once it is dead; drift readers consult both.
 This is a local write. Author and session are currently always unknown; this operation
 does not infer identity from store-wide legacy metadata. It neither ratifies a proposal nor proves the claim true. Original decision
 bytes and capture provenance remain unchanged. There is no companion CLI in this release.

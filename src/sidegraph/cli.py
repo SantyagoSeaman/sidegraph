@@ -2240,7 +2240,9 @@ def compact_main(argv: list[str] | None = None) -> int:
         "Append-only: records MOVE to the archive, never lost or mutated. On a format-2 "
         "(packed) store the command is maintenance instead: it folds settled per-record "
         "files and archive segments into the shard files verbatim (--settled-days), on the "
-        "default branch unless --any-branch, and never commits.",
+        "default branch unless --any-branch, and never commits. It also packs committed "
+        "drift-check files into verifications/packed.shard and drops dead ones, with no "
+        "settled wait; the first such run raises the store's requirement to Sidegraph 0.22.0.",
     )
     parser.add_argument(
         "--db",
@@ -2470,7 +2472,10 @@ def _compact_format2(args: argparse.Namespace) -> int:
         return 1
     try:
         report = store.maintain(
-            settled_days=settled_days, dry_run=args.dry_run, any_branch=args.any_branch
+            settled_days=settled_days,
+            dry_run=args.dry_run,
+            any_branch=args.any_branch,
+            fold_checks=True,
         )
     except maintenance_clock.ClockError as e:
         print(f"refused: {e}")
@@ -2487,7 +2492,7 @@ def _compact_format2(args: argparse.Namespace) -> int:
     finally:
         store.close()
     print(render_report(report), end="")
-    return 2 if report.stopped else 0
+    return 2 if report.stopped or report.checks_stopped else 0
 
 
 def _compact_format1(args: argparse.Namespace, store: Store) -> int:

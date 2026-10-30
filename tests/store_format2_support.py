@@ -21,6 +21,7 @@ from sidegraph.schema import SCHEMA_VERSION, validate_record_body
 from sidegraph.store_format import (
     SHARD_TYPES,
     bucket_name,
+    encode_body,
     encode_line,
     inventory_from_disk,
     marker_text,
@@ -329,22 +330,24 @@ class Killed(BaseException):
     """Raised by :func:`run_with_kill` at the chosen checkpoint: a process killed there."""
 
 
-def _maintain(store: Path) -> object:
+def _maintain(store: Path, *, fold_checks: bool = False) -> object:
     from sidegraph.store import Store
 
-    return Store(store).maintain(settled_days=0, dry_run=False, any_branch=True)
+    return Store(store).maintain(
+        settled_days=0, dry_run=False, any_branch=True, fold_checks=fold_checks
+    )
 
 
-def record_checkpoints(store: Path) -> list[str]:
+def record_checkpoints(store: Path, *, fold_checks: bool = False) -> list[str]:
     """Run maintenance on ``store`` with ``maintenance.checkpoint`` recording every label."""
     labels: list[str] = []
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(maintenance, "checkpoint", labels.append)
-        _maintain(store)
+        _maintain(store, fold_checks=fold_checks)
     return labels
 
 
-def run_with_kill(store: Path, k: int) -> None:
+def run_with_kill(store: Path, k: int, *, fold_checks: bool = False) -> None:
     """Run maintenance on ``store`` and raise :class:`Killed` at its ``k``-th (0-based)
     checkpoint, after the durable step the checkpoint follows."""
     count = 0
@@ -357,7 +360,7 @@ def run_with_kill(store: Path, k: int) -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(maintenance, "checkpoint", hook)
-        _maintain(store)
+        _maintain(store, fold_checks=fold_checks)
 
 
 def _name_of_fd(fd: int, store: Path) -> str:
@@ -766,3 +769,58 @@ def _open_and_close_store(path_str: str, barrier, result_queue) -> None:
         result_queue.put(("ok", None))
     except Exception as e:  # report every failure mode back to the parent, not just crash
         result_queue.put(("error", f"{type(e).__name__}: {e}"))
+
+
+# -- drift-check files and packed lines ---------------------------------------------------------
+# see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (§3, §4)
+
+
+def check_body(cid: str, decision_id: str, **over: object) -> dict:
+    """A drift-check body that passes ``DriftCheck.model_validate``."""
+    commit = "a" * 40
+    body: dict = {
+        "schema_version": 1,
+        "id": cid,
+        "decision_id": decision_id,
+        "checked_at": _WHEN,
+        "checked_commit": commit,
+        "provenance": {"source": "agent", "commit": commit},
+        "rationale": "Still holds.",
+        "required_files": ["code.py"],
+        "checked_files": [{"path": "code.py", "blob_id": "b" * 40, "mode": "100644"}],
+        "subject_digest": "c" * 64,
+    }
+    body.update(over)
+    return body
+
+
+def put_check(store: Path, body: dict, *, name: str | None = None) -> Path:
+    """Write ``verifications/<name or id>.json`` as the writer does (``indent=2``)."""
+    folder = store / "verifications"
+    folder.mkdir(exist_ok=True)
+    path = folder / f"{name or body['id']}.json"
+    path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def put_packed(store: Path, lines: Iterable[dict | bytes]) -> Path:
+    """Write ``verifications/packed.shard``: a dict becomes its ``encode_body`` line, bytes
+    are taken as a raw line."""
+    folder = store / "verifications"
+    folder.mkdir(exist_ok=True)
+    path = folder / "packed.shard"
+    path.write_bytes(
+        b"".join(
+            (encode_body(line).encode("utf-8") if isinstance(line, dict) else line) + b"\n"
+            for line in lines
+        )
+    )
+    return path
+
+
+@pytest.fixture
+def pin_version_0_22(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run as Sidegraph 0.22.0, the release that reads and folds packed drift checks."""
+    import sidegraph
+
+    monkeypatch.setattr(sidegraph, "__version__", "0.22.0")
