@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "sidegraph",
-  "version": "0.21.0",
+  "version": "0.21.1",
   "description": "Durable decisions, facts and lessons over your code graph.",
   "compat": {
     "source": "native",
@@ -64,6 +64,26 @@
       {
         "id": "triage-drift",
         "path": "skills/triage-drift/SKILL.md"
+      }
+    ],
+    "hooks": [
+      {
+        "id": "session-start",
+        "event": "SessionStart",
+        "command": [
+          "python3",
+          "muse/session_start.py"
+        ],
+        "timeoutMs": 15000
+      },
+      {
+        "id": "subagent-start",
+        "event": "SubagentStart",
+        "command": [
+          "python3",
+          "muse/subagent_start.py"
+        ],
+        "timeoutMs": 5000
       }
     ],
     "mcpServers": [

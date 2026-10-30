@@ -29,8 +29,8 @@ and exact contracts; it does not replace their version-specific requirements.
 - [integrations/claude-code.md](integrations/claude-code.md) — the host seam: MCP server + SessionStart/Stop/PreToolUse/SubagentStart hooks
 - [integrations/codex.md](integrations/codex.md) — Codex integration
 
-- [integrations/grok.md](integrations/grok.md) — experimental MCP/skills-only Grok Build installation through its plugin marketplace
-- [integrations/muse.md](integrations/muse.md) — experimental MCP/skills-only Muse installation and process-directory limits
+- [integrations/grok.md](integrations/grok.md) — Grok Build plugin: MCP, skills and hooks (records on reads, capture reminder), with the session map sent by the MCP server
+- [integrations/muse.md](integrations/muse.md) — experimental Muse: MCP, skills, the session map and a subagent brief through two hooks; process-directory limits
 - [integrations/opencode.md](integrations/opencode.md) — OpenCode V2 MCP and shared skills; native Git install/update guide
 
 ## Guides

@@ -8,10 +8,10 @@ agent.
 
 1. [Install Sidegraph and Graphify](getting-started/installation.md).
 2. Follow the [end-to-end quickstart](getting-started/quickstart.md).
-3. Use the recommended host path for [Claude Code](getting-started/claude-code-setup.md) or
-   [Codex](getting-started/codex-setup.md), or the MCP/skills-only paths for
-   [OpenCode V2](../.opencode/INSTALL.md), experimental [Muse](integrations/muse.md) and experimental
-   [Grok Build](integrations/grok.md).
+3. Use the recommended host path for [Claude Code](getting-started/claude-code-setup.md),
+   [Codex](getting-started/codex-setup.md) or [Grok Build](integrations/grok.md), or the narrower
+   paths for [OpenCode V2](../.opencode/INSTALL.md) (MCP and skills) and experimental
+   [Muse](integrations/muse.md) (MCP, skills, the session map and a subagent brief).
 4. Run the [four-case verification checklist](guides/verifying-your-setup.md).
 
 If the repository already has ADRs or specs, use the
@@ -62,4 +62,4 @@ it is optional background on evidence, limits, and repository fit.
 - [Git bindings](reference/git-bindings.md)
 - Integrations: [Claude Code](integrations/claude-code.md),
   [Codex](integrations/codex.md), [OpenCode V2](integrations/opencode.md),
-  experimental [Muse](integrations/muse.md), experimental [Grok Build](integrations/grok.md), [Graphify](integrations/graphify.md)
+  experimental [Muse](integrations/muse.md), [Grok Build](integrations/grok.md), [Graphify](integrations/graphify.md)

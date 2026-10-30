@@ -113,6 +113,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      # The Muse hook adapter runs on the stock macOS python3 (3.9); its test needs a 3.9 here.
+      - name: Install Python 3.9 for the Muse adapter test
+        run: |
+          set -euo pipefail
+          uv python install 3.9
+          py39="$(uv python find --no-project 3.9)"
+          "$py39" -c 'import sys; assert sys.version_info[:2] == (3, 9)'
+          echo "SIDEGRAPH_TEST_PY39=$py39" >> "$GITHUB_ENV"
+
       - name: Run tests
         run: uv run pytest -q --durations=30 --durations-min=1
 

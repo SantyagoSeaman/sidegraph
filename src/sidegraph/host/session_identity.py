@@ -7,8 +7,14 @@ Host seam. The MCP server process learns its session from its host, with no stor
 - Codex (``"codex-mcp-client"``): ``threadId`` in the request ``_meta``. The hook side keys a
   Codex session by its rollout file stem, ``rollout-<ts>-<threadId>``, so the id is bridged to
   the SessionStart stamp whose key ends in ``-<threadId>``.
-- Anything else (Grok, an MCP-only client): no identity and no family. An env id is trusted only
-  together with the client name, because a Grok started from a Claude shell inherits the id.
+- Grok Build (``"grok-shell-<server name>"``): ``GROK_SESSION_ID`` in the server's own
+  environment, the session that started the server. Grok starts one server per session, and
+  the hook side keys that session by the same id (measured on Grok Build 1.0.70). A subagent
+  reuses its parent's server, so its MCP calls are attributed to the parent, while its own
+  hooks carry its own id: the request names no child id to recover it from.
+- Anything else (an MCP-only client): no identity and no family. An env id is trusted only
+  together with the client name, because a child process inherits its parent's: a Grok started
+  from a Claude shell carries ``CLAUDE_CODE_SESSION_ID``, and the reverse.
 
 Never raises: a surprise in any host detail resolves to "no identity".
 see design/superpowers/specs/2026-10-11-session-attribution-design.md (D3, D4)
@@ -24,7 +30,10 @@ CLAUDE_CLIENT = "claude-code"
 CODEX_CLIENT = "codex-mcp-client"
 CLAUDE_FAMILY = "claude"
 CODEX_FAMILY = "codex"
+GROK_CLIENT_PREFIX = "grok-shell-"
+GROK_FAMILY = "grok"
 _CLAUDE_ENV = "CLAUDE_CODE_SESSION_ID"
+_GROK_ENV = "GROK_SESSION_ID"
 
 
 def _text(value: object) -> str | None:
@@ -61,6 +70,8 @@ def hint_for(
             return SessionHint(bridge_codex_thread(thread_id, stamp_keys()), CODEX_FAMILY)
         except Exception:
             return SessionHint(thread_id, CODEX_FAMILY)
+    if isinstance(client_name, str) and client_name.startswith(GROK_CLIENT_PREFIX):
+        return SessionHint(_text(env.get(_GROK_ENV)), GROK_FAMILY)
     return SessionHint(None, None)
 
 

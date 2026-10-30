@@ -937,3 +937,74 @@ def test_t5_the_listing_is_the_index_alone_with_no_scan_of_untracked_files(
     (argv,) = spawned
     assert "--cached" in argv
     assert "--others" not in argv and "--exclude-standard" not in argv
+
+
+# -- T6: Muse sessions ----------------------------------------------------------------------
+# The check reads Claude Code's settings files, so a Muse session must not be told about them.
+# see design/superpowers/specs/2026-10-28-muse-hooks-design.md (Host seam changes)
+
+
+def test_t6_the_host_family_knows_muse(monkeypatch):
+    monkeypatch.setenv("SIDEGRAPH_HOST", "muse")
+
+    assert hooks._host_family() == "muse"
+
+
+def test_the_host_family_knows_grok(monkeypatch):
+    """The Grok hooks file sets ``SIDEGRAPH_HOST=grok``; red against a family set without it,
+    which stamps a Grok session ``unknown``."""
+    monkeypatch.setenv("SIDEGRAPH_HOST", "grok")
+
+    assert hooks._host_family() == "grok"
+
+
+def _case_a_and_b_repo(tmp_path: Path) -> Path:
+    repo = _repo(tmp_path)
+    _settings(repo / ".claude" / "settings.json", {"sidegraph@x": True})
+    _settings(repo / "pkg" / ".claude" / "settings.json", {"other@x": True})
+    return repo
+
+
+def test_t6_a_muse_session_start_has_no_plugin_off_notice(tmp_path, monkeypatch, capsys):
+    """Red against the registry that runs the check for every host: the model line and the
+    human's notice both name Claude sessions."""
+    repo = _case_a_and_b_repo(tmp_path)
+    monkeypatch.setenv("SIDEGRAPH_HOST", "muse")
+
+    out = _session_start_out(repo, tmp_path, monkeypatch, capsys)
+
+    assert "Claude sessions started below the repository root" not in json.dumps(out)
+
+
+def test_a_grok_session_start_has_no_plugin_off_notice(tmp_path, monkeypatch, capsys):
+    """Grok runs its own hooks file, not Claude Code's settings, so the notice that names Claude
+    sessions is wrong there. Red against a skip that covers Muse only."""
+    repo = _case_a_and_b_repo(tmp_path)
+    monkeypatch.setenv("SIDEGRAPH_HOST", "grok")
+
+    out = _session_start_out(repo, tmp_path, monkeypatch, capsys)
+
+    assert "Claude sessions started below the repository root" not in json.dumps(out)
+
+
+def test_t6_a_claude_session_start_still_has_the_notice(tmp_path, monkeypatch, capsys):
+    repo = _case_a_and_b_repo(tmp_path)
+    monkeypatch.setenv("SIDEGRAPH_HOST", "claude")
+
+    out = _session_start_out(repo, tmp_path, monkeypatch, capsys)
+
+    assert "Claude sessions started below the repository root" in out["systemMessage"]
+
+
+def test_t6_doctor_keeps_the_check_when_the_host_is_muse(tmp_path, monkeypatch, capsys):
+    """The skip is the session surface only: a person can still run ``sidegraph-doctor`` from
+    a terminal that has this variable set, and the shared registry still lists the check."""
+    _repo_root, store_dir = _doctor_repo(tmp_path)
+    monkeypatch.setenv("SIDEGRAPH_HOST", "muse")
+
+    doctor_main(["--db", str(store_dir), "--json"])
+
+    findings = json.loads(capsys.readouterr().out)["findings"]
+    assert [f["code"] for f in findings if f["code"] == PLUGIN_OFF] == [PLUGIN_OFF]
+    registry = hooks.host_checks(StoreLocation(str(store_dir), None))
+    assert PLUGIN_OFF in {check.id for check in registry}

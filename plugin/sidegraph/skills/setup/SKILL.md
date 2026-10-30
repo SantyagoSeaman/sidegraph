@@ -9,8 +9,11 @@ description: >-
 Bring a repo from zero to a working memory loop. One fact up front: **if this skill is
 running, the Sidegraph plugin is already installed**. Claude Code wires MCP and all four
 hooks (`SessionStart`, `Stop`, `PreToolUse`, `SubagentStart`); Codex wires MCP and
-`SessionStart`, `Stop`, `SubagentStart`. Both launch Sidegraph through `uvx` from the repository. OpenCode and experimental Muse support MCP and skills only:
-use explicit MCP calls; there is no automatic session map, capture nudge or read context.
+`SessionStart`, `Stop`, `SubagentStart`. Grok Build wires MCP and all four hooks, but Grok
+does not pass `SessionStart` or `SubagentStart` output to the model, so the MCP server sends the
+session map instead. These hosts launch Sidegraph through `uvx` from the repository. Experimental
+Muse adds the session map and a subagent brief through two hooks, with no capture nudge or read
+context. OpenCode supports MCP and skills only: use explicit MCP calls there.
 What may still be missing: the engine, the graph, the store, and the first
 memory. Work through the steps in order; every one is idempotent and safe to re-run.
 
@@ -63,17 +66,18 @@ Commit `.sidegraph/` with the repo — the store travels with the code.
 ## 4. Verify the wiring
 
 On experimental Muse, first confirm that Muse was started in this repository: the MCP
-server serves the process's starting directory. Otherwise exit and restart Muse here.
+server serves the Git repository enclosing the process's starting directory. Otherwise exit and restart Muse here.
 
 Call `list_domains()` — the cheapest read-only MCP tool. A well-formed answer proves the
 server is alive; an empty list is normal on a fresh store. To verify the intended project
 store, retrieve a known project record, or use the linked capture/recall proof for a new store. On hosts with lifecycle hooks, the `SessionStart` memory map appears at the start of the **next** session — a stub
-on an empty store is expected, not broken. For the full four-case proof (host wiring, durable
+on an empty store is expected, not broken. On Grok Build the map comes from the MCP server: it is
+there before the first answer, or after the first tool call when the server started slowly. For the full four-case proof (host wiring, durable
 capture and retrieval, ratification, sync), point the human at
 [verifying your setup](../../../../docs/guides/verifying-your-setup.md).
 
-For Codex, OpenCode and experimental Muse, the MCP call is the wiring check; skip the
-following Claude-specific settings check. Shared `sidegraph:<skill>` names denote the corresponding
+For Codex, Grok Build, OpenCode and experimental Muse, the MCP call is the wiring check; skip
+the following Claude-specific settings check. Shared `sidegraph:<skill>` names denote the corresponding
 installed skill; in OpenCode use `@sidegraph-<skill>`.
 
 On Claude Code, run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor --json` (a pure read) and read the finding `plugin-off-in-subdirectories`. It says that Claude

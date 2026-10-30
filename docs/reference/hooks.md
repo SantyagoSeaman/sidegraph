@@ -21,13 +21,14 @@ Other `Store`, hot-index and read-only-index callers retain their existing defau
 
 ## The command guard
 
-The wiring commands in the plugin manifests and the setup recipes end with a shell guard:
+The shell wiring commands in the plugin manifests and the setup recipes end with a shell guard
+(Muse's hooks run a Python adapter instead, which answers `{}` itself on any failure):
 `|| printf '{}\n'` on `Stop`, `PreToolUse` and `SubagentStart`, and
 `|| printf '%s\n' '{"systemMessage":"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error"}'`
 on `SessionStart`. The entry points below already print `{}` on any failure of their own (except
 that `sidegraph-session-start` reports a store that cannot be opened, see
 [A store that cannot open](#a-store-that-cannot-open)), but they cannot catch one that happens before Python starts: `uv` exiting 2 on an internal error, or
-the `cd` in front of the command failing. On `Stop`, both hosts treat exit 2 with text on stderr
+the `cd` in front of the command failing. On `Stop`, Claude Code and Codex treat exit 2 with text on stderr
 as a block and continue the session, and Claude Code does the same on `PreToolUse` by blocking
 the tool call, so without the guard such a command could loop a session. A command that does
 start is not affected.
@@ -46,8 +47,9 @@ SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json \
 
 The `@main` ref tracks a mutable branch; see
 [Mutable development references](../getting-started/installation.md#mutable-development-references).
-That is the `SessionStart` command. The plugin's `Stop`, `PreToolUse` and `SubagentStart` commands
-run the same way but from the commit `SessionStart` recorded in a `launch-commit` file (see
+That is the `SessionStart` command.
+
+The plugin's `Stop`, `PreToolUse` and `SubagentStart` commands run the same way but from the commit `SessionStart` recorded in a `launch-commit` file (see
 [Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file)); to reproduce one by hand, put that commit where `@main`
 stands. A plugin pinned to a tag or commit ignores the file and launches its own ref.
 For a source checkout, the development form:
@@ -82,6 +84,8 @@ So the session is taken from **`transcript_path` — its file name without the e
 falling back to `session_id` when the payload carries no transcript (the field is nullable in
 Codex's own hook schema). On Claude Code the two are the same string, so nothing changed
 there; on Codex each thread is now its own session instead of a day of work sharing one.
+Grok Build names every transcript `updates.jsonl` inside a directory named after the session
+id, so when the transcript's directory is the payload `session_id`, that id is the session.
 
 The workspace session, when it differs, is kept separately in the `telemetry:session_group`
 meta key: it is the only thing linking sibling threads.
@@ -98,12 +102,16 @@ sessions of several hosts can share one repository, so each tool call is attribu
   2.1.163 (on 2.1.154-2.1.162 a resumed session reads as two sessions in `sidegraph-stats`).
   On **Codex** (`codex-mcp-client`) it is the request's `threadId`, matched to the
   SessionStart stamp whose key ends in that id (each Codex subagent thread is its own
-  session, as everywhere on Codex), or the bare thread id when there is no stamp. Any other
-  client (Grok, a bare MCP client) is unattributed: an environment id is trusted only
-  together with the client name, because a child process inherits its parent's.
+  session, as everywhere on Codex), or the bare thread id when there is no stamp. On **Grok
+  Build** (`grok-shell-<server name>`) it is `GROK_SESSION_ID` in the server's environment:
+  the session that started the server, which Grok's hooks key by the same id. A Grok subagent
+  reuses its parent's server, so its MCP calls count toward the parent session while its own
+  hooks count toward the subagent. Any other client (a bare MCP client) is
+  unattributed: an environment id is trusted only together with the client name, because a
+  child process inherits its parent's.
 - **Stamps.** With an existing store, SessionStart writes `telemetry:session:<session key>` =
   `<iso time>|<family>` in `index.db` (the family comes from `SIDEGRAPH_HOST`, set in each
-  shipped hook command: `claude`, `codex`, else `unknown`). They are pruned after 25 hours,
+  shipped hook command: `claude`, `codex`, `muse`, `grok`, else `unknown`). They are pruned after 25 hours,
   and the older `telemetry:session` key is still written for one more minor.
 - **Fallback.** A client that names its host but no id (Claude Code before 2.1.154) gets the
   one fresh stamp of its own family if there is exactly one, else nothing. A guess across
@@ -133,6 +141,10 @@ content in the TOC's unratified block, while the pending-ratification counter be
 always keeps counting them. From the stdin payload it reads only the session — see
 [Which session a hook is in](#which-session-a-hook-is-in) — used for the duplicate-injection
 guard and published to the store as the telemetry session key.
+
+On Grok Build this hook runs but its output does not reach the model, so the MCP server sends
+the session map instead, as a workaround (see the
+[Grok guide](../integrations/grok.md#session-map-on-grok-a-workaround)).
 
 Behavior:
 
@@ -595,7 +607,13 @@ Behavior, in order:
 
 1. `$SIDEGRAPH_CAPTURE_NUDGE == "off"` → print `{}` (allow), without marking the ledger.
 2. `stop_hook_active` truthy (this Stop is the continuation of our own earlier block) →
-   print `{}` (allow). Prevents an infinite block loop.
+   print `{}` (allow). Prevents an infinite block loop. On Grok Build (the hook's
+   `SIDEGRAPH_HOST` is `grok`), a Stop that is not a turn a person ended is allowed the same
+   way: a `reason` other than `end_turn` (Grok sends `shutdown` when every `grok` process
+   exits); a `promptId` of a turn Grok starts itself, such as `subagent-completed-…` or
+   `task-completed-…` after a subagent or a background task finishes; and a headless session
+   (`"session_kind": "headless"` in the `summary.json` beside the transcript), also when the
+   session is due a re-arm.
 3. No session identity in the payload (neither `transcript_path` nor `session_id`) → print
    `{}` (allow) — can't dedup the nudge without an id, so it never risks looping.
 4. Resolves the selected store once. If it is absent, prints `{}` without reading the transcript,
@@ -606,7 +624,7 @@ Behavior, in order:
    [Re-arm after more work](#re-arm-after-more-work), which skips the next two steps). Any
    failure of the peek (no index, a held lock, an unreadable table) falls through to the next
    step, and a captured session found there is allowed without a re-arm.
-5. **Substance gate:** read the transcript once, in either host's shape, and count the
+5. **Substance gate:** read the transcript once, in any host's shape, and count the
    session's *real* user prompts. Fewer than `_MIN_USER_PROMPTS` (currently 2) — including a
    missing `transcript_path`, or a transcript file that's missing/unreadable/malformed —
    → print `{}` (allow) **without calling `mark_captured`**. Calibration: Claude Code calls
@@ -654,8 +672,16 @@ Behavior, in order:
      `exec` (the Codex TypeScript SDK runs `codex exec` under an originator of its own, so the
      `source` is the field that still marks it); a Stop block would replace such a run's `-o`
      output, or the SDK caller's result, with the continuation. A rollout with no
-     `thread_source` (an older Codex) is a person's thread. Codex has no tool-use branch. A genuine prompt that happens to start
-     with a marker only raises the threshold by one.
+     `thread_source` (an older Codex) is a person's thread. Codex has no tool-use branch. A
+     genuine prompt that happens to start with a marker only raises the threshold by one.
+   - **A Grok Build session** (`updates.jsonl`). A real prompt is a run of `user_message_chunk`
+     updates (one per block of the prompt, and an `image_dropped` line between blocks does not
+     split it), counted once at its first chunk with text, unless that text starts with
+     `<system-reminder>` (a notice Grok writes itself, such as a finished background task) or
+     one of Claude's host-written prefixes above. A Stop block's reason is recorded as a
+     `hook_annotation`, so the nudge never counts as a prompt. A headless `grok -p` session
+     never arms, because its `summary.json` says `"session_kind": "headless"` and a Stop block
+     would append the continuation to the run's printed answer. Grok has no tool-use branch.
 6. `store.was_captured(session_id)` already true → print `{}` (allow).
 7. Otherwise: `store.mark_captured(session_id)` is written **before** the block response is
    emitted (so a crash between the two can't double-nudge), and so is the session's
@@ -767,7 +793,8 @@ this hook, like `stop`, never touches the graph. Reads
 the stdin JSON payload for these keys: `tool_name`, `tool_input`, `cwd` (a Bash line resolves
 its relative paths from it), the session (`transcript_path`, else `session_id` — see
 [Which session a hook is in](#which-session-a-hook-is-in)), and `agent_id`, present only when
-the call comes from a subagent.
+the call comes from a subagent. On Grok Build the tool names are Grok's own; see
+[Grok Build](../integrations/grok.md#hooks-on-grok).
 
 **What it does.** When an agent is about to read or edit a file that decisions or facts are anchored to,
 the hook hands it those records, in the same tool call, as a non-blocking `additionalContext`
@@ -1118,7 +1145,8 @@ nothing beyond the standard library, like the rest of this hook.
 - **`fork` spawns** reach the hook with the same `tool_input` shape, but are not available
   headless, and were not run.
 
-Codex has no `PreToolUse` carrier for this yet: it is a Claude Code feature.
+Grok Build gets it too: its `spawn_subagent` tool maps to `Agent`. Codex has no `PreToolUse`
+carrier for this yet.
 
 ## `sidegraph-subagent-start`
 
@@ -1133,6 +1161,7 @@ A subagent starts without the `SessionStart` context, and Explore and Plan agent
 `CLAUDE.md` either, so nothing standing tells one that decision memory exists. The hook fires
 on `SubagentStart`, which Claude Code and Codex both emit when a subagent is created, and
 answers with an `additionalContext` that the host puts in front of that subagent's first turn.
+Muse delivers it as well; Grok Build runs the hook but does not pass its output to the model.
 The brief is the call to make, the same standing instruction `SessionStart` gives the main
 agent (the hook imports the constant, so the two cannot drift), and one sentence on what memory
 holds:
@@ -1184,7 +1213,8 @@ every subagent gets the brief once. The hook never sets a `systemMessage`; the c
 this event answers `{}`, so a start failure never puts a message in front of a subagent.
 
 **Codex** users approve the new hook once: Codex records trust per hook definition (see
-[`integrations/codex.md`](../integrations/codex.md#plugin-install-path)).
+[`integrations/codex.md`](../integrations/codex.md#plugin-install-path)). **Muse** users approve
+it with `muse plugins approve sidegraph`.
 
 ## Wiring
 

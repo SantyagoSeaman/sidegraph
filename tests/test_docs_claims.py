@@ -1256,12 +1256,11 @@ _README_HOST_RECIPES = (
     (
         "Muse (experimental)",
         (
-            "git clone -c core.autocrlf=false "
-            "https://github.com/SantyagoSeaman/sidegraph.git sidegraph-plugin",
-            "muse plugins install ./sidegraph-plugin/plugin/sidegraph",
+            "muse plugins marketplace add sidegraph https://github.com/SantyagoSeaman/sidegraph",
+            "muse plugins install sidegraph@sidegraph",
             "muse plugins inspect sidegraph",
             "muse plugins approve sidegraph",
-            "git -C sidegraph-plugin pull --ff-only",
+            "muse plugins marketplace update sidegraph",
             "muse plugins update sidegraph",
         ),
         ("Review", "restart", "project", "MCP"),
@@ -1294,6 +1293,25 @@ def test_readme_has_scoped_host_install_update_and_permissions(host, commands, p
     )
     if host == "Codex":
         assert "codex plugin update sidegraph@sidegraph" not in body
+
+
+_MUSE_MARKETPLACE_COMMANDS = (
+    "muse plugins marketplace add sidegraph https://github.com/SantyagoSeaman/sidegraph",
+    "muse plugins install sidegraph@sidegraph",
+    "muse plugins approve sidegraph",
+    "muse plugins marketplace update sidegraph",
+    "muse plugins update sidegraph",
+)
+
+
+@pytest.mark.parametrize("path", ["README.md", "docs/integrations/muse.md"])
+def test_muse_installs_from_the_marketplace_not_a_local_checkout(path):
+    """Muse installs from the public marketplace like Claude Code and Codex; the old route from a
+    maintained local clone is gone from every page that gives the commands."""
+    text = (_ROOT / path).read_text(encoding="utf-8")
+    fenced = _fenced_lines(text)
+    assert all(command in fenced for command in _MUSE_MARKETPLACE_COMMANDS), path
+    assert "sidegraph-plugin" not in text, f"{path}: still installs from a local checkout"
 
 
 def test_readme_warns_existing_stores_before_graphify_upgrade():

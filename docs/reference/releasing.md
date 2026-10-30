@@ -27,6 +27,7 @@ restate it in prose or carry it in a manifest field.
 | `plugin/sidegraph/.claude-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
 | `plugin/sidegraph/.codex-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
 | `plugin/sidegraph/.muse-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
+| `plugin/sidegraph/.grok-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
 | `package.json` | OpenCode Git package's `version`, kept in lockstep with `pyproject.toml` |
 | `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | Update any `plugins[]` entry's `version` if that optional field is present; leave it omitted otherwise |
 

@@ -274,6 +274,29 @@ def test_t10_claude_without_an_env_id_names_its_family_only():
     )
 
 
+def test_a_grok_client_is_its_session_from_the_grok_env():
+    """Grok Build names its MCP client ``grok-shell-<server name>`` and starts the server per
+    session with ``GROK_SESSION_ID`` set (measured on 1.0.70); the hook side keys the same
+    session by that id. Red against treating Grok as an unknown client. A Claude id inherited
+    from the shell that launched Grok is never used for it."""
+    env = {"GROK_SESSION_ID": "01a1899e-grok", "CLAUDE_CODE_SESSION_ID": "inherited"}
+    assert hint_for("grok-shell-sidegraph", None, env, list) == SessionHint("01a1899e-grok", "grok")
+    assert hint_for("grok-shell-sidegraph", None, {"GROK_SESSION_ID": ""}, list) == SessionHint(
+        None, "grok"
+    )
+
+
+def test_a_grok_id_in_the_env_is_ignored_for_other_clients():
+    """Red against reading ``GROK_SESSION_ID`` without the client name: a Claude Code or Codex
+    started from a Grok shell inherits it."""
+    env = {"GROK_SESSION_ID": "inherited-grok"}
+    assert hint_for("claude-code", None, env, list) == SessionHint(None, "claude")
+    assert hint_for("codex-mcp-client", None, env, list) == SessionHint(None, "codex")
+    assert hint_for("some-client", None, env, list) == SessionHint(None, None)
+    # Only Grok's own client name binds; another client merely named grok-something does not.
+    assert hint_for("grok-bridge", None, env, list) == SessionHint(None, None)
+
+
 def test_t10_bridge_matches_the_tail_only():
     assert bridge_codex_thread(THREAD, ["a", ROLLOUT]) == ROLLOUT
     assert bridge_codex_thread(THREAD, [THREAD]) == THREAD
@@ -370,7 +393,13 @@ def _session_start(monkeypatch, capsys, db: Path, payload: dict, host: str | Non
 
 @pytest.mark.parametrize(
     ("host", "family"),
-    [("claude", "claude"), ("codex", "codex"), (None, "unknown"), ("grok", "unknown")],
+    [
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("grok", "grok"),
+        (None, "unknown"),
+        ("kimi", "unknown"),
+    ],
 )
 def test_t6_session_start_writes_a_per_session_stamp_and_the_legacy_key(
     tmp_path, monkeypatch, capsys, host, family
@@ -471,6 +500,8 @@ MANIFESTS = {
     "plugin/sidegraph/hooks/hooks.public.json": "claude",
     "plugin/sidegraph/codex/hooks.json": "codex",
     "plugin/sidegraph/codex/hooks.public.json": "codex",
+    "plugin/sidegraph/grok/hooks.json": "grok",
+    "plugin/sidegraph/grok/hooks.public.json": "grok",
 }
 
 

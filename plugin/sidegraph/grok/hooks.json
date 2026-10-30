@@ -1,0 +1,68 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_HOST=grok SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_HOST=grok SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from \"$u\" sidegraph-stop || printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_HOST=grok SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*\\\\[ntr]'sed '*|*[!A-Za-z0-9_]'grep '*|*\\\\[ntr]'grep '*|*[!A-Za-z0-9_]'rg '*|*\\\\[ntr]'rg '*|*[!A-Za-z0-9_]'cat '*|*\\\\[ntr]'cat '*) printf '%s\\n' \"$p\" | { f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_HOST=grok SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n' ; } ;; *) printf '{}\\n' ;; esac",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_HOST=grok SIDEGRAPH_DIR=.sidegraph uvx --from \"$u\" sidegraph-pre-tool-use || printf '{}\\n'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit\"; c=; [ -f \"$f\" ] && c=$(head -c 41 \"$f\" 2>/dev/null); case \"$c\" in *[!0123456789abcdef]*) c= ;; esac; [ \"${#c}\" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n \"$c\" ] && [ \"${u##*@}\" = main ] && u=${u%@*}@$c; cd \"${CLAUDE_PROJECT_DIR}\" && SIDEGRAPH_HOST=grok SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from \"$u\" sidegraph-subagent-start || printf '{}\\n'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

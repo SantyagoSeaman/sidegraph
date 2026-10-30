@@ -122,13 +122,14 @@ _SESSION_START_DEDUPE_SECONDS = 60
 
 # The longest reader TTL (capture's 24 h provenance window) plus a one-hour margin.
 _SESSION_STAMP_RETENTION_HOURS = 25
-_HOST_FAMILIES = frozenset({"claude", "codex"})
+_HOST_FAMILIES = frozenset({"claude", "codex", "muse", "grok"})
 
 
 def _host_family() -> str:
     """The host family this hook belongs to, from ``SIDEGRAPH_HOST`` (set in each manifest's
-    hook command), else ``unknown``. Not inferred from the payload: a Claude-shaped payload is
-    identical for Claude and for Grok, which runs the Claude plugin hooks."""
+    hook command), else ``unknown``. Not inferred from the payload: Grok runs the Claude plugin
+    hooks and sends the same keys, but its ``tool_name`` values are its own (see
+    :func:`_claude_shaped`), so the shape does not say which host sent it."""
     value = os.environ.get("SIDEGRAPH_HOST", "").strip().lower()
     return value if value in _HOST_FAMILIES else "unknown"
 
@@ -147,7 +148,9 @@ def _session_identity(payload: dict) -> tuple[str | None, str | None]:
       ``session-start.command.input`` schema carries no thread id and no ``agent_type``.
 
     So the transcript path is the one field that identifies a session on both hosts, and its
-    stem is the id on the host where the two agree. Returns ``(key, group)``: ``group`` is the
+    stem is the id on the host where the two agree. Grok writes ``<session id>/updates.jsonl``,
+    so there the transcript's directory is the id (measured on Grok Build 1.0.70). Returns
+    ``(key, group)``: ``group`` is the
     host's own ``session_id`` when it differs from ``key``, else ``None`` — nothing extra to
     record on a host whose session id already IS the key.
 
@@ -163,7 +166,13 @@ def _session_identity(payload: dict) -> tuple[str | None, str | None]:
     if isinstance(raw_path, str) and raw_path:
         # PurePosixPath, not Path: the stem of a host-written path, never touched on disk. A
         # Windows host writes backslashes, which PurePosixPath would keep inside the stem.
-        stem = PurePosixPath(raw_path.replace("\\", "/")).stem or None
+        transcript = PurePosixPath(raw_path.replace("\\", "/"))
+        stem = transcript.stem or None
+        # Grok names every transcript `updates.jsonl`, one directory per session id: there the
+        # directory, not the stem, names the session. Claude's and Codex's parents never equal
+        # the session id, so their keys are untouched.
+        if session_id and transcript.parent.name == session_id:
+            stem = session_id
     key = stem or session_id
     group = session_id if session_id and session_id != key else None
     return key, group
@@ -403,7 +412,7 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
     """The integrity checks that need the host: ``stray-store``, a closure over this launch's
     ``StoreLocation`` because the portable registry's ``Inputs`` stays host-free, and the three
     host-wiring checks, ``version-skew``, ``path-skew`` and ``plugin-off-in-subdirectories``.
-    The hook passes ``CHECKS[:5] + host_checks(location) + CHECKS[5:]`` to keep the line order, and
+    The hook passes ``CHECKS[:5] + session_host_checks(location) + CHECKS[5:]`` (line order), and
     ``sidegraph-doctor`` passes them to ``doctor.curate``, so ``doctor.py`` imports nothing
     from this seam.
     see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D1, D4 check 5)
@@ -521,6 +530,17 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
             detect_plugin_off,
         ),
     )
+
+
+def session_host_checks(location: StoreLocation) -> tuple[Check, ...]:
+    """``host_checks`` for the SessionStart hook. ``plugin-off-in-subdirectories`` reads Claude
+    Code's settings files, so a Muse or Grok session leaves it out; ``sidegraph-doctor`` keeps it.
+    see design/superpowers/specs/2026-10-28-muse-hooks-design.md (Host seam changes)
+    """
+    checks = host_checks(location)
+    if _host_family() in ("muse", "grok"):
+        return tuple(check for check in checks if check.id != "plugin-off-in-subdirectories")
+    return checks
 
 
 # A notice reaches the human at most once a day per check, and again at once when the severity
@@ -832,9 +852,11 @@ def _is_real_user_prompt(entry: object) -> bool:
     if entry.get("isMeta") or entry.get("isCompactSummary"):
         return False
     origin = entry.get("origin")
-    if isinstance(origin, dict) and origin.get("kind") in _HOST_ORIGIN_KINDS:
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    if isinstance(kind, str) and kind in _HOST_ORIGIN_KINDS:
         return False
-    if entry.get("promptSource") in _HOST_PROMPT_SOURCES:
+    source = entry.get("promptSource")
+    if isinstance(source, str) and source in _HOST_PROMPT_SOURCES:
         return False
     message = entry.get("message")
     if not isinstance(message, dict):
@@ -923,6 +945,104 @@ def _is_codex_real_user_prompt(entry: dict) -> bool:
     return False
 
 
+# Grok Build transcripts (see design/superpowers/specs/2026-10-30-grok-stop-capture-nudge-design.md,
+# D1). `updates.jsonl` holds `{timestamp, method, params}` lines with no top-level `type`, so the
+# Claude and Codex predicates never match one, and a Claude or Codex line has no `method`. A
+# person's prompt is a `user_message_chunk`; Grok writes its own notices there too, wrapped in
+# `<system-reminder>`. A Stop block's reason is a `hook_annotation`, never a user chunk.
+_GROK_METHODS = frozenset({"session/update", "_x.ai/session/update"})
+_GROK_INJECTED_PREFIXES = ("<system-reminder>",) + _HOST_EMITTED_PREFIXES
+# Lines Grok writes between the blocks of one prompt (an image it did not send), which do not end
+# the prompt's run of chunks.
+_GROK_IN_PROMPT_UPDATES = frozenset({"image_dropped"})
+# `summary.json`'s `session_kind` for a `grok -p` run, whose output a Stop block would extend.
+_GROK_HEADLESS_KIND = "headless"
+# The Stop events that are not a turn a person ended (D3): process exit, and the turns Grok starts
+# itself. `subagent-completed-` and `task-completed-` are captured; the others are the synthetic
+# prompt-id prefixes in the Grok Build 1.0.70 binary, kept here so a turn Grok starts never
+# spends the session's nudge.
+_GROK_TURN_END_REASON = "end_turn"
+_GROK_COMPLETION_PROMPTS = (
+    "subagent-completed-",
+    "task-completed-",
+    "bash-completed-",
+    "monitor-completed-",
+    "workflow-completed-",
+    "parent-agent-message-",
+    "parent-message-",
+    "notifications-",
+    "goal-summary-",
+    "goal-classifier-nudge-",
+    "plan-resume-",
+)
+
+
+def _is_grok_line(entry: dict) -> bool:
+    """True for a Grok Build ``updates.jsonl`` line: a session-update ``method`` with a dict
+    ``params.update``."""
+    params = entry.get("params")
+    method = entry.get("method")
+    return (
+        isinstance(method, str)
+        and method in _GROK_METHODS
+        and isinstance(params, dict)
+        and isinstance(params.get("update"), dict)
+    )
+
+
+def _grok_update(entry: dict) -> tuple[str | None, dict]:
+    """The ``sessionUpdate`` kind and the update of a Grok line (``None`` for any other line)."""
+    if not _is_grok_line(entry):
+        return None, {}
+    update = entry["params"]["update"]
+    kind = update.get("sessionUpdate")
+    return (kind if isinstance(kind, str) else None), update
+
+
+def _is_grok_person_chunk(update: dict) -> bool:
+    """True for a ``user_message_chunk`` a person typed: its text does not start with Grok's
+    ``<system-reminder>`` or a host-emitted prefix."""
+    content = update.get("content")
+    if not isinstance(content, dict) or not isinstance(content.get("text"), str):
+        return False
+    return not content["text"].lstrip().startswith(_GROK_INJECTED_PREFIXES)
+
+
+def _grok_session_kind(transcript_path: str) -> str | None:
+    """``session_kind`` from the ``summary.json`` beside a Grok transcript; None when absent."""
+    try:
+        summary = json.loads(
+            (Path(transcript_path).parent / "summary.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    kind = summary.get("session_kind") if isinstance(summary, dict) else None
+    return kind if isinstance(kind, str) and kind else None
+
+
+def _grok_stop_skipped(payload: dict) -> bool:
+    """True for a Grok Stop that must not nudge: a ``reason`` other than ``end_turn``
+    (``shutdown`` on every process exit), a ``promptId`` of a turn Grok started itself, or a
+    headless session (its ``summary.json``), on the re-arm path too. Only on the ``grok`` host
+    family.
+    see design/superpowers/specs/2026-10-30-grok-stop-capture-nudge-design.md (D3)
+    """
+    if _host_family() != "grok":
+        return False
+    reason = payload.get("reason")
+    if reason is not None and reason != _GROK_TURN_END_REASON:
+        return True
+    prompt_id = payload.get("promptId")
+    if isinstance(prompt_id, str) and prompt_id.startswith(_GROK_COMPLETION_PROMPTS):
+        return True
+    transcript_path = payload.get("transcript_path")
+    return (
+        isinstance(transcript_path, str)
+        and bool(transcript_path)
+        and _grok_session_kind(transcript_path) == _GROK_HEADLESS_KIND
+    )
+
+
 # Substance signal for agentic one-shot sessions (design D1, E10 H-F0): a `claude -p`
 # session has exactly one real prompt however much work follows, so the >=2-prompts gate
 # never arms there — every stage-session capture in E8/E9/E9b had been armed by the
@@ -945,22 +1065,28 @@ class _TranscriptStats(NamedTuple):
     originator: str | None = None
     codex_subagent: bool = False
     source: str | None = None
+    # Grok only (``summary.json`` beside the transcript); None for a Claude or Codex transcript.
+    session_kind: str | None = None
 
 
 def _transcript_stats(transcript_path: str) -> _TranscriptStats:
-    """One pass over a transcript JSONL file, either host's shape: real user prompts
-    (``_is_real_user_prompt``, or ``_is_codex_real_user_prompt`` for a Codex rollout's
-    ``response_item`` lines), assistant ``tool_use`` blocks, the first-seen top-level
-    ``entrypoint`` field, and, for a rollout, the thread kind its FIRST ``session_meta`` names
-    (a forked subagent carries its own meta first and its parent's second).
+    """One pass over a transcript JSONL file, any host's shape: real user prompts
+    (``_is_real_user_prompt``, ``_is_codex_real_user_prompt`` for a Codex rollout's
+    ``response_item`` lines, or a run of a person's ``user_message_chunk`` lines in a Grok
+    ``updates.jsonl``), assistant ``tool_use`` blocks (Grok: ``tool_call`` lines), the
+    first-seen top-level ``entrypoint`` field, and, for a rollout, the thread kind its FIRST
+    ``session_meta`` names (a forked subagent carries its own meta first and its parent's
+    second).
 
     A single malformed line is skipped rather than fatal, so one corrupt row doesn't zero
     out an otherwise-substantial session (the skip is shared by all the counts — one
     parse, one policy). A missing/unreadable file (bad path, permissions) propagates to
     the caller -- ``stop``'s outer ``try/except`` turns that into the same "print {} and
     allow" as any other never-crash failure. A transcript with no ``entrypoint`` anywhere
-    returns ``None`` — the caller degrades to the prompt-only gate, never to arming.
+    returns ``None`` — the caller degrades to the prompt-only gate, never to arming. A Grok
+    transcript also reports the ``session_kind`` of the ``summary.json`` beside it.
     see design/superpowers/specs/2026-10-01-codex-capture-gate-design.md (D1)
+    see design/superpowers/specs/2026-10-30-grok-stop-capture-nudge-design.md (D1)
     """
     real_prompts = 0
     tool_uses = 0
@@ -970,6 +1096,9 @@ def _transcript_stats(transcript_path: str) -> _TranscriptStats:
     originator: str | None = None
     codex_subagent = False
     source_name: str | None = None
+    grok_seen = False
+    in_grok_prompt = False  # inside a run of user chunks: one prompt however many chunks
+    grok_prompt_index: object = None  # the open run's `_meta.promptIndex`, when Grok sends one
     with open(transcript_path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -995,6 +1124,28 @@ def _transcript_stats(transcript_path: str) -> _TranscriptStats:
                     source = meta.get("source")
                     codex_subagent = isinstance(source, dict) and "subagent" in source
                     source_name = source if isinstance(source, str) and source else None
+            grok_kind, update = _grok_update(entry)
+            if grok_kind is not None:
+                grok_seen = True
+                if grok_kind == "user_message_chunk":
+                    # The run opens at its first person chunk: an image block or a Grok notice
+                    # before the text does not hide the prompt. A different `promptIndex`
+                    # inside a run is a new prompt.
+                    meta = update.get("_meta")
+                    index = meta.get("promptIndex") if isinstance(meta, dict) else None
+                    if _is_grok_person_chunk(update) and (
+                        not in_grok_prompt or (index is not None and index != grok_prompt_index)
+                    ):
+                        real_prompts += 1
+                        in_grok_prompt = True
+                        grok_prompt_index = index
+                    continue
+                if grok_kind in _GROK_IN_PROMPT_UPDATES:
+                    continue
+                in_grok_prompt = False
+                if grok_kind == "tool_call":
+                    tool_uses += 1
+                continue
             if _is_real_user_prompt(entry) or _is_codex_real_user_prompt(entry):
                 real_prompts += 1
             elif entry.get("type") == "assistant":
@@ -1006,7 +1157,14 @@ def _transcript_stats(transcript_path: str) -> _TranscriptStats:
                         if isinstance(block, dict) and block.get("type") == "tool_use"
                     )
     return _TranscriptStats(
-        real_prompts, tool_uses, entrypoint, thread_source, originator, codex_subagent, source_name
+        real_prompts,
+        tool_uses,
+        entrypoint,
+        thread_source,
+        originator,
+        codex_subagent,
+        source_name,
+        _grok_session_kind(transcript_path) if grok_seen else None,
     )
 
 
@@ -1019,8 +1177,9 @@ def _is_substantial(stats: _TranscriptStats) -> bool:
     ``thread_source`` or by a subagent ``source``) or a headless ``codex exec`` run (its
     ``originator`` is ``codex_exec``, or its ``source`` is ``exec``, which also catches the
     TypeScript SDK's own originator), whose Stop block would replace its output. A rollout
-    with no ``thread_source`` (an older Codex) is a person's thread. A Claude transcript has
-    none of these fields, so the thread rules are inert there.
+    with no ``thread_source`` (an older Codex) is a person's thread. Grok: the same prompt
+    count, never a headless ``grok -p`` session, whose output a Stop block would extend. A
+    Claude transcript has none of these fields, so the thread rules are inert there.
     see design/superpowers/specs/2026-10-01-codex-capture-gate-design.md (D2)
     """
     if (
@@ -1028,6 +1187,7 @@ def _is_substantial(stats: _TranscriptStats) -> bool:
         or stats.thread_source in _CODEX_NON_PERSON_THREADS
         or stats.originator == _CODEX_HEADLESS_ORIGINATOR
         or stats.source == _CODEX_HEADLESS_SOURCE
+        or stats.session_kind == _GROK_HEADLESS_KIND
     ):
         return False
     return stats.real_prompts >= _MIN_USER_PROMPTS or (
@@ -1310,7 +1470,7 @@ def session_start() -> None:
                         drift_recent=drift_recent,
                     ),
                     "session",
-                    integrity.CHECKS[:5] + host_checks(location) + integrity.CHECKS[5:],
+                    integrity.CHECKS[:5] + session_host_checks(location) + integrity.CHECKS[5:],
                 )
             except Exception as error:
                 diagnostics.report("integrity", error)
@@ -1461,9 +1621,11 @@ def stop() -> None:
     (capture ledger + ``stop_hook_active``) is nudged again only after at least
     ``_REARM_GAP`` and ``_REARM_MIN_COMMITS`` new commits (``_rearm_commits``), and exactly
     one of several parallel Stops wins that nudge (a compare-and-swap on ``capture_rearm``).
-    It reads a Claude Code transcript and a Codex rollout alike; on Codex only a person's
-    interactive thread can arm. Disable entirely with ``SIDEGRAPH_CAPTURE_NUDGE=off``. Must
-    never crash the session — any failure allows the stop.
+    It reads a Claude Code transcript, a Codex rollout and a Grok ``updates.jsonl`` alike; on
+    Codex only a person's interactive thread can arm, and on Grok only a turn a person ended
+    in a session that is not headless (``_grok_stop_skipped``). Disable entirely with
+    ``SIDEGRAPH_CAPTURE_NUDGE=off``. Must never crash the session — any failure allows the
+    stop.
     see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D2-D5)
 
     Ordering matters: the substance gate runs BEFORE ``mark_captured`` is ever written, and
@@ -1490,7 +1652,7 @@ def stop() -> None:
 
         stage = "payload"
         payload = _read_payload()
-        if payload.get("stop_hook_active"):
+        if payload.get("stop_hook_active") or _grok_stop_skipped(payload):
             print(json.dumps({}))
             return
         session_id, _ = _session_identity(payload)
@@ -1688,6 +1850,63 @@ _BRIEF_CLOSE = "--- end of Sidegraph records ---"
 _BRIEF_RECORDS_PER_FILE = 2
 _BRIEF_MAX_LINES = 6
 _BRIEF_MAX_CHARS = 3000
+
+
+# Grok Build runs the Claude plugin's hooks and sends the Claude keys, but `tool_name` holds
+# Grok's own tool name (measured on 1.0.70). Only these six are mapped; `hashline_edit` and the
+# rest have no captured payload and stay unknown.
+_GROK_TOOLS = {
+    "run_terminal_command": "Bash",
+    "read_file": "Read",
+    "grep": "Grep",
+    "search_replace": "Edit",
+    "write": "Write",
+    "spawn_subagent": "Agent",
+}
+# The mapped tools that name a file. Grok sends that path as the model wrote it, relative to
+# the session directory (`cwd`); Claude Code sends absolute paths.
+_GROK_PATH_TOOLS = frozenset({"read_file", "grep", "search_replace", "write"})
+
+
+def _claude_shaped(payload: dict) -> dict:
+    """A copy of ``payload`` with a Grok tool name and path rewritten the way Claude sends them.
+
+    ``tool_name`` becomes Claude's (``read_file`` -> ``Read``; ``search_replace`` ->
+    ``Edit`` and Grok's separate ``write`` -> ``Write``), ``read_file``'s ``target_file`` is
+    copied to ``file_path`` when neither ``file_path`` nor ``path`` is set, and a relative path
+    becomes absolute against the payload ``cwd`` when that is an existing absolute directory.
+    A Claude name, an unknown name and a ``cwd`` that is not a directory pass through
+    untouched, and the original is never mutated. ``Bash`` needs no path rule: the shell
+    reader already resolves from ``cwd``.
+    see design/superpowers/specs/2026-10-29-grok-pretooluse-if-design.md (D-G3)
+    """
+    name = payload.get("tool_name")
+    claude_name = _GROK_TOOLS.get(name) if isinstance(name, str) else None
+    if claude_name is None:
+        return payload
+    mapped = {**payload, "tool_name": claude_name}
+    tool_input = payload.get("tool_input")
+    if name not in _GROK_PATH_TOOLS or not isinstance(tool_input, dict):
+        return mapped
+    tool_input = dict(tool_input)
+    target = tool_input.get("target_file")
+    unnamed = not tool_input.get("file_path") and not tool_input.get("path")
+    if name == "read_file" and unnamed and isinstance(target, str):
+        tool_input["file_path"] = target
+    key = "file_path" if tool_input.get("file_path") else "path"
+    value = tool_input.get(key)
+    cwd = payload.get("cwd")
+    if (
+        isinstance(value, str)
+        and value.strip()
+        and not os.path.isabs(value)
+        and isinstance(cwd, str)
+        and os.path.isabs(cwd)
+        and os.path.isdir(cwd)
+    ):
+        tool_input[key] = os.path.join(cwd, value)
+    mapped["tool_input"] = tool_input
+    return mapped
 
 
 def _touch_path(tool_input: object, root: str) -> str | None:
@@ -2364,6 +2583,10 @@ def pre_tool_use() -> None:
         payload = {}
     hot = _HotOpener(diagnostics)
     try:
+        try:
+            payload = _claude_shaped(payload)
+        except Exception as error:
+            diagnostics.report("payload", error)
         _record_touch_event(payload, hot)
         try:
             output = _hook_output(payload, hot)

@@ -33,7 +33,8 @@ creates the repo-committed `.sidegraph/` record directories and a gitignored der
 
 Run `sidegraph-init` from the repository root before starting your host session. On Claude Code and Codex, without a
 store, SessionStart shows setup guidance and Stop stays silent; neither creates one.
-OpenCode and Muse use explicit MCP calls instead of lifecycle hooks. If an
+OpenCode uses explicit MCP calls instead of lifecycle hooks, and Muse has no `Stop` hook. On
+Grok Build the setup guidance appears only in Grok's own interface, not to the agent. If an
 older hook already left an empty store, init identifies it as empty and prints setup guidance.
 
 In a terminal, `sidegraph-init` asks two questions. Both default to yes, so pressing Enter twice
@@ -74,8 +75,9 @@ codex plugin add sidegraph@sidegraph
 
 Start a new interactive session in the repository and review its approval prompts; Codex
 hooks require explicit trust through the startup warning or `/hooks`. For OpenCode V2, use
-the [native Git installation guide](../../.opencode/INSTALL.md); for experimental MCP/skills-only
-Muse, use the [Muse guide](../integrations/muse.md) and start its process in this project.
+the [native Git installation guide](../../.opencode/INSTALL.md); for experimental
+Muse, use the [Muse guide](../integrations/muse.md) and start its process in this project; for
+Grok Build, use the [Grok Build guide](../integrations/grok.md).
 The [README host recipes](../../README.md#claude-code) describe installation and updates. For a
 manual or source-checkout setup, use the host-specific page:
 [Claude Code](claude-code-setup.md) or [Codex](codex-setup.md).
@@ -131,5 +133,6 @@ alone and only installs the graph hook.
 
 Next, run the short
 [verification checklist](../guides/verifying-your-setup.md), then
-[name domains](../guides/naming-your-domains.md) if you want a table of contents of your memory. Claude Code and Codex also inject it at
-SessionStart; OpenCode and Muse retrieve it explicitly through MCP.
+[name domains](../guides/naming-your-domains.md) if you want a table of contents of your memory. Claude Code, Codex and Muse also inject it at
+SessionStart; Grok Build receives it through the MCP server's instructions; OpenCode retrieves it
+explicitly through MCP.

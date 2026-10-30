@@ -33,9 +33,23 @@ def test_native_muse_exposes_every_shared_skill() -> None:
     assert len(skills) == len(actual), "Duplicate skill ids lose native registrations"
 
 
-def test_native_muse_does_not_register_unimplemented_lifecycle_hooks() -> None:
-    """Experimental MCP/skills support must not advertise the deferred hook adapter."""
-    assert not _manifest()["capabilities"].get("hooks")
+def test_native_muse_registers_the_proved_lifecycle_hooks() -> None:
+    """Only the shipped stage is declared: SessionStart and SubagentStart, each its own source.
+
+    Muse rejects two hooks on one file (``duplicate-hook-source``), so each event has an entry
+    file and ``hook.py`` is shared, never declared. An unproved event is not advertised.
+    see design/superpowers/specs/2026-10-28-muse-hooks-design.md (Adapter, Manifest)
+    """
+    hooks = _manifest()["capabilities"]["hooks"]
+    assert [(h["id"], h["event"], h["command"]) for h in hooks] == [
+        ("session-start", "SessionStart", ["python3", "muse/session_start.py"]),
+        ("subagent-start", "SubagentStart", ["python3", "muse/subagent_start.py"]),
+    ]
+    sources = [h["command"][1] for h in hooks]
+    assert len(set(sources)) == len(sources)
+    assert "muse/hook.py" not in sources
+    assert all((PLUGIN / source).is_file() for source in sources)
+    assert all(isinstance(h["timeoutMs"], int) and h["timeoutMs"] > 1000 for h in hooks)
 
 
 def test_native_muse_mcp_uses_the_public_runtime_without_a_shell() -> None:

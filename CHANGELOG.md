@@ -7,6 +7,52 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.21.1] — 2026-10-30
+
+### Added
+
+- Muse sessions get the Sidegraph session map at start and a memory brief for subagents,
+  through two plugin hooks that run on the stock macOS `python3`. Approve the hook
+  capabilities with `muse plugins approve sidegraph`.
+
+### Fixed
+
+- On Grok Build, records now reach the agent when it reads, searches, edits or writes a file and when
+  it starts a subagent. The hook did not recognise Grok's tool names, and resolved a relative
+  path against the repository root instead of the directory the session started in; see
+  [`docs/integrations/grok.md`](docs/integrations/grok.md).
+- On Grok Build, the hook now starts for shell reads (`sed`, `grep`, `rg`, `cat`), and the Hooks
+  tab no longer shows the four `if` errors. The plugin gives Grok its own hooks file without the
+  `if` field Grok skips.
+- On Grok Build, every session shared one session key, because Grok names each transcript
+  `updates.jsonl`. A file's records reached the agent once across all Grok sessions, and after
+  ten files no Grok session got records at all. Each Grok session is now keyed by its own id.
+- Grok Build sessions are attributed to Grok, not to Claude Code: hooks stamp the `grok` host
+  family, and MCP calls from Grok are bound to the same session as its hooks. A Grok session
+  no longer gets the notice about Claude Code's settings in subdirectories.
+- Grok Build sessions now see the project's session map. Grok drops the SessionStart hook's
+  output, so as a workaround the MCP server sends the map as its instructions, to Grok clients
+  only; the map carries the domain table of contents but not SessionStart's status lines. It
+  goes away once Grok passes hook context to the model.
+- On Grok Build, the Stop hook now asks for a capture once a session has had two prompts: it
+  reads Grok's own transcript, ignores the Stop Grok sends when a process exits and on the
+  turns Grok starts itself, and never asks in a headless `grok -p` run, where the request would
+  be printed into the run's output.
+- On Grok Build, the first `SessionStart` after installing no longer runs out of time: it downloads
+  and builds Sidegraph (5–7 seconds measured on its own, about 10 inside Grok), past Grok's
+  5-second default for a hook. The Grok hooks file now gives `SessionStart` 30 seconds and the
+  file and subagent hooks 10.
+- Grok Build is no longer marked experimental: with the hooks, the session map and the capture
+  request working, the README and the Grok guide list it beside Claude Code and Codex. The Grok
+  guide adds what to do when the plugin is disabled, and that under `--sandbox read-only` the
+  hooks deliver no records.
+- A malformed line in a session transcript (a `method`, `origin.kind` or `promptSource` that is
+  a list or an object) no longer stops the prompt count, which had silently dropped the capture
+  reminder for that session.
+- The Muse install and update instructions in the README and the Muse guide now use the
+  public marketplace (`muse plugins marketplace add`, `install sidegraph@sidegraph`) instead
+  of a maintained local clone of the repository.
+
 ## [0.21.0] — 2026-10-28
 
 ### Changed

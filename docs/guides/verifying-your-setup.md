@@ -20,12 +20,16 @@ you can drop the prefix and use the bare `sidegraph-*` names.
 **Success:** the tool is available and returns either task context or `No context found.` A
 missing record is fine; a trailing `## No code graph` block means the code graph is missing or not
 readable (build it with `graphify update .`, or fix its permissions), not that the wiring failed. “Unknown tool”, a different repository's
-records, or a silent SessionStart hook is not fine. For Codex, confirm hook trust before debugging the JSON.
+records, or a silent SessionStart hook is not fine. For Codex, confirm hook trust before debugging the JSON. On Grok Build
+the opening map comes from the MCP server rather than the hook; it is there before the first
+answer, unless the server started slowly, when it arrives after the first tool call (see the [Grok Build guide](../integrations/grok.md)); on Muse, approve the hooks
+first (see the [Muse guide](../integrations/muse.md)).
 
 If this fails, compare the resolved paths with
 [Configuration](../reference/configuration.md#store-path-resolution) and the relevant host
-page: [Claude Code](../getting-started/claude-code-setup.md) or
-[Codex](../getting-started/codex-setup.md).
+page: [Claude Code](../getting-started/claude-code-setup.md),
+[Codex](../getting-started/codex-setup.md), [Grok Build](../integrations/grok.md) or
+[Muse](../integrations/muse.md).
 
 ## Case 2 — Durable capture and retrieval
 

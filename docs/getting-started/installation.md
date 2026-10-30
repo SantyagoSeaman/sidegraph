@@ -9,9 +9,11 @@ file- and domain-linked records without a graph; the complete workflow below ins
 - **Python 3.13+** for Sidegraph (`.python-version` pins it).
 - **Python 3.10+** for Graphify.
 - [`uv`](https://docs.astral.sh/uv/) — used to install and run both.
-- For automatic session integration: [Claude Code](claude-code-setup.md) or
-  [Codex](codex-setup.md). [OpenCode V2](../../.opencode/INSTALL.md) and experimental
-  [Muse](../integrations/muse.md) provide MCP tools and shared skills without lifecycle hooks.
+- For automatic session integration: [Claude Code](claude-code-setup.md),
+  [Codex](codex-setup.md) or [Grok Build](../integrations/grok.md).
+  [OpenCode V2](../../.opencode/INSTALL.md) provides MCP tools and shared skills without
+  lifecycle hooks; experimental [Muse](../integrations/muse.md) adds the session map and a
+  subagent brief through two hooks.
   Other stdio MCP clients can call the tools directly; the CLI also works without a host.
 
 ### Platform coverage
@@ -37,8 +39,8 @@ above, including a Windows 3.14 cell with PowerShell 7 unavailable for preflight
 real host sessions. Windows 3.13 retains PowerShell 7; its launcher checks also cover 5.1.
 Stable publication of 0.14.0 required the full gate to pass without a known-issue exception.
 The README's blue badges summarize release acceptance, rather than live workflow status or
-support for every published version. Muse and OpenCode have the narrower coverage in
-their installation guides and are outside this native matrix.
+support for every published version. Muse, OpenCode and Grok Build have the narrower
+coverage in their installation guides and are outside this native matrix.
 
 On native Windows, the Claude Code hooks run through Git Bash, which comes with Git for
 Windows; the MCP launchers and the Codex hooks need no POSIX shell. The native checks run
@@ -215,8 +217,10 @@ keep `sidegraph@sidegraph`; update cached assets with the host's native update c
 then start a new session and review any changed approvals. The runtime's `@main` does not
 refresh cached skills or manifests. OpenCode V2 uses the
 [canonical Git package guide](../../.opencode/INSTALL.md). Experimental
-[Muse](../integrations/muse.md) supplies MCP/skills only and must be restarted from the
-intended project when switching workspaces; expanded native acceptance is deferred.
+[Muse](../integrations/muse.md) supplies MCP, skills, the session map and a subagent brief,
+and must be restarted from the intended project when switching workspaces; expanded native
+acceptance is deferred. Grok Build installs from its own plugin marketplace; see the
+[Grok Build guide](../integrations/grok.md).
 
 ### Option C — uvx directly from git
 

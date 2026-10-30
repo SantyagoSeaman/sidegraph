@@ -118,10 +118,10 @@ TELEMETRY_SESSION_KEY = "telemetry:session"
 TELEMETRY_SESSION_GROUP_KEY = "telemetry:session_group"
 
 # One index-only row per session start: `telemetry:session:<session key>` = `<iso>|<family>`,
-# where family is `claude`, `codex` or `unknown` (host/hooks.py). The single legacy key above
-# cannot say which of several concurrent hosts wrote it; these rows can. The value starts with
-# the ISO timestamp so `Store.prune_meta_prefixes` expires them (it matches on that), which the
-# legacy `<id>|<iso>` value never satisfies.
+# where family is `claude`, `codex`, `muse`, `grok` or `unknown` (host/hooks.py). The single
+# legacy key above cannot say which of several concurrent hosts wrote it; these rows can. The
+# value starts with the ISO timestamp so `Store.prune_meta_prefixes` expires them (it matches
+# on that), which the legacy `<id>|<iso>` value never satisfies.
 # see design/superpowers/specs/2026-10-11-session-attribution-design.md (D5)
 TELEMETRY_SESSION_STAMP_PREFIX = "telemetry:session:"
 

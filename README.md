@@ -15,9 +15,10 @@ the files and symbols an agent is working on.
 
 Records live in your repository as reviewable JSON files. A derived SQLite index supports
 retrieval; [Graphify](https://github.com/Graphify-Labs/graphify) supplies the code and document
-graph used to anchor records. Claude Code and Codex plugins connect capture and retrieval
-to coding sessions. OpenCode V2 and the experimental Muse and Grok Build expose MCP tools and shared skills
-for explicit retrieval and capture.
+graph used to anchor records. Claude Code, Codex and Grok Build plugins connect capture and
+retrieval to coding sessions. OpenCode V2 and the experimental Muse expose MCP tools and shared
+skills for explicit retrieval and capture; Muse also receives the session map and a subagent
+brief.
 
 - Keep decisions, rejected alternatives, and evidence with their provenance and history.
 - Hand the agent the relevant mistakes and constraints before it edits, sized to fit its context.
@@ -50,8 +51,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 ```
 
 Linux follows the macOS commands but is not among the checked platforms. Open a new terminal afterwards so `uv` is on your PATH, then change into the root of your
-repository (`cd /path/to/your/repo`). Every command below runs there, except the Muse
-install, which says otherwise.
+repository (`cd /path/to/your/repo`). Every command below runs there.
 
 **Already using Sidegraph?** (New here? Skip to step 1.) Follow the [0.14 migration guide](docs/guides/migrating-to-0.14.md)
 before upgrading Graphify, so accepted domains keep their membership. Update every client
@@ -115,9 +115,9 @@ Details: [`sidegraph-init`](docs/reference/cli.md#sidegraph-init).
 |---|---|---|
 | Claude Code | yes: hooks, capture reminders, context on reads | macOS and Windows |
 | Codex | yes: hooks, after you approve them | macOS and Windows |
-| Muse (experimental) | no: MCP and skills | macOS |
+| Muse (experimental) | partly: session map and subagent brief, after you approve them | macOS |
 | OpenCode V2 | no: MCP and skills | macOS |
-| Grok Build (experimental) | no: MCP and skills | macOS |
+| Grok Build | yes: hooks, capture reminders, context on reads; the session map through the MCP server | macOS |
 
 Claude Code is shown first; open the section for another host. Host plugin updates and the
 MCP runtime are separate: the default runtime follows the public repository's `main`, which
@@ -174,12 +174,14 @@ or later. See the [Codex guide](docs/getting-started/codex-setup.md#keep-the-plu
 </details>
 
 <details>
-<summary><strong>Grok Build</strong> (experimental)</summary>
+<summary><strong>Grok Build</strong></summary>
 
-#### Grok Build (experimental)
+#### Grok Build
 
-MCP and skills only; no automatic session map, read context or capture reminder: ask the
-agent for context and for capture explicitly. Run in a terminal:
+The plugin brings the MCP tools, the skills and the hooks: records arrive when the agent reads,
+searches, edits or writes a file or starts a subagent, and the agent is reminded to propose
+decisions once a session has done some work. Grok does not pass the `SessionStart` hook's output
+to the model, so the session map comes from the MCP server instead. Run in a terminal:
 
 ```sh
 grok plugin marketplace add SantyagoSeaman/sidegraph
@@ -188,8 +190,9 @@ grok plugin install sidegraph@sidegraph
 
 Accept the trust prompt (`--trust` skips it), then start a new Grok session in the repository.
 Ask the agent which Sidegraph tools it has: `get_task_context` should be among them. Checked
-with Grok Build 1.0.62 on macOS: install, MCP tools, skills, and recording and retrieving a
-gotcha across two sessions. Windows is not checked. See the [Grok Build guide](docs/integrations/grok.md).
+on macOS with Grok Build 1.0.70 (hooks, session map, capture reminder) and 1.0.62 (install,
+MCP tools, skills, a gotcha recorded in one session and retrieved in the next). Windows is not
+checked. See the [Grok Build guide](docs/integrations/grok.md).
 For an existing install, run these in your terminal, then start a new session:
 
 ```sh
@@ -204,17 +207,17 @@ grok plugin update sidegraph
 
 #### Muse (experimental)
 
-MCP and shared skills only; no automatic session map, read context or capture reminder.
-Run the install and update commands from the same stable directory outside any project
-(for example, your home directory), not from the repository. Keep that checkout with LF line endings:
+MCP, shared skills, a session map at start and a memory brief for subagents; no context on
+reads and no capture reminder. The hooks need `python3` (3.9 or later; the macOS one works).
+Add the marketplace and install the plugin:
 
 ```sh
-git clone -c core.autocrlf=false https://github.com/SantyagoSeaman/sidegraph.git sidegraph-plugin
-muse plugins install ./sidegraph-plugin/plugin/sidegraph
+muse plugins marketplace add sidegraph https://github.com/SantyagoSeaman/sidegraph
+muse plugins install sidegraph@sidegraph
 muse plugins inspect sidegraph
 ```
 
-Review the MCP capability, then approve it:
+Review the two hook capabilities and the MCP capability, then approve them:
 
 ```sh
 muse plugins approve sidegraph
@@ -222,10 +225,11 @@ muse plugins approve sidegraph
 
 Exit Muse and start a new Muse process from the intended project directory. Restart it there
 whenever you switch projects; selecting a workspace in a running process is insufficient.
-For an existing install, refresh the maintained checkout and inspect the changed capability:
+For an existing install, refresh the marketplace and the plugin, then inspect the changed
+capability:
 
 ```sh
-git -C sidegraph-plugin pull --ff-only
+muse plugins marketplace update sidegraph
 muse plugins update sidegraph
 muse plugins inspect sidegraph
 ```
@@ -236,9 +240,8 @@ Review changes, then approve and restart Muse from the target project:
 muse plugins approve sidegraph
 ```
 
-Basic installation and MCP access were checked on Muse 1.4.7 on macOS; the update command is
-supported by native help, with its full lifecycle and Windows not checked. See the
-[Muse guide](docs/integrations/muse.md).
+Installation, update, MCP approval, the session map and the subagent brief were checked on
+Muse 1.4.14 on macOS; Windows is not checked. See the [Muse guide](docs/integrations/muse.md).
 
 </details>
 
@@ -355,8 +358,9 @@ evaluate it on your own repository.
 ## How it works
 
 1. **Capture.** During a session the agent saves a decision when you ask for one. At the end of
-   a Claude Code or Codex session the plugin reminds it to propose decisions worth keeping.
-   In OpenCode, Muse and Grok Build, ask for capture explicitly. Known secret patterns are redacted before storage (best effort).
+   a Claude Code, Codex or Grok Build session the plugin reminds it to propose decisions worth
+   keeping (on Grok Build in interactive sessions only). In OpenCode and Muse, ask for capture
+   explicitly. Known secret patterns are redacted before storage (best effort).
 2. **Review.** You accept or drop what the agent proposed; Sidegraph calls this *ratifying*.
    Records are JSON in `.sidegraph/`, committed with your code: one file per record, or lines
    in shard files once maintenance has packed them.
