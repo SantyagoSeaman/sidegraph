@@ -3,7 +3,7 @@
 Two ways a decision enters the store: at your request, the agent writes it **directly** mid-session
 (`add_decision`), or the session gets **distilled and proposed** at the end and is ratified
 later, by a human (`propose_decisions` → `sidegraph-ratify`) or at write time by an
-[auto-ratification policy](#5-auto-ratification-policy-opt-in). The library default is
+[auto-ratification policy](#5-auto-ratification-policy). The library default is
 `manual`; `sidegraph-init` asks, in an interactive terminal, whether a fresh project should
 auto-ratify instead, defaulting the answer to yes (`auto-low-risk`); a person's choice is
 committed to `.claude/settings.json` either way, and a non-interactive run (CI, a script, an
@@ -149,8 +149,9 @@ can still record raw inputs.
 The write pipeline (`src/sidegraph/capture.py`) is deterministic — no LLM key required:
 
 1. **Redact** admitted text fields (AWS keys, GitHub/Slack tokens, bearer tokens,
-   private key blocks, `key=value`/`key: value` secrets) — the scrubbed text is the only
-   text that ever reaches the store. Tags are redacted before slugification and duplicate
+   private key blocks, `key=value`/`key: value` secrets) — the scrubbed prose is the only
+   prose that ever reaches the store. Identifiers are stored as given: anchor names and paths,
+   and provenance (`ref`, `author`, `session_id`). Tags are redacted before slugification and duplicate
    slugs are combined. Comma-separated string input is cleaned before splitting: if any
    secret matches in a comma-containing string, all its tags are omitted. Use a list to
    make tag boundaries explicit. Quoted assignment values are consumed whole, including
@@ -170,7 +171,7 @@ The write pipeline (`src/sidegraph/capture.py`) is deterministic — no LLM key 
    decision with the same `kind` and the same canonicalized `title` already binds one of the
    same anchor entities. When unsure, it writes — the human drops it at ratification instead.
    (Under an auto-ratification policy nobody drops it: a near-duplicate with a different
-   title can ratify itself — see [§5](#5-auto-ratification-policy-opt-in).)
+   title can ratify itself — see [§5](#5-auto-ratification-policy).)
 3. **Write** as `status="proposed"`, with `provenance.source="agent"` and the current
    `graph_version` recorded.
 4. **Anchor** best-effort via the same multi-anchor resolution as `add_decision` (orphaned
@@ -222,7 +223,7 @@ Full exact flags and behavior: [`reference/cli.md`](../reference/cli.md).
 
 The proposed → ratify gate above is the store's **only noise filter** — every agent-drafted
 decision and fact stops there until it is accepted — explicitly by a human, unless an
-[auto-ratification policy](#5-auto-ratification-policy-opt-in) admits it. Some workflows (a solo
+[auto-ratification policy](#5-auto-ratification-policy) admits it. Some workflows (a solo
 developer working alone, a personal/scratch corpus) would rather skip that stop entirely.
 Set `SIDEGRAPH_AUTO_ACCEPT=on` in the environment the MCP server runs in, and every agent
 capture through `propose_decisions` — each decision draft, its attached facts, and any
@@ -262,9 +263,11 @@ all-or-nothing, opt-in, and off unless the environment variable is exactly `"on"
 and [`reference/mcp-tools.md`](../reference/mcp-tools.md#propose_decisions) for
 `propose_decisions`'s full auto-accept behavior.
 
-## 5. Auto-ratification policy (opt-in)
+## 5. Auto-ratification policy
 
-`SIDEGRAPH_RATIFY_POLICY` is a second, independent opt-in: instead of skipping ratification
+`SIDEGRAPH_RATIFY_POLICY` is a second, independent project setting. A terminal
+`sidegraph-init` proposes `auto-low-risk` and writes the answer to `.claude/settings.json`, so
+a project set up by pressing Enter runs `auto-low-risk`. Instead of skipping ratification
 entirely (auto-accept, above), it lets a *deterministic, stamped* policy stand in for the
 human at write time — useful for an unattended import pipeline where nobody is going to run
 `sidegraph-ratify` at all. Set it in the environment the MCP server or
@@ -273,7 +276,7 @@ or empty value falls back to `manual`.
 
 | Policy | Admits |
 |---|---|
-| `manual` (default) | Nothing — every write keeps today's behavior exactly, including the three CLI batch summaries and every rendered surface. |
+| `manual` (library default, when the variable is unset) | Nothing — every write keeps today's behavior exactly, including the three CLI batch summaries and every rendered surface. |
 | `auto-low-risk` | An eligible `gotcha`/`lesson` decision or standalone fact. |
 | `auto-all` | Everything `auto-low-risk` admits, plus `adr`/`constraint` decisions and domains. |
 

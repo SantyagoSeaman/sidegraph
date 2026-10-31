@@ -104,7 +104,7 @@ The available action stays visible at every line-oriented prompt:
 | edit | no result until reconfirmed | no |
 | keep proposed | `proposed` | only through the quarantine tier |
 | skip | no stored record | no |
-| batch `N,M` | the listed candidates are accepted; every other remaining candidate stays `proposed` | accepted ones only |
+| batch `N,M` | the listed candidates are accepted; every other remaining candidate stays `proposed` | accepted ones; the rest only through the quarantine tier |
 
 `edit` opens one mode-`0600` temporary file through `$VISUAL`, then `$EDITOR`. Edited content
 is parsed, redacted, validated, re-anchored, shown as a new diff, and confirmed again. If no

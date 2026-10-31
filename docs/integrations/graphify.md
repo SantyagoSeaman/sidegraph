@@ -38,7 +38,8 @@ Graphify 0.9.87 and later refresh the agent skills they installed (such as `~/.c
 corpora Sidegraph anchors to:
 
 - **Code** — functions, classes, modules become nodes; `contains`/`references` edges link
-  them; Leiden clustering assigns each node a community.
+  them; community detection (Leiden with Graphify's `leiden` extra, otherwise Louvain) assigns
+  each node a community.
 - **Markdown / ADR-SAD docs** — every file and every heading becomes a node the same way,
   with the same file/community metadata. Sidegraph anchors decisions to doc headings exactly
   like code symbols.
@@ -65,7 +66,7 @@ LLM-enriched build) does. Don't expect `wiki/` after a plain
 
 A third build mode, `graphify extract . --backend <claude|gemini|openai|deepseek|ollama>`,
 adds the **semantic pass**: it reads prose instead of just structure, producing `concept` and
-`rationale` nodes (plus thematic Leiden communities) in the same `graph.json`. Every backend
+`rationale` nodes (plus thematic communities) in the same `graph.json`. Every backend
 except a local `ollama` needs an API key and costs real money per run; `ollama` talks to a local
 server and needs no real key. Runs are cached per file, so re-runs only pay for changed docs.
 Anchoring and `sidegraph-import` both treat its output identically to the AST pass's nodes —
@@ -74,7 +75,8 @@ cost/cache expectations, and the bootstrap-import walkthrough.
 
 Point Sidegraph at it with `SIDEGRAPH_GRAPH` (default `graphify-out/graph.json`). The CLI
 commands resolve a relative default against the store's project, and a `--graph` you type
-against the shell's directory. The MCP server resolves it the same way, against the
+against the shell's directory; `sidegraph-bootstrap` resolves both against its `--root`, so pass
+it an absolute `--graph` when the graph lives elsewhere. The MCP server resolves it the same way, against the
 project of the store it serves, and so do the hooks: a relative `SIDEGRAPH_GRAPH` is looked up in the
 store's project, not under `$CLAUDE_PROJECT_DIR`. See [Graph path resolution](../reference/cli.md).
 
@@ -84,7 +86,7 @@ store's project, not under `$CLAUDE_PROJECT_DIR`. See [Graph path resolution](..
 graph. Without one nothing resolves through the graph: `get_task_context` finds no entity for a seed
 unless it matches an anchor stored on a live binding. When the
 store's own graph is missing and its repository is a linked worktree of a main checkout, the
-read tools (`get_task_context`, `query_structure`, `query_decisions`, `drill_down`) and the
+read tools (`get_task_context`, `retrieve_decisions`, `query_structure`, `query_decisions`, `drill_down`) and the
 `SessionStart` hook open the **main checkout's** graph instead. The path is the store's own
 project-relative one, applied in the main checkout: a store at `.config/sidegraph` borrows
 `<main>/.config/graphify-out/graph.json`.
@@ -168,15 +170,17 @@ for a `Read`.
 
 Graphify ships its own Claude Code wiring via `graphify claude install`. That command writes
 a `## graphify` section to `CLAUDE.md` **and two `PreToolUse` hooks into the project's
-`.claude/settings.json`** — a `Bash` matcher (fires when a shell command looks like
+`.claude/settings.json`** — a `Bash|Grep` matcher (fires on a Grep call or a shell command that looks like
 `grep`/`rg`/`find`) and a `Read|Glob` matcher (fires on reads of source/doc files) — both
 injecting a "you MUST run `graphify query` first" nudge. This overlaps Sidegraph's own
 `PreToolUse` records block, so the interaction is worth being explicit about.
 
 It is **not a destructive conflict.** The two live in different files (Graphify's in
 `.claude/settings.json`, Sidegraph's in the plugin's `hooks/hooks.json`), which Claude Code
-merges rather than overwrites; both hooks only add `additionalContext` and neither ever
-denies a tool call, so there is no blocking or deadlock; and `graphify claude uninstall`
+merges rather than overwrites; by default both hooks only add `additionalContext` and neither
+denies a tool call, so there is no blocking or deadlock (Graphify's opt-in strict mode,
+`graphify claude install --strict` or `GRAPHIFY_HOOK_STRICT=1`, can deny the first raw read of
+a session); and `graphify claude uninstall`
 filters on Graphify's own matchers (`Bash`, `Read|Glob`, `Glob|Grep`) plus the text `graphify`
 anywhere in the entry, so it never removes Sidegraph's `Read|Grep|Edit|Write` hook. Safe to run
 with the plugin — but redundant.

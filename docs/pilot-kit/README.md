@@ -34,8 +34,13 @@ Do not enable the `SessionStart`, `SubagentStart`, or `PreToolUse` hooks for the
 sessions. Give the agent an explicit end-of-session capture instruction and allow only
 the write-side
 `propose_decisions` MCP path; deny `get_task_context`, `query_decisions`,
-`retrieve_decisions`, `list_facts`, `drill_down`, and other store reads. Review the queue
-outside the measured agent session with `sidegraph-ratify --db .sidegraph-shadow`.
+`retrieve_decisions`, `list_facts`, `drill_down`, and other store reads. Start the shadow MCP
+server with `SIDEGRAPH_RATIFY_POLICY=manual` and without `SIDEGRAPH_AUTO_ACCEPT`: otherwise the
+server applies the repository's committed auto-ratify policy, and accepted records never reach
+the queue. Check with one sample capture that it stays `proposed`. Review the queue
+outside the measured agent session with `sidegraph-ratify --db .sidegraph-shadow`. A
+`propose_decisions` result also carries up to three neighbouring decision titles from the
+shadow store; accept that small leak or strip `neighbors` from the result.
 
 `SIDEGRAPH_UNRATIFIED=off` alone is **not** delivery isolation: accepted memory and the
 SessionStart map can still reach the agent. Verify the effective hook and tool configuration
@@ -53,7 +58,8 @@ worth the two weeks by itself.
 ## Stage 3 — the paired battery (1 engineer-day, ~$20–40 of model spend)
 
 Run each question four times: twice with memory enabled, twice with every memory channel
-denied (tools deny-listed, hooks disarmed). With 16 questions that is **64 answer sessions**:
+denied (tools deny-listed, hooks disarmed, and on Grok Build no Sidegraph MCP server at all,
+since it sends the session map in its initialize instructions). With 16 questions that is **64 answer sessions**:
 16 × 2 arms × 2 repeats. Randomize run order and keep the same model, repository commit,
 prompt, and tool budget across arms. Two repeats are a small pilot sample, not a precision
 estimate; report uncertainty and inspect item-level disagreements.

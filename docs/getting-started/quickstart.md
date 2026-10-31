@@ -5,7 +5,8 @@ anchored gotcha, and retrieve it in a new session. It assumes Graphify is instal
 [Installation](installation.md). Commands are written with the `uvx` prefix the plugin uses, so
 no Sidegraph install is needed. With the optional CLI installed and kept updated
 ([Option A](installation.md#option-a--the-cli-on-your-path)), the bare `sidegraph-*` names
-work too, and the text below uses them. (`@main` is a mutable ref; to pin it see
+work too; the prose below uses those bare names, the code blocks the `uvx` form. (`@main` is a
+mutable ref; to pin it see
 [mutable development references](installation.md#mutable-development-references).)
 
 On Windows, run them in PowerShell and use the line marked for it: in Windows PowerShell 5.1,
@@ -13,7 +14,9 @@ On Windows, run them in PowerShell and use the line marked for it: in Windows Po
 Run the shell commands from the repository that Sidegraph should remember.
 
 For an existing store, follow the [0.14 migration guide](../guides/migrating-to-0.14.md)
-before upgrading Graphify; update every Sidegraph client first.
+before upgrading Graphify and read
+[Upgrading an existing install](installation.md#upgrading-an-existing-install); update every
+Sidegraph client first.
 
 ## 1. Build the graph and store
 
@@ -37,22 +40,30 @@ OpenCode uses explicit MCP calls instead of lifecycle hooks, and Muse has no `St
 Grok Build the setup guidance appears only in Grok's own interface, not to the agent. If an
 older hook already left an empty store, init identifies it as empty and prints setup guidance.
 
-In a terminal, `sidegraph-init` asks two questions. Both default to yes, so pressing Enter twice
-accepts them.
+In a terminal, `sidegraph-init` asks up to two questions; it skips one that is already settled
+(a committed policy, a wired hook, a directory that is not a git repository). Both default to
+yes, so pressing Enter accepts them.
 
 - *Keep the code graph fresh?* Yes installs a helper and a marked block in the `post-commit`,
   `post-merge` and `post-checkout` git hooks, which rebuild `graphify-out/graph.json` in the
   background. It never replaces a hook you already have. `sidegraph-init --hooks` answers yes
   without asking, `--no-hooks` answers no and stops the reminder, and `--remove-hooks` takes the
-  hook out. See
+  hook out. With `core.hooksPath` set, init installs only the helper and prints the line to add
+  to each hook in your hook manager. See
   [keeping the graph fresh](../integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
-- *Auto-ratify low-risk records?* Yes means the lessons, gotchas and facts the agent proposes
-  are accepted without review; ADRs, constraints and domains still wait for a person. The
+- *Auto-ratify low-risk records?* Yes means the lessons, gotchas and standalone facts the agent
+  proposes are accepted without review when they anchor to code in the current graph and replace
+  no earlier record (see
+  [auto-ratification policy](../guides/capturing-decisions.md#5-auto-ratification-policy));
+  ADRs, constraints and domains still wait for a person. The
   answer is saved in `.claude/settings.json`, which you commit. Sidegraph applies it in every MCP integration unless an explicit
-  `SIDEGRAPH_RATIFY_POLICY` overrides it, so teammates use the same project policy. See
+  `SIDEGRAPH_RATIFY_POLICY` overrides it, so teammates use the same project policy; the
+  `export` line init prints is for CLI and CI runs outside a host. See
   [`sidegraph-init`](../reference/cli.md#sidegraph-init).
 
-Without a terminal it asks neither question.
+Without a terminal it asks neither question, so the project keeps the `manual` policy and no
+graph refresh hook is installed until you run `sidegraph-init --ratify-policy auto-low-risk` or
+`sidegraph-init --hooks`.
 
 If the repository already contains ADRs or supported flow specs, you can now switch to the
 [preview-first bootstrap](bootstrap.md). Otherwise continue here.
@@ -75,21 +86,16 @@ codex plugin add sidegraph@sidegraph
 
 Start a new interactive session in the repository and review its approval prompts; Codex
 hooks require explicit trust through the startup warning or `/hooks`. For OpenCode V2, use
-the [native Git installation guide](../../.opencode/INSTALL.md); for experimental
+the [native Git installation guide](../../.opencode/INSTALL.md); for
 Muse, use the [Muse guide](../integrations/muse.md) and start its process in this project; for
 Grok Build, use the [Grok Build guide](../integrations/grok.md).
-The [README host recipes](../../README.md#claude-code) describe installation and updates. For a
+The [host plugin recipes](installation.md#host-plugins-install-and-update) describe installation and updates. For a
 manual or source-checkout setup, use the host-specific page:
 [Claude Code](claude-code-setup.md) or [Codex](codex-setup.md).
 
-**Scope.** `/plugin install` offers three scopes: user, local and project. From a terminal the
-flag is `claude plugin install sidegraph@sidegraph --scope user|project|local`, and the default
-is user. Enable the plugin at user scope, or in the repository root's
-`.claude/settings.local.json`, and it covers sessions started in any subdirectory. Project scope
-(`.claude/settings.json`) covers only the directory it was installed from: Claude Code reads a
-launch directory's own project settings and no parent's, so a plugin installed at the repository
-root leaves sessions started below it without it. `sidegraph-doctor` reports the gap as
-[`plugin-off-in-subdirectories`](../guides/troubleshooting.md#plugin-off-in-subdirectories).
+**Scope (Claude Code).** Install at user scope, or enable the plugin in the repository root's
+`.claude/settings.local.json`, so sessions started in subdirectories get it too; see
+[plugin scope](claude-code-setup.md#option-a--plugin-recommended).
 
 ## 3. Record one real gotcha
 
@@ -100,8 +106,9 @@ Choose a real file or symbol in the repository. Tell the agent:
 > content hash instead.
 
 This human-requested path calls `add_decision`, so the record lands accepted. Confirm that a
-new JSON file exists under `.sidegraph/decisions/` and that its binding points at the file or
-symbol you named.
+new JSON file exists under `.sidegraph/decisions/`, that a binding file with the same id exists
+under `.sidegraph/bindings/`, and that the write result's `entities` name the file or symbol you
+gave.
 
 ## 4. Retrieve it from a fresh session
 

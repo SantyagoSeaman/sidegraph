@@ -2809,6 +2809,14 @@ def _get_entity_history_impl(store: Store, entity_id: str) -> list[dict]:
             fact = store.get_fact(b.record_id)
             if fact is not None:
                 records.append(("fact", fact))
+    # History keeps superseded and rejected records (the "tried before" chain), but a proposal
+    # obeys the surfacing policy here as in every other raw listing: regulated mode and the
+    # window exist to keep unreviewed text away from the agent.
+    records = [
+        pair
+        for pair in records
+        if pair[1].status != DecisionStatus.PROPOSED or proposal_surfaces(pair[1])
+    ]
     records.sort(key=lambda pair: pair[1].valid_from, reverse=True)
     out = []
     for record_type, record in records:
@@ -2842,7 +2850,8 @@ def _entity_history_listing(
 
     Fill rule: full records up to half the budget (at least one, at most ``limit``), then a
     short row for each other record, and the ids of those that do not fit as rows; the length
-    never exceeds the clamped budget. A record is never dropped, only shortened or named.
+    never exceeds the clamped budget. A record is never dropped, only shortened or named,
+    except a proposal the surfacing policy withholds (see ``_get_entity_history_impl``).
     see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D3)
     """
     limit = max(1, min(_LISTING_LIMIT_MAX, limit))
@@ -2892,8 +2901,10 @@ def _entity_history_listing(
             out["hint"] = hint
         elif matched == 0:
             out["hint"] = (
-                "Nothing is anchored to this entity (or the status filter matched nothing). "
-                "find_entity(name) looks an entity_id up."
+                "Nothing visible is anchored to this entity: the status filter matched nothing, "
+                "or the only records are proposals the surfacing policy withholds "
+                "(list_proposed shows the review queue). find_entity(name) looks an "
+                "entity_id up."
             )
         else:
             out["hint"] = None
@@ -2946,7 +2957,8 @@ def get_entity_history(
     """Every decision AND fact anchored to an entity, newest first, bounded. The answer is one
     JSON object in one text block: ``{"entity_id", "matched", "returned", "omitted", "records",
     "omitted_records", "omitted_ids", "hint"}``. Every record carries ``"record_type":
-    "decision" | "fact"``; superseded records are included (the "tried before" chain).
+    "decision" | "fact"``; superseded records are included (the "tried before" chain). A
+    proposed record obeys the proposal-surfacing policy (regulated mode, the window).
 
     ``records`` holds the newest records in full, up to half of ``budget_chars`` (default 24000,
     max 40000) and ``limit`` (default 25, max 100), at least one. Each other record is a short

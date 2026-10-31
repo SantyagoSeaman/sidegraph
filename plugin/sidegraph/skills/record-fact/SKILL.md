@@ -89,7 +89,7 @@ keeping** — including an attached fact discovered while drafting a decision �
 own `facts` list, or the top-level `facts` param on `propose_decisions` — `status=proposed`
 (or `accepted` immediately under `SIDEGRAPH_AUTO_ACCEPT=on` — see [auto-accept's
 trade-off](../../../../docs/guides/capturing-decisions.md#4-auto-accept-opt-in) — or accepted
-at write time when an opt-in `SIDEGRAPH_RATIFY_POLICY` admits it, the result's `ratified_by`
+at write time when the project's `SIDEGRAPH_RATIFY_POLICY` admits it, the result's `ratified_by`
 then reading `auto:<policy>`, so don't tell the human it awaits review) until a
 human ratifies it. **Never call `add_fact` on your own initiative** — read the full
 rationale in `sidegraph:record-decision` if the split is unclear; it doesn't change here.

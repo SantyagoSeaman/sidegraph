@@ -1,4 +1,4 @@
-# Muse (experimental)
+# Muse
 
 Sidegraph exposes its shared skills, MCP tools and two lifecycle hooks through Muse's native
 plugin format:
@@ -38,7 +38,7 @@ workspace, exit and start Muse again from the new directory; selecting a differe
 with `--workspace` or inside an existing host does not reliably move the MCP server.
 
 Follow the setup skill to prepare the graph and store. Call `list_domains()` to verify MCP
-access; an empty list is normal for a fresh store. Call `get_task_context(files=[...])` before
+access; an empty `domains` array is normal for a fresh store. Call `get_task_context(files=[...])` before
 working on files and use `propose_decisions` to capture durable findings explicitly.
 
 To update, refresh the marketplace snapshot, then the installed plugin, and restart Muse:
@@ -56,7 +56,9 @@ muse plugins approve sidegraph
 ```
 
 The MCP runtime and the SessionStart hook use the release's configured Git ref (normally
-`main`). SessionStart records the commit it ran, and the subagent hook starts from that commit,
-so both hooks of a session run the same version. Context on reads, the capture reminder,
-workspace switching and Windows are not supported yet; this experimental support does not
-claim parity with Claude Code or Codex.
+`main`). SessionStart records the commit it ran, and the subagent hook starts from the commit the
+machine's latest SessionStart recorded. The record is one per machine, so a SessionStart in
+another project can move it during a session (see
+[the Claude Code integration](claude-code.md#plugin-install-path)). Context on reads, the capture reminder,
+workspace switching and Windows are not supported yet; Muse support does not claim parity
+with Claude Code or Codex.

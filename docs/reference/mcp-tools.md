@@ -32,7 +32,7 @@ EOF on standard input, keeping subprocesses separate from the MCP protocol strea
 The development lockfile selects FastMCP 3.4.11 and MCP Python SDK 1.30.0. Supported package
 dependencies are `fastmcp>=3.4.10,<4`, `mcp>=1.30,<2` and `markdown-it-py>=4,<5` (it reads
 markdown structure for [declared-section drift checks](#record_drift_check)), with runtime security floors
-`certifi>=2026.10.19` and `opentelemetry-api>=1.45.1`. The locked stack
+`certifi>=2026.10.19`, `opentelemetry-api>=1.45.1`, `authlib>=1.9.1` and `dnspython>=2.9.0`. The locked stack
 uses the `initialize` / `notifications/initialized` lifecycle and negotiates protocol
 versions through **2025-11-25**. The server reports Sidegraph's package version in
 `serverInfo.version`; that is separate from the negotiated protocol version.
@@ -160,7 +160,7 @@ Write exception guards prevent raw validation/generic causes in framework WARNIN
 logs. FastMCP DEBUG argument tracing occurs before middleware and remains outside this
 protection. Read/filesystem diagnostics, successful descriptors and paths, record IDs
 and ratify result keys keep their usual semantics; historical logs/data are unchanged.
-See [security policy](../../SECURITY.md#write-diagnostics-and-logging).
+See [security internals](security-internals.md#write-diagnostics-and-logging).
 
 ## Capture and direct-write resource limits
 
@@ -210,7 +210,7 @@ Python invocation are outside this application boundary.
 Documents use an independent 8 MiB per-file limit; an import may exceed 4 MiB total or
 produce more than 100 records. Operator tags and free-text import options are bounded
 separately. See [document import](cli.md#importing-decision-shaped-markdown---docs) and
-[security policy](../../SECURITY.md#resource-limits-and-redaction-runtime) for file admission
+[security internals](security-internals.md#resource-limits-and-redaction-runtime) for file admission
 and the practical scope of the four linear redaction recognizers.
 
 ## Commit hint
@@ -433,8 +433,10 @@ replacement to ONLY those refs, exactly like `add_decision`. Omit `anchors` (the
 the replacement instead **inherits the predecessor's bindings verbatim** — same
 `entity_id`/`tier`/`status`, copied via `Store.add_binding` — since a reversal concerns the
 same entities the original decision did; task-seeded retrieval finds the successor everywhere
-it found the predecessor. The two paths are exclusive: passing `anchors` replaces inheritance,
-it never adds to it. Explicit `anchors` are validated exactly like `add_decision`'s, before the
+it found the predecessor. The two paths are exclusive: a non-empty `anchors` list replaces
+inheritance, it never adds to it. Omitted, `null` or `[]` all inherit, so `[]` cannot clear the
+inherited bindings; a successor can still end with none (the predecessor had none, or no graph
+resolved the explicit list), so read the result. Explicit `anchors` are validated exactly like `add_decision`'s, before the
 successor is written or the predecessor closed. Inheriting from a predecessor whose bindings file
 the store could not read (it is left out of the index, see [`store-format.md`](store-format.md))
 is refused before anything is written: there would be nothing to copy, and the successor
@@ -522,7 +524,8 @@ Anchoring mirrors `supersede_decision`'s two exclusive paths: pass `anchors` to 
 bind the successor to ONLY those refs (same no-graph orphaned-leaf fallback `add_fact`
 gives); omit `anchors` (the default) to **inherit the predecessor's bindings verbatim** —
 same `entity_id`/`tier`/`weight`/`relation`/`status`, *including* any `orphaned` ones,
-carried as-is. Passing `anchors` replaces inheritance; it never adds to it. Explicit
+carried as-is. A non-empty `anchors` list replaces inheritance; it never adds to it. Omitted,
+`null` or `[]` all inherit. Explicit
 `anchors` are validated exactly like `add_decision`'s, before the successor is written or
 the predecessor closed. Inheriting from a predecessor whose bindings file the store could not
 read is refused the same way as in `supersede_decision`.
@@ -746,7 +749,10 @@ get_entity_history(
 entity's display name; get one from `add_decision`/`supersede_decision`'s `entities` field or
 from [`find_entity`](#find_entity). Returns every decision **and** fact with any binding to
 that entity, newest (`valid_from`) first, regardless of binding status or decision/fact
-status (superseded records are the "tried before" chain, so they are included).
+status (superseded records are the "tried before" chain, so they are included), except that
+a `proposed` record obeys the proposal-surfacing policy like every other raw listing: it is
+left out under `SIDEGRAPH_UNRATIFIED=off` or once it is older than the surfacing window.
+`list_proposed` and `sidegraph-ratify` still show the whole review queue.
 
 The tool resolves every binding's record type in one read of the index, then loads each
 record with the getter its type names. A binding whose record exists in neither table stays
@@ -758,14 +764,16 @@ hundreds of records, so the answer fills in this order:
 
 1. `records`: full `Decision`/`Fact` dicts (`model_dump(mode="json")`, all fields, with
    `"record_type": "decision" | "fact"`), newest first, up to `limit` and up to half of
-   `budget_chars`, and at least one.
+   `budget_chars`, and at least one when a full record fits the response budget; otherwise
+   the newest appears only as a short row or an id.
 2. `omitted_records`: every other record as a short row `{id, record_type, kind (null for a
    fact), status, valid_from, title}` (the title or statement clipped to 80 characters, about
    225 characters a row), as many rows as the rest of the budget holds.
 3. `omitted_ids`: the ids of the records that did not fit even as rows, newest first;
    `omitted_ids_unlisted` counts ids the budget cut as well.
 
-Nothing is dropped silently: a superseded record is at worst a short row or a bare id. Read an
+Nothing is dropped silently: a superseded record is at worst a short row or a bare id, and
+only a proposal the surfacing policy withholds is left out. Read an
 omitted decision locally with `Store.get_decision(id)` and an omitted fact with
 `Store.get_fact(id)` on the configured store, or narrow with `status=[...]` (for example
 `["superseded"]`). Explicit-id `retrieve_decisions`/`list_facts` calls still obey the
@@ -857,9 +865,11 @@ distinct paths as you wrote them.
 Nothing is added when the graph holds every seed, and then no git call is made. The block belongs
 to `get_task_context` only; `query_structure` and `query_decisions` are unchanged.
 
-In a **linked worktree** that has no graph of its own, every read tool opens the main checkout's
+In a **linked worktree** that has no graph of its own, the retrieval tools (`get_task_context`,
+`retrieve_decisions`, `query_structure`, `query_decisions`, `drill_down`) open the main checkout's
 graph (see [the Graphify integration](../integrations/graphify.md#linked-worktrees-read-the-main-checkouts-graph))
-and syncs it index-only (no tracked file is rewritten). The `## Not in the code graph` block is then worded for it:
+and sync it index-only (no tracked file is rewritten); `list_facts(files=…)` and
+`list_domain_candidates` read only the worktree's own graph. The `## Not in the code graph` block is then worded for it:
 
 - a seed that exists only in the worktree gets "This worktree reads the main checkout's graph,
   which does not hold files that exist only on this branch." with no freshness check, because the
@@ -1286,7 +1296,7 @@ applicability remains available as described above. `facts` is one
 had none) — see below for the shape.
 `neighbors` lists up to 3 live decisions already reachable via the draft's own anchors, newest
 first. `ratified_by` is the `auto:<policy>` stamp when an
-[auto-ratification policy](../guides/capturing-decisions.md#5-auto-ratification-policy-opt-in)
+[auto-ratification policy](../guides/capturing-decisions.md#5-auto-ratification-policy)
 accepted the record at write time (`null` otherwise — always under the default `manual`);
 `auto_ratify_error` is `null` unless an attempt failed. `status` keeps its write-action
 meaning: an auto-ratified draft still reports `"written"`. A `written` result may carry a

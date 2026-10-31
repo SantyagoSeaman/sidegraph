@@ -54,7 +54,9 @@ Prepare the release on a release-prep branch in the development repository, merg
 through a Ready pull request, then run the clean-tree preflight on merged `main`:
 
 1. Update `CHANGELOG.md`: keep a fresh empty `## [Unreleased]` first and add
-   `## [X.Y.Z] — YYYY-MM-DD` beneath it. Group changes using Keep a Changelog headings.
+   `## [X.Y.Z] — YYYY-MM-DD` beneath it. Group changes using Keep a Changelog headings. In
+   the link list at the end of the file, point `[Unreleased]` at `compare/vX.Y.Z...HEAD` and
+   add `[X.Y.Z]: …/compare/v<previous>...vX.Y.Z` above the previous version's line.
 2. Update every file in the version table above and any affected `docs/` page.
    Keep all four manifest/package versions together and update optional catalog entry
    versions already present. Do not add version fields to otherwise unversioned entries.

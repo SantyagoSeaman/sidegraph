@@ -1074,7 +1074,6 @@ def test_pages_beside_the_plugin_offer_the_cli_with_its_update():
         "docs/getting-started/claude-code-setup.md": "installation.md",
         "docs/getting-started/codex-setup.md": "installation.md",
         "docs/reference/cli.md": "../getting-started/installation.md",
-        "README.md": "docs/getting-started/installation.md",
     }
     problems: list[str] = []
     for rel, prefix in pages.items():
@@ -1233,7 +1232,8 @@ def test_the_docs_guard_rejects_comments_and_bare_runs(tmp_path):
     assert _unprotected_workflow_steps(job_env) == []
 
 
-_README_HOST_RECIPES = (
+_INSTALLATION = _ROOT / "docs" / "getting-started" / "installation.md"
+_HOST_RECIPES = (
     (
         "Claude Code",
         (
@@ -1254,7 +1254,7 @@ _README_HOST_RECIPES = (
         ("/hooks", "approve", "new", "session"),
     ),
     (
-        "Muse (experimental)",
+        "Muse",
         (
             "muse plugins marketplace add sidegraph https://github.com/SantyagoSeaman/sidegraph",
             "muse plugins install sidegraph@sidegraph",
@@ -1277,11 +1277,15 @@ _README_HOST_RECIPES = (
 )
 
 
-@pytest.mark.parametrize("host,commands,permission_tokens", _README_HOST_RECIPES)
-def test_readme_has_scoped_host_install_update_and_permissions(host, commands, permission_tokens):
-    text = (_ROOT / "README.md").read_text(encoding="utf-8")
-    section = re.search(rf"^#### {re.escape(host)}\n(.*?)(?=^#{{1,4}} |\Z)", text, re.M | re.S)
-    assert section and section[1].strip(), f"README has no nonempty {host} section"
+@pytest.mark.parametrize("host,commands,permission_tokens", _HOST_RECIPES)
+def test_installation_has_scoped_host_install_update_and_permissions(
+    host, commands, permission_tokens
+):
+    """The README keeps one install line per host and links here: the installation page
+    holds each host's install, update and approval recipe."""
+    text = _INSTALLATION.read_text(encoding="utf-8")
+    section = re.search(rf"^### {re.escape(host)}\n(.*?)(?=^#{{1,3}} |\Z)", text, re.M | re.S)
+    assert section and section[1].strip(), f"installation.md has no nonempty {host} section"
     body = section[1]
     fenced = _fenced_lines(body)
     assert all(command in fenced for command in commands), f"{host}: missing scoped command"
@@ -1304,7 +1308,9 @@ _MUSE_MARKETPLACE_COMMANDS = (
 )
 
 
-@pytest.mark.parametrize("path", ["README.md", "docs/integrations/muse.md"])
+@pytest.mark.parametrize(
+    "path", ["docs/getting-started/installation.md", "docs/integrations/muse.md"]
+)
 def test_muse_installs_from_the_marketplace_not_a_local_checkout(path):
     """Muse installs from the public marketplace like Claude Code and Codex; the old route from a
     maintained local clone is gone from every page that gives the commands."""
@@ -1314,6 +1320,75 @@ def test_muse_installs_from_the_marketplace_not_a_local_checkout(path):
     assert "sidegraph-plugin" not in text, f"{path}: still installs from a local checkout"
 
 
-def test_readme_warns_existing_stores_before_graphify_upgrade():
+def test_installation_warns_existing_stores_before_graphify_upgrade():
+    text = _INSTALLATION.read_text(encoding="utf-8")
+    assert text.index("guides/migrating-to-0.14.md") < text.index('uv tool install "graphifyy')
+
+
+_HOOK_ENTRY_POINTS = frozenset(
+    {
+        "sidegraph-session-start",
+        "sidegraph-stop",
+        "sidegraph-pre-tool-use",
+        "sidegraph-subagent-start",
+    }
+)
+
+
+def _readme_details_names(summary: str) -> list[str]:
+    """The first-column names of the README table under one ``<details>`` summary."""
     text = (_ROOT / "README.md").read_text(encoding="utf-8")
-    assert text.index("docs/guides/migrating-to-0.14.md") < text.index('uv tool install "graphifyy')
+    block = re.search(
+        rf"<summary><strong>{re.escape(summary)}</strong></summary>(.*?)</details>", text, re.S
+    )
+    assert block, f"README has no <details> block titled {summary!r}"
+    return re.findall(r"^\| `([^`]+)` \|", block[1], re.M)
+
+
+def _counted_line() -> str:
+    text = (_ROOT / "README.md").read_text(encoding="utf-8")
+    line = re.search(r"^\*\*\d+ skills · .*\*\*$", text, re.M)
+    assert line, "README has no counts line under 'What you can do'"
+    return line[0]
+
+
+def test_readme_lists_every_skill():
+    """The README's skill list and its count follow the plugin's skills directory."""
+    shipped = sorted(
+        p.name
+        for p in (_ROOT / "plugin" / "sidegraph" / "skills").iterdir()
+        if (p / "SKILL.md").is_file()
+    )
+    listed = _readme_details_names(f"All {len(shipped)} skills")
+    assert sorted(listed) == shipped
+    assert f"**{len(shipped)} skills · " in _counted_line()
+
+
+def test_readme_lists_every_mcp_tool():
+    """The README's MCP tool list and its count follow the registered tools, the deprecated
+    alias included: the reference and the stability policy count it too."""
+    import asyncio
+
+    from sidegraph import server
+
+    async def names() -> list[str]:
+        return sorted(t.name for t in await server.mcp.list_tools())
+
+    registered = asyncio.run(names())
+    listed = _readme_details_names(f"All {len(registered)} MCP tools")
+    assert sorted(listed) == registered
+    assert f" · {len(registered)} MCP tools · " in _counted_line()
+
+
+def test_readme_lists_every_cli_command():
+    """The README's CLI list follows ``[project.scripts]``, minus the hook entry points that
+    only an agent host runs."""
+    import tomllib
+
+    scripts = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "scripts"
+    ]
+    commands = sorted(set(scripts) - _HOOK_ENTRY_POINTS)
+    listed = _readme_details_names(f"All {len(commands)} CLI commands")
+    assert sorted(listed) == commands
+    assert f" · {len(commands)} CLI commands · " in _counted_line()

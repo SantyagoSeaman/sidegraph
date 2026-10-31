@@ -30,7 +30,8 @@ Three shapes of why-question, three entry points:
 - **A named symbol, class, or doc heading** ("why does `X` do Y") →
   `find_entity(name, file_path=...)` first. A single match returns `entity_id`; then
   `get_entity_history(entity_id)` — every decision **and** fact ever bound to that
-  entity, newest first, *regardless of status*. Ambiguity comes back as `candidates`,
+  entity, newest first, *regardless of status* (a proposal the surfacing policy withholds is
+  left out). Ambiguity comes back as `candidates`,
   never a guess — re-call with `file_path`.
 - **An area or theme** ("why do we do payments this way") → `list_domains()` for the
   slug, then `drill_down(domain_slug)` — the domain's summary, member sample, and its

@@ -117,8 +117,10 @@ manual adds and `supersede_domain` successors always wait for a human.
 
 **Sync keeps the mapping fresh.** After a graph rebuild, `sidegraph-sync` (or the lazy
 read-path trigger) recomputes each *accepted* domain's `communities` field — see
-[below](#how-domains-relate-to-engine-communities) — so a domain's membership tracks the code
-as it moves, without a human re-authoring anything. `path_prefixes` is never touched by sync;
+[below](#how-domains-relate-to-engine-communities) — so a domain's membership follows the code
+as the graph regroups it, without a human re-authoring anything, as long as each seed anchor's
+name and file still resolve. A seed whose file moved or was renamed stops resolving; re-scope
+that domain (see [naming your domains](../guides/naming-your-domains.md)). `path_prefixes` is never touched by sync;
 only `communities` is (see [configuration](../reference/configuration.md#domain-sync-and-the-toc-cache)).
 
 **Supersede to evolve a description.** Editing a domain's title/summary, or re-parenting it, is

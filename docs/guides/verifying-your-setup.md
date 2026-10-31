@@ -80,7 +80,8 @@ uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-do
 git status --short
 ```
 
-**Success:** sync reports no actionable degraded/orphaned anchors, doctor reports no strict
+**Success:** `sidegraph-sync --check` exits 0 (orphaned/ambiguous lines are informational;
+heal any printed ones with the `sidegraph:heal-anchors` skill), doctor reports no strict
 violations, and `.sidegraph/index.db` remains absent from git output. Graphify may update its
 own output. Sidegraph canonical files should stay unchanged during an ordinary sync; the
 documented exception is a confirmed leaf-file move, which updates that entity's durable

@@ -445,6 +445,7 @@ line.
 ## The launch-commit file
 
 The plugin's `Stop`, `PreToolUse` and `SubagentStart` hooks (and Codex's `Stop` and
+`SubagentStart`, Grok Build's `Stop`, `PreToolUse` and `SubagentStart`, and Muse's
 `SubagentStart`) launch from a commit, not from
 `@main`, which tracks a mutable branch (see
 [Mutable development references](../getting-started/installation.md#mutable-development-references)):

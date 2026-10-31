@@ -26,9 +26,10 @@ and anchor mappings are rebuilt from canonical files and the graph. Local retrie
 telemetry is not reconstructible; deleting the index loses those local statistics, but never
 loses the team's durable decisions or facts.
 
-The committed files under `decisions/`, `facts/`, `domains/`, `entities/`, `bindings/` and
-`initiatives/`, plus `shards/` in a packed store and optional `archive/` segments, **are** the
-team's memory. Never `.gitignore` those paths, and never treat them as disposable local cache the way you
+Everything else under `.sidegraph/` (all but what its own `.gitignore` lists) **is** the
+team's memory: the record directories `decisions/`, `facts/`, `domains/`, `entities/`,
+`bindings/` and `initiatives/`, plus `shards/` in a packed store, optional `archive/`
+segments, `verifications/`, the `format` marker and `domain-snapshot.json`. Never `.gitignore` those paths, and never treat them as disposable local cache the way you
 might Graphify's `graph.json` — that one really is regenerated on every build; the decision
 store is the opposite, deliberately durable, and is the one piece of Sidegraph's state that
 must survive a laptop being wiped.
@@ -68,6 +69,17 @@ what it is: a new gotcha, lesson, ADR, or constraint entering the team's memory,
 `rejected` field right there in the diff for a reviewer to weigh in on before it's permanent.
 That's the founding promise of moving off a single opaque database file: ratification is
 **batched into the PR diff itself**, not hidden behind a tool you have to remember to run.
+
+That gate holds only under the `manual` ratification policy. A terminal `sidegraph-init`
+answered with Enter writes `SIDEGRAPH_RATIFY_POLICY=auto-low-risk` to
+`.claude/settings.json`, and under it an eligible gotcha, lesson or standalone fact arrives in
+the diff already `accepted`, stamped `ratified_by: "auto:auto-low-risk"` rather than a
+person's name ([auto-ratification policy](capturing-decisions.md#5-auto-ratification-policy)).
+Reviewers should read that field, not just `status`. A team that wants no automatic
+acceptance answers no at init (or runs `sidegraph-init --ratify-policy manual` before
+anything is set), or changes the value in `.claude/settings.json`. `manual` stops only the
+policy: an agent with the MCP tools can still write an accepted record (`add_decision`) or
+call `ratify` itself, so the review of the `.sidegraph/` diff is the gate.
 
 Two things still help beyond just reading the diff:
 
@@ -153,7 +165,9 @@ the same warning on stderr the moment any tool opens the store fresh, graph or n
 stays flagged until you act on it), so treat it as something to resolve by hand — pick a
 survivor and retire the other:
 
-- `sidegraph-ratify --drop <loser-id>` flips the loser to `dropped`, freeing the slug back up.
+- `sidegraph-ratify --drop <loser-id>` flips the loser to `dropped`, which ends the conflict.
+  The dropped domain still holds the slug against new proposals; supersede it to release
+  the slug.
   This works whether the loser is still `proposed` or already `accepted` — dropping an
   accepted domain is a legitimate, append-only-safe retirement (the file stays, only its
   status flips), unlike dropping an accepted *decision*, which the store deliberately never
@@ -178,7 +192,8 @@ format-1 command, which a store that is not yet migrated still runs.
 
 Once a decision or domain reaches a terminal status (`superseded`/`rejected`/`deprecated` for
 decisions, `superseded`/`dropped` for domains), it can never change again — append-only rules
-guarantee it. `sidegraph-compact` packs those closed records out of the individual-file
+guarantee it — with one exception: a `dropped` domain can still be superseded
+(`supersede_domain`), which is how a mass-drop is recovered. `sidegraph-compact` packs those closed records out of the individual-file
 directories into an immutable `archive/<date>-<seq>-<hash12>.jsonl` segment, so a repo that's
 been accumulating history for a year doesn't accumulate an ever-growing pile of small files
 that no PR will ever touch again. See [`reference/store-format.md`](../reference/store-format.md#archive-segments-sidegraph-compact)
@@ -210,8 +225,11 @@ is no operation that hard-deletes a `Decision`. When the team disagrees with a p
 or a new decision reverses an old one:
 
 - Use `supersede_decision` (or `supersedes` in a `propose_decisions` draft), never a fresh,
-  unrelated record. The store closes the predecessor (`valid_to` set, `status=superseded`) in
-  the same call that writes the replacement — both committed files land together.
+  unrelated record. `supersede_decision` closes the predecessor (`valid_to` set,
+  `status=superseded`) in the same call that writes the replacement — both committed files
+  land together. A `propose_decisions` draft with `supersedes` does the same under the
+  `manual` policy; under `auto-low-risk`/`auto-all` the predecessor stays open until the
+  successor is ratified.
 - The old record stays retrievable via `get_entity_history` and the `~ tried, reverted 2026-01:
   ...` one-liners in `## Related` — "we tried this, here's why we stopped" is exactly the memory
   that keeps the next person from re-litigating a settled argument or re-discovering the same

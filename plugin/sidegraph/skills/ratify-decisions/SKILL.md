@@ -10,7 +10,7 @@ The human gate of the capture loop: everything `propose_decisions` (decisions **
 attached or standalone facts), `propose_domains`, `add_domain`, and `sidegraph-import
 --propose` wrote as `status=proposed` stays tagged `[unratified]` in every retrieval until a
 human accepts or drops it here. You are the presenter and advisor; the human is the gate.
-Under an opt-in `SIDEGRAPH_RATIFY_POLICY`, eligible drafts are accepted at write time
+Under the project's `SIDEGRAPH_RATIFY_POLICY`, eligible drafts are accepted at write time
 (stamped `auto:<policy>`) and never reach this queue; whatever the policy left `proposed`
 still waits for the human here.
 

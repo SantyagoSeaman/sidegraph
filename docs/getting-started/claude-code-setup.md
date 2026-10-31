@@ -20,14 +20,14 @@ toolchain is the other supported route.
 
 Inside a Claude Code session, in that repo:
 
-The plugin follows the public repository's `main`, which advances at releases. To pin a
-version for reproducible environments, see
-[how to pin mutable development references](installation.md#mutable-development-references).
-
 ```
 /plugin marketplace add SantyagoSeaman/sidegraph
 /plugin install sidegraph@sidegraph
 ```
+
+The plugin follows the public repository's `main`, which advances at releases. To pin a
+version for reproducible environments, see
+[how to pin mutable development references](installation.md#mutable-development-references).
 
 Installs the MCP server and all four hooks (`SessionStart`, `Stop`, `PreToolUse`,
 `SubagentStart`) in one step, pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by
@@ -116,13 +116,14 @@ flag if you want a private, user-local registration instead.
 **From a source checkout instead** (contributors — see
 [installation: from source](installation.md#option-d--from-source-contributors)): replace the
 `uvx --from git+...` invocation above with
-`uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp` (CLI form: `-- uv run --project
-/ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp`).
+`uv run --project '/ABSOLUTE/PATH/TO/sidegraph' sidegraph-mcp` (CLI form: `-- uv run --project
+'/ABSOLUTE/PATH/TO/sidegraph' sidegraph-mcp`; in the JSON form the path is one `args` value and
+needs no quotes).
 
-The released package is available from PyPI, so both shorten further, to `uvx --from
-sidegraph sidegraph-mcp` — see
-[`integrations/claude-code.md`](../integrations/claude-code.md#plugin-install-path)
-for the pinning policy. Use `sidegraph==X.Y.Z` in automation.
+The released package is also on PyPI: to pin an exact version, use `uvx --from
+'sidegraph==X.Y.Z' sidegraph-mcp` (in JSON, `"--from", "sidegraph==X.Y.Z"`) — see
+[installation: the CLI on your PATH](installation.md#option-a--the-cli-on-your-path)
+for the pinning policy.
 
 The store (`SIDEGRAPH_DIR`) is meant to live **inside the repo it documents** — commit
 `.sidegraph/` alongside your code (its committed record directories and shard files, not the gitignored
@@ -219,7 +220,7 @@ These recipes keep plain `@main` on every command, which is simpler to copy. The
 which is faster on each call; see [the plugin install path](../integrations/claude-code.md#plugin-install-path).
 
 From a source checkout, replace each `uvx --from git+... <entrypoint>` above with `uv run
---project /ABSOLUTE/PATH/TO/sidegraph <entrypoint>` (see the note in step 1). Keep the trailing
+--project '/ABSOLUTE/PATH/TO/sidegraph' <entrypoint>` (see the note in step 1). Keep the trailing
 `|| printf …` on each command: Claude Code treats a hook that exits 2 with text on stderr as a
 block on `Stop` (it continues the conversation) and on `PreToolUse` (it blocks the tool call), and
 `uvx` exits 2 on some of its own errors, so without the guard a command that cannot start would

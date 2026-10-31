@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from .drift_checks import CheckOccurrence, check_stem, conflicting_keys, is_packable
 from .schema import DecisionStatus, DriftCheck
 from .store_format import Inventory, encode_body
-from .store_layout import NOT_A_FILE_REASON
+from .store_layout import NOT_A_FILE_REASON, PACKED_CHECKS_NAME, VERIFICATIONS_SUBDIR
 from .store_rules import effective_all
 
 # Mirrors store._TERMINAL_DECISION_STATUSES by value; store imports maintenance, which will
@@ -29,6 +29,7 @@ _TERMINAL = frozenset(
 )
 
 OUTSIDE_GIT = "outside a git work tree"
+_PACKED_REL = f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}"
 
 
 class DecisionState(NamedTuple):
@@ -158,8 +159,12 @@ def plan_check_fold(
     ]
     damaged_ids = {id(occ) for occ in damaged}
     candidates = [*eligible, *(occ for occ in lines if id(occ) not in damaged_ids)]
-    top: dict[str, str] = {}  # decision id -> highest candidate key (rule (a) superseders)
-    for occ in candidates:
+    # Only committed check data makes another check dead: while packed.shard is untracked or
+    # modified, its lines still carry into the image but supersede nothing.
+    shard = f"{store_rel}/{_PACKED_REL}" if store_rel else _PACKED_REL
+    superseders = eligible if shard in dirty else candidates
+    top: dict[str, str] = {}  # decision id -> highest superseder key (rule (a))
+    for occ in superseders:
         assert occ.decision_id is not None and occ.key is not None
         if occ.key > top.get(occ.decision_id, ""):
             top[occ.decision_id] = occ.key

@@ -124,6 +124,19 @@ def test_superseder_outside_image_does_not_drop():
     assert p.packed == [fpath(A)] and p.dropped == []
 
 
+def test_uncommitted_packed_line_does_not_supersede_a_committed_file():
+    """Only committed check data drives a drop: while packed.shard is untracked or modified,
+    its lines still carry into the image, but a newer line does not make a committed file dead.
+    Red against the planner that counted every packed line as a rule (a) superseder."""
+    shard = frozenset({f"{REL}/verifications/packed.shard"})
+    p = plan([fobs(check_body(A, D1))], lines(check_body(B, D1)), dirty=shard)
+    assert p.dropped == [] and p.packed == [fpath(A)]
+    assert p.image == lines(check_body(A, D1), check_body(B, D1))
+    # A committed packed.shard line still supersedes, as before.
+    q = plan([fobs(check_body(A, D1))], lines(check_body(B, D1)))
+    assert q.dropped == [fpath(A)] and q.packed == []
+
+
 def test_terminal_decision_drops():
     p = plan([fobs(check_body(A, D1))], decisions={D1: TERMINAL})
     assert p.dropped == [fpath(A)] and p.packed == [] and p.image == b""

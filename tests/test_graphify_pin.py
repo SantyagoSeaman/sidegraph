@@ -11,7 +11,7 @@ from sidegraph.engine import reader
 _ROOT = Path(__file__).resolve().parents[1]
 _PIN_RE = re.compile(r"graphifyy(?:\[[^]]+\])?==([0-9.]+)")
 _PIN_SURFACES = (
-    "README.md",
+    "docs/getting-started/installation.md",
     "plugin/sidegraph/skills/setup/SKILL.md",
     ".github/workflows/ci.yml",
 )

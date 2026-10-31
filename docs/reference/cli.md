@@ -271,7 +271,7 @@ sidegraph-init --remove-hooks   # take the hook out again
 ## `sidegraph-ratify`
 
 ```
-sidegraph-ratify [--db PATH] [--accept ID ...] [--drop ID ...] [--all]
+sidegraph-ratify [--db PATH] [--accept ID ...] [--drop ID ...] [--all] [--graph PATH]
 ```
 
 | Flag | Default | Meaning |
@@ -400,7 +400,7 @@ recomputes the `SessionStart` TOC cache.
 9. If any accepted domain's `path_prefixes` recomputed to a candidate that would newly claim
    more than 20% of all current communities (a candidate that resolves to a single community is
    never capped, regardless of ratio — one community can't swallow anything else), the path
-   contribution is **rejected and dropped** — but any `seed_anchors` the domain carries are
+   contribution's community claim is **rejected** (files under the prefix still count as members) — but any `seed_anchors` the domain carries are
    still resolved and applied, so a domain with both an overbroad path rule and precise
    `seed_anchors` has its `communities` mapping **replaced** by the anchor-resolved set; only a
    domain whose overbroad path had no `seed_anchors` to rescue it keeps its previous
@@ -530,7 +530,8 @@ Two independent importers behind one command, switched by `--docs` and/or `--pro
   [`guides/semantic-docs.md`](../guides/semantic-docs.md) for the full walkthrough and the
   underlying `import_rationales` (`src/sidegraph/importer.py`).
 - **`--docs` mode** parses decision-shaped markdown files directly — the parser itself is
-  deterministic and LLM-free — and turns each into one anchored `Decision`. The command as a
+  deterministic and LLM-free — and turns each into one or more anchored decisions
+  (split-capable profiles add per-heading children). The command as a
   whole still requires a current, readable graph: every anchor is resolved against it, and a
   document with nothing anchorable at all is skipped rather than imported (see below). Run
   `graphify update .` right before a `--docs` import so newly-added documents can actually
@@ -656,7 +657,8 @@ sidegraph-import --kind lesson --db .sidegraph
 
 `sidegraph-import --docs <path> [--docs <path> ...]` switches to the second importer
 (`doc_import.import_docs`): a deterministic parser (no LLM, no API key) that recognizes
-decision-shaped markdown and turns each qualifying document into one anchored `Decision`. The
+decision-shaped markdown and turns each qualifying document into one or more anchored
+decisions (split-capable profiles add per-heading children). The
 parsing itself never touches the graph, but the command still requires one — a `GraphifyReader`
 is constructed up front, so a missing/unreadable `graph.json` fails the whole run, not just
 anchor resolution — and every mention is resolved against whatever graph it reads, so a stale
@@ -735,16 +737,18 @@ least half of anchor-attempted documents come back unanchorable, the command war
 warning: N doc(s) unanchorable — not inside a git work tree, so doc paths resolve against the current directory; if this is not the project root, run sidegraph-import from there.
 ```
 
-**What qualifies as decision-shaped:** an H1 title, plus either a known decision-section
+**What qualifies as decision-shaped:** an H1 title (or a profile's path-built title, below), plus either a known decision-section
 heading (ADR-style: Context/Decision(s)/Status/Consequences/Rejected/Alternatives/Root cause;
 spec-style: Trigger/Design/Residuals/Scope notes/User decisions — matched by case-insensitive
 prefix, so a decorated real-world heading like "Design — track the observed…" still matches)
 or a bold top metadata line (`**Trigger:**` or `**Status:**`). A document with
 `**Status:** superseded`/`deprecated` in its frontmatter is skipped, not imported as live
 history. A file that doesn't qualify is counted `skipped_not_decision`, not treated as an
-error.
+error. A profile with a `title_pattern` (`openspec`) builds the title from the document's path
+when it has no H1, and parsing then proceeds as if that title were the H1; for other profiles the
+H1 is required.
 
-**Mapping:** `title` = the H1 (plain 120-char slice); `context` = the Context/Trigger section
+**Mapping:** `title` = the H1, or that path-built title (plain 120-char slice); `context` = the Context/Trigger section
 (or the bold `**Trigger:**` line when no such section exists); `choice` = the Decision/Design
 section, or the first paragraph after the H1 when neither exists; `rejected` = the
 Rejected/Alternatives/Considered-alternatives section, falling back to bold pseudo-heading
@@ -971,8 +975,9 @@ reach them.
 
 **Output, non-dry-run:** `proposed N domain(s) (skipped: X existing)`. Under
 `SIDEGRAPH_RATIFY_POLICY` other than `manual`: `proposed N domain(s), auto-ratified K
-(skipped: X existing)` (`N` still counts every write), plus `auto-ratify failure: <id>:
-<reason>` on stderr per failed attempt. Two independent stderr
+(skipped: X existing)` (`N` still counts every write). A candidate with warnings adds one
+`  warning (<slug>): <w>` line per warning, and each failed auto-ratify attempt prints
+`auto-ratify failure: <id>: <reason>` on stderr. Two independent stderr
 notes can precede the write (both computed from a read-only pre-check, before anything is
 written — see below): when `--limit` (default or explicit) actually cut candidates, `note: M
 significant communities found — showing only the top N (community-id order); pass --limit 0
@@ -980,7 +985,8 @@ for the full list, a higher --limit N, or narrow with --min-members/--paths`; se
 the number about to be proposed exceeds 50, `note: about to propose N domains — consider
 --min-members/--limit and ratify selectively`.
 
-**Output, `--dry-run`:** one line per candidate — `<community_id>: <slug> — <title>` — followed
+**Output, `--dry-run`:** one line per candidate — `<community_id>: <slug> — <title>`, then
+`    warning: <w>` for each of its warnings — followed
 by `would propose N domain(s) (skipped: X existing, Y below threshold, Z filtered)`. No domain
 record is written. The same `--limit`-truncation note as above prints on stderr when it applies; the
 "ratify selectively" nag does not (dry runs are for tuning `--min-members`/`--limit` before

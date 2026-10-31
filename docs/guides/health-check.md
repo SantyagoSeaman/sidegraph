@@ -19,7 +19,7 @@ use the existing `<project>/.venv/Scripts/python.exe`. Installed use requires a
 known interpreter from attached host launch metadata or metadata for an identified Sidegraph
 environment. The collector does not guess a Python on `PATH`, run an unknown Sidegraph
 executable, or use `uv`/`uvx` as its launcher. If no suitable interpreter is known, the skill
-shows all six sections as limited, includes safe static evidence already available, lists
+shows all six sections as `warning`, states that collection is limited, includes safe static evidence already available, lists
 manual recommendations, and stops. The same fallback applies when the helper exits nonzero,
 prints error JSON, or cannot import required inspection helpers; show only the error class and
 do not echo exception text. Cached package files alone do not authorize provisioning.

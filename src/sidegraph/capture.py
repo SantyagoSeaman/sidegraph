@@ -41,7 +41,7 @@ from .gitenv import git_env
 from .input_limits import MAX_DRAFTS, preflight_drafts
 from .redaction_scan import PhaseScanner
 from .redaction_tokens import iter_jwt_spans, iter_private_key_spans
-from .retrieval import TOC_CACHE_KEY, build_toc
+from .retrieval import TOC_CACHE_KEY, build_toc, proposal_surfaces
 from .schema import (
     AnchorBinding,
     Decision,
@@ -1000,11 +1000,13 @@ def _bind_orphaned(
 
 
 # Neighbors cap (design D2, "Thresholds" — chosen, not measured): how many live decisions
-# `_live_neighbors` ever returns, after dedup-by-id and ULID-descending ordering.
+# `_live_neighbors` returns by default, after dedup-by-id and ULID-descending ordering.
 _NEIGHBORS_CAP = 3
 
 
-def _live_neighbors(draft: DraftDecision, store: Store) -> list[Decision]:
+def _live_neighbors(
+    draft: DraftDecision, store: Store, cap: int | None = _NEIGHBORS_CAP
+) -> list[Decision]:
     """Live decisions already sharing one of ``draft``'s own ``anchors`` entities (design
     D2) — the walk ``_is_duplicate`` always performed, factored out so a new reporting step
     (``ProposeResult.neighbors``, below) can reuse it instead of re-walking the store.
@@ -1026,11 +1028,12 @@ def _live_neighbors(draft: DraftDecision, store: Store) -> list[Decision]:
     several copies of the same record and zero breadth (the E9 probe this closes: a real
     pair shared 5 entities, of which the signal was one Tier-2 leaf). Ordered by id
     descending (ULIDs sort by creation time, newest first; ``valid_decisions_for_entity``
-    itself is an unsorted binding scan) and capped at :data:`_NEIGHBORS_CAP`.
+    itself is an unsorted binding scan) and capped at :data:`_NEIGHBORS_CAP` (``cap=None``
+    returns them all, for a caller that filters before it caps).
 
-    Used by both ``_is_duplicate`` (the exact kind+title dedup check) and ``_propose_one``'s
-    reporting step, so the two can never disagree about which live records the draft's own
-    anchors currently reach.
+    Used by both ``_is_duplicate`` (the exact kind+title dedup check, on the default cap) and
+    ``_propose_one``'s reporting step (uncapped, so it can filter before it caps); both walk
+    the same live records the draft's own anchors currently reach.
     """
     by_id: dict[str, Decision] = {}
     for anchor in draft.anchors:
@@ -1040,7 +1043,8 @@ def _live_neighbors(draft: DraftDecision, store: Store) -> list[Decision]:
         for member in store.identity_members(entity):  # spelling twins share their records
             for d in store.valid_decisions_for_entity(member.entity_id):
                 by_id[d.id] = d
-    return sorted(by_id.values(), key=lambda d: d.id, reverse=True)[:_NEIGHBORS_CAP]
+    ordered = sorted(by_id.values(), key=lambda d: d.id, reverse=True)
+    return ordered if cap is None else ordered[:cap]
 
 
 def _neighbor_dict(d: Decision) -> dict:
@@ -1048,6 +1052,17 @@ def _neighbor_dict(d: Decision) -> dict:
     an agent to decide whether to ``supersede_decision`` it — the full record is a
     ``get_task_context``/``drill_down`` call away."""
     return {"id": d.id, "kind": d.kind.value, "title": d.title, "status": d.status.value}
+
+
+def _neighbor_dicts(decisions: Iterable[Decision]) -> list[dict]:
+    """The neighbors an agent may see. A title is record content, so a proposal that the
+    surfacing policy withholds (regulated mode, the window) is left out here as in every
+    listing; dedup, which runs on :func:`_live_neighbors` itself, still sees it."""
+    return [
+        _neighbor_dict(d)
+        for d in decisions
+        if d.status != DecisionStatus.PROPOSED or proposal_surfaces(d)
+    ]
 
 
 def _is_duplicate(clean_title: str, draft: DraftDecision, store: Store) -> str | None:
@@ -1501,7 +1516,7 @@ def _propose_one(
             # where supersession advice matters most, so the dup itself rides as the one
             # neighbor. `dup` is always found here in practice (it was just looked up by
             # this same store), but the None guard keeps this path never-fail regardless.
-            neighbors=[_neighbor_dict(dup)] if dup is not None else [],
+            neighbors=_neighbor_dicts([dup]) if dup is not None else [],
         )
 
     # 2b. Neighbors (design D2): live decisions the draft's own anchors already reach,
@@ -1509,7 +1524,8 @@ def _propose_one(
     # possibly-contradicting record alongside it. MUST run here — pre-write, immediately
     # after the dedup check, before store.add_decision below — see _live_neighbors's
     # docstring for why a post-write walk would be wrong twice over.
-    neighbors = [_neighbor_dict(d) for d in _live_neighbors(draft, store)]
+    # Filter before the cap: a withheld proposal must not take a visible neighbor's slot.
+    neighbors = _neighbor_dicts(_live_neighbors(draft, store, cap=None))[:_NEIGHBORS_CAP]
 
     # 3-4. Package + validate + write (append-only; supersede closes the predecessor).
     # title/context/choice are required (non-Optional) on DraftDecision, and the loop above

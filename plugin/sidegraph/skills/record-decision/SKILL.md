@@ -20,7 +20,7 @@ right write path, right `kind`, filled `rejected`, tight prose, on-target anchor
   **`propose_decisions`**. It lands `status=proposed` (or `accepted` immediately under
   `SIDEGRAPH_AUTO_ACCEPT=on` — see [auto-accept's
   trade-off](../../../../docs/guides/capturing-decisions.md#4-auto-accept-opt-in) — or
-  accepted at write time when an opt-in `SIDEGRAPH_RATIFY_POLICY` admits it, the result's
+  accepted at write time when the project's `SIDEGRAPH_RATIFY_POLICY` admits it, the result's
   `ratified_by` then reading `auto:<policy>`, so don't tell the human it awaits review),
   tagged `[unratified]` in retrieval, for a human to accept later via
   `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
@@ -101,10 +101,10 @@ anchors resurface as noise in someone else's task context later.
 - **Check `anchors_skipped` in the result.** An entry means that name matched more than
   one graph node (`candidates` lists up to 5) and no precise leaf was created. Identical
   path-less external stubs (what newer Graphify emits for an imported name such as
-  `BaseModel`) count as one match. Fix an
-  already-written record with `supersede_decision` carrying precise `{"name", "file_path"}`
-  anchors — a repeat `add_decision` call would mint a duplicate record; for a
-  still-proposed draft, drop it and re-propose corrected. Don't leave a decision
+  `BaseModel`) count as one match. Repair the already-written record with
+  `add_anchors(record_id, [{"name", "file_path"}])` carrying precise anchors; it works for
+  accepted and proposed records alike. A repeat `add_decision` call would mint a duplicate
+  record; supersede only when the content is wrong. Don't leave a decision
   effectively anchorless because of a silent skip.
 - **Check `anchors_orphaned` too — it is the more common failure.** An entry means the name
   has no unique graph match. The leaf is still written, but orphaned; ordinary graph-based
@@ -155,7 +155,7 @@ store.
   immediately, the asking human was the gate. You noticed it's worth keeping — including an
   attached fact discovered while drafting a decision → a draft's `facts` list or the
   top-level `facts` param on `propose_decisions` — `status=proposed` (or `accepted`
-  immediately under `SIDEGRAPH_AUTO_ACCEPT=on`, or accepted at write time when an opt-in
+  immediately under `SIDEGRAPH_AUTO_ACCEPT=on`, or accepted at write time when the project's
   `SIDEGRAPH_RATIFY_POLICY` admits it — the result's `ratified_by` then reads
   `auto:<policy>`, so don't tell the human it awaits review), tagged `[unratified]` until a
   human ratifies it. **Never call `add_fact` on your own initiative.**
@@ -187,8 +187,10 @@ from a decision, and the discernment rules for attached vs. standalone — see
 
 **Use `supersede_decision` (or `supersedes: <old_id>` in a draft) — never a fresh,
 unrelated record.** The chain of "tried before, abandoned because..." is the product; the
-store closes the predecessor (`status=superseded`, `valid_to` set) in the same
-transaction, never deletes it. Anchoring on supersede: omit `anchors` and the replacement
+store closes the predecessor (`status=superseded`, `valid_to` set), never deletes it.
+`supersede_decision` closes it in the same transaction; a proposed draft's `supersedes`
+does too under the `manual` policy, but under `auto-low-risk`/`auto-all` the predecessor
+stays open until the successor is ratified. Anchoring on supersede: omit `anchors` and the replacement
 inherits the predecessor's bindings verbatim (right when the reversal concerns the same
 entities); pass `anchors` to re-anchor from scratch (the two are exclusive — passing
 anchors replaces inheritance).

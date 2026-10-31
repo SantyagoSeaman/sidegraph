@@ -7,22 +7,68 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-10-31
+
+### Security
+
+- **The lockfile moves `authlib` from 1.7.2 to 1.9.1 and `dnspython` from 2.8.0 to 2.9.1.**
+  Both come in through FastMCP. The Authlib releases fix one critical, two high, four medium
+  and one low advisory, among them
+  [GHSA-6v38-4h7w-rj9h](https://github.com/advisories/GHSA-6v38-4h7w-rj9h) and
+  [GHSA-8m4g-j4wp-wgcg](https://github.com/advisories/GHSA-8m4g-j4wp-wgcg); dnspython 2.9.0
+  fixes [GHSA-45c3-73f7-pv4m](https://github.com/advisories/GHSA-45c3-73f7-pv4m) (high). The
+  runtime floors rise to `authlib>=1.9.1` and `dnspython>=2.9.0`, so standalone wheel installs
+  also exclude the affected versions.
+- **`get_entity_history` and `propose_decisions` neighbors obey the proposal-surfacing
+  policy.** History returned `proposed` records, and a proposal result named neighboring
+  proposals by title, under `SIDEGRAPH_UNRATIFIED=off` and after the surfacing window, while
+  every other raw MCP listing withheld them. History still includes superseded and rejected
+  records; deduplication still sees every proposal; `list_proposed` and `sidegraph-ratify`
+  still show the whole review queue.
+
+### Fixed
+
+- `sidegraph-compact` no longer drops a committed drift-check file because an untracked or
+  modified `verifications/packed.shard` holds a newer check for the same decision. While the
+  packed file is uncommitted, its lines are kept but make no check dead.
+
+### Changed
+
+- Muse is no longer marked experimental. What it supports is unchanged: MCP, shared skills,
+  the session map and a subagent brief.
+
+### Documentation
+
+- The README is rewritten: what Sidegraph is for, how it works and a two-command plugin
+  quickstart. Per-agent install and update recipes moved to
+  [installation](docs/getting-started/installation.md#host-plugins-install-and-update).
+- A verified audit corrected the user docs against the code. Corrections that change advice:
+  - Without a graph, records get no code anchors and file retrieval finds nothing.
+  - A terminal `sidegraph-init` defaults to the `auto-low-risk` policy, so review the
+    `.sidegraph/` diff, not only `status`.
+  - The headless CI triage recipe limits built-in tools with `--tools`.
+  - `graphify merge-graphs` must not be written over the repository graph.
+- `SECURITY.md` states that ratification is a workflow, not an access control, and how
+  conduct reports are handled.
+
 ## [0.22.0] — 2026-10-30
 
 ### Changed (Contract change)
 
-- **Packed drift checks (0.22.0).** On a format-2 store, `sidegraph-compact` now folds the
-  committed scoped drift-check files (`verifications/<id>.json`) into one file,
-  `verifications/packed.shard`, and drops dead checks: a check whose decision has a newer check
-  or is superseded, rejected or deprecated. A check file folds once it is tracked and
-  unmodified against `HEAD`. The first run that packs or drops a check raises
-  `requires-sidegraph` to `0.22.0`: 0.17 to 0.21 then refuse the store, and an older pinned
-  `sidegraph-verify` reports `requirement-above-verifier`, so move every teammate and CI pin
-  first. The dry run says so. `sidegraph-verify` reports `packed-checks-without-requirement`
-  and, with `--against`, `packed-check-without-source`; a deleted check is judged per check
-  instead of always illegal. Drift-check files now count toward the `maintenance-due` threshold.
-  A format-1 store and `sidegraph-migrate` are unchanged. See
+- **Action required before the first packing compact:** upgrade every teammate and CI pin to
+  0.22.0. The first `sidegraph-compact` run that packs or drops a drift check raises the
+  store's `requires-sidegraph` to `0.22.0`; Sidegraph 0.17 to 0.21 then refuse the store, and
+  an older pinned `sidegraph-verify` reports `requirement-above-verifier`. The dry run says so.
+  A format-1 store and `sidegraph-migrate` are unchanged.
+- **Packed drift checks.** On a format-2 store, `sidegraph-compact` now folds the committed
+  scoped drift-check files (`verifications/<id>.json`) into one file,
+  `verifications/packed.shard`, and drops dead checks: a check whose decision has a newer
+  check or is superseded, rejected or deprecated. A check file folds once it is tracked and
+  unmodified against `HEAD`. See
   [Scoped drift checks](docs/reference/store-format.md#scoped-drift-checks).
+- **Verification.** `sidegraph-verify` reports `packed-checks-without-requirement` and, with
+  `--against`, `packed-check-without-source`; a deleted check is judged per check instead of
+  always illegal. Drift-check files now count toward the `maintenance-due` threshold.
 
 ## [0.21.1] — 2026-10-30
 
@@ -1996,7 +2042,7 @@ First public release.
 
 ### Added
 
-- **Proposal surfacing window + regulated mode** (practitioner-panel wave, 2026-08-04):
+- **Proposal surfacing window + regulated mode**:
   a `proposed` record older than `SIDEGRAPH_PROPOSAL_WINDOW_DAYS` (default 30; `0`
   disables) stops rendering as content — in task context, drill-down, the SessionStart
   TOC, and the PreToolUse nudge — while staying in the store, in the ratify queue, and
@@ -2029,7 +2075,7 @@ First public release.
   schema `0.2.x`/`0.3.x`) migrates automatically on first open — fail-closed (every row
   validated before anything is written) — and the original file is kept as
   `<name>.migrated-backup`, never deleted (`0.3.0` was additive over `0.2.0`: a new
-  `domains` table, `Decision.layer`, `AnchorBinding.relation`). This wave set `SCHEMA_VERSION` to `0.5.0` (later bumped to
+  `domains` table, `Decision.layer`, `AnchorBinding.relation`). This release set `SCHEMA_VERSION` to `0.5.0` (later bumped to
   `0.6.0` — see the derived-community-bindings entry below), across six canonical subdirectories (`decisions`, `facts`, `domains`,
   `entities`, `bindings`, `initiatives`). See
   [`docs/reference/store-format.md`](docs/reference/store-format.md).
@@ -2111,7 +2157,7 @@ First public release.
   consequences, plus tag text before slugification; an all-secret tag is skipped, never
   minted as `tag:redacted`), and their results carry a `redactions` count. Previously the
   direct MCP path committed its text verbatim into the repo-committed store — a gap against
-  the redact-first rule, surfaced by the skills-wave blind audit.
+  the redact-first rule, surfaced by a blind audit of the skills.
 - **`GraphifyReader` no longer hangs on large graphs**: `neighbors()`, `resolve()`, and
   `nodes_in_file()` are backed by prebuilt indexes instead of re-scanning every edge/node on
   each call. On an Apache Airflow-scale graph (23K nodes / 233K edges ≈ 5.4B comparisons) the
@@ -2173,7 +2219,7 @@ First public release.
   counts when the path carries nothing or a `Grep` has no path. The two forms hold
   SEPARATE once-per-session keys, so the generic form cannot consume the specific one.
   The counting-only form was measured across 168 sessions: it fires and agents read the
-  file anyway (`design/testing/2026-07-31-whitepaper-evidence-results.md` §4.4).
+  file anyway.
 - **`SessionStart` standing search instruction**: the injected context now leads with an
   unconditional instruction to call `get_task_context` before any search — bash
   `grep`/`rg`/`find` and MCP structure-query tools included, not just `Read`/`Grep` (the
@@ -2253,7 +2299,7 @@ First public release.
   two-phase mistakes bucket places every mistake decision line before any evidence line is
   spent). Facts reuse the existing `AnchorBinding` machinery — `decision_id` renamed to
   `record_id` (it now holds a decision OR a fact id), `find_entity` gains `record_type`.
-  This wave is what bumps `SCHEMA_VERSION` to `0.5.0` (see the store-format bullet above):
+  This change is what bumps `SCHEMA_VERSION` to `0.5.0` (see the store-format bullet above):
   a store still stamped `0.4.0` reloads its index and re-stamps to `0.5.0` automatically on
   open (no hard failure — the 0.4.0 canonical layout is fully forward-compatible).
   `facts/<ulid>.json` isn't yet covered by `sidegraph-compact` (deferred — facts stay
@@ -2271,7 +2317,7 @@ First public release.
   reload — the stale *binding* entry sheds lazily, the next time that record's binding file is
   legitimately rewritten for an unrelated reason, but the stale *entity* file itself has no
   decay path and persists until a future cleanup command — no proactive cleanup command in
-  this wave.
+  this release.
   Bumps `SCHEMA_VERSION` to `0.6.0`: a `0.5.0` store reloads its index and re-stamps
   automatically on open, same forward-compatible pattern as the `0.4.0` → `0.5.0` step.
   Mixed-version teams: a teammate still on pre-`0.6.0` code will transiently re-mint
@@ -2613,25 +2659,17 @@ First public release.
 
 ### Changed
 
-- **Whitepaper rev 6.0 is the GitHub edition, and it ships alone** (rev 5.0 shipped
-  2026-09-05, rewritten to rev 6.0 on 2026-09-15): `design/whitepaper/draft.md` is a
-  ground-up rewrite under the leitmotif fixed with the owner the same day. Engineers
-  remember decisions, not code. Agents read the same code but keep no decisions.
-  Sidegraph is the missing link. The rewrite opens with the three ways teams cope and
-  their ceilings, restores the related-work section with every neighbour linked, and
-  walks one real decision chain from this repository's own store (`Store.ratify`, two
-  supersession chains, the plan check that surfaced a twice-rejected design). Every
-  measured number and its boundary from rev 5.1 survives. The claim ledger is now at rev
-  2.7. The text passed three review rounds (Codex, muse, a Fable subagent, each blind to
-  the others), two style rounds, and eight blind-reader passes. The public snapshot still
-  carries `docs/whitepaper/index.md` only: the evidence edition, the claim ledger, the
-  artifact bundle, the bibliography and the figures stay in the internal repository, and
-  `docs/llms.txt` and the pilot kit no longer point at them. The pilot kit is described as
-  the procedure and prompts (four runs per question, blinding done by hand). The
-  measurement harness behind the paper is not published.
+- **The engineering whitepaper is rewritten** ([`docs/whitepaper/index.md`](docs/whitepaper/index.md)).
+  Its argument: engineers remember decisions, not code; agents read the same code but keep
+  no decisions; Sidegraph is the missing link. It opens with the three ways teams cope and
+  their ceilings, adds a related-work section with every neighbour linked, and walks one
+  real decision chain from Sidegraph's own store. Every measured number and its boundary
+  carries over from the previous edition. The paper is the only evidence document in this
+  repository: the measurement harness and raw artifacts are not published, and the pilot
+  kit describes the procedure and prompts (four runs per question, blinding done by hand).
 - **Proposed-record quarantine — a retrieval-ordering change for existing stores**: a proposed
   decision or fact (not yet ratified) now ranks after every accepted record on the five
-  production delivery surfaces spec rev 3 §3.5 names — `get_task_context` and `query_decisions`
+  production delivery surfaces — `get_task_context` and `query_decisions`
   (both via `rank_decisions`), `drill_down`, `SessionStart`/TOC, and the `PreToolUse` title
   nudge — instead of competing for mistakes-first placement the way an accepted gotcha does. It
   is still discoverable and still rendered `[unratified]`; it simply can no longer outrank a team's
@@ -2640,15 +2678,40 @@ First public release.
   the back of the list on upgrade. `retrieve_decisions`, the raw MCP listing, is a **deliberate,
   unquarantined exception**: it keeps sorting by kind alone (gotcha, then lesson, then everything
   else), so a proposed gotcha or lesson can still rank ahead of an accepted ADR there — every row
-  still renders its own `status`, so trust information is present even though ranking isn't. See
-  ADR `01KZ27ZQXHAP8J8TYSAPSHSMT3`.
-- **Whitepaper promoted to a public engineering release candidate**: `design/whitepaper/draft.md`
-  (rev 2.2, Bootstrap publication audit, 2026-08-02) and `design/whitepaper/README.md` now carry
-  "Public engineering whitepaper release candidate" status. The claim-ledger audit (58 claims: 16
-  implemented property, 23 design rationale, 15 empirical finding, 4 open hypothesis, backed by
-  18 publication sources) permits publishing the bounded architecture, the completed evidence
-  program's measured mechanisms and negative results (E14 Phases 0–3), and the new cold-start
-  Bootstrap workflow. This is not a final paper: release-candidate technical review findings
-  remain open, and any claim that task-aware delivery causes better engineering outcomes, beats a
-  baseline, or provides superiority stays blocked on the controlled Track B campaign and its
-  raw-artifact review.
+  still renders its own `status`, so trust information is present even though ranking isn't.
+- **The whitepaper is published as an engineering release candidate.** Every claim in it was
+  audited against its sources. It publishes the bounded architecture, the measured mechanisms
+  and negative results of the evidence program, and the cold-start bootstrap workflow. It does
+  not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
+  that would need a controlled campaign that has not been run.
+
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.21.1...v0.22.0
+[0.21.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.21.0...v0.21.1
+[0.21.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.20.0...v0.21.0
+[0.20.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.18.0...v0.19.0
+[0.18.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.17.3...v0.18.0
+[0.17.3]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.17.2...v0.17.3
+[0.17.2]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.17.1...v0.17.2
+[0.17.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.17.0...v0.17.1
+[0.17.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.11.1...v0.12.0
+[0.11.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.11.0...v0.11.1
+[0.11.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/SantyagoSeaman/sidegraph/releases/tag/v0.1.0

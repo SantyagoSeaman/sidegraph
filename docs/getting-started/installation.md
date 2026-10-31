@@ -1,8 +1,9 @@
 # Installation
 
 Install **Sidegraph** for the decision store, MCP server, CLI, and host hooks. Add
-**Graphify** for symbol-level anchors and structural context. Sidegraph can retrieve
-file- and domain-linked records without a graph; the complete workflow below installs both.
+**Graphify** for anchors to files and symbols and for structural context. Without a graph
+the store, the session map and listings still work, but records cannot be anchored to code
+(see [Without the graph](#without-the-graph)); the complete workflow below installs both.
 
 ## Prerequisites
 
@@ -12,54 +13,16 @@ file- and domain-linked records without a graph; the complete workflow below ins
 - For automatic session integration: [Claude Code](claude-code-setup.md),
   [Codex](codex-setup.md) or [Grok Build](../integrations/grok.md).
   [OpenCode V2](../../.opencode/INSTALL.md) provides MCP tools and shared skills without
-  lifecycle hooks; experimental [Muse](../integrations/muse.md) adds the session map and a
+  lifecycle hooks; [Muse](../integrations/muse.md) adds the session map and a
   subagent brief through two hooks.
   Other stdio MCP clients can call the tools directly; the CLI also works without a host.
-
-### Platform coverage
-
-On every pull request that is ready for review (not a draft), on `main` and before every
-publish, the automated matrix runs the full suite on Linux with Python 3.13 and 3.14. Native
-Windows x64 (`windows-2022`) runs a selected portable core/MCP suite on both versions:
-Store mutation/rollback and cross-process conflicts, UTF-8 and descriptor cleanup,
-MCP result contracts, invocation admission, and wheel-probe guards. It also builds and
-installs a non-editable wheel outside the checkout, checks its package bytes against the
-artifact, runs a CLI, and exchanges real MCP stdio messages in a Unicode/spaced directory.
-The exact selection is in [the CI workflow](../../.github/workflows/ci.yml).
-
-For the 0.14.0 release-candidate campaign, real Claude Code and Codex sessions ran with the
-installed plugin, in fresh host profiles, on Windows Server 2022 x64 and macOS 15 arm64,
-each with Python 3.13 and 3.14. Each run was the full plugin session for both hosts: the
-plugin's MCP server, `SessionStart` context, records before a Read, a bundled skill, a
-subagent brief, the `Stop` capture prompt, capture and ratification, and recall in a fresh
-session. The project folder and host profile paths contained a non-ASCII character.
-
-**0.14.0 publication gate:** Claude Code 2.1.296 and Codex CLI 0.162.1 on all four cells
-above, including a Windows 3.14 cell with PowerShell 7 unavailable for preflight and both
-real host sessions. Windows 3.13 retains PowerShell 7; its launcher checks also cover 5.1.
-Stable publication of 0.14.0 required the full gate to pass without a known-issue exception.
-The README's blue badges summarize release acceptance, rather than live workflow status or
-support for every published version. Muse, OpenCode and Grok Build have the narrower
-coverage in their installation guides and are outside this native matrix.
-
-On native Windows, the Claude Code hooks run through Git Bash, which comes with Git for
-Windows; the MCP launchers and the Codex hooks need no POSIX shell. The native checks run
-with Git for Windows installed; they do not establish support for Windows hosts without it. Graphify integration
-remains outside these checks.
-See [Windows](#windows) before installing a host plugin.
-
-Package dependencies support `fastmcp>=3.4.10,<4`, `mcp>=1.30,<2` and `markdown-it-py>=4,<5`
-(markdown section scope for drift checks). Runtime security
-floors also require `certifi>=2026.10.19` and
-`opentelemetry-api>=1.45.1`, including standalone wheel installations. Major SDK upgrades
-require a separate compatibility review; an unlocked package install may resolve newer
-versions within those bounds than the development lockfile.
 
 ### Windows
 
 Current native CI covers selected core/MCP checks, wheel installation, CLI execution, and
 MCP stdio paths; WSL is not a separate CI target. Full Windows plugin sessions were exercised
-in the historical 0.14.0 release-candidate campaign described above.
+in the historical 0.14.0 release-candidate campaign (see
+[Platform coverage](#platform-coverage)).
 
 **Version requirement:** releases before 0.12.0 can stall a native Windows write: a Git
 child inherits the MCP stdin pipe and holds the write until the request times out (see
@@ -202,21 +165,16 @@ or [Codex](../integrations/codex.md#plugin-install-path).
 the bare `sidegraph-*` commands in your own terminal, install the CLI as in
 [Option A](#option-a--the-cli-on-your-path), together with its update step.
 
-**Scope.** `/plugin install` offers three scopes: user, local and project. From a terminal the
-flag is `claude plugin install sidegraph@sidegraph --scope user|project|local`, and the default
-is user. Enable the plugin at user scope, or in the repository root's
-`.claude/settings.local.json`, and it covers sessions started in any subdirectory. Project scope
-(`.claude/settings.json`) covers only the directory it was installed from: Claude Code reads a
-launch directory's own project settings and no parent's, so a plugin installed at the repository
-root leaves sessions started below it without it. `sidegraph-doctor` reports the gap as
-[`plugin-off-in-subdirectories`](../guides/troubleshooting.md#plugin-off-in-subdirectories).
+**Scope (Claude Code).** Install at user scope, or enable the plugin in the repository root's
+`.claude/settings.local.json`, so sessions started in subdirectories get it too; see
+[plugin scope](claude-code-setup.md#option-a--plugin-recommended).
 
 For installation and updates for every host, see the
-[README host recipes](../../README.md#claude-code). Existing Claude Code and Codex installs
+[host plugin recipes](#host-plugins-install-and-update). Existing Claude Code and Codex installs
 keep `sidegraph@sidegraph`; update cached assets with the host's native update commands,
 then start a new session and review any changed approvals. The runtime's `@main` does not
 refresh cached skills or manifests. OpenCode V2 uses the
-[canonical Git package guide](../../.opencode/INSTALL.md). Experimental
+[canonical Git package guide](../../.opencode/INSTALL.md).
 [Muse](../integrations/muse.md) supplies MCP, skills, the session map and a subagent brief,
 and must be restarted from the intended project when switching workspaces; expanded native
 acceptance is deferred. Grok Build installs from its own plugin marketplace; see the
@@ -266,6 +224,208 @@ ignored` to stderr. That's `uv` itself, not Sidegraph, and it's harmless — the
 runs against Sidegraph's own `.venv`. Silence it with `uv run --no-active --project ...` or by
 deactivating the other venv first.
 
+
+## Host plugins: install and update
+
+Each recipe below installs the plugin and gives the command that updates it. Host plugin
+updates and the MCP runtime are separate: the default runtime follows the public repository's
+`main`, which advances at releases, and that does not refresh cached skills, manifests or hook
+definitions. Use your host's update recipe after a release, then start a new session.
+
+| Host | Automatic session memory | Checked |
+|---|---|---|
+| Claude Code | yes: hooks, capture reminders, context on reads | macOS and Windows |
+| Codex | yes: hooks, after you approve them | macOS and Windows |
+| Grok Build | yes: hooks, capture reminders, context on reads; the session map through the MCP server | macOS |
+| Muse | partly: session map and subagent brief, after you approve them | macOS |
+| OpenCode V2 | no: MCP and skills | macOS |
+
+### Claude Code
+
+In a Claude Code session in the repository:
+
+```text
+/plugin marketplace add SantyagoSeaman/sidegraph
+/plugin install sidegraph@sidegraph
+```
+
+Review the installation summary and any approval prompts, then start a new Claude Code
+session. The plugin provides MCP, skills, session memory, capture reminders and context on reads.
+To check the connection, run `/mcp` in the new session: `sidegraph` should be listed as connected.
+For an existing install, run these in your terminal:
+
+```sh
+claude plugin marketplace update sidegraph
+claude plugin update sidegraph@sidegraph
+```
+
+Keep the same install scope; see the [Claude Code guide](claude-code-setup.md#update-an-existing-plugin).
+Start a new session after updating, or use `/reload-plugins` and review its prompts.
+
+### Codex
+
+Run these in a terminal in the repository:
+
+```sh
+codex plugin marketplace add SantyagoSeaman/sidegraph
+codex plugin add sidegraph@sidegraph
+```
+
+Start a new interactive Codex session. Review Sidegraph's hooks through the startup warning
+or `/hooks`, then approve them. Without approval, MCP remains available but automatic session
+memory, capture reminders and subagent notices stay silent.
+For an existing install, run this in your terminal:
+
+```sh
+codex plugin marketplace upgrade sidegraph
+```
+
+Start a new session and review any changed hook definitions through the startup warning or
+`/hooks`; updating does not grant approval. This update recipe requires Codex CLI 0.162.1
+or later. See the [Codex guide](codex-setup.md#keep-the-plugin-updated).
+
+### Grok Build
+
+The plugin brings the MCP tools, the skills and the hooks: records arrive when the agent reads,
+searches, edits or writes a file or starts a subagent, and the agent is reminded to propose
+decisions once a session has done some work. Grok does not pass the `SessionStart` hook's output
+to the model, so the session map comes from the MCP server instead. Run in a terminal:
+
+```sh
+grok plugin marketplace add SantyagoSeaman/sidegraph
+grok plugin install sidegraph@sidegraph
+```
+
+Accept the trust prompt (`--trust` skips it), then start a new Grok session in the repository.
+Ask the agent which Sidegraph tools it has: `get_task_context` should be among them. Checked
+on macOS with Grok Build 1.0.70 (hooks, session map, capture reminder) and 1.0.62 (install,
+MCP tools, skills, a gotcha recorded in one session and retrieved in the next). Windows is not
+checked. See the [Grok Build guide](../integrations/grok.md).
+For an existing install, run these in your terminal, then start a new session:
+
+```sh
+grok plugin marketplace update
+grok plugin update sidegraph
+```
+
+### Muse
+
+MCP, shared skills, a session map at start and a memory brief for subagents; no context on
+reads and no capture reminder. The hooks need `python3` (3.9 or later; the macOS one works).
+Add the marketplace and install the plugin:
+
+```sh
+muse plugins marketplace add sidegraph https://github.com/SantyagoSeaman/sidegraph
+muse plugins install sidegraph@sidegraph
+muse plugins inspect sidegraph
+```
+
+Review the two hook capabilities and the MCP capability, then approve them:
+
+```sh
+muse plugins approve sidegraph
+```
+
+Exit Muse and start a new Muse process from the intended project directory. Restart it there
+whenever you switch projects; selecting a workspace in a running process is insufficient.
+For an existing install, refresh the marketplace and the plugin, then inspect the changed
+capability:
+
+```sh
+muse plugins marketplace update sidegraph
+muse plugins update sidegraph
+muse plugins inspect sidegraph
+```
+
+Review changes, then approve and restart Muse from the target project:
+
+```sh
+muse plugins approve sidegraph
+```
+
+Installation, update, MCP approval, the session map and the subagent brief were checked on
+Muse 1.4.14 on macOS; Windows is not checked. See the [Muse guide](../integrations/muse.md).
+
+### OpenCode V2
+
+Requires OpenCode V2 (native baseline 2.0.29), `uv` and Git on PATH. Native packaging and MCP
+were checked on macOS; Windows is not checked. In your terminal:
+
+```sh
+opencode plugin add 'git+https://github.com/SantyagoSeaman/sidegraph.git#main'
+```
+
+Start a new OpenCode session in your project and use `@sidegraph-setup`. Keep OpenCode's
+normal MCP and skill permissions; no additional plugin-approval command is needed. This
+route supplies MCP and skills only: ask for context and capture decisions explicitly.
+For an existing install, check and update the Git package, then restart OpenCode:
+
+```sh
+opencode plugin check 'git+https://github.com/SantyagoSeaman/sidegraph.git#main'
+opencode plugin update 'git+https://github.com/SantyagoSeaman/sidegraph.git#main'
+```
+
+The [OpenCode installation guide](../../.opencode/INSTALL.md) is the canonical recipe, including
+configuration overrides. The package target `#main` and the MCP runtime's Git ref are
+separate settings.
+
+### Any MCP client
+
+Without a plugin, register the stdio server with your client and run it from the repository
+root. For a client that reads an `mcpServers` file:
+
+```json
+{ "mcpServers": { "sidegraph": { "command": "uvx", "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp", "--repo-root"], "env": { "SIDEGRAPH_DIR": ".sidegraph", "SIDEGRAPH_GRAPH": "graphify-out/graph.json" } } } }
+```
+
+There is no setup skill without a plugin: build the graph and create the store from a terminal
+as in the [Quickstart](quickstart.md), and ask for context with the MCP tools
+([reference](../reference/mcp-tools.md)). No hooks run, so memory reaches the agent only when
+it calls a tool.
+
+## Upgrading an existing install
+
+Read the [changelog](../../CHANGELOG.md) entries since your version first. Before upgrading
+Graphify, follow the [0.14 migration guide](../guides/migrating-to-0.14.md) so accepted
+domains keep their membership. [0.17](../guides/migrating-to-0.17.md) introduced the packed
+store format. From 0.22, the first `sidegraph-compact` that packs or drops a drift check makes 0.17 to
+0.21 refuse the store, so upgrade every teammate and CI pin before running it. Then use your
+host's [update recipe](#host-plugins-install-and-update); Claude Code and Codex keep the same
+`sidegraph@sidegraph` identity, so no reinstall is needed.
+
+## Without the graph
+
+Skip the Graphify install and `graphify update`, run `sidegraph-init` as usual, and answer no
+to its *Keep the code graph fresh?* question. The store, the SessionStart map, the proposal
+queue, store listings and global memory still work. Anchoring does not: `add_decision` keeps
+no anchors without a graph, a proposed draft keeps only an orphaned anchor that waits for a
+graph, and retrieval for a file or a symbol finds nothing (a seed that names a descriptor
+already stored with a record still finds it). There is no structural map, no automatic domain
+candidates and no following of moved code. The loop of capturing a record for a file and
+recalling it when that file is read needs the graph. See
+[the graph dependency](../reference/operations.md#the-graph-dependency-stated-plainly).
+
+## If something does not work
+
+- Run `sidegraph-doctor` (as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor`,
+  or by its plain name if you installed the CLI, see [Option A](#option-a--the-cli-on-your-path)):
+  it lists what is wrong with the store, the graph and the wiring.
+  [Troubleshooting](../guides/troubleshooting.md) explains each message, and the
+  [verification checklist](../guides/verifying-your-setup.md) walks the whole workflow.
+- `get_task_context` finds nothing for a function: there is no graph yet, or the record was
+  saved before the graph existed. Build the graph first (`graphify update .`). A proposed
+  draft's orphaned anchors then heal with `sidegraph-sync`; a record written directly with
+  `add_decision` kept no anchors, so add them with `add_anchors`.
+- The agent has no Sidegraph tools: start a new session after installing, approve the
+  plugin's prompts (Codex: its hooks too), and in Claude Code check `/mcp`.
+
+## Removing Sidegraph
+
+Remove the plugin with your host's plugin command (`/plugin uninstall sidegraph@sidegraph` in
+Claude Code, `grok plugin uninstall sidegraph` in Grok Build).
+`sidegraph-init --remove-hooks` removes the git hook. The records in `.sidegraph/` are your
+project's memory and are committed: delete them only if you mean to lose them.
+`graphify-out/` can always be deleted and rebuilt.
 
 ## Entry points
 
@@ -334,6 +494,44 @@ fine with Sidegraph; Sidegraph only ever reads `graph.json` directly and doesn't
 
 See [`integrations/graphify.md`](../integrations/graphify.md) for how Sidegraph reads
 Graphify's output, corpus types, and troubleshooting.
+
+## Platform coverage
+
+On every pull request that is ready for review (not a draft), on `main` and before every
+publish, the automated matrix runs the full suite on Linux with Python 3.13 and 3.14. Native
+Windows x64 (`windows-2022`) runs a selected portable core/MCP suite on both versions:
+Store mutation/rollback and cross-process conflicts, UTF-8 and descriptor cleanup,
+MCP result contracts, invocation admission, and wheel-probe guards. It also builds and
+installs a non-editable wheel outside the checkout, checks its package bytes against the
+artifact, runs a CLI, and exchanges real MCP stdio messages in a Unicode/spaced directory.
+The exact selection is in [the CI workflow](../../.github/workflows/ci.yml).
+
+For the 0.14.0 release-candidate campaign, real Claude Code and Codex sessions ran with the
+installed plugin, in fresh host profiles, on Windows Server 2022 x64 and macOS 15 arm64,
+each with Python 3.13 and 3.14. Each run was the full plugin session for both hosts: the
+plugin's MCP server, `SessionStart` context, records before a Read, a bundled skill, a
+subagent brief, the `Stop` capture prompt, capture and ratification, and recall in a fresh
+session. The project folder and host profile paths contained a non-ASCII character.
+
+**0.14.0 publication gate:** Claude Code 2.1.296 and Codex CLI 0.162.1 on all four cells
+above, including a Windows 3.14 cell with PowerShell 7 unavailable for preflight and both
+real host sessions. Windows 3.13 retains PowerShell 7; its launcher checks also cover 5.1.
+Stable publication of 0.14.0 required the full gate to pass without a known-issue exception.
+The README's badges show the latest workflow run and release, not support for every
+published version. Muse, OpenCode and Grok Build have the narrower
+coverage in their installation guides and are outside this native matrix.
+
+On native Windows, the Claude Code hooks run through Git Bash, which comes with Git for
+Windows; the MCP launchers and the Codex hooks need no POSIX shell. The native checks run
+with Git for Windows installed; they do not establish support for Windows hosts without it. Graphify integration
+remains outside these checks.
+
+Package dependencies support `fastmcp>=3.4.10,<4`, `mcp>=1.30,<2` and `markdown-it-py>=4,<5`
+(markdown section scope for drift checks). Runtime security
+floors also require `certifi>=2026.10.19`,
+`opentelemetry-api>=1.45.1`, `authlib>=1.9.1` and `dnspython>=2.9.0`, including standalone wheel installations. Major SDK upgrades
+require a separate compatibility review; an unlocked package install may resolve newer
+versions within those bounds than the development lockfile.
 
 ## Next
 

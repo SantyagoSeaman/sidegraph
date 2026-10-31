@@ -2,7 +2,8 @@
 
 > Durable decisions and non-derivable facts for coding agents, stored as repo-committed
 > JSON records with a derived local index. Sidegraph reads Graphify's code/doc graph and
-> delivers mistakes-first, task-scoped memory through MCP and Claude Code/Codex hooks.
+> delivers mistakes-first, task-scoped memory through MCP and host hooks (Claude Code, Codex,
+> Grok Build, Muse).
 
 Use [README.md](README.md) for task-oriented navigation. This index points to the guides
 and exact contracts; it does not replace their version-specific requirements.
@@ -28,9 +29,8 @@ and exact contracts; it does not replace their version-specific requirements.
 - [integrations/graphify.md](integrations/graphify.md) — the engine seam: GraphifyReader over graph.json
 - [integrations/claude-code.md](integrations/claude-code.md) — the host seam: MCP server + SessionStart/Stop/PreToolUse/SubagentStart hooks
 - [integrations/codex.md](integrations/codex.md) — Codex integration
-
 - [integrations/grok.md](integrations/grok.md) — Grok Build plugin: MCP, skills and hooks (records on reads, capture reminder), with the session map sent by the MCP server
-- [integrations/muse.md](integrations/muse.md) — experimental Muse: MCP, skills, the session map and a subagent brief through two hooks; process-directory limits
+- [integrations/muse.md](integrations/muse.md) — Muse: MCP, skills, the session map and a subagent brief through two hooks; process-directory limits
 - [integrations/opencode.md](integrations/opencode.md) — OpenCode V2 MCP and shared skills; native Git install/update guide
 
 ## Guides
@@ -57,6 +57,7 @@ and exact contracts; it does not replace their version-specific requirements.
 - [reference/cli.md](reference/cli.md) — command flags, output, exit codes, import profiles, verification, and local diagnostics
 - [reference/hooks.md](reference/hooks.md) — sidegraph-session-start, sidegraph-stop, sidegraph-pre-tool-use, and sidegraph-subagent-start: env, JSON I/O, guarantees
 - [reference/git-bindings.md](reference/git-bindings.md) — commit trailers (candidate rules, comment-char handling, fail-open bounded stages, installation) and sidegraph-blame (trailer + provenance joins and output caps)
+- [reference/security-internals.md](reference/security-internals.md) — the exact runtime security rules: inspection history contents, redaction edge cases, input limits, content-free write diagnostics, Git baseline and bootstrap read validation
 - [reference/configuration.md](reference/configuration.md) — environment variables, store/graph paths, retrieval budgets, and sync caches
 - [reference/stability.md](reference/stability.md) — committed and provisional surfaces, compatibility policy, and behavioral guarantees
 - [reference/operations.md](reference/operations.md) — what runs when, local writes and measured costs, the graph boundary, CI wiring, and unmeasured scale questions

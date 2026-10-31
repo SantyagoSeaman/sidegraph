@@ -10,7 +10,7 @@ agent.
 2. Follow the [end-to-end quickstart](getting-started/quickstart.md).
 3. Use the recommended host path for [Claude Code](getting-started/claude-code-setup.md),
    [Codex](getting-started/codex-setup.md) or [Grok Build](integrations/grok.md), or the narrower
-   paths for [OpenCode V2](../.opencode/INSTALL.md) (MCP and skills) and experimental
+   paths for [OpenCode V2](../.opencode/INSTALL.md) (MCP and skills) and
    [Muse](integrations/muse.md) (MCP, skills, the session map and a subagent brief).
 4. Run the [four-case verification checklist](guides/verifying-your-setup.md).
 
@@ -60,6 +60,7 @@ it is optional background on evidence, limits, and repository fit.
 - [Store format](reference/store-format.md)
 - [Stability levels](reference/stability.md)
 - [Git bindings](reference/git-bindings.md)
+- [Security internals](reference/security-internals.md)
 - Integrations: [Claude Code](integrations/claude-code.md),
   [Codex](integrations/codex.md), [OpenCode V2](integrations/opencode.md),
-  experimental [Muse](integrations/muse.md), [Grok Build](integrations/grok.md), [Graphify](integrations/graphify.md)
+  [Muse](integrations/muse.md), [Grok Build](integrations/grok.md), [Graphify](integrations/graphify.md)

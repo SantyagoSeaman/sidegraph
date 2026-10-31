@@ -58,9 +58,11 @@ session.
   them again does not regenerate them.
 - **Membership stays fresh automatically.** As code moves, `sidegraph-sync` (which runs lazily
   on every `SessionStart` / `get_task_context`) re-resolves each domain's `seed_anchors` to its
-  current communities. A function that moved or a file that was renamed is followed to its new
-  home without you touching the domains — the same durable-anchor mechanism decisions use. No
-  `name-domains` re-run needed for ordinary drift.
+  current communities, so membership follows regrouping in the graph while each seed's name
+  and file still resolve. No `name-domains` re-run needed for ordinary drift. A seed whose
+  file moved or was renamed stops resolving (domains have no move ladder, unlike decision
+  anchors): re-scope the domain with `supersede_domain` and fresh
+  `seed_anchors`/`path_prefixes` (see `sidegraph:manage-domains`).
 - **Re-running is incremental, not a redo.** A community claimed by any non-superseded domain is skipped
   (the tool reports it as `already_claimed`), so on an already-named project `name-domains`
   surfaces roughly zero candidates and the agent stops — it never re-offers the domains you
@@ -148,7 +150,8 @@ write time — that's explicit human intent. But **every** accepted domain's `pa
 regardless of who wrote it, is still capped at refresh time (a path candidate that resolves to
 a single community is never capped, regardless of ratio — one community can't swallow anything
 else): if a later `sidegraph-sync` finds that a path rule now resolves to more than 20% of all
-current communities, that path contribution is **rejected and dropped** — but any
+current communities, that rule's community claim is **rejected** (files directly under the
+prefix still count as the domain's members) — but any
 `seed_anchors` the domain carries are still resolved and applied, so a domain with both an
 overbroad path rule and precise `seed_anchors` has its `communities` **replaced** by the
 anchor-resolved set; only a domain whose overbroad path had no `seed_anchors` to rescue it

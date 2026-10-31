@@ -58,6 +58,8 @@ jobs:
       pull-requests: write   # the github-script comment step below needs this
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # full history — move detection reads the deleting commit's parent
 
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
@@ -278,6 +280,8 @@ jobs:
       pull-requests: write   # ...and open the PR itself
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # full history — move detection reads the deleting commit's parent
 
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
@@ -323,6 +327,7 @@ jobs:
           Summarize every action taken and recommendation at the end.' \
             --model "$SIDEGRAPH_TRIAGE_MODEL" \
             --mcp-config mcp-config.json --strict-mcp-config \
+            --tools "Read,Grep,Glob" \
             --allowedTools "mcp__sidegraph__sync_anchors mcp__sidegraph__find_entity mcp__sidegraph__query_structure mcp__sidegraph__query_decisions mcp__sidegraph__add_anchors mcp__sidegraph__propose_decisions mcp__sidegraph__list_proposed mcp__sidegraph__retrieve_decisions mcp__sidegraph__get_entity_history mcp__sidegraph__list_facts mcp__sidegraph__verify_store" \
             --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__ratify_decisions,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact,mcp__sidegraph__record_drift_check,mcp__sidegraph__propose_domains" \
             --output-format stream-json --verbose \
@@ -355,12 +360,15 @@ See **Prerequisites** above for the API key, pinned model, PR-creation toggle, a
 gate. The command passes the repository variable explicitly instead of inheriting a changing
 CLI default.
 
-Do not add `--permission-mode bypassPermissions`: it disables both tool lists. The
+Do not add `--permission-mode bypassPermissions`: it approves every tool the deny list does
+not name, which voids the allowlist. The deny list still holds under it. The
 `--disallowedTools` list is the ratification guard: it names the tools that ratify or write a
 record directly, records a drift check, or proposes a domain. The allowlist only narrows normal MCP
-access and can be widened by ambient host settings. Keep both. Read-only built-in
-tools can still inspect the checkout in a headless run; the troubleshooting note below states
-that boundary explicitly. The matching
+access and can be widened by ambient host settings. Keep both. `--tools` limits the built-in
+tools to read-only ones (`Read`, `Grep`, `Glob`), so no built-in `Edit`, `Write` or `Bash` is
+available for a project `permissions.allow` or `defaultMode` to approve; the MCP tools are not
+affected by it. Those read-only tools can still inspect the checkout; the troubleshooting note
+below states that boundary explicitly. The matching
 [`heal-anchors` headless example](../../plugin/sidegraph/skills/heal-anchors/SKILL.md#running-this-playbook-headlessly-ci)
 uses the same deny-list rule.
 
@@ -379,8 +387,8 @@ drafts. Proposed content stays below accepted memory and may be hidden by regula
   misfiring. Read the finding's detail: two archive segments whose payloads differ, two hot
   files with the same id (a copied record file, usually with a `filename-id-mismatch` beside
   it) and a hot file next to an archived copy all produce it, identical content or not.
-- **Exit codes, all three CLIs used above:** `0` clean (or, for `sidegraph-sync`, a
-  version-skip), `1` an *operational* error (unreadable graph/store; for verification's
+- **Exit codes, all three CLIs used above:** `0` clean (a plain `sidegraph-sync` also exits
+  `0` on a version-skip; `--check` always runs the full pass), `1` an *operational* error (unreadable graph/store; for verification's
   transition layer, an unresolvable `--against` ref or no git repository), `2`
   findings/violations actually present. Recipes 1
   and 2 fail the job on either `1` or `2` (`continue-on-error` + a manual `exit 1` at the
@@ -394,18 +402,23 @@ drafts. Proposed content stays below accepted memory and may be hidden by regula
 - **`fetch-depth: 0` missing → merge-base fails.** `actions/checkout`'s default
   (`fetch-depth: 1`) only fetches the tip commit, so `git merge-base` in Recipe 2 has
   nothing to search and errors out (an operational error, exit `1`, not a false-clean
-  result) — the workflow above sets `fetch-depth: 0` for exactly this reason.
+  result) — the workflow above sets `fetch-depth: 0` for exactly this reason. Recipe 1 needs
+  it too: sync confirms a file move by reading the deleting commit's parent, and at a shallow
+  boundary it declines the move. The moved anchor stays orphaned, and a decision that loses its only live
+  anchor that way goes stale and fails `--check`.
 - **A headless `claude -p` run can still read the repo — that's by design, not a leak.**
-  Read-only built-in tools (`Read`, a plain read-only `Bash` invocation) are auto-permitted
-  in headless runs independently of `--allowedTools`/`--disallowedTools`, which here name
-  only `mcp__sidegraph__*` tools (measured live: the transcript shows several `Bash` reads and a
-  `Read` running, alongside one `Bash` call the same static command classification denied —
-  its shape didn't read as safely read-only). What the two flags together guarantee is
-  narrower and still sufficient for hard rule 1: the run cannot **write** anything except
-  through the allowlisted MCP tools, and the deny list blocks the ratification and
-  direct-write tools (`ratify`, `add_decision`, `supersede_*`, `record_drift_check`, ...) outright. If you see "no Bash/Edit/Write
-  reachable" claimed anywhere for this setup, that's wrong — treat repo contents as
-  readable by the run and scope secrets accordingly.
+  Read-only built-in tools are auto-permitted in headless runs independently of
+  `--allowedTools`/`--disallowedTools`, which here name only `mcp__sidegraph__*` tools
+  (measured live without `--tools`: the transcript shows several `Bash` reads and a `Read`
+  running, alongside one `Bash` call the same static command classification denied — its
+  shape didn't read as safely read-only). Recipe 3's `--tools "Read,Grep,Glob"` keeps only
+  the read-only built-ins. With it, the run can write only through the allowlisted MCP
+  tools, and the deny list blocks the ratification and direct-write tools (`ratify`,
+  `add_decision`, `supersede_*`, `record_drift_check`, ...) outright. Without `--tools`, a
+  project `permissions.allow` or `defaultMode` in `.claude/settings.json` can approve `Edit`,
+  `Write` or `Bash`, and the `.sidegraph` PR step would carry a direct file write into the
+  store. Either way, treat repo contents as readable by the run and scope secrets
+  accordingly.
 
 ## See also
 

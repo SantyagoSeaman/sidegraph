@@ -34,15 +34,16 @@ claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRA
 replace the `uvx --from git+...` invocation in either form above with `uv run --project
 /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp`.
 
-The released package is available from PyPI, so both shorten further — no git/checkout path
-needed:
+The released package is also on PyPI. Use it to pin an exact version (see
+[installation: the CLI on your PATH](../getting-started/installation.md#option-a--the-cli-on-your-path)),
+replacing `X.Y.Z` with a release:
 
 ```bash
-claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from sidegraph sidegraph-mcp
+claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from 'sidegraph==X.Y.Z' sidegraph-mcp
 ```
 
 ```json
-{ "mcpServers": { "sidegraph": { "command": "uvx", "args": ["--from", "sidegraph", "sidegraph-mcp"], "env": { "SIDEGRAPH_DIR": ".sidegraph", "SIDEGRAPH_GRAPH": "graphify-out/graph.json" } } } }
+{ "mcpServers": { "sidegraph": { "command": "uvx", "args": ["--from", "sidegraph==X.Y.Z", "sidegraph-mcp"], "env": { "SIDEGRAPH_DIR": ".sidegraph", "SIDEGRAPH_GRAPH": "graphify-out/graph.json" } } } }
 ```
 
 ## Hooks in detail
@@ -138,7 +139,7 @@ human ratifies them (`sidegraph-ratify`) — unless `SIDEGRAPH_AUTO_ACCEPT=on`, 
 decisions and facts land `accepted` immediately instead (domains are always exempt from that
 flag; see
 [`guides/capturing-decisions.md#4-auto-accept-opt-in`](../guides/capturing-decisions.md#4-auto-accept-opt-in)),
-or an opt-in `SIDEGRAPH_RATIFY_POLICY` accepts an eligible proposal at write time with an
+or the project's `SIDEGRAPH_RATIFY_POLICY` accepts an eligible proposal at write time with an
 `auto:<policy>` stamp (see [configuration](../reference/configuration.md)).
 A session that was nudged early is nudged again after more work: at least 30 minutes and 10 new
 commits (on any local branch) after the last nudge, with the count added to the nudge's text
@@ -228,7 +229,7 @@ any exception inside `stop` prints `{}` (Claude Code proceeds to stop normally);
 inside `pre_tool_use` — or the nudge conditions simply not holding — also prints `{}` (the
 tool call proceeds through the normal permission flow); any exception inside `subagent_start`, or
 nothing anchored to code to describe, prints `{}` (the subagent starts with no brief). A missing
-graph degrades to file-path anchors and a shorter map; after a new store or canonical index
+graph leaves new records without code anchors and gives a shorter map; after a new store or canonical index
 reload, hot-hook record delivery and briefs remain withheld until sync can run with a reader.
 A missing store is not an error either:
 `SessionStart` creates nothing: it sends a `systemMessage` that names the expected path and asks for
@@ -239,7 +240,7 @@ memory. None of these breaks the session.
 ## Plugin install path
 
 Sidegraph ships a Claude Code plugin + marketplace manifest **in the repo itself** — this is
-the recommended install path, and it works today, no PyPI publish required:
+the recommended install path:
 
 ```
 /plugin marketplace add SantyagoSeaman/sidegraph

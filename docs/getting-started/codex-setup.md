@@ -20,14 +20,14 @@ not verify a complete Codex plugin session.
 
 From a terminal, in that repo:
 
-The plugin follows the public repository's `main`, which advances at releases. To pin a
-version for reproducible environments, see
-[how to pin mutable development references](installation.md#mutable-development-references).
-
 ```bash
 codex plugin marketplace add SantyagoSeaman/sidegraph
 codex plugin add sidegraph@sidegraph
 ```
+
+The plugin follows the public repository's `main`, which advances at releases. To pin a
+version for reproducible environments, see
+[how to pin mutable development references](installation.md#mutable-development-references).
 
 These are shell commands, not slash commands typed inside a Codex session. The marketplace
 source takes `owner/repo[@ref]`, a local path or a Git URL.
@@ -83,7 +83,7 @@ want to point at a source checkout? Register the pieces yourself.
 Via the CLI:
 
 ```bash
-codex mcp add sidegraph -- bash -lc "cd /ABSOLUTE/PATH/TO/your-repo && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp"
+codex mcp add sidegraph -- bash -lc "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
 ```
 
 Or add it to the repo's `.codex/config.toml` (recommended for project-specific setup):
@@ -93,9 +93,16 @@ Or add it to the repo's `.codex/config.toml` (recommended for project-specific s
 command = "bash"
 args = [
   "-lc",
-  "cd /ABSOLUTE/PATH/TO/your-repo && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp"
+  "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
 ]
 ```
+
+**From a source checkout instead** (contributors; see
+[installation: from source](installation.md#option-d--from-source-contributors)): in this
+command and in the hooks below, replace `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`
+with `uv run --project '/ABSOLUTE/PATH/TO/sidegraph'` (the single quotes keep a path with
+spaces whole and need no escaping in JSON). `@main` is a mutable ref; to pin it, see
+[mutable development references](installation.md#mutable-development-references).
 
 Codex also reads `~/.codex/config.toml`. Use the project file when the registration belongs
 to this repository; use the global file only when you intentionally want the server in every
@@ -128,7 +135,7 @@ Create `.codex/hooks.json` in the repo:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -138,7 +145,7 @@ Create `.codex/hooks.json` in the repo:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-stop || printf '{}\\n'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -148,7 +155,7 @@ Create `.codex/hooks.json` in the repo:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-subagent-start || printf '{}\\n'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-subagent-start || printf '{}\\n'"
           }
         ]
       }

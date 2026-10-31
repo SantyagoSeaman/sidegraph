@@ -12,7 +12,10 @@ Every new session, the `sidegraph-session-start` hook runs a lazy sync (best-eff
 contents as `additionalContext` — not a full dump of the store. Which of two renderers runs
 depends entirely on whether the store has any **accepted domains** yet (see
 [mind model](../concepts/mind-model.md) and
-[retrieval: SessionStart TOC](../concepts/retrieval.md#sessionstart-toc)):
+[retrieval: SessionStart TOC](../concepts/retrieval.md#sessionstart-toc)).
+On Grok Build the hook still runs, but its text is lost; the MCP server supplies the map
+instead (the cached domain table of contents, or only the standing lines, never the
+`## Communities` fallback below; see the [Grok Build guide](../integrations/grok.md)):
 
 - **Once at least one domain has been ratified** (`sidegraph-domains bootstrap`/`add` →
   `sidegraph-ratify` — see [naming your domains](naming-your-domains.md)), `render_toc()`
@@ -77,6 +80,8 @@ Verbatim, with the counts substituted:
 > Sidegraph: N record(s) awaiting ratification (X decisions, Y facts, Z domains; oldest D days) — review
 > with the ratify MCP tool or sidegraph-ratify.
 
+The `; oldest D days` part is left out when only domains are pending.
+
 The count is proposed decisions, standalone proposed facts (a fact riding a proposed
 decision's cascade is covered by it and never double-counted), and proposed domains — see
 [`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start) and
@@ -118,8 +123,9 @@ a later identical record may say `See above` with its kind, trust marker and ID 
 applicable file. The first copy remains complete for that surface. No state crosses calls or
 agents, and saved characters do not buy extra records. Existing once-per-file claims remain;
 use `get_task_context` for fuller decision context and `list_facts` for whole facts.
-These two channels exist on Claude Code only. `SubagentStart` runs on Claude Code and on
-Codex. The wiring is in the [hooks reference](../reference/hooks.md#sidegraph-pre-tool-use).
+These two channels run on Claude Code and Grok Build (Sidegraph ships no `PreToolUse` hook for Codex or Muse).
+`SubagentStart` delivers its brief on Claude Code, Codex and Muse; Grok Build runs it but does
+not pass the output to the model. The wiring is in the [hooks reference](../reference/hooks.md#sidegraph-pre-tool-use).
 
 ## Asking task-scoped questions so `get_task_context` fires with the right seeds
 
@@ -245,8 +251,9 @@ A decision shows up under `## Related` instead of the direct blocks in two situa
    *ADR-B*, if both live in the same reference cluster.
 2. **Peripheral entities.** Anything that shows up as a non-seed node in the budgeted
    structural subgraph (reachable from your seeds within the `structure_budget`) also
-   contributes its own decisions to `## Related` — one hop out from what you asked about,
-   not a full graph walk.
+   contributes its own decisions to `## Related` — a breadth-first neighbourhood of your
+   seeds, bounded by `structure_budget` (it can reach several hops on a sparse graph), not a
+   full graph walk.
 
 Global-scope decisions land in `## Related` too (after community/peripheral), so a
 repo-wide constraint you already saw at session start can resurface here if it's relevant.

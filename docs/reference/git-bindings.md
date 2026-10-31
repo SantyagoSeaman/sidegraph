@@ -168,4 +168,5 @@ were omitted — never a silent truncation.
 - [`reference/cli.md`](cli.md#sidegraph-prepare-commit-msg) /
   [`reference/cli.md`](cli.md#sidegraph-blame) — flags and exit codes
 - [`concepts/data-model.md`](../concepts/data-model.md) — `Provenance.commit`, stamped
-  best-effort on every decision/fact write path
+  best-effort on the decision/fact add, supersede and propose paths (not on `sidegraph-import`
+  records)

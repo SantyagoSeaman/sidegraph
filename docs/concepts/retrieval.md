@@ -426,8 +426,10 @@ store's index directly (see [hooks](../reference/hooks.md)):
   memory exists, how to ask it, and how many decisions, files and mistakes it holds. It carries no
   records. `SIDEGRAPH_SUBAGENT_BRIEF=off` stops it.
 
-The first two deliver decisions only: their index reader has no fact query, so facts reach an
-agent through `get_task_context`. The first two are Claude Code only. `SubagentStart` runs on Claude Code and on Codex. The day to
+The first two deliver decisions and eligible facts (a fact line over 512 characters is withheld;
+`list_facts` reads it); see [`sidegraph-pre-tool-use`](../reference/hooks.md#sidegraph-pre-tool-use).
+The first two run on Claude Code and Grok Build. `SubagentStart` runs on Claude Code, Codex and
+Muse; Grok Build runs it but does not pass its output to the model. The day to
 day view is in [retrieval in sessions](../guides/retrieval-in-sessions.md#memory-without-asking).
 
 ## See also

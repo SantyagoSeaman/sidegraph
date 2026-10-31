@@ -897,12 +897,13 @@ engine-coupling state — specifically, community labels — could still touch g
   `bindings/<record_id>.json` file (identity + tier/relation/weight, no `status`) is
   untouched by that flip. An `Entity`'s `last_seen_*` fields are likewise index-only.
 - **Domain status transitions, not rewrites.** `ratify_domains` flips `proposed -> accepted`
-  (and mints the paired `domain:<slug>` entity) or `proposed -> dropped`. Editing a `Domain`'s
+  (and mints the paired `domain:<slug>` entity), `proposed -> dropped` or `accepted -> dropped`. Editing a `Domain`'s
   description is a new committed file: `supersede_domain` closes the predecessor (status ->
   `superseded`) and writes a successor with `supersedes` set, both in the same call — mirroring
   `add_decision`'s supersede path. The only other sanctioned mutation is
   `refresh_domain_communities`, which `sidegraph-sync` uses to update ONLY the index-only
-  `communities` field (REPLACE semantics) on every `accepted` domain; `title`, `summary`,
+  `communities` field (REPLACE semantics) on every `accepted` domain, and which also runs
+  immediately when a domain is accepted and a graph is readable; `title`, `summary`,
   `parent_id`, and `path_prefixes` live in the committed file and are never touched by sync.
 - Every write path also enforces the schema-level invariants from
   [data model](../concepts/data-model.md): `valid_to >= valid_from`; every `AnchorBinding`
@@ -1070,7 +1071,8 @@ the check file's JSON body taken verbatim (sorted keys, compact separators), wit
 the body carries its own `id`. A check file folds once it is tracked and unmodified against
 `HEAD`; there is no settled-days wait. A check is **dead** when its decision has a check with a
 higher id, or the decision is `superseded`, `rejected` or `deprecated`; compaction drops dead
-checks when it folds, so their bytes survive only in git history. Nothing reads a check that is
+checks when it folds, so their bytes survive only in git history. While `packed.shard` itself is
+untracked or modified, its lines are kept but make no check dead. Nothing reads a check that is
 not the selected one, so no reader sees a change. A file that is untracked, modified, damaged
 or whose decision is missing is kept and listed with the reason. Outside a git work tree
 nothing folds. A packed line is equal to the check file with the same id and body, so a crash

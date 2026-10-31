@@ -169,7 +169,7 @@ propose_decisions(drafts=[{
 ```
 
 This lands the successor `status=proposed` — a human still reviews and ratifies its
-*content*. Note: under the default `manual` policy `store.add_decision` closes the
+*content*. Note: under the `manual` policy (the one the headless recipe pins) `store.add_decision` closes the
 *predecessor's own record* (`accepted` → `superseded`) in the very same call (under an auto
 policy it stays open until the successor is ratified — automatically, or later by a human) —
 that's the ordinary append-only
@@ -209,15 +209,15 @@ proposed decisions/facts or a supported domain drop; retain accepted decision hi
 there is no meaningful successor. Do not call ratify. Summarize every action taken and every recommendation at the end.' \
   --model claude-sonnet-5 \
   --mcp-config mcp-config.json --strict-mcp-config \
+  --tools "Read,Grep,Glob" \
   --allowedTools "mcp__sidegraph__*" \
   --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__ratify_decisions,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact,mcp__sidegraph__record_drift_check,mcp__sidegraph__propose_domains" \
   --output-format stream-json --verbose
 ```
 
-**No `--permission-mode bypassPermissions` here, deliberately.** Bypass skips Claude Code's
-permission system outright — `--allowedTools`/`--disallowedTools` are allow/deny lists that
-system itself consults, so under bypass they'd bind nothing at all, and the run would be
-able to call every tool including `ratify`. **The `--disallowedTools` deny list is the
+**No `--permission-mode bypassPermissions` here, deliberately.** Bypass approves every tool
+the deny list does not name (`Edit`, `Write`, any `Bash`), which voids the allowlist; only
+the `--disallowedTools` deny list still holds under it. **The `--disallowedTools` deny list is the
 load-bearing guard**: it names the exact write-gate tools this playbook must never call
 unattended — `ratify`/`ratify_decisions`, `add_decision`/`supersede_decision`,
 `add_fact`/`supersede_fact`, `add_domain`/`supersede_domain`, `record_drift_check`,
@@ -229,14 +229,15 @@ silently overrides allowlist-only narrowing (measured live — a narrowed allowl
 not stop a ratify call on a permissively-configured machine; the deny list did). Always ship
 both; the enforcement never rests on the prompt instruction or the allowlist alone.
 
-**Read-only built-in tools stay reachable — that's expected, not a hole.** `Read` and a
-plain read-only `Bash` invocation are auto-permitted in headless runs independently of
+**Read-only built-in tools stay reachable — that's expected, not a hole.** Read-only
+built-ins are auto-permitted in headless runs independently of
 `--allowedTools`/`--disallowedTools`, which here name only `mcp__sidegraph__*` tools (measured
-live: a triage run's transcript shows several `Bash` reads and a `Read` running, plus one
-`Bash` call the same static command classification denied — its shape didn't read as safely
-read-only). The flags' guarantee is narrower than "no Bash/Edit/Write reachable" — a claim
-that overstates what they do: the run cannot **write** anything except through the
-allowlisted MCP tools, and the deny list blocks every write-gate tool outright, but the repo
+live without `--tools`: a triage run's transcript shows several `Bash` reads and a `Read`
+running, plus one `Bash` call the same static command classification denied — its shape
+didn't read as safely read-only). `--tools "Read,Grep,Glob"` limits the built-ins to
+read-only ones and leaves the MCP tools alone; with it, the run can write only through the
+allowlisted MCP tools, and the deny list blocks every write-gate tool outright. Without it, a
+project `permissions.allow` or `defaultMode` can approve `Edit`/`Write`. Either way the repo
 stays readable to the run's own judgment. This is also why the `--allowedTools` wildcard
 above should still be trusted to cover the decision-reading tools (`retrieve_decisions`,
 `get_entity_history`, `list_facts`, `verify_store`) rather than narrowed past them: a live

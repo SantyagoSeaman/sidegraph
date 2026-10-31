@@ -61,7 +61,10 @@ gate), `agent` (`propose_decisions`, the agent-initiated draft pipeline), `impor
 (rationale-node import), or `doc-import` (`--docs` markdown import); `manual` and `bootstrap`
 are the corresponding values for `Domain` provenance instead — see
 [`Domain`](#domain--the-owned-abstraction) below), `ref`, `author`, `session_id`,
-`graph_version` — all optional except `source`, which records where the decision came from.
+`graph_version`, `commit` — all optional except `source`, which records where the decision came from.
+`commit` is a best-effort `git rev-parse HEAD` at write time, stamped on the add, supersede and
+propose paths for decisions and facts; it is never backfilled, and `sidegraph-import` records
+do not carry it.
 `session_id` is best-effort attribution, not identity: it is the calling host's session when the
 server could tell, and `null` otherwise (always `null` for CLI writes). A wrong or missing value
 is not repaired in place; the store is append-only. See
@@ -178,7 +181,7 @@ linking a record to an entity. One record can have several (multi-anchor) — se
 | `tier` | `0` \| `1` \| `2` | `0` = semantic/abstract (initiative, tag); `1` = group (community, or an accepted domain covering it); `2` = leaf (concrete entity). |
 | `weight` | float, 0.0-1.0 | How central this anchor is to the decision (default `1.0`). |
 | `status` | `live` \| `degraded` \| `orphaned` | Resolution health. Retrieval skips `orphaned` bindings and resolves the best `live` (or `degraded`) one. |
-| `relation` | `creates` \| `modifies` \| `affects` \| `deprecates` \| `considered` | Optional, default `"affects"`; additive, only rendered when non-default. What kind of relationship the decision has to this particular anchor — "decision X *deprecates* entity Y" changes how an agent should treat the entity, unlike the default "affects." Set per-anchor at capture (`anchors=[{"name": ..., "relation": ...}]`); never applies to the Tier-0 initiative binding, which is decision-level rather than per-anchor. |
+| `relation` | `creates` \| `modifies` \| `affects` \| `deprecates` \| `considered` | Optional, default `"affects"`; additive, only rendered in retrieval output when non-default (the OKF export always shows it). What kind of relationship the decision has to this particular anchor — "decision X *deprecates* entity Y" changes how an agent should treat the entity, unlike the default "affects." Set per-anchor at capture (`anchors=[{"name": ..., "relation": ...}]`); never applies to the Tier-0 initiative binding, which is decision-level rather than per-anchor. |
 
 The store keys `anchor_bindings` on `(record_id, entity_id)` — a record (decision or fact) has
 at most one binding per entity; re-anchoring or re-pointing overwrites
@@ -197,11 +200,11 @@ like they'd bind to a `community:<id>` entity.
 | Field | Type | Meaning |
 |---|---|---|
 | `domain_id` | ULID | Immutable, minted once. |
-| `slug` | str (kebab-case) | Unique among non-superseded domains; the paired entity's name is `f"domain:{slug}"`. |
+| `slug` | str (kebab-case) | Unique among live (`proposed`/`accepted`) domains; the paired entity's name is `f"domain:{slug}"`. |
 | `title` | str | Short label, non-empty. |
 | `summary` | str | The WHY-IT-EXISTS prose — 1-3 sentences, **required**, non-empty. |
 | `parent_id` | ULID \| `null` | Optional self-reference for a flexible hierarchy; acyclic, enforced on write. |
-| `communities` | list[str] | Last-seen engine community ids covering this domain's members. Refreshed by `sidegraph-sync` on every accepted domain (REPLACE semantics — see [mind model](mind-model.md#how-domains-relate-to-engine-communities)); never touched by anything else. |
+| `communities` | list[str] | Last-seen engine community ids covering this domain's members. Refreshed by `sidegraph-sync` on every accepted domain (REPLACE semantics — see [mind model](mind-model.md#how-domains-relate-to-engine-communities)), and immediately when a domain is accepted while a graph is readable; never touched by anything else. |
 | `path_prefixes` | list[str] | Optional stabilizer/bootstrap membership rule — repo-relative path prefixes that count as "in this domain." Set at authoring time; **never refreshed by sync** (see [configuration](../reference/configuration.md#domain-sync-and-the-toc-cache)). |
 | `status` | `proposed` \| `accepted` \| `superseded` \| `dropped` | Lifecycle state, mirroring `Decision.status` minus `rejected`/`deprecated`. |
 | `supersedes` | ULID \| `null` | The `Domain` this one replaces, if any — description edits are a new row, like decisions. |
@@ -278,9 +281,10 @@ newer/future version, or an unrecognized string) is a hard rejection: use a fres
 
 The high-level capture APIs use an initiative as a flat Tier-0 abstract entity named
 `initiative:<label>`. Passing a draft's `initiative` field creates that entity and binding,
-after the name is redacted and trimmed; a blank or all-secret name binds nothing. Omitting
-it creates neither. Capture may derive the label from a branch before it reaches
-this step, but the storage layer does not do so implicitly.
+after the name is redacted and trimmed; a whitespace-only or all-secret name binds nothing.
+Omitting it creates neither, except on the propose path, where an omitted or empty
+`initiative` may take the branch-derived name before it reaches this step; the storage layer
+does not do so implicitly.
 
 The `Initiative` model below is a separate low-level persisted record supported by
 `Store.upsert_initiative`. Current MCP capture paths do not create one, so do not expect an

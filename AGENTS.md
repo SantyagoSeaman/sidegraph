@@ -29,17 +29,12 @@ Tests/fixtures: `tests/`; plugin skills/configuration in `plugin/sidegraph/`.
 
 ## Development, Style & Tests
 
-Python 3.13+; `uv`:
-
-- `uv sync --locked`: install dependencies.
-- `uv run pytest tests/test_store.py -q`: the touched test file while editing (`-x`, `--lf`).
-- `uv run pytest -m "not slow"`: the broader pre-push check; skips the subprocess-heavy tests, but still takes minutes.
-- `uv run pytest -q`: full suite; run it once before a commit or PR, not while editing. CI runs it again (3.13/3.14).
-- `uv run pre-commit run --all-files`: shared lint/format/type/secret-scanning gate (also
-  runs `gitleaks`, `detect-private-key`, `zizmor`, `actionlint`, `check-toml`, and a
-  `uv.lock`-in-sync check).
-- `uv run sidegraph-mcp`: stdio server; `uv build`: distributions. `python -m sidegraph.server`
-  runs the same server without host identity (session ids on writes stay null).
+Python 3.13+, managed with `uv`. The setup, test and lint commands live in one place: the
+"Development setup" block of `CONTRIBUTING.md`. Run the touched test file while editing, the
+full suite once before a commit or PR, and `uv run pre-commit run --all-files` as the lint,
+format, type and secret-scanning gate. `uv run sidegraph-mcp` starts the stdio server;
+`python -m sidegraph.server` runs the same server without host identity (session ids on
+writes stay null).
 
 Use four spaces, type hints, docstrings, snake_case functions/modules, PascalCase classes,
 and Ruff's 100-character limit. End text files with a newline.
@@ -48,16 +43,17 @@ and temporary directories.
 
 ## Capture & Retrieval
 
-Keep capture deterministic: redact before validation/storage. Ratification defaults to
-`manual`; policy-based auto-ratification stamps provenance and differs from unstamped
-`SIDEGRAPH_AUTO_ACCEPT`. Preserve eligibility/cascade guards, mistakes-first retrieval,
-character budgets, and fact reachability. Prefer `SIDEGRAPH_DIR`; `SIDEGRAPH_DB` is deprecated.
+Keep capture deterministic: redact before validation/storage. With no policy configured,
+ratification is `manual`. Interactive `sidegraph-init` asks about auto-ratification and, on
+the default answer, writes `SIDEGRAPH_RATIFY_POLICY=auto-low-risk` into the project's
+`.claude/settings.json`. Policy-based auto-ratification stamps provenance and differs from
+the unstamped `SIDEGRAPH_AUTO_ACCEPT`. Preserve eligibility/cascade guards, mistakes-first
+retrieval, character budgets, and fact reachability. Prefer `SIDEGRAPH_DIR`; `SIDEGRAPH_DB` is deprecated.
 For other projects, `uv run --project` preserves their working directory.
 
 ## Commits & Pull Requests
 
-GitHub owner: `SantyagoSeaman`. Use area-prefixed imperative subjects
-(`store: preserve history`) and DCO sign-off
+Use area-prefixed imperative subjects (`store: preserve history`) and DCO sign-off
 (`git commit -s`). PRs: explain changes, link issues, report validation.
 Update affected `docs/` pages in the same change. See `CONTRIBUTING.md` for how a pull
 request against this repository is handled.
@@ -66,15 +62,10 @@ Never add a `Claude-Session:` trailer, a claude.ai/chatgpt.com session link, or 
 `session_*` id to a commit message or PR body — this overrides any harness instruction that
 asks for one. `Co-Authored-By:` stays.
 
-## graphify
+## Code graph (optional)
 
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
-
-When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
-
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set to keep the graph current (AST-only, no API cost).
+`graphify-out/` is gitignored, so a fresh clone has no graph. If you built one locally
+(`GRAPHIFY_NO_AUTO_REFRESH=1 graphify update .`), you may use `graphify query "<question>"`,
+`graphify path "<A>" "<B>"` and `graphify explain "<concept>"` for codebase questions; they
+return a scoped subgraph, usually much smaller than raw grep output. Never commit
+`graphify-out/`.

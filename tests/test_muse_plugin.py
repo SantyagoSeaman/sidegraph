@@ -1,4 +1,4 @@
-"""The experimental native Muse package exposes shared skills and a direct MCP entry."""
+"""The native Muse package exposes shared skills and a direct MCP entry."""
 
 import json
 import tomllib

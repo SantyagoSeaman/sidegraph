@@ -205,6 +205,34 @@ def test_e2e_dirty_superseder_does_not_drop(git_repo: Path, pin_version_0_22: No
     assert C1.encode() in (store / PACKED).read_bytes()
 
 
+def test_e2e_untracked_packed_shard_does_not_drop(git_repo: Path, pin_version_0_22: None) -> None:
+    """The real dirty-path scan sees an untracked packed.shard: its newer check for the same
+    decision kills nothing, so the committed check is packed, not dropped."""
+    store = make_store(git_repo)
+    put_file(store, "decision", decision_body("D1", status="accepted"))
+    put_check(store, check_body(C1, "D1"))
+    commit_all(git_repo, "s", date=OLD)
+    put_packed(store, [check_body(C2, "D1")])
+    report = fold(store)
+    assert report.checks_packed == [REL1] and report.checks_dropped == []
+    assert C1.encode() in (store / PACKED).read_bytes()
+    assert verify_snapshot(store) == []
+
+
+def test_e2e_modified_packed_shard_does_not_drop(git_repo: Path, pin_version_0_22: None) -> None:
+    """The same through a committed packed.shard modified in the working tree."""
+    store = make_store(git_repo)
+    put_file(store, "decision", decision_body("D1", status="accepted"))
+    put_file(store, "decision", decision_body("D2", status="accepted"))
+    put_check(store, check_body(C1, "D1"))
+    put_packed(store, [check_body(C3, "D2")])
+    commit_all(git_repo, "s", date=OLD)
+    put_packed(store, [check_body(C3, "D2"), check_body(C2, "D1")])
+    report = fold(store)
+    assert report.checks_packed == [REL1] and report.checks_dropped == []
+    assert C1.encode() in (store / PACKED).read_bytes()
+
+
 def test_e2e_dirty_decision_does_not_drop(git_repo: Path, pin_version_0_22: None) -> None:  # A6
     store = committed(git_repo)
     put_file(

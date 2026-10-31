@@ -45,7 +45,7 @@ a local Ollama model, no key required. The backend's extra must be installed alo
 Graphify itself, e.g. for Claude:
 
 ```bash
-uv tool install "graphifyy[anthropic]==<ver>" --force
+uv tool install "graphifyy[anthropic]==0.9.90" --force
 ```
 
 **Model choice.** Backend defaults change faster than this guide. Pin `--model` (or the
@@ -85,9 +85,12 @@ store, anchored via their backtick-quoted mentions. Direct import avoids the sem
 extraction step for this task; docstring rationale is already available from the AST pass.
 
 For genuinely semantic folders that don't name code line-by-line (architecture overviews,
-design rationale, glossaries), the semantic pass is still the right tool — just scope it, per
-the engine's own advice: extract only that subfolder and merge, e.g.
-`graphify extract docs/architecture --backend claude` followed by `graphify merge-graphs`.
+design rationale, glossaries), the semantic pass is still the right tool. Run it from the repository root
+(`graphify extract . --backend claude`); the per-file cache keeps re-runs cheap. Do not
+extract a subfolder and combine it with `graphify merge-graphs`: that command merges separate
+repositories, so it prefixes every node id with a repository tag and keeps each graph's file
+paths relative to its own root. Its output is not a graph Sidegraph can anchor into, and
+writing it over `graphify-out/graph.json` replaces the ids your anchors were resolved against.
 
 To rebuild after a noisy extract, use Graphify's supported overwrite path:
 
@@ -113,12 +116,13 @@ churn. Anchoring to both the concept and its containing file means the file anch
 surviving community keeps the decision retrievable even if the concept itself is renamed or
 dropped on the next extraction.
 
-**Migrating a doc corpus from the AST build to the semantic build orphans heading anchors —
-temporarily.** Switching from `graphify update .` to `graphify extract .` on the same docs
+**Migrating a doc corpus from the AST build to the semantic build orphans heading anchors.**
+Switching from `graphify update .` to `graphify extract .` on the same docs
 replaces heading nodes with concept nodes — any decision anchored only to a heading (Tier-2)
-loses that leaf on the next sync — but a later `graphify update .` **merges** the two layers
-back together (headings return alongside concepts, healing the heading anchor), so the window
-is exactly one orphaned sync between the first pure-semantic extract and the next update; file
+loses that leaf on the next sync. A later `graphify update .` does not bring the heading nodes
+back for those documents: the pinned Graphify never re-scans a document that already carries
+semantic nodes. Re-anchor heading-only decisions (`add_anchors`, or a supersession when the
+content changed too) or rebuild the documents' AST layer. File
 anchors survive throughout, since both builds keep a file-level node, but its **label**
 differs by build mode — the filename in AST/merged builds vs. the document title in
 pure-semantic builds — so for the "file" half of the recommended concept+file multi-anchor,

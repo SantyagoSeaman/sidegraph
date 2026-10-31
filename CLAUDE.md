@@ -13,7 +13,7 @@ task-aware retrieval + decision memory riding on the engine's entity graph.
 continuing participant in the project. A core feature must preserve, organize, or deliver
 accumulated project understanding. Document search by itself is not the product.
 
-Sidegraph is pre-1.0 (v0.22.0) — the full loop (capture, ratification, mistakes-first
+Sidegraph is pre-1.0 (v0.23.0) — the full loop (capture, ratification, mistakes-first
 retrieval, refactor-surviving re-anchoring, semantic docs layer, mind-model domains, and the
 facts evidence layer) ships and is exercised end-to-end, but interfaces may still move before
 a stable release. See
@@ -49,6 +49,9 @@ away for convenience.
 
 Keep these boundaries clean; they are what make the project OSS-friendly and churn-resistant.
 
+Key modules only; `cli.py`, `bootstrap/`, `viz/` and the rest of `src/sidegraph/` sit
+beside them.
+
 ```
 src/sidegraph/
 ├── schema.py        # Pydantic models: Entity, Decision, Fact, AnchorBinding, Domain, Initiative
@@ -59,12 +62,16 @@ src/sidegraph/
 ├── store_layout.py  # store constants and rules shared with the hot path (pydantic-free)
 ├── server.py        # FastMCP decision MCP — the tools agents call
 ├── engine/          # ── ENGINE SEAM ── the ONLY place Graphify specifics may live
-│   └── reader.py    #   GraphifyReader: reads graph.json (read-only input; no MCP)
-└── host/            # ── HOST SEAM ── Claude Code integration (SessionStart/Stop/PreToolUse/SubagentStart)
-    ├── hooks.py     #   host-specific; portable core never reaches in here
+│   ├── reader.py    #   GraphifyReader: reads graph.json (read-only input; no MCP)
+│   └── rationale.py #   matching of Graphify rationale labels across its cut forms
+└── host/            # ── HOST SEAM ── agent-host integration (SessionStart/Stop/PreToolUse/SubagentStart)
+    ├── hooks.py     #   hook entry points; branch on host family (Claude Code, Codex, Muse, Grok Build)
     ├── mcp_entry.py #   `sidegraph-mcp` entry: server + session-binding middleware
-    ├── session_identity.py  #   Claude/Codex session id from clientInfo, env, _meta
-    └── subagent.py  #   SubagentStart: the memory brief for a starting subagent
+    ├── session_identity.py  #   host session id from clientInfo, env, _meta
+    ├── subagent.py  #   SubagentStart: the memory brief for a starting subagent
+    ├── launch.py    #   the commit SessionStart resolved, which the hot-path hooks launch from
+    ├── diagnostics.py  #   one bounded, content-free stderr signal per hook call
+    └── claude_settings.py  #   the ratify-policy entry `sidegraph-init` writes
 ```
 
 - **Portable core** (`schema`, `store`, `retrieval`, `server`) knows nothing about Graphify
@@ -74,9 +81,10 @@ src/sidegraph/
   version; version the reader against it. Graphify is the reference (and only) adapter — do
   **not** build a second graph engine integration; just don't let the core reach past the
   reader.
-- **Host seam** (`host/`): Claude Code hooks stay isolated. Codex CLI is supported at the
-  configuration level only — its hooks speak the same JSON contract, so the existing entry
-  points serve it with zero host-specific code; the boundary stays clean for future hosts too.
+- **Host seam** (`host/` and `plugin/sidegraph/`): everything host-specific lives here.
+  Claude Code, Codex, Muse and Grok Build run the same hook entry points, which branch on the
+  host family where payloads differ; OpenCode V2 gets MCP tools and shared skills. The
+  portable core never imports `host/`.
 
 See [`docs/concepts/data-model.md`](docs/concepts/data-model.md) for the record types
 (`Entity`, `Decision`, `Fact`, `AnchorBinding`, `Domain`, `Initiative`) and
@@ -100,13 +108,12 @@ See [`docs/concepts/data-model.md`](docs/concepts/data-model.md) for the record 
 
 ## Common commands
 
+Setup, tests and lint: the "Development setup" block in
+[`CONTRIBUTING.md`](CONTRIBUTING.md) is the one list (`uv sync --locked`, the test tiers,
+`uv run pre-commit run --all-files`). CI runs that same pre-commit configuration as its lint
+job, plus a history secret scan and, on ready pull requests, the full test matrix.
+
 ```bash
-uv sync                            # install deps into .venv
-uv run pre-commit install          # once per clone — the lint gate runs before each commit
-uv run pytest tests/test_store.py -q   # while editing: the touched file (-x, --lf)
-uv run pytest -m "not slow"         # broader pre-push check: skips subprocess-heavy tests, still minutes
-uv run pytest                      # full suite: once before a commit or PR (CI runs it again)
-uv run pre-commit run --all-files  # lint + format + types, exactly what CI runs
 uv run sidegraph-mcp               # run the decision MCP server (stdio)
                                    # (`python -m sidegraph.server`: same server, no host identity)
 ```

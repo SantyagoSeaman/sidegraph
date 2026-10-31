@@ -563,6 +563,9 @@ def test_l3_filters(facts_store):
 
 
 def test_l4_counts_cover_history_and_follow_the_proposal_policy(facts_store, monkeypatch):
+    # The fixture dates records from a fixed NOW; with no proposal window the pending fact
+    # surfaces whatever today's date is.
+    monkeypatch.setenv("SIDEGRAPH_PROPOSAL_WINDOW_DAYS", "0")
     answer = json.loads(server._fact_listing(facts_store, None))
     assert answer["counts"]["status"] == {"accepted": 201, "proposed": 1, "superseded": 1}
     assert all(f["status"] != "superseded" for f in answer["facts"])
@@ -1301,3 +1304,91 @@ def test_history_tail_explains_visibility_and_offers_local_record_reads(history)
     assert "surfacing policy" in answer["hint"]
     assert "Store.get_decision" in answer["hint"]
     assert "Store.get_fact" in answer["hint"]
+
+
+# -- L6: the history listing obeys the proposal-surfacing policy ---------------------------
+
+
+def _history_with_a_proposal(
+    store: Store, age: timedelta = timedelta(0)
+) -> tuple[str, str, str, str, str]:
+    """An entity with a superseded pair, a rejected decision, one proposed decision and one
+    proposed fact. Dated from the real clock, so only the policy under test can hide the
+    proposals."""
+    entity = store.get_or_create_abstract_entity("domain:proposals")
+    now = datetime.now(UTC) - age
+    old = Decision(
+        title="old",
+        kind=DecisionKind.GOTCHA,
+        context="c",
+        choice="ch",
+        valid_from=now - timedelta(days=2),
+        provenance=Provenance(source="manual"),
+    )
+    store.add_decision(old)
+    new = Decision(
+        title="new",
+        kind=DecisionKind.GOTCHA,
+        context="c",
+        choice="ch",
+        supersedes=old.id,
+        valid_from=now - timedelta(days=1),
+        provenance=Provenance(source="manual"),
+    )
+    store.add_decision(new)
+    pending = Decision(
+        title="pending",
+        kind=DecisionKind.GOTCHA,
+        context="c",
+        choice="ch",
+        status=DecisionStatus.PROPOSED,
+        valid_from=now,
+        provenance=Provenance(source="agent"),
+    )
+    store.add_decision(pending)
+    fact = Fact(
+        statement="pending fact",
+        source="bench",
+        status=DecisionStatus.PROPOSED,
+        valid_from=now,
+        provenance=Provenance(source="agent"),
+    )
+    store.add_fact(fact)
+    dropped = Decision(
+        title="dropped",
+        kind=DecisionKind.GOTCHA,
+        context="c",
+        choice="ch",
+        status=DecisionStatus.REJECTED,
+        valid_from=now - timedelta(days=3),
+        provenance=Provenance(source="agent"),
+    )
+    store.add_decision(dropped)
+    for record_id in (old.id, new.id, pending.id, fact.id, dropped.id):
+        _bind(store, record_id, entity.entity_id)
+    return entity.entity_id, old.id, pending.id, fact.id, dropped.id
+
+
+def test_l6_history_hides_proposals_in_regulated_mode(store, monkeypatch):
+    eid, old_id, pending_id, fact_id, dropped_id = _history_with_a_proposal(store)
+    shown = {r["id"] for r in json.loads(server._entity_history_listing(store, eid))["records"]}
+    assert {pending_id, fact_id, old_id} <= shown
+
+    monkeypatch.setenv("SIDEGRAPH_UNRATIFIED", "off")
+    answer = json.loads(server._entity_history_listing(store, eid))
+    assert pending_id not in _reachable(answer) and fact_id not in _reachable(answer)
+    # Superseded and rejected history stays: it is the point of the tool.
+    assert {old_id, dropped_id} <= _reachable(answer)
+
+
+def test_l6_history_hides_proposals_outside_the_window(store, monkeypatch):
+    eid, old_id, pending_id, fact_id, dropped_id = _history_with_a_proposal(
+        store, age=timedelta(days=10)
+    )
+    monkeypatch.setenv("SIDEGRAPH_PROPOSAL_WINDOW_DAYS", "30")
+    shown = _reachable(json.loads(server._entity_history_listing(store, eid)))
+    assert {pending_id, fact_id} <= shown
+    monkeypatch.setenv("SIDEGRAPH_PROPOSAL_WINDOW_DAYS", "5")
+    answer = json.loads(server._entity_history_listing(store, eid))
+    assert pending_id not in _reachable(answer) and fact_id not in _reachable(answer)
+    assert {old_id, dropped_id} <= _reachable(answer)

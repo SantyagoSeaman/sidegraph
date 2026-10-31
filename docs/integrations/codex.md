@@ -23,15 +23,22 @@ that belongs to one repository. Pin the working directory rather than relying on
 command = "bash"
 args = [
   "-lc",
-  "cd /ABSOLUTE/PATH/TO/your-repo && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp"
+  "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
 ]
 ```
 
 Register the same thing with the CLI:
 
 ```bash
-codex mcp add sidegraph -- bash -lc "cd /ABSOLUTE/PATH/TO/your-repo && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-mcp"
+codex mcp add sidegraph -- bash -lc "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
 ```
+
+From a source checkout (contributors; see
+[installation: from source](../getting-started/installation.md#option-d--from-source-contributors)),
+replace `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main` here and in the
+hooks below with `uv run --project '/ABSOLUTE/PATH/TO/sidegraph'`. `@main` is a mutable ref; to
+pin it, see
+[mutable development references](../getting-started/installation.md#mutable-development-references).
 
 `SIDEGRAPH_DIR` (default `.sidegraph`) and `SIDEGRAPH_GRAPH` (default
 `graphify-out/graph.json`) are the same two environment variables the Claude Code integration
@@ -49,7 +56,7 @@ Project-scoped, at `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -59,7 +66,7 @@ Project-scoped, at `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-stop || printf '{}\\n'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -69,7 +76,7 @@ Project-scoped, at `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-subagent-start || printf '{}\\n'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-subagent-start || printf '{}\\n'"
           }
         ]
       }
@@ -78,8 +85,8 @@ Project-scoped, at `.codex/hooks.json`:
 }
 ```
 
-The `cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"` prefix stands in for Claude
-Code's `"cwd": "${CLAUDE_PROJECT_DIR}"` plugin field — Codex hook entries, like Claude Code's,
+The `cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"` prefix stands in for the
+`cd "${CLAUDE_PROJECT_DIR}"` prefix of the Claude Code hooks — Codex hook entries, like Claude Code's,
 have no dedicated `cwd`/`env` fields, so the working directory has to be pinned inside the
 command itself. The `|| pwd` fallback matters because Sidegraph explicitly supports non-git
 corpora (a plain folder of docs Graphify was pointed at directly — see
@@ -271,10 +278,10 @@ to the project: `CLAUDE_PROJECT_DIR` when set, else the git top-level, else the 
 anchoring, not a plugin-provided variable, is what keeps `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH`
 pointed at the right repo.
 
-**Current native verification (0.162.1, macOS ARM, 2026-10-15).** A fresh owned
+**Native verification for the 0.14.0 release (Codex CLI 0.162.1, macOS ARM, 2026-10-15).** A fresh owned
 `CODEX_HOME` installed the public-form Sidegraph from a Git marketplace. All 30 installed
 plugin files matched committed source after the four public substitutions. The native
-registries contained 12 skills, the expected enabled `sidegraph` MCP command/arguments/
+registries contained the 12 skills shipped then (14 today), the expected enabled `sidegraph` MCP command/arguments/
 environment, and exactly three initially untrusted hooks. The existing native gate's
 `config/batchWrite` approval path wrote only their current hashes; all three then reported
 trusted. No project-trust write was needed for this plugin registry check.

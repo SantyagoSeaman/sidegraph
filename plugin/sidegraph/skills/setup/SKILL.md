@@ -11,7 +11,7 @@ running, the Sidegraph plugin is already installed**. Claude Code wires MCP and 
 hooks (`SessionStart`, `Stop`, `PreToolUse`, `SubagentStart`); Codex wires MCP and
 `SessionStart`, `Stop`, `SubagentStart`. Grok Build wires MCP and all four hooks, but Grok
 does not pass `SessionStart` or `SubagentStart` output to the model, so the MCP server sends the
-session map instead. These hosts launch Sidegraph through `uvx` from the repository. Experimental
+session map instead. These hosts launch Sidegraph through `uvx` from the repository.
 Muse adds the session map and a subagent brief through two hooks, with no capture nudge or read
 context. OpenCode supports MCP and skills only: use explicit MCP calls there.
 What may still be missing: the engine, the graph, the store, and the first
@@ -40,6 +40,11 @@ The LLM-free build — no API key. Produces `graphify-out/graph.json`, which Sid
 folder too (sync falls back to a content-hash graph version — see
 [non-git corpora](../../../../docs/integrations/graphify.md#non-git-and-doc-only-corpora)).
 
+The graph is rebuilt from the code, so keep it out of git: if the root `.gitignore` has no
+`graphify-out/` line, append one (create the file if it is missing). Write it as UTF-8; in
+Windows PowerShell 5.1 use `Add-Content .gitignore "graphify-out/"`, not `>>`, which writes
+UTF-16 that git ignores.
+
 ## 3. Store
 
 ```bash
@@ -65,7 +70,7 @@ Commit `.sidegraph/` with the repo — the store travels with the code.
 
 ## 4. Verify the wiring
 
-On experimental Muse, first confirm that Muse was started in this repository: the MCP
+On Muse, first confirm that Muse was started in this repository: the MCP
 server serves the Git repository enclosing the process's starting directory. Otherwise exit and restart Muse here.
 
 Call `list_domains()` — the cheapest read-only MCP tool. A well-formed answer proves the
@@ -76,7 +81,7 @@ there before the first answer, or after the first tool call when the server star
 capture and retrieval, ratification, sync), point the human at
 [verifying your setup](../../../../docs/guides/verifying-your-setup.md).
 
-For Codex, Grok Build, OpenCode and experimental Muse, the MCP call is the wiring check; skip
+For Codex, Grok Build, OpenCode and Muse, the MCP call is the wiring check; skip
 the following Claude-specific settings check. Shared `sidegraph:<skill>` names denote the corresponding
 installed skill; in OpenCode use `@sidegraph-<skill>`.
 
@@ -108,7 +113,22 @@ Code (SessionStart map, records on read and edit, MCP); Graphify's own Claude wi
 noisier — see
 [why](../../../../docs/integrations/graphify.md#graphify-claude-install-is-redundant-with-the-sidegraph-plugin--skip-it).
 
-## 6. First memory — hand off
+## 6. Review policy (ask the human first)
+
+Run from a session, `sidegraph-init` asks no settings question either, so the project keeps
+the `manual` policy: every record the agent proposes waits for review. In a terminal the same
+command asks whether to auto-ratify, and its default answer is yes. Put that question to the
+human: should the lessons, gotchas and facts the agent proposes be accepted without review
+once they are anchored to code? ADRs, constraints and domains always wait for a person either
+way. On a yes run
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --ratify-policy auto-low-risk`;
+on a no run the same command with `--ratify-policy manual`, which records the answer. It
+writes `SIDEGRAPH_RATIFY_POLICY` into `.claude/settings.json`, which the project commits, and
+never overwrites a value already there. The MCP server reads the policy when it starts, so
+the new policy applies from the next session. Details:
+[`sidegraph-init`](../../../../docs/reference/cli.md#sidegraph-init).
+
+## 7. First memory — hand off
 
 In order of payoff:
 

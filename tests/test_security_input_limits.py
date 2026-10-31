@@ -13,7 +13,7 @@ def limits():
 
 def test_shipped_limits_match_the_documented_numbers(limits):
     """The boundary tests below shrink the ceilings; this pins the shipped values to the
-    table in SECURITY.md (resource limits)."""
+    limits table in docs/reference/mcp-tools.md."""
     assert limits.MAX_FIELD_BYTES == 256 * 1024
     assert limits.MAX_REQUEST_BYTES == 4 * 1024 * 1024
     assert limits.MAX_DRAFTS == 100

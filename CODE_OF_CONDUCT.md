@@ -37,12 +37,13 @@ This Code of Conduct applies within all community spaces, and also applies when 
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the
-community leaders responsible for enforcement via GitHub's private vulnerability reporting
-channel on this repository (Security tab → **Report a vulnerability**, also published in
-[`SECURITY.md`](SECURITY.md)): https://github.com/SantyagoSeaman/sidegraph/security/policy.
-This is a personal open-source project with a single maintainer, so this channel, not a
-public issue, is the one route for any private report, conduct or security alike. All
-complaints will be reviewed and investigated promptly and fairly.
+community leaders responsible for enforcement through GitHub's private reporting form on this
+repository: https://github.com/SantyagoSeaman/sidegraph/security/advisories/new (you must be
+signed in). Start the title with `[conduct]` so the report is handled as a conduct report,
+not as a vulnerability. This is a personal open-source project with a single maintainer, so
+this form, not a public issue, is the one route for any private report, conduct or security
+alike; [`SECURITY.md`](SECURITY.md) describes the same channel. All complaints will be
+reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 

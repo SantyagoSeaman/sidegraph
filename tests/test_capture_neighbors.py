@@ -7,6 +7,7 @@ fresh, possibly-contradicting record alongside it.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ import pytest
 from sidegraph import capture
 from sidegraph.capture import propose
 from sidegraph.engine.reader import GraphifyReader
+from sidegraph.schema import AnchorBinding, Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
@@ -180,3 +182,61 @@ def test_neighbors_capped_at_three_newest_first(tmp_path):
     assert len(neighbor_ids) == 3
     # newest-first (ULID descending) among the 4 live neighbors sharing the anchor
     assert neighbor_ids == sorted(written_ids, reverse=True)[:3]
+
+
+@pytest.mark.parametrize("hidden_by", ["regulated", "window"])
+def test_neighbors_withhold_a_proposal_the_surfacing_policy_hides(tmp_path, monkeypatch, hidden_by):
+    """A neighbor's title is record content: a proposal that regulated mode or the window
+    withholds from every listing must not reach the agent through ``neighbors`` either, on
+    the written path or the deduped one. Dedup itself still sees it."""
+    monkeypatch.setenv("SIDEGRAPH_RATIFY_POLICY", "manual")
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+    if hidden_by == "regulated":
+        written = propose([_draft(title="hidden proposal")], store, reader)
+        assert written[0].status == "written"
+        monkeypatch.setenv("SIDEGRAPH_UNRATIFIED", "off")
+    else:
+        # An anchored entity first, then a proposal dated past the default 30-day window.
+        propose([_draft(title="anchor holder")], store, reader)
+        entity = store.resolve_descriptor("Trader", "trader/exec.py")
+        assert entity is not None
+        old = Decision(
+            title="hidden proposal",
+            kind=DecisionKind.GOTCHA,
+            context="c",
+            choice="ch",
+            status=DecisionStatus.PROPOSED,
+            valid_from=datetime.now(UTC) - timedelta(days=40),
+            provenance=Provenance(source="agent"),
+        )
+        store.add_decision(old)
+        store.add_binding(
+            AnchorBinding(record_id=old.id, entity_id=entity.entity_id, tier=2, status="live")
+        )
+
+    other = propose([_draft(kind="adr", title="another decision")], store, reader)
+    assert other[0].status == "written"
+    assert "hidden proposal" not in [n["title"] for n in other[0].neighbors]
+
+    dup = propose([_draft(title="hidden proposal", context="other words")], store, reader)
+    assert dup[0].status == "deduped"
+    assert "hidden proposal" not in [n["title"] for n in dup[0].neighbors]
+
+
+def test_hidden_proposals_do_not_crowd_out_an_accepted_neighbor(tmp_path, monkeypatch):
+    """The cap counts only neighbors the agent may see: three newer proposals that regulated
+    mode withholds must not push the older accepted record out of ``neighbors``."""
+    monkeypatch.setenv("SIDEGRAPH_RATIFY_POLICY", "manual")
+    store = Store(tmp_path / "t.db")
+    reader = GraphifyReader(FIXTURE)
+    accepted = propose([_draft(kind="lesson", title="accepted lesson")], store, reader)
+    store.ratify(accepted[0].decision_id)
+    for i in range(3):
+        written = propose([_draft(kind="adr", title=f"pending adr {i}")], store, reader)
+        assert written[0].status == "written"
+    monkeypatch.setenv("SIDEGRAPH_UNRATIFIED", "off")
+
+    result = propose([_draft(kind="constraint", title="a new constraint")], store, reader)
+    assert result[0].status == "written"
+    assert [n["id"] for n in result[0].neighbors] == [accepted[0].decision_id]
