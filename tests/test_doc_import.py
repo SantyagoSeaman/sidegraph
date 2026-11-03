@@ -1519,6 +1519,55 @@ def test_import_docs_idempotent_rerun_skips(tmp_path):
     assert len(list(store.iter_decisions())) == 1
 
 
+@pytest.mark.parametrize(
+    ("before", "after", "stored"),
+    [
+        ("Proposed", "Accepted", DecisionStatus.PROPOSED),
+        ("Accepted", "Draft", DecisionStatus.ACCEPTED),
+    ],
+)
+def test_import_docs_status_only_change_is_skipped_existing(tmp_path, before, after, stored):
+    # The documented rule: change detection reads content only; a status word that changes
+    # without the content (other than to or from rejected) leaves the stored record as it is.
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    store = Store(tmp_path / "s.db")
+    md_path = _write_md(tmp_path, "docs/a.md", _adr_with_frontmatter_status("Submit path", before))
+    import_docs(store, reader, [str(md_path)], any_doc=True)
+    [record] = list(store.iter_decisions())
+    assert record.status == stored
+
+    md_path.write_text(_adr_with_frontmatter_status("Submit path", after))
+    rerun = import_docs(store, reader, [str(md_path)], any_doc=True)
+
+    assert rerun.skipped_existing == 1
+    assert (rerun.imported, rerun.superseded) == (0, 0)
+    assert [(d.id, d.status) for d in store.iter_decisions()] == [(record.id, stored)]
+
+
+@pytest.mark.parametrize(
+    ("before", "stored"),
+    [
+        ("Accepted", DecisionStatus.ACCEPTED),
+        ("Proposed", DecisionStatus.PROPOSED),
+        ("Rejected", DecisionStatus.REJECTED),
+    ],
+)
+def test_import_docs_status_flip_to_deprecated_keeps_the_record_status(tmp_path, before, stored):
+    # A superseded/deprecated status skips the document, so its earlier record keeps its status.
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    store = Store(tmp_path / "s.db")
+    md_path = _write_md(tmp_path, "docs/a.md", _adr_with_frontmatter_status("Submit path", before))
+    import_docs(store, reader, [str(md_path)], any_doc=True)
+    [record] = list(store.iter_decisions())
+    assert record.status == stored
+
+    md_path.write_text(_adr_with_frontmatter_status("Submit path", "Deprecated"))
+    rerun = import_docs(store, reader, [str(md_path)], any_doc=True)
+
+    assert rerun.skipped_superseded_frontmatter == 1
+    assert [(d.id, d.status) for d in store.iter_decisions()] == [(record.id, stored)]
+
+
 def test_import_docs_edited_doc_supersedes_history_retrievable(tmp_path):
     reader = _reader(tmp_path, IDENTIFIER_GRAPH)
     store = Store(tmp_path / "s.db")
@@ -2258,6 +2307,23 @@ def test_import_docs_encoding_bom_stripped_and_imports(tmp_path):
     assert "﻿" not in d.title
 
 
+def test_import_docs_dangling_symlink_is_a_named_skip_and_run_continues(tmp_path):
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    store = Store(tmp_path / "s.db")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    link = docs / "0001-dangling.md"
+    link.symlink_to(tmp_path / "missing-target.md")
+    _write_md(tmp_path, "docs/0002-good.md", _adr("Use SQLite", decision="Wire `submit_order` in."))
+
+    report = import_docs(store, reader, [str(docs)], any_doc=True)
+
+    assert report.imported == 1
+    assert report.skipped_unreadable == 1
+    assert report.unreadable_files == [str(link)]
+    assert report.skipped_undecodable == 0
+
+
 def test_import_docs_encoding_outside_profile_skipped_before_decode(tmp_path, monkeypatch):
     # D3: the profile-glob check runs BEFORE the decode, so an undecodable file outside the
     # active profile's scope is never even opened -- counted skipped_outside_profile, never
@@ -2879,3 +2945,188 @@ def test_import_docs_tag_redactions_count_even_without_candidates(tmp_path, dry_
         assert report.tag_redactions == 2
         assert report.model_dump()["tag_redactions"] == 2
         assert list(store.iter_decisions()) == []
+
+
+def test_import_docs_does_not_supersede_a_pending_proposal_it_skips_with_a_reason(tmp_path):
+    # The stored record is a pending proposal and the doc now reads "rejected": replacing it
+    # would supersede a proposed record, which the store refuses. The batch reports a skip.
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    store = Store(tmp_path / "s.db")
+    md_path = tmp_path / "docs" / "a.md"
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text(_adr_with_frontmatter_status("Submit path", "draft"))
+    first = import_docs(store, reader, [str(md_path)], any_doc=True)
+    assert first.status_derived_proposed == 1
+    pending = next(store.iter_decisions())
+    assert pending.status == DecisionStatus.PROPOSED
+
+    md_path.write_text(_adr_with_frontmatter_status("Submit path", "rejected"))
+    report = import_docs(store, reader, [str(md_path)], any_doc=True)
+
+    assert report.skipped_pending_proposal == 1
+    assert "pending proposal" in report.skipped_pending_reasons[0]
+    assert [d.id for d in store.iter_decisions()] == [pending.id]
+    assert store.get_decision(pending.id).status == DecisionStatus.PROPOSED
+
+
+def test_import_docs_skips_an_edit_whose_record_has_an_out_of_ref_pending_successor(tmp_path):
+    # An agent's pending successor of the imported record lives at another ref, so the import
+    # cannot drop it and the store refuses a second successor: the document is skipped with a
+    # reason (dry run and real run agree) and the rest of the batch is still imported.
+    from sidegraph.schema import Decision, Provenance
+    from sidegraph.schema import DecisionStatus as DS
+
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    store = Store(tmp_path / "s.db")
+    md_a = tmp_path / "docs" / "a.md"
+    md_b = tmp_path / "docs" / "b.md"
+    md_a.parent.mkdir(parents=True, exist_ok=True)
+    md_a.write_text(_adr_with_frontmatter_status("Submit path", "accepted"))
+    assert import_docs(store, reader, [str(md_a)], any_doc=True).imported == 1
+    accepted = next(store.iter_decisions())
+    agent = store.add_decision(
+        Decision(
+            title="agent",
+            kind=DecisionKind.ADR,
+            status=DS.PROPOSED,
+            context="c",
+            choice="c",
+            supersedes=accepted.id,
+            valid_from=accepted.valid_from,
+            provenance=Provenance(source="agent"),
+        )
+    )
+
+    md_a.write_text(
+        _adr_with_frontmatter_status(
+            "Submit path", "accepted", decision="Also calls `submit_order` on retry."
+        )
+    )
+    md_b.write_text(_adr_with_frontmatter_status("Other doc", "accepted"))
+    args = [str(md_a), str(md_b)]
+    dry = import_docs(store, reader, args, any_doc=True, propose=True, dry_run=True)
+    real = import_docs(store, reader, args, any_doc=True, propose=True)
+
+    for report in (dry, real):
+        assert report.skipped_pending_proposal == 1
+        assert agent.id in report.skipped_pending_reasons[0]
+    assert (dry.imported, dry.superseded) == (real.imported, real.superseded) == (1, 0)
+    assert store.get_decision(accepted.id).status == DS.ACCEPTED
+    assert store.get_decision(agent.id).status == DS.PROPOSED
+
+
+# -- an unreadable document is a named skip (in-repo O_NOFOLLOW read branch) ----------------
+
+
+def test_in_repo_dangling_symlink_is_a_named_skip(tmp_path, monkeypatch):
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    (repo / "docs").mkdir()
+    link = repo / "docs" / "0001-dangling.md"
+    link.symlink_to(repo / "missing-target.md")
+    _write_md(repo, "docs/0002-good.md", _adr("Use SQLite", decision="Wire `submit_order` in."))
+    reader = _reader(repo, IDENTIFIER_GRAPH)
+    monkeypatch.chdir(repo)
+
+    report = import_docs(Store(tmp_path / "s.db"), reader, ["docs"], any_doc=True)
+
+    assert report.imported == 1
+    assert report.skipped_unreadable == 1
+    assert report.unreadable_files == ["docs/0001-dangling.md"]
+
+
+def test_in_repo_directories_named_md_do_not_leak_descriptors(tmp_path, monkeypatch):
+    resource = pytest.importorskip("resource")  # RLIMIT_NOFILE: POSIX only
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    for i in range(60):
+        (repo / "docs" / f"{i:03d}-dir.md").mkdir(parents=True)
+    _write_md(repo, "docs/999-good.md", _adr("Use SQLite", decision="Wire `submit_order` in."))
+    reader = _reader(repo, IDENTIFIER_GRAPH)
+    store = Store(tmp_path / "s.db")
+    monkeypatch.chdir(repo)
+    open_fds = len(os.listdir("/dev/fd"))
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (open_fds + 40, hard))
+    try:
+        report = import_docs(store, reader, ["docs"], any_doc=True)
+        leaked = len(os.listdir("/dev/fd")) - open_fds
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    assert report.imported == 1
+    assert report.skipped_unreadable == 60
+    assert leaked <= 0
+
+
+def test_profile_discovery_names_a_dangling_symlink(tmp_path, monkeypatch, capsys):
+    from sidegraph.cli import import_main
+
+    repo = _hermetic_git_repo(tmp_path, monkeypatch)
+    (repo / "docs" / "adr").mkdir(parents=True)
+    (repo / "docs" / "adr" / "0001-dangling.md").symlink_to(repo / "missing-target.md")
+    _write_md(repo, "docs/adr/0002-good.md", _adr("Use SQLite", decision="Wire `submit_order` in."))
+    graph = _write_graph(repo, "g.json", IDENTIFIER_GRAPH)
+    monkeypatch.chdir(repo)
+
+    for extra in (["--dry-run"], []):
+        rc = import_main(["--db", str(tmp_path / "t.db"), "--graph", str(graph), "--docs", *extra])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "1 file(s) skipped: could not be read:" in out
+        assert "docs/adr/0001-dangling.md" in out
+
+
+def test_collection_oserror_is_a_named_skip_and_run_continues(tmp_path, monkeypatch):
+    reader = _reader(tmp_path, IDENTIFIER_GRAPH)
+    bad = tmp_path / "locked.md"
+    bad.write_text("x")
+    good = _write_md(
+        tmp_path, "0002-good.md", _adr("Use SQLite", decision="Wire `submit_order` in.")
+    )
+    real_is_dir = Path.is_dir
+
+    def is_dir(self, *args, **kwargs):
+        if self.name == "locked.md":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_dir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+
+    report = import_docs(Store(tmp_path / "s.db"), reader, [str(bad), str(good)], any_doc=True)
+
+    assert report.imported == 1
+    assert report.skipped_unreadable == 1
+    assert report.unreadable_files == [str(bad)]
+
+
+def test_fifo_named_md_is_unreadable_not_a_hang(tmp_path):
+    import sys
+    import textwrap
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("POSIX only")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    os.mkfifo(docs / "0001-fifo.md")
+    (docs / "0002-fifo-link.md").symlink_to(docs / "0001-fifo.md")
+    _write_md(tmp_path, "docs/0003-good.md", _adr("Use SQLite", decision="Wire `submit_order` in."))
+    graph = _write_graph(tmp_path, "g.json", IDENTIFIER_GRAPH)
+    script = textwrap.dedent(
+        """
+        import sys
+        from sidegraph.doc_import import import_docs
+        from sidegraph.engine.reader import GraphifyReader
+        from sidegraph.store import Store
+
+        reader = GraphifyReader(sys.argv[1])
+        r = import_docs(Store(sys.argv[2]), reader, [sys.argv[3]], any_doc=True)
+        print(r.imported, r.skipped_unreadable)
+        """
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script, str(graph), str(tmp_path / "s.db"), str(docs)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    assert out.stdout.split() == ["1", "2"]

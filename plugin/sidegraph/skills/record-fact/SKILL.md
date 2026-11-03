@@ -1,7 +1,7 @@
 ---
 name: record-fact
 description: >-
-  Use when a session surfaces a hard-won empirical finding that isn't a choice — "запомни факт", "зафиксируй цифру/лимит/результат бенчмарка", "record a fact", "we learned that X", "оказалось, что", "note this benchmark result", "the API caps at N requests", "turns out httpx doesn't retry", or any trial-learned/observed/external-limit knowledge with no `choice` and no `rejected` attached. Also reachable directly as /sidegraph:record-fact. The authoring craft — pass the scope razor first, tell a fact apart from a decision, attach vs. stand alone, fill `source`, and pick the right write path: add_fact (human-asked, immediate) vs. propose_decisions's facts (agent-initiated, gated).
+  Use when a session surfaces a hard-won empirical finding that isn't a choice — "запомни факт", "зафиксируй цифру/лимит/результат бенчмарка", "record a fact", "we learned that X", "оказалось, что", "note this benchmark result", "the API caps at N requests", "turns out httpx doesn't retry", or any trial-learned/observed/external-limit knowledge with no `choice` and no `rejected` attached. Also reachable directly as /sidegraph:record-fact. The authoring craft — apply the scope razor first, tell a fact apart from a decision, attach vs. stand alone, fill `source`, and pick the right write path: add_fact (human-asked, immediate) vs. propose_decisions's facts (agent-initiated, gated).
 ---
 
 # Record a fact
@@ -87,7 +87,7 @@ explicitly asked** ("note that httpx has no built-in retry") → `add_fact`, acc
 immediately, the asking human was the gate; **you (the agent) noticed it's worth
 keeping** — including an attached fact discovered while drafting a decision → the draft's
 own `facts` list, or the top-level `facts` param on `propose_decisions` — `status=proposed`
-(or `accepted` immediately under `SIDEGRAPH_AUTO_ACCEPT=on` — see [auto-accept's
+(or `accepted` immediately under the deprecated `SIDEGRAPH_AUTO_ACCEPT=on` — see [auto-accept's
 trade-off](../../../../docs/guides/capturing-decisions.md#4-auto-accept-opt-in) — or accepted
 at write time when the project's `SIDEGRAPH_RATIFY_POLICY` admits it, the result's `ratified_by`
 then reading `auto:<policy>`, so don't tell the human it awaits review) until a
@@ -97,14 +97,16 @@ rationale in `sidegraph:record-decision` if the split is unclear; it doesn't cha
 ## No-graph behavior
 
 With no Graphify reader present, `add_fact` still binds each anchor as an **orphaned**
-Tier-2 leaf rather than dropping it — the opposite of `add_decision`'s no-graph behavior,
-which silently drops anchors when there's no reader. A fact never writes unreachable; the
-orphaned binding heals once a graph exists (see `sidegraph:heal-anchors`).
+Tier-2 leaf rather than dropping it, as `add_decision` does. A fact never writes
+unreachable; the orphaned binding heals once a graph exists (see `sidegraph:heal-anchors`).
 
 ## Falsification
 
-The fact turned out wrong, or the world changed — never edit it, never write a fresh
-contradicting fact next to the old one. Call `supersede_fact(old_fact_id, statement,
+The fact turned out wrong, or the world changed. Preserve its history and check its status. For a
+wrong proposal, ask the human to drop it and freshly propose corrected knowledge without
+superseding the dropped proposal. For closed history, find the accepted, open head of the
+chain, or restate current knowledge as a fresh anchored proposal when no live head exists.
+For an accepted fact with `valid_to` unset, call `supersede_fact(old_fact_id, statement,
 source, ...)`: the predecessor closes in the same transaction (`valid_to` set, `status`
 flipped to `superseded`), never deleted, and stays retrievable as "believed before,
 corrected because…". Omit `anchors` to inherit the predecessor's bindings verbatim —
@@ -117,13 +119,12 @@ it never adds to it.
 - **Check `anchors_skipped` in the result** — same discipline as `record-decision`. An
   entry means that anchor's name matched more than one graph node (`candidates` capped at
   5) and no precise leaf was created. Identical path-less external stubs (what newer
-  Graphify emits for an imported name such as `BaseModel`) count as one match. Fix an already-**accepted** fact with `supersede_fact`
-  carrying precise anchors — a repeat `add_fact` call would mint a duplicate record. For a
-  **still-proposed** draft, don't use `supersede_fact`: it writes `status=accepted`/
-  `provenance.source=human`, which would silently turn an ungated agent proposal into
-  accepted memory — the same gate bypass this skill's write-path rule forbids. Instead
-  drop it (`ratify(drop=[...])`) and re-propose corrected. Don't leave a fact effectively
-  anchorless because of a silent skip.
+  Graphify emits for an imported name such as `BaseModel`) count as one match. Use
+  `add_anchors` with a precise name and file path to repair bindings on an accepted or
+  proposed fact. A repeat `add_fact` call would mint a duplicate. Supersede only when the
+  content changed and the predecessor is accepted with `valid_to` unset. The store refuses
+  a proposed predecessor. For a wrong proposal, follow the human drop and fresh-proposal
+  route above. Do not leave a fact effectively anchorless because of a silent skip.
 - **Check `anchors_orphaned` too — same discipline, more common failure.** An entry means
   the name has no unique graph match, so the leaf was bound `orphaned`. Ordinary graph-based
   retrieval, `drill_down` and automatic point-of-read delivery skip that binding. When an
@@ -134,9 +135,7 @@ it never adds to it.
   `reason` first:** `file-not-in-graph` usually means a stale graph (run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set,
   and re-anchor — the name was probably fine), `name-not-in-file` means the name is wrong
   (`find_entity`/`query_structure` will say what is really there), `no-file-path` means pass
-  one. With no graph at all, an `add_fact`/`supersede_fact` entry carries **no** `reason`
-  key (`{entity_id, canonical_name, tier: 2}`; `reason: "no-graph"` appears only on
-  `propose_decisions` results). That is the expected graph-less case described above — not
+  one. With no graph at all, every entry carries `reason: "no-graph"`. That is the expected graph-less case described above — not
   an authoring mistake, and it heals on the next sync.
 - **Check `redactions`** — every text field (`statement`/`source`) is redacted first, the
   same secret patterns `add_decision` runs; a non-zero count means something got scrubbed

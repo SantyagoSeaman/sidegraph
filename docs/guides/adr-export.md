@@ -1,5 +1,7 @@
 # Export and maintain ADRs
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 `sidegraph-export-adr` makes stored architectural decisions readable as Markdown ADRs.
 It projects the memory you have; it does not infer a complete architecture from the code.
 Preview first, then run the same command with `--write` after reviewing its diff. Commands are shown by name; without the CLI on your PATH, run them with the `uvx` prefix described in [running the CLIs](../reference/cli.md#running-the-clis-beside-the-plugin).
@@ -11,8 +13,7 @@ sidegraph-export-adr --db .sidegraph --out docs/adr --write
 
 The default is a read-only preview. It creates no directories or files. Neither preview
 nor write opens a `Store`, migrates it, updates its index, or writes `graph.json`. The source
-must already be a valid canonical store; migrate legacy databases explicitly with
-`sidegraph-init` first. Exported text can contain private reasoning: review the diff before
+must already be a valid canonical store. Exported text can contain private reasoning: review the diff before
 putting it in tracked or shared documentation.
 
 ## What is exported
@@ -135,5 +136,5 @@ not generated ADRs. This command is separate from the one-way OKF bundle export.
 
 `--json` gives planned changes/diffs, advisories, warnings, counts and write-completion
 flags. Exit 0 means successful preview/write, including a valid empty store's empty index;
-2 means invalid input/store, a conflict or operational failure. Review partial-write flags
+2 means the plan holds conflicts (reported, nothing written); 1 means invalid input/store or an operational failure, with the message on stderr (under `--json` the report, with an `error` key, is still on stdout). Review partial-write flags
 before assuming a failed write applied nothing.

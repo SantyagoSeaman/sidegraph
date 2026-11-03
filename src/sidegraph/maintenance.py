@@ -667,10 +667,11 @@ def fsync_fd(fd: int) -> None:
     os.fsync(fd)
 
 
-def fsync_dir(path: Path) -> None:
+def fsync_dir(path: Path, *, full: bool = True) -> None:
     """Make the entries of directory ``path`` durable; a no-op only on Windows (which cannot open
     a directory) or where the filesystem does not fsync one. Any other error (EIO,
     ENOSPC, EDQUOT ...) propagates so a device failure stops the run before its deletions.
+    ``full=False`` uses plain ``os.fsync`` instead of ``fsync_fd`` (no drive-cache flush on macOS).
     see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.2)"""
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -679,7 +680,10 @@ def fsync_dir(path: Path) -> None:
             return  # only Windows cannot open a directory; on POSIX EACCES is a real failure
         raise
     try:
-        fsync_fd(fd)
+        if full:
+            fsync_fd(fd)
+        else:
+            os.fsync(fd)
     except OSError as exc:
         if exc.errno not in _DIR_FSYNC_UNSUPPORTED:
             raise
@@ -859,19 +863,20 @@ def preview_check_fold(
     if not plan.has_work():
         return
     wanted = PACKED_CHECKS_REQUIREMENT
+    note_wrote = _wrote_noter(report)
     if check_requirement_needs_raise(held_requirement):
         if not requirement_met(wanted):
             report.checks_stopped = f"{too_old_runtime_message()}{CHECKS_LEFT_AS_THEY_ARE}"
             return
         report.requirement_raised = wanted
-        _note_wrote(report, FORMAT_MARKER_NAME)
+        note_wrote(FORMAT_MARKER_NAME)
     if (plan.current is not None or plan.image) and plan.image != plan.current:
-        _note_wrote(report, f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}")
+        note_wrote(f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}")
     report.checks_packed = list(plan.packed)
     report.checks_dropped = list(plan.dropped)
     report.checks_dropped_lines = list(plan.dropped_lines)
     for rel in sorted([*plan.packed, *plan.dropped]):
-        _note_wrote(report, rel)
+        note_wrote(rel)
 
 
 # a few new empty buckets are named; a first fold's many are one line
@@ -1060,6 +1065,12 @@ class _Run:
         self.n = plan.n
         self.expected = expected
         self.skipped = {(s.record_type, s.record_id) for s in plan.skipped}
+        # derived from ``expected`` only, never from disk: the parsed lines of an image, keyed on
+        # the image object, and the report paths already listed (a list scan per deletion made
+        # a large migration quadratic)
+        self._parsed: dict[Path, tuple[bytes, dict[tuple[str, str], list[bytes]]]] = {}
+        self.wrote_seen = set(report.wrote)
+        self.folded_seen = set(report.folded)
 
     def bucket_path(self, b: int) -> Path:
         return self.shards_dir / bucket_name(b)
@@ -1068,6 +1079,23 @@ class _Run:
         return [
             (*_identity_and_body(raw)[:2], raw) for _no, raw in split_lines(self.expected[path])
         ]
+
+    def by_identity(self, path: Path) -> dict[tuple[str, str], list[bytes]]:
+        """The lines of the image expected at ``path``, by identity; parsed once per image."""
+        image = self.expected[path]
+        cached = self._parsed.get(path)
+        if cached is None or cached[0] is not image:
+            index: dict[tuple[str, str], list[bytes]] = {}
+            for t, i, raw in self.lines(path):
+                index.setdefault((t, i), []).append(raw)
+            cached = self._parsed[path] = (image, index)
+        return cached[1]
+
+    def fold(self, origin: str) -> None:
+        """Record a per-record file or segment folded into a shard, once."""
+        if origin not in self.folded_seen:
+            self.folded_seen.add(origin)
+            self.report.folded.append(origin)
 
     def publish(self, path: Path, image: bytes) -> None:
         """Publish ``image`` over the file as this run last saw it; the image becomes expected."""
@@ -1081,8 +1109,12 @@ class _Run:
 
     def note(self, path: Path) -> None:
         """Record a tracked path this run wrote or removed, once."""
-        rel = path.relative_to(self.store_dir).as_posix()
-        if rel not in self.report.wrote:
+        self.note_rel(path.relative_to(self.store_dir).as_posix())
+
+    def note_rel(self, rel: str) -> None:
+        """:meth:`note` for a store-relative path."""
+        if rel not in self.wrote_seen:
+            self.wrote_seen.add(rel)
             self.report.wrote.append(rel)
 
     def sync(self, path: Path) -> None:
@@ -1092,10 +1124,8 @@ class _Run:
     def holds_equal(self, path: Path, record_type: str, record_id: str, raw: bytes) -> bool:
         """Whether the image expected at ``path`` has a line of the same identity with an equal
         body."""
-        return any(
-            (t, i) == (record_type, record_id) and _same_line_body(line, raw)
-            for t, i, line in self.lines(path)
-        )
+        lines = self.by_identity(path).get((record_type, record_id), [])
+        return any(_same_line_body(line, raw) for line in lines)
 
     def check_on_disk(self, path: Path) -> None:
         """Raise :class:`StoreChanged` unless ``path`` holds exactly the expected image."""
@@ -1249,8 +1279,8 @@ def _phase_c(run: _Run) -> None:
         published = True
         checkpoint(f"C:{path.name}")
         for w in [*run.plan.replacements, *run.plan.inserts]:
-            if w.bucket == b and w.origin not in run.report.folded:
-                run.report.folded.append(w.origin)  # a segment of many lines counts once
+            if w.bucket == b:
+                run.fold(w.origin)  # a segment of many lines counts once
     if published:
         run.sync(run.shards_dir)
 
@@ -1269,7 +1299,7 @@ def _shard_body(run: _Run, record_type: str, record_id: str) -> list[object] | N
     """The parsed bodies of the identity's lines in its bucket image; ``None`` when it has none."""
     path = run.bucket_path(bucket(record_id, run.n))
     bodies = [
-        decode_line(raw).body for t, i, raw in run.lines(path) if (t, i) == (record_type, record_id)
+        decode_line(raw).body for raw in run.by_identity(path).get((record_type, record_id), [])
     ]
     return bodies or None
 
@@ -1372,8 +1402,7 @@ def _delete(run: _Run, report: MaintenanceReport) -> None:
         reason = _delete_file(run, rel)
         if reason is None:
             report.deleted_files.append(rel)
-            if rel not in report.folded:
-                report.folded.append(rel)  # its shard line already held it
+            run.fold(rel)  # its shard line already held it
             removed_files.add(rel.partition("/")[0])
         elif reason != ALREADY_GONE:
             report.kept.append((rel, reason))
@@ -1406,9 +1435,9 @@ def simulate_writes(
     _phase_a(run)
     _phase_b(run)
     _phase_c(run)
-    wrote = list(scratch.wrote)
-    wrote.extend(rel for rel in [*plan.file_deletions, *plan.segment_deletions] if rel not in wrote)
-    return wrote, list(scratch.empty_created)
+    for rel in [*plan.file_deletions, *plan.segment_deletions]:
+        run.note_rel(rel)
+    return list(scratch.wrote), list(scratch.empty_created)
 
 
 def publish_plan(
@@ -1451,9 +1480,17 @@ def publish_plan(
     return report
 
 
-def _note_wrote(report: MaintenanceReport, rel: str) -> None:
-    if rel not in report.wrote:
-        report.wrote.append(rel)
+def _wrote_noter(report: MaintenanceReport) -> Callable[[str], None]:
+    """Append a path to ``report.wrote`` once; a set beside the list keeps it O(1) per path
+    (a list scan per folded check file made a large fold quadratic)."""
+    seen = set(report.wrote)
+
+    def note(rel: str) -> None:
+        if rel not in seen:
+            seen.add(rel)
+            report.wrote.append(rel)
+
+    return note
 
 
 def publish_check_fold(
@@ -1480,6 +1517,7 @@ def publish_check_fold(
     verifications = store_dir / VERIFICATIONS_SUBDIR
     packed_path = verifications / PACKED_CHECKS_NAME
     packed_rel = f"{VERIFICATIONS_SUBDIR}/{PACKED_CHECKS_NAME}"
+    note_wrote = _wrote_noter(report)
     try:
         _refuse_links(store_dir)
         try:
@@ -1489,7 +1527,7 @@ def publish_check_fold(
             return
         if raised is not None:
             report.requirement_raised = raised
-            _note_wrote(report, FORMAT_MARKER_NAME)
+            note_wrote(FORMAT_MARKER_NAME)
         checkpoint("checks:raise")
         stage("checks:after_raise")
         stage("checks:before_publish")
@@ -1500,7 +1538,7 @@ def publish_check_fold(
             pass  # a drop-only fold of files: no packed file to create, none to flush
         elif plan.image != plan.current:
             publish_bytes(packed_path, plan.image, expect=plan.current)
-            _note_wrote(report, packed_rel)
+            note_wrote(packed_rel)
         else:
             # An unchanged image may still be only in the page cache. The entry is checked
             # first: opening a FIFO that replaced the file would block under the reservation.
@@ -1525,11 +1563,12 @@ def publish_check_fold(
     witness = None if plan.current is None and not plan.image else plan.image
     removed = False
     names = sorted([*plan.packed, *plan.dropped])
+    dropped = set(plan.dropped)
     for position, rel in enumerate(names):
         stage(f"checks:before_unlink:{rel.rpartition('/')[2]}")
         # A drop has no line in the image, so a branch switch since step 4 could make it live
         # again; a packed file's body is in the witnessed image and needs no re-read.
-        if rel in plan.dropped and head_changed():
+        if rel in dropped and head_changed():
             report.checks_stopped = "HEAD moved during the unlinks; remaining files kept"
             report.checks_kept.extend((r, "HEAD moved") for r in names[position:])
             break
@@ -1561,8 +1600,8 @@ def publish_check_fold(
         except FileNotFoundError:
             continue  # vanished after its witness read: already gone
         removed = True
-        (report.checks_packed if rel in plan.packed else report.checks_dropped).append(rel)
-        _note_wrote(report, rel)
+        (report.checks_dropped if rel in dropped else report.checks_packed).append(rel)
+        note_wrote(rel)
         checkpoint(f"checks:unlink:{rel.rpartition('/')[2]}")
     if removed:
         fsync_dir(verifications)

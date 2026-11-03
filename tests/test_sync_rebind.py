@@ -1223,3 +1223,37 @@ def test_a_stale_key_holding_an_adopted_entity_is_dropped_not_abandoned(tmp_path
     assert [o.status for o in r.outcomes] == ["unchanged"]
     assert "abandoned" not in (r.outcomes[0].detail or "")
     assert s.get_meta(_PENDING_KEY) is None
+
+
+def test_a_no_graph_orphan_write_keeps_a_stashed_move_watched_until_it_is_committed(tmp_path):
+    """A pending no-graph rebind on an unchanged graph must not run the full ladder: that
+    orphaned the stashed move's live binding and cleared its watch, so the later commit of
+    the move was never picked up."""
+    from sidegraph.server import _add_decision_impl
+
+    reader = _pending_repo(tmp_path)
+    store, entity, record = _pending_store(tmp_path)
+    sync(store, reader)
+    _git(["stash", "-q"], tmp_path)
+    (tmp_path / "x.txt").write_text("x\n")
+    _git(["add", "x.txt"], tmp_path)
+    _git(["commit", "-q", "-m", "unrelated"], tmp_path)
+    _add_decision_impl(
+        store,
+        None,
+        "other",
+        "adr",
+        "c",
+        "ch",
+        anchors=[{"name": "later", "file_path": "later.py"}],
+    )
+    sync(store, reader)
+    assert store.bindings_for_record(record.id)[0].status == "live"
+    assert store.get_meta(sync_module.PENDING_MOVES_KEY) is not None
+
+    _git(["stash", "pop", "-q", "--index"], tmp_path)
+    _commit_the_move(tmp_path)
+    report = sync(store, reader)
+    assert not report.skipped
+    assert store.get_entity(entity.entity_id).descriptor.file_path == "d.py"
+    assert store.bindings_for_record(record.id)[0].status == "live"

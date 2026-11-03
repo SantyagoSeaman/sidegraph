@@ -26,11 +26,12 @@ from sidegraph.schema import (
     AnchorBinding,
     Decision,
     DecisionKind,
+    DecisionStatus,
     Descriptor,
     Domain,
+    DomainStatus,
     Entity,
     Fact,
-    Initiative,
     Provenance,
 )
 from sidegraph.store import Store
@@ -96,7 +97,7 @@ def test_decision_status_transitions_pinned():
         ("proposed", "rejected"),
         ("proposed", "superseded"),
         ("accepted", "superseded"),
-        ("accepted", "deprecated"),  # forward-compat only -- no live write path sets this
+        ("accepted", "deprecated"),  # retire
     } == _DECISION_STATUS_TRANSITIONS
 
 
@@ -480,6 +481,7 @@ def test_verify_against_clean_on_legal_supersede_commit(git_repo):
                 kind=DecisionKind.ADR,
                 context="Context.",
                 choice="A revised choice.",
+                status=DecisionStatus.ACCEPTED,
                 valid_from=datetime(2026, 2, 1, tzinfo=UTC),
                 supersedes=old.id,
                 provenance=Provenance(source="manual"),
@@ -540,6 +542,7 @@ def test_verify_against_legal_compact_deletion(git_repo):
                 kind=DecisionKind.ADR,
                 context="Context.",
                 choice="A revised choice.",
+                status=DecisionStatus.ACCEPTED,
                 valid_from=datetime(2026, 2, 1, tzinfo=UTC),
                 supersedes=d.id,
                 provenance=Provenance(source="manual"),
@@ -568,6 +571,7 @@ def _compacted_store_and_segment(store_dir: Path) -> Path:
                 kind=DecisionKind.ADR,
                 context="Context.",
                 choice="A revised choice.",
+                status=DecisionStatus.ACCEPTED,
                 valid_from=datetime(2026, 2, 1, tzinfo=UTC),
                 supersedes=d.id,
                 provenance=Provenance(source="manual"),
@@ -645,8 +649,12 @@ def test_verify_against_ignores_bindings_and_initiatives_deletion_is_illegal(git
             )
         )
         s.add_binding(AnchorBinding(record_id=d.id, entity_id=entity.entity_id, tier=2))
-        s.upsert_initiative(Initiative(name="Q3 payments push"))
-        initiative_id = next(s.iter_initiatives()).id
+    # a file an older Sidegraph wrote: no code reads or writes it, but its deletion stays illegal
+    initiative_id = "01J0000000000000000000INIT"
+    (store_dir / "initiatives").mkdir()
+    (store_dir / "initiatives" / f"{initiative_id}.json").write_text(
+        json.dumps({"id": initiative_id, "name": "Q3 payments push"}), encoding="utf-8"
+    )
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "initial"], cwd=git_repo)
 
@@ -855,6 +863,7 @@ def test_ratifier_stamp_ratify_then_supersede_in_one_range(git_repo, monkeypatch
                 kind=DecisionKind.ADR,
                 context="Context.",
                 choice="A revised choice.",
+                status=DecisionStatus.ACCEPTED,
                 valid_from=datetime(2026, 2, 1, tzinfo=UTC),
                 supersedes=d1.id,
                 provenance=Provenance(source="manual"),
@@ -930,6 +939,7 @@ def test_absent_equals_null_old_format_file_superseded_through_store(git_repo, m
                 kind=DecisionKind.ADR,
                 context="Context.",
                 choice="A revised choice.",
+                status=DecisionStatus.ACCEPTED,
                 valid_from=datetime(2026, 2, 1, tzinfo=UTC),
                 supersedes=d1.id,
                 provenance=Provenance(source="manual"),
@@ -1123,6 +1133,7 @@ def test_against_with_a_symlinked_store_dir_reports_only_the_link(git_repo, tmp_
                 kind=DecisionKind.ADR,
                 context="Context.",
                 choice="A revised choice.",
+                status=DecisionStatus.ACCEPTED,
                 valid_from=datetime(2026, 2, 1, tzinfo=UTC),
                 supersedes=d1.id,
                 provenance=Provenance(source="manual"),
@@ -1492,7 +1503,8 @@ def test_archive_transfer_rejects_superseded_domain_becoming_dropped(git_repo):
     store_dir = git_repo / ".sidegraph"
     hot = _hot_record(store_dir, "domain", terminal=False)
     with Store(format1_store(store_dir)) as store:
-        store.supersede_domain(hot.stem, _domain(supersedes=hot.stem))
+        store.ratify_domains(accept=[hot.stem])  # only an accepted domain can be superseded
+        store.supersede_domain(hot.stem, _domain(supersedes=hot.stem, status=DomainStatus.ACCEPTED))
     payload = json.loads(hot.read_text())
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "superseded baseline"], cwd=git_repo)
@@ -1506,10 +1518,12 @@ def test_archive_transfer_rejects_superseded_domain_becoming_dropped(git_repo):
 def test_archive_transfer_allows_domain_supersede_and_compact(git_repo):
     store_dir = git_repo / ".sidegraph"
     hot = _hot_record(store_dir, "domain", terminal=False)
+    with Store(format1_store(store_dir)) as store:
+        store.ratify_domains(accept=[hot.stem])  # only an accepted domain can be superseded
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "baseline"], cwd=git_repo)
     with Store(format1_store(store_dir)) as store:
-        store.supersede_domain(hot.stem, _domain(supersedes=hot.stem))
+        store.supersede_domain(hot.stem, _domain(supersedes=hot.stem, status=DomainStatus.ACCEPTED))
         store.compact()
     _git(["add", "-A"], cwd=git_repo)
 

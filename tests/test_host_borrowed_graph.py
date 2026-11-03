@@ -150,7 +150,6 @@ def test_the_domain_map_of_a_borrowed_graph_is_built_from_the_store_every_time(
                             "subdomains": 0,
                         }
                     ],
-                    "initiatives": [],
                     "global_mistakes": [],
                 }
             ),

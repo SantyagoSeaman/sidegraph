@@ -1638,8 +1638,51 @@ def query_decisions(
     return ctx.render(include_structure=False)
 
 
+@dataclass(frozen=True)
+class MapEntry:
+    """One line of a SessionStart map section. ``rank`` orders a trim inside the section: a
+    lower rank is dropped first, and equal ranks go from the tail."""
+
+    text: str
+    rank: int = 0
+
+
+@dataclass(frozen=True)
+class MapSection:
+    """One ``## heading`` of a SessionStart map and its entries, kept structured so a size
+    budget trims whole entries and never re-parses the rendered text."""
+
+    heading: str
+    entries: tuple[MapEntry, ...]
+
+
+def one_line(text: str) -> str:
+    """``text`` on one line: an authored title or summary with a line break (``"\\n## Notes"``)
+    must not open a section of its own in the rendered map."""
+    return " ".join(text.splitlines())
+
+
+def render_sections(sections: Sequence[MapSection]) -> str:
+    """The SessionStart map text for ``sections``: the guard line, the title, then each section
+    that has entries, one line per entry."""
+    lines = [MEMORY_GUARD_LINE, "# Sidegraph — project memory", ""]
+    for section in sections:
+        if section.entries:
+            lines.append(section.heading)
+            lines.extend(one_line(e.text) for e in section.entries)
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def top_tier_map(store: Store, reader: GraphifyReader | None, top_communities: int = 8) -> str:
-    """Phase-1 table of contents for SessionStart: top communities, initiatives, and global
+    """:func:`render_sections` of :func:`top_tier_sections`."""
+    return render_sections(top_tier_sections(store, reader, top_communities))
+
+
+def top_tier_sections(
+    store: Store, reader: GraphifyReader | None, top_communities: int = 8
+) -> list[MapSection]:
+    """Phase-1 table of contents for SessionStart: top communities and global
     mistakes. Proposed records are kept in a final unratified section. Computed on demand;
     degrades without a reader.
 
@@ -1653,41 +1696,29 @@ def top_tier_map(store: Store, reader: GraphifyReader | None, top_communities: i
     `drill_down` for the real payload, not the payload itself (unlike `drill_down`, which IS
     the "go deeper" call and renders its decisions at the detailed tier — see its docstring).
     """
-    lines = [
-        MEMORY_GUARD_LINE,
-        "# Sidegraph — project memory",
-        "",
-    ]
+    sections: list[MapSection] = []
 
     if reader is not None:
         communities = sorted(reader.communities(), key=lambda c: len(c.members), reverse=True)
         communities = communities[:top_communities]
-        if communities:
-            lines.append("## Communities")
-            for c in communities:
-                god = reader.get_node(c.god_node) if c.god_node else None
-                label = god.name if god is not None else c.community_id
-                lines.append(f"- {label} — {len(c.members)} entities (community {c.community_id})")
-            lines.append("")
-
-    initiatives = list(store.iter_initiatives())
-    if initiatives:
-        lines.append("## Initiatives")
-        for i in initiatives:
-            desc = f" — {i.description}" if i.description else ""
-            lines.append(f"- {i.name}{desc}")
-        lines.append("")
+        rows = []
+        for c in communities:
+            god = reader.get_node(c.god_node) if c.god_node else None
+            label = god.name if god is not None else c.community_id
+            rows.append(
+                MapEntry(f"- {label} — {len(c.members)} entities (community {c.community_id})")
+            )
+        sections.append(MapSection("## Communities", tuple(rows)))
 
     global_mistakes, _proposed_global_mistakes = partition_by_trust(
         d for d in store.decisions_by_scope(Scope.GLOBAL) if d.kind in _MISTAKE_KINDS
     )
     shown: set[str] = set()
-    if global_mistakes:
-        lines.append("## Global mistakes & constraints")
-        for d in _by_recency(global_mistakes)[:10]:
-            lines.append(_fmt_decision(d))
-            shown.add(d.id)
-        lines.append("")
+    rows = []
+    for d in _by_recency(global_mistakes)[:10]:
+        rows.append(MapEntry(_fmt_decision(d)))
+        shown.add(d.id)
+    sections.append(MapSection("## Global mistakes & constraints", tuple(rows)))
 
     # Everything else the store actually holds. Without this, the two filters above --
     # Scope.GLOBAL and a mistake kind -- silently hide a store's entire contents from the
@@ -1706,38 +1737,36 @@ def top_tier_map(store: Store, reader: GraphifyReader | None, top_communities: i
         for d in store.iter_decisions()
         if d.id not in shown and d.valid_to is None and d.status == DecisionStatus.ACCEPTED
     ]
-    if others:
-        lines.append("## Recorded decisions")
-        for d in _by_recency(others)[:10]:
-            lines.append(_fmt_decision(d))
-        lines.append("")
+    sections.append(
+        MapSection(
+            "## Recorded decisions",
+            tuple(MapEntry(_fmt_decision(d)) for d in _by_recency(others)[:10]),
+        )
+    )
 
     accepted_facts, proposed_facts = partition_by_trust(_live_facts(list(store.iter_facts())))
-    if accepted_facts:
-        lines.append("## Known facts")
-        for f in sorted(accepted_facts, key=lambda f: f.valid_from, reverse=True)[:10]:
-            lines.append(_fmt_fact(f))
-        lines.append("")
+    newest_facts = sorted(accepted_facts, key=lambda f: f.valid_from, reverse=True)[:10]
+    sections.append(
+        MapSection("## Known facts", tuple(MapEntry(_fmt_fact(f)) for f in newest_facts))
+    )
 
     proposed_decisions = [
         d
         for d in store.iter_decisions()
         if d.valid_to is None and d.status == DecisionStatus.PROPOSED and proposal_surfaces(d)
     ]
-    if proposed_decisions or proposed_facts:
-        lines.append("## Unratified proposals")
-        for d in _by_recency(proposed_decisions)[:10]:
-            lines.append(_fmt_decision(d))
-        for f in sorted(proposed_facts, key=lambda f: f.valid_from, reverse=True)[:10]:
-            lines.append(_fmt_fact(f))
-        lines.append("")
-
-    return "\n".join(lines).rstrip() + "\n"
+    proposals = [MapEntry(_fmt_decision(d)) for d in _by_recency(proposed_decisions)[:10]]
+    proposals += [
+        MapEntry(_fmt_fact(f))
+        for f in sorted(proposed_facts, key=lambda f: f.valid_from, reverse=True)[:10]
+    ]
+    sections.append(MapSection("## Unratified proposals", tuple(proposals)))
+    return sections
 
 
 def build_toc(store: Store, reader: GraphifyReader | None = None) -> dict:
     """Precompute the SessionStart table of contents (§5/§6): accepted domains (title,
-    summary, parent, mistake + subdomain counts), initiatives, and global mistakes.
+    summary, parent, mistake + subdomain counts) and global mistakes.
     Written to ``store`` meta under :data:`TOC_CACHE_KEY` at the end of ``sync.sync``.
 
     A domain's mistake count is the accepted mistake-kind decisions in
@@ -1786,13 +1815,10 @@ def build_toc(store: Store, reader: GraphifyReader | None = None) -> dict:
             }
         )
 
-    initiatives = [{"name": i.name, "description": i.description} for i in store.iter_initiatives()]
-
     global_mistakes, unratified = _global_mistake_lines(store)
 
     result = {
         "domains": domains,
-        "initiatives": initiatives,
         "global_mistakes": global_mistakes,
     }
     if unratified:
@@ -1803,8 +1829,12 @@ def build_toc(store: Store, reader: GraphifyReader | None = None) -> dict:
 def _global_mistake_lines(store: Store) -> tuple[list[str], list[str]]:
     """The rendered global mistake/constraint lines (accepted, then proposed), most recent
     first and capped at ten each: the two store-only sections of :func:`build_toc`."""
+    return _mistake_lines(store.decisions_by_scope(Scope.GLOBAL))
+
+
+def _mistake_lines(decisions: Iterable[Decision]) -> tuple[list[str], list[str]]:
     accepted_mistakes, proposed_mistakes = partition_by_trust(
-        _by_recency([x for x in store.decisions_by_scope(Scope.GLOBAL) if x.kind in _MISTAKE_KINDS])
+        _by_recency([x for x in decisions if x.kind in _MISTAKE_KINDS])
     )
     return (
         [_fmt_decision(d) for d in accepted_mistakes[:10]],
@@ -1824,6 +1854,32 @@ def unratified_mistakes(store: Store) -> list[str]:
     return _global_mistake_lines(store)[1]
 
 
+def live_global_mistakes(store: Store) -> dict[str, list[str]]:
+    """The two store-only sections of :func:`build_toc`, read live: ``global_mistakes``
+    (accepted) and ``unratified`` (proposed). A cached domain map is rendered with these laid
+    over it, so a global mistake retired, superseded or proposed after the cache was built is
+    shown as it is now, even when no graph is available to refresh the cache.
+    # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D2b)
+    """
+    accepted, proposed = _global_mistake_lines(store)
+    return {"global_mistakes": accepted, "unratified": proposed}
+
+
+def global_mistakes_from(decisions: Iterable[Decision]) -> dict[str, list[str]]:
+    """:func:`live_global_mistakes` over decisions read without a :class:`Store` (the cold
+    Grok map reads them from the read-only index): the same scope and lifecycle filter as
+    ``Store.decisions_by_scope``, then the same trust and proposal-window split."""
+    now = datetime.now(UTC)
+    accepted, proposed = _mistake_lines(
+        d
+        for d in decisions
+        if d.scope == Scope.GLOBAL
+        and d.status not in _TERMINAL_DECISION_STATUSES
+        and (d.valid_to is None or d.valid_to > now)
+    )
+    return {"global_mistakes": accepted, "unratified": proposed}
+
+
 def render_toc(cache: dict) -> str:
     """Render :func:`build_toc`'s cached shape as SessionStart ``additionalContext`` — the
     real domain-named table of contents (§5). Called only when the cache has >= 1 domain;
@@ -1833,55 +1889,42 @@ def render_toc(cache: dict) -> str:
     Like ``top_tier_map``, this does NOT include the standing "use get_task_context before
     searching" instruction — ``host.hooks.session_start`` prepends that once, at the
     hook-assembly level, ahead of whichever renderer produced this text."""
-    lines = [
-        MEMORY_GUARD_LINE,
-        "# Sidegraph — project memory",
-        "",
+    return render_sections(toc_sections(cache))
+
+
+def toc_sections(cache: dict) -> list[MapSection]:
+    """:func:`render_toc`'s sections. A domain's trim rank: a subdomain (``parent_slug`` set)
+    goes first, then a domain with no mistakes, then the rest."""
+    rows = []
+    for d in cache.get("domains") or []:
+        title = d.get("title") or ""
+        raw_summary = d.get("summary") or ""
+        mistakes = d.get("mistakes", 0)
+        # Exact-equality guard (see `_structure_fallback_lines`'s docstring for why it's
+        # exact-only, not a startswith/prefix rule): a label-bootstrapped domain's
+        # summary is sometimes IDENTICAL to its title before any real digest exists —
+        # drop the redundant "— summary" tail rather than repeat the title verbatim.
+        if raw_summary.strip() == title.strip():
+            line = f"- {title} ({mistakes} mistake(s))"
+        else:
+            summary = _truncate_summary(raw_summary)
+            line = f"- {title} — {summary} ({mistakes} mistake(s))"
+        subdomains = d.get("subdomains", 0)
+        if subdomains:
+            line += f" · {subdomains} subdomains"
+        rank = 0 if d.get("parent_slug") else 1 if not mistakes else 2
+        rows.append(MapEntry(line, rank))
+    return [
+        MapSection("## Domains", tuple(rows)),
+        MapSection(
+            "## Global mistakes & constraints",
+            tuple(MapEntry(line) for line in cache.get("global_mistakes") or []),
+        ),
+        MapSection(
+            "## Unratified proposals",
+            tuple(MapEntry(line) for line in cache.get("unratified") or []),
+        ),
     ]
-
-    domains = cache.get("domains") or []
-    if domains:
-        lines.append("## Domains")
-        for d in domains:
-            title = d.get("title") or ""
-            raw_summary = d.get("summary") or ""
-            mistakes = d.get("mistakes", 0)
-            # Exact-equality guard (see `_structure_fallback_lines`'s docstring for why it's
-            # exact-only, not a startswith/prefix rule): a label-bootstrapped domain's
-            # summary is sometimes IDENTICAL to its title before any real digest exists —
-            # drop the redundant "— summary" tail rather than repeat the title verbatim.
-            if raw_summary.strip() == title.strip():
-                line = f"- {title} ({mistakes} mistake(s))"
-            else:
-                summary = _truncate_summary(raw_summary)
-                line = f"- {title} — {summary} ({mistakes} mistake(s))"
-            subdomains = d.get("subdomains", 0)
-            if subdomains:
-                line += f" · {subdomains} subdomains"
-            lines.append(line)
-        lines.append("")
-
-    initiatives = cache.get("initiatives") or []
-    if initiatives:
-        lines.append("## Initiatives")
-        for i in initiatives:
-            desc = f" — {i['description']}" if i.get("description") else ""
-            lines.append(f"- {i['name']}{desc}")
-        lines.append("")
-
-    global_mistakes = cache.get("global_mistakes") or []
-    if global_mistakes:
-        lines.append("## Global mistakes & constraints")
-        lines.extend(global_mistakes)
-        lines.append("")
-
-    unratified = cache.get("unratified") or []
-    if unratified:
-        lines.append("## Unratified proposals")
-        lines.extend(unratified)
-        lines.append("")
-
-    return "\n".join(lines).rstrip() + "\n"
 
 
 # Cap on how many member NodeRefs `drill_down` renders (§5 Axis-1 "member sample, capped").

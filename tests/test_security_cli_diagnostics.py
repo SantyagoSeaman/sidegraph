@@ -32,7 +32,7 @@ def test_domain_cli_diagnostic_omits_unknown_or_malformed_identifiers(tmp_path, 
     assert result == 1
     output = capsys.readouterr()
     assert MARKER.casefold() not in (output.out + output.err).casefold()
-    assert "slug" in output.out if argument == "--slug" else "parent" in output.out
+    assert "slug" in output.err if argument == "--slug" else "parent" in output.err
 
 
 def test_domain_cli_caught_store_failure_omits_the_cause(tmp_path, monkeypatch, capsys):

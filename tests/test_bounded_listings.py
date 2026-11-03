@@ -428,7 +428,7 @@ def test_domain_listing_filtered_lineage_keeps_unselected_status_relatives(store
 
 
 def test_domain_listing_distinguishes_same_slug_revisions_by_id(store):
-    old = _add_listing_domain(store, "revision", summary="old")
+    old = _add_listing_domain(store, "revision", summary="old", status=DomainStatus.ACCEPTED)
     new = Domain(
         slug=old.slug,
         title="New revision",
@@ -560,6 +560,53 @@ def test_l3_filters(facts_store):
     blank = json.loads(server._fact_listing(facts_store, None, files=[""], query="  ", ids=[]))
     plain = json.loads(server._fact_listing(facts_store, None))
     assert blank == plain
+
+
+def test_list_facts_supports_filters_by_the_decisions_a_fact_supports(store, monkeypatch):
+    d1, d2 = _decision(store, 1), _decision(store, 2)
+
+    def supporting(
+        statement: str,
+        minutes: int,
+        ids: list[str],
+        status: DecisionStatus = DecisionStatus.ACCEPTED,
+    ) -> Fact:
+        fact = Fact(
+            statement=statement,
+            source="s",
+            valid_from=NOW - timedelta(minutes=minutes),
+            supports=ids,
+            status=status,
+            provenance=Provenance(source="manual"),
+        )
+        store.add_fact(fact)
+        return fact
+
+    f1 = supporting("one", 0, [d1.id])
+    f2 = supporting("two", 1, [d2.id])
+    supporting("loose", 2, [])
+    pending = supporting("pending", 3, [d1.id], status=DecisionStatus.PROPOSED)
+
+    def ids(**kw) -> list[str]:
+        return [f["id"] for f in json.loads(server._fact_listing(store, None, **kw))["facts"]]
+
+    # The proposal policy decides whether the proposed fact shows; pin it, not the clock.
+    monkeypatch.setenv("SIDEGRAPH_PROPOSAL_WINDOW_DAYS", "0")
+    assert ids(supports=[d1.id]) == [f1.id, pending.id]
+    assert ids(supports=[d1.id, d2.id]) == [f1.id, f2.id, pending.id]
+    assert ids(supports=[d1.id], status="proposed") == [pending.id]
+    assert ids(supports=[d2.id], status="proposed") == []
+    assert ids(supports=[d1.id], status="accepted") == [f1.id]
+    monkeypatch.setenv("SIDEGRAPH_UNRATIFIED", "off")
+    assert ids(supports=[d1.id]) == [f1.id]
+    assert ids(supports=[d1.id], status="proposed") == []
+    monkeypatch.delenv("SIDEGRAPH_UNRATIFIED")
+
+    # through the real tool: the argument reaches the filter
+    _, answer = wire("list_facts", {"supports": [d2.id]})
+    assert [f["id"] for f in answer["facts"]] == [f2.id]
+    assert ids(supports=["no-such-decision"]) == []
+    assert ids(supports=[" "]) == ids()
 
 
 def test_l4_counts_cover_history_and_follow_the_proposal_policy(facts_store, monkeypatch):
@@ -1320,6 +1367,7 @@ def _history_with_a_proposal(
     old = Decision(
         title="old",
         kind=DecisionKind.GOTCHA,
+        status=DecisionStatus.ACCEPTED,
         context="c",
         choice="ch",
         valid_from=now - timedelta(days=2),
@@ -1329,6 +1377,7 @@ def _history_with_a_proposal(
     new = Decision(
         title="new",
         kind=DecisionKind.GOTCHA,
+        status=DecisionStatus.ACCEPTED,
         context="c",
         choice="ch",
         supersedes=old.id,

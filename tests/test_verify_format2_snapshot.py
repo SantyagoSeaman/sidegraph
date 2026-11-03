@@ -10,11 +10,13 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
 
-from sidegraph.cli import verify_main
+from sidegraph import store_format
+from sidegraph.cli import doctor_main, verify_main
 from sidegraph.maintenance import self_healing_counts
 from sidegraph.store_format import (
     ShardListing,
@@ -651,6 +653,119 @@ def test_unreadable_record_file_is_a_parse_error_on_both_formats(tmp_path: Path,
     assert PARSE_ERROR in codes(found)
     assert SUPERSEDED_WITHOUT_SUCCESSOR in codes(found)
     assert code == 2
+
+
+@pytest.mark.parametrize("fmt", [1, 2])
+def test_record_file_that_cannot_be_stated_is_a_parse_error_not_an_abort(
+    tmp_path: Path, fmt: int
+) -> None:
+    # red: on a packed store the PermissionError of the entry's stat propagates from the
+    # inventory, and verify and doctor exit 1 with no report
+    _skip_if_chmod_is_moot(tmp_path)
+    store = make_store(tmp_path, fmt=fmt)
+    path = put_file(store, "decision", decision_body("D001"))
+    put_file(store, "decision", decision_body("D002", status="superseded"))
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    (sealed / "D001.json").write_text("{}", "utf-8")
+    path.unlink()
+    path.symlink_to(sealed / "D001.json")
+    sealed.chmod(0)  # no search bit: stat of the symlink target fails with EACCES
+    try:
+        found = verify_snapshot(store)
+        code = _exit(store)
+        doctor_code = doctor_main(["--db", str(store)])
+    finally:
+        sealed.chmod(0o700)
+    assert [f.path for f in _of(found, PARSE_ERROR)] == [str(path)]  # once, not twice
+    assert SUPERSEDED_WITHOUT_SUCCESSOR in codes(found)
+    assert code == 2
+    assert doctor_code == 2
+
+
+def test_archive_segment_that_cannot_be_stated_is_a_finding_not_an_abort(tmp_path: Path) -> None:
+    _skip_if_chmod_is_moot(tmp_path)
+    store = make_store(tmp_path)
+    segment = put_archive(store, "2026-01", [archived_decision("D001")])
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    (sealed / "2026-01.jsonl").write_text("{}", "utf-8")
+    segment.unlink()
+    segment.symlink_to(sealed / "2026-01.jsonl")
+    sealed.chmod(0)
+    try:
+        found = verify_snapshot(store)
+        code = _exit(store)
+        doctor_code = doctor_main(["--db", str(store)])
+    finally:
+        sealed.chmod(0o700)
+    assert BAD_ARCHIVE_SEGMENT in codes(found)
+    assert code == 2
+    assert doctor_code == 2
+
+
+@pytest.mark.parametrize("kind", ["file", "archive"])
+def test_inventory_only_stat_error_is_one_finding_not_a_clean_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    # red: the per-record walk reads the file fine, the inventory's stat fails, and the
+    # callback's error is dropped: exit 0
+    store = make_store(tmp_path)
+    if kind == "file":
+        target = put_file(store, "decision", decision_body("D001"))
+        code_name = PARSE_ERROR
+    else:
+        target = put_archive(store, "2026-01", [archived_decision("D001")])
+        code_name = BAD_ARCHIVE_SEGMENT
+    real = store_format.stat_entry
+
+    def flaky(path: Path) -> os.stat_result:
+        if Path(path) == target:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(store_format, "stat_entry", flaky)
+    found = verify_snapshot(store)
+    assert [f.path for f in _of(found, code_name)] == [str(target)]
+    assert _exit(store) == 2
+    assert doctor_main(["--db", str(store)]) == 2
+
+
+def test_shard_listing_stat_error_is_a_finding_not_an_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # red: the unguarded lstat of the shards listing propagates: verify and doctor exit 1
+    store = make_store(tmp_path)
+    shard = put_shard_line(store, "decision", "D001", decision_body("D001"))
+    real = Path.lstat
+
+    def flaky(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self == shard and sys._getframe(1).f_code.co_name == "_regular_files":
+            raise OSError(5, "Input/output error")
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "lstat", flaky)
+    found = verify_snapshot(store)
+    assert [f.path for f in _of(found, BAD_SHARD_LINE)] == [f"shards/{shard.name}"]
+    assert _exit(store) == 2
+    assert doctor_main(["--db", str(store)]) == 2
+
+
+def test_unreadable_file_with_an_unsafe_name_gets_only_the_unsafe_finding(tmp_path: Path) -> None:
+    _skip_if_chmod_is_moot(tmp_path)
+    store = make_store(tmp_path)
+    put_file(store, "decision", decision_body("D001"))
+    path = store / "decisions" / ".bad.json"
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    (sealed / "x.json").write_text("{}", "utf-8")
+    path.symlink_to(sealed / "x.json")
+    sealed.chmod(0)
+    try:
+        found = verify_snapshot(store)
+    finally:
+        sealed.chmod(0o700)
+    assert [f.code for f in found if f.path == str(path)] == ["unsafe-record-id"]
 
 
 # -- review round 2 ----------------------------------------------------------------------------

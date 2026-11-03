@@ -13,7 +13,7 @@ import pytest
 from sidegraph import verify
 from sidegraph.cli import doctor_main, verify_main
 from sidegraph.gitenv import git_env
-from sidegraph.schema import Decision, DecisionKind, Provenance
+from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
 from tests.store_format2_support import format1_store
 
@@ -151,6 +151,7 @@ def test_real_archive_segment_names_cannot_hide_changes(
                 kind=DecisionKind.ADR,
                 context="Synthetic context",
                 choice="Successor choice",
+                status=DecisionStatus.ACCEPTED,
                 valid_from=datetime(2026, 2, 1, tzinfo=UTC),
                 supersedes=old.id,
                 provenance=Provenance(source="manual"),
@@ -323,7 +324,8 @@ def test_malformed_or_failed_diff_is_operational_before_show(
     else:
         assert main(["--db", str(store), "--against", "HEAD", "--json"]) == 1
         output = capsys.readouterr()
-        assert "failed" in output.out
-        assert not output.err
+        assert "failed" in output.err
+        # --json still prints exactly one object, carrying the error.
+        assert "failed" in json.loads(output.out)["error"]
     assert "diff" in commands and "show" not in commands
     assert _canonical_bytes(store) == before

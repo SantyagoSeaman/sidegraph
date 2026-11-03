@@ -143,8 +143,8 @@ class TestExitCodes:
         )
         assert (out / "index.md").is_file()
 
-    def test_uninitialized_store_exits_2(self, tmp_path: Path, capsys) -> None:
-        assert _export(tmp_path / "missing", tmp_path / "bundle") == 2
+    def test_uninitialized_store_exits_1(self, tmp_path: Path, capsys) -> None:
+        assert _export(tmp_path / "missing", tmp_path / "bundle") == 1
         assert "run `sidegraph-init` first" in capsys.readouterr().err
         assert not (tmp_path / "missing").exists()  # never auto-created
 
@@ -155,7 +155,7 @@ class TestOutDirSafety:
         out = tmp_path / "precious"
         out.mkdir()
         (out / "keep.txt").write_text("mine\n", encoding="utf-8")
-        assert _export(db, out) == 2
+        assert _export(db, out) == 1
         assert "refusing to overwrite" in capsys.readouterr().err
         assert (out / "keep.txt").read_text(encoding="utf-8") == "mine\n"
         assert not (out / "index.md").exists()
@@ -189,7 +189,7 @@ class TestOutDirSafety:
         for target in (empty, previous):
             link = tmp_path / "link"
             link.symlink_to(target, target_is_directory=True)
-            assert _export(db, link) == 2
+            assert _export(db, link) == 1
             assert "symlink" in capsys.readouterr().err
             link.unlink()
         assert _tree(empty) == {}
@@ -199,7 +199,7 @@ class TestOutDirSafety:
         db = _seed(tmp_path)
         link = tmp_path / "link"
         link.symlink_to(tmp_path / "nowhere", target_is_directory=True)
-        assert _export(db, link) == 2
+        assert _export(db, link) == 1
         err = capsys.readouterr().err
         assert "symlink" in err and "File exists" not in err
 
@@ -220,7 +220,7 @@ class TestOutDirSafety:
             return real(self, *a, **kw)  # type: ignore[arg-type]
 
         monkeypatch.setattr(Path, "write_text", flaky)
-        assert _export(db, out) == 2
+        assert _export(db, out) == 1
         monkeypatch.undo()
         assert "disk full" in capsys.readouterr().err
         assert _tree(out) == before
@@ -272,7 +272,7 @@ class TestOutDirSafety:
         db = _seed(tmp_path)
         (tmp_path / "afile").write_text("x\n", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
-        assert export_okf_main(["--db", str(db), "--out", "afile/bundle"]) == 2
+        assert export_okf_main(["--db", str(db), "--out", "afile/bundle"]) == 1
         err = capsys.readouterr().err
         assert "afile/bundle" in err and ".okf-new-" not in err
         assert not _okf_leftovers(tmp_path)
@@ -285,7 +285,7 @@ class TestOutDirSafety:
         out.mkdir()
         (out / "keep.txt").write_text("mine\n", encoding="utf-8")
         monkeypatch.setattr(os.path, "ismount", lambda p: True)
-        assert _export(db, out) == 2
+        assert _export(db, out) == 1
         assert "refusing to overwrite" in capsys.readouterr().err
         assert _tree(out) == {"keep.txt": b"mine\n"}
 
@@ -300,7 +300,7 @@ class TestOutDirSafety:
         (tmp_path / "ro").chmod(0o555)
         monkeypatch.chdir(tmp_path)
         try:
-            assert export_okf_main(["--db", str(db), "--out", "ro/x"]) == 2
+            assert export_okf_main(["--db", str(db), "--out", "ro/x"]) == 1
         finally:
             (tmp_path / "ro").chmod(0o755)
         err = capsys.readouterr().err
@@ -363,7 +363,7 @@ class TestOutDirSafety:
         monkeypatch.setattr(Path, "chmod", flaky)
         monkeypatch.setattr(Path, "rename", refuse_first_swap)
         try:
-            assert _export(db, out) == 2
+            assert _export(db, out) == 1
         finally:
             monkeypatch.undo()
             out.chmod(0o755)
@@ -446,7 +446,7 @@ class TestOutDirSafety:
         (out / "facts").chmod(0o555)  # decisions/ sorts first and is writable
         monkeypatch.setattr("sidegraph.okf._must_emit_in_place", lambda target: True)
         try:
-            assert _export(db, out) == 2
+            assert _export(db, out) == 1
         finally:
             monkeypatch.undo()
             _make_writable(tmp_path)
@@ -465,7 +465,7 @@ class TestOutDirSafety:
         capsys.readouterr()
         out.chmod(0o000)
         try:
-            assert export_okf_main(["--db", str(db), "--out", "bundle"]) == 2
+            assert export_okf_main(["--db", str(db), "--out", "bundle"]) == 1
         finally:
             out.chmod(0o755)
         err = capsys.readouterr().err

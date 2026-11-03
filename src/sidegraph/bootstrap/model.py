@@ -46,7 +46,7 @@ class WarningCode(StrEnum):
 #   proposed + changed    -> Store.drop marks the stale draft rejected, a fresh record is
 #                            written with supersedes=None
 #   rejected + identical  -> needs_status_change flips; a new accepted record revives it
-#                            with supersedes=<rejected id>
+#                            with supersedes=None (a rejected record is not a predecessor)
 #   rejected + changed    -> a fresh accepted record is written with supersedes=None (no
 #                            open record exists to close, so the clause is vacuously true)
 # Two earlier drafts of this sentence were false: one claimed accepting always "writes a

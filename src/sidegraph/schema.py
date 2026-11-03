@@ -1,14 +1,13 @@
 """Core record types for the owned decision store.
 
-Six record types live in an owned, append-only store (see
+Five record types live in an owned, append-only store (see
 ``docs/concepts/data-model.md``) — the founding three:
 
 - :class:`Entity`      — internal identity + engine mapping (created lazily).
 - :class:`Decision`    — the ADR / lesson / gotcha, with temporal validity.
 - :class:`AnchorBinding` — a tiered, status-tracked link between a record and an entity.
 
-Plus :class:`Initiative`, a flat container that groups decisions (Tier-0 anchoring),
-:class:`Domain`, an owned, append-only named abstraction with a paired abstract entity
+Plus :class:`Domain`, an owned, append-only named abstraction with a paired abstract entity
 (see ``docs/concepts/mind-model.md``), and :class:`Fact`, a compact, falsifiable piece of
 non-derivable knowledge that informed one or more decisions (see
 ``design/superpowers/specs/2026-07-10-facts-layer-design.md``).
@@ -419,6 +418,15 @@ class Domain(BaseModel):
         return v
 
 
+class Retirement(BaseModel):
+    """Why an accepted decision was retired (``accepted -> deprecated``) rather than superseded:
+    a duplicate of another live record (``duplicate_of``), or a rule whose subject is gone.
+    Written once, by ``Store.retire``, together with that status move."""
+
+    reason: str
+    duplicate_of: str | None = None  # id of the live Decision this one duplicated
+
+
 class Decision(BaseModel):
     """The memory: an ADR, lesson, constraint, or gotcha with temporal validity.
 
@@ -453,11 +461,20 @@ class Decision(BaseModel):
     # panel, security reviewer objection 7).
     ratified_by: str | None = None
     ratified_at: AwareDatetime | None = None
+    # Set ONLY by ``Store.retire``, in the same write that moves the record to ``deprecated``;
+    # None on every other record. Needs requires-sidegraph >= 0.24.0 (docs/reference/stability.md).
+    retired: Retirement | None = None
 
     @model_validator(mode="after")
     def _check_validity_window(self) -> Decision:
         if self.valid_to is not None and self.valid_to < self.valid_from:
             raise ValueError("valid_to must be >= valid_from")
+        return self
+
+    @model_validator(mode="after")
+    def _check_retired(self) -> Decision:
+        if self.retired is not None and self.status != DecisionStatus.DEPRECATED:
+            raise ValueError("retired is set only on a deprecated decision")
         return self
 
 
@@ -522,15 +539,6 @@ class AnchorBinding(BaseModel):
     status: str = "live"  # live | degraded | orphaned
     # additive; defaulted to avoid capture friction — rendered only when non-default
     relation: Relation = "affects"
-
-
-class Initiative(BaseModel):
-    """A flat container grouping related decisions (the Tier-0 owning anchor)."""
-
-    id: str = Field(default_factory=_new_id)
-    name: str
-    description: str | None = None
-    tags: list[str] = Field(default_factory=list)
 
 
 _BODY_MODELS: dict[str, type[BaseModel]] = {

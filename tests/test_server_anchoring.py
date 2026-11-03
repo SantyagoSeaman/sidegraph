@@ -94,8 +94,9 @@ def test_add_decision_anchors_but_no_reader_still_writes(tmp_path):
         anchors=[{"name": "Trader", "file_path": "trader/exec.py"}],
     )
     assert out["status"] == "accepted"
-    # reader absent -> anchoring skipped, still writes
-    assert out["bindings"] == 0
+    # reader absent -> the anchor binds as an orphaned leaf, reported with reason no-graph
+    assert out["bindings"] == 1
+    assert [e["reason"] for e in out["anchors_orphaned"]] == ["no-graph"]
 
 
 def test_add_decision_records_graph_version_in_provenance(tmp_path):

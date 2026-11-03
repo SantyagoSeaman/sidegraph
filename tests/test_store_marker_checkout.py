@@ -218,5 +218,5 @@ def test_init_refuses_busy_git_for_an_existing_markerless_store(
     stdout, stderr = capsys.readouterr()
     actual = (store / "format").read_text() if (store / "format").exists() else None
     assert rc == 1, (stdout, stderr, actual)
-    assert "git did not answer in time" in stdout
+    assert "git did not answer in time" in stderr
     assert actual is None

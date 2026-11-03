@@ -907,7 +907,7 @@ def _snapshot_canonical_dir(store: Store) -> dict[str, tuple[bytes, int, int]]:
     seed_anchors regression self-contained, same convention _ratified_domain uses across
     cli.py/server.py)."""
     out: dict[str, tuple[bytes, int, int]] = {}
-    for sub in ("decisions", "domains", "entities", "bindings", "initiatives"):
+    for sub in ("decisions", "domains", "entities", "bindings"):
         d = store.path / sub
         if not d.is_dir():
             continue

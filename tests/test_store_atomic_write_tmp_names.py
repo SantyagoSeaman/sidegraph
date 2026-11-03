@@ -9,6 +9,8 @@ one thing still exposed to it.
 
 from __future__ import annotations
 
+import os
+
 from sidegraph.store import _atomic_write_text
 
 
@@ -16,14 +18,14 @@ def test_two_writes_to_one_target_never_share_a_tmp_path(tmp_path, monkeypatch):
     target = tmp_path / "rec.json"
     seen: list[str] = []
 
-    real = type(target).write_text
+    real = os.replace
 
-    def _spy(self, text, **kwargs):
-        if self.name.endswith(".tmp"):
-            seen.append(self.name)
-        return real(self, text, **kwargs)
+    def _spy(src, dst):
+        if os.path.basename(src).endswith(".tmp"):
+            seen.append(os.path.basename(src))
+        return real(src, dst)
 
-    monkeypatch.setattr(type(target), "write_text", _spy)
+    monkeypatch.setattr(os, "replace", _spy)
 
     _atomic_write_text(target, "one")
     _atomic_write_text(target, "two")

@@ -38,7 +38,6 @@ from .store import (
     unknown_stamp_message,
 )
 from .store_format import (
-    FORMAT2_MIN_SIDEGRAPH,
     SHARD_COUNTS,
     Marker,
     bucket_name,
@@ -46,6 +45,7 @@ from .store_format import (
     inventory_from_disk,
     list_shard_files,
     marker_text,
+    new_store_requirement,
 )
 from .store_layout import (
     FORMAT_MARKER_NAME,
@@ -104,13 +104,15 @@ def recover_shard_count(listing_names: Iterable[str]) -> int | None:
 
 
 def _requirement_for_marker(existing: str | None) -> str:
-    """``max(existing, 0.17.0)``, both release versions."""
+    """``max(existing, new_store_requirement())``, both release versions: 0.17.0, or the
+    record-fields release once this Sidegraph has reached it."""
     held = release_tuple(existing) if existing is not None else None
-    floor = release_tuple(FORMAT2_MIN_SIDEGRAPH)
+    wanted = new_store_requirement()
+    floor = release_tuple(wanted)
     assert floor is not None
     if existing is not None and held is not None and held > floor:
         return existing
-    return FORMAT2_MIN_SIDEGRAPH
+    return wanted
 
 
 def _case_remedy(reason: str) -> str:

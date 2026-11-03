@@ -536,6 +536,56 @@ def test_t4_the_three_are_the_first_three_that_have_records(bash_project, monkey
     assert _files_in(_text(out)) == ["a.py", "b.py", "c.py"]
 
 
+def test_t4_the_block_stays_under_the_hosts_character_cap(bash_project, monkeypatch, capsys):
+    """Claude Code caps ``additionalContext`` at 10,000 characters. Three files with very long
+    paths and long fact lines can pass it, so a file whose block would not fit is left out,
+    unclaimed, and one closing line says so. The cap is lowered here to bind on short paths."""
+    for n in range(2):
+        bash_project.record("c.py", f"Long gotcha {n} " + "t" * 70, choice="Use " + "c" * 100)
+    full = _text(_run(monkeypatch, capsys, bash_project, _bash("cat a.py b.py c.py", "other")))
+    blocks = full.split("\n", 1)[1]
+    third = blocks.index("Recorded for c.py")
+    cap = len(GUARD) + 1 + third + len(hooks._PRETOOL_OMITTED.format(count=9999)) + 1
+    monkeypatch.setattr(hooks, "HOOK_CONTEXT_MAX_CHARS", cap)
+
+    text = _text(_run(monkeypatch, capsys, bash_project, _bash("cat a.py b.py c.py")))
+
+    assert len(text) <= cap < len(full)
+    assert _files_in(text) == ["a.py", "b.py"]
+    assert text.split("\n")[-1] == hooks._PRETOOL_OMITTED.format(count=1)
+    monkeypatch.setattr(hooks, "HOOK_CONTEXT_MAX_CHARS", 9500)
+    later = _run(monkeypatch, capsys, bash_project, _bash("cat c.py"))
+    assert _files_in(_text(later)) == ["c.py"]  # left out, not spent
+
+
+def test_t4_when_every_block_is_left_out_the_closing_line_still_says_so(
+    bash_project, monkeypatch, capsys
+):
+    """No block fits the cap: the agent still gets the closing line pointing at
+    ``get_task_context``, and nothing else. Nothing was delivered, so nothing is claimed or
+    journaled, and a later read under the real cap gets all three files."""
+    cap = len(GUARD) + 1 + 10 + len(hooks._PRETOOL_OMITTED.format(count=9999)) + 1
+    monkeypatch.setattr(hooks, "HOOK_CONTEXT_MAX_CHARS", cap)
+
+    text = _text(_run(monkeypatch, capsys, bash_project, _bash("cat a.py b.py c.py")))
+
+    assert text == hooks._PRETOOL_OMITTED.format(count=3)
+    assert bash_project.meta("pretool_file:%") == {}
+    conn = sqlite3.connect(bash_project.store_dir / "index.db")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM delivery_occurrences").fetchone() == (0,)
+    finally:
+        conn.close()
+    monkeypatch.setattr(hooks, "HOOK_CONTEXT_MAX_CHARS", 9500)
+    later = _run(monkeypatch, capsys, bash_project, _bash("cat a.py b.py c.py"))
+    assert _files_in(_text(later)) == ["a.py", "b.py", "c.py"]
+    conn = sqlite3.connect(bash_project.store_dir / "index.db")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM delivery_occurrences").fetchone() == (1,)
+    finally:
+        conn.close()
+
+
 def test_t4_a_bash_read_is_not_a_touch(bash_project, monkeypatch, capsys):
     """D8: touches stay on Read, Grep, Edit and Write."""
     _run(monkeypatch, capsys, bash_project, _bash("cat a.py"))

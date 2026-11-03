@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from ulid import ULID
@@ -250,6 +250,11 @@ def test_deadline_marks_hung_batch_failed_and_skips_unrun(git_repo, monkeypatch)
     _git(["add", "-A"], cwd=git_repo)
     _git(["commit", "-q", "-m", "change"], cwd=git_repo)
 
+    # A fake scan clock: only the mocked diff advances it, so the budget is consumed by
+    # exactly the first diff however loaded the machine is. The repo root is passed in, so
+    # no real git call runs against the budget either.
+    clock = {"now": 0.0}
+    monkeypatch.setattr(doctor_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
     real = doctor_mod._run_git
     slow_done = {"n": 0}
 
@@ -257,20 +262,75 @@ def test_deadline_marks_hung_batch_failed_and_skips_unrun(git_repo, monkeypatch)
         if args and args[0] == "diff":
             slow_done["n"] += 1
             # Simulate a hang that outlives the remaining budget: a real subprocess would
-            # be killed at `timeout=`; the mock burns wall-clock past the deadline first
+            # be killed at `timeout=`; the mock moves the clock past the deadline first
             # so the NEXT batch sees an exhausted budget.
-            time.sleep(0.05)
+            clock["now"] += 1.0
             raise subprocess.TimeoutExpired(cmd=["git", *args], timeout=kw.get("timeout") or 0)
         return real(args, cwd, **kw)
 
     monkeypatch.setattr(doctor_mod, "_run_git", slow)
-    scan = scan_code_drift(store_dir, deadline=0.02)
+    scan = scan_code_drift(store_dir, git_repo, deadline=0.5)
     assert scan.active
+    assert not scan.repo_root_failed
     assert len(scan.batches) == 2
     assert all(b.failed for b in scan.batches)
     # Deadline exhaustion must not run every batch's subprocess: after the first timeout
     # consumed the whole budget, the second batch is marked failed WITHOUT running.
     assert slow_done["n"] == 1
+
+
+def test_root_resolution_time_comes_off_the_diff_budget(git_repo, monkeypatch):
+    """Time spent resolving the repo root is part of the ONE budget: when root resolution
+    eats it all, the root is still found but every batch is failed without a diff."""
+    import sidegraph.verify as verify_mod
+
+    store_dir, _rid, _commit = _drifted_repo(git_repo)
+    clock = {"now": 0.0}
+    fake_time = SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(doctor_mod, "time", fake_time)
+    monkeypatch.setattr(verify_mod, "time", fake_time)
+    real = verify_mod._run_git
+
+    def slow_root(args, cwd, **kw):
+        if args == ["rev-parse", "--show-toplevel"]:
+            clock["now"] += 10.0  # past the 5 s deadline, then the real answer
+        return real(args, cwd, **kw)
+
+    diffs: list[list[str]] = []
+
+    def no_diff(args, cwd, **kw):
+        diffs.append(args)
+        raise AssertionError("no git call may run once root resolution spent the budget")
+
+    monkeypatch.setattr(verify_mod, "_run_git", slow_root)
+    monkeypatch.setattr(doctor_mod, "_run_git", no_diff)
+    scan = scan_code_drift(store_dir, deadline=5.0)
+    assert scan.active
+    assert not scan.repo_root_failed
+    assert scan.batches
+    assert all(b.failed for b in scan.batches)
+    assert diffs == []
+
+
+def test_deadline_spent_before_root_resolution_fails_closed(git_repo, monkeypatch):
+    """The ONE budget covers root resolution too: a spent budget gives repo_root_failed with
+    no batches, and no git call is spawned for the root (fail-closed, nothing is guessed)."""
+    import sidegraph.verify as verify_mod
+
+    store_dir, _rid, _commit = _drifted_repo(git_repo)
+    calls: list[list[str]] = []
+
+    def spying(args, cwd, **kw):
+        calls.append(args)
+        raise AssertionError("no git call may run on a spent budget")
+
+    monkeypatch.setattr(doctor_mod, "_run_git", spying)
+    monkeypatch.setattr(verify_mod, "_run_git", spying)
+    scan = scan_code_drift(store_dir, deadline=0.0)
+    assert scan.active
+    assert scan.repo_root_failed
+    assert scan.batches == []
+    assert calls == []
 
 
 def test_no_deadline_means_no_timeout_kw(git_repo, monkeypatch):

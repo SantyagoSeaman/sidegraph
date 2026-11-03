@@ -1,5 +1,7 @@
 # Capturing decisions
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 Two ways a decision enters the store: at your request, the agent writes it **directly** mid-session
 (`add_decision`), or the session gets **distilled and proposed** at the end and is ratified
 later, by a human (`propose_decisions` → `sidegraph-ratify`) or at write time by an
@@ -125,17 +127,7 @@ Each draft maps directly onto the decision schema:
 | Learned | `consequences` | trade-offs accepted |
 | (rejected) | `rejected` | what was tried and abandoned |
 
-Before processing any batch item, capture checks the raw input against fixed limits:
-256 KiB UTF-8 per string, 4 MiB of admitted strings per request, 100 drafts including
-attached facts, depth 32, 4,096 visited nodes per draft and 65,536 admitted nodes per request.
-Tags, metadata, descriptor strings and mapping keys count too. The combined MCP decisions
-and standalone facts share one budget. A field or structure violation rejects the entire
-top-level draft, including attached facts, while valid siblings continue; rejected items
-consume no admitted byte/node budget. A request-wide limit violation fails before any
-canonical write. Cycles and invalid UTF-8 strings are rejected with static errors. Inputs
-are never silently truncated and no environment switch disables these limits. Direct
-add/supersede writes use the same field, depth, item-node and aggregate limits. See the
-[MCP reference](../reference/mcp-tools.md#capture-and-direct-write-resource-limits).
+Capture validates a whole request before writing it. Invalid items report a reason while valid siblings may continue. Large or malformed requests can be refused. See [capture and direct-write limits](../reference/mcp-tools.md#capture-and-direct-write-resource-limits) for the exact contract.
 
 Malformed drafts report bounded known-field/error-code diagnostics without reflecting
 values or arbitrary exception causes. Invalid drafts write nothing and valid siblings
@@ -193,8 +185,6 @@ Ratify without leaving the session. `SessionStart` tells you when something is w
 is two MCP tools: `list_proposed()` (human-readable render of the pending queue; a long queue is shown in part, with the rest listed by id) and
 `ratify(accept=[...], drop=[...])` — the unified tool that ratifies decisions *and* domains
 through one gate (see [mind model](../concepts/mind-model.md#domain-lifecycle)).
-`ratify_decisions(accept=[...], drop=[...])` still works but is a **deprecated alias** (since
-0.1.0, still kept) for existing callers only — prefer `ratify` in new code.
 
 - **Accept** flips `proposed → accepted`. The record now reads untagged everywhere.
 - **Drop** is append-only, like everything else in the store: it sets `valid_to` and flips
@@ -225,6 +215,11 @@ The proposed → ratify gate above is the store's **only noise filter** — ever
 decision and fact stops there until it is accepted — explicitly by a human, unless an
 [auto-ratification policy](#5-auto-ratification-policy) admits it. Some workflows (a solo
 developer working alone, a personal/scratch corpus) would rather skip that stop entirely.
+
+**Deprecated:** `SIDEGRAPH_AUTO_ACCEPT` keeps working exactly as described here until it is removed in a later release (announced in the CHANGELOG), but SessionStart and `sidegraph-doctor` warn when the variable is set in their own environment, and every `written` `propose_decisions` result carries a `deprecation` note while it is on. Its replacement is
+`SIDEGRAPH_RATIFY_POLICY=auto-all` ([section 5](#5-auto-ratification-policy)), which stamps who
+ratified each record and requires a live anchor; a capture without one stays `proposed`.
+
 Set `SIDEGRAPH_AUTO_ACCEPT=on` in the environment the MCP server runs in, and every agent
 capture through `propose_decisions` — each decision draft, its attached facts, and any
 standalone facts passed via the top-level `facts` parameter — lands `status="accepted"`
@@ -319,7 +314,7 @@ once any record anywhere carries an `auto:` stamp, `sidegraph-doctor`'s human ou
 - **v1 sets no auto-share threshold and takes no automatic response** to any of the above —
   the two doctor lines are informational only, for now.
 
-Legacy `SIDEGRAPH_AUTO_ACCEPT=on` still wins when both knobs are set — see
+Deprecated `SIDEGRAPH_AUTO_ACCEPT=on` still wins when both knobs are set — see
 [`reference/configuration.md`](../reference/configuration.md).
 
 ## Facts: the evidence layer
@@ -385,11 +380,14 @@ human was the gate.
 
 ### Falsifying a fact
 
-Never edit a fact or delete it — `supersede_fact(old_fact_id, statement, source, ...)`
+For an accepted fact with `valid_to` unset, `supersede_fact(old_fact_id, statement, source, ...)`
 closes the predecessor (`status=superseded`, `valid_to` set) and writes a replacement in the
 same transaction, exactly like `supersede_decision`. Omit `anchors` to inherit the
 predecessor's bindings verbatim (including any `orphaned` ones, carried as-is); `supports`
-defaults to the predecessor's own `supports` when omitted.
+defaults to the predecessor's own `supports` when omitted. For an invalidated proposal or
+closed history, follow the [status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings):
+human drop and corrected capture for a proposal, or the chain's live head when one exists.
+With no live head, restate current knowledge as a fresh anchored record. Keep the history.
 
 Full signatures and return shapes:
 [`docs/reference/mcp-tools.md`](../reference/mcp-tools.md#add_fact). For the full
@@ -410,9 +408,18 @@ though: every decision it writes must anchor, and a document with nothing anchor
 skipped rather than imported. **Run `graphify update .` right before importing** so the docs
 you're about to seed can actually resolve:
 
+macOS or Linux:
+
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+graphify update .
+sidegraph-import --docs docs/adr --dry-run
+```
+
+Windows PowerShell:
+
+```powershell
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
 sidegraph-import --docs docs/adr --dry-run
 ```
@@ -437,6 +444,6 @@ for the full flag reference.
 - **Keep `context`/`choice`/`consequences` short and concrete.** Retrieval is budget-bounded
   in characters (see [`reference/configuration.md`](../reference/configuration.md)); a long
   decision crowds out others in the same task context.
-- **Use `supersede_decision` (or `supersedes` in a draft), not a fresh unrelated record**,
-  when a past decision was reversed — the chain of "tried before, abandoned because…" is the
-  point (see [`concepts/decision-memory.md`](../concepts/decision-memory.md)).
+- **Use a real successor for an accepted, open decision whose claim changed.** Use
+  `supersede_decision` or `supersedes` in a draft to preserve the chain. For an invalidated
+  proposal or closed history, follow the [status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings).

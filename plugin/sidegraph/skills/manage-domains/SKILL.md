@@ -1,7 +1,7 @@
 ---
 name: manage-domains
 description: >-
-  Use for managing, editing, fixing, splitting, or dropping domains after the initial naming pass — "this domain is wrong", "split payments into two", "add a domain for X", "rename that domain", "drop this domain", "show me all domains". Also reachable directly as /sidegraph:manage-domains. The escape hatch and ongoing-maintenance flow for individual domains, by key — the a-la-carte counterpart to name-domains' whole-set picker.
+  Use for managing, editing, fixing, splitting, or dropping domains after the initial domain naming — "this domain is wrong", "split payments into two", "add a domain for X", "rename that domain", "drop this domain", "show me all domains". Also reachable directly as /sidegraph:manage-domains. The escape hatch and ongoing-maintenance flow for individual domains, by key — the a-la-carte counterpart to name-domains' whole-set picker.
 ---
 
 # Manage domains
@@ -79,10 +79,12 @@ supersede_domain(
 )
 ```
 
-It closes the old domain (`status -> superseded`: retrievable history, no longer live/
-TOC-visible) and writes the successor in the same call — same one-gate rule as everywhere
-else: the successor lands `status=proposed`, so `ratify(accept=[<new_domain_id>])` is still
-needed to make the rename live.
+It writes the successor and closes the old domain (`status -> superseded`: retrievable
+history, no longer live/TOC-visible) when the successor is accepted — same one-gate rule as
+everywhere else: the successor lands `status=proposed`, so `ratify(accept=[<new_domain_id>])`
+is what makes the rename live and retires the old (accepted) domain; dropping the successor
+leaves the old domain untouched. Only an accepted domain can be superseded, one pending
+successor at a time; a *dropped* domain is the one exception and is flipped at once.
 
 **No rule is inherited.** The successor's `path_prefixes`/`seed_anchors` start at `[]` unless
 you pass them explicitly — to keep covering the same code, carry over whatever membership rule
@@ -105,7 +107,7 @@ need git-history archaeology either:
 mass-drop](../../../../docs/guides/naming-your-domains.md#recovering-from-a-mass-drop): give
 the successor NO matching `path_prefixes`/`seed_anchors` (instead of carrying the old rule
 forward) and its `communities` stays empty, freeing the community for a future
-`sidegraph-domains bootstrap` pass — the opposite intent from an ordinary rename, so be
+`sidegraph-domains bootstrap` run — the opposite intent from an ordinary rename, so be
 deliberate about which one you're doing. With a domain snapshot, leave that placeholder
 `proposed`: an accepted successor of a domain the snapshot covers takes over its frozen
 membership, and the community stays claimed.
@@ -128,9 +130,11 @@ membership), ratify both, then drop the original (see "Drop a wrong domain" abov
 On a store with a domain snapshot, the two new domains get members by their rules only in
 files the snapshot does not list, so they start almost empty. Once both are ratified and the
 original is dropped, `sidegraph-domains snapshot --refresh --domain <part-a> --domain <part-b>`
-re-derives both parts from their rules and freezes them. A split made by superseding one
-covered domain twice is the same: neither successor holds any of the frozen membership until
-that refresh names both, and `sidegraph-sync` and `sidegraph-doctor` report it as a split.
+re-derives both parts from their rules and freezes them. A split that arrives through a git
+merge (two branches each superseded the same covered domain) is the same: neither successor
+holds any of the frozen membership until that refresh names both, and `sidegraph-sync` and
+`sidegraph-doctor` report it as a split. `supersede_domain` itself refuses a second successor
+while the first is pending.
 
 ## Domains under a snapshot
 
@@ -146,7 +150,7 @@ include a note for frozen membership or a split.
 
 ## See also
 
-- `sidegraph:name-domains` — the whole-set onboarding flow; use it for the *first* naming pass
+- `sidegraph:name-domains` — the whole-set onboarding flow; use it for the *first* naming round
   on a repo, not one-off edits.
 - [`docs/guides/naming-your-domains.md`](../../../../docs/guides/naming-your-domains.md) —
   background on bootstrap idempotency, mass-drop recovery, and the CLI equivalents

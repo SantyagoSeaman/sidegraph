@@ -1,5 +1,7 @@
 # Muse
 
+[Glossary](../concepts/glossary.md)
+
 Sidegraph exposes its shared skills, MCP tools and two lifecycle hooks through Muse's native
 plugin format:
 
@@ -59,6 +61,6 @@ The MCP runtime and the SessionStart hook use the release's configured Git ref (
 `main`). SessionStart records the commit it ran, and the subagent hook starts from the commit the
 machine's latest SessionStart recorded. The record is one per machine, so a SessionStart in
 another project can move it during a session (see
-[the Claude Code integration](claude-code.md#plugin-install-path)). Context on reads, the capture reminder,
+[the launch-commit contract](../reference/hooks.md#the-launch-commit-file)). Context on reads, the capture reminder,
 workspace switching and Windows are not supported yet; Muse support does not claim parity
 with Claude Code or Codex.

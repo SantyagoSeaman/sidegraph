@@ -19,7 +19,7 @@ directly (``json.loads`` + ``Model.model_validate``) and never constructs a
 :class:`sidegraph.store.Store`. Opening a ``Store`` is NOT a read-only operation — its
 ``__init__`` runs ``_refresh_freshness``, which can WRITE: a stale/missing digest triggers
 ``_reload_index_from_canonical`` (rewrites ``index.db``'s digest + ``schema_version``
-meta), and an unmigrated legacy single-file store gets migrated in place. A lint command
+meta). A lint command
 must never mutate the very thing it is inspecting.
 
 Reading the canonical files directly (rather than the derived ``index.db``) is also *the
@@ -70,13 +70,12 @@ from .schema import (
     DriftCheck,
     Entity,
     Fact,
-    Initiative,
     is_safe_record_id,
     validate_record_body,
 )
 from .store import (
     _FORMAT_MARKER_NAME,
-    _MIGRATABLE_SCHEMA_VERSIONS,
+    _LEGACY_SINGLE_FILE_SCHEMA_VERSIONS,
     _RELOADABLE_SCHEMA_VERSIONS,
     _TERMINAL_DECISION_STATUSES,
     _TERMINAL_DOMAIN_STATUSES,
@@ -98,6 +97,7 @@ from .store_format import (
     parse_marker,
 )
 from .store_layout import (
+    ARCHIVE_SUBDIR,
     DOMAIN_SNAPSHOT_NAME,
     MAX_FORMAT_MARKER_BYTES,
     NOT_A_FILE_REASON,
@@ -205,11 +205,11 @@ SYMLINK_STOP_NOTE = (
 # carries the running code's CURRENT ``SCHEMA_VERSION`` at creation. An explicit requirement
 # uses REQUIREMENT_MARKER_VERSION instead; a mere reload rewrites neither marker.
 # A store this code can actually OPEN (see
-# ``store._RELOADABLE_SCHEMA_VERSIONS``/``_MIGRATABLE_SCHEMA_VERSIONS``) may therefore still
-# carry an older marker; all three sets together are exactly "known to this running code",
-# mirroring what ``Store.__init__`` itself tolerates without raising.
+# ``store._RELOADABLE_SCHEMA_VERSIONS``) may therefore still carry an older marker, and a
+# marker stamped like a retired single-file store (``store._LEGACY_SINGLE_FILE_SCHEMA_VERSIONS``)
+# is still recognised: the three sets together are "known to this running code".
 _KNOWN_SCHEMA_VERSIONS = frozenset(
-    {SCHEMA_VERSION} | _RELOADABLE_SCHEMA_VERSIONS | _MIGRATABLE_SCHEMA_VERSIONS
+    {SCHEMA_VERSION} | _RELOADABLE_SCHEMA_VERSIONS | _LEGACY_SINGLE_FILE_SCHEMA_VERSIONS
 )
 
 # A ``1.0.0`` marker carries a minimum Sidegraph version (D6 of
@@ -417,7 +417,7 @@ def _check_temporal_dir(dir_path: Path, model: type[BaseModel]) -> _WalkResult:
 
 
 def _check_plain_dir(dir_path: Path, model: type[BaseModel], id_field: str) -> _WalkResult:
-    """``domains/``, ``entities/``, ``initiatives/`` — no validity window, straightforward
+    """``domains/`` and ``entities/`` — no validity window, straightforward
     schema validation. ``id_field`` is ``"domain_id"``/``"entity_id"``/``"id"``. See
     :func:`_check_temporal_dir` for the ``path_by_id`` vs. ``all_paths_by_id`` split."""
     raw_by_id: dict[str, dict] = {}
@@ -1183,6 +1183,24 @@ def _packed_inventory(store_dir: Path) -> _Packed | None:
     return _Packed(inv, eff, by_id, reps, held, entity_ids, pooled, archive_carried, unreadable)
 
 
+def _inventory_unreadable_findings(
+    store_dir: Path, packed: _Packed, reported: set[str]
+) -> list[Violation]:
+    """The record files and archive segments the inventory could not stat or read that the
+    per-record walk did not report itself (it read them fine, or saw them differently):
+    ``parse-error`` / ``bad-archive-segment`` on the walk's path, once per path and never for a
+    path already reported as an unsafe name (that finding stands alone)."""
+    out: list[Violation] = []
+    for rel, exc in packed.unreadable:
+        code = BAD_ARCHIVE_SEGMENT if rel.startswith(f"{ARCHIVE_SUBDIR}/") else PARSE_ERROR
+        where = str(store_dir / rel)
+        if rel.startswith(f"{SHARDS_SUBDIR}/") or where in reported:
+            continue
+        reported.add(where)
+        out.append(_violation(code, where, f"unreadable: {exc}"))
+    return out
+
+
 def _shard_line_findings(packed: _Packed) -> list[Violation]:
     """``bad-shard-line`` for a line that is not a readable record (envelope, JSON, model or
     body-id failure: the test ``parse-error`` applies to a file), ``shard-conflict`` for a line
@@ -1535,10 +1553,6 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
         store_dir / "entities", Entity, "entity_id"
     )
     violations += v
-    _initiatives_raw, _initiative_paths, initiative_all_paths, _initiatives_skipped, v = (
-        _check_plain_dir(store_dir / "initiatives", Initiative, "id")
-    )
-    violations += v
     bindings_by_record, binding_paths, v = _check_bindings_dir(store_dir / "bindings")
     violations += v
     archive = _check_archive_dir(store_dir / "archive")
@@ -1621,7 +1635,7 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
     )
 
     # duplicate-ulid: decisions/domains compare hot against BOTH archive pools (the only two
-    # archived record types); facts/entities/initiatives are never archived, so only hot-hot
+    # archived record types); facts/entities are never archived, so only hot-hot
     # duplication is possible for them.
     decision_hot: Mapping[str, Sequence[Path | str]]
     domain_hot: Mapping[str, Sequence[Path | str]]
@@ -1642,10 +1656,18 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
     violations += _check_duplicate_ulids(domain_hot, domain_archive, strict=strict)
     violations += _check_duplicate_ulids(fact_all_paths, {})
     violations += _check_duplicate_ulids(entity_all_paths, {})
-    violations += _check_duplicate_ulids(initiative_all_paths, {})
 
     if packed is not None:
         violations += _shard_line_findings(packed)
+        violations += _inventory_unreadable_findings(
+            store_dir,
+            packed,
+            {
+                v.path
+                for v in violations
+                if v.code in (PARSE_ERROR, BAD_ARCHIVE_SEGMENT, UNSAFE_RECORD_ID)
+            },
+        )
         violations += _duplicate_packed_findings(packed)
         violations += _shadow_findings(store_dir, packed)
         violations += _binding_entry_findings(store_dir, packed)
@@ -1908,7 +1930,7 @@ def _classify_store_relative_path(store_relative: str) -> str | None:
     """``<dir>/<id>.json`` (a path already relative to the store dir) -> a
     :func:`classify_transition` ``kind``, or one of two kinds :func:`verify_against` handles
     directly rather than through :func:`classify_transition` (see its docstring):
-    ``"initiative"`` (no append-only guard in store.py at all -- deletion-only check) and
+    ``"initiative"`` (a legacy file no code reads or writes any more -- deletion-only check) and
     ``"archive"`` (``archive/*.jsonl`` segments — write-once by design, see
     ``store._write_archive_segment``'s docstring "Segments are write-once ... and this
     always creates a brand-new file" and ``docs/reference/store-format.md``'s "immutable

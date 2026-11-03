@@ -72,10 +72,10 @@ def _violation(code: str, path: Path | str, detail: str) -> Violation:
 #   them should be tolerated, not flagged) — but in practice no LEGITIMATE diff ever
 #   exercises that branch: a real committed file never carries these keys to begin with, so
 #   classifying them mutable is inert bookkeeping, not a load-bearing behavior.
-# - ``Initiative`` has NO append-only guard at all (``Store.upsert_initiative`` is a bare,
-#   unconditional upsert — see store.py) — so field-level mutation is never checked for
-#   initiatives here (:func:`classify_transition` has no ``"initiative"`` kind;
-#   :func:`verify.verify_against` handles the type directly, deletion-only — see its docstring).
+# - ``initiatives/`` files, written by stores before 0.24, are no longer a record type: nothing
+#   reads or writes them, so field-level mutation is never checked for them here
+#   (:func:`classify_transition` has no ``"initiative"`` kind;
+#   :func:`verify.verify_against` still treats their deletion as illegal — see its docstring).
 #
 # Two more legal rewrites, beyond the mutable-field tables, that this module must not flag
 # (design/superpowers/specs/2026-09-23-verify-ratifier-stamp-design.md): ``Store.ratify``,
@@ -95,10 +95,11 @@ def _violation(code: str, path: Path | str, detail: str) -> Violation:
 # not covered by that rule (see :func:`same_modulo_absent`'s own docstring); it has its own
 # narrow table, :data:`LEGACY_DEFAULTS`.
 
-# Decisions/facts (store.py's ``add_decision``, ``add_fact``, ``ratify``, ``drop``,
+# Decisions/facts (store.py's ``add_decision``, ``add_fact``, ``ratify``, ``drop``, ``retire``,
 # ``ratify_fact``, ``drop_fact``): the only fields any write path ever changes on an EXISTING
 # record are ``status`` (along a real transition) and ``valid_to`` (null -> a value, once,
-# when a record closes). Everything else is written once, at creation, and never touched
+# when a record closes), plus ``retired`` on a decision ``retire`` closes (its own rule,
+# :func:`_check_retired`). Everything else is written once, at creation, and never touched
 # again by any of those methods.
 _DECISION_STATUS_TRANSITIONS = frozenset(
     {
@@ -106,14 +107,12 @@ _DECISION_STATUS_TRANSITIONS = frozenset(
         ("proposed", "rejected"),  # drop
         ("proposed", "superseded"),  # add_decision/ratify closing a still-proposed predecessor
         ("accepted", "superseded"),  # add_decision/ratify closing an accepted predecessor
-        # No live write path sets DEPRECATED today -- store.py's own comment on
-        # _TERMINAL_DECISION_STATUSES calls it a "dead enum value ... included for
-        # forward-compat rather than silently left hot forever the day something does start
-        # setting it." Allowed here for that same documented forward-compat reason, not a
-        # gap this module papers over.
-        ("accepted", "deprecated"),
+        ("accepted", "deprecated"),  # retire
     }
 )
+# ``proposed -> deprecated`` is a ratify then a retire inside one diffed range, so it is legal
+# only where the ratifier stamp appears in the same range (:func:`_ratified_in_range`).
+_RATIFY_THEN_RETIRE = ("proposed", "deprecated")
 _FACT_STATUS_TRANSITIONS = frozenset(
     {
         ("proposed", "accepted"),  # ratify_fact, or ratify's decision-supports cascade
@@ -256,6 +255,38 @@ def _check_ratifier_stamp(old: dict, new: dict, path: str) -> list[Violation]:
     ]
 
 
+# The retirement record (store.py's ``retire``): like the ratifier stamp, it may appear only once
+# and only alongside one status move, so it has its own rule rather than a mutable-field entry.
+_RETIRED = ("retired",)
+
+
+def _ratified_in_range(old: dict, new: dict) -> bool:
+    """The ratifier stamp is unset on the old side and set on the new one."""
+    return old.get("ratified_at") is None and new.get("ratified_at") is not None
+
+
+def _check_retired(old: dict, new: dict, path: str) -> list[Violation]:
+    """``retired`` may change in exactly one way: unset on an old side that is ``accepted`` (or
+    ``proposed`` with the ratifier stamp newly set, a ratify inside the diffed range), set on a
+    new side that is ``deprecated``. Any other change — appearing on another status move,
+    edited or removed once set — is :data:`ILLEGAL_FIELD_CHANGE`."""
+    before, after = old.get("retired"), new.get("retired")
+    if before == after:
+        return []
+    retiring = (
+        before is None
+        and after is not None
+        and new.get("status") == "deprecated"
+        and (
+            old.get("status") == "accepted"
+            or (old.get("status") == "proposed" and _ratified_in_range(old, new))
+        )
+    )
+    if retiring:
+        return []
+    return [_violation(ILLEGAL_FIELD_CHANGE, path, "field 'retired' changed")]
+
+
 def _absent_vs_default(old: dict, new: dict, key: str, default: object) -> bool:
     """One side lacks ``key`` and the other holds exactly its legacy ``default``: the reader
     loads both as that default, so neither a writer's backfill nor an older copy of the record
@@ -352,13 +383,19 @@ def classify_transition(kind: str, old: dict | None, new: dict | None) -> list[V
     if kind in ("decision", "fact"):
         legal = _DECISION_STATUS_TRANSITIONS if kind == "decision" else _FACT_STATUS_TRANSITIONS
         mutable = DECISION_MUTABLE_FIELDS if kind == "decision" else FACT_MUTABLE_FIELDS
+        exempt: tuple[str, ...] = _RATIFIER_STAMP
+        if kind == "decision":
+            exempt += _RETIRED
+            if _ratified_in_range(old, new):
+                legal = legal | {_RATIFY_THEN_RETIRE}
         return (
             _check_status_transition(old, new, legal, path)
             + _check_valid_to_transition(old, new, path)
             + _check_immutable_fields(
-                old, new, mutable, path, exempt=_RATIFIER_STAMP, defaults=LEGACY_DEFAULTS.get(kind)
+                old, new, mutable, path, exempt=exempt, defaults=LEGACY_DEFAULTS.get(kind)
             )
             + _check_ratifier_stamp(old, new, path)
+            + (_check_retired(old, new, path) if kind == "decision" else [])
         )
     if kind == "domain":
         return (

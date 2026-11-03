@@ -100,7 +100,7 @@ def test_cli_option_ref_is_operational_and_preserves_files(tracked_edit, main, c
     assert sentinel.read_bytes() == b"preserve this sentinel\n"
     assert path.read_bytes() == before
     assert code == 1
-    assert output.out.strip()
+    assert output.err.strip() and not output.out
 
 
 @pytest.mark.parametrize("oid", ["a" * 40, "b" * 64])
@@ -339,4 +339,4 @@ def test_cli_invalid_baseline_is_operational(tracked_edit, main, ref, capsys):
     output = capsys.readouterr()
     assert path.read_bytes() == before
     assert code == 1
-    assert output.out.strip()
+    assert output.err.strip() and not output.out

@@ -105,7 +105,7 @@ def test_cli_sync_force_reruns(tmp_path, capsys):
 
 def test_cli_sync_unreadable_graph_reports_and_fails(tmp_path, capsys):
     assert sync_main(["--db", str(tmp_path / "t.db"), "--graph", str(tmp_path / "no.json")]) == 1
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 def test_cli_sync_store_open_failure_exits_nonzero(tmp_path, capsys):
@@ -119,7 +119,7 @@ def test_cli_sync_store_open_failure_exits_nonzero(tmp_path, capsys):
     conn.commit()
     conn.close()
     assert sync_main(["--db", str(db), "--graph", str(graph)]) == 1
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 def test_cli_sync_per_entity_errors_do_not_fail_run(tmp_path, capsys, monkeypatch):

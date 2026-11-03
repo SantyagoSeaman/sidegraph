@@ -1,5 +1,7 @@
 # CLI reference
 
+> **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
+
 22 console scripts are registered in `pyproject.toml` (`[project.scripts]`): seventeen
 commands documented on this page — fifteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
 (including `sidegraph-prepare-commit-msg`, which doubles as a git hook — see
@@ -13,10 +15,10 @@ guided `sidegraph-bootstrap` in
 Commands with `--db` use the shared path precedence documented in
 [`configuration.md`](configuration.md): explicit flag, `SIDEGRAPH_DIR`, deprecated
 `SIDEGRAPH_DB`, an existing `.sidegraph/`, then `.sidegraph`. Commands that construct a
-`Store` can migrate a supported legacy single-file `*.db` path and rebuild the derived index
+`Store` refuse a legacy single-file `*.db` path and rebuild the derived index
 on open. `sidegraph-verify` and `sidegraph-doctor` instead inspect a canonical store directory
 directly; `sidegraph-stats` and `sidegraph-blame` read an existing `index.db` without opening
-the store. Do not rely on a read-oriented command to migrate legacy data.
+the store. A legacy single-file store is refused by every command that opens the store.
 
 Health, visualization, export, and stats commands refuse a missing store instead of creating
 an empty one. Mutating commands warn before the shared resolver would create a new default
@@ -39,6 +41,30 @@ readable (<path>)`, while `-init`, `-ratify`, `-doctor` and `-stats` carry on wi
 store in a nested directory (`SIDEGRAPH_DIR=.config/sidegraph`) has `.config` as its project,
 so pair it with an absolute `SIDEGRAPH_GRAPH` or `--graph` (the MCP server needs the absolute `SIDEGRAPH_GRAPH`). The MCP server's `sync_anchors` and lazy sync follow the same default rule (see [`configuration.md`](configuration.md#path-resolution-semantics)). `sidegraph-bootstrap` resolves
 both `--db` and `--graph` against its own `--root` instead.
+
+## Exit codes and streams
+
+One convention holds for every command on this page except `sidegraph-bootstrap` (below) and
+the hook entry points, whose output contracts are in [`reference/hooks.md`](hooks.md):
+
+| Exit | Meaning | Stream |
+|---|---|---|
+| `0` | success, a no-op included | the result on stdout |
+| `1` | an operational error or a refusal: no store, a store or graph that cannot be read, an out-of-range flag value, an I/O error, a busy store, a run that stopped | the message on stderr; stdout carries at most a partial report: a stopped `compact` or `migrate` run, the ids `ratify` processed, `export-adr`'s planned changes, or, under `--json`, one JSON object with an `error` key |
+| `2` | findings: `sidegraph-verify` violations, `sidegraph-doctor` violations (and its findings under `--check`), `sidegraph-sync --check` attention findings; also argparse usage errors (an unknown flag, a missing argument, an invalid choice, a value of the wrong type such as a non-integer `--window`), whose usage text goes to stderr | the findings on stdout, as the report |
+
+A script that treats `2` as "the memory has something to look at" and `1` as "the command did
+not do its job" is right for every command. Two commands keep a wider meaning:
+`sidegraph-export-adr` exits `2` when its plan holds conflicts (no write is applied, the
+conflicts are reported), and `sidegraph-bootstrap` uses `2` for a resumable, incomplete run
+(its exit codes are listed in its own section). The human-readable error or refusal message is always on stderr.
+Under `--json`, every command that takes the flag prints exactly one JSON object on stdout on
+exit `0`, `1` and `2`; the exception is an argparse usage error, which exits `2` with stdout
+empty. A script branches on the exit code first, then reads the object. On exit `1` the
+object always carries an `error` key holding the same message as stderr, plus whichever of
+the command's usual keys it can honestly fill (each command's `--json` row says which).
+`error` does not by itself mean exit `1`: `sidegraph-export-adr`'s exit-`2` conflict report
+carries it too.
 
 ## Running the CLIs beside the plugin
 
@@ -106,9 +132,19 @@ durably written (a post-write I/O failure is at worst `2`, never `1`); `2` for a
 `incomplete` or `partial-recoverable` activation. The 10–15 minute path is an unmeasured
 launch target, not a measured CLI guarantee.
 
+macOS or Linux:
+
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+graphify update .
+sidegraph-bootstrap --profile generic-adr --host claude-code --report bootstrap-report.md
+sidegraph-bootstrap --resume --profile generic-adr --host claude-code
+```
+
+Windows PowerShell:
+
+```powershell
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
 sidegraph-bootstrap --profile generic-adr --host claude-code --report bootstrap-report.md
 sidegraph-bootstrap --resume --profile generic-adr --host claude-code
@@ -123,7 +159,7 @@ sidegraph-init [--db PATH] [--graph PATH] [--no-settings | --ratify-policy VALUE
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--db` | `$SIDEGRAPH_DIR` if set, else existing `.sidegraph/` if present, else `.sidegraph` | store directory to create — the recommended in-repo location; `$SIDEGRAPH_DB` is honored for back-compat (deprecated). Passing a legacy `*.db` file path still works via one-time migration |
+| `--db` | `$SIDEGRAPH_DIR` if set, else existing `.sidegraph/` if present, else `.sidegraph` | store directory to create — the recommended in-repo location; `$SIDEGRAPH_DB` is honored for back-compat (deprecated). A legacy `*.db` file path is refused |
 | `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | `graph.json` path to check for (read-only; never created) |
 | `--no-settings` | off | skip the `.claude/settings.json` step described below entirely: no prompt, no write, just the line a person would need to set it up by hand |
 | `--ratify-policy` | unset | `manual`, `auto-low-risk`, or `auto-all`: write this value into `.claude/settings.json` with no prompt (still never overwrites an existing value there); for a scripted, non-interactive setup that wants an explicit answer instead of the interactive question below. Mutually exclusive with `--no-settings` |
@@ -135,19 +171,20 @@ Bootstraps a target repo for Sidegraph. Run it once, in the repo you want memory
 the Sidegraph checkout):
 
 1. Creates the store's directory (the canonical `decisions/`/`facts/`/`domains/`/`entities/`/
-   `bindings/`/`initiatives/` layout, a committed `format` marker, a committed
+   `bindings/` layout, a committed `format` marker, a committed
    `stamping_live_since` file, and a store-written `.sidegraph/.gitignore` ignoring the derived
    `index.db` and its SQLite sidecars) at `--db`. A fresh store is **format 2** (marker
-   `sidegraph-store 2.0.0`, `requires-sidegraph >= 0.17.0`, `shards 64`); the shard files
+   `sidegraph-store 2.0.0`, `requires-sidegraph >= 0.24.0` from 0.24.0 on (`0.17.0` before;
+   see [mixed versions](stability.md#mixed-versions)), `shards 64`); the shard files
    themselves appear when [`sidegraph-compact`](#sidegraph-compact) first folds records into
    them. The store is created through `Store(...)`, the same call every other entry point
    makes, so the step is inherently idempotent. A new store prints `created store: <path>`. A
    scaffold with a `format` marker but no record yet prints `empty store: <path> exists;
-   complete setup using the guidance below.` If the directory already holds records (or is an
-   un-migrated legacy `decisions.db`, or a legacy `*.db` file path), it prints
-   `already initialized: <path> exists.` instead of touching it again; a legacy path that isn't yet migrated is migrated in place, and the (accurate)
-   "already initialized" message still applies since that's pre-existing data, not a fresh
-   store.
+   complete setup using the guidance below.` If the directory already holds records, it prints
+   `already initialized: <path> exists.` instead of creating a store there. A legacy
+   single-file store (a `decisions.db` inside the directory, or a legacy `*.db` file path) is
+   refused at once, without that message: init prints `store not writable` with the 0.23.x
+   instruction and exits 1, and so does a path with an interrupted 0.23.x migration.
 2. Checks whether `--graph` exists. Prints `found graph: <path>` if so, or `missing graph:
    <path> — run \`graphify update .\` with the environment variable \`GRAPHIFY_NO_AUTO_REFRESH=1\` set, then \`sidegraph-sync\`, to anchor decisions to code
    (optional; Sidegraph works without it).` if not. The graph is optional at init time —
@@ -298,8 +335,12 @@ otherwise it ends with `N pending. Use --accept ID... / --drop ID... / --all.` (
 decisions, standalone facts, and domains; nested facts are represented by their decision).
 
 **With `--accept`/`--drop`/`--all`:** prints one line per id — `accepted <id>` / `dropped
-<id>` on success, `error <id>: <message>` if the id isn't in a state that action allows, or
-doesn't resolve to a decision, fact, or domain at all. Accepting or dropping a decision also
+<id>` on success, `already accepted <id>` / `already rejected <id>` (`already dropped` for a
+domain) when the record already has that verdict (a no-op that does not fail the exit code),
+`error <id>: <message>` if the id is in the opposite terminal state (`already rejected; it
+cannot be accepted` / `already accepted; it cannot be dropped`, which for a decision names
+`retire_decision` and supersession as the ways to close it), in another state that action
+does not allow, or doesn't resolve to a decision, fact, or domain at all. Accepting or dropping a decision also
 prints one `accepted/dropped (evidence of <decision-id>) <fact-id>` line for every supporting
 proposed fact cascaded by that verdict. `--accept` always requires `proposed`. `--drop`
 requires `proposed` for a **decision or fact** (an accepted record is memory, not something
@@ -324,7 +365,7 @@ incompatible `schema_version`, printed as `store not readable (<path>): <error>`
 id passed to `--accept`/`--drop` errors (unknown, not in an eligible status for that action,
 or wrong-kind). The per-id
 `error <id>: ...` lines still print and the rest of the ids are still processed either way —
-the exit code just lets scripts detect the failure via `$?` instead of parsing stdout.
+the exit code just lets scripts detect the failure via `$?` instead of parsing the output; the `error <id>: ...` lines go to stderr.
 
 **Examples:**
 
@@ -347,7 +388,7 @@ sidegraph-sync [--db PATH] [--graph PATH] [--force] [--json] [--check]
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated); warns on stderr if the resolved path doesn't exist yet (see above) |
 | `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | graph.json path |
 | `--force` | off | re-run the full rebind pass even if `graph_version` matches the last sync |
-| `--json` | off | print the report as one JSON object to stdout (nothing else) — same shape as the `sync_anchors` MCP tool's return value (`sync.report_as_dict`); see [CI-consumable output](#ci-consumable-output) below |
+| `--json` | off | print the report as one JSON object to stdout (nothing else) — same shape as the `sync_anchors` MCP tool's return value (`sync.report_as_dict`); on an operational error (exit `1`) it prints `{"error": <message>}` instead, the message also on stderr; see [CI-consumable output](#ci-consumable-output) below |
 | `--check` | off | exit `2` when the report has an attention finding — for CI; see [CI-consumable output](#ci-consumable-output) below |
 
 Re-resolves every tracked concrete entity through the rebind ladder (see
@@ -480,7 +521,8 @@ consumed that heal and discarded its report (both lazy callers wrap the call in
 and reporting an empty, misleadingly-clean skip. Forcing costs one full rebind pass
 (measured ~4.6 ms on this repo's corpus) and closes that hole. A **plain** `sidegraph-sync`
 (or `--json` without `--check`) can still legitimately report `"synced": false` when
-`graph_version` already matches, no cold-reload flag is pending, no pending uncommitted move
+`graph_version` already matches, no cold-reload flag is pending, no orphan written while no graph was present awaits its
+rebind, no pending uncommitted move
 sees a changed `HEAD`, and no remembered Tier-1 reconcile has anything to report — that skip
 is fine there because nothing is asserting on the report. See
 [`guides/ci-cd-maintenance.md`](../guides/ci-cd-maintenance.md) for the full GitHub Actions
@@ -491,7 +533,8 @@ branch, and (with `--check`, which always runs a real pass — see above) a clea
 Returns `1` if `graph.json` can't be read (`graph not
 readable (<path>): <error>`), if the store can't be opened (`store not readable (<path>):
 <error>`), or if the rebind pass itself raises an unexpected exception (`sync failed:
-<error>`) — these operational-error paths are unchanged by `--json`/`--check`. Returns `2`
+<error>`); under `--json` each of these also prints `{"error": <message>}` on stdout, and
+`--check` does not change them. Returns `2`
 with `--check` when the report has an attention finding (see above). Per-entity `error`
 outcomes inside an otherwise-completed sync report (step 6 above) do **not**, on their own,
 override a clean exit *without* `--check` — that's a report finding about one entity, not a
@@ -544,7 +587,7 @@ Two independent importers behind one command, switched by `--docs` and/or `--pro
 | `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | graph.json path |
 | `--kind` | `adr` (rationale mode); auto per document (`--docs` mode — see below) | one of `adr`/`lesson`/`constraint`/`gotcha`; passed explicitly, pins every decision imported this run to that kind |
 | `--propose` | off | write as `proposed` (ratify gate) instead of `accepted` by default; a `--docs`-mode document whose own status reads as draft/pending review lands `proposed` regardless (see below); under a non-`manual` `SIDEGRAPH_RATIFY_POLICY` an eligible `--propose` write is auto-ratified at write time (see [configuration](configuration.md)) |
-| `--dry-run` | off | list candidates without writing canonical records; store open may still migrate supported legacy data or rebuild `index.db` |
+| `--dry-run` | off | list candidates without writing canonical records; store open may still rebuild `index.db` |
 | `--limit N` | unlimited | cap the number processed (rationale nodes after `--path` filtering, or markdown files in `--docs` mode); must be `>= 0` |
 | `--path PREFIX` | none | only import rationales whose `file_path` is under directory `PREFIX`, or is that exact file (repeatable); **rationale mode only** — combining with `--docs` is a hard error |
 | `--docs PATH` | none | switch to markdown-import mode: `PATH` is a file or a directory (recursed for `*.md`); repeatable. Bare (no `PATH`) imports the active profile's ingest globs — `generic-adr`'s by default, or the profile named by `--profile` — see below |
@@ -805,9 +848,48 @@ path), comparing `title`/`context`/`choice`/`rejected`/`consequences` against ev
 that ref that is `accepted`, `proposed` **or** `rejected`. An unchanged re-import is skipped
 (`skipped_existing`) — including a rejected one, which before this was invisible to the
 comparison and so re-imported as a brand-new record on every single run; an edited doc (parsed content changed — including a `consequences`-only
-change, or the SAME file re-parsed under a different `--section-limit`) supersedes the old
-record, keeping its history retrievable. With `--propose` (or the status-derived override
-above), the supersession happens at ratification time instead of immediately.
+change, or the SAME file re-parsed under a different `--section-limit`) is handled by the
+state of the stored record:
+
+- **accepted:** the edit supersedes it, keeping its history retrievable. With `--propose` (or the
+  status-derived override above) the new record lands as a proposal and the accepted one closes
+  at ratification time instead of immediately. If another proposal already supersedes the accepted
+  record (one outside the document's own ref, such as an agent's), the document is skipped with
+  that proposal's id in the report (`skipped_pending_proposal`); ratify or drop it, then re-run.
+- **proposed:** a proposal is never superseded. An edit drops the stale proposal and writes a
+  fresh record with no link to it; a document flipped to `rejected` while its record is still
+  proposed is skipped and reported, and the proposal is left for you to drop or ratify.
+- **rejected:** a rejected record is not a predecessor either. An un-rejected document is written
+  as a fresh record with no `supersedes` link; when the edited document names no anchor of its
+  own, the new record inherits the rejected one's bindings.
+
+**A status-only change is not an edit.** The comparison above reads content only, and the
+document's status is not part of it. The importer reads a status from two places only: a YAML
+frontmatter `status:` key, or a bold `**Status:**` line in the document's top metadata, before
+its first section. A `## Status` section, a MADR `* Status:` list item and a plain `Status:`
+line are not read as a status, so changing them never changes a record's status. A bold
+`**Status:**` line inside a section is part of that section's text, so changing it is a content
+edit. When a re-imported document changes the status the importer reads and nothing else, the
+result depends on the new status:
+
+- **Another open status** (`Proposed` → `Accepted`, `Accepted` → `Draft`, `Accepted` →
+  `Approved`): the document is `skipped_existing` and the stored record keeps its status. A
+  record that landed `proposed` stays in the ratification queue; ratify it in Sidegraph
+  (`sidegraph-ratify`, or the `ratify` MCP tool) rather than expecting the import to promote it.
+- **`superseded` or `deprecated`:** the document is skipped as history
+  (`skipped_superseded_frontmatter`, see above), and the record imported earlier keeps the
+  status it had: an `accepted` record stays live, a `proposed` one stays in the ratification
+  queue (drop it with `sidegraph-ratify --drop`), and a `rejected` one stays rejected. To close
+  an accepted record, supersede it (`supersede_decision`) if something replaces it, or retire
+  it (`retire_decision`) if nothing does.
+- **To or from `rejected`:** the only status change a re-import acts on, by the per-state rules
+  in the list above. A flip to `rejected` supersedes an accepted record with a rejected
+  successor and leaves a proposed one for you to drop or ratify; a flip away from `rejected`
+  writes a fresh record.
+
+When the content changes in the same edit, the re-import treats it as an ordinary edit, and the
+new record's status comes from the document's current status and the run's flags, as for a
+first import. A `superseded` or `deprecated` document is still skipped as history.
 
 **Templates are detected and skipped, never imported as decisions.** A document TEMPLATE — a
 skeleton meant to be copied and filled in — is recognized by a filename stem of `template` (as
@@ -856,12 +938,23 @@ import byte or output-count cap and no environment switch disabling these limits
 is decoded as `utf-8-sig` — plain UTF-8, with a leading byte-order mark stripped when one is
 present. No encoding is guessed. A file whose bytes don't decode (for example, one saved in
 `cp1251`) is counted `skipped_undecodable` instead of raising and aborting the whole run.
-Both the real run and `--dry-run` print an extra block, last, whenever
+Both the real run and `--dry-run` print an extra block, after the other report lines, whenever
 `skipped_undecodable > 0`:
 
 ```
 N file(s) skipped: not valid UTF-8, re-save as UTF-8 to import:
   path/to/bad-file.md
+```
+
+**A file that cannot be read is skipped, named, and the run continues.** A document that
+cannot be opened or read (a dangling `*.md` symlink, a directory or FIFO named `*.md`, a
+permission error) is counted `skipped_unreadable` and listed in `unreadable_files` instead of raising and
+aborting the whole run. Both the real run and `--dry-run` print, after the undecodable-file
+block, whenever `skipped_unreadable > 0`:
+
+```
+N file(s) skipped: could not be read:
+  path/to/dangling.md
 ```
 
 **Real run:** `imported N decision(s), superseded M (skipped: A existing, B unanchorable,
@@ -870,8 +963,8 @@ by the status-derived lines above (`N landed rejected`, `N landed proposed`) whe
 followed by the template-skip line
 and the degenerate-parent line above when applicable, then `N doc(s) refused: a symlink
 pointing outside the repository` and `N existing record(s) had their anchors repaired` when
-non-zero, and the oversized-file block when applicable, with the undecodable-file block
-above last. A non-zero `F` is the profile scope filter, not a parse failure — see
+non-zero, and the oversized-file block when applicable, with the undecodable-file and
+unreadable-file blocks above last. A non-zero `F` is the profile scope filter, not a parse failure — see
 the `--any-doc` note under the flag table above. Under a non-`manual`
 `SIDEGRAPH_RATIFY_POLICY`: `imported N decision(s), superseded M, auto-ratified K (skipped:
 …)` — only fresh `--propose` writes that land as a new `proposed` record are eligible;
@@ -889,12 +982,12 @@ non-`manual` policy), the status-derived-rejected line when applicable (`N would
 proposed (...)`), the template-skip line and the degenerate-parent line above when
 applicable, the `N doc(s) refused: a symlink pointing outside the repository` line when
 non-zero (a dry run never prints the anchors-repaired line), and a per-file breakdown. The
-oversized-file block prints after the per-file breakdown; the undecodable-file block above
-prints last. Both indent their lines by two spaces, so breakdown lines printed
-after the block would read as more undecodable files. No decision or binding is written. Opening the
+oversized-file block prints after the per-file breakdown, then the undecodable-file block, then
+the unreadable-file block above, last. They indent their lines by two spaces, so breakdown
+lines printed after them would read as more skipped files. No decision or binding is written. Opening the
 store may still create a fresh store's own files (`format`, `.gitignore`, `stamping_live_since`,
-`index.db`, its 0-byte `index.db-journal` and the empty record directories), migrate supported
-legacy data or rebuild the derived index.
+`index.db`, its 0-byte `index.db-journal` and the empty record directories) or rebuild the
+derived index.
 
 **Exit code:** `0` on success, including an empty run and every `--dry-run` invocation.
 Returns `1` before touching the graph or store if `--profile` names an unknown profile
@@ -942,7 +1035,7 @@ MCP-only path for agent proposals. Both CLI proposal commands land `status=propo
 | `--min-members N` | `5` | minimum anchorable member count for a community to be proposed; must be `>= 1` |
 | `--paths PREFIX` | none | only consider communities with >= 1 anchorable member whose `file_path` is under directory `PREFIX`, or is that exact file (repeatable) |
 | `--limit N` | `100` | cap the number of *significant* communities considered, after threshold/path filtering, in deterministic community-id order; must be `>= 0`; `0` means unlimited — the full list |
-| `--dry-run` | off | list candidates without writing domain records; store open may still migrate supported legacy data or rebuild `index.db` |
+| `--dry-run` | off | list candidates without writing domain records; store open may still rebuild `index.db` |
 
 One `Domain` draft per community at or above `--min-members` (counting only anchorable
 members): slug/title/summary come from the engine's community label
@@ -1092,9 +1185,9 @@ sidegraph-compact [--db PATH] [--older-than N] [--dry-run] [--settled-days DAYS]
 | Flag | Default | Meaning |
 |---|---|---|
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated) |
-| `--older-than N` | unlimited | **format 1 only** (refused on a format-2 store, exit `2`, the message names `--settled-days`): only compact records that have been in a terminal state for at least `N` days (uses a decision's `valid_to`; domains carry no terminal timestamp at all and are conservatively excluded — kept hot — whenever this flag is set); must be `>= 0` |
-| `--dry-run` | off | list candidates without creating a segment or removing hot files; store open may still migrate supported legacy data or rebuild `index.db` |
-| `--settled-days DAYS` | `7` | **format 2 only** (refused on a format-1 store, exit `2`, the message names `--older-than`): fold a per-record file into the shards once its current content landed on the current branch at least `DAYS` days ago; must be `>= 0`. `0` folds every tracked, committed file and is the only value accepted outside a git work tree |
+| `--older-than N` | unlimited | **format 1 only** (refused on a format-2 store, exit `1`, the message names `--settled-days`): only compact records that have been in a terminal state for at least `N` days (uses a decision's `valid_to`; domains carry no terminal timestamp at all and are conservatively excluded — kept hot — whenever this flag is set); must be `>= 0` |
+| `--dry-run` | off | list candidates without creating a segment or removing hot files; store open may still rebuild `index.db` |
+| `--settled-days DAYS` | `7` | **format 2 only** (refused on a format-1 store, exit `1`, the message names `--older-than`): fold a per-record file into the shards once its current content landed on the current branch at least `DAYS` days ago; must be `>= 0`. `0` folds every tracked, committed file and is the only value accepted outside a git work tree |
 | `--any-branch` | off | **format 2 only**: run on a branch other than the repository's default branch |
 
 On a **format-2** store (`sidegraph-store 2.0.0`, records packed into `shards/`) the command is
@@ -1114,7 +1207,7 @@ first. The dry run says so ("The store would require Sidegraph >= 0.22.0"). `sid
 never folds checks.
 
 - **Branch.** It runs only on the repository's default branch (the target of `origin/HEAD`, else
-  `main` or `master`); on any other branch, or on a detached `HEAD`, it refuses with exit `2`
+  `main` or `master`); on any other branch, or on a detached `HEAD`, it refuses with exit `1`
   unless `--any-branch` is given. The same rule applies to `--dry-run`. Outside a git work tree
   there is no branch rule.
 - **Settled.** A file folds only when it is tracked, unmodified against `HEAD` and settled. The
@@ -1141,25 +1234,25 @@ never folds checks.
   `0`). A packed check whose file has not
   reached the default branch is listed with a warning that `sidegraph-verify --against` reports
   it as `packed-check-without-source` until it does.
-- **Exit codes.** `0` after a completed run, a no-op included. `2` when the command refuses
-  before it opens the store, with a one-line message: a flag that belongs to the other format
+- **Exit codes.** `0` after a completed run, a no-op included. `1` when the command refuses
+  before it opens the store, with a one-line message on stderr: a flag that belongs to the other format
   (`--older-than` here, `--settled-days` or `--any-branch` on format 1), a negative
   `--settled-days`, a path that holds no store (the command never creates one), a branch other
   than the default (`refused: …`), a git state it cannot read (`refused: …`), or a `--dry-run`
-  on a store that opening would write into (no `.gitignore`, no record yet). `2` also when a
-  run stops: the report is printed with a `Stopped:` line giving the reason, for a store that
+  on a store that opening would write into (no `.gitignore`, no record yet). `1` also when a
+  run stops: the report is printed on stdout with a `Stopped:` line giving the reason, for a store that
   fails an entry condition (a bad shard line, a shard conflict, an identity with no effective
   record, shard file names that differ only in case) or a `HEAD` or shard file that changed
   under the run, and for the check fold when the requirement cannot be raised (the running
   Sidegraph is older than 0.22.0; a dry run predicts this stop) or the packed file
-  or `HEAD` changed under the run (`Drift checks stopped: …`). `1` when the store cannot be opened or written (for example a full disk) or
+  or `HEAD` changed under the run (`Drift checks stopped: …`). `1` as well when the store cannot be opened or written (for example a full disk) or
   another writer holds it (`the store is busy, try again`); an interrupted or busy run is safe
   to repeat. A dry run writes no tracked content: it may only refresh the derived, gitignored
   `index.db`.
 
 On a **format-1** store the command works as described below and ends with a line advising
 `sidegraph-migrate`. In both formats a path that holds no store (missing, or an empty directory
-with no record) is refused with exit `2`: `sidegraph-compact` never creates a store.
+with no record) is refused with exit `1`: `sidegraph-compact` never creates a store.
 
 Packs every **terminal**-status record — decisions `superseded`/`rejected`/`deprecated`,
 domains `superseded`/`dropped` — into a new immutable
@@ -1200,8 +1293,8 @@ interrupted compact run`; and mismatches add `would keep K hot file(s): their co
 represented in the archive`. Dry-run compares fresh candidates as well as archived leftovers and
 writes no canonical file, archive segment or digest. `--older-than` filters fresh candidates;
 already archived leftovers remain eligible for cleanup or retention regardless of their current
-hot status or age. Opening the store may still initialize or
-migrate it, or rebuild `index.db`.
+hot status or age. Opening the store may still initialize it
+or rebuild `index.db`.
 
 **Real-run output:** when there was nothing to do at all, a single line —
 `nothing to compact` (bare), or `nothing to compact; Z skipped (not terminal enough)` and/or
@@ -1255,12 +1348,13 @@ over the old marker, and the store directory flushed), so from then on the store
 format-2 store whose records are all still per-record files. It then runs the maintenance of
 [`sidegraph-compact`](#sidegraph-compact) with no age limit: the shard files and the
 `.gitattributes` line `*.shard -text` are created, every per-record file of the packable types
-(decisions, facts, entities, domains and bindings; initiatives stay as they are) and every
+(decisions, facts, entities, domains and bindings; a legacy `initiatives/` directory stays as it is) and every
 archive segment is folded into the shards verbatim, and a file or segment is deleted only when a shard line holds
 its body. It never commits: review the changes under `.sidegraph/` and commit them in one pull
-request. The marker requires `max(current requirement, 0.17.0)`.
+request. The marker requires `max(current requirement, 0.17.0)`, or
+`max(current requirement, 0.24.0)` from 0.24.0 on.
 
-- **Entry conditions** (a format-1 store; the command refuses with exit `2`, naming each reason,
+- **Entry conditions** (a format-1 store; the command refuses with exit `1`, naming each reason,
   and writes nothing): the store opens; the checkout is on the default branch unless
   `--any-branch` (the target of `origin/HEAD`, else `main` or `master`); nothing under
   `.sidegraph/` is uncommitted; no `parse-error`, `unsafe-record-id` or `filename-id-mismatch`
@@ -1283,12 +1377,12 @@ request. The marker requires `max(current requirement, 0.17.0)`.
   refuses and names that command, so it is never a way to fold unsettled files on a migrated
   store.
 - **Report and exit codes** are those of [`sidegraph-compact`](#sidegraph-compact) on a format-2
-  store, with `format` listed among the files written. `0` after a completed run; `2` on a
-  refusal (every reason is printed as a `refused:` line; a store that does not open, including an
-  unreadable `index.db`, is a refusal) or when the run stops (the report ends with a `Stopped:`
-  line); `1` when another writer holds the store (`the store is busy, try again`) or reading or
-  writing it fails (an I/O error such as a full disk). A path that holds no store is refused with
-  exit `2`: the command never creates one. A dry run builds no store handle and creates no file,
+  store, with `format` listed among the files written. `0` after a completed run; `1` on a
+  refusal (every reason is printed on stderr as a `refused:` line; a store that does not open,
+  including an unreadable `index.db`, is a refusal), when the run stops (the report on stdout
+  ends with a `Stopped:` line), when another writer holds the store (`the store is busy, try
+  again`) or when reading or writing it fails (an I/O error such as a full disk). A path that
+  holds no store is refused with exit `1`: the command never creates one. A dry run builds no store handle and creates no file,
   not even `.gitignore` or `index.db`. After a run, findings of `sidegraph-verify` that did not
   stop it (a dangling `supersedes`, for example) are listed as carried over.
 
@@ -1337,11 +1431,11 @@ sidegraph-verify [--db PATH] [--against GIT_REF] [--json]
 |---|---|---|
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated) — but see "Exit code" below: like `sidegraph-doctor`, `sidegraph-stats`, `sidegraph-viz` and `sidegraph-export-okf`, a missing directory here is a hard failure, never something this command creates (mutating commands warn and may create one) |
 | `--against GIT_REF` | none | also run the transition layer: classify every store file that changed vs `GIT_REF` against the store's own write-path rules (git plumbing — `git diff`/`git show`; CI mode) |
-| `--json` | off | print `{"clean": bool, "violations": [{"code", "path", "detail"}, ...]}` as one JSON object to stdout (nothing else) |
+| `--json` | off | print `{"clean": bool, "violations": [{"code", "path", "detail"}, ...]}` as one JSON object to stdout (nothing else); on an operational error (exit `1`) the object has `clean: false`, the violations the snapshot layer found before a failed `--against`, and an `error` key holding the message also printed on stderr |
 
 Lints the store's canonical files against the invariants `store.py`'s write API enforces at
 write time. **Pure read** — opens the canonical JSON files directly and never constructs a
-`Store`, so a lint run can never itself write to `index.db`, migrate a legacy store, or
+`Store`, so a lint run can never itself write to `index.db` or
 mutate anything it inspects (see [`reference/store-format.md`](store-format.md) for the
 on-disk layout this walks). Two layers, combined into one report:
 
@@ -1450,16 +1544,19 @@ not invented — see `verify.py`'s module comment above the mutable-field tables
 which methods):
 
 - **Decisions:** `status` (only along a real transition — `proposed→accepted`,
-  `proposed→rejected`, `proposed→superseded`, `accepted→superseded`, `accepted→deprecated`),
+  `proposed→rejected`, `proposed→superseded`, `accepted→superseded`, `accepted→deprecated`,
+  and `proposed→deprecated` only when the ratifier stamp appears in the same diffed range),
   `valid_to` (`null → value`, once). `ratified_at`/`ratified_by` may be set once, when a
   proposed record is accepted — even if it moves on to a later state (`superseded`) within the
-  same diffed range — and never changes again after that. Everything else (`title`, `kind`,
+  same diffed range — and never changes again after that. `retired` may be set once, from
+  `null`, only together with the move to `deprecated` (`retire_decision`), and never changes
+  again; on any other move it is `illegal-field-change`. Everything else (`title`, `kind`,
   `context`, `choice`, `rejected`, `consequences`, `layer`, `valid_from`, `supersedes`,
   `provenance`) is immutable.
 - **Facts:** the same shape, `status`/`valid_to`/the ratifier stamp, but **without**
-  `accepted→deprecated` — no live write path ever sets a fact `deprecated` (`schema.py`:
-  "DEPRECATED unused for facts", unlike the decision-side forward-compat carve-out above), so
-  that jump is *not* legal here and is flagged `illegal-status-jump` if it appears. Legal:
+  `accepted→deprecated` — no write path ever sets a fact `deprecated` (`retire_decision`
+  takes decisions only), so that jump is *not* legal here and is flagged
+  `illegal-status-jump` if it appears. Legal:
   `proposed→accepted`, `proposed→rejected`, `proposed→superseded`, `accepted→superseded`.
   Everything else (`statement`, `source`, `supports`, `valid_from`, `supersedes`,
   `provenance`) is immutable.
@@ -1476,9 +1573,9 @@ which methods):
 - **Bindings:** referential integrity only — any change to a `bindings/<record_id>.json`
   file, including deletion, is never flagged here (machine-managed payload; the snapshot
   layer's `dangling-binding-entity` check covers correctness of the new state).
-- **Initiatives:** no append-only guard in `store.py` at all (`Store.upsert_initiative` is a
-  bare, unconditional upsert) — only a *deletion* is flagged (`illegal-deletion`); no
-  field-level check runs for initiatives.
+- **Legacy initiatives** (`initiatives/*.json`, written before 0.24; nothing writes them now):
+  only a *deletion* is flagged (`illegal-deletion`); no field-level check runs, and the
+  snapshot layer does not read them.
 - **Auxiliary verifications** (`verifications/*.json`): write-once, including formatting;
   additions are schema/reference-checked by the snapshot layer, and every later modification
   is illegal. On a format-1 store a deletion is illegal too. On a packed (format 2) store a
@@ -1563,9 +1660,9 @@ sidegraph-doctor [--db PATH] [--against GIT_REF] [--check] [--stale-days N] [--j
 |---|---|---|
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated) — same never-auto-create rule as `sidegraph-verify` (see above) |
 | `--against GIT_REF` | none | also run `sidegraph-verify`'s transition layer vs `GIT_REF` (identical semantics — same operational-error rules) |
-| `--check` | off | advisory findings also exit `2`, except `maintenance-due` (default: report only; a *skipped* check never fails, even with `--check`) |
-| `--stale-days N` | `30` | flag a proposed decision/domain whose id timestamp is strictly older than `N` days; must be `>= 0` |
-| `--json` | off | print `{"clean", "violations", "findings", "skipped"}`, plus `drift_groups` when per-record `code-drift` is grouped, as one JSON object to stdout (nothing else) |
+| `--check` | off | advisory findings also exit `2`, except those listed as exempt (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`) (default: report only; an entry in the JSON `skipped` list never fails, even with `--check`; store-level `code-drift` notes are findings and can fail) |
+| `--stale-days N` | `30` | flag a proposed decision/domain whose id timestamp is strictly older than `N` days; must be `>= 0`, and small enough that `N` days before today is still a date (about 739,000 today); otherwise exit `1` before the store is touched |
+| `--json` | off | print `{"clean", "violations", "findings", "skipped"}`, plus `drift_groups` when per-record `code-drift` is grouped, as one JSON object to stdout (nothing else); on an operational error (exit `1`) the object has `clean: false`, empty `findings`, `skipped: ["advisory-checks"]`, the violations found before a failed `--against`, and an `error` key holding the message also printed on stderr |
 | `--flat` | off | one `code-drift` line per record, as before: restores the flat listing and skips the grouping by file |
 | `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | read-only input used for the `graph-root-mismatch` and `graph-stale` checks below; missing or unreadable skips both and says so (see *Skipped checks* below) |
 
@@ -1582,8 +1679,10 @@ never constructs a `Store`.
   the snapshot layer works without git.
 - **Advisory section** — `doctor.curate`: curation findings that never gate the exit code
   by default; `--check` escalates them to exit `2`, mirroring `sidegraph-sync --check`. The
-  one exception is `maintenance-due`, routine upkeep on a healthy packed store: it is still
-  printed and still in `--json`, but never changes the exit code.
+  exempt findings are `maintenance-due` (routine upkeep on a healthy packed store),
+  `deprecated-auto-accept`, and `superseded-no-live-successor` (it cannot clear once the
+  knowledge is restated): each is still printed and still in `--json`, but never changes the
+  exit code.
 
 **Finding codes** (the `code` field in `--json`'s `findings`, or the first column of a
 plain-text line):
@@ -1596,6 +1695,7 @@ plain-text line):
 | `stale-proposal` | a proposed decision/domain whose ULID timestamp is strictly older than `--stale-days` |
 | `unreferenced-entity` | a hot entity no committed anchor set references (structural `domain:*`/`community:*` entities are exempt) |
 | `expired-open-validity` | a decision's `valid_to` is strictly past but its status is still open (`proposed`/`accepted`) |
+| `superseded-no-live-successor` | a `superseded` decision or fact that has successors, all `rejected`: no live record carries its knowledge (a store written before the live-head rule, after a successor proposal was dropped). A successor that is accepted, proposed, deprecated or itself superseded keeps the chain healthy, and the finding is withheld for the whole store while `sidegraph-verify` reports a record it could not read in full (`parse-error`, `bad-validity-window`, `filename-id-mismatch`, `bad-archive-segment`, `bad-shard-line`, `unsafe-record-id`, `shard-conflict`, `duplicate-packed-record`, `symlinked-store-entry`) or cannot run; no successor at all is `sidegraph-verify`'s `superseded-without-successor`. Archived decisions count on both sides. The record cannot be superseded again, so the heal is a fresh `add_decision`/`add_fact`, which does not link to the old record: the finding stays as history, so **`--check` does not escalate it** |
 | `code-drift` | an open (`proposed`/`accepted`) decision's anchored file(s) changed since capture, or an earlier scoped check (including its declared sections) no longer applies; `record_drift_check` can record an explicit current inspection without rewriting the decision (MCP only); when binding statuses are uncomputed or unavailable, excludes committed deletions and says "binding status unknown"; also carries the "N record(s) predate commit stamping — not checkable" and git-unavailable notes, in place, when either applies. The default text groups the per-record lines by drifted file (`code-drift: N record(s) in M file group(s)`), numbers each distinct `git diff <old blob> <new blob>` once, and may add `anchored region unchanged; sibling sections of the file may still matter` to a record whose anchored Python function or Markdown section is textually identical at both ends; `--flat` restores one line per record. The hint is a reading aid, never a verdict: it changes no count and no exit code. `--json` adds a sibling `drift_groups` key (`partial`, `notes`, `groups[].records[]` with `basis`, `reason`, `diff` and `hint`); `findings` is unchanged |
 | `never-surfaced` | an accepted decision has `0` shows against `N > 0` queries on its anchored file(s) — anchored where people repeatedly work, never once rendered or injected by a hook |
 | `stale-instructions` | an auto-injected agent-instructions file beside the store (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`) still carries the distinctive wording of a **superseded** decision — that file reaches the agent at turn zero, before retrieval, so an abandoned rule surviving there outranks the store's correction by default. Verbatim-ish match on normalized text with length/word floors; superseded records only; no git call. Advisory: it reports a quotation, not a proven contradiction — the file may be narrating history |
@@ -1604,13 +1704,15 @@ plain-text line):
 | `graph-root-mismatch` | `graphify update` was likely run from a subdirectory instead of the repository root, so every recorded `source_file` is relative to that subdirectory instead — every anchor in the graph will look orphaned until it's rebuilt from the root. Detected from `--graph`: a sample of anchorable `source_file` values that mostly don't exist relative to the repo root, but DO all exist under one specific subdirectory (named in the finding). Silent on a legitimately partial graph (a doc-only corpus, an `--exclude`d build) and on too small a sample to judge safely; needs `--graph` to resolve (missing/unreadable simply skips it) |
 | `snapshot-split` | Two or more accepted domains descend from one covered snapshot domain, so neither holds its frozen membership. Refresh each part: `sidegraph-domains snapshot --refresh --domain <each part>` |
 | `graph-stale` | the graph was built at a commit HEAD has moved past (graph.json's `built_at_commit`), and a file the graph should reflect changed since: one it holds was edited after the graph was last built (the later of `graph.json`'s and its sibling `manifest.json`'s modification times) or deleted, or a new file of a type it holds now exists (not under a dot-directory, which Graphify skips). Memory cannot see or anchor to code added after the build. The detail gives the build commit, how many commits behind HEAD (or "a commit outside HEAD's history" after a checkout of an older commit), how many files changed, and up to five example paths; the fix is to rebuild from the repository root by running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then `sidegraph-sync`. Silent when the build commit is HEAD, when only file types the graph does not hold changed (a `.yml` against a `.py`-only graph), and when a graph built from a dirty tree was committed afterwards, or a `graphify update .` found nothing to change and rewrote only `manifest.json` (the file is no newer than the build); also silent when the comparison cannot be made (no `built_at_commit`, one that is not a full commit id, a graph outside a git repository, a build commit the repository lacks, git unavailable or slower than 3 seconds). **`--check` exits `2` on it**, so a CI job that runs doctor should rebuild the graph first; one that does is unaffected. Needs `--graph` to resolve |
-| `orphaned-record` | an open (`proposed`/`accepted`) decision or fact whose every Tier-2 (leaf) anchor is `orphaned`, so retrieval reaches it only through its file or domain; one finding per record, at its canonical file, naming how many leaf anchors it has. Statuses come from `index.db` and read "as of last sync", so the check is skipped while the statuses are not computed for the current graph (see *Skipped checks* below; run `sidegraph-sync`). It is the record-level view of `orphaned-binding` (any record it flags has orphaned bindings, which that code already reports), so it adds no new reason for `--check` to exit `2`. The fix is to rebuild a stale graph, then `sidegraph-sync`; otherwise re-anchor the record with `add_anchors` or the `heal-anchors` skill, or supersede it if the code is gone. Needs a usable `index.db` |
+| `orphaned-record` | an open (`proposed`/`accepted`) decision or fact whose every Tier-2 (leaf) anchor is `orphaned`, so retrieval reaches it only through its file or domain; one finding per record, at its canonical file, naming how many leaf anchors it has. Statuses come from `index.db` and read "as of last sync", so the check is skipped while the statuses are not computed for the current graph (see *Skipped checks* below; run `sidegraph-sync`). It is the record-level view of `orphaned-binding` (any record it flags has orphaned bindings, which that code already reports), so it adds no new reason for `--check` to exit `2`. The fix is to rebuild a stale graph, then `sidegraph-sync`; otherwise re-anchor the record with `add_anchors` or the `heal-anchors` skill, or follow the [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings) if the claim changed or its subject is gone. Needs a usable `index.db` |
 | `store-uncommitted` | store files nobody committed for at least 24 hours: records, bindings, entities, an archive segment or the root files (`format`, `.gitignore`, `stamping_live_since`) that `git status` shows as new, modified or deleted. One finding, at the store path, naming how many files there are, how old the oldest is and what kinds they are (a new `archive/` segment beside deleted records reads as "a compaction"). A new record or entity file is aged by its ULID name, which a `git stash` cannot rewrite; a modified file, or anything under `bindings/`, by its modification time; a deleted file by its subdirectory's, a lower bound. Entries fully staged in the index are not counted, so a `--check` run in a pre-commit hook does not block the commit that fixes the problem. **`--check` exits `2` on it.** The fix is to commit the store in a pull request. Silent, and not run, outside a git repository, with no `git`, or when git is slower than 2 seconds |
 | `plugin-off-in-subdirectories` | Claude Code sessions started below the repository root run without the Sidegraph plugin. Claude Code reads the project settings (`.claude/settings.json`) of the launch directory only, and the repository root's `.claude/settings.local.json` for every launch inside the repository; `enabledPlugins` merges key by key (user settings, then project, then local). Two problems, reported as up to two findings: (a) the plugin is enabled only in the root's `.claude/settings.json`, so every directory below the root without its own enabling settings runs without it (reported at that file); (b) nested directories with a `.claude/settings.json` or `.claude/settings.local.json` of their own that sets `enabledPlugins` and whose merge leaves the plugin off (reported at the first such directory, naming how many there are; a nested settings file without `enabledPlugins` cannot change the merge, so it is not counted). The walk covers every directory that holds a tracked file (one `git ls-files` over the index, a few tens of milliseconds on a large repository) and looks for the two settings files in each directly, so a repository that ignores `.claude/` is covered. User settings are read from `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set and non-empty, else from `~/.claude/settings.json`. Silent when the plugin is not enabled for a launch at the root at all, and not run outside a git repository, with no `git`, or when `git ls-files` takes longer than 5 seconds. **`--check` exits `2` on it**; enabling the plugin at user scope or in the root's `.claude/settings.local.json` clears it |
-| `refresh-helper-outdated` | a git hook runs an older graph refresh helper that uses directory-based locking (unsafe with uutils `mkdir`), or whose Graphify line lacks `GRAPHIFY_NO_AUTO_REFRESH=1` (Graphify 0.9.87 and later can rewrite installed agent skills after an upgrade). Advisory, per clone (the helper lives in `.git/hooks`); **`--check` exits `2` on it**. `maintenance-due` is the one finding it does not escalate. One hook that runs the helper is enough, and a recorded decline does not silence it. The fix is `sidegraph-init` (no flag), which refreshes the helper and keeps a recorded hook choice. Silent outside a git repository, with no helper, or when no hook runs it |
-| `engine-version` | the graph was built by a Graphify release this Sidegraph was not tested with (its `graph.graphify_version` stamp is neither absent nor in the tested set), so anchors and domains may read differently. Advisory; **`--check` exits `2` on it**. `maintenance-due` is the one finding it does not escalate. Pin Graphify to a tested release listed under [Engine version pinning](../integrations/graphify.md#engine-version-pinning), then rebuild the graph. It also fires for a mention-edge graph (Graphify 0.9.62 or later) over a store without a minimum Sidegraph version; follow the [0.14 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.14.md). A malformed marker leaves this second case silent. Silent without a readable graph |
-| `store-not-migrated` | the store uses the pre-0.17 layout (a format marker below major 2) and holds at least one record of any kind (initiatives included). One finding, at the store path, naming `sidegraph-migrate` (run on the default branch, after the team checklist in the [0.17 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.17.md)) and the `sidegraph:compact` skill. Degraded; **`--check` exits `2` on it**. `maintenance-due` is the one finding it does not escalate. Silent on an empty store and on a store that is already format 2 |
-| `maintenance-due` | a format-2 store that `sidegraph-compact` would tidy: more than 200 per-record files (drift-check files `verifications/*.json` count, the packed file does not), or a legacy `archive/` segment it would delete, or a misplaced or duplicated shard line, or a stray shard file. `sidegraph-verify` does not report these; maintenance heals them. A segment kept because one of its lines is not safe to delete does not count. Advisory, and the one finding **`--check` does not escalate**: it is printed and listed in `--json`, but the exit code stays `0`. Run `sidegraph-compact` on the default branch. Silent on a store that is not format 2 |
+| `refresh-helper-outdated` | a git hook runs an older graph refresh helper that uses directory-based locking (unsafe with uutils `mkdir`), or whose Graphify line lacks `GRAPHIFY_NO_AUTO_REFRESH=1` (Graphify 0.9.87 and later can rewrite installed agent skills after an upgrade). Advisory, per clone (the helper lives in `.git/hooks`); **`--check` exits `2` on it**. The exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`) are the only ones it does not escalate. One hook that runs the helper is enough, and a recorded decline does not silence it. The fix is `sidegraph-init` (no flag), which refreshes the helper and keeps a recorded hook choice. Silent outside a git repository, with no helper, or when no hook runs it |
+| `engine-version` | the graph was built by a Graphify release this Sidegraph was not tested with (its `graph.graphify_version` stamp is neither absent nor in the tested set), so anchors and domains may read differently. Advisory; **`--check` exits `2` on it**. The exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`) are the only ones it does not escalate. Pin Graphify to a tested release listed under [Engine version pinning](../integrations/graphify.md#engine-version-pinning), then rebuild the graph. It also fires for a mention-edge graph (Graphify 0.9.62 or later) over a store without a minimum Sidegraph version; follow the [0.14 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.14.md). A malformed marker leaves this second case silent. Silent without a readable graph |
+| `store-not-migrated` | the store uses the pre-0.17 layout (a format marker below major 2) and holds at least one record of any kind (initiatives included). One finding, at the store path, naming `sidegraph-migrate` (run on the default branch, after the team checklist in the [0.17 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.17.md)) and the `sidegraph:compact` skill. Degraded; **`--check` exits `2` on it**. The exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`) are the only ones it does not escalate. Silent on an empty store and on a store that is already format 2 |
+| `deprecated-auto-accept` | `SIDEGRAPH_AUTO_ACCEPT=on` is set in the environment doctor runs in. The variable is deprecated: it lands agent captures `accepted` with no ratifier stamp and no live-anchor requirement. Set `SIDEGRAPH_RATIFY_POLICY=auto-all` instead (it stamps `ratified_by`, but a record with no live anchor stays `proposed`). One finding, at `SIDEGRAPH_AUTO_ACCEPT`; `--check` never fails on it |
+| `record-fields-requirement` | the store's `requires-sidegraph` is below the release that added a field to a stored record, so an older client could drop that field when it rewrites a record. The detail names `sidegraph-require --sidegraph X.Y.Z`; run it and commit `.sidegraph/format` (no command raises the requirement for you). Advisory, doctor only; **`--check` exits `2` on it**. Silent until a release raises the constant above the requirement every store already carries (`0.17.0`), while the running Sidegraph is older than the constant, on an empty store, and once the store requires the release |
+| `maintenance-due` | a format-2 store that `sidegraph-compact` would tidy: more than 200 per-record files (drift-check files `verifications/*.json` count, the packed file does not), or a legacy `archive/` segment it would delete, or a misplaced or duplicated shard line, or a stray shard file. `sidegraph-verify` does not report these; maintenance heals them. A segment kept because one of its lines is not safe to delete does not count. Advisory, and one of the exempt findings **`--check` does not escalate**: it is printed and listed in `--json`, but the exit code stays `0`. Run `sidegraph-compact` on the default branch. Silent on a store that is not format 2 |
 
 `degraded-binding`/`orphaned-binding` come from `index.db`, opened strictly read-only — it
 is the only source for binding status (canonical `bindings/*.json` files carry identity,
@@ -1675,8 +1777,9 @@ Use `record_id` to retrieve or check a drifted decision; do not parse the shard 
 
 `clean` is `true` only when both `violations` and `findings` are empty.
 
-**Skipped checks.** A check that cannot look says so and is never a finding: it affects neither
-the exit code nor `clean`, even under `--check`. Without a usable `index.db` the index checks
+**Skipped checks.** Entries in the JSON `skipped` list affect neither the exit code nor
+`clean`, even under `--check`. Store-level `code-drift` evidence notes are findings instead,
+even when their detail says "check skipped", and can make `--check` exit `2`. Without a usable `index.db` the index checks
 (`binding-status`, `never-surfaced`, `orphaned-records`) are listed in `skipped` and printed as
 "... check skipped (no usable index.db — run sidegraph-sync)". `binding-status` and
 `orphaned-records` are also skipped while the index is usable but its binding statuses are not
@@ -1697,15 +1800,15 @@ of the lines above. A store whose format marker refuses this version also skips 
 checks: `remaining checks skipped (<the reason>)`, for example
 `remaining checks skipped (This store requires Sidegraph >= 0.15.0; this is 0.14.0.)`.
 A missing graph is deliberately not a finding: `--check` escalates
-every finding except `maintenance-due`, so a CI job that runs doctor without building a graph
+every finding except the exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`), so a CI job that runs doctor without building a graph
 would start exiting `2`.
 
 **Exit code:** `0` healthy — advisory findings alone stay `0` without `--check`. `1`
 operational error — same paths as `sidegraph-verify` (unreadable store; or, when `--against`
-is used, a bad ref or store outside any git repo), plus a negative `--stale-days`, rejected before the
+is used, a bad ref or store outside any git repo), plus a negative `--stale-days` or one too large to date, rejected before the
 store is touched (same hard-usage treatment as `sidegraph-import --limit`). `2` strict
-violations, or — with `--check` — advisory findings too, except `maintenance-due`, which never
-changes the exit code.
+violations, or — with `--check` — advisory findings too, except the exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`),
+which never change the exit code.
 
 **Examples:**
 
@@ -1737,15 +1840,17 @@ sidegraph-viz [--db PATH] [--out sidegraph-graph] [--open] \
   product).
 - `--max-nodes N` — cap the node count; excess is truncated lowest-priority-first and the drop
   is reported (never silent). Default 800.
-- `--json` — print the `{nodes, edges, stats}` JSON to stdout and write no HTML.
+- `--json` — print the `{nodes, edges, stats}` JSON to stdout and write no HTML; on an operational error (exit `1`) it prints `{"error": <message>}` instead, the message also on stderr.
 
 Rendering does not mutate canonical records or `graph.json`. It opens the ordinary `Store`,
-so startup may migrate supported legacy data or rebuild `index.db`. Binding status
+so startup may rebuild `index.db`. Binding status
 (live/degraded/orphaned) reflects the last `sidegraph-sync`; run sync first for a fresh view.
-Exit code 0 on success (a store with problems still exits 0 — the problems are the output), 2
+Exit code 0 on success (a store with problems still exits 0 — the problems are the output), 1
 on an operational error: an uninitialized store, a store that cannot be opened (for example
-a corrupt `index.db` or a format marker this version does not read; one
-`store not readable (<path>): <error>` line on stderr, and with `--json` nothing on stdout),
+a corrupt `index.db`, an index row that does not parse, or a format marker this version
+does not read; one
+`store not readable (<path>): <error>` line on stderr, and with `--json` that line as
+`{"error": <message>}` on stdout),
 or an unwritable output path.
 
 ## `sidegraph-export-adr`
@@ -1783,7 +1888,7 @@ Export never opens Store, migrates it, or updates source/index/graph files. Drif
 report-only and can be unknown, including for unopened WAL indexes. Both import and
 bootstrap skip generated projections; importing exported ADRs does not create fresh
 memory. Exit 0 for successful preview/write (including an admitted empty population), 2
-for invalid input/store, conflicts or operational errors. See the
+for plan conflicts (reported, nothing written), 1 for invalid input/store or operational errors. See the
 [ADR export guide](../guides/adr-export.md) for formats, custom templates, source tracing,
 conflict recovery, drift limits and round-trip semantics.
 
@@ -1828,7 +1933,7 @@ parent, or a previous export that cannot be renamed aside is written in place in
 write failure there can leave a partial export. A killed export can leave `.<out>.okf-new-*`
 or `.<out>.okf-old-*` beside `--out` (the repo root for the default `--out`). The `-old-`
 one holds the previous export: if `--out` is missing, rename it back; if `--out` already holds
-the new bundle, delete it. Exit `0` on success, `2` on an operational error
+the new bundle, delete it. Exit `0` on success, `1` on an operational error
 (uninitialized store — never auto-created — a store that cannot be opened, printed as
 `store not readable (<path>): <error>` on stderr, or a refused/unwritable out dir or its
 parent).
@@ -1862,19 +1967,19 @@ there anyway", so no line of the report claims an effect.
 
 - `--db PATH` — the store **directory**; resolved like every other command (see the top of
   this page). The command reads `<store>/index.db` and never creates or rebuilds it. It never
-  opens the store, so a legacy single-file `*.db` path is not migrated here: it exits `2` for
-  want of an `index.db`. Run a command that opens the store on it first (`sidegraph-init`).
+  opens the store, so a legacy single-file `*.db` path exits `1` for want of an `index.db`.
 - `--window DAYS` — how many days of journal to report on. Default `30`, which is also how
   long the journal is kept (older rows are pruned at each `SessionStart`), so a larger value
-  reports what is still held and no more. Must be a positive whole number; anything else
-  exits `2` before any path is touched.
+  reports what is still held and no more. Must be a positive whole number: a number out of range (`0`, a negative or one too large to date)
+  exits `1` before any path is touched, and a value that is not an integer at all is an argparse
+  usage error that exits `2`.
 - `--graph PATH` — the Graphify `graph.json`, read only to size the graph and to compare the
   commit it was built at with `HEAD` (a few bounded, read-only git calls), default
   `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`. The default resolves against the
   STORE's project root (so a store elsewhere is not measured against whatever graph sits
   beside your shell); a path you type resolves against the shell's directory. A graph that is missing or unreadable is
   stated in the report, not an error.
-- `--json` — print the same report as one JSON object and nothing else. The text and the JSON
+- `--json` — print the same report as one JSON object and nothing else (on an operational error (exit `1`) it prints `{"error": <message>}` instead, the message also on stderr). The text and the JSON
   are two renderings of one computation, so the numbers cannot disagree, and so do their
   absences: where the text withholds a figure because its source is absent, the JSON carries
   `null` for it, never a zero. That is `activation` and `retained_days` with recording off (as
@@ -2028,12 +2133,12 @@ Lines the report will not invent:
   them `all time`.
 
 **Exit codes:** `0` on success — a store with no activity still exits `0`, the silence is the
-output; `2` on an operational error: a non-positive or unrepresentable `--window`, no store
+output; `1` on an operational error (the message is on stderr): a non-positive or unrepresentable `--window`, no store
 index at the resolved path (run `sidegraph-init` first — a fresh clone has the committed
 records but not the derived index, and `sidegraph-init` rebuilds it), an index SQLite cannot
 read, an index or store directory the process may not search (`cannot read the store index`,
-not "no store index"), a record directory it may not list or search (`cannot read the store`,
-naming that directory), a store whose format marker refuses this version
+not "no store index"), a record directory it may not list or search, or one that a symlink
+loop or an I/O error stops (`cannot read the store`, naming that directory or file), a store whose format marker refuses this version
 (`cannot read the store (<dir>): This store requires Sidegraph >= X.Y.Z; this is A.B.C.`),
 or a record row in it that does not parse (the message names the index
 file, the table and the record id). An index from before the render journal, and a graph that is missing or unreadable, are
@@ -2083,7 +2188,7 @@ sidegraph-blame <file> [--range A,B] [--db PATH] [--json]
 |---|---|---|
 | `--range A,B` | whole file | blame only lines A through B (`git blame -L A,B`) |
 | `--db` | shared store-path resolution | canonical Sidegraph store directory |
-| `--json` | off | print the hunk/record table as one JSON object to stdout |
+| `--json` | off | print the hunk/record table as one JSON object to stdout; on an operational error (exit `1`) it prints `{"error": <message>}` instead, the message also on stderr |
 
 `git blame`, joined to the decisions and facts each hunk's commit carries — see
 [`reference/git-bindings.md`](git-bindings.md) for the join mechanics (commit trailers +

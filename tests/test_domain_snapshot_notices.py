@@ -6,24 +6,28 @@ from __future__ import annotations
 
 from sidegraph.cli import ratify_main
 from sidegraph.doctor import curate
-from sidegraph.schema import Domain, Provenance
+from sidegraph.schema import Domain, DomainStatus, Provenance
 from sidegraph.server import _ratify_impl, _supersede_domain_impl
 from sidegraph.store import Store
-from tests.snapshot_support import accept, standard_domains
+from tests.snapshot_support import accept, merged_heir, standard_domains
 from tests.test_sync_snapshot_membership import _snapshotted
 
 
 def _successor(store, old, slug):
-    return store.supersede_domain(
-        old.domain_id,
-        Domain(
-            slug=slug,
-            title=slug,
-            summary="s",
-            path_prefixes=["src"],
-            supersedes=old.domain_id,
-            provenance=Provenance(source="manual"),
-        ),
+    heir = _heir(old, slug)
+    if store.get_domain(old.domain_id).status == DomainStatus.ACCEPTED:
+        return store.supersede_domain(old.domain_id, heir)
+    return merged_heir(store, heir)  # a second heir only arrives with a merge
+
+
+def _heir(old, slug):
+    return Domain(
+        slug=slug,
+        title=slug,
+        summary="s",
+        path_prefixes=["src"],
+        supersedes=old.domain_id,
+        provenance=Provenance(source="manual"),
     )
 
 

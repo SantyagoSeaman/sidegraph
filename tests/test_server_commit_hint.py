@@ -12,6 +12,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
+import sidegraph
 from sidegraph.server import (
     _add_anchors_impl,
     _add_decision_impl,
@@ -19,11 +22,13 @@ from sidegraph.server import (
     _add_fact_impl,
     _propose_decisions_impl,
     _propose_domains_impl,
+    _retire_decision_impl,
     _supersede_decision_impl,
     _supersede_domain_impl,
     _supersede_fact_impl,
 )
 from sidegraph.store import Store
+from sidegraph.store_layout import RECORD_FIELDS_REQUIREMENT
 
 HINT = (
     "Commit {prefix} in the same change as the work that produced this record, so it reaches "
@@ -33,6 +38,7 @@ HINT = (
 DICT_TOOLS = [
     "add_decision",
     "supersede_decision",
+    "retire_decision",
     "add_fact",
     "supersede_fact",
     "add_anchors",
@@ -58,16 +64,26 @@ def plain_store(tmp_path: Path) -> Store:
     return Store(parent / ".sidegraph")
 
 
+@pytest.fixture(autouse=True)
+def release_version(monkeypatch):
+    """``retire_decision`` writes only on a store that requires the release adding ``retired``;
+    a store created by that release does."""
+    monkeypatch.setattr(sidegraph, "__version__", RECORD_FIELDS_REQUIREMENT)
+
+
 def run_dict_tools(store: Store) -> dict[str, dict]:
     anchors = [{"name": "x", "file_path": "x.py"}]
     decision = _add_decision_impl(store, None, "t", "adr", "c", "ch")
+    duplicate = _add_decision_impl(store, None, "dup", "adr", "c", "ch")
     fact = _add_fact_impl(store, None, statement="s", source="src", anchors=anchors)
     domain = _add_domain_impl(store, None, slug="pay", title="Pay", summary="s.")
+    store.ratify_domains(accept=[domain["domain_id"]])  # only an accepted domain is superseded
     return {
         "add_decision": decision,
         "supersede_decision": _supersede_decision_impl(
             store, None, decision["id"], "t2", "adr", "c2", "ch2"
         ),
+        "retire_decision": _retire_decision_impl(store, duplicate["id"], "subject gone"),
         "add_fact": fact,
         "supersede_fact": _supersede_fact_impl(
             store, None, fact["id"], statement="s2", source="src2", anchors=anchors

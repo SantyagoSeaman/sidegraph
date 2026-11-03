@@ -37,8 +37,7 @@ def test_add_fact_lands_accepted_and_redacts(tmp_path):
 
 
 def test_add_fact_no_graph_binds_orphaned_leaf(tmp_path):
-    # Unlike add_decision (which drops anchors without a graph), add_fact writes an
-    # orphaned leaf that heals later — the spec forbids repeating that asymmetry.
+    # With no graph, add_fact writes an orphaned leaf that heals later, as add_decision does.
     store = Store(tmp_path / "srv.db")
     out = _add_fact_impl(
         store,
@@ -49,6 +48,7 @@ def test_add_fact_no_graph_binds_orphaned_leaf(tmp_path):
     )
     bindings = store.bindings_for_record(out["id"])
     assert len(bindings) == 1 and bindings[0].status == "orphaned"
+    assert [e["reason"] for e in out["anchors_orphaned"]] == ["no-graph"]
 
 
 def test_add_fact_validates_supports(tmp_path):
@@ -143,6 +143,7 @@ def test_supersede_fact_explicit_anchors_no_reader_binds_orphaned(tmp_path):
     )
     bindings = store.bindings_for_record(new["id"])
     assert len(bindings) == 1 and bindings[0].status == "orphaned"
+    assert [e["reason"] for e in new["anchors_orphaned"]] == ["no-graph"]
 
 
 # -- I1 (R1 improvement wave §1): _supersede_fact_impl gains session_id/author + the D7.3
@@ -299,10 +300,9 @@ def test_get_entity_history_includes_facts_with_record_type(tmp_path):
     store = Store(tmp_path / "srv.db")
 
     # The fact's own anchor mints (and orphan-binds) the entity — add_fact writes an
-    # orphaned Tier-2 leaf even with no reader (unlike add_decision, which no-ops
-    # anchoring entirely without one — see test_add_fact_no_graph_binds_orphaned_leaf
-    # above). The decision is bound to that SAME entity directly, since
-    # _add_decision_impl's own anchoring is a no-op with reader=None; the point pinned
+    # orphaned Tier-2 leaf even with no reader (see
+    # test_add_fact_no_graph_binds_orphaned_leaf above). The decision is bound to that SAME
+    # entity directly, as the test needs a graph-free fixture; the point pinned
     # here is "one decision + one fact bound to the same entity, both in history, typed",
     # not the anchoring path itself.
     f = _add_fact_impl(

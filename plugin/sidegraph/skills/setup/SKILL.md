@@ -1,7 +1,7 @@
 ---
 name: setup
 description: >-
-  Use when Sidegraph needs to be set up (or its setup finished/verified) in a repo — "set up sidegraph", "install sidegraph here", "get sidegraph working on this project", "настрой sidegraph", a fresh clone where memory should be turned on, or "why is my SessionStart map empty". Also reachable directly as /sidegraph:setup. The end-to-end first run: engine → graph → store → wiring check — then hands off to name-domains / import-adrs / record-decision for the first real memory.
+  Use when Sidegraph needs to be set up (or its setup finished/verified) in a repo — "set up sidegraph", "install sidegraph here", "get sidegraph working on this project", "настрой sidegraph", a fresh clone where memory should be turned on, or "why is my SessionStart map empty". Also reachable directly as /sidegraph:setup. The end-to-end first run: engine → graph → store → wiring check — offers domain naming after wiring, then hands off to import-adrs / record-decision for the first real memory.
 ---
 
 # Set up Sidegraph
@@ -59,16 +59,25 @@ SessionStart do not establish a session version pin.
 
 Creates `.sidegraph/` — the repo-committed, file-per-record sidecar, plus its own
 `.gitignore` keeping the derived `index.db` out of git — and reports the graph check.
-Expected: `created store: .sidegraph` (or `already initialized: .sidegraph exists.` —
-fine) and `found graph:` followed by the absolute path of `graphify-out/graph.json`.
+Expected: `created store: .sidegraph`, `already initialized: .sidegraph exists.`, or
+`empty store: .sidegraph exists; complete setup using the guidance below.` — all are
+successful store results — and `found graph:` followed by the absolute path of
+`graphify-out/graph.json`.
 `missing graph:` means step 2 didn't run here. Run from a session it is non-interactive, so it
 does not ask whether to install the git hook that keeps the graph fresh; it prints how to
-(`sidegraph-init --hooks`, or `--no-hooks` to stop the reminder). Ask the human, and do not
-install it unasked (see [the Graphify
+(`sidegraph-init --hooks`, or `--no-hooks` to stop the reminder). Defer the hook question to step 5. Do not ask it or
+install it here (see [the Graphify
 integration](../../../../docs/integrations/graphify.md#keeping-the-graph-fresh-git-hooks)).
 Commit `.sidegraph/` with the repo — the store travels with the code.
 
 ## 4. Verify the wiring
+
+Before any MCP call, require step 3 to exit successfully and report
+`created store:` or `already initialized:`, or `empty store:`,
+plus `found graph:` for the intended project.
+Verify that both reported paths exist. If initialization failed, either expected output
+is missing/malformed, or the store or graph is absent, stop and repair steps 2–3.
+Do not call MCP tools to create a missing store.
 
 On Muse, first confirm that Muse was started in this repository: the MCP
 server serves the Git repository enclosing the process's starting directory. Otherwise exit and restart Muse here.
@@ -80,6 +89,31 @@ on an empty store is expected, not broken. On Grok Build the map comes from the 
 there before the first answer, or after the first tool call when the server started slowly. For the full four-case proof (host wiring, durable
 capture and retrieval, ratification, sync), point the human at
 [verifying your setup](../../../../docs/guides/verifying-your-setup.md).
+
+### Offer domain naming once
+
+This is the only domain-naming offer in this setup flow. First confirm that the store
+from step 3 exists and the graph from step 2 is available; if either is missing, repair
+setup and do not offer yet. Read `list_domains(status="accepted")` and
+`list_domains(status="proposed")`. Continue only when both results' `matched` counts are
+`0`; an empty `domains` array does not prove zero matches. If either call fails or a
+result is malformed, do not offer: finish the wiring check first.
+
+Then call `list_domain_candidates(min_members=0, limit=1)`. Offer only if `graph_version`
+is not null and `total_significant > 0`; a missing or unreadable graph, no communities,
+or a failed/malformed result means no offer. The zero threshold checks for any community;
+actual domain naming still uses the skill's normal candidate threshold.
+
+Ask exactly this one line, once, and wait for the human's reply:
+
+> Sidegraph's memory tools are connected. Would you like to name this project's domains now with sidegraph:name-domains?
+
+On yes, invoke `sidegraph:name-domains` now, then resume this setup flow here. That yes
+opens the naming conversation; it does not pick a domain set or authorize domain writes.
+On no or defer, continue setup. Do not repeat the offer in the final handoff or in later
+ordinary sessions. An explicit new setup request starts a new setup flow.
+
+### Finish the host check
 
 For Codex, Grok Build, OpenCode and Muse, the MCP call is the wiring check; skip
 the following Claude-specific settings check. Shared `sidegraph:<skill>` names denote the corresponding
@@ -132,12 +166,9 @@ the new policy applies from the next session. Details:
 
 In order of payoff:
 
-1. **`sidegraph:name-domains`** — turn the graph's raw communities into a named table of
-   contents; on hosts with lifecycle hooks, accepting a domain brings the `SessionStart`
-   TOC to life.
-2. **`sidegraph:import-adrs`** — if the repo already has ADRs/specs/runbooks, seed the
+1. **`sidegraph:import-adrs`** — if the repo already has ADRs/specs/runbooks, seed the
    store from them instead of starting empty.
-3. **`sidegraph:record-decision`** — capture the first gotcha by hand; then call
+2. **`sidegraph:record-decision`** — capture the first gotcha by hand; then call
    `get_task_context(files=[...])` for the relevant files to check recall on any host.
 
 ## Reset / cleanup

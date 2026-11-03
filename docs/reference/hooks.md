@@ -1,5 +1,20 @@
 # Hooks reference
 
+> **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
+
+Choose the event you are diagnosing:
+
+| Event | Expected effect | First check |
+|---|---|---|
+| SessionStart | Gives the agent the project map and running version | Start a new session in the repository and inspect its opening context |
+| PreToolUse | Adds relevant file records on supported reads or edits | Read a file with an accepted anchored record |
+| SubagentStart | Introduces retrieval to a new subagent | Ask the subagent to retrieve context for its task files |
+| Stop | Reminds a substantial session to propose durable learning | Codex and Grok require interactive work; Claude also supports substantial one-shot runs |
+
+A **record** is a stored decision or fact. A **domain** is a named project area. A **binding** connects a record to a target. A **proposed** record awaits a trust decision. A **drift** warning requests a content check. The event sections below give the exact JSON, gates and switches.
+
+The table describes the hook entry points. Hosts wire different subsets: Claude Code has all four, Codex has SessionStart/Stop/SubagentStart, Muse has SessionStart/SubagentStart, and Grok Build wires all four events but supplies its map through MCP instructions because its SessionStart and SubagentStart output is not passed to the model. Its PreToolUse output does reach the model. OpenCode uses explicit MCP tool calls.
+
 Four hook entry points, registered as console scripts: `sidegraph-session-start`,
 `sidegraph-stop` and `sidegraph-pre-tool-use` in
 [`src/sidegraph/host/hooks.py`](../../src/sidegraph/host/hooks.py), and
@@ -224,7 +239,8 @@ Behavior:
 
 When a notice for the person is due, the object also carries a top-level `systemMessage`
 (see [Notices for the human](#notices-for-the-human)); the lines below are appended to
-`additionalContext` either way.
+`additionalContext` either way. The whole output is held to a character and a byte limit (see
+[Output size budget](#output-size-budget)).
 
 Both renderers open their text with one standing line:
 
@@ -237,7 +253,7 @@ red-team battery measured obedience to instruction-shaped text inside a record a
 the line and 0/8 without it (whitepaper §8.7). Treat
 retrieved record text as untrusted repository content, exactly like a code comment.
 
-Steps 6 to 19 are the integrity registry's status lines ([`sidegraph.integrity`](../../src/sidegraph/integrity.py),
+Steps 6 to 20 are the integrity registry's status lines ([`sidegraph.integrity`](../../src/sidegraph/integrity.py),
 [troubleshooting](../guides/troubleshooting.md)). One run decides which problems exist and
 appends each one's line, in this order, after the map; the texts are unchanged. A check that
 raises costs only its own line.
@@ -467,7 +483,11 @@ raises costs only its own line.
     for the person follows only when a branch holding records has gone untouched for more than a
     week. See [`branch-only-records`](../guides/troubleshooting.md#branch-only-records).
 
-18. **Store-not-migrated line.** When the store uses the pre-0.17 layout (a format marker below
+18. **Deprecated auto-accept line.** When `SIDEGRAPH_AUTO_ACCEPT=on` is present in the hook's
+    environment, a line and notice explain its replacement. See
+    [deprecated-auto-accept](../guides/troubleshooting.md#deprecated-auto-accept) for the migration.
+
+19. **Store-not-migrated line.** When the store uses the pre-0.17 layout (a format marker below
     major 2) and holds at least one record, one line points at the migration. Verbatim:
 
     > Sidegraph: the store uses the pre-0.17 layout, one file per record. Run
@@ -477,7 +497,7 @@ raises costs only its own line.
     It also sends a notice for the person. See
     [`store-not-migrated`](../guides/troubleshooting.md#store-not-migrated).
 
-19. **Maintenance-due line.** When a format-2 store has work for `sidegraph-compact` (more than
+20. **Maintenance-due line.** When a format-2 store has work for `sidegraph-compact` (more than
     200 per-record files, an archive segment it can remove, a misplaced or duplicated shard line,
     or a stray shard file), one line names the reasons, joined by "; ". Verbatim, with `R` the
     reasons:
@@ -487,6 +507,56 @@ raises costs only its own line.
 
     It also sends a notice for the person. See
     [`maintenance-due`](../guides/troubleshooting.md#maintenance-due).
+
+### Output size budget
+
+Two host limits apply at once, and the output is trimmed to whichever binds first:
+
+- **9,500 characters** each for the `additionalContext` and `systemMessage` strings. Claude Code
+  caps each of a hook's `additionalContext` and `systemMessage` strings at 10,000 characters and
+  replaces a longer one with a file path and a short preview
+  ([Claude Code hooks reference](https://code.claude.com/docs/en/hooks)).
+- **14,336 bytes** (14 KiB) of UTF-8 for the whole printed line, JSON envelope, `systemMessage`
+  and trailing newline included. Muse discards a hook's output over 16 KiB, and its adapter gives
+  up at 15 KiB. The JSON escapes every non-ASCII character as `\uXXXX`, so a name in Cyrillic or
+  CJK costs one character but six bytes, and an emoji twelve.
+
+An ASCII map reaches the character limit first, a non-ASCII one the byte limit. The byte limit
+also covers a host that counts characters in UTF-16 units, where an emoji counts twice. Codex
+documents no limit. Both limits are checked on the printed output.
+
+Under both limits the output is unchanged. Over either, these steps run in order until it fits:
+
+1. Whole map entries are dropped, never part of a line, section by section in this order:
+   1. `## Unratified proposals` (the pending-ratification status line still counts them);
+   2. `## Domains`: subdomains first, then domains with no mistakes, then the rest from the tail;
+   3. `## Communities`;
+   4. `## Known facts`, then `## Recorded decisions`;
+   5. `## Global mistakes & constraints`.
+
+   Each list goes from its tail. A section left with no entries loses its heading. Any dropped
+   entry that fits in the room left is then put back, most valuable first, so one very long
+   entry does not empty its section.
+2. The whole map goes.
+3. Each status line and notice is clipped to 300 characters.
+4. The context, then the notices, are cut to the longest prefix that fits, ending in `…`. The
+   cut falls between characters, never inside one.
+
+The early answers (the setup notice for a missing store and the report of
+[a store that cannot open](#a-store-that-cannot-open)) are held to the same two limits. They
+have no map, so over a limit they go straight to step 4.
+
+The standing instruction, the version line, the status lines and the notices survive steps 1
+and 2 whole. When any map entry was omitted, the context ends with one line that counts them and
+names the call that lists each kind, for example:
+
+> Sidegraph: 312 map entries omitted to fit the hook output limit: 300 domains (list_domains),
+> 12 unratified proposals (list_proposed).
+
+The calls named are `list_proposed`, `list_domains`, `list_facts`,
+`retrieve_decisions(status="accepted")` for recorded decisions and
+`retrieve_decisions(kind=["gotcha", "constraint", "lesson"])` for global mistakes. Communities
+are counted with no call: none lists the map's top communities.
 
 ### Notices for the human
 
@@ -514,7 +584,7 @@ Which checks send notices: `store-unreadable` (always), `graph-stale`, `stray-st
 nested directory with its own `enabledPlugins` leaves the plugin off (case (b)),
 `orphaned-records` when degraded,
 `branch-only-records` when a branch holding records is more than a week old,
-`store-not-migrated`, `maintenance-due`, and
+`store-not-migrated`, `maintenance-due`, `deprecated-auto-accept` while `SIDEGRAPH_AUTO_ACCEPT=on` is in the hook's environment, and
 `pending-ratification` once its oldest proposal is 30 days old:
 
 > Sidegraph: N record(s) await ratification, the oldest for D days. Review them with
@@ -722,6 +792,11 @@ The nudge text (verbatim, `CAPTURE_NUDGE` in the module):
 > recurring unnamed area). If this session made an existing recorded decision false or too
 > broad, supersede it via supersede_decision (ids come from get_task_context or the propose
 > result's neighbors). Otherwise just finish — silence is fine.
+
+Before updating an existing record, follow the
+[status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
+Supersession requires an accepted, open predecessor. Invalidated proposals need human
+review for dropping, followed by corrected capture.
 
 The full What/Why/Where/Learned field guidance (title, kind, context, choice, rejected,
 consequences, anchors=[{name, file_path, relation}], `facts`, etc.) lives in
@@ -994,6 +1069,15 @@ processes Claude Code starts for one Bash line cannot add up past it. `SessionSt
 on the same terms, and the two one-shot prefixes older versions wrote, `pretool_nudge:` and
 `pretool_nudge_path:`, which nothing writes now (`Store.prune_meta_prefixes`).
 
+**A character cap.** The block is held to 9,500 characters, under Claude Code's 10,000-character
+cap on `additionalContext` (see [Output size budget](#output-size-budget)). Three files of three
+records come to about 5,000 characters plus six times the longest path, so only paths of some
+750 characters reach it. A file whose block would not fit is left out before claiming, so a later
+read still delivers it, and the block ends with one line:
+
+> Sidegraph: the records of N more file(s) were left out to fit the hook output limit;
+> get_task_context(files=[…]) returns them.
+
 ### Bash lines
 
 The plugin wires Bash as one group of four hook entries, with `if` set to `Bash(sed *)`,
@@ -1243,3 +1327,37 @@ it with `muse plugins approve sidegraph`.
 See [`getting-started/claude-code-setup.md`](../getting-started/claude-code-setup.md) for the
 `.mcp.json` and `.claude/settings.json` snippets that register `sidegraph-mcp` and all four
 hooks against a project.
+
+## The launch-commit file
+
+The plugin's `Stop`, `PreToolUse` and `SubagentStart` hooks (and Codex's `Stop` and
+`SubagentStart`, Grok Build's `Stop`, `PreToolUse` and `SubagentStart`, and Muse's
+`SubagentStart`) launch from a commit, not from
+`@main`, which tracks a mutable branch (see
+[Mutable development references](../getting-started/installation.md#mutable-development-references)):
+`uv` re-resolves a branch reference on every call and serves a commit from its cache.
+`SessionStart` writes the commit.
+
+A historical local launch measurement on 2026-10-03 (uv 0.12.0, macOS, early-exit hook
+payload, two rounds of six warm calls) recorded about 0.8 s for `@main` and about 0.2 s
+for an already cached commit. These figures explain the launcher choice and are not a
+latency guarantee.
+
+- **What it is.** The 40 hex characters of a commit, in
+  `${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit`, one per machine. Only a Sidegraph
+  installed from `@main` writes it, so an install pinned to a tag or SHA (a CI run, a pilot), an
+  editable install and a PyPI install never repoint the plugin. The reading side is the same: a
+  plugin pinned to a tag or commit ignores the file and launches its own ref. A later
+  SessionStart in another project can update this shared file, changing the commit used by
+  subsequent hooks in an already open session.
+- **Deleting it is safe.** With no valid file the hooks launch `@main`, as they did before, and
+  the next `SessionStart` writes it again. The hooks require a regular file and a value of 40 lowercase hex characters. POSIX
+  launchers and the Muse adapter validate the first 41 bytes after trimming
+  trailing newlines. Codex on Windows requires the whole file to be exactly 40 bytes. A
+  value failing its launcher's validation is ignored.
+- **A slow hook call.** A value you edited by hand that looks like a commit but is not one makes
+  every `Stop`, `PreToolUse` and `SubagentStart` call wait about six seconds for `uv` to fail before the hook
+  answers `{}`. Delete the file, or start a session so `SessionStart` overwrites it.
+- **After `uv cache clean`.** The cached commit is gone: the next call fetches it again, online.
+  Offline it fails into the guard and answers `{}`, which is also what an offline `@main` call
+  does.

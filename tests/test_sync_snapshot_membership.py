@@ -42,6 +42,7 @@ from tests.snapshot_support import (
     legacy_graph,
     members,
     mention_graph,
+    merged_heir,
     nodes_of,
     seed_members,
     standard_domains,
@@ -226,8 +227,8 @@ def test_a_split_and_its_end_reach_the_next_capture_without_a_sync(tmp_path):
     payments = domains["payments"]
     accept(store, "billing-a", supersedes=payments)
     assert _tier1(store, mention, "Invoice", "src/pay/model.py") == ["domain:billing-a"]
-    b = store.supersede_domain(
-        payments.domain_id,
+    b = merged_heir(
+        store,
         Domain(
             slug="billing-b",
             title="Billing B",
@@ -282,8 +283,8 @@ def test_a_status_change_waits_for_a_running_membership_pass(tmp_path, monkeypat
     store, domains, _l, mention = _snapshotted(tmp_path)
     payments = domains["payments"]
     accept(store, "billing-a", supersedes=payments)
-    b = store.supersede_domain(
-        payments.domain_id,
+    b = merged_heir(
+        store,
         Domain(
             slug="billing-b",
             title="Billing B",

@@ -34,8 +34,8 @@ from tests.store_non_file_support import (
 )
 
 SKIP_KEY = "skipped_canonical_files"
-# first, middle and last of the inventory's one record-dir loop, plus initiatives (its own loop)
-RECORD_DIRS = ["entities", "facts", "bindings", "initiatives"]
+# first, middle and last of the inventory's one record-dir loop
+RECORD_DIRS = ["entities", "facts", "bindings"]
 
 
 def _skipped(s: Store) -> dict[str, str]:

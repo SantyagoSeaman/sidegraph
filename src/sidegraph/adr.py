@@ -72,7 +72,7 @@ def read_snapshot(path: Path) -> AdrSnapshot:
     if not root.is_dir() or (root / "decisions.db").exists():
         raise ValueError(
             "ADR export needs a canonical store directory; "
-            "migrate legacy stores with sidegraph-init first"
+            "a legacy single-file store must be migrated with Sidegraph 0.23.x first"
         )
     violations = verify_snapshot(root)
     if violations:
@@ -258,12 +258,19 @@ def render_record(
         .replace("\r", "\n")
         .rstrip()
     )
+    retired = ""
+    if decision.retired is not None:
+        retired = f"Retired: {' '.join(decision.retired.reason.split())}\n"
+        if decision.retired.duplicate_of:
+            kept = decision.retired.duplicate_of
+            shown = _ref(kept, paths) if kept in snapshot.decisions else record_ref(kept)
+            retired += f"Duplicate of: {shown}\n"
     footer = f"""---
 
 Record: {record_link}
 Kind: {fields["kind"]}; status: {fields["status"]}
 Valid from: {fields["valid_from"]}; valid to: {fields["valid_to"]}
-Supersedes: {fields["supersedes"]}
+{retired}Supersedes: {fields["supersedes"]}
 Successors: {fields["successors"]}
 Domains (explicit intent): {fields["domains"]}
 {source}

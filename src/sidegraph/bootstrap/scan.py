@@ -98,6 +98,8 @@ def _validate_source(handle: BinaryIO, *, budget: int, overflow_reason: str) -> 
             return "binary"
         prefix.extend(chunk)
 
+    # Strict `utf-8`, not `utf-8-sig`: a complete BOM validates here, and the `-sig` decoder
+    # would also accept a truncated one the planner then fails on.
     decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
     decoder.decode(prefix, final=eof)
     if eof:

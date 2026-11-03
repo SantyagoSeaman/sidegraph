@@ -18,7 +18,6 @@ from sidegraph.schema import (
     Domain,
     Entity,
     Fact,
-    Initiative,
     Provenance,
 )
 from sidegraph.store import Store
@@ -92,8 +91,6 @@ def test_every_writer_refuses_unsafe_id(tmp_path):
         )
     with pytest.raises(ValueError, match="unsafe record id"):
         s.add_domain(Domain(domain_id=bad, slug="d", title="D", summary="sum", provenance=_prov()))
-    with pytest.raises(ValueError, match="unsafe record id"):
-        s.upsert_initiative(Initiative(id=bad, name="n"))
     s.close()
     assert _files_outside(tmp_path, db) == []
 
@@ -338,13 +335,11 @@ def test_every_record_kind_gets_the_identity_check(tmp_path, capsys):
     s.upsert_entity(Entity(canonical_name="x"))
     s.add_fact(Fact(statement="s", source="src", valid_from=datetime.now(UTC), provenance=_prov()))
     s.add_domain(Domain(slug="d", title="D", summary="sum", provenance=_prov()))
-    s.upsert_initiative(Initiative(name="n"))
     s.close()
     tables = {
         "entities": "entities",
         "facts": "facts",
         "domains": "domains",
-        "initiatives": "initiatives",
     }
     for sub in tables:
         (only,) = list((db / sub).glob("*.json"))

@@ -30,7 +30,6 @@ from sidegraph.schema import (
     Domain,
     Entity,
     Fact,
-    Initiative,
     Provenance,
 )
 from sidegraph.store import Store
@@ -54,6 +53,8 @@ def _decision(title: str = "an adr", **over) -> Decision:
         valid_from=datetime.now(UTC),
         provenance=_prov(),
     )
+    if "supersedes" in over:
+        base["status"] = "accepted"  # only an accepted successor closes
     base.update(over)
     return Decision(**base)
 
@@ -313,7 +314,7 @@ def test_a_compacted_decision_whose_title_holds_a_unicode_line_separator_reopens
     db = tmp_path / ".sidegraph"
     title = f"before{char}after"
     with Store(format1_store(db)) as s:
-        old = s.add_decision(_decision(title))
+        old = s.add_decision(_decision(title, status="accepted"))
         s.add_decision(_decision("successor", supersedes=old.id))
         assert s.compact().decisions_compacted == 1
     for stale in db.glob("index.db*"):
@@ -384,7 +385,6 @@ def _writers() -> dict:
         "domains": lambda s, i: s._write_domain_canonical(
             Domain(domain_id=i, slug="d", title="D", summary="s", provenance=prov)
         ),
-        "initiatives": lambda s, i: s._write_initiative_canonical(Initiative(id=i, name="n")),
         "bindings": lambda s, i: s._write_bindings_file(i, []),
     }
 

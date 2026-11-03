@@ -1,5 +1,7 @@
 # Mind model
 
+> **Start here:** Read the opening explanation, then follow only the detail needed for your current task. [Glossary](glossary.md).
+
 Sidegraph's founding bet is that an agent should open a session already carrying a **mental
 model** of the project — not re-derive one from a blind grep every time. That model has two
 halves that come from different places and age differently:
@@ -106,7 +108,7 @@ write below — the three raw authoring paths underneath it are:
    asked to) names a domain directly, optionally nesting it under a `parent_slug`.
 
 All three land `status=proposed`. **Every path passes through the same ratification gate** —
-the unified `ratify` MCP tool (`ratify_decisions` is a deprecated alias, still kept)
+the unified `ratify` MCP tool
 and the `sidegraph-ratify` CLI, which list and accept/drop decisions *and* domains side by
 side. By default no path bypasses human review, including bootstrap: a fresh repo can
 propose dozens of domains from its community structure in one command, but nothing is named
@@ -124,10 +126,10 @@ that domain (see [naming your domains](../guides/naming-your-domains.md)). `path
 only `communities` is (see [configuration](../reference/configuration.md#domain-sync-and-the-toc-cache)).
 
 **Supersede to evolve a description.** Editing a domain's title/summary, or re-parenting it, is
-the `supersede_domain` MCP tool (wrapping `store.supersede_domain(old_id, new_domain)`
-directly): the old row flips to `superseded`, a new row (same slug or a new one, `supersedes`
-set) replaces it — landing `status=proposed` like every other domain write, so it still needs
-a `ratify` to go live. See the
+the `supersede_domain` MCP tool: a new row (same slug or a new one, `supersedes` set) replaces the old one —
+landing `status=proposed` like every other domain write, so it still needs a `ratify` to go
+live, and that `ratify` is what flips the old row to `superseded`. One pending successor is allowed per predecessor. A dropped domain can also be superseded
+for recovery. That predecessor closes immediately, while the successor still awaits review. See the
 [naming guide](../guides/naming-your-domains.md#recovering-from-a-mass-drop) for the one place
 this matters in practice beyond an ordinary rename: freeing a community that a dropped domain
 still claims (give the successor no matching `path_prefixes`/`seed_anchors` instead of
@@ -142,56 +144,11 @@ include membership/lineage fields (`member_count`, `seed_anchor_count`, `parent_
 
 ## How domains relate to engine communities
 
-A `Domain.communities` field is a list of Leiden community ids — a **snapshot mapping**, not
-an identity. Leiden renumbers community ids on every rebuild (the dogfood corpus saw
-`149 → 19 → 256` across three rebuilds), so nothing durable can be *keyed* on a community id; a
-`Domain`'s durable identity is its `slug` and its paired `domain:<slug>` entity. What used to
-require re-pointing on **every decision's** Tier-1 binding individually now only needs repair
-**once per domain**, at sync time: `sync._recompute_domain_communities` reruns the domain's own
-membership rule against the current graph and writes the result back into `communities`.
+A domain has a durable human name. A community is a temporary cluster computed by the graph engine. Sync recomputes domain membership after rebuilds while keeping the domain name stable.
 
-That refresh uses **REPLACE semantics, not a union**, and it is worth being explicit about why,
-so nobody "fixes" it into a union later: when a domain's `path_prefixes` match at least one
-anchorable node in the *current* graph, the communities those matches sit in are direct,
-current evidence — they fully replace whatever `communities` recorded before, rather than being
-added to it. A blind union would let a domain that was once associated with some community keep
-silently absorbing that community's decisions forever, even after the graph reorganizes and a
-*different, unrelated* domain gets assigned that same now-reused id — Leiden ids are recycled
-across rebuilds, so a union has no way to tell "still the same area" from "coincidentally the
-same number now." Only when `path_prefixes` matches nothing today does the refresh fall back to
-"survivors" — the subset of the previously recorded ids that still exist somewhere in the
-current graph — and even then it never adds a *new*, unevidenced id. A domain that recomputes
-to no communities *and* whose `path_prefixes` matched nothing is flagged **empty** in the sync
-report and routed to a human (re-scope or supersede) rather than silently degrading.
+Path rules describe an area broadly. Seed anchors identify specific members. A committed domain snapshot can preserve reviewed membership through an engine upgrade. If a rule becomes empty or too broad, sync asks for review instead of adopting an uncertain scope.
 
-The "never guess" discipline extends to *scope*, not just existence: a `path_prefixes` rule
-that would newly claim more than 20% of all current communities is never written either (a
-candidate that resolves to a single community is never capped, regardless of ratio — one
-community can't swallow anything else) — the overbroad path contribution is dropped and the
-domain is flagged **overbroad** in the sync report. If the domain also carries `seed_anchors`,
-those are precise per-entity authoring and are always applied, so the domain keeps its
-anchor-resolved membership; a domain with only the overbroad path keeps its previous
-`communities` mapping unchanged. This applies to every
-accepted domain's `path_prefixes` regardless of how it was authored (bootstrap-derived or
-hand-written), and bootstrap's own proposal step applies a matching guard before a rule is even
-proposed — see the [naming guide's guardrails](../guides/naming-your-domains.md#guardrails-against-an-over-broad-path-rule)
-for the full mechanics.
-
-Once a domain is accepted, new anchoring at capture time (`resolve_and_bind`) prefers it over
-the bare `community:<id>` entity: if an anchor's current community is covered by an accepted
-domain, the Tier-1 binding goes to the domain's `domain:<slug>` entity instead. Decisions bound
-to the community before the domain existed are not migrated, but retrieval still surfaces them
-under the community fallback — see
-[retrieval](retrieval.md#bucket-c-domains-and-communities).
-
-**Membership is computed once per sync and kept per node.** Each pass writes every accepted domain's
-members into the local index, and everything that asks "is this in the domain" reads it: drill-down
-members, the decisions a domain gathers, the Tier-1 domain a new decision binds to, retrieval's
-related bucket. A domain's members are the nodes of its communities plus the nodes under its path
-prefixes. With a [domain snapshot](../reference/store-format.md#the-domain-snapshot), a covered
-domain's members come from the snapshot, and a change to its rules changes nothing for the files the snapshot lists until a refresh. A file the snapshot does not list (a new one) is still matched against the domain's path prefixes. Before all of
-this, a community that holds code and documents is split in two: Graphify 0.9.62 and later link a
-document to the code it mentions, which merges them.
+See [implementation details](../reference/anchoring-internals.md#how-domains-relate-to-engine-communities).
 
 ## Tags vs. domains vs. initiatives
 
@@ -210,9 +167,9 @@ describing *why performance work exists here* — that's what a domain's summary
 domain is the only one of the three that is itself ratified content: it has a required summary,
 it can be superseded, and it is what the TOC and `drill_down` are built from. An initiative
 groups decisions around a unit of *work* (a branch, a project) rather than a unit of the
-*system*. Current capture paths implement it as an abstract entity and binding, not as an
-`Initiative` record with a description; nothing renders a description-first view of it the way
-`drill_down` does for a domain.
+*system*. It is an abstract entity and binding only, with no record of its own and no
+description; nothing renders a description-first view of it the way `drill_down` does for a
+domain.
 
 ## See also
 

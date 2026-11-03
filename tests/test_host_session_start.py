@@ -71,12 +71,12 @@ def test_session_start_never_raises(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     monkeypatch.setenv("SIDEGRAPH_DB", str(tmp_path / "s.db"))
 
-    # force an internal failure: session_start imports top_tier_map from the retrieval
+    # force an internal failure: session_start imports top_tier_sections from the retrieval
     # module at call time, so patching the source symbol makes the build blow up.
     def boom(*a, **k):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("sidegraph.retrieval.top_tier_map", boom)
+    monkeypatch.setattr("sidegraph.retrieval.top_tier_sections", boom)
 
     hooks.session_start()
     out = json.loads(capsys.readouterr().out)
@@ -138,7 +138,6 @@ def test_session_start_renders_domain_toc_when_cache_present(tmp_path, monkeypat
                         "subdomains": 0,
                     }
                 ],
-                "initiatives": [],
                 "global_mistakes": [],
             }
         ),
@@ -207,7 +206,6 @@ def test_session_start_augments_stale_domain_cache_with_live_unratified_memory(
                         "subdomains": 0,
                     }
                 ],
-                "initiatives": [],
                 "global_mistakes": [],
             }
         ),
@@ -283,7 +281,6 @@ def test_session_start_does_not_build_the_whole_toc_to_read_the_unratified_list(
                         "subdomains": 0,
                     }
                 ],
-                "initiatives": [],
                 "global_mistakes": [],
             }
         ),
@@ -338,7 +335,6 @@ def test_session_start_standing_instruction_precedes_domain_toc(tmp_path, monkey
                         "subdomains": 0,
                     }
                 ],
-                "initiatives": [],
                 "global_mistakes": [],
             }
         ),
@@ -375,9 +371,7 @@ def test_session_start_falls_back_to_legacy_map_when_cache_has_no_domains(
 
     db = tmp_path / "s.db"
     store = Store(db)
-    store.set_meta(
-        TOC_CACHE_KEY, json.dumps({"domains": [], "initiatives": [], "global_mistakes": []})
-    )
+    store.set_meta(TOC_CACHE_KEY, json.dumps({"domains": [], "global_mistakes": []}))
 
     monkeypatch.setenv("SIDEGRAPH_DB", str(db))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
@@ -427,7 +421,7 @@ def test_session_start_malformed_toc_shape_degrades_to_legacy_map_not_empty(
     store.set_meta(LAST_SYNCED_KEY, GraphifyReader(FIXTURE).sync_stamp())
     store.set_meta(
         TOC_CACHE_KEY,
-        json.dumps({"domains": "not-a-list-of-dicts", "initiatives": [], "global_mistakes": []}),
+        json.dumps({"domains": "not-a-list-of-dicts", "global_mistakes": []}),
     )
 
     monkeypatch.setenv("SIDEGRAPH_DB", str(db))
@@ -506,12 +500,23 @@ def test_session_start_pending_count_failure_keeps_map(tmp_path, monkeypatch, ca
 
 
 def test_session_start_malformed_graph_degrades_to_store_only(tmp_path, monkeypatch, capsys):
-    from sidegraph.schema import Initiative
+    from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance, Scope
     from sidegraph.store import Store
 
-    # a store with an initiative (store-only content, needs no reader)
+    # a store with a global constraint (store-only content, needs no reader)
     db = tmp_path / "s.db"
-    Store(db).upsert_initiative(Initiative(name="Trading Core"))
+    Store(db).add_decision(
+        Decision(
+            title="Trading Core stays async",
+            kind=DecisionKind.CONSTRAINT,
+            status=DecisionStatus.ACCEPTED,
+            scope=Scope.GLOBAL,
+            context="c",
+            choice="ch",
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual"),
+        )
+    )
     # valid JSON but the wrong shape (nodes is a str -> AttributeError on parse)
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"built_at_commit": "x", "nodes": "not-a-list"}))
@@ -737,3 +742,26 @@ def test_session_start_survives_a_failing_freshness_check(tmp_path, monkeypatch,
 
     assert "get_task_context" in ctx
     assert "the code graph is stale" not in ctx
+
+
+def test_later_zero_domain_sessions_do_not_repeat_the_setup_offer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Guard against a runtime reminder: the name-domains-offer design keeps it in setup."""
+    from sidegraph.store import Store
+
+    db = _existing_store(tmp_path / ".sidegraph")
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    for session in ("onboarding-first", "onboarding-later"):
+        out = _run_session_start(monkeypatch, capsys, db, session_id=session)
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "## Communities" in context
+        assert "sidegraph:name-domains" not in json.dumps(out)
+        assert len(context) <= hooks.HOOK_CONTEXT_MAX_CHARS
+        assert len((json.dumps(out) + "\n").encode()) <= hooks.SESSION_START_OUTPUT_BUDGET
+    store = Store(db)
+    try:
+        assert list(store.iter_domains()) == []
+    finally:
+        store.close()

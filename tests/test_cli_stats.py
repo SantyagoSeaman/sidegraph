@@ -187,8 +187,8 @@ def test_a_narrowed_window_prints_no_false_absence(tmp_path, capsys, monkeypatch
 @pytest.mark.parametrize("window", ["0", "-3"])
 def test_a_nonpositive_window_is_rejected_before_any_io(window, tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "missing"))
-    assert stats_main(["--window", window]) == 2
-    # Exit 2 alone proves nothing here: a missing store also exits 2. The message names the
+    assert stats_main(["--window", window]) == 1
+    # Exit 1 alone proves nothing here: a missing store also exits 1. The message names the
     # cause, so this fails if the flag stops being what rejects the run.
     out = capsys.readouterr()
     assert out.out == ""
@@ -197,12 +197,12 @@ def test_a_nonpositive_window_is_rejected_before_any_io(window, tmp_path, capsys
 
 
 def test_window_zero_is_rejected_against_a_real_store_too(tmp_path, capsys, monkeypatch):
-    """Against a missing store the exit 2 can come from the store, so the boundary itself
+    """Against a missing store the exit 1 can come from the store, so the boundary itself
     (`<= 0`, not `< 0`) is only exercised here, where nothing else can supply it."""
     Store(tmp_path / ".sidegraph").close()
     monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / ".sidegraph"))
 
-    assert stats_main(["--window", "0"]) == 2
+    assert stats_main(["--window", "0"]) == 1
     out = capsys.readouterr()
     assert out.out == "" and "--window" in out.err
 
@@ -216,14 +216,14 @@ def test_a_window_too_large_to_date_is_rejected_not_a_traceback(tmp_path, capsys
     """`now - timedelta(days=N)` overflows past year 1, and that OverflowError would surface
     from deep inside the aggregator as a stack trace."""
     monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "missing"))
-    assert stats_main(["--window", "999999999"]) == 2
+    assert stats_main(["--window", "999999999"]) == 1
     assert "--window" in capsys.readouterr().err
     assert not (tmp_path / "missing").exists()
 
 
 def test_a_missing_store_names_the_command_that_creates_it(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / "missing"))
-    assert stats_main([]) == 2
+    assert stats_main([]) == 1
     out = capsys.readouterr()
     assert out.out == ""
     assert "sidegraph-init" in out.err
@@ -238,7 +238,7 @@ def test_a_store_directory_with_no_index_is_an_operational_error(tmp_path, capsy
     (store_dir / "index.db").unlink()
     monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
 
-    assert stats_main([]) == 2
+    assert stats_main([]) == 1
     assert "sidegraph-init" in capsys.readouterr().err
     assert not (store_dir / "index.db").exists(), "stats must not rebuild the index itself"
 
@@ -291,7 +291,7 @@ def test_an_unrecognised_index_is_an_operational_error_not_a_traceback(
     (store_dir / "index.db").write_bytes(b"this is not a sqlite file" * 100)
     monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
 
-    assert stats_main([]) == 2
+    assert stats_main([]) == 1
     out = capsys.readouterr()
     assert out.out == ""
     assert "index.db" in out.err
@@ -474,7 +474,7 @@ def test_an_absolute_graph_is_left_alone(tmp_path, capsys, monkeypatch):
     assert json.loads(capsys.readouterr().out)["graph"]["available"] is True
 
 
-# --- a record row the index cannot parse keeps the exit-2 contract (finding 10) ---------------
+# --- a record row the index cannot parse keeps the exit-1 contract (finding 10) ---------------
 
 
 def _store_with_one_of_each(tmp_path):
@@ -528,14 +528,15 @@ def test_an_unparseable_record_row_is_an_operational_error_naming_file_and_recor
         conn.execute(f"UPDATE {table} SET data = ?", (damage,))
     monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
 
-    assert stats_main([]) == 2
+    assert stats_main([]) == 1
     out = capsys.readouterr()
     assert out.out == "", "nothing on stdout: the report was not produced"
     assert "index.db" in out.err and ids[table] in out.err and table in out.err
     assert "Traceback" not in out.err
 
-    assert stats_main(["--json"]) == 2
-    assert capsys.readouterr().out == ""
+    assert stats_main(["--json"]) == 1
+    captured = capsys.readouterr()  # no report: one error object, the message also on stderr
+    assert json.loads(captured.out) == {"error": captured.err.rstrip("\n")}
 
 
 def test_an_unparseable_binding_row_names_both_ends_of_the_binding(tmp_path, capsys, monkeypatch):
@@ -544,7 +545,7 @@ def test_an_unparseable_binding_row_names_both_ends_of_the_binding(tmp_path, cap
         conn.execute("UPDATE anchor_bindings SET data = 'nope'")
     monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
 
-    assert stats_main([]) == 2
+    assert stats_main([]) == 1
     err = capsys.readouterr().err
     assert ids["decisions"] in err and ids["entities"] in err and "anchor_bindings" in err
 
@@ -581,30 +582,29 @@ def _help_of(main, capsys) -> str:
     return " ".join(capsys.readouterr().out.split())  # argparse wraps to the terminal width
 
 
-def test_the_stats_help_says_db_is_a_directory_and_a_legacy_file_needs_a_store_open(capsys):
-    """`--db legacy.db` exits 2 looking for `legacy.db/index.db`: this command never opens a
-    `Store`, and migration happens when one opens. The shared help promises otherwise."""
+def test_the_stats_help_says_db_is_a_directory_and_a_legacy_file_is_not_a_store(capsys):
+    """`--db legacy.db` exits 1 looking for `legacy.db/index.db`: this command never opens a
+    `Store`, so its help says a legacy file is not a store here."""
     text = _help_of(stats_main, capsys)
     assert "store directory" in text
-    assert "legacy" in text and "sidegraph-init" in text
-    assert "one-time migration" not in text
+    assert "legacy" in text and "sidegraph-init" not in text
+    assert "migration" not in text
 
 
 def test_a_legacy_file_path_is_refused_not_migrated(tmp_path, capsys):
     legacy = tmp_path / "legacy.db"
     legacy.write_bytes(b"")
 
-    assert stats_main(["--db", str(legacy)]) == 2
+    assert stats_main(["--db", str(legacy)]) == 1
     assert "no store index" in capsys.readouterr().err
     assert legacy.read_bytes() == b"", "nothing was migrated or written"
 
 
-def test_the_shared_db_help_still_promises_migration_where_it_is_true(capsys):
-    """The commands that open a `Store` do migrate a legacy file; only this one must not
-    inherit that sentence."""
+def test_the_shared_db_help_no_longer_promises_a_legacy_migration(capsys):
+    """A legacy file path is refused everywhere now, so no command's help may promise it."""
     from sidegraph.cli import export_okf_main
 
-    assert "one-time migration" in _help_of(export_okf_main, capsys)
+    assert "migration" not in _help_of(export_okf_main, capsys)
 
 
 def test_the_inspection_commands_do_not_promise_a_legacy_migration(capsys):
@@ -614,7 +614,7 @@ def test_the_inspection_commands_do_not_promise_a_legacy_migration(capsys):
 
     for main in (verify_main, doctor_main, blame_main):
         text = _help_of(main, capsys)
-        assert "cannot migrate" in text and "one-time migration" not in text, main
+        assert "legacy" in text and "migration" not in text, main
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
@@ -639,7 +639,7 @@ def test_stats_names_the_unreadable_record_directory_not_the_index(mode, tmp_pat
         err = capsys.readouterr().err
     finally:
         blocked.chmod(0o755)
-    assert rc == 2
+    assert rc == 1
     assert err.startswith(f"cannot read the store ({blocked}): ")
     assert "store index" not in err
     assert f"{blocked}{os.sep}" not in err  # the directory, not a file inside it
@@ -656,7 +656,7 @@ def test_stats_says_unreadable_not_missing_for_a_store_dir_it_cannot_search(tmp_
         err = capsys.readouterr().err
     finally:
         store_dir.chmod(0o755)
-    assert rc == 2
+    assert rc == 1
     assert "no store index" not in err
     assert err.startswith(f"cannot read the store index ({store_dir / 'index.db'}): ")
     assert "Permission denied" in err  # the real error, not a fixed phrase
@@ -676,7 +676,7 @@ def test_a_store_that_requires_a_newer_sidegraph_is_explained_not_read(
     with pytest.raises(StoreRequirementError):
         build_report(store_dir, None)
     monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
-    assert stats_main([]) == 2
+    assert stats_main([]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert f"This store requires Sidegraph >= {above}; this is {__version__}." in captured.err

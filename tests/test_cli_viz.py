@@ -100,14 +100,14 @@ def test_viz_empty_store_ok(tmp_path):
     assert doc["nodes"] == []
 
 
-def test_viz_uninitialized_store_exits_2(tmp_path, capsys):
+def test_viz_uninitialized_store_exits_1(tmp_path, capsys):
     missing = tmp_path / "nope"
-    assert viz_main(["--db", str(missing), "--out", str(tmp_path / "x")]) == 2
+    assert viz_main(["--db", str(missing), "--out", str(tmp_path / "x")]) == 1
     assert "sidegraph-init" in capsys.readouterr().err
 
 
-def test_viz_unwritable_out_exits_2(tmp_path, capsys):
+def test_viz_unwritable_out_exits_1(tmp_path, capsys):
     db = _seed(tmp_path)
     bad = tmp_path / "no-such-dir" / "g"  # parent dir does not exist
-    assert viz_main(["--db", str(db), "--out", str(bad)]) == 2
+    assert viz_main(["--db", str(db), "--out", str(bad)]) == 1
     assert "cannot write" in capsys.readouterr().err

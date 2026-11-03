@@ -1,7 +1,7 @@
 ---
 name: compact
 description: >-
-  Use when someone asks to compact, pack or migrate the Sidegraph store — "compact the store", "pack the decisions", "migrate to the packed format", "sidegraph-compact", "sidegraph-migrate", "too many files in .sidegraph", or when sidegraph-doctor reports `store-not-migrated`. Also reachable directly as /sidegraph:compact. Runs the local sidegraph-compact (or, on a store in the older layout, sidegraph-migrate) command: dry run first, the report shown verbatim, the real pass only after an explicit yes, then sidegraph-verify. It never commits; the changed `.sidegraph/` files go to the human to commit in a pull request.
+  Use when someone asks to compact, pack or migrate the Sidegraph store — "compact the store", "pack the decisions", "migrate to the packed format", "sidegraph-compact", "sidegraph-migrate", "too many files in .sidegraph", or when sidegraph-doctor reports `store-not-migrated`. Also reachable directly as /sidegraph:compact. Runs the local sidegraph-compact (or, on a store in the older layout, sidegraph-migrate) command: dry run first, the report shown verbatim, the real run only after an explicit yes, then sidegraph-verify. It never commits; the changed `.sidegraph/` files go to the human to commit in a pull request.
 ---
 
 # Compact
@@ -31,7 +31,7 @@ Show the report **verbatim** in a fenced block. A dry run writes nothing tracked
 ## 2. Ask
 
 Summarise in one or two lines what the report says would change, then ask the human to
-confirm. **Never run the real pass without an explicit yes.** A "looks fine" about the report
+confirm. **Never run the real command (compact or migrate) without an explicit yes.** A "looks fine" about the report
 is not a yes to the run; ask again plainly.
 
 If the dry run says the store "would require Sidegraph >= 0.22.0", the first fold of drift

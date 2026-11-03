@@ -1,7 +1,11 @@
 # Verify your setup
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 These four checks prove the useful path without turning installation into a test project.
 Run them in the repository whose `.sidegraph/` you configured.
+
+Before starting, install `uv`, Git and Graphify, build `graphify-out/graph.json` and initialize `.sidegraph/`. Install the host integration and review its trust prompts. Keep the current repository selected for each check. A record is a stored decision or fact; an anchor identifies the file or symbol it is about.
 
 Commands are written with the `uvx` prefix the plugin uses, so no Sidegraph install is needed
 (`@main` is a mutable ref: see
@@ -11,16 +15,16 @@ you can drop the prefix and use the bare `sidegraph-*` names.
 
 ## Case 1 — Host wiring
 
-**Proves:** the MCP server and SessionStart hook point at this repository.
+**Proves:** the MCP server points at this repository, and the opening map arrives on hosts that support it.
 
 1. Start a fresh interactive agent session in the repository.
-2. Confirm that the opening context mentions Sidegraph memory or its domain map.
+2. On Claude Code, Codex and Muse, confirm that the opening context mentions Sidegraph or its domain map. On Grok Build, check its MCP instructions. OpenCode has no opening-map check.
 3. Ask the agent to call `get_task_context` for one existing file.
 
 **Success:** the tool is available and returns either task context or `No context found.` A
 missing record is fine; a trailing `## No code graph` block means the code graph is missing or not
 readable (build it with `graphify update .`, or fix its permissions), not that the wiring failed. “Unknown tool”, a different repository's
-records, or a silent SessionStart hook is not fine. For Codex, confirm hook trust before debugging the JSON. On Grok Build
+records, or missing opening context on a host with map delivery needs investigation. For Codex, confirm hook trust before debugging the JSON. On Grok Build
 the opening map comes from the MCP server rather than the hook; it is there before the first
 answer, unless the server started slowly, when it arrives after the first tool call (see the [Grok Build guide](../integrations/grok.md)); on Muse, approve the hooks
 first (see the [Muse guide](../integrations/muse.md)).
@@ -29,7 +33,7 @@ If this fails, compare the resolved paths with
 [Configuration](../reference/configuration.md#store-path-resolution) and the relevant host
 page: [Claude Code](../getting-started/claude-code-setup.md),
 [Codex](../getting-started/codex-setup.md), [Grok Build](../integrations/grok.md) or
-[Muse](../integrations/muse.md).
+[Muse](../integrations/muse.md) or [OpenCode](../integrations/opencode.md).
 
 ## Case 2 — Durable capture and retrieval
 
@@ -57,6 +61,24 @@ decision's verdict.
 
 For this check, use `SIDEGRAPH_RATIFY_POLICY=manual` and ensure legacy
 `SIDEGRAPH_AUTO_ACCEPT` is unset or `off`. Restart the host after changing its environment.
+For a host launched from a terminal, set the environment before starting the fresh session:
+
+macOS or Linux:
+
+```bash
+export SIDEGRAPH_RATIFY_POLICY=manual
+unset SIDEGRAPH_AUTO_ACCEPT
+```
+
+Windows PowerShell:
+
+```powershell
+$env:SIDEGRAPH_RATIFY_POLICY = "manual"
+Remove-Item Env:SIDEGRAPH_AUTO_ACCEPT -ErrorAction SilentlyContinue
+```
+
+If your MCP registration or the `env` block in `.claude/settings.json` sets these variables, make the same change there before restarting. Restore your previous policy after this check.
+
 Ask the agent to propose an ADR with one attached fact, both anchored to a real file.
 
 Before ratification, `list_proposed` should show the fact nested under the decision and
@@ -71,9 +93,20 @@ record remains in the proposal block.
 
 **Proves:** the graph/store relationship is healthy and derived state stays local.
 
+macOS or Linux:
+
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+graphify update .
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync --check
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor
+git status --short
+```
+
+Windows PowerShell:
+
+```powershell
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync --check
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor

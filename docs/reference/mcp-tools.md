@@ -1,5 +1,7 @@
 # MCP tools reference
 
+> **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
+
 Twenty-five tools, all defined in [`src/sidegraph/server.py`](../../src/sidegraph/server.py) and
 exposed by the `sidegraph-mcp` stdio server (`FastMCP("sidegraph")`). The server holds one
 process-wide `Store` (path resolved via `$SIDEGRAPH_DIR`, same precedence the CLI and hooks
@@ -106,6 +108,7 @@ for recovery from an incomplete operation.
 | [`add_decision`](#add_decision) | Write one decision directly, `status=accepted` | Mid-session, when a human/agent asks to record something now |
 | [`record_drift_check`](#record_drift_check) | Record an attributed inspection of an unchanged decision | After reading current code and confirming the claim still holds |
 | [`supersede_decision`](#supersede_decision) | Close an old decision, write its replacement | When a past decision is explicitly reversed |
+| [`retire_decision`](#retire_decision) | Close an accepted decision with a reason, no replacement | A duplicate, or a decision whose subject is gone |
 | [`add_fact`](#add_fact) | Write one non-derivable fact directly, `status=accepted` | Mid-session, when a human asks to record a benchmark/limit/trial-learned fact now |
 | [`supersede_fact`](#supersede_fact) | Close an old fact, write its falsifying replacement | When a past fact is disproven or corrected |
 | [`retrieve_decisions`](#retrieve_decisions) | Filter decisions by status, kind, file, text or id (bounded) | Ad hoc "what's in memory" queries, audits |
@@ -124,7 +127,6 @@ for recovery from an incomplete operation.
 | [`supersede_domain`](#supersede_domain) | Close an old Domain, write its rename/re-scoped replacement | Renaming/re-scoping a domain, or freeing a mass-dropped community |
 | [`list_proposed`](#list_proposed) | Human-readable listing of pending decisions, facts, *and* domains (bounded; the rest by id) | Before ratifying, in a session or in PR review |
 | [`ratify`](#ratify) | Accept/drop pending proposals of any kind (decisions, facts, domains) | Ratifying from within a session (CLI equivalent: `sidegraph-ratify`) |
-| [`ratify_decisions`](#ratify_decisions-deprecated) | Deprecated alias for `ratify` | Existing callers only — prefer `ratify` |
 | [`sync_anchors`](#sync_anchors) | Re-anchor the store against the current graph and report what happened | The diagnostic/heal path, after a `graphify update`; the `heal-anchors` skill's MCP-first path |
 | [`verify_store`](#verify_store) | Integrity lint of the store's canonical files | CI or ad hoc — checking the store hasn't been hand-corrupted |
 | [`add_anchors`](#add_anchors) | Append bindings to an EXISTING decision or fact | The `heal-anchors` triage flow — "code moved, decision still valid" |
@@ -138,7 +140,7 @@ fields/codes use fixed placeholders. Validation semantics and per-item draft iso
 are unchanged. A malformed outer signature still rejects the whole call.
 
 Raw admission runs before signature coercion. All logical MCP writes, including
-`ratify`, `ratify_decisions`, `sync_anchors` and `add_anchors`, apply the finite input
+`ratify`, `sync_anchors` and `add_anchors`, apply the finite input
 shape, string and node policy described below. Unknown write parameter names are omitted
 from errors while valid parameter help remains. Read-tool aliases/help are unchanged.
 The server rejects unsupported tool registrations rather than executing an unguarded
@@ -219,8 +221,8 @@ A store is committed with the repository, so a record follows the branch and the
 written on. When the store sits inside a git repository, the write tools add a `commit_hint` key
 to a successful result:
 
-- `add_decision`, `supersede_decision`, `add_fact`, `supersede_fact`, `add_anchors`,
-  `add_domain` and `supersede_domain` return one dict, which gains the key.
+- `add_decision`, `supersede_decision`, `retire_decision`, `add_fact`, `supersede_fact`,
+  `add_anchors`, `add_domain` and `supersede_domain` return one dict, which gains the key.
 - `propose_decisions` and `propose_domains` return a list, and only the elements that wrote a
   record gain it: `status` `"written"` for the first, `"proposed"` for the second. A `deduped`,
   `rejected` or `skipped` element has none, and neither does `add_anchors`' `{"error": ...}`.
@@ -229,9 +231,8 @@ The value is one sentence, naming the store's path relative to the repository ro
 `Commit .sidegraph/ in the same change as the work that produced this record, so it reaches
 other checkouts and teammates.` Outside a git repository the key is absent, and so it is for a
 store that is a symlink to a directory outside the repository, because git commits the link and
-not the records behind it. `ratify` and
-`ratify_decisions` carry none, because their results are keyed by record id, and `sync_anchors`
-writes a committed file only when a rung moves. The key is additive, like every field the tools'
+not the records behind it. `ratify` carries none, because its results are keyed by record id,
+and `sync_anchors` writes a committed file only when a rung moves. The key is additive, like every field the tools'
 results may still gain ([stability](stability.md)).
 
 ## Annotations
@@ -258,13 +259,13 @@ cover the 25 tools, defined once in `server.py`:
 |---|---|
 | Read-only | `list_facts`, `find_entity`, `get_entity_history`, `list_proposed`, `list_domains`, `list_domain_candidates`, `verify_store` |
 | Not read-only: they run the lazy sync | `retrieve_decisions`, `get_task_context`, `query_structure`, `query_decisions`, `drill_down` |
-| Not read-only: they write records | `record_drift_check`, `add_decision`, `supersede_decision`, `add_fact`, `supersede_fact`, `propose_decisions`, `ratify`, `ratify_decisions`, `add_domain`, `supersede_domain`, `propose_domains`, `sync_anchors`, `add_anchors` |
+| Not read-only: they write records | `record_drift_check`, `add_decision`, `supersede_decision`, `retire_decision`, `add_fact`, `supersede_fact`, `propose_decisions`, `ratify`, `add_domain`, `supersede_domain`, `propose_domains`, `sync_anchors`, `add_anchors` |
 
 What does not count as a write: `.sidegraph/index.db` is local, gitignored state (the derived
 index, usage statistics, the capture ledger and the session meta), never committed and never
 sent, so a tool that only writes there is still read-only. So is opening the store: the first
 open in a process may create the store's `format` file, its `.gitignore` and its record
-directories, or run a legacy migration, whichever tool comes first.
+directories, whichever tool comes first.
 
 The tools that run the lazy sync are not read-only. Its moved rung can adopt a moved symbol into
 a tracked `entities/<id>.json` file, which is the one tracked write a sync makes (see
@@ -340,8 +341,9 @@ value does not end it, and a quoted JSON key does not consume the next field. An
 `initiative` is dropped and binds nothing, as an all-secret tag does. An all-secret tag redacts to `[REDACTED]` and is skipped, never minted as a
 `tag:redacted` entity — same rule as `propose_decisions`. Each `anchors` entry is resolved against the
 current graph and multi-anchored (leaf + domain/community) via `resolve_and_bind` —
-best-effort: with no graph present the decision still writes, but the requested code anchors
-are skipped and both anchor feedback lists are empty. The initiative Tier-0 binding, when
+best-effort: with no graph present the decision still writes, and each requested code anchor
+binds as an orphaned leaf, reported in `anchors_orphaned` with reason `no-graph`, that the next
+sync heals once a graph holds the name. The initiative Tier-0 binding, when
 `initiative` is given, is decision-level: it is made whether or not a graph or any anchor is
 present, and never takes an anchor's `relation`. An anchor's optional `relation` (one of
 `creates`/`modifies`/`affects`/`deprecates`/`considered`, default `"affects"`) overrides the
@@ -384,7 +386,7 @@ available graph lacks the declared file; this does not verify or heal its symbol
 | `file-not-in-graph` | the graph carries no node for that `file_path` at all | usually a **stale graph**: run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor. Also a typo'd path, or a file type the engine doesn't index |
 | `name-not-in-file` | the graph has that file; it has no such name | fix the **name** — `find_entity`/`query_structure` will say what is really there |
 | `no-file-path` | a bare name that resolved to nothing | pass `file_path` |
-| `no-graph` | no graph reader present at all (propose path only) | expected in a graph-less run; the anchor heals on the next sync once a graph exists |
+| `no-graph` | no graph reader present at all | expected in a graph-less run; the anchor heals on the next sync once a graph exists |
 
 Repair an already-written record with [`add_anchors`](#add_anchors) — bindings-only, no
 duplicate record and no content-free supersession — rather than leaving memory that can never
@@ -425,6 +427,8 @@ Writes a replacement `Decision` (`status="accepted"`, provenance source defaults
 `"human"`) with
 `supersedes=old_decision_id`. Under one serialized store mutation, the successor is written
 first and the predecessor is then closed (`valid_to` set, `status` flipped to `superseded`).
+The predecessor must be accepted with `valid_to` unset. For proposals or closed history,
+follow [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
 The predecessor is never deleted. `session_id`, `author`, and `source` are stamped into the
 successor's provenance; use `source="agent"` when an agent initiates the reversal.
 
@@ -449,6 +453,56 @@ would silently start with no anchors. MCP omits the raw cause/file name; use `si
 (explicit or inherited) produced the replacement's bindings (`anchors_skipped` is always
 `[]` on the inherited path — inheritance never resolves against the graph). Text fields are
 redacted exactly like `add_decision`'s. Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
+
+## `retire_decision`
+
+```python
+retire_decision(
+    id: str,
+    reason: str,
+    duplicate_of: str | None = None,  # the accepted decision that stays
+) -> dict
+```
+
+Closes an `accepted` decision that has nothing to be replaced with. Use it for:
+
+- **a duplicate**: two accepted records say the same thing. Pass `duplicate_of`, the id of the
+  one that stays.
+- **a decision whose subject is gone**: the code, module or practice it governed no longer
+  exists, so no successor would say anything new.
+
+When the decision was wrong or has changed, call [`supersede_decision`](#supersede_decision)
+instead: its successor carries the new rule. A pending proposal is dropped with
+[`ratify`](#ratify)`(drop=[...])`.
+
+The record moves to `status="deprecated"`, its `valid_to` is set to now unless it is
+already set, and it gains `retired: {"reason", "duplicate_of"}`. `reason` is redacted like
+every other text field. For a duplicate, the kept record first gains a binding to every entity
+the duplicate reaches through a `live` or `degraded` binding it does not already have (an
+orphaned or weaker binding of its own to that entity is replaced by the duplicate's), so the
+rule keeps surfacing for the duplicate's files; `anchors_added` lists them. The
+record is never deleted. Default retrieval, `get_task_context`, `query_decisions`,
+`drill_down` and the hooks stop serving it, and sync stops reporting it as possibly stale.
+[`get_entity_history`](#get_entity_history) and `retrieve_decisions(status="deprecated")` (or
+`include_superseded=True`) still show it, with its `retired` object.
+
+Refused, with nothing written, when:
+
+- the store requires less than 0.24.0, the release that added `retired`. The message names the
+  store's current requirement and says to run `sidegraph-require --sidegraph 0.24.0` and commit
+  `.sidegraph/format` before retiring (see [mixed versions](stability.md#mixed-versions)); a
+  store created by 0.24.0 or later already requires it;
+- the id names no decision (`id names no decision`), or `duplicate_of` names none
+  (`duplicate_of names no decision`); an id that names no record is never echoed;
+- the decision is not `accepted`, or `reason` is blank;
+- `duplicate_of` is the same id, or not another accepted, open decision;
+- a proposed successor of the decision is pending, or a proposed fact supports it: ratify or
+  drop it first.
+
+**Returns:** `{"id": str, "status": "deprecated", "valid_to": str, "duplicate_of": str | null,
+"anchors_added": list[dict], "redactions": int}`; `anchors_added` holds `{"entity_id",
+"canonical_name", "tier"}` per binding added to the kept record, `[]` without `duplicate_of`.
+Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `add_fact`
 
@@ -478,8 +532,8 @@ supported decision that is still live (`proposed` or `accepted`); terminal-only 
 rejected as unreachable. `anchors` is the same `{"name", "file_path", "relation"?}` ref shape
 `add_decision` takes, resolved against the current Graphify graph and multi-anchored (leaf +
 community, best-effort) when a reader is present. **With no graph present, an anchor still gets
-an ORPHANED Tier-2 leaf** — unlike `add_decision`, which silently *drops* anchors when there's
-no reader — so a fact never writes unreachable; the binding heals once a graph exists.
+an ORPHANED Tier-2 leaf** — as `add_decision` does — so a fact never writes unreachable; the
+binding heals once a graph exists.
 `anchors` are validated exactly like `add_decision`'s, before anything is written.
 
 Every text field (`statement`/`source`) is redacted first, same secret patterns as
@@ -493,8 +547,8 @@ list[str]}, ...]` (candidates capped at 5) — populated only when a graph is pr
 anchor's name matched more than one node, since there's nothing to be ambiguous against
 otherwise. Identical path-less external stubs (the per-file stubs newer Graphify emits for an imported name such as `BaseModel`) count as one match.
 `anchors_orphaned` is `[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]` when a graph
-is present and the name resolved to nothing; with no graph every anchor lands there as
-`{"entity_id", "canonical_name", "tier": 2}` with no `reason` key, and heals on the next sync.
+is present and the name resolved to nothing; with no graph every anchor lands there with
+`reason` `no-graph`, and heals on the next sync.
 Repair either with [`add_anchors`](#add_anchors). Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `supersede_fact`
@@ -510,6 +564,9 @@ supersede_fact(
     author: str | None = None,
 ) -> dict
 ```
+
+Requires an accepted predecessor with `valid_to` unset. For proposals or closed history,
+follow the [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
 
 Falsifies a fact: closes the predecessor (`valid_to` set, `status` flipped to `superseded`)
 and writes a replacement (`status="accepted"`, `provenance.source="human"`) with
@@ -576,7 +633,7 @@ serialized answer never exceeds the clamped `budget_chars`.**
 rejected ones included, whatever `include_superseded` says: they tell the caller that history
 exists. `newest` holds up to `limit` compact rows (exactly the five keys above), newest
 `valid_from` first, of the records `include_superseded` admits: by default everything except
-`superseded` and `rejected`.
+`superseded`, `rejected` and `deprecated`.
 
 **With a narrowing filter, full records.**
 
@@ -596,9 +653,9 @@ exists. `newest` holds up to `limit` compact rows (exactly the five keys above),
 The filters combine with AND:
 
 - **`status`** and **`kind`** take one value or a list, in any letter case. An unknown value is
-  an error that names the valid ones. `status` replaces the default exclusion of `superseded`
-  and `rejected`; without it, those two are left out unless `include_superseded=True`.
-  `deprecated` is listed by default.
+  an error that names the valid ones. `status` replaces the default exclusion of `superseded`,
+  `rejected` and `deprecated` (a [retired](#retire_decision) decision); without it, those three
+  are left out unless `include_superseded=True`.
 - **`files`** are read the way [`get_task_context`](#get_task_context) reads file seeds, so a
   basename, a path suffix, a letter-case slip, a `./` prefix, an absolute path inside the
   repository or any linked worktree and a directory all work: a path the code graph does not hold goes through the
@@ -610,7 +667,7 @@ The filters combine with AND:
   the stored paths are compared.
 - **`query`** is split on whitespace; every word must occur, in any letter case, in the
   record's `title`, `context`, `choice`, `rejected` or `consequences`.
-- **`ids`** returns those records by exact id, superseded and rejected ones too; the default
+- **`ids`** returns those records by exact id, superseded, rejected and retired ones too; the default
   exclusion does not apply to `ids` unless `status` is also given.
 
 **Order and bounds.** Records come back `gotcha`, then `lesson`, then everything else; within
@@ -670,6 +727,7 @@ list_facts(
     files: list[str] | None = None,          # repo-relative paths, read as get_task_context reads them
     query: str | None = None,                # every word must occur in statement or source
     ids: list[str] | None = None,            # exact fact ids
+    supports: list[str] | None = None,       # decision ids; facts attached to any of them
     limit: int = 25,                         # clamped to 1..100
     budget_chars: int = 24000,               # clamped to 4000..40000
 ) -> ToolResult                              # one text block holding a JSON object
@@ -696,8 +754,11 @@ exclusion. Filters combine with AND; an empty one is ignored. `files` match fact
 those paths (read the way `get_task_context` reads file seeds; the graph is read without a lazy
 sync, so the tool stays read-only), and `unresolved_files` says, for each path nothing could
 read, why. `query` words must all occur in `statement` or `source`. `ids` returns those facts.
-The proposal policy applies as it does to `retrieve_decisions`: a proposed fact outside the
-surfacing window, or any proposed fact in regulated mode, is omitted.
+`supports` takes decision ids and keeps the facts attached to (supporting) any of them; an
+unknown id matches nothing, with no error. Facts are not re-pointed when a decision is
+superseded, so pass the predecessor's id too to see its evidence. The proposal policy applies
+as it does to `retrieve_decisions`: a proposed fact outside the surfacing window, or any
+proposed fact in regulated mode, is omitted.
 
 ## `find_entity`
 
@@ -749,7 +810,8 @@ get_entity_history(
 entity's display name; get one from `add_decision`/`supersede_decision`'s `entities` field or
 from [`find_entity`](#find_entity). Returns every decision **and** fact with any binding to
 that entity, newest (`valid_from`) first, regardless of binding status or decision/fact
-status (superseded records are the "tried before" chain, so they are included), except that
+status (superseded and retired records are the "tried before" chain, so they are included;
+a retired decision carries its `retired` object with the reason), except that
 a `proposed` record obeys the proposal-surfacing policy like every other raw listing: it is
 left out under `SIDEGRAPH_UNRATIFIED=off` or once it is older than the surfacing window.
 `list_proposed` and `sidegraph-ratify` still show the whole review queue.
@@ -1101,7 +1163,7 @@ decisions about the code (or docs) in this area"*: imported (and most) decisions
 code/doc entity, not the domain abstraction, so without (b) a domain's own decisions never
 surfaced under it. The join is bounded to the domain's own members and communities (a decision in a
 different domain's never leaks in) and applies the same status/validity filters as
-the tagged path (superseded/rejected/expired decisions and orphaned bindings are excluded); it
+the tagged path (superseded/rejected/retired/expired decisions and orphaned bindings are excluded); it
 is store-derived, so it needs no graph reader.
 
 Branch (c) exists for **document corpora**: `sidegraph-import --docs` anchors an ADR/spec
@@ -1308,7 +1370,7 @@ initiative and tags cannot be added afterwards. A `rejected` result whose `reaso
 `internal error` may have left the record on disk unindexed until the store is reopened: do not
 re-propose it in the same session, and check `list_proposed` in the next one. Inside a git repository, each element that wrote a record also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
-**Auto-accept:** when the `SIDEGRAPH_AUTO_ACCEPT` environment variable is `"on"` (read at
+**Auto-accept (deprecated; each `written` result then carries a `deprecation` key; `SIDEGRAPH_RATIFY_POLICY=auto-all` replaces it and still requires a live anchor):** when the `SIDEGRAPH_AUTO_ACCEPT` environment variable is `"on"` (read at
 point of use in this tool shell; any other value, including unset, is off), every decision
 draft, its attached facts, and every standalone fact land `status="accepted"` directly
 instead of `"proposed"` — the pending-ratification queue is bypassed for this call.
@@ -1456,11 +1518,18 @@ from the predecessor; pass its values back explicitly to carry them over. With a
 does carry over, to the successor once it is accepted; the successor's own rules apply only
 after `sidegraph-domains snapshot --refresh --domain <slug>`.
 
-The predecessor is flipped to `superseded` immediately (append-only: the record stays, fully
-retrievable, never deleted) in the same transaction that writes the successor. The successor
-itself always lands `status="proposed"` — same rule `add_domain` always follows (and
-`propose_domains` under the default policy): a human still calls
-`ratify(accept=[...])` before the new name/scope is TOC-visible. The new title and summary
+An accepted domain can be superseded, and it takes one pending successor at a
+time (a pending or closed target is refused with a message naming the next step); the one
+exception is a *dropped* domain, kept for the mass-drop recovery below. See
+[the supersession invariant](../concepts/data-model.md#the-supersession-invariant).
+
+The successor always lands `status="proposed"` — same rule `add_domain` always follows (and
+`propose_domains` under the default policy) — and the predecessor stays live until a human
+calls `ratify(accept=[...])` on it, which flips an *accepted* predecessor to `superseded`
+(append-only: the record stays, fully retrievable, never deleted) in the same operation.
+Dropping the successor leaves it exactly as it was. A *dropped* predecessor holds no live
+domain, so it is flipped to `superseded` at once (this is what frees its community in the
+mass-drop recovery below). The new title and summary
 are redacted first, and the result carries `"redactions": int` next to `domain_id`, `status`
 and `supersedes`.
 
@@ -1560,9 +1629,21 @@ it. Order-independence:
 — every decision id in `accept` is processed in a first pass (so its cascade always sweeps a
 nested fact before that fact's own turn), then everything else.
 
+**Supersession of a live predecessor:** accepting its proposed successor closes it.
+Accepting a proposed decision (or domain) that supersedes a still-open record closes that
+record in the same operation, at the ratification time; dropping the proposal never touches
+it. Writes already guarantee a single pending successor of a live head (a dropped domain can
+still be superseded, but it too takes one pending successor at a time), so the refusals that
+remain are cross-branch merge cases: accepting a successor whose predecessor chain already has
+another live head (`<id> is already superseded by <id>; supersede that one instead`), or
+accepting a domain whose slug an unrelated accepted domain already holds, returns a clear
+`"error: ..."` entry and changes nothing. See
+[the supersession invariant](../concepts/data-model.md#the-supersession-invariant).
+
 An id present in both lists is accepted; the drop result for it reads `"<accept-result> (drop
 ignored)"`. An unknown id gets a fixed unknown-ID error; an unsuccessful transition
-gets a controlled ratification failure with reopen/inspect guidance. Raw exception text
+is answered as described below, or with a controlled ratification failure with reopen/inspect
+guidance when the status does not explain it. Raw exception text
 is omitted. The result's keys remain the caller's requested IDs. One bad id never aborts
 the rest of the batch.
 
@@ -1571,30 +1652,33 @@ immediately rebuilds the `SessionStart` TOC cache (`toc_cache` in store meta) �
 makes `bootstrap → ratify` turn the TOC on in the same session, without waiting for the next
 `sidegraph-sync` pass. A decisions/facts-only call leaves the cache untouched.
 
-**Returns:** `{id: "accepted" | "dropped" | "error: ..." | "<result> (drop ignored)" |
+**Returns:** `{id: "accepted" | "dropped" | "already accepted" | "already rejected" |
+"already dropped" | "error: ..." | "<result> (drop ignored)" |
 "accepted (evidence of <decision_id>)" | "dropped (evidence of <decision_id>)"}` — the last
 two only ever appear for a fact id that rode a decision's cascade rather than being named
 directly.
 
-Decisions and facts can be accepted or dropped only while `proposed`. A refusal names
-the existing status; an accepted decision cannot be retired through `drop`. Propose a
-meaningful supersession when the recorded claim becomes obsolete. If no successor exists,
-report that limitation and retain history rather than editing canonical status fields.
+A record that is no longer pending is answered from its current status. Repeating the verdict
+it already has is a no-op, not an error: `"already accepted"` (accepting an accepted record,
+for example one the ratify policy accepted at write time), `"already rejected"` (dropping a
+rejected decision or fact) or `"already dropped"` (dropping a dropped domain). The opposite
+verdict is a refusal that says why, `"error: already rejected; it cannot be accepted"` (`dropped`
+for a domain) or `"error: already accepted; it cannot be dropped"` (for a decision it goes on:
+`; supersede it if it changed, or retire it with retire_decision if it is a duplicate or its
+subject is gone`). Any other
+non-pending status keeps `"error: <kind> is not proposed (status: ...); ratify cannot change
+it"` (`"error: domain is not proposed or accepted (status: ...); ratify cannot change it"` for
+a domain drop). The generic ratification failure is kept for failures the status does not
+explain; a mutation that fails because another writer settled the record in between is
+re-read and answered by its new status.
+
+Decisions and facts can be accepted or dropped only while `proposed`; an accepted decision
+cannot be retired through `drop`. Supersede an accepted, open head when its claim has changed, or call
+[`retire_decision`](#retire_decision) when it is a duplicate or its subject is gone; never edit
+canonical status fields. An accepted fact has no retire path: supersede its accepted, open
+head when its claim changed. For closed history, follow the
+[status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
 Domain drop has its separate accepted-domain exception.
-
-## `ratify_decisions` (deprecated)
-
-```python
-ratify_decisions(
-    accept: list[str] | None = None, drop: list[str] | None = None
-) -> dict[str, str]
-```
-
-**Deprecated alias for [`ratify`](#ratify), and still kept.** It has been deprecated since 0.1.0,
-and no removal date is set. Despite the name, it now
-covers facts and domains too — behavior is identical to `ratify`, including the cascade and the
-TOC-cache refresh. Prefer `ratify`; this alias exists only so existing callers written against
-the old decisions-only name keep working.
 
 ## `sync_anchors`
 
@@ -1666,7 +1750,8 @@ hides it: the move surfaces as `orphaned` after the next graph rebuild.
 ```
 
 `synced` is `False` when the pass was skipped outright (`graph_version` unchanged, no
-`force`, no cold-reload flag pending, no remembered `moved_uncommitted` entity to
+`force`, no cold-reload flag pending, no orphan written while no graph was present still
+awaiting its rebind, no remembered `moved_uncommitted` entity to
 re-verify after `HEAD` moved, and no remembered Tier-1 community reconcile whose retry
 repaired the record or failed again (a retry that abstains reports nothing); with a
 `moved_uncommitted` entity, the narrow pass runs and `synced` is `True` with
@@ -1743,8 +1828,7 @@ verify_store() -> dict
 Lints the store's canonical files against the write-path invariants `store.py`'s write API
 enforces at write time — the MCP counterpart to `sidegraph-verify` run *without*
 `--against`. The snapshot checker itself only reads canonical files. The MCP wrapper first
-opens the normal `Store`, so that open may create/rebuild `index.db` or run a supported legacy
-migration; it does not mutate valid canonical record content merely to perform the lint.
+opens the normal `Store`, so that open may create/rebuild `index.db`; it does not mutate valid canonical record content merely to perform the lint.
 
 Checks (snapshot layer, always everything): every hot record file, and on a format-2 store
 every line of every packed shard (see [`store-format.md`](store-format.md#format-2-packed-shards)),

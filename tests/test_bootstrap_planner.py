@@ -233,6 +233,36 @@ def test_secret_is_redacted_before_candidate_and_plan_serialization(tmp_path):
     assert "[REDACTED]" in payload
 
 
+def test_adr_saved_with_utf8_bom_becomes_a_candidate(tmp_path):
+    doc = write_adr(tmp_path)
+    doc.write_bytes(b"\xef\xbb\xbf" + doc.read_bytes())
+
+    plan = graphless_plan(tmp_path, doc)
+
+    assert [c.title for c in plan.candidates] == ["Use SQLite"]
+
+
+def test_scan_and_plan_agree_on_bom_files(tmp_path):
+    from sidegraph.bootstrap.scan import scan_sources
+
+    good = write_adr(tmp_path)
+    good.write_bytes(b"\xef\xbb\xbf" + good.read_bytes())
+    plain = write(
+        tmp_path / "docs/adr/002.md",
+        good.read_text(encoding="utf-8-sig").replace("SQLite", "Postgres"),
+    )
+    # A truncated BOM is not valid UTF-8: the scan must exclude it, never hand it to the planner.
+    (tmp_path / "docs/adr/003.md").write_bytes(b"\xef\xbb" + plain.read_bytes())
+    (tmp_path / "docs/adr/004.md").write_bytes(b"\xef")
+
+    scan = scan_sources(tmp_path, get_profile("generic-adr"))
+    plan = plan_sources(tmp_path, scan, get_profile("generic-adr"))
+
+    assert scan.files == ("docs/adr/001.md", "docs/adr/002.md")
+    assert {e.path for e in scan.exclusions} == {"docs/adr/003.md", "docs/adr/004.md"}
+    assert sorted(c.title for c in plan.candidates) == ["Use Postgres", "Use SQLite"]
+
+
 @pytest.mark.parametrize(
     ("choice", "rejected", "expected"),
     [

@@ -757,9 +757,12 @@ def test_supersede_domain_closes_old_and_writes_proposed_successor(tmp_path):
     # lands proposed, not auto-accepted -- a human still ratifies it.
     assert out["status"] == "proposed"
 
+    # The accepted predecessor stays live until its successor is ratified.
     reloaded_old = store.get_domain(old.domain_id)
-    assert reloaded_old.status == DomainStatus.SUPERSEDED
+    assert reloaded_old.status == DomainStatus.ACCEPTED
     assert reloaded_old.summary == "v1 summary"  # history retrievable, unmodified
+    store.ratify_domains(accept=[out["domain_id"]])
+    assert store.get_domain(old.domain_id).status == DomainStatus.SUPERSEDED
 
     new_domain = store.get_domain(out["domain_id"])
     assert new_domain.slug == "payments-v2"
@@ -767,19 +770,19 @@ def test_supersede_domain_closes_old_and_writes_proposed_successor(tmp_path):
     assert new_domain.summary == "v2 summary"
     assert new_domain.path_prefixes == ["payments/", "billing/"]
     assert new_domain.supersedes == old.domain_id
-    assert new_domain.status == DomainStatus.PROPOSED
+    assert new_domain.status == DomainStatus.ACCEPTED  # ratified above
 
 
 def test_supersede_domain_resolves_old_by_slug_not_just_id(tmp_path):
     store = Store(tmp_path / "t.db")
-    old = store.add_domain(_new_domain(slug="payments"))
+    old = store.add_domain(_new_domain(slug="payments", status="accepted"))
     out = _supersede_domain_impl(store, None, "payments", "payments-v2", "Payments v2", "v2")
     assert out["supersedes"] == old.domain_id
 
 
 def test_supersede_domain_carries_seed_anchors(tmp_path):
     store = Store(tmp_path / "t.db")
-    old = store.add_domain(_new_domain())
+    old = store.add_domain(_new_domain(status="accepted"))
     out = _supersede_domain_impl(
         store,
         None,
@@ -798,7 +801,7 @@ def test_supersede_domain_carries_seed_anchors(tmp_path):
 def test_supersede_domain_resolves_parent_slug(tmp_path):
     store = Store(tmp_path / "t.db")
     root = store.add_domain(_new_domain(slug="root", title="Root"))
-    old = store.add_domain(_new_domain(slug="payments"))
+    old = store.add_domain(_new_domain(slug="payments", status="accepted"))
     out = _supersede_domain_impl(
         store, None, old.domain_id, "payments-v2", "Payments v2", "v2", parent_slug="root"
     )
@@ -814,7 +817,7 @@ def test_supersede_domain_unknown_old_ref_raises(tmp_path):
 
 def test_supersede_domain_unknown_parent_slug_raises(tmp_path):
     store = Store(tmp_path / "t.db")
-    old = store.add_domain(_new_domain())
+    old = store.add_domain(_new_domain(status="accepted"))
     with pytest.raises(ValueError, match="parent_slug"):
         _supersede_domain_impl(
             store, None, old.domain_id, "payments-v2", "Payments v2", "v2", parent_slug="nope"
@@ -823,7 +826,7 @@ def test_supersede_domain_unknown_parent_slug_raises(tmp_path):
 
 def test_supersede_domain_stamps_manual_provenance_and_author(tmp_path):
     store = Store(tmp_path / "t.db")
-    old = store.add_domain(_new_domain())
+    old = store.add_domain(_new_domain(status="accepted"))
     out = _supersede_domain_impl(
         store, None, old.domain_id, "payments-v2", "Payments v2", "v2", author="alex"
     )
@@ -835,7 +838,7 @@ def test_supersede_domain_stamps_manual_provenance_and_author(tmp_path):
 def test_supersede_domain_stamps_graph_version(tmp_path):
     store = Store(tmp_path / "t.db")
     reader = GraphifyReader(FIXTURE)
-    old = store.add_domain(_new_domain())
+    old = store.add_domain(_new_domain(status="accepted"))
     out = _supersede_domain_impl(store, reader, old.domain_id, "payments-v2", "Payments v2", "v2")
     new_domain = store.get_domain(out["domain_id"])
     assert new_domain.provenance.graph_version == reader.graph_version()
@@ -1004,7 +1007,7 @@ def test_manual_domain_paths_redact_add(tmp_path):
 
 def test_manual_domain_paths_redact_supersede(tmp_path):
     store = Store(tmp_path / "t.db")
-    old = store.add_domain(_new_domain(slug="payments"))
+    old = store.add_domain(_new_domain(slug="payments", status="accepted"))
     out = _supersede_domain_impl(
         store,
         None,

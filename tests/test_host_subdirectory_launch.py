@@ -30,7 +30,7 @@ from sidegraph.schema import (
     Scope,
 )
 from sidegraph.store import Store
-from sidegraph.store_layout import VOLATILE_STALE_KEY
+from sidegraph.store_layout import VOLATILE_STALE_KEY, InterruptedMigrationError
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
 
@@ -284,4 +284,36 @@ def test_stop_ledger_peek_looks_in_the_repository_store(repo, monkeypatch, capsy
     hooks.stop()
     assert json.loads(capsys.readouterr().out) == {}
     assert parsed == []
+    assert not (repo / "sub" / ".sidegraph").exists()
+
+
+# -- an interrupted migration with the original path gone ---------------------------------
+
+
+def _interrupt_migration(directory: Path) -> None:
+    """The store path was moved aside and the replacement never created: only the sentinel."""
+    (directory / ".sidegraph.migration-incomplete").write_text("{}", encoding="utf-8")
+
+
+def test_session_start_names_an_interrupted_migration_when_the_path_is_missing(
+    repo, monkeypatch, capsys
+):
+    _interrupt_migration(repo)
+    _launch(monkeypatch, repo)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    hooks.session_start()
+    message = json.loads(capsys.readouterr().out)["systemMessage"]
+    assert "interrupted" in message and "0.23.x" in message
+    assert not (repo / ".sidegraph").exists()
+
+
+def test_the_mcp_server_names_an_interrupted_migration_when_the_path_is_missing(repo, monkeypatch):
+    """The missing path sits below the repository root, where an absent store is otherwise
+    answered with the explicit-setup message."""
+    _interrupt_migration(repo / "sub")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(repo / "sub" / ".sidegraph"))
+    monkeypatch.setattr(server, "_store", None)
+    with pytest.raises(InterruptedMigrationError):
+        server._get_store()
     assert not (repo / "sub" / ".sidegraph").exists()

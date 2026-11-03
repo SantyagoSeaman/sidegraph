@@ -143,11 +143,12 @@ def accept(
         supersedes=supersedes.domain_id if supersedes else None,
         provenance=Provenance(source="manual"),
     )
-    added = (
-        store.supersede_domain(supersedes.domain_id, draft)
-        if supersedes
-        else store.add_domain(draft)
-    )
+    if supersedes is not None and _second_heir(store, supersedes):
+        added = merged_heir(store, draft)
+    elif supersedes:
+        added = store.supersede_domain(supersedes.domain_id, draft)
+    else:
+        added = store.add_domain(draft)
     store.ratify_domains(accept=[added.domain_id])
     domain = store.get_domain(added.domain_id)
     assert domain is not None and domain.status == DomainStatus.ACCEPTED
@@ -203,3 +204,16 @@ def tier1_names(store: Store, record_id: str) -> list[str]:
         for b in store.bindings_for_record(record_id)
         if b.tier == 1
     )
+
+
+def _second_heir(store: Store, old: Domain) -> bool:
+    head = store.get_domain(old.domain_id)
+    return head is None or head.status != DomainStatus.ACCEPTED
+
+
+def merged_heir(store: Store, draft: Domain) -> Domain:
+    """A pending heir of an already-superseded domain, written the way a merge of two branches
+    brings one in: only the live head can be superseded, so no write path creates a second one."""
+    with store._mutation():
+        store._write_domain(draft)
+    return draft

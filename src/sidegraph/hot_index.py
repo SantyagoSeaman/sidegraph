@@ -81,14 +81,15 @@ BUSY_TIMEOUT_SECONDS = 1.0
 
 _SUPERSEDED = "superseded"
 _REJECTED = "rejected"
+_DEPRECATED = "deprecated"
 _ACCEPTED = "accepted"
 _PROPOSED = "proposed"
 _CONCRETE = "concrete"
 
 
 def _is_live(record: dict, now: datetime) -> bool:
-    """A decision that is not superseded or rejected and has not expired."""
-    if record["status"] in (_SUPERSEDED, _REJECTED):
+    """A decision that is not superseded, rejected or retired and has not expired."""
+    if record["status"] in (_SUPERSEDED, _REJECTED, _DEPRECATED):
         return False
     valid_to = record.get("valid_to")
     return valid_to is None or datetime.fromisoformat(valid_to) > now

@@ -1,9 +1,10 @@
 # Sidegraph
 
-> Durable decisions and non-derivable facts for coding agents, stored as repo-committed
-> JSON records with a derived local index. Sidegraph reads Graphify's code/doc graph and
-> delivers mistakes-first, task-scoped memory through MCP and host hooks (Claude Code, Codex,
-> Grok Build, Muse).
+[Glossary](concepts/glossary.md)
+
+Sidegraph keeps the project's decision graph for AI coding agents: decisions, rejected
+alternatives and gotchas, anchored to your code. Sessions, subagents and different tools share it,
+and each learns at that code what was decided and why.
 
 Use [README.md](README.md) for task-oriented navigation. This index points to the guides
 and exact contracts; it does not replace their version-specific requirements.
@@ -18,13 +19,19 @@ and exact contracts; it does not replace their version-specific requirements.
 
 ## Concepts
 
+- [concepts/glossary.md](concepts/glossary.md) — vocabulary for the guides and reference
+
 - [concepts/decision-memory.md](concepts/decision-memory.md) — what a decision is, why mistakes rank first
 - [concepts/mind-model.md](concepts/mind-model.md) — the mental-model idea: named Domains, TOC → drill_down → leaves, domain lifecycle
-- [concepts/data-model.md](concepts/data-model.md) — Entity, Decision, Fact, AnchorBinding, Domain, Initiative
+- [concepts/data-model.md](concepts/data-model.md) — Entity, Decision, Fact, AnchorBinding, Domain
 - [concepts/anchoring.md](concepts/anchoring.md) — tiered anchors, multi-anchor binding, domain-aware Tier-1
 - [concepts/retrieval.md](concepts/retrieval.md) — the multi-altitude, budget-bounded read path (TOC, drill_down, thin tools)
 
 ## Integrations
+
+- [integrations/desktop-apps.md](integrations/desktop-apps.md) — verified local Code-tab and Codex-view installation, first run and support boundaries
+
+- [integrations/support.md](integrations/support.md) — host feature matrix and delivery boundaries
 
 - [integrations/graphify.md](integrations/graphify.md) — the engine seam: GraphifyReader over graph.json
 - [integrations/claude-code.md](integrations/claude-code.md) — the host seam: MCP server + SessionStart/Stop/PreToolUse/SubagentStart hooks
@@ -45,7 +52,7 @@ and exact contracts; it does not replace their version-specific requirements.
 - [guides/naming-your-domains.md](guides/naming-your-domains.md) — conversational and CLI paths for naming domains; membership guardrails and recovery
 - [guides/retrieval-in-sessions.md](guides/retrieval-in-sessions.md) — reading SessionStart and task-context output, evidence, and unratified proposals
 - [guides/surviving-refactors.md](guides/surviving-refactors.md) — rebuilding the graph, syncing anchors, healing stale decisions
-- [guides/troubleshooting.md](guides/troubleshooting.md) — session integrity checks, notices, diagnostic commands, and fixes
+- [guides/troubleshooting.md](guides/troubleshooting.md) — symptom-to-fix triage, every doctor finding code, and session notice recovery
 - [guides/team-workflow.md](guides/team-workflow.md) — committing the store, PR review, merge conflicts, compaction, and onboarding
 - [guides/semantic-docs.md](guides/semantic-docs.md) — the two-pass (AST + LLM) workflow over docs, concept/rationale anchoring, and the sidegraph-import bootstrap walkthrough
 - [guides/verifying-your-setup.md](guides/verifying-your-setup.md) — a four-case post-install checklist: host wiring, durable capture/retrieval, ratification with evidence, and sync/repository hygiene
@@ -53,11 +60,20 @@ and exact contracts; it does not replace their version-specific requirements.
 
 ## Reference
 
+- [reference/examples.md](reference/examples.md) — captured output from a real scratch repository
+- [reference/health-check.md](reference/health-check.md) — collector runtime and preservation contract
+- [reference/host-wiring.md](reference/host-wiring.md) — Claude Code hook mechanics
+- [reference/codex-wiring.md](reference/codex-wiring.md) — Codex manual hook recipe and mechanics
+- [reference/graphify-internals.md](reference/graphify-internals.md) — worktree and git-hook refresh mechanics
+- [reference/retrieval-internals.md](reference/retrieval-internals.md) — task-context ranking and budget details
+- [reference/anchoring-internals.md](reference/anchoring-internals.md) — sync rebind ladder and derived mappings
+
 - [reference/mcp-tools.md](reference/mcp-tools.md) — MCP tool parameters, return shapes, write guards, and retrieval behavior
 - [reference/cli.md](reference/cli.md) — command flags, output, exit codes, import profiles, verification, and local diagnostics
 - [reference/hooks.md](reference/hooks.md) — sidegraph-session-start, sidegraph-stop, sidegraph-pre-tool-use, and sidegraph-subagent-start: env, JSON I/O, guarantees
 - [reference/git-bindings.md](reference/git-bindings.md) — commit trailers (candidate rules, comment-char handling, fail-open bounded stages, installation) and sidegraph-blame (trailer + provenance joins and output caps)
 - [reference/security-internals.md](reference/security-internals.md) — the exact runtime security rules: inspection history contents, redaction edge cases, input limits, content-free write diagnostics, Git baseline and bootstrap read validation
+- [privacy.md](privacy.md) — what Sidegraph keeps locally, its network activity (none from the runtime; uv's launches from the public repository, Graphify downloads, your agent's provider, optional Graphify semantic extraction), the local usage log and how to remove your data
 - [reference/configuration.md](reference/configuration.md) — environment variables, store/graph paths, retrieval budgets, and sync caches
 - [reference/stability.md](reference/stability.md) — committed and provisional surfaces, compatibility policy, and behavioral guarantees
 - [reference/operations.md](reference/operations.md) — what runs when, local writes and measured costs, the graph boundary, CI wiring, and unmeasured scale questions

@@ -34,7 +34,7 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import MEMBERSHIP_STAMP_KEY, Store
-from sidegraph.store_layout import VOLATILE_STALE_KEY
+from sidegraph.store_layout import VOLATILE_STALE_KEY, LegacyStoreError
 
 
 class _Held:
@@ -762,7 +762,7 @@ def test_doctor_binding_snapshot_uses_zero_timeout_under_exclusive_writer(
     assert time.monotonic() - started < 0.5
 
 
-def test_locked_legacy_store_read_uses_zero_timeout(tmp_path: Path, held_lock) -> None:
+def test_locked_legacy_store_is_refused_without_waiting(tmp_path: Path, held_lock) -> None:
     legacy = tmp_path / "legacy.db"
     conn = sqlite3.connect(legacy)
     conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -772,7 +772,7 @@ def test_locked_legacy_store_read_uses_zero_timeout(tmp_path: Path, held_lock) -
     held_lock(tmp_path, database_path=legacy)
 
     started = time.monotonic()
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(LegacyStoreError):
         Store(legacy, busy_timeout_seconds=0.0)
 
     assert time.monotonic() - started < 0.5

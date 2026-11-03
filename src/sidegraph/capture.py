@@ -58,7 +58,8 @@ from .schema import (
     matches_path_prefix,
     slugify,
 )
-from .store import _TERMINAL_DECISION_STATUSES, Store
+from .store import _TERMINAL_DECISION_STATUSES, Store, SupersessionConflictError
+from .store_layout import REBIND_PENDING_KEY
 from .sync import activate_accepted_domain
 from .validation_errors import format_validation_error
 from .verify import _run_git, find_store_project_repo
@@ -299,25 +300,45 @@ def normalize_tags(tags: Sequence[str] | str) -> tuple[list[str], int]:
 
 
 class RatifyPolicy(StrEnum):
-    """Auto-ratification policy for a propose/import/bootstrap batch (design D1).
+    """Landing and auto-ratification policy for a propose/import/bootstrap batch (design D1).
 
     ``MANUAL`` (default): introduces NO new transition and leaves every existing write
     path's semantics exactly as they are — it is not a claim that every write lands
     ``proposed``. Some paths already land ``accepted`` under their own, pre-existing
-    flags (e.g. ``importer.py``'s ``propose=False``, or the unrelated legacy
-    ``SIDEGRAPH_AUTO_ACCEPT=on`` knob); that behavior is untouched and out of this
-    feature's scope. ``AUTO_LOW_RISK``/``AUTO_ALL`` gate which shapes may self-ratify at
+    flags (e.g. ``importer.py``'s ``propose=False``); that behavior is untouched and out of
+    this feature's scope. ``AUTO_LOW_RISK``/``AUTO_ALL`` gate which shapes may self-ratify at
     write time. Resolved ONCE per CLI/MCP invocation by the outer shell from
-    ``SIDEGRAPH_RATIFY_POLICY`` (via
-    ``parse_ratify_policy``) and threaded down as a keyword, the same way ``auto_accept``
-    already is — this module never reads the environment itself (see the module
-    docstring).
+    ``SIDEGRAPH_RATIFY_POLICY`` (via ``parse_ratify_policy``) and threaded down as a
+    keyword — this module never reads the environment itself (see the module docstring).
+
+    ``LEGACY_ACCEPT`` is NOT a user-facing value: ``parse_ratify_policy`` never returns it
+    and ``SIDEGRAPH_RATIFY_POLICY`` cannot select it. Only ``server._capture_policy`` yields
+    it, when the deprecated ``SIDEGRAPH_AUTO_ACCEPT=on`` is set (which wins over every
+    policy). It lands agent captures ``accepted`` straight away with no ratifier stamp and no
+    live-anchor requirement, and the auto-ratify hook never runs for it (nothing landed
+    proposed). Domains never see it: ``propose_domains`` samples the policy variable alone.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1
     """
 
     MANUAL = "manual"
     AUTO_LOW_RISK = "auto-low-risk"
     AUTO_ALL = "auto-all"
+    LEGACY_ACCEPT = "legacy-accept"
+
+    def landing_status(self) -> DecisionStatus:
+        """The status an agent-proposed decision or fact is written with: ``accepted`` only
+        under ``LEGACY_ACCEPT``, ``proposed`` otherwise (the auto policies ratify AFTER the
+        write, through ``Store.ratify``)."""
+        return (
+            DecisionStatus.ACCEPTED
+            if self is RatifyPolicy.LEGACY_ACCEPT
+            else DecisionStatus.PROPOSED
+        )
+
+    @property
+    def auto_ratifies(self) -> bool:
+        """True iff a write that landed ``proposed`` may be auto-ratified afterwards."""
+        return self in (RatifyPolicy.AUTO_LOW_RISK, RatifyPolicy.AUTO_ALL)
 
 
 def parse_ratify_policy(raw: str | None) -> RatifyPolicy:
@@ -337,9 +358,11 @@ def parse_ratify_policy(raw: str | None) -> RatifyPolicy:
     if raw is None:
         return RatifyPolicy.MANUAL
     try:
-        return RatifyPolicy(raw.strip())
+        policy = RatifyPolicy(raw.strip())
     except ValueError:
         return RatifyPolicy.MANUAL
+    # LEGACY_ACCEPT is the deprecated AUTO_ACCEPT switch's internal stand-in, not a setting.
+    return RatifyPolicy.MANUAL if policy is RatifyPolicy.LEGACY_ACCEPT else policy
 
 
 # Kinds `auto-low-risk` admits by shape (D3 gate 1): `gotcha`/`lesson` decisions and
@@ -531,6 +554,8 @@ def _auto_ratify(
         return AutoRatifyOutcome(
             ratified_by=stamp, error=None, cascaded_fact_ids=tuple(f.id for f in cascaded)
         )
+    except SupersessionConflictError as e:
+        return AutoRatifyOutcome(ratified_by=None, error=str(e))
     except Exception:
         return AutoRatifyOutcome(
             ratified_by=None,
@@ -997,6 +1022,9 @@ def _bind_orphaned(
             relation=relation if relation is not None else "affects",
         )
     )
+    # An orphan born without a graph must be rebound by the next ordinary sync even when the
+    # same graph comes back: the sync gate compares graph versions, which would not differ.
+    store.update_meta_if(REBIND_PENDING_KEY, lambda cur: str(int(cur or "0") + 1))
 
 
 # Neighbors cap (design D2, "Thresholds" — chosen, not measured): how many live decisions
@@ -1195,7 +1223,6 @@ def _propose_fact_one(
     *,
     attached_to: str | None = None,
     inherited_anchors: list[AnchorDraft] | None = None,
-    auto_accept: bool = False,
     ratify_policy: RatifyPolicy = RatifyPolicy.MANUAL,
 ) -> ProposeFactResult:
     """One Fact draft through the deterministic pipeline — mirrors ``_propose_one``'s
@@ -1209,14 +1236,11 @@ def _propose_fact_one(
     standalone ``propose_facts`` draft passes neither, and must supply its own anchor or
     supports id (see the reachability check below).
 
-    ``auto_accept`` (default ``False``): when true (``SIDEGRAPH_AUTO_ACCEPT=on``, threaded
-    down from ``propose_facts``/``propose``'s own ``auto_accept`` — see
-    design/superpowers/specs/2026-07-10-ratification-ux-and-mcp-gaps-design.md), the fact
-    lands ``status=ACCEPTED`` instead of ``PROPOSED``, skipping the ratification queue.
-    Provenance still stamps ``source="agent"`` regardless — history never lies about who
-    authored a record, only whether a human reviewed it.
-
-    ``ratify_policy`` (default ``RatifyPolicy.MANUAL``): the post-write auto-ratify block
+    ``ratify_policy`` (default ``RatifyPolicy.MANUAL``): ``LEGACY_ACCEPT`` (the deprecated
+    ``SIDEGRAPH_AUTO_ACCEPT=on``) lands the fact ``status=ACCEPTED`` instead of ``PROPOSED``,
+    skipping the ratification queue; provenance still stamps ``source="agent"`` — history
+    never lies about who authored a record, only whether a human reviewed it. Otherwise the
+    post-write auto-ratify block
     below only ever runs when ``attached_to is None`` — design D2/D3's standalone-only
     restriction. An ATTACHED fact is never independently eligible (gate 1's shape test is
     the OWNING DECISION's, not this fact's); it rides that decision's own cascade instead
@@ -1280,7 +1304,7 @@ def _propose_fact_one(
             statement=statement,
             source=source,
             supports=supports,
-            status=DecisionStatus.ACCEPTED if auto_accept else DecisionStatus.PROPOSED,
+            status=ratify_policy.landing_status(),
             valid_from=datetime.now(UTC),
             provenance=Provenance(
                 source="agent",
@@ -1375,12 +1399,11 @@ def _propose_fact_one(
         # none of its `supports` ids resolves to a still-proposed decision (rev 12 erratum:
         # such a fact rides THAT decision's verdict too, even when it arrives later through
         # its own propose_facts call — see _supports_a_still_proposed_decision). Skipped
-        # outright when `auto_accept` is true — the fact already landed ACCEPTED above, and the
-        # hook runs ONLY on writes that landed proposed (D2).
+        # outright under LEGACY_ACCEPT (`auto_ratifies` is false) — the fact already landed
+        # ACCEPTED above, and the hook runs ONLY on writes that landed proposed (D2).
         if (
             attached_to is None
-            and not auto_accept
-            and ratify_policy != RatifyPolicy.MANUAL
+            and ratify_policy.auto_ratifies
             and not _supports_a_still_proposed_decision(store, fact.supports)
         ):
             live_tier12, ambiguous_or_orphan_only = _anchor_signal(store, fact.id)
@@ -1399,7 +1422,7 @@ def _propose_fact_one(
                 auto_ratify_error = outcome.error
     except Exception:
         cause = "operation failed"
-        if auto_accept:
+        if ratify_policy is RatifyPolicy.LEGACY_ACCEPT:
             # Accepted already: Store.drop_fact refuses it, so the remedy is add_anchors (it
             # takes fact ids). Facts carry no initiative or tags.
             guard_reason = (
@@ -1443,24 +1466,22 @@ def _propose_one(
     ref: str | None,
     graph_version: str | None,
     *,
-    auto_accept: bool = False,
     ratify_policy: RatifyPolicy = RatifyPolicy.MANUAL,
 ) -> ProposeResult:
     """One DraftDecision through the deterministic pipeline (see module docstring for the
     overall redact -> validate -> package -> anchor -> dedup -> write stages).
 
-    ``auto_accept`` (default ``False``): when true (``SIDEGRAPH_AUTO_ACCEPT=on`` — see
-    design/superpowers/specs/2026-07-10-ratification-ux-and-mcp-gaps-design.md), the
-    decision AND every attached fact (draft.facts, via the facts loop below) land
-    ``status=ACCEPTED`` instead of ``PROPOSED``, bypassing the ratification queue.
-    Provenance still stamps ``source="agent"`` regardless.
-
-    ``ratify_policy`` (default ``RatifyPolicy.MANUAL``): when it allows and D3's gates pass
+    ``ratify_policy`` (default ``RatifyPolicy.MANUAL``): ``LEGACY_ACCEPT`` (the deprecated
+    ``SIDEGRAPH_AUTO_ACCEPT=on`` — see
+    design/superpowers/specs/2026-07-10-ratification-ux-and-mcp-gaps-design.md) lands the
+    decision AND every attached fact (draft.facts, via the facts loop below)
+    ``status=ACCEPTED`` instead of ``PROPOSED``, bypassing the ratification queue; provenance
+    still stamps ``source="agent"``. Otherwise, when it allows and D3's gates pass
     (including the cascade rule over this call's own attached facts — see the post-write
     block after step 7, below), the decision is auto-ratified through the same
-    ``Store.ratify`` a human tap calls, stamped ``"auto:<policy>"``. Ignored entirely when
-    ``auto_accept`` is true — that write already landed ACCEPTED, and the hook runs ONLY on
-    writes that landed ``proposed`` (design D2).
+    ``Store.ratify`` a human tap calls, stamped ``"auto:<policy>"``. Never runs under
+    ``LEGACY_ACCEPT`` — that write already landed ACCEPTED, and the hook runs ONLY on writes
+    that landed ``proposed`` (design D2).
     """
     try:
         draft = DraftDecision.model_validate(raw)
@@ -1527,7 +1548,8 @@ def _propose_one(
     # Filter before the cap: a withheld proposal must not take a visible neighbor's slot.
     neighbors = _neighbor_dicts(_live_neighbors(draft, store, cap=None))[:_NEIGHBORS_CAP]
 
-    # 3-4. Package + validate + write (append-only; supersede closes the predecessor).
+    # 3-4. Package + validate + write (append-only; a proposed successor leaves its
+    # predecessor open until `Store.ratify`, an accepted one closes it at write time).
     # title/context/choice are required (non-Optional) on DraftDecision, and the loop above
     # only maps None -> None — they can only be None here if they went in None, which the
     # schema forbids. Only rejected/consequences are genuinely optional.
@@ -1538,7 +1560,7 @@ def _propose_one(
         decision = Decision(
             title=clean["title"],
             kind=draft.kind,
-            status=DecisionStatus.ACCEPTED if auto_accept else DecisionStatus.PROPOSED,
+            status=ratify_policy.landing_status(),
             context=clean["context"],
             choice=clean["choice"],
             rejected=clean["rejected"],
@@ -1555,30 +1577,14 @@ def _propose_one(
                 commit=_capture_commit(store),
             ),
         )
-        # Deferred supersession for an auto-policy proposal (design D2/T12): closing the
-        # predecessor eagerly (the default) would flip it to superseded BEFORE the
-        # post-write eligibility block below can reject this successor -- leaving a
-        # rejected/ineligible draft with an already-closed predecessor and no accepted
-        # successor to show for it. `manual` and legacy `auto_accept=True` keep today's
-        # eager close (a manual write is reviewed by a human either way; auto_accept lands
-        # this decision ACCEPTED directly, so there is no gap to defer across). Only when
-        # `ratify_policy` allows auto AND this write is landing `proposed` AND the draft
-        # actually names a predecessor is the close deferred to a successful `Store.ratify`
-        # (its own existing deferred-supersession branch performs it, `auto-all` and
-        # `auto-low-risk` alike — `auto-all` admits the shape and can still fail a later
-        # gate or lose the transition race, `auto-low-risk` almost always fails gate 1 for
-        # a superseding draft, see D3 — either way the close must wait for that verdict).
-        defer_close = (
-            not auto_accept
-            and ratify_policy != RatifyPolicy.MANUAL
-            and draft.supersedes is not None
-        )
     except ValidationError as e:
         return ProposeResult(
             status="rejected", reason=format_validation_error(e), redactions=redactions
         )
     try:
-        store.add_decision(decision, close_predecessor=not defer_close)
+        store.add_decision(decision)
+    except SupersessionConflictError as e:
+        return ProposeResult(status="rejected", reason=str(e), redactions=redactions)
     except Exception as e:
         return ProposeResult(
             status="rejected", reason=_internal_error_reason(e), redactions=redactions
@@ -1684,7 +1690,6 @@ def _propose_one(
                     graph_version,
                     attached_to=decision.id,
                     inherited_anchors=draft.anchors,
-                    auto_accept=auto_accept,
                     ratify_policy=ratify_policy,
                 )
                 # The fact's own post-write guard reports on a "written" result's reason;
@@ -1705,15 +1710,15 @@ def _propose_one(
 
         step = "auto-ratify"
         # 8. Auto-ratify (design D2/D3) — runs AFTER step 7 so this call's own attached facts
-        # already exist and can be checked as the cascade set. Skipped outright when
-        # `auto_accept` is true (this decision already landed ACCEPTED, and the hook runs ONLY
+        # already exist and can be checked as the cascade set. Skipped outright under
+        # LEGACY_ACCEPT (this decision already landed ACCEPTED, and the hook runs ONLY
         # on writes that landed proposed). The decision's own gates run first (cheaper); the
         # cascade rule (`_cascade_eligible`) runs only when the decision itself is already
         # eligible, and blocks the WHOLE auto-block when any fact in the cascade set is not —
         # decision AND facts stay proposed together, to leave the queue by one human verdict.
-        if fact_failed and not auto_accept and ratify_policy != RatifyPolicy.MANUAL:
+        if fact_failed and ratify_policy.auto_ratifies:
             guard_reason = "attached fact failed; left proposed for review"
-        elif not auto_accept and ratify_policy != RatifyPolicy.MANUAL:
+        elif ratify_policy.auto_ratifies:
             live_tier12, ambiguous_or_orphan_only = _anchor_signal(store, decision.id)
             decision_signal = AutoEligibility(
                 kind=draft.kind.value,
@@ -1752,7 +1757,7 @@ def _propose_one(
 
     except Exception:
         cause = "operation failed"
-        if auto_accept:
+        if ratify_policy is RatifyPolicy.LEGACY_ACCEPT:
             guard_reason = (
                 f"written (accepted), but {step} and the later steps did not run ({cause}); "
                 "anchors can be added with add_anchors; initiative and tags cannot be "
@@ -1786,22 +1791,17 @@ def propose(
     author: str | None = None,
     ref: str | None = None,
     *,
-    auto_accept: bool = False,
     ratify_policy: RatifyPolicy = RatifyPolicy.MANUAL,
 ) -> list[ProposeResult]:
     """Run the deterministic write pipeline per draft. Per-draft failure never aborts the batch.
 
-    ``auto_accept`` (default ``False``, keyword-only): the ``SIDEGRAPH_AUTO_ACCEPT=on``
-    opt-in (see design/superpowers/specs/2026-07-10-ratification-ux-and-mcp-gaps-design.md)
-    — when true, every drafted decision AND its attached facts land ``status=ACCEPTED``
-    instead of ``PROPOSED``, bypassing the human ratification queue. Capture itself stays
-    pure: the env var is read once by the caller (``server._auto_accept()``) and passed in
-    here as a plain bool — this module never reads the environment. Provenance still
-    stamps ``source="agent"`` either way; only the ratification status changes.
-
-    ``ratify_policy`` (default ``RatifyPolicy.MANUAL``, keyword-only): the resolved
-    ``SIDEGRAPH_RATIFY_POLICY`` value (design D1/D2), threaded the same way ``auto_accept``
-    is — this module never reads the environment. When it allows and D3's gates pass, each
+    ``ratify_policy`` (default ``RatifyPolicy.MANUAL``, keyword-only): the resolved policy
+    (design D1/D2; ``server._capture_policy()`` folds the deprecated
+    ``SIDEGRAPH_AUTO_ACCEPT=on`` into ``RatifyPolicy.LEGACY_ACCEPT``), threaded down — this
+    module never reads the environment. ``LEGACY_ACCEPT`` lands every drafted decision AND
+    its attached facts ``status=ACCEPTED`` instead of ``PROPOSED`` (see
+    design/superpowers/specs/2026-07-10-ratification-ux-and-mcp-gaps-design.md); provenance
+    still stamps ``source="agent"`` either way. Otherwise, when it allows and D3's gates pass, each
     written decision (and its eligible attached-fact cascade) is auto-ratified — see
     ``_propose_one``'s own post-write block.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1/D2
@@ -1825,7 +1825,6 @@ def propose(
                     author,
                     ref,
                     graph_version,
-                    auto_accept=auto_accept,
                     ratify_policy=ratify_policy,
                 )
             )
@@ -1841,7 +1840,6 @@ def propose_facts(
     session_id: str | None = None,
     author: str | None = None,
     *,
-    auto_accept: bool = False,
     ratify_policy: RatifyPolicy = RatifyPolicy.MANUAL,
 ) -> list[ProposeFactResult]:
     """Run the deterministic Fact write pipeline per STANDALONE draft (mirrors ``propose``
@@ -1850,12 +1848,6 @@ def propose_facts(
     reachability check) — unlike a ``DraftDecision.facts`` entry, which always inherits
     ``attached_to``/the decision's anchors via ``_propose_one``'s facts loop. Per-draft
     failure never aborts the batch.
-
-    ``auto_accept`` (default ``False``, keyword-only): same ``SIDEGRAPH_AUTO_ACCEPT=on``
-    opt-in ``propose`` documents (see design/superpowers/specs/
-    2026-07-10-ratification-ux-and-mcp-gaps-design.md) — standalone facts land
-    ``status=ACCEPTED`` instead of ``PROPOSED`` when true. This module never reads the
-    environment itself; the bool is passed in by the caller.
 
     ``ratify_policy`` (default ``RatifyPolicy.MANUAL``, keyword-only): same keyword
     ``propose`` documents (design D1/D2) — sampled once by the caller and passed down
@@ -1882,7 +1874,6 @@ def propose_facts(
                     session_id,
                     author,
                     graph_version,
-                    auto_accept=auto_accept,
                     ratify_policy=ratify_policy,
                 )
             )
@@ -1891,9 +1882,15 @@ def propose_facts(
     return results
 
 
-def format_proposal(d: Decision) -> str:
-    """Human-readable render of a pending proposal (shared by the ratify CLI and MCP)."""
+def format_proposal(d: Decision, predecessor: Decision | None = None) -> str:
+    """Human-readable render of a pending proposal (shared by the ratify CLI and MCP).
+
+    A superseding proposal names the record ratifying it will close (``predecessor``, when
+    the caller could look it up), so the human sees what the verdict replaces."""
     lines = [f"{d.id}  [{d.kind.value}] {d.title}"]
+    if d.supersedes:
+        replaced = f"{d.supersedes} {predecessor.title}" if predecessor else d.supersedes
+        lines.append(f"  supersedes: {replaced}")
     lines.append(f"  what:    {d.choice}")
     lines.append(f"  why:     {d.context}")
     if d.rejected:

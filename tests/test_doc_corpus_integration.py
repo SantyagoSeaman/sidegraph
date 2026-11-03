@@ -2,7 +2,7 @@ import json
 
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import Seed, get_task_context
-from sidegraph.server import _propose_decisions_impl, _ratify_decisions_impl
+from sidegraph.server import _propose_decisions_impl, _ratify_impl
 from sidegraph.store import Store
 from sidegraph.sync import sync
 
@@ -55,7 +55,7 @@ def _capture_gotcha(store, reader):
         ],
         session_id="s-doc",
     )
-    _ratify_decisions_impl(store, accept=[results[0]["decision_id"]])
+    _ratify_impl(store, accept=[results[0]["decision_id"]])
     return results[0]["decision_id"]
 
 

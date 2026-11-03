@@ -24,6 +24,8 @@ def _domain(**overrides) -> Domain:
         summary="Handles order settlement and refunds.",
         provenance=Provenance(source="manual"),
     )
+    if "supersedes" in overrides:
+        base["status"] = "accepted"  # only an accepted successor closes
     base.update(overrides)
     return Domain(**base)
 
@@ -238,7 +240,7 @@ def test_slug_collision_among_live_domains_rejected(store: Store) -> None:
 
 
 def test_slug_reusable_once_predecessor_superseded(store: Store) -> None:
-    old = store.add_domain(_domain(slug="payments", title="Payments v1"))
+    old = store.add_domain(_domain(slug="payments", title="Payments v1", status="accepted"))
     new = store.supersede_domain(
         old.domain_id,
         _domain(slug="payments", title="Payments v2", supersedes=old.domain_id),
@@ -445,7 +447,7 @@ def test_two_node_parent_cycle_rejected(store: Store) -> None:
 
 
 def test_supersede_domain_closes_predecessor_and_keeps_history(store: Store) -> None:
-    old = store.add_domain(_domain(summary="v1 summary"))
+    old = store.add_domain(_domain(summary="v1 summary", status="accepted"))
     new = store.supersede_domain(
         old.domain_id,
         _domain(summary="v2 summary", supersedes=old.domain_id),
@@ -463,7 +465,7 @@ def test_supersede_domain_unknown_old_id_rejected(store: Store) -> None:
 
 
 def test_supersede_domain_requires_matching_supersedes(store: Store) -> None:
-    old = store.add_domain(_domain())
+    old = store.add_domain(_domain(status="accepted"))
     with pytest.raises(ValueError, match="supersedes"):
         store.supersede_domain(old.domain_id, _domain(slug="other", supersedes="mismatch"))
 
@@ -474,7 +476,7 @@ def test_supersede_domain_invalid_successor_does_not_leak_flip(store: Store) -> 
     first; if the successor then failed validation, that flip sat uncommitted in
     sqlite's implicit transaction and the NEXT unrelated write would durably commit a
     "superseded with zero successors" domain."""
-    old = store.add_domain(_domain(slug="payments", title="Payments"))
+    old = store.add_domain(_domain(slug="payments", title="Payments", status="accepted"))
     store.ratify_domains(accept=[old.domain_id])
     # a third, unrelated live domain that the successor collides with
     store.add_domain(_domain(slug="shipping", title="Shipping"))
@@ -505,7 +507,7 @@ def test_supersede_domain_reusing_predecessor_id_rejected(store: Store) -> None:
     """append-only: a successor reusing its OWN predecessor's domain_id must be rejected
     — without the guard, ON CONFLICT DO UPDATE in _write_domain would rewrite the
     predecessor's row in place, leaving no superseded row behind (history erased)."""
-    old = store.add_domain(_domain(slug="payments", title="Payments v1"))
+    old = store.add_domain(_domain(slug="payments", title="Payments v1", status="accepted"))
 
     with pytest.raises(ValueError, match="already exists"):
         store.supersede_domain(
@@ -525,7 +527,7 @@ def test_supersede_domain_reusing_predecessor_id_rejected(store: Store) -> None:
     try:
         reloaded = reopened.get_domain(old.domain_id)
         assert reloaded is not None
-        assert reloaded.status == DomainStatus.PROPOSED
+        assert reloaded.status == DomainStatus.ACCEPTED
         assert reloaded.title == "Payments v1"
     finally:
         reopened.close()
@@ -542,7 +544,7 @@ def test_supersede_domain_successor_write_failure_does_not_leave_predecessor_fli
     that flip was already durable; the next Store to open this path would digest-reload a
     "superseded with zero successors" domain whose slug is unresolvable. Mirrors
     add_decision/ratify's write order."""
-    old = store.add_domain(_domain(slug="payments", title="Payments v1"))
+    old = store.add_domain(_domain(slug="payments", title="Payments v1", status="accepted"))
     store.ratify_domains(accept=[old.domain_id])
 
     new_domain = _domain(slug="payments", title="Payments v2", supersedes=old.domain_id)
@@ -576,7 +578,7 @@ def test_supersede_domain_reusing_unrelated_third_id_rejected(store: Store) -> N
     """append-only: a successor reusing a THIRD, unrelated domain's id must be rejected
     — without the guard, ON CONFLICT DO UPDATE in _write_domain would silently rewrite
     that unrelated row instead of inserting a new one."""
-    old = store.add_domain(_domain(slug="payments", title="Payments v1"))
+    old = store.add_domain(_domain(slug="payments", title="Payments v1", status="accepted"))
     third = store.add_domain(_domain(slug="shipping", title="Shipping"))
 
     with pytest.raises(ValueError, match="already exists"):
@@ -603,7 +605,7 @@ def test_supersede_domain_reusing_unrelated_third_id_rejected(store: Store) -> N
         # the predecessor must also be untouched (still live, not superseded)
         reloaded_old = reopened.get_domain(old.domain_id)
         assert reloaded_old is not None
-        assert reloaded_old.status == DomainStatus.PROPOSED
+        assert reloaded_old.status == DomainStatus.ACCEPTED
     finally:
         reopened.close()
 

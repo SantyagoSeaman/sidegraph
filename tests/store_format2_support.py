@@ -390,9 +390,10 @@ def record_fsyncs(monkeypatch: pytest.MonkeyPatch, store: Path) -> list[tuple[st
         calls.append(("file", _name_of_fd(handle, store)))
         real_fd(handle)
 
-    def directory(path: Path) -> None:
-        calls.append(("dir", _name_of_dir(path, store)))
-        real_dir(path)
+    def directory(path: Path, **kw: bool) -> None:
+        if kw.get("full", True):  # a canonical record write's plain flush is not a publish's
+            calls.append(("dir", _name_of_dir(path, store)))
+        real_dir(path, **kw)
 
     def unlink(path: str | os.PathLike[str], *a: object, **kw: object) -> None:
         target = Path(os.fsdecode(path))
@@ -425,9 +426,10 @@ def record_publishes(monkeypatch: pytest.MonkeyPatch, store: Path) -> list[tuple
         calls.append(("fsync_tmp", name))
         real_fd(handle)
 
-    def directory(path: Path) -> None:
-        calls.append(("fsync_dir", _name_of_dir(path, store)))
-        real_dir(path)
+    def directory(path: Path, **kw: bool) -> None:
+        if kw.get("full", True):  # a canonical record write's plain flush is not a publish's
+            calls.append(("fsync_dir", _name_of_dir(path, store)))
+        real_dir(path, **kw)
 
     def replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
         target = Path(os.fsdecode(dst))

@@ -2,7 +2,7 @@ import json
 
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import Seed, get_task_context
-from sidegraph.server import _propose_decisions_impl, _ratify_decisions_impl
+from sidegraph.server import _propose_decisions_impl, _ratify_impl
 from sidegraph.store import Store
 from sidegraph.sync import sync
 
@@ -61,7 +61,7 @@ def test_community_fallback_survives_renumbering(tmp_path):
         ],
         session_id="s-repoint",
     )
-    _ratify_decisions_impl(store, accept=[results[0]["decision_id"]])
+    _ratify_impl(store, accept=[results[0]["decision_id"]])
 
     # Community fallback BEFORE the rebuild: seeding by the *other* file in the cluster
     # surfaces the decision via community:1.
@@ -124,7 +124,7 @@ def test_orphaned_decision_reachable_via_fallback_after_renumber(tmp_path):
         ],
         session_id="s-orphan",
     )
-    _ratify_decisions_impl(store, accept=[results[0]["decision_id"]])
+    _ratify_impl(store, accept=[results[0]["decision_id"]])
 
     # Rename + renumber in ONE rebuild (the dogfood-verified failure mode).
     reader_c = GraphifyReader(_write(tmp_path, "c.json", GRAPH_C))

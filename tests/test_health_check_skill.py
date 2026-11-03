@@ -43,7 +43,7 @@ def _sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pat
     store = project / ".sidegraph"
     store.mkdir()
     (store / "format").write_text(f"sidegraph-store {SCHEMA_VERSION}\n", encoding="utf-8")
-    for name in ("decisions", "facts", "domains", "entities", "bindings", "archive", "initiatives"):
+    for name in ("decisions", "facts", "domains", "entities", "bindings", "archive"):
         (store / name).mkdir()
     (project / "graphify-out").mkdir()
     (project / "graphify-out/graph.json").write_text(

@@ -38,11 +38,11 @@ LOCAL_WRITE = {
     "record_drift_check",
     "add_decision",
     "supersede_decision",
+    "retire_decision",
     "add_fact",
     "supersede_fact",
     "propose_decisions",
     "ratify",
-    "ratify_decisions",
     "add_domain",
     "supersede_domain",
     "propose_domains",
@@ -84,3 +84,11 @@ def test_t1_the_three_sets_cover_every_registered_tool():
     assert not (READ_ONLY & LOCAL_WRITE_SYNC or READ_ONLY & LOCAL_WRITE)
     assert not LOCAL_WRITE_SYNC & LOCAL_WRITE
     assert registered == READ_ONLY | LOCAL_WRITE_SYNC | LOCAL_WRITE
+
+
+def test_ratify_decisions_is_not_a_registered_tool():
+    """The deprecated alias of ``ratify`` is gone; ``ratify`` is the one ratification tool."""
+    registered = set(_listed_tools())
+
+    assert "ratify_decisions" not in registered
+    assert "ratify" in registered

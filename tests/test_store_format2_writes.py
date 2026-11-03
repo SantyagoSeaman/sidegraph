@@ -62,6 +62,8 @@ def _decision(**over) -> Decision:
         valid_from=datetime.now(UTC),
         provenance=Provenance(source="manual"),
     )
+    if "supersedes" in over:
+        base["status"] = "accepted"  # only an accepted successor closes
     base.update(over)
     return Decision(**base)
 

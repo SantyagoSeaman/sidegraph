@@ -79,7 +79,12 @@ from .store import (
     Store,
     StoreBusyError,
 )
-from .store_layout import snapshot_signature, stamp_cache
+from .store_layout import (
+    REBIND_DONE_KEY,
+    REBIND_PENDING_KEY,
+    snapshot_signature,
+    stamp_cache,
+)
 from .verify import _run_git
 
 LAST_SYNCED_KEY = "last_synced_graph_version"
@@ -1634,7 +1639,11 @@ def _stale_decisions(store: Store) -> list[dict]:
     """Live decisions whose every Tier-2 leaf is orphaned."""
     stale: list[dict] = []
     for d in store.iter_decisions():
-        if d.status in (DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED):
+        if d.status in (
+            DecisionStatus.SUPERSEDED,
+            DecisionStatus.REJECTED,
+            DecisionStatus.DEPRECATED,
+        ):
             continue
         # Leaf-based: surviving Tier-1/Tier-0 bindings keep the decision retrievable
         # (the escalation), but do not vouch for the claim — the concrete code is gone.
@@ -1642,6 +1651,44 @@ def _stale_decisions(store: Store) -> list[dict]:
         if leaves and all(b.status == "orphaned" for b in leaves):
             stale.append({"id": d.id, "title": d.title})
     return stale
+
+
+def _rebind_orphans(
+    store: Store,
+    reader: GraphifyReader,
+    to_version: str,
+    skip_ids: set[str],
+    canonical_writes: bool,
+) -> list[RebindOutcome]:
+    """Rebind just the entities holding an orphaned Tier-2 leaf, bar ``skip_ids`` (the
+    entities a pending move is watching). The gate-open counterpart of the full ladder, for
+    orphans born while the graph was missing; one entity's error is isolated."""
+    outcomes: list[RebindOutcome] = []
+    vacated: dict[str, set[str]] = {}
+    repo_root = _resolve_repo_root(reader) if canonical_writes else None
+    for entity in store.iter_concrete_entities():
+        if entity.entity_id in skip_ids or not any(
+            b.tier == 2 and b.status == "orphaned"
+            for b in store.bindings_for_entity(entity.entity_id)
+        ):
+            continue
+        try:
+            outcomes.append(
+                rebind_entity(
+                    entity, store, reader, repo_root, vacated, canonical_writes=canonical_writes
+                )
+            )
+        except Exception as e:  # one bad entity must not abort the pass
+            outcomes.append(
+                RebindOutcome(
+                    entity_id=entity.entity_id,
+                    canonical_name=entity.canonical_name,
+                    status="error",
+                    detail=str(e),
+                )
+            )
+    _reconcile_vacated(vacated, store, outcomes, to_version)
+    return outcomes
 
 
 def _reverify_pending_moves(
@@ -1764,6 +1811,11 @@ def sync(
     ``graphify-out``, a deterministic rebuild at the same commit), must not look "already
     synced" to a pass that owns the moved rung.
 
+    Orphans born with no graph (``add_decision`` and the like) cannot move the version, so
+    they mark a pending rebind: with the version unchanged the pass then rebinds only the
+    entities holding an orphaned leaf, never those a pending move is watching, and reports
+    them instead of skipping.
+
     Entities that error during rebind are not retried until the next graph-version change
     (or force=True) — the stamp records a completed visit, not universal success. The
     exceptions are an entity left ``moved_uncommitted`` and a remembered Tier-1 reconcile
@@ -1806,7 +1858,20 @@ def sync(
     # sidegraph-sync / lazy sync rebuilds volatile state") — set on every reload since, and
     # read here for the first time.
     volatile_stale = store.get_meta(VOLATILE_STALE_KEY) == "1"
+    # Read BEFORE the ladder snapshots the entities: the pass acknowledges this value, never a
+    # later one, so an orphan born while it runs keeps the next ordinary pass from skipping.
+    rebind_gen = store.get_meta(REBIND_PENDING_KEY) or "0"
+    rebind_pending = rebind_gen != (store.get_meta(REBIND_DONE_KEY) or "0")
     if stamp == last_stamp and not volatile_stale and not force:
+        if rebind_pending:
+            # Orphans born with no graph, and nothing else changed: rebind only the entities
+            # holding an orphaned leaf and leave the pending-move watches (below) to their own
+            # narrow path -- the full ladder would orphan a stashed move and clear its watch.
+            held = _load_pending_moves(store) if canonical_writes else None
+            retried = retried + _rebind_orphans(
+                store, reader, to_version, set(held[1]) if held else set(), canonical_writes
+            )
+            store.set_meta(REBIND_DONE_KEY, rebind_gen)
         # A committed move does not change graph.json, so a pass that left entities
         # `moved_uncommitted` would otherwise never revisit them. Re-check them once HEAD has
         # resolvably moved (design D2); an unresolvable HEAD keeps the key and skips.
@@ -1917,6 +1982,7 @@ def sync(
     # let a persistent TOC failure leave the half-state "version stamped but flag set",
     # which the gate below reads as "heal me" on every single retrieval call.
     store.set_meta(VOLATILE_STALE_KEY, "0")
+    store.set_meta(REBIND_DONE_KEY, rebind_gen)
     # TOC precompute (§5/§6): recomputed AFTER the domain-community refresh above and the
     # last_synced stamp, so it reflects this pass's own updates; written on every completed
     # (non-skipped) pass, fresh or forced — a skipped pass returns above and never reaches
@@ -1965,7 +2031,8 @@ def report_as_dict(report: SyncReport) -> dict:
     callers (design/superpowers/specs/2026-07-11-ci-integrity-design.md ruling 1).
 
     ``synced`` is ``False`` when the pass was skipped outright (``graph_version``
-    unchanged, no ``force``, no pending move to re-verify, and no remembered Tier-1
+    unchanged, no ``force``, no orphan awaiting its rebind, no pending move to re-verify,
+    and no remembered Tier-1
     reconcile whose retry repaired the record or failed again; a retry that abstains
     because a live or degraded Tier-2 anchor has no recorded community reports nothing)
     -- every OTHER field is then

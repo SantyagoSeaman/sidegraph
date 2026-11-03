@@ -302,6 +302,11 @@ def build_bundle(store: Store) -> dict[str, str]:
         ):
             if text.strip():
                 sections.append(f"{heading}\n{text.strip()}")
+        if d.retired is not None:
+            retired = ["# Retired", d.retired.reason.strip()]
+            if d.retired.duplicate_of:
+                retired.append(f"- Duplicate of {_record_ref(d.retired.duplicate_of)}")
+            sections.append("\n".join(retired))
         for block in (_anchor_lines(d.id), _history_lines(d.id, d.supersedes)):
             if block:
                 sections.append("\n".join(block))

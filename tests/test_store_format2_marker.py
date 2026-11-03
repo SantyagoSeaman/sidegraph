@@ -28,7 +28,7 @@ from sidegraph.schema import (
 )
 from sidegraph.stats.model import build_report
 from sidegraph.store import Store
-from sidegraph.store_format import FORMAT2_INDEX_STAMP, marker_text
+from sidegraph.store_format import FORMAT2_INDEX_STAMP, marker_text, new_store_requirement
 from sidegraph.store_layout import (
     INDEX_STAMPS,
     StoreRequirementError,
@@ -68,6 +68,11 @@ def _decision(title: str, **over: object) -> Decision:
 
 
 F2 = "sidegraph-store 2.0.0\nrequires-sidegraph >= 0.17.0\nshards 64\n"
+
+
+def _fresh() -> str:
+    """The marker a fresh store gets: 0.17.0, or the record-fields release once it runs."""
+    return marker_text(2, new_store_requirement(), 64)
 
 
 def _plant_shard(store: Path, name: str = "0a.shard", data: bytes = b"") -> Path:
@@ -294,7 +299,7 @@ def test_verify_accepts_a_format2_marker_and_a_fresh_store(tmp_path):
 
 def test_fresh_store_is_format2_without_shards_dir(tmp_path):
     Store(tmp_path / "s").close()
-    assert (tmp_path / "s" / "format").read_text() == F2
+    assert (tmp_path / "s" / "format").read_text() == _fresh()
     assert not (tmp_path / "s" / "shards").exists()
     assert index_stamp_of(tmp_path / "s") == FORMAT2_INDEX_STAMP
     Store(tmp_path / "s").close()  # reopens: the stamp is the one it expects
@@ -305,7 +310,7 @@ def test_missing_marker_on_an_empty_layout_is_format2_again(tmp_path):
     Store(tmp_path / "s").close()
     (tmp_path / "s" / "format").unlink()
     Store(tmp_path / "s").close()
-    assert (tmp_path / "s" / "format").read_text() == F2
+    assert (tmp_path / "s" / "format").read_text() == _fresh()
 
 
 def test_format2_marker_first_write_is_atomic_and_exclusive(tmp_path, monkeypatch):
@@ -318,7 +323,7 @@ def test_format2_marker_first_write_is_atomic_and_exclusive(tmp_path, monkeypatc
     def fail_publication(src, dst):
         if Path(dst).name == "format":
             attempts.append(Path(src))
-            assert Path(src).read_text(encoding="utf-8") == F2
+            assert Path(src).read_text(encoding="utf-8") == _fresh()
             raise OSError("simulated crash between tmp write and exclusive publication")
         return real_link(src, dst)
 
@@ -329,7 +334,7 @@ def test_format2_marker_first_write_is_atomic_and_exclusive(tmp_path, monkeypatc
     assert len(attempts) == 1
     assert not (tmp_path / "s" / "format").exists()
     with Store(tmp_path / "s"):
-        assert (tmp_path / "s" / "format").read_text(encoding="utf-8") == F2
+        assert (tmp_path / "s" / "format").read_text(encoding="utf-8") == _fresh()
     assert list((tmp_path / "s").glob("format.*.tmp")) == []
 
 
@@ -352,7 +357,7 @@ def test_format2_marker_write_tolerates_lost_concurrent_first_open_race(tmp_path
     monkeypatch.setattr(store_module.os, "link", race_once)
     with Store(tmp_path / "s") as store:
         assert raced
-        assert (store.path / "format").read_text(encoding="utf-8") == F2
+        assert (store.path / "format").read_text(encoding="utf-8") == _fresh()
 
 
 def test_backfill_writes_major0_but_refuses_with_shards(tmp_path):
@@ -625,5 +630,5 @@ def test_concurrent_first_open_of_an_empty_directory_agrees_on_format2(tmp_path)
     outcomes = [queue.get(timeout=5) for _ in range(count)]
     assert [o for o in outcomes if o[0] == "error"] == []
     assert [proc.exitcode for proc in procs] == [0] * count
-    assert (path / "format").read_text(encoding="utf-8") == F2
+    assert (path / "format").read_text(encoding="utf-8") == _fresh()
     assert not (path / "shards").exists()

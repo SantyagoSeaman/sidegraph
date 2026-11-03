@@ -487,7 +487,7 @@ def test_hooks_exits_1_when_it_cannot_write_after_running_the_rest_of_init(
     monkeypatch.chdir(repo)
     monkeypatch.setattr(githooks, "install", _unwritable)
     code = init_main(["--db", str(repo / ".sidegraph"), "--no-settings", "--hooks"])
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert code == 1
     assert "graph refresh hook: could not write (read-only file system)" in out
     assert (repo / ".sidegraph").is_dir()  # the rest of init ran
@@ -499,7 +499,7 @@ def test_remove_hooks_exits_1_when_it_cannot_remove(sandbox, monkeypatch, capsys
     monkeypatch.setattr(githooks, "remove", _unwritable)
     code = init_main(["--db", str(repo / ".sidegraph"), "--remove-hooks"])
     assert code == 1
-    assert "graph refresh hook: could not remove (read-only file system)" in capsys.readouterr().out
+    assert "graph refresh hook: could not remove (read-only file system)" in capsys.readouterr().err
 
 
 PARTIAL = "graph refresh hook: removal was partial"
@@ -516,7 +516,7 @@ def test_remove_hooks_exits_1_when_a_hook_keeps_its_block_because_of_damaged_mar
     lone_marker = damaged.read_text().replace(githooks.END_MARKER + "\n", "")
     damaged.write_text(lone_marker)
     code = init_main(["--db", str(repo / ".sidegraph"), "--remove-hooks"])
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert code == 1
     partial = [line for line in out.splitlines() if line.startswith(PARTIAL)]
     assert len(partial) == 1
@@ -533,7 +533,7 @@ def test_remove_hooks_exits_1_when_a_hook_is_a_symlink_it_left_alone(sandbox, mo
     wire_by_hand(sandbox, repo)  # post-commit is a symlink whose target carries the call
     init(repo, monkeypatch, capsys, "--hooks")  # the other two hooks get the block
     code = init_main(["--db", str(repo / ".sidegraph"), "--remove-hooks"])
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert code == 1
     partial = [line for line in out.splitlines() if line.startswith(PARTIAL)]
     assert len(partial) == 1 and "post-commit (symlink)" in partial[0]
@@ -549,7 +549,7 @@ def test_remove_hooks_exits_1_and_not_nothing_to_remove_when_only_a_damaged_hook
     path.write_text("#!/bin/sh\n# >>> sidegraph graph refresh >>>\n")
     path.chmod(0o755)
     code = init_main(["--db", str(repo / ".sidegraph"), "--remove-hooks"])
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert code == 1
     assert PARTIAL in out and "nothing to remove" not in out
 
@@ -561,4 +561,4 @@ def test_a_failed_write_after_the_question_keeps_exit_0(sandbox, monkeypatch, ca
     monkeypatch.setattr("sys.stdin", _FakeTTY("y\n"))
     code = init_main(["--db", str(repo / ".sidegraph"), "--no-settings"])
     assert code == 0
-    assert "graph refresh hook: could not write" in capsys.readouterr().out
+    assert "graph refresh hook: could not write" in capsys.readouterr().err

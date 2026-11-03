@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
-from sidegraph.store import Store
+from sidegraph.store import Store, SupersessionConflictError
 
 
 def _proposed(store, title="draft"):
@@ -103,6 +103,7 @@ def test_supersede_future_dated_predecessor_stays_readable(tmp_path):
         Decision(
             title="future rule",
             kind=DecisionKind.CONSTRAINT,
+            status=DecisionStatus.ACCEPTED,
             context="c",
             choice="x",
             valid_from=future,
@@ -113,6 +114,7 @@ def test_supersede_future_dated_predecessor_stays_readable(tmp_path):
         Decision(
             title="replaces future rule",
             kind=DecisionKind.ADR,
+            status=DecisionStatus.ACCEPTED,
             context="c",
             choice="y",
             valid_from=datetime.now(UTC),
@@ -151,8 +153,8 @@ def test_dropped_future_dated_record_not_in_live_reads(tmp_path):
     assert d.id not in {x.id for x in s.decisions_by_scope(Scope.GLOBAL)}
 
 
-# -- deferred supersession: add_decision(close_predecessor=False) + ratify (design §3
-# option (b), doc-import's --propose rule; see doc_import.py) ---------------------------
+# -- deferred supersession: a PROPOSED successor leaves its predecessor open until ratify
+# (design §3 option (b), doc-import's --propose rule; see doc_import.py) ---------------------------
 
 
 def _accepted(store, title="old way"):
@@ -169,7 +171,7 @@ def _accepted(store, title="old way"):
     )
 
 
-def test_add_decision_close_predecessor_false_leaves_predecessor_untouched(tmp_path):
+def test_add_decision_proposed_successor_leaves_predecessor_untouched(tmp_path):
     s = Store(tmp_path / "t.db")
     old = _accepted(s)
     s.add_decision(
@@ -181,15 +183,14 @@ def test_add_decision_close_predecessor_false_leaves_predecessor_untouched(tmp_p
             supersedes=old.id,
             valid_from=datetime.now(UTC),
             provenance=Provenance(source="manual"),
-        ),
-        close_predecessor=False,
+        )
     )
     reloaded = s.get_decision(old.id)
     assert reloaded.status == DecisionStatus.ACCEPTED
     assert reloaded.valid_to is None
 
 
-def test_add_decision_close_predecessor_false_still_validates_supersedes_exists(tmp_path):
+def test_add_decision_proposed_successor_still_validates_supersedes_exists(tmp_path):
     s = Store(tmp_path / "t.db")
     with pytest.raises(ValueError, match="unknown decision"):
         s.add_decision(
@@ -201,8 +202,7 @@ def test_add_decision_close_predecessor_false_still_validates_supersedes_exists(
                 supersedes="01JUNKULIDDOESNOTEXIST00",
                 valid_from=datetime.now(UTC),
                 provenance=Provenance(source="manual"),
-            ),
-            close_predecessor=False,
+            )
         )
 
 
@@ -219,8 +219,7 @@ def test_ratify_closes_still_open_predecessor_when_supersedes_set(tmp_path):
             supersedes=old.id,
             valid_from=datetime.now(UTC),
             provenance=Provenance(source="manual"),
-        ),
-        close_predecessor=False,
+        )
     )
     assert s.get_decision(old.id).status == DecisionStatus.ACCEPTED  # untouched at write time
 
@@ -233,9 +232,9 @@ def test_ratify_closes_still_open_predecessor_when_supersedes_set(tmp_path):
 
 
 def test_ratify_does_not_reclose_already_superseded_predecessor(tmp_path):
-    # The ordinary (close_predecessor=True, the default) path already closed the
-    # predecessor at write time; ratifying a proposed successor that also supersedes it
-    # must be a no-op there, not a crash or a second (re-stamped) close.
+    # The legacy shape (a store written before the close was deferred): the predecessor was
+    # closed at write time while its successor stayed proposed. Ratifying that successor
+    # must be a no-op on the predecessor, not a crash or a second (re-stamped) close.
     s = Store(tmp_path / "t.db")
     old = _accepted(s)
     new = s.add_decision(
@@ -250,7 +249,11 @@ def test_ratify_does_not_reclose_already_superseded_predecessor(tmp_path):
             provenance=Provenance(source="manual"),
         )
     )
-    assert s.get_decision(old.id).status == DecisionStatus.SUPERSEDED
+    legacy = s.get_decision(old.id)
+    legacy.status = DecisionStatus.SUPERSEDED
+    legacy.valid_to = datetime.now(UTC)
+    with s._mutation():
+        s._write_decision(legacy)
     valid_to_before = s.get_decision(old.id).valid_to
 
     s.ratify(new.id)
@@ -272,8 +275,7 @@ def test_ratify_drop_never_touches_supersedes_target(tmp_path):
             supersedes=old.id,
             valid_from=datetime.now(UTC),
             provenance=Provenance(source="manual"),
-        ),
-        close_predecessor=False,
+        )
     )
 
     s.drop(new.id)
@@ -291,3 +293,98 @@ def test_capture_ledger_idempotent(tmp_path):
     assert s.was_captured("sess-1") is True
     s.mark_captured("sess-1")  # idempotent, no error
     assert s.was_captured("sess-1") is True
+
+
+def _successor(store, old_id, title="new way", status=DecisionStatus.PROPOSED):
+    return store.add_decision(
+        Decision(
+            title=title,
+            kind=DecisionKind.ADR,
+            status=status,
+            context="c",
+            choice="y",
+            supersedes=old_id,
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual"),
+        )
+    )
+
+
+def test_rejected_successor_still_closes_predecessor_at_write(tmp_path):
+    # Every successor except a proposed one closes at write (doc-import `status: rejected`).
+    s = Store(tmp_path / "t.db")
+    old = _accepted(s)
+    _successor(s, old.id, status=DecisionStatus.REJECTED)
+    assert s.get_decision(old.id).status == DecisionStatus.SUPERSEDED
+
+
+def test_proposed_successor_then_drop_leaves_predecessor_accepted_and_open(tmp_path):
+    s = Store(tmp_path / "t.db")
+    old = _accepted(s)
+    new = _successor(s, old.id)
+    s.drop(new.id)
+    kept = s.get_decision(old.id)
+    assert kept.status == DecisionStatus.ACCEPTED and kept.valid_to is None
+
+
+def _merged_in(store, old_id, title="merged"):
+    """A pending successor written the way a merge brings one in: past the write-time check."""
+    d = Decision(
+        title=title,
+        kind=DecisionKind.ADR,
+        status=DecisionStatus.PROPOSED,
+        context="c",
+        choice="y",
+        supersedes=old_id,
+        valid_from=datetime.now(UTC),
+        provenance=Provenance(source="manual"),
+    )
+    with store._mutation():
+        store._write_decision(d)
+    return d
+
+
+def test_chain_of_proposals_is_refused_at_write(tmp_path):
+    # A (accepted) <- B (proposed): a record that is itself a pending proposal cannot be
+    # superseded, so the chain A <- B <- C never exists.
+    s = Store(tmp_path / "t.db")
+    a = _accepted(s)
+    b = _successor(s, a.id, "B")
+    with pytest.raises(SupersessionConflictError, match=f"{b.id} is a pending proposal"):
+        _successor(s, b.id, "C")
+
+
+def test_ratify_refuses_successor_whose_predecessor_is_still_proposed(tmp_path):
+    s = Store(tmp_path / "t.db")
+    a = _accepted(s)
+    b = _successor(s, a.id, "B")
+    c = _merged_in(s, b.id, "C")
+    with pytest.raises(ValueError, match=f"predecessor {b.id} is still proposed; ratify or drop"):
+        s.ratify(c.id)
+    assert s.get_decision(c.id).status == DecisionStatus.PROPOSED
+    s.ratify(b.id)
+    s.ratify(c.id)
+    assert s.get_decision(a.id).status == DecisionStatus.SUPERSEDED
+    assert s.get_decision(b.id).status == DecisionStatus.SUPERSEDED
+
+
+def test_ratify_allows_successor_of_a_dropped_predecessor(tmp_path):
+    s = Store(tmp_path / "t.db")
+    a = _accepted(s)
+    b = _successor(s, a.id, "B")
+    c = _merged_in(s, b.id, "C")
+    s.drop(b.id)
+    s.ratify(c.id)
+    assert s.get_decision(c.id).status == DecisionStatus.ACCEPTED
+    assert s.get_decision(a.id).status == DecisionStatus.ACCEPTED  # C closes nothing
+
+
+def test_ratify_refuses_second_sibling_successor(tmp_path):
+    s = Store(tmp_path / "t.db")
+    a = _accepted(s)
+    p1 = _successor(s, a.id, "P1")
+    p2 = _merged_in(s, a.id, "P2")
+    s.ratify(p1.id)
+    with pytest.raises(ValueError, match=f"{a.id} is already superseded by {p1.id}"):
+        s.ratify(p2.id)
+    assert s.get_decision(p2.id).status == DecisionStatus.PROPOSED

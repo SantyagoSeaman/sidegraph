@@ -9,7 +9,10 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from sidegraph.cli import doctor_main
+from sidegraph.doctor import CHECK_EXEMPT_CODES
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -98,19 +101,19 @@ def test_violations_exit_2_with_and_without_check(tmp_path):
 
 def test_missing_store_dir_is_operational_error(tmp_path, capsys):
     assert doctor_main(["--db", str(tmp_path / "nope")]) == 1
-    assert "store not readable" in capsys.readouterr().out
+    assert "store not readable" in capsys.readouterr().err
 
 
 def test_against_outside_git_repo_is_operational_error(tmp_path, capsys):
     db = _seed_healthy(tmp_path)  # tmp_path is not a git repository
     assert doctor_main(["--db", str(db), "--against", "HEAD"]) == 1
-    assert "--against" in capsys.readouterr().out
+    assert "--against" in capsys.readouterr().err
 
 
 def test_negative_stale_days_is_usage_error(tmp_path, capsys):
     db = _seed_healthy(tmp_path)
     assert doctor_main(["--db", str(db), "--stale-days", "-1"]) == 1
-    assert "--stale-days" in capsys.readouterr().out
+    assert "--stale-days" in capsys.readouterr().err
 
 
 def test_an_archive_segment_of_invalid_utf8_is_a_violation_not_an_unreadable_store(
@@ -438,3 +441,68 @@ def test_json_does_not_touch_the_index(tmp_path, capsys):
     doctor_main(["--db", str(db), "--json"])
     capsys.readouterr()
     assert (db / "index.db").read_bytes() == before
+
+
+# -- superseded-no-live-successor never escalates ------------------------------------------
+
+
+def _seed_orphaned_supersession(tmp_path: Path) -> Path:
+    """Healthy store plus the pre-live-head shape: a superseded decision whose only successor
+    was rejected. Written past the store guards, as the propose-then-drop sequence that left it
+    no longer closes the predecessor."""
+    db = _seed_healthy(tmp_path)
+    s = Store(db)
+    t = datetime.now(UTC)
+
+    def decision(status: DecisionStatus, supersedes: str | None = None) -> Decision:
+        return Decision(
+            title="t",
+            kind=DecisionKind.ADR,
+            status=status,
+            context="c",
+            choice="ch",
+            valid_from=t,
+            valid_to=t,
+            supersedes=supersedes,
+            provenance=Provenance(source="manual"),
+        )
+
+    old = decision(DecisionStatus.SUPERSEDED)
+    with s._mutation():
+        s._write_decision(old)
+        s._write_decision(decision(DecisionStatus.REJECTED, supersedes=old.id))
+    return db
+
+
+def test_help_names_every_check_exemption(capsys):
+    with pytest.raises(SystemExit):
+        doctor_main(["--help"])
+    # argparse may wrap a long code at one of its hyphens
+    flat = " ".join(capsys.readouterr().out.split()).replace("- ", "-")
+    for code in CHECK_EXEMPT_CODES:
+        assert code in flat
+
+
+def test_superseded_without_live_successor_alone_exits_0_with_check(tmp_path, capsys):
+    db = _seed_orphaned_supersession(tmp_path)
+    assert doctor_main(["--db", str(db), "--check"]) == 0
+    out = capsys.readouterr().out
+    assert "superseded-no-live-successor" in out
+    assert "0 violation(s), 1 finding(s)" in out
+
+
+def test_superseded_without_live_successor_does_not_hide_an_escalating_finding(tmp_path):
+    db = _seed_orphaned_supersession(tmp_path)
+    s = Store(db)
+    s.add_decision(
+        Decision(
+            title="unbound",
+            kind=DecisionKind.ADR,
+            status=DecisionStatus.ACCEPTED,
+            context="c",
+            choice="ch",
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual"),
+        )
+    )
+    assert doctor_main(["--db", str(db), "--check"]) == 2

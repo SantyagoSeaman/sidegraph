@@ -18,7 +18,7 @@ right write path, right `kind`, filled `rejected`, tight prose, on-target anchor
 - **You (the agent) decided it's worth keeping** — including when the Stop-hook nudge
   ("Sidegraph: if this session produced a durable decision...") prompts you — →
   **`propose_decisions`**. It lands `status=proposed` (or `accepted` immediately under
-  `SIDEGRAPH_AUTO_ACCEPT=on` — see [auto-accept's
+  the deprecated `SIDEGRAPH_AUTO_ACCEPT=on` — see [auto-accept's
   trade-off](../../../../docs/guides/capturing-decisions.md#4-auto-accept-opt-in) — or
   accepted at write time when the project's `SIDEGRAPH_RATIFY_POLICY` admits it, the result's
   `ratified_by` then reading `auto:<policy>`, so don't tell the human it awaits review),
@@ -79,7 +79,7 @@ anchors resurface as noise in someone else's task context later.
   anchor, the file anchor keeps the decision retrievable:
   `[{"name": "Vocabulary and Entity Relations", "file_path": "adr/ADR-001.md"},
   {"name": "ADR-001.md", "file_path": "adr/ADR-001.md"}]`. In the first store maintenance
-  pass (2026-08-09), this one rule would have kept 7 of 10 fully-invisible records
+  run (2026-08-09), this one rule would have kept 7 of 10 fully-invisible records
   reachable.
 - For a long document, section scope is declared when the record is checked
   (`record_drift_check` with `sections`), not when it is anchored.
@@ -104,7 +104,7 @@ anchors resurface as noise in someone else's task context later.
   `BaseModel`) count as one match. Repair the already-written record with
   `add_anchors(record_id, [{"name", "file_path"}])` carrying precise anchors; it works for
   accepted and proposed records alike. A repeat `add_decision` call would mint a duplicate
-  record; supersede only when the content is wrong. Don't leave a decision
+  record. For wrong content, follow the [status checks](#reversing-an-earlier-decision). Don't leave a decision
   effectively anchorless because of a silent skip.
 - **Check `anchors_orphaned` too — it is the more common failure.** An entry means the name
   has no unique graph match. The leaf is still written, but orphaned; ordinary graph-based
@@ -118,11 +118,10 @@ anchors resurface as noise in someone else's task context later.
   (bindings-only, no duplicate record, no content-free supersession). Anchor to real symbols
   and real file paths — a feature name, a directory, a domain title or a heading you invented
   reads fine and resolves to nothing.
-- No graph present? A `propose_decisions` draft still writes, with an orphaned leaf that
-  heals once a graph appears (see `sidegraph:heal-anchors`) — but `add_decision` silently
-  **drops** anchors when there is no graph (nothing minted, nothing to heal later). On the
-  direct path, make sure the graph exists before recording, or use the propose path.
-  **`add_fact` does not repeat this asymmetry** — see [Facts](#facts) below.
+- No graph present? `add_decision`, `supersede_decision` and `propose_decisions` still
+  write, with an orphaned leaf per anchor (reported in `anchors_orphaned`, reason
+  `no-graph`) that heals once a graph appears (see `sidegraph:heal-anchors`). `add_fact`
+  behaves the same — see [Facts](#facts) below.
 
 ## Facts
 
@@ -155,7 +154,7 @@ store.
   immediately, the asking human was the gate. You noticed it's worth keeping — including an
   attached fact discovered while drafting a decision → a draft's `facts` list or the
   top-level `facts` param on `propose_decisions` — `status=proposed` (or `accepted`
-  immediately under `SIDEGRAPH_AUTO_ACCEPT=on`, or accepted at write time when the project's
+  immediately under the deprecated `SIDEGRAPH_AUTO_ACCEPT=on`, or accepted at write time when the project's
   `SIDEGRAPH_RATIFY_POLICY` admits it — the result's `ratified_by` then reads
   `auto:<policy>`, so don't tell the human it awaits review), tagged `[unratified]` until a
   human ratifies it. **Never call `add_fact` on your own initiative.**
@@ -165,14 +164,13 @@ store.
   session"). There's no default to fall back on: a fact with no source is unfalsifiable
   noise.
 
-- **No-graph contrast with `add_decision`.** `add_decision` with no reader silently *drops*
-  anchors — nothing minted, nothing to heal later. `add_fact` does the opposite: with no
-  reader it still binds an ORPHANED Tier-2 leaf per anchor (the same propose-path behavior a
-  no-graph `propose_decisions` draft gets), so a fact never writes unreachable — the binding
-  heals once a graph exists (see `sidegraph:heal-anchors`). This holds on both the direct
-  (`add_fact`) and propose paths.
+- **No graph.** With no reader `add_fact` still binds an ORPHANED Tier-2 leaf per anchor,
+  as `add_decision` and `propose_decisions` do, so a fact never writes unreachable — the
+  binding heals once a graph exists (see `sidegraph:heal-anchors`). This holds on both the
+  direct (`add_fact`) and propose paths.
 
-- **Falsification is `supersede_fact`** — never a fresh, unrelated record. Same append-only
+- **Falsification of an accepted, open fact is `supersede_fact`.** Apply the status checks
+  in [Reversing an earlier decision](#reversing-an-earlier-decision) first. Same append-only
   discipline as `supersede_decision`: the predecessor closes (`valid_to` set, `status`
   flipped to `superseded`) in the same transaction the successor writes, with `supersedes`
   pointing back. Omit `anchors` to inherit the predecessor's bindings verbatim — including
@@ -185,15 +183,31 @@ from a decision, and the discernment rules for attached vs. standalone — see
 
 ## Reversing an earlier decision
 
-**Use `supersede_decision` (or `supersedes: <old_id>` in a draft) — never a fresh,
-unrelated record.** The chain of "tried before, abandoned because..." is the product; the
+**For an accepted, open predecessor, use `supersede_decision` (or
+`supersedes: <old_id>` in a draft).** The chain of "tried before, abandoned because..." is the product; the
 store closes the predecessor (`status=superseded`, `valid_to` set), never deletes it.
-`supersede_decision` closes it in the same transaction; a proposed draft's `supersedes`
-does too under the `manual` policy, but under `auto-low-risk`/`auto-all` the predecessor
-stays open until the successor is ratified. Anchoring on supersede: omit `anchors` and the replacement
+`supersede_decision` closes it in the same transaction (its replacement lands accepted); a
+proposed draft's `supersedes` closes it only when the draft is ratified, under every policy
+— until then the predecessor stays accepted, and dropping the draft leaves it untouched. Only
+an accepted decision with `valid_to` unset can be superseded, one pending successor at a
+time. To amend a pending draft, ask the human to drop it, then propose corrected knowledge
+without superseding the dropped draft. For a closed record, keep its history and find the
+accepted, open head of its chain. Replace that head if needed. With no live head, restate
+current knowledge as a fresh anchored proposal. The store refuses other targets. Follow
+the status routes above when a refusal has no live successor to name. Anchoring on supersede: omit `anchors` and the replacement
 inherits the predecessor's bindings verbatim (right when the reversal concerns the same
 entities); pass `anchors` to re-anchor from scratch (the two are exclusive — passing
 anchors replaces inheritance).
+
+**A duplicate, or a decision whose subject is gone, is retired, not superseded.** When two
+accepted records say the same thing, or the code or practice a decision governed no longer
+exists and a successor would have nothing new to say, call `retire_decision(id, reason,
+duplicate_of=<the id that stays, for a duplicate>)`. It moves the record to `deprecated`,
+keeps the reason, and stops serving it; history still shows it. For a duplicate, the kept
+record takes over the duplicate's anchors (`anchors_added`). Retire only with the human's
+agreement, and only an accepted decision (a proposal is dropped with `ratify(drop=...)`). The
+tool refuses until the store requires 0.24.0: relay its `sidegraph-require` instruction to the
+human rather than working around it.
 
 ## Notes
 

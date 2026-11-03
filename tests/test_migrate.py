@@ -27,7 +27,7 @@ from sidegraph.migrate import MigrationRefused, migrate, recover_shard_count
 from sidegraph.schema import Decision
 from sidegraph.store import Store, StoreBusyError
 from sidegraph.store_format import bucket as bucket_of
-from sidegraph.store_format import bucket_name, inventory_from_disk
+from sidegraph.store_format import bucket_name, inventory_from_disk, new_store_requirement
 from sidegraph.store_layout import store_marker
 from sidegraph.store_rules import effective_all
 from sidegraph.verify import verify_snapshot
@@ -134,7 +134,7 @@ def test_marker_fsynced_before_any_shard(git_repo, monkeypatch):  # T-M3, red: m
     assert calls.index(("fsync_dir", "store"), first_replace) < first_shard(calls)
     marker = marker_of(store)
     assert marker is not None and marker.major == 2 and marker.shards == 64
-    assert marker.requirement == "0.17.0"
+    assert marker.requirement == new_store_requirement()
 
 
 def test_marker_requirement_is_raised_to_the_format_floor(git_repo):
@@ -144,7 +144,8 @@ def test_marker_requirement_is_raised_to_the_format_floor(git_repo):
     )
     migrate(store, dry_run=False, any_branch=True)
     marker = marker_of(store)
-    assert marker is not None and marker.requirement == "0.17.0"  # max(existing, 0.17.0)
+    # max(existing, 0.17.0), or the record-fields release once it runs
+    assert marker is not None and marker.requirement == new_store_requirement()
 
 
 def test_migrated_store_opens_stamped_as_format_2(git_repo):
@@ -202,10 +203,6 @@ def break_store(repo: Path, store: Path, cond: str) -> None:
         return
     elif cond == "parse-error":
         (store / "decisions" / "BAD.json").write_text("{not json", encoding="utf-8")
-    elif cond == "parse-error-unpacked":
-        # initiatives are never packed, so only the snapshot layer sees this one
-        (store / "initiatives").mkdir()
-        (store / "initiatives" / "BAD.json").write_text("{not json", encoding="utf-8")
     elif cond == "unsafe-record-id":
         put_file(store, "decision", decision_body("X/Y"), record_id="UNSAFE")
     elif cond == "filename-id-mismatch":
@@ -231,7 +228,6 @@ def break_store(repo: Path, store: Path, cond: str) -> None:
         "not_default_branch",
         "uncommitted_store",
         "parse-error",
-        "parse-error-unpacked",
         "unsafe-record-id",
         "filename-id-mismatch",
         "symlinked-store-entry",
@@ -243,8 +239,8 @@ def test_entry_conditions_refuse_write_nothing(git_repo, capsys, cond):  # T-M4
     break_store(git_repo, store, cond)
     before = tree_bytes(store)
     status = git(git_repo, "status", "--porcelain")
-    assert run(store) == 2
-    out = capsys.readouterr().out
+    assert run(store) == 1
+    out = capsys.readouterr().err
     assert out.startswith("refused:")
     assert tree_bytes(store) == before and git(git_repo, "status", "--porcelain") == status
     assert not (store / "shards").exists() and not (store / ".gitattributes").exists()
@@ -254,8 +250,8 @@ def test_entry_conditions_refuse_write_nothing(git_repo, capsys, cond):  # T-M4
 def test_any_branch_lifts_only_the_branch_condition(git_repo, capsys):
     store = format1_committed(git_repo)
     git(git_repo, "switch", "-q", "-c", "topic")
-    assert run(store) == 2
-    assert "--any-branch" in capsys.readouterr().out
+    assert run(store) == 1
+    assert "--any-branch" in capsys.readouterr().err
     assert run(store, "--any-branch") == 0
     assert marker_of(store).major == 2
 
@@ -263,15 +259,15 @@ def test_any_branch_lifts_only_the_branch_condition(git_repo, capsys):
 def test_detached_head_refused(git_repo, capsys):
     store = format1_committed(git_repo)
     git(git_repo, "checkout", "-q", "--detach")
-    assert run(store) == 2
-    assert "detached" in capsys.readouterr().out
+    assert run(store) == 1
+    assert "detached" in capsys.readouterr().err
 
 
 def test_a_path_holding_no_store_is_refused_never_created(tmp_path, capsys):
     target = tmp_path / "nothing"
-    assert run(target) == 2
+    assert run(target) == 1
     assert not target.exists()
-    assert "no store" in capsys.readouterr().out
+    assert "no store" in capsys.readouterr().err
 
 
 # -- the pairs rule ------------------------------------------------------------------------------
@@ -473,8 +469,8 @@ def test_unmigrated_shards_completed(git_repo, capsys, shape):  # Muse rev 8 fin
 def test_lone_upper_case_bucket_names_the_git_mv_remedy(git_repo, capsys):
     store = unmigrated_shards(git_repo, "lone_upper")
     before = tree_bytes(store)
-    assert run(store) == 2
-    out = capsys.readouterr().out
+    assert run(store) == 1
+    out = capsys.readouterr().err
     assert "git mv" in out and "0A.shard" in out
     assert "restore the missing bucket files" not in out  # N=16 is recovered from lower case
     assert tree_bytes(store) == before and marker_of(store).major == 1
@@ -493,8 +489,8 @@ def test_incomplete_name_set_refuses(git_repo, capsys):  # red: infer N from the
     (store / "shards" / "extra.shard").write_bytes(b"")  # 16 files, not a set
     commit_all(git_repo, "gap", date=OLD)
     before = tree_bytes(store)
-    assert run(store) == 2
-    assert "refused:" in capsys.readouterr().out
+    assert run(store) == 1
+    assert "refused:" in capsys.readouterr().err
     assert tree_bytes(store) == before
     assert marker_of(store).major == 1
 
@@ -508,8 +504,8 @@ def test_case_collision_refused_before_marker_switch(git_repo, monkeypatch, caps
         lambda wt: [f"{rel}/0a.shard", f"{rel}/0A.shard"],
     )
     before_marker = (store / "format").read_text(encoding="utf-8")
-    assert run(store) == 2
-    out = capsys.readouterr().out
+    assert run(store) == 1
+    out = capsys.readouterr().err
     assert (store / "format").read_text(encoding="utf-8") == before_marker
     assert "git mv" in out and "0A.shard" in out
     assert not (store / "shards").exists()
@@ -523,11 +519,11 @@ def test_outside_git_branch_condition_does_not_apply(tmp_path, capsys):
     put_file(store, "decision", decision_body("D1"))
     (store / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
     before = snapshot_as_format2(store)
-    assert run(store) == 0, capsys.readouterr().out
+    assert run(store) == 0, capsys.readouterr().err
     assert marker_of(store).major == 2 and not (store / "decisions" / "D1.json").exists()
     assert survives(store, before)
-    assert run(store) == 2  # outside git, format 2 is refused: nothing to resume
-    assert "sidegraph-compact --settled-days 0" in capsys.readouterr().out
+    assert run(store) == 1  # outside git, format 2 is refused: nothing to resume
+    assert "sidegraph-compact --settled-days 0" in capsys.readouterr().err
 
 
 def test_resume_only_when_head_marker_below_2(git_repo, capsys):
@@ -537,8 +533,8 @@ def test_resume_only_when_head_marker_below_2(git_repo, capsys):
     capsys.readouterr()
     commit_all(git_repo, "migrated", date=OLD)  # HEAD's marker is now major 2
     before = tree_bytes(store)
-    assert run(store) == 2
-    assert "sidegraph-compact --settled-days 0" in capsys.readouterr().out
+    assert run(store) == 1
+    assert "sidegraph-compact --settled-days 0" in capsys.readouterr().err
     assert tree_bytes(store) == before
 
 
@@ -618,7 +614,7 @@ def test_busy_store_exits_1(git_repo, monkeypatch, capsys):
 
     monkeypatch.setattr(migrate_module, "Store", busy)
     assert run(store) == 1
-    assert "busy, try again" in capsys.readouterr().out
+    assert "busy, try again" in capsys.readouterr().err
     assert marker_of(store).major == 1
 
 
@@ -630,7 +626,7 @@ def test_sqlite_locked_exits_1(git_repo, monkeypatch, capsys):
 
     monkeypatch.setattr(migrate_module, "Store", locked)
     assert run(store) == 1
-    assert "busy, try again" in capsys.readouterr().out
+    assert "busy, try again" in capsys.readouterr().err
 
 
 def test_migration_refused_carries_reasons(git_repo):
@@ -720,8 +716,8 @@ def test_marker_changed_after_the_checks_stops_the_run(git_repo, monkeypatch, ca
             (store / "format").write_text(newer, encoding="utf-8")
 
     monkeypatch.setattr(maintenance, "stage", stage)
-    assert run(store, "--any-branch") == 2
-    assert "changed under the run" in capsys.readouterr().out
+    assert run(store, "--any-branch") == 1
+    assert "changed under the run" in capsys.readouterr().err
     assert (store / "format").read_text(encoding="utf-8") == newer  # the other writer's marker
     assert not (store / "shards").exists()
 
@@ -737,8 +733,8 @@ def test_tracked_edit_hidden_from_git_status_still_refuses(git_repo, capsys, fla
     put_file(store, "decision", decision_body("D1", title="edited behind git's back"))
     assert git(git_repo, "status", "--porcelain").strip() == ""  # git status sees nothing
     before = tree_bytes(store)
-    assert run(store) == 2
-    assert "decisions/D1.json" in capsys.readouterr().out
+    assert run(store) == 1
+    assert "decisions/D1.json" in capsys.readouterr().err
     assert tree_bytes(store) == before and marker_of(store).major == 1
 
 
@@ -811,11 +807,11 @@ def test_unusable_index_is_a_refusal_that_writes_nothing(git_repo, tmp_path, cap
     }[kind](store, tmp_path)
     before = tree_state(store)
     try:
-        assert run(store, *(["--dry-run"] if dry else [])) == 2
+        assert run(store, *(["--dry-run"] if dry else [])) == 1
         after = tree_state(store)
     finally:
         (store / "index.db").chmod(0o644)
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert out.startswith("refused:") and "index.db" in out
     assert after == before  # no .gitignore, no format, nothing
     assert not (store / ".gitignore").exists()
@@ -944,8 +940,8 @@ def test_unknown_stamp_with_a_matching_digest_is_refused_before_anything_is_writ
 ):
     store = gitignore_less_with_stamped_index(git_repo, stale=False)
     before = tree_state(store)
-    assert run(store, *(["--dry-run"] if dry else [])) == 2
-    out = capsys.readouterr().out
+    assert run(store, *(["--dry-run"] if dry else [])) == 1
+    out = capsys.readouterr().err
     assert out.startswith("refused:") and "'9.9.9'" in out and "index.db" in out
     assert tree_state(store) == before  # no .gitignore, no initiatives/, no journal, no marker
     assert marker_of(store).major == 1
@@ -989,8 +985,8 @@ def test_a_resume_probes_the_index_too(git_repo, capsys, dry):
     migrate(store, dry_run=False, any_branch=True)  # marker switched, uncommitted
     stamp_index(store, stale=False)
     before = tree_state(store)
-    assert run(store, *(["--dry-run"] if dry else [])) == 2
-    assert "'9.9.9'" in capsys.readouterr().out
+    assert run(store, *(["--dry-run"] if dry else [])) == 1
+    assert "'9.9.9'" in capsys.readouterr().err
     assert tree_state(store) == before
 
 
@@ -1004,8 +1000,8 @@ def test_unmet_requirement_refuses_a_resume(git_repo, capsys, dry):
     store = format1_committed(git_repo)
     (store / "format").write_text(marker_text(2, "99.0.0", 64), encoding="utf-8")
     before = tree_state(store)  # work tree: major 2 requiring 99.0.0; HEAD: format 1
-    assert run(store, *(["--dry-run"] if dry else [])) == 2
-    out = capsys.readouterr().out
+    assert run(store, *(["--dry-run"] if dry else [])) == 1
+    out = capsys.readouterr().err
     assert out.startswith("refused:") and "99.0.0" in out
     assert tree_state(store) == before
 
@@ -1063,7 +1059,7 @@ def test_an_io_error_at_open_is_exit_1_with_the_resume_hint_when_switched(
 
     monkeypatch.setattr(migrate_module, "Store", full_disk)
     assert run(store) == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "cannot migrate" in out and "No space left" in out
     assert ("already switched" in out) == (path == "resume")
 
@@ -1084,7 +1080,7 @@ def test_a_full_disk_while_copying_the_index_is_exit_1_not_a_refusal(
     monkeypatch.setattr(migrate_module, "_put_scratch", full)
     before = tree_state(store)
     assert run(store, *(["--dry-run"] if dry else [])) == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "cannot migrate" in out and "No space left" in out and "delete it" not in out
     assert tree_state(store) == before
 
@@ -1109,7 +1105,7 @@ def test_a_full_disk_inside_the_probe_database_is_exit_1_not_a_refusal(
 
     monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: FullConnection())
     assert run(store, "--dry-run") == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "disk is full" in out and "delete it" not in out
 
 
@@ -1124,5 +1120,21 @@ def test_an_unreadable_source_is_still_a_refusal(git_repo, tmp_path, monkeypatch
         return real_open(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(Path, "open", deny)
-    assert run(store, "--dry-run") == 2
-    assert "cannot be read" in capsys.readouterr().out
+    assert run(store, "--dry-run") == 1
+    assert "cannot be read" in capsys.readouterr().err
+
+
+def test_a_stopped_run_prints_its_reason_on_stderr_and_the_report_on_stdout(
+    git_repo, monkeypatch, capsys
+):
+    from sidegraph import migrate as migrate_module
+    from sidegraph.maintenance import MaintenanceReport
+
+    store = format1_committed(git_repo)
+    stopped = MaintenanceReport()
+    stopped.stopped = "HEAD moved after the marker switch: run maintenance again"
+    monkeypatch.setattr(migrate_module, "migrate", lambda *a, **k: stopped)
+    assert run(store) == 1
+    captured = capsys.readouterr()
+    assert "Stopped: HEAD moved" in captured.out
+    assert "HEAD moved after the marker switch" in captured.err

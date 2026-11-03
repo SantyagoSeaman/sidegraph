@@ -1,5 +1,7 @@
 # CI/CD maintenance
 
+> **Start here:** Choose Recipe 1 for anchor health, Recipe 2 for canonical store validation or Recipe 3 for scheduled review. Copy one recipe into your consuming repository and replace its version pin deliberately. [Glossary](../concepts/glossary.md).
+
 Sidegraph's store is a git-native log, so the obvious next step is to check its integrity
 the same way you check code: on every pull request, and on a schedule. This guide has three
 GitHub Actions recipes — an anchor-health required check, a store-lint on PR, and a
@@ -81,10 +83,11 @@ jobs:
         id: classify
         if: steps.sync.outcome == 'failure'
         run: |
-          # sidegraph-sync only prints JSON on exit 0/2 (a completed report); exit 1
-          # (operational error — graph or store unreadable) prints a plain-text error
-          # line instead, so a JSON-parse failure is how you tell the two apart in CI.
-          if jq -e . sync-report.json >/dev/null 2>&1; then
+          # sidegraph-sync --json always prints one JSON object. On exit 1 (operational
+          # error — graph or store unreadable) it is {"error": <message>}, the message also
+          # on stderr, in this step's log. This step runs only on a non-zero exit, and sync's
+          # exit-2 report never carries the error key, so the key tells exit 1 from exit 2.
+          if jq -e 'has("error") | not' sync-report.json >/dev/null 2>&1; then
             echo "kind=findings" >> "$GITHUB_OUTPUT"
           else
             echo "kind=operational-error" >> "$GITHUB_OUTPUT"
@@ -195,10 +198,11 @@ jobs:
         id: classify
         if: steps.verify.outcome == 'failure'
         run: |
-          # sidegraph-verify only prints JSON on exit 0/2 (a completed report); exit 1
-          # (operational error — unreadable store, an unresolvable --against ref) prints a
-          # plain-text error line instead — same convention as sidegraph-sync --json.
-          if jq -e . verify-report.json >/dev/null 2>&1; then
+          # sidegraph-verify --json always prints one JSON object. On exit 1 (operational
+          # error — unreadable store, an unresolvable --against ref) it carries an "error" key
+          # with the message, which is also on stderr, in this step's log. Its exit-2 report
+          # never carries that key, so the key tells exit 1 from exit 2 here.
+          if jq -e 'has("error") | not' verify-report.json >/dev/null 2>&1; then
             echo "kind=violations" >> "$GITHUB_OUTPUT"
           else
             echo "kind=operational-error" >> "$GITHUB_OUTPUT"
@@ -214,12 +218,12 @@ jobs:
       - name: Fail the job on violations or an operational error
         if: steps.verify.outcome == 'failure'
         run: |
-          echo "::error::sidegraph-verify --against reported: ${{ steps.classify.outputs.kind }} — see the uploaded report"
+          echo "::error::sidegraph-verify --against reported: ${{ steps.classify.outputs.kind }} — see the uploaded report, or the step log for an operational error"
           exit 1
 ```
 
 `sidegraph-verify` is a pure read: it opens canonical JSON directly, never constructs a
-`Store`, and therefore cannot migrate the store or rebuild `index.db`. See
+`Store`, and therefore cannot rebuild `index.db`. See
 [`reference/cli.md#sidegraph-verify`](../reference/cli.md#sidegraph-verify).
 
 **On a packed (format 2) store**, the same recipe judges each record on its own: a fold,
@@ -230,8 +234,8 @@ the branch. (That holds on that checkout; on your own machine the merge base is 
 target's tip only after you merged the target into your branch.) Run `sidegraph-verify` against that value: a local run against the fork point can
 differ, and CI's answer is the one that gates the merge. Findings and their remedies:
 [migrating to 0.17](migrating-to-0.17.md). A job that runs `sidegraph-doctor --check` exits `2`
-on the `store-not-migrated` notice until the store is migrated. The `maintenance-due` notice is
-reported but never fails `--check`.
+on the `store-not-migrated` notice until the store is migrated. The `maintenance-due` notice and the
+`superseded-no-live-successor` finding are reported but never fail `--check`.
 
 ## Recipe 3: scheduled triage
 
@@ -320,16 +324,19 @@ jobs:
         run: |
           claude -p 'Run the heal-anchors playbook: call sync_anchors(force=True), then for
           every orphaned/ambiguous entity and every stale decision, follow the triage tree —
-          add_anchors for code that moved, propose_decisions(supersedes=...) for content
-          that is genuinely outdated, and a status-aware summary for obsolete subjects.
+          add_anchors for code that moved, propose_decisions(supersedes=...) for an accepted
+          decision with valid_to unset whose content is genuinely outdated, and a
+          status-aware summary for obsolete subjects. For an invalidated proposal,
+          recommend human drop and corrected capture without superseding that proposal.
           Recommend drop only for proposed decisions/facts or a supported domain drop;
-          retain accepted decision history when there is no meaningful successor.
+          for an accepted decision with no meaningful successor, recommend
+          retire_decision with a reason. Do not call ratify or retire_decision.
           Summarize every action taken and recommendation at the end.' \
             --model "$SIDEGRAPH_TRIAGE_MODEL" \
             --mcp-config mcp-config.json --strict-mcp-config \
             --tools "Read,Grep,Glob" \
             --allowedTools "mcp__sidegraph__sync_anchors mcp__sidegraph__find_entity mcp__sidegraph__query_structure mcp__sidegraph__query_decisions mcp__sidegraph__add_anchors mcp__sidegraph__propose_decisions mcp__sidegraph__list_proposed mcp__sidegraph__retrieve_decisions mcp__sidegraph__get_entity_history mcp__sidegraph__list_facts mcp__sidegraph__verify_store" \
-            --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__ratify_decisions,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact,mcp__sidegraph__record_drift_check,mcp__sidegraph__propose_domains" \
+            --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__retire_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact,mcp__sidegraph__record_drift_check,mcp__sidegraph__propose_domains" \
             --output-format stream-json --verbose \
             > triage.jsonl
 

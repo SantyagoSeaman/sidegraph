@@ -15,6 +15,7 @@ import errno
 import hashlib
 import os
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -278,13 +279,28 @@ class DocWriteRequest(BaseModel):
 
 
 class DocWriteResult(BaseModel):
-    action: Literal["written", "superseded", "skipped-existing", "skipped-unanchorable"]
+    action: Literal[
+        "written",
+        "superseded",
+        "skipped-existing",
+        "skipped-unanchorable",
+        "skipped-pending-proposal",
+    ]
     decision_id: str | None = None
+    # Why a ``skipped-pending-proposal`` document was left alone, when the generic wording
+    # does not say it (a pending successor outside the document's own ref).
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
 class _DocDisposition:
-    action: Literal["written", "superseded", "skipped-existing", "skipped-unanchorable"]
+    action: Literal[
+        "written",
+        "superseded",
+        "skipped-existing",
+        "skipped-unanchorable",
+        "skipped-pending-proposal",
+    ]
     accepted_ancestor: Decision | None
     pending_proposal: Decision | None
     supersedable: tuple[Decision, ...]
@@ -292,10 +308,11 @@ class _DocDisposition:
     # The content-matched open record behind a ``skipped-existing`` action (D3), else None.
     match: Decision | None = None
     # The id a ``written``/``superseded`` write stamps as its ``supersedes``, else None: the
-    # accepted ancestor, or else the content match whose status flips (rejected <-> open).
+    # accepted ancestor (only a live head can be superseded).
     # ``_apply_doc_state`` writes it and the dry run's auto-ratify verdict reads it
     # (``is not None``), so the two cannot disagree on whether a ``written`` record supersedes.
     supersedes_id: str | None = None
+    reason: str | None = None
 
 
 class DocImportReport(BaseModel):
@@ -311,6 +328,11 @@ class DocImportReport(BaseModel):
     skipped_existing: int = 0
     skipped_generated_adr: int = 0  # projections are not fresh capture evidence
     skipped_unanchorable: int = 0
+    # A document whose stored record is a pending proposal that the new status would have to
+    # replace: a proposed record cannot be superseded (amend it by dropping it, or ratify it
+    # first), so the document is left alone and the reason listed in `skipped_pending_reasons`.
+    skipped_pending_proposal: int = 0
+    skipped_pending_reasons: list[str] = Field(default_factory=list)
     skipped_not_decision: int = 0
     skipped_superseded_frontmatter: int = 0
     # BUG G: a document TEMPLATE (skeleton to copy/fill) — detected by a "template" filename,
@@ -354,6 +376,11 @@ class DocImportReport(BaseModel):
     oversized_files: list[str] = Field(default_factory=list)
     skipped_undecodable: int = 0
     undecodable_files: list[str] = Field(default_factory=list)  # on-disk rel_path, in order
+    # A file that could not be opened or read (a dangling `*.md` symlink, a directory named
+    # `*.md`, a permission error): a named skip, like `skipped_undecodable`, so one bad entry
+    # never aborts the batch.
+    skipped_unreadable: int = 0
+    unreadable_files: list[str] = Field(default_factory=list)  # on-disk rel_path, in order
     # E3 (design note §7, review Major 4/Blocker N1): a split-produced parent that is
     # never written because it is degenerate — either an echo of its own `context` (rule
     # 1) or empty even after every fallback (rule 2, which previously discarded the whole
@@ -1437,22 +1464,51 @@ def _select_mention_anchors(
 # -- import (design §3/§4) -----------------------------------------------------------------
 
 
-def _collect_markdown_files(paths: Sequence[str | Path]) -> list[str]:
+def _collect_markdown_files(
+    paths: Sequence[str | Path], unreadable: list[str] | None = None
+) -> list[str]:
     """Expand ``paths`` (each a file or a directory to recurse) into a sorted, deterministic
     list of ``*.md`` file path strings. A directory contributes every ``*.md`` under it
     (recursive); a bare file is taken as-is regardless of extension (the parser itself
     rejects anything that isn't decision-shaped, so an explicit non-``.md`` file is simply
     very likely to come back unparseable — no special-cased rejection needed here). Paths
     that don't exist are silently omitted (the CLI validates existence up front so this
-    only matters to direct callers of ``import_docs``)."""
+    only matters to direct callers of ``import_docs``). A path whose type cannot even be
+    probed (``OSError``, e.g. a link into a directory without search permission) is
+    appended to ``unreadable`` when given, and collection continues."""
     out: list[str] = []
     for p in paths:
         path = Path(p)
-        if path.is_dir():
-            out.extend(str(f) for f in sorted(path.rglob("*.md")))
-        elif path.is_file():
-            out.append(str(path))
+        try:
+            if path.is_dir():
+                out.extend(str(f) for f in sorted(path.rglob("*.md")))
+            elif path.is_file() or path.is_symlink():
+                # A dangling link is kept so the guarded read names it instead of dropping it.
+                out.append(str(path))
+        except OSError:
+            if unreadable is not None:
+                unreadable.append(str(path))
     return out
+
+
+def _read_document(path: Path, *, nofollow: bool) -> bytes:
+    """Read at most ``MAX_IMPORT_BYTES + 1`` bytes of one regular file. Opened
+    ``O_NONBLOCK`` so a FIFO (or a link to one) cannot block the open, then ``fstat``-checked:
+    anything but a regular file raises ``OSError``. The raw descriptor is closed on every
+    failure path. ``nofollow`` refuses a final-component link (``ELOOP``)."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    if nofollow:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        handle = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)  # fdopen refused or the check failed: the raw fd is still ours
+        raise
+    with handle:
+        return handle.read(MAX_IMPORT_BYTES + 1)
 
 
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -1707,7 +1763,7 @@ def import_docs(
     ``Store.ratify`` closes any still-open (``accepted``/``proposed``) predecessor it
     supersedes in the same operation (valid_to + status=superseded) — this is shared,
     generic machinery, not doc-import-specific, so it applies identically whether
-    ratification comes through the MCP ``ratify``/``ratify_decisions`` tools or
+    ratification comes through the MCP ``ratify`` tool or
     ``sidegraph-ratify``. Dropping the proposal instead (``Store.drop``) never touches the
     ancestor — it stays untouched, exactly as if the edit had never been proposed. History
     is preserved either way; the only change from the old rule is WHEN an accepted record
@@ -1803,10 +1859,13 @@ def import_docs(
     dialect = active_profile.dialect
     tag_slugs, tag_redactions = normalize_tags(tags or [])
 
-    files = _collect_markdown_files(paths)
+    collect_failures: list[str] = []
+    files = _collect_markdown_files(paths, collect_failures)
     process = files[:limit] if limit is not None else files
 
     report = DocImportReport(tag_redactions=tag_redactions)
+    report.skipped_unreadable += len(collect_failures)
+    report.unreadable_files.extend(collect_failures)
     # A dry run's view of the refs it has already counted a write for: per ref, the records a
     # real run would hold there by now. A real run writes the first record at a ref and the
     # next copy sees it in the store; a dry run writes nothing, so a ref repeated within the
@@ -1861,21 +1920,19 @@ def import_docs(
             report.skipped_outside_profile += 1
             continue
 
-        if _in_repo(repo_rel):
-            try:
-                fd = os.open(read_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            except OSError as exc:
-                if exc.errno != errno.ELOOP:
-                    raise
+        # Any other OSError opening or reading the document (a dangling link, a directory
+        # named `*.md`, a FIFO, a permission error) is a named skip, not an aborted run.
+        try:
+            source_bytes = _read_document(read_path, nofollow=_in_repo(repo_rel))
+        except OSError as exc:
+            if exc.errno == errno.ELOOP and _in_repo(repo_rel):
                 # The validated target became a link after the check: same refusal as an
                 # escape.
                 report.skipped_outside_repo += 1
                 continue
-            with os.fdopen(fd, "rb") as handle:
-                source_bytes = handle.read(MAX_IMPORT_BYTES + 1)
-        else:
-            with read_path.open("rb") as handle:
-                source_bytes = handle.read(MAX_IMPORT_BYTES + 1)
+            report.skipped_unreadable += 1
+            report.unreadable_files.append(rel_path)
+            continue
         if len(source_bytes) > MAX_IMPORT_BYTES:
             report.skipped_oversized += 1
             report.oversized_files.append(rel_path)
@@ -2078,7 +2135,7 @@ def _import_one_record(
     if dry_run:
         existing = _doc_existing(store, request, would_be)
         disposition = _classify_doc_state(store, request, existing)
-        result = DocWriteResult(action=disposition.action)
+        result = DocWriteResult(action=disposition.action, reason=disposition.reason)
         # The verdict the post-write block below reaches, from the inputs the write uses (the
         # 2026-10-04 spec, D1): the same gate, the same kind, `supersedes` from the same
         # disposition `_apply_doc_state` stamps, and the live Tier-1/2 bindings the write
@@ -2153,6 +2210,13 @@ def _import_one_record(
         return
     if result.action == "skipped-unanchorable":
         report.skipped_unanchorable += 1
+        return
+    if result.action == "skipped-pending-proposal":
+        report.skipped_pending_proposal += 1
+        report.skipped_pending_reasons.append(
+            f"{request.ref}: "
+            + (result.reason or "its stored record is a pending proposal; drop or ratify it first")
+        )
         return
     if result.action == "superseded":
         report.superseded += 1
@@ -2280,17 +2344,47 @@ def _classify_doc_state(
                 inherit_bindings_from=None,
             )
 
+    if (
+        accepted_ancestor is None
+        and needs_status_change
+        and match is not None
+        and match.status == DecisionStatus.PROPOSED
+    ):
+        return _DocDisposition(
+            action="skipped-pending-proposal",
+            accepted_ancestor=None,
+            pending_proposal=pending_proposal,
+            supersedable=supersedable,
+            inherit_bindings_from=None,
+            match=match,
+        )
+
+    if accepted_ancestor is not None:
+        # A pending successor outside this ref (an agent's proposal) cannot be dropped here, and
+        # the store refuses a second successor beside it: leave the document for the human.
+        outside = store.pending_decision_successor(
+            accepted_ancestor.id, exclude_id=pending_proposal.id if pending_proposal else None
+        )
+        if outside is not None:
+            return _DocDisposition(
+                action="skipped-pending-proposal",
+                accepted_ancestor=accepted_ancestor,
+                pending_proposal=pending_proposal,
+                supersedable=supersedable,
+                inherit_bindings_from=None,
+                reason=(
+                    f"its accepted record {accepted_ancestor.id} already has a pending "
+                    f"successor {outside}; ratify or drop it first"
+                ),
+            )
+
     return _DocDisposition(
         action="superseded" if supersedable else "written",
         accepted_ancestor=accepted_ancestor,
         pending_proposal=pending_proposal,
         supersedable=supersedable,
         inherit_bindings_from=inherit_bindings_from,
-        supersedes_id=(
-            accepted_ancestor.id
-            if accepted_ancestor is not None
-            else (match.id if needs_status_change and match is not None else None)
-        ),
+        supersedes_id=accepted_ancestor.id if accepted_ancestor is not None else None,
     )
 
 
@@ -2370,14 +2464,6 @@ def _build_doc_decision(
     )
 
 
-def _closes_predecessor(request: DocWriteRequest, disposition: _DocDisposition) -> bool:
-    """Whether the write closes the record it supersedes: not when a ``proposed`` successor
-    follows an accepted ancestor (an unreviewed proposal never closes an accepted decision)."""
-    return not (
-        request.status == DecisionStatus.PROPOSED and disposition.accepted_ancestor is not None
-    )
-
-
 def _records_after_write(
     existing: Sequence[Decision],
     request: DocWriteRequest,
@@ -2397,7 +2483,7 @@ def _records_after_write(
     gone: set[str] = set()
     if disposition.pending_proposal is not None:
         gone.add(disposition.pending_proposal.id)
-    if decision.supersedes is not None and _closes_predecessor(request, disposition):
+    if decision.supersedes is not None and decision.status != DecisionStatus.PROPOSED:
         gone.update(
             record.id
             for record in existing
@@ -2417,8 +2503,8 @@ def _apply_doc_state(
     decision_kind: DecisionKind,
 ) -> DocWriteResult:
     disposition = _classify_doc_state(store, request, existing)
-    if disposition.action == "skipped-unanchorable":
-        return DocWriteResult(action=disposition.action)
+    if disposition.action in ("skipped-unanchorable", "skipped-pending-proposal"):
+        return DocWriteResult(action=disposition.action, reason=disposition.reason)
     if disposition.action == "skipped-existing":
         match = _preferred_content_match(request, existing)
         if match is None:  # Defensive: classification can skip only a content match.
@@ -2442,7 +2528,7 @@ def _apply_doc_state(
         store.drop(disposition.pending_proposal.id)
 
     decision = _build_doc_decision(request, disposition, decision_kind)
-    store.add_decision(decision, close_predecessor=_closes_predecessor(request, disposition))
+    store.add_decision(decision)
     _apply_doc_bindings(
         store=store,
         reader=reader,

@@ -207,8 +207,17 @@ def test_session_start_and_doctor_show_them(tmp_path, monkeypatch, capsys):
     assert any(line.startswith("maintenance-due  ") for line in printed.splitlines())
 
 
-def test_doctor_check_ignores_maintenance_due_but_not_store_not_migrated(tmp_path, capsys):
+def test_doctor_check_ignores_maintenance_due_but_not_store_not_migrated(
+    tmp_path, capsys, monkeypatch
+):
     # Closed records only, so maintenance-due (one misplaced line) is the store's one finding.
+    # A 0.17.0 marker also draws the record-fields-requirement advisory from 0.24.0 on, a
+    # finding about the marker that --check counts; it has its own tests
+    # (tests/test_record_fields_notice.py).
+    from sidegraph import integrity
+    from sidegraph.store_format import FORMAT2_MIN_SIDEGRAPH
+
+    monkeypatch.setattr(integrity, "RECORD_FIELDS_REQUIREMENT", FORMAT2_MIN_SIDEGRAPH)
     packed = make_store(tmp_path / "new", n=64)
     (a,) = ids_in_bucket(3, 1, prefix="XA")
     (b,) = ids_in_bucket(17, 1, prefix="YB")

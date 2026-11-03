@@ -1,5 +1,7 @@
 # Operations reference
 
+> **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
+
 What actually runs, where, and what it costs. Every number here was measured on this
 repository (216 Python files / 2,035 tracked files, and a store holding 239 decisions
 across 1,426 canonical JSON files) on an Apple-silicon laptop, measured 2026-09-17. They
@@ -114,3 +116,9 @@ files, hundreds of domains); no multi-developer concurrency numbers; no fleet ag
 of the local diagnostics; no growth curve for stores an order of magnitude larger than
 this one. If you run a pilot, these are the numbers worth capturing — see the
 [pilot kit](../pilot-kit/README.md).
+
+## Historical pilot retrieval proxy
+
+The earlier reminder-based protocol used a **40%** ceiling on sessions without a
+retrieval call (the measured post-improvement pooled share was 26%). Current hooks can
+deliver records without that call, so the old proxy cannot serve as the delivery gate.

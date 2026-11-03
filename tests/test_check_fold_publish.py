@@ -500,3 +500,49 @@ def test_head_moved_during_the_unlinks_keeps_the_drops(
     assert report.checks_packed == [REL1] and report.checks_dropped == []
     assert (REL2, "HEAD moved") in report.checks_kept and (rel3, "HEAD moved") in report.checks_kept
     assert (store / REL2).exists() and (store / rel3).exists() and not (store / REL1).exists()
+
+
+class _CountedList(list):
+    """A list that counts membership tests: each one scans the whole list."""
+
+    scans = 0
+
+    def __contains__(self, item: object) -> bool:
+        type(self).scans += 1
+        return super().__contains__(item)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_check_fold_never_scans_a_list_per_file(
+    git_repo: Path, pin_version_0_22: None, monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    """Each folded check file costs O(1) bookkeeping: the publisher and its preview never test
+    membership in ``report.wrote`` or in the plan's packed and dropped lists, which grow with
+    the number of check files (a scan per file made a large fold quadratic)."""
+    checks = [(f"01ARZ3NDEKTSV4RRFFQ69G5{i:03d}", "D1") for i in range(12)]
+    store = committed(git_repo, checks=checks)
+    counted: list[str] = []
+
+    def counting(real):
+        def run(plan, *args, report, **kwargs):
+            report.wrote = _CountedList(report.wrote)
+            plan.packed, plan.dropped = _CountedList(plan.packed), _CountedList(plan.dropped)
+            counted.append(real.__name__)
+            return real(plan, *args, report=report, **kwargs)
+
+        return run
+
+    real_publish = maintenance.publish_check_fold
+
+    def publish(store_dir, plan, **kwargs):
+        return counting(lambda p, **kw: real_publish(store_dir, p, **kw))(plan, **kwargs)
+
+    _CountedList.scans = 0
+    monkeypatch.setattr(maintenance, "publish_check_fold", publish)
+    monkeypatch.setattr(maintenance, "preview_check_fold", counting(maintenance.preview_check_fold))
+    with Store(store) as s:
+        report = s.maintain(settled_days=0, dry_run=dry_run, any_branch=True, fold_checks=True)
+    assert counted  # the check fold ran
+    assert report.checks_stopped is None
+    assert len(report.checks_packed) + len(report.checks_dropped) == len(checks)
+    assert _CountedList.scans == 0

@@ -1,0 +1,252 @@
+{
+    "None|None": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "None|manual": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "None|auto-low-risk": {
+        "plain": "accepted|auto:auto-low-risk|auto:auto-low-risk|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "accepted|auto:auto-low-risk|auto:auto-low-risk|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "None|auto-all": {
+        "plain": "accepted|auto:auto-all|auto:auto-all|None",
+        "successor": "accepted|auto:auto-all|auto:auto-all|None",
+        "attached": "accepted|auto:auto-all|auto:auto-all|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "accepted|auto:auto-all|auto:auto-all|None",
+        "standalone": "accepted|auto:auto-all|auto:auto-all|None",
+        "predecessor": "superseded",
+        "domain": "accepted|auto:auto-all|proposed"
+    },
+    "None|bogus": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "0|None": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "0|manual": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "0|auto-low-risk": {
+        "plain": "accepted|auto:auto-low-risk|auto:auto-low-risk|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "accepted|auto:auto-low-risk|auto:auto-low-risk|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "0|auto-all": {
+        "plain": "accepted|auto:auto-all|auto:auto-all|None",
+        "successor": "accepted|auto:auto-all|auto:auto-all|None",
+        "attached": "accepted|auto:auto-all|auto:auto-all|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "accepted|auto:auto-all|auto:auto-all|None",
+        "standalone": "accepted|auto:auto-all|auto:auto-all|None",
+        "predecessor": "superseded",
+        "domain": "accepted|auto:auto-all|proposed"
+    },
+    "0|bogus": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "1|None": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "1|manual": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "1|auto-low-risk": {
+        "plain": "accepted|auto:auto-low-risk|auto:auto-low-risk|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "accepted|auto:auto-low-risk|auto:auto-low-risk|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "1|auto-all": {
+        "plain": "accepted|auto:auto-all|auto:auto-all|None",
+        "successor": "accepted|auto:auto-all|auto:auto-all|None",
+        "attached": "accepted|auto:auto-all|auto:auto-all|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "accepted|auto:auto-all|auto:auto-all|None",
+        "standalone": "accepted|auto:auto-all|auto:auto-all|None",
+        "predecessor": "superseded",
+        "domain": "accepted|auto:auto-all|proposed"
+    },
+    "1|bogus": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "off|None": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "off|manual": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "off|auto-low-risk": {
+        "plain": "accepted|auto:auto-low-risk|auto:auto-low-risk|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "accepted|auto:auto-low-risk|auto:auto-low-risk|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "off|auto-all": {
+        "plain": "accepted|auto:auto-all|auto:auto-all|None",
+        "successor": "accepted|auto:auto-all|auto:auto-all|None",
+        "attached": "accepted|auto:auto-all|auto:auto-all|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "accepted|auto:auto-all|auto:auto-all|None",
+        "standalone": "accepted|auto:auto-all|auto:auto-all|None",
+        "predecessor": "superseded",
+        "domain": "accepted|auto:auto-all|proposed"
+    },
+    "off|bogus": {
+        "plain": "proposed|None|None|None",
+        "successor": "proposed|None|None|None",
+        "attached": "proposed|None|None|None",
+        "unanchored": "proposed|None|None|None",
+        "adr": "proposed|None|None|None",
+        "standalone": "proposed|None|None|None",
+        "predecessor": "accepted",
+        "domain": "proposed|None|proposed"
+    },
+    "on|None": {
+        "plain": "accepted|None|None|None",
+        "successor": "accepted|None|None|None",
+        "attached": "accepted|None|None|None",
+        "unanchored": "accepted|None|None|None",
+        "adr": "accepted|None|None|None",
+        "standalone": "accepted|None|None|None",
+        "predecessor": "superseded",
+        "domain": "proposed|None|proposed"
+    },
+    "on|manual": {
+        "plain": "accepted|None|None|None",
+        "successor": "accepted|None|None|None",
+        "attached": "accepted|None|None|None",
+        "unanchored": "accepted|None|None|None",
+        "adr": "accepted|None|None|None",
+        "standalone": "accepted|None|None|None",
+        "predecessor": "superseded",
+        "domain": "proposed|None|proposed"
+    },
+    "on|auto-low-risk": {
+        "plain": "accepted|None|None|None",
+        "successor": "accepted|None|None|None",
+        "attached": "accepted|None|None|None",
+        "unanchored": "accepted|None|None|None",
+        "adr": "accepted|None|None|None",
+        "standalone": "accepted|None|None|None",
+        "predecessor": "superseded",
+        "domain": "proposed|None|proposed"
+    },
+    "on|auto-all": {
+        "plain": "accepted|None|None|None",
+        "successor": "accepted|None|None|None",
+        "attached": "accepted|None|None|None",
+        "unanchored": "accepted|None|None|None",
+        "adr": "accepted|None|None|None",
+        "standalone": "accepted|None|None|None",
+        "predecessor": "superseded",
+        "domain": "accepted|auto:auto-all|proposed"
+    },
+    "on|bogus": {
+        "plain": "accepted|None|None|None",
+        "successor": "accepted|None|None|None",
+        "attached": "accepted|None|None|None",
+        "unanchored": "accepted|None|None|None",
+        "adr": "accepted|None|None|None",
+        "standalone": "accepted|None|None|None",
+        "predecessor": "superseded",
+        "domain": "proposed|None|proposed"
+    }
+}

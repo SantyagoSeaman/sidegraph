@@ -1,131 +1,37 @@
 # Using the memory day to day
 
+> **Start here:** Call `get_task_context` with your task files, then use the sections below to interpret the reply. [Glossary](../concepts/glossary.md).
+
 Sidegraph shows up in two places during a normal session: an automatic map at session start,
 and an on-demand, task-scoped pull whenever you ask the agent something that touches specific
-code or docs. Both render through the same `TaskContext`/`top_tier_map` machinery in
-`src/sidegraph/retrieval.py`.
+code or docs. Ask for the relevant records before choosing an approach.
 
 ## What `SessionStart` injects
 
-Every new session, the `sidegraph-session-start` hook runs a lazy sync (best-effort, see
-[`guides/surviving-refactors.md`](surviving-refactors.md)) and injects a compact table of
-contents as `additionalContext` — not a full dump of the store. Which of two renderers runs
-depends entirely on whether the store has any **accepted domains** yet (see
-[mind model](../concepts/mind-model.md) and
-[retrieval: SessionStart TOC](../concepts/retrieval.md#sessionstart-toc)).
-On Grok Build the hook still runs, but its text is lost; the MCP server supplies the map
-instead (the cached domain table of contents, or only the standing lines, never the
-`## Communities` fallback below; see the [Grok Build guide](../integrations/grok.md)):
+The session map gives a short orientation before work. A **domain** is a named area of the project. Accepted domains appear as a table of contents with their purpose and mistake counts. Before domains are named, the hook can show graph communities instead. A community is a cluster of related code or document nodes.
 
-- **Once at least one domain has been ratified** (`sidegraph-domains bootstrap`/`add` →
-  `sidegraph-ratify` — see [naming your domains](naming-your-domains.md)), `render_toc()`
-  renders the real, domain-named table of contents: one line per accepted domain (title,
-  one-line summary truncated to 100 characters, mistake count, subdomain count when
-  non-zero). This is the normal steady-state view for any project whose mind model has names
-  in it — most projects, after the first bootstrap/ratify pass.
-- **Before any domain is ratified** — a fresh repo, or one that hasn't bootstrapped/ratified
-  domains yet — `top_tier_map()` is the fallback: the same surrounding shape, but with a
-  nameless `## Communities` section (up to the 8 largest Graphify communities by member
-  count, labeled only by their highest-degree "god" node, e.g. `Trader — 42 entities
-  (community 3)`; omitted entirely if no graph is present) instead of `## Domains`.
-
-Whichever renderer ran, the `sidegraph-session-start` hook prepends the same **standing
-search instruction**, once, ahead of the rest of the text (not inside either renderer — see
-[`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start)):
+The standing instruction is:
 
 > When you need to find or understand code in this project, call get_task_context(files=[…])
 > with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
 > are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
 > available. If the tool is listed only by name, load it first.
 
-Unlike the records the `PreToolUse` hook delivers at the point of reading (see
-[Memory without asking](#memory-without-asking) below), this line is unconditional and covers
-every search surface behaviorally, not just calls that name a file with records — bash `find`
-and MCP structure-query tools included.
+`Sidegraph X.Y.Z` identifies the running package. A pending-ratification line means someone must review proposed records. A drift line asks for a content check. Read other diagnostic lines using [troubleshooting](troubleshooting.md). None of these lines means the whole store is loaded into the agent's context.
 
-The next line names the package the hooks run: `Sidegraph X.Y.Z`. A session that launched an old
-install says so in its own context.
+Claude Code, Codex and Muse receive a session map through hooks. Grok Build receives its map through the MCP server's instructions. OpenCode uses explicit calls. If a map is absent, ask for task context directly and [verify the setup](verifying-your-setup.md).
 
-Both renderers also inject:
-
-- **Initiatives** — every `Initiative` recorded in the store (name + description).
-- **Global mistakes & constraints** — up to the 10 most recent `gotcha`/`lesson`/`constraint`
-  decisions scoped `global`, newest first.
-- **Unratified proposals** — proposed records inside the surfacing window, after everything
-  accepted (see [below](#why-an-unratified-draft-still-shows-up-and-what-the-tag-means)). The
-  domain map lists proposed global mistakes only. The nameless map lists proposed decisions and
-  facts, up to 10 of each.
-
-The nameless map (no domain ratified yet) has two more sections: **Recorded decisions**, up to
-the 10 most recent accepted decisions that no section above already shows, and **Known facts**,
-up to 10 accepted facts. So the global mistakes are not the only decisions a session sees at
-start. Everything task-scoped is deferred to `get_task_context`.
-
-After the map come the status lines, one for each problem the integrity checks find, in a fixed
-order: records awaiting ratification, code drift, a borrowed or stale code graph, a stray empty
-store, a plugin and package version mismatch, a second Sidegraph on `PATH`, the plugin off in
-subdirectories, a missing code graph, a code graph built by an untested Graphify release,
-orphaned records, store files left out of the index, an outdated refresh helper, no refresh
-hook, uncommitted store files, records that exist only on unmerged branches, a store not yet
-migrated to the packed layout, and packed-store maintenance that is due. Each line is there only while its
-problem is. A problem that needs a person also sends a notice to the user, at most once a day.
-The texts and the notice rules are in the
-[hooks reference](../reference/hooks.md#sidegraph-session-start), and
-[troubleshooting](troubleshooting.md) says what to do about each.
-
-The line you will meet most is the ratification one. Unless `$SIDEGRAPH_RATIFY_NUDGE == "off"`, the
-hook adds it whenever the pending-ratification queue is non-empty (nothing is appended at zero).
-Verbatim, with the counts substituted:
-
-> Sidegraph: N record(s) awaiting ratification (X decisions, Y facts, Z domains; oldest D days) — review
-> with the ratify MCP tool or sidegraph-ratify.
-
-The `; oldest D days` part is left out when only domains are pending.
-
-The count is proposed decisions, standalone proposed facts (a fact riding a proposed
-decision's cascade is covered by it and never double-counted), and proposed domains — see
-[`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start) and
-[`guides/capturing-decisions.md`](capturing-decisions.md) for what "ratification" means and
-the `sidegraph:ratify-decisions` skill (which this line is meant to trigger) for the
-in-session walkthrough.
-
-With an empty store and no graph, this degrades to the standing instruction, the version line,
-the header and a line saying there is no code graph — that's expected, not a bug (see the
-never-crash contract in [`reference/hooks.md`](../reference/hooks.md)).
+The [delivery contract](../reference/retrieval-internals.md#what-sessionstart-injects) has the exact limits and switches.
 
 ## Memory without asking
 
-The map above is thin on purpose, and an agent does not always call `get_task_context` before it
-reads. Three more channels put records in front of an agent, or tell it that records exist, with
-no query. All three read the store's index directly, so each costs a few tens of milliseconds.
+On Claude Code and Grok Build, a supported file read or edit can deliver the file's most relevant records automatically. A subagent task brief can receive records for the files it names. Each file is delivered once per agent, so use `get_task_context` when you need the full context again.
 
-- **At the point of reading.** The `PreToolUse` hook runs before a `Read`, `Edit`, `Write` or
-  `Grep` call, and before a Bash line that runs `sed`, `grep`, `rg` or `cat`. When the call names
-  a file that decisions are anchored to, the agent gets that file's top decisions, mistakes first,
-  in the same call: two decisions, or three when the first two are mistakes, for at most three
-  files per call. Each file is delivered once per agent, and an agent gets ten files in all. A call that
-  names no file with records gets nothing. `SIDEGRAPH_GREP_NUDGE=off` stops it.
-- **In a subagent's brief.** On an `Agent` call (`Task` on older hosts), the hook reads the files
-  the brief names, and the files named in a plan or notes document the brief names, and appends
-  the decisions anchored to them to the brief: two per file, at most six lines. The subagent finds
-  the block at the end of its first message. The parent does not see it, and its transcript keeps
-  the prompt it wrote. `SIDEGRAPH_AGENT_BRIEF=off` stops it.
-- **At the start of a subagent.** A subagent starts without the session's context. The
-  `SubagentStart` hook gives it the standing instruction and one sentence saying how many
-  decisions are anchored to code, in how many files, and how many are recorded mistakes. It
-  carries no records: the subagent asks `get_task_context` for the files it works on.
-  `SIDEGRAPH_SUBAGENT_BRIEF=off` stops it.
+Claude Code, Codex and Muse also introduce retrieval to a starting subagent through a short hook brief. That introduction contains no records. Grok's subagents share the parent's MCP instructions. OpenCode uses explicit tool calls.
 
-The first two channels can deliver eligible facts as well as decisions, within the same record
-caps. Facts keep their whole statement and source; fact lines longer than 512 characters are
-withheld whole and remain available through `list_facts`. Within one answer or appended brief,
-a later identical record may say `See above` with its kind, trust marker and ID under each
-applicable file. The first copy remains complete for that surface. No state crosses calls or
-agents, and saved characters do not buy extra records. Existing once-per-file claims remain;
-use `get_task_context` for fuller decision context and `list_facts` for whole facts.
-These two channels run on Claude Code and Grok Build (Sidegraph ships no `PreToolUse` hook for Codex or Muse).
-`SubagentStart` delivers its brief on Claude Code, Codex and Muse; Grok Build runs it but does
-not pass the output to the model. The wiring is in the [hooks reference](../reference/hooks.md#sidegraph-pre-tool-use).
+These channels supplement the task lookup. If the automatic block is absent, ask for `get_task_context(files=["<your file>"])`. See the [host matrix](../integrations/support.md) to choose the setup page for your host.
+
+The [delivery contract](../reference/retrieval-internals.md#memory-without-asking) has the exact limits and switches.
 
 ## Asking task-scoped questions so `get_task_context` fires with the right seeds
 
@@ -302,7 +208,8 @@ cannot see is exactly the one that rots. `sidegraph-doctor` adds the latency cou
 `[drifted]` requests a content review; a moved file alone does not invalidate a decision.
 Use `sidegraph:triage-drift` to read the claim and current code. If the claim still holds,
 `record_drift_check` can append a justified inspection of the current clean committed
-files without changing the decision. If it no longer holds, propose a real successor.
+files without changing the decision. If it no longer holds, follow the
+[status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
 The [tool reference](../reference/mcp-tools.md#record_drift_check) describes refusal cases
 and coverage. Changed inspected files or scope re-arm the warning, and for a markdown file
 checked with declared sections only a change to a declared or also-watched section or to the

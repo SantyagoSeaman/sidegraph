@@ -106,20 +106,27 @@ from .host.claude_settings import (
 from .importer import import_rationales
 from .input_limits import InputLimitError
 from .integrity import binding_statuses_computed
-from .maintenance import render_report
+from .maintenance import MaintenanceReport, render_report
 from .okf import build_bundle, write_bundle
 from .profiles import PROFILES, get_profile
 from .retrieval import TOC_CACHE_KEY, build_toc, proposal_surfaces
 from .schema import Decision, DecisionKind, DecisionStatus, Domain, DomainStatus, Fact, Provenance
 from .stats.model import UnreadableRecordError, build_report
 from .stats.render import render_json, render_text
-from .store import VOLATILE_STALE_KEY, Store, StoreBusyError
+from .store import (
+    VOLATILE_STALE_KEY,
+    Store,
+    StoreBusyError,
+    settled_after_failure,
+    settled_ratify_result,
+)
 from .store_format import has_shard_files
 from .store_layout import (
     ARCHIVE_SUBDIR,
     CANONICAL_SUBDIRS,
     FORMAT_MARKER_NAME,
     GITIGNORE_NAME,
+    LEGACY_SUBDIRS,
     SHARDS_SUBDIR,
     STAMPING_MARKER_NAME,
     StoreRequirementError,
@@ -146,7 +153,13 @@ from .sync import (
     take_snapshot,
 )
 from .validation_errors import format_validation_error
-from .verify import SYMLINK_STOP_NOTE, find_store_project_repo, verify_against, verify_snapshot
+from .verify import (
+    SYMLINK_STOP_NOTE,
+    Violation,
+    find_store_project_repo,
+    verify_against,
+    verify_snapshot,
+)
 from .viz.model import build_graph
 from .viz.render import to_html, to_json
 
@@ -162,41 +175,36 @@ _BOOTSTRAP_LARGE_RUN_THRESHOLD = 50
 _DB_HELP = (
     "store directory (default: $SIDEGRAPH_DIR if set, else existing "
     f"'{DEFAULT_STORE_DIR}/' if present, else '{DEFAULT_STORE_DIR}'; $SIDEGRAPH_DB is "
-    "honored for back-compat, deprecated — a legacy *.db file path still works there via "
-    "one-time migration)"
+    "honored for back-compat, deprecated)"
 )
 
 # ``sidegraph-stats`` cannot use the shared text: it reads ``<dir>/index.db`` and never opens a
-# ``Store``, and migration happens when a ``Store`` opens. Handed a legacy ``*.db`` file it exits
-# 2 looking for ``<file>/index.db``, so its help says what it does instead of what the others do.
+# ``Store``. Handed a legacy ``*.db`` file it exits 1 looking for ``<file>/index.db``, so its
+# help says what it does instead of what the others do.
 _INSPECT_DB_HELP = (
     "store directory (default: $SIDEGRAPH_DIR if set, else existing "
     f"'{DEFAULT_STORE_DIR}/' if present, else '{DEFAULT_STORE_DIR}'; $SIDEGRAPH_DB is "
-    "honored for back-compat, deprecated). This command never opens the store, so it cannot "
-    "migrate a legacy *.db file: run a command that opens the store first (sidegraph-init)"
+    "honored for back-compat, deprecated). This command never opens the store, so a legacy "
+    "*.db file path is not a store here"
 )
 
 _STATS_DB_HELP = (
     "store directory (default: $SIDEGRAPH_DIR if set, else existing "
     f"'{DEFAULT_STORE_DIR}/' if present, else '{DEFAULT_STORE_DIR}'; $SIDEGRAPH_DB is "
     "honored for back-compat, deprecated). This command only reads <directory>/index.db and "
-    "never opens the store, so it cannot migrate a legacy *.db file: run a command that opens "
-    "the store first (sidegraph-init)"
+    "never opens the store, so a legacy *.db file path is not a store here"
 )
 
 
 def _looks_already_initialized(path: Path) -> bool:
     """True iff ``path`` already names a real store: an existing legacy single-file store
-    (a plain file — ``Store`` migrates it in place on open), a directory that already
-    carries the canonical layout (its ``format`` marker exists — see
-    ``store.Store._ensure_format_marker``), or a directory holding an UN-migrated legacy
-    ``decisions.db`` (no ``format`` marker yet, since migration hasn't run — see
-    ``store.Store._migrate_legacy``). That last case (review Minor 5) is real,
-    pre-existing data: without it, ``init_main`` reported "created store" for a directory
-    ``Store(...)`` was about to MIGRATE a moment later, understating what actually
-    happened. A bare ``path.exists()`` used to false-positive on any pre-existing-but-empty
-    directory too, reporting "already initialized" for a directory ``sidegraph-init`` was
-    about to populate for the first time."""
+    (a plain file, which ``Store`` refuses), a directory that already carries the canonical
+    layout (its ``format`` marker exists — see ``store.Store._ensure_format_marker``), or a
+    directory holding a legacy ``decisions.db`` (which ``Store`` also refuses). That last case
+    is real, pre-existing data, so ``init_main`` must not report "created store" for it. A
+    bare ``path.exists()`` used to false-positive on any pre-existing-but-empty directory
+    too, reporting "already initialized" for a directory ``sidegraph-init`` was about to
+    populate for the first time."""
     if path_is_file(path):
         return True
     if path_exists(path / "format"):
@@ -218,7 +226,9 @@ def _is_empty_store_for_init(path: Path) -> bool:
         or not path_exists(path / FORMAT_MARKER_NAME)
     ):
         return False
-    pending = [path / name for name in (*CANONICAL_SUBDIRS, ARCHIVE_SUBDIR, SHARDS_SUBDIR)]
+    pending = [
+        path / name for name in (*CANONICAL_SUBDIRS, *LEGACY_SUBDIRS, ARCHIVE_SUBDIR, SHARDS_SUBDIR)
+    ]
     while pending:
         directory = pending.pop()
         try:
@@ -534,7 +544,7 @@ def _graph_refresh_hook(
                 )
             return True
     except OSError as e:
-        print(f"graph refresh hook: could not write ({e})")
+        print(f"graph refresh hook: could not write ({e})", file=sys.stderr)
         return False
     print(_GRAPH_REFRESH_NON_INTERACTIVE)
     return True
@@ -554,14 +564,14 @@ def _remove_graph_refresh_hook(project: Path) -> int:
     try:
         report = githooks.remove(info)
     except OSError as e:
-        print(f"graph refresh hook: could not remove ({e})")
+        print(f"graph refresh hook: could not remove ({e})", file=sys.stderr)
         return 1
     changed = [r.hook for r in report.hooks if r.action in ("removed", "deleted")]
     if changed:
         print(f"graph refresh hook: removed ({', '.join(changed)})")
     left = [r for r in report.hooks if r.action in ("refused", "damaged")]
     for result in left:
-        print(f"{result.hook}: {result.reason}")
+        print(f"{result.hook}: {result.reason}", file=sys.stderr)
     if report.helper_removed:
         print(f"removed the helper {info.helper} and its lock files")
     if had_choice:
@@ -574,7 +584,8 @@ def _remove_graph_refresh_hook(project: Path) -> int:
         )
         print(
             "graph refresh hook: removal was partial; Sidegraph's block may remain in "
-            f"{names}, left untouched: edit them by hand"
+            f"{names}, left untouched: edit them by hand",
+            file=sys.stderr,
         )
         return 1
     return 0
@@ -596,8 +607,7 @@ def init_main(argv: list[str] | None = None) -> int:
         default=None,
         help="store directory to create (default: $SIDEGRAPH_DIR if set, else existing "
         f"'{DEFAULT_STORE_DIR}/' if present, else '{DEFAULT_STORE_DIR}' — the recommended "
-        "in-repo location; $SIDEGRAPH_DB is honored for back-compat, deprecated. Passing a "
-        "legacy *.db file path still works via one-time migration)",
+        "in-repo location; $SIDEGRAPH_DB is honored for back-compat, deprecated)",
     )
     parser.add_argument(
         "--graph",
@@ -615,7 +625,7 @@ def init_main(argv: list[str] | None = None) -> int:
     )
     settings_flags.add_argument(
         "--ratify-policy",
-        choices=[p.value for p in RatifyPolicy],
+        choices=[p.value for p in RatifyPolicy if p is not RatifyPolicy.LEGACY_ACCEPT],
         default=None,
         help=(
             f"set {RATIFY_POLICY_ENV_VAR} in {SETTINGS_RELATIVE_PATH.as_posix()} to this "
@@ -666,15 +676,13 @@ def init_main(argv: list[str] | None = None) -> int:
     db_path = Path(args.db)
     already_initialized = _looks_already_initialized(db_path)
     empty_store = _is_empty_store_for_init(db_path)
-    # Before Store(): opening a legacy single-file --db migrates it into a directory, after
-    # which the legacy-file rule no longer applies and init would report another graph than sync.
     graph_path = _resolve_cli_graph(args.graph, args.db)
     try:
         # A markerless directory can be a checkout window, even when it has no records.
         creating = not already_initialized and not path_exists(db_path)
         Store(args.db, creating=creating)
     except Exception as e:
-        print(f"store not writable ({db_path}): {e}")
+        print(f"store not writable ({db_path}): {e}", file=sys.stderr)
         return 1
 
     if empty_store:
@@ -785,7 +793,10 @@ def _route_ratify(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]
     than a script needs — so the seam is kept even though the original hazard no longer
     forces it.
     """
-    if store.get_decision(id_) is not None:
+    decision = store.get_decision(id_)
+    if decision is not None:
+        if decision.status != DecisionStatus.PROPOSED:
+            return settled_ratify_result("decision", decision.status.value, action), []
         try:
             if action == "accept":
                 _decision, cascaded = store.ratify(id_)
@@ -793,8 +804,12 @@ def _route_ratify(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]
             _decision, cascaded = store.drop(id_)
             return "dropped", cascaded
         except ValueError as e:
-            return f"error: {e}", []
-    if store.get_fact(id_) is not None:
+            raced = settled_after_failure(store, "decision", id_, action, decision.status.value)
+            return raced or f"error: {e}", []
+    fact = store.get_fact(id_)
+    if fact is not None:
+        if fact.status != DecisionStatus.PROPOSED:
+            return settled_ratify_result("fact", fact.status.value, action), []
         try:
             if action == "accept":
                 store.ratify_fact(id_)
@@ -802,13 +817,22 @@ def _route_ratify(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]
                 store.drop_fact(id_)
             return ("accepted" if action == "accept" else "dropped"), []
         except ValueError as e:
-            return f"error: {e}", []
-    if store.get_domain(id_) is not None:
+            raced = settled_after_failure(store, "fact", id_, action, fact.status.value)
+            return raced or f"error: {e}", []
+    domain = store.get_domain(id_)
+    if domain is not None:
+        if domain.status != DomainStatus.PROPOSED and not (
+            action == "drop" and domain.status == DomainStatus.ACCEPTED
+        ):
+            return settled_ratify_result("domain", domain.status.value, action), []
         result = (
             store.ratify_domains(accept=[id_])
             if action == "accept"
             else store.ratify_domains(drop=[id_])
         )
+        if result[id_].startswith("error"):
+            raced = settled_after_failure(store, "domain", id_, action, domain.status.value)
+            return raced or result[id_], []
         return result[id_], []
     return f"error: unknown id {id_!r} (not a pending decision, fact, or domain)", []
 
@@ -840,7 +864,7 @@ def _format_proposed_decision_block(store: Store, d: Decision) -> str:
     # surfacing window is only humane if the queue says which items it has stopped
     # serving — otherwise a reviewer cannot tell an urgent backlog from an inert one, and
     # the window reads as a silent drop. The record stays listed and ratifiable either way.
-    head = format_proposal(d)
+    head = format_proposal(d, store.get_decision(d.supersedes) if d.supersedes else None)
     if not proposal_surfaces(d):
         # On the TITLE line, where the eye lands — not at the end of a multi-line block.
         first, _, rest = head.partition("\n")
@@ -857,7 +881,7 @@ def _ratified_domain(store: Store, id_: str, result: str) -> bool:
     cache refresh below to real domain changes only (mirrors ``server._ratified_domain``;
     duplicated rather than imported so this CLI stays clear of ``server.py``'s module-level
     store, same rationale as ``_route_ratify``'s docstring)."""
-    if result.startswith("error"):
+    if result.startswith(("error", "already")):
         return False
     return store.get_decision(id_) is None and store.get_domain(id_) is not None
 
@@ -985,7 +1009,7 @@ def ratify_main(argv: list[str] | None = None) -> int:
     try:
         store = Store(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
 
     if args.all:
@@ -1047,7 +1071,7 @@ def ratify_main(argv: list[str] | None = None) -> int:
             accepted_domain_ids.append(did)
         if result.startswith("error"):
             detail = result.split(":", 1)[1].strip() if ":" in result else result
-            print(f"error {did}: {detail}")
+            print(f"error {did}: {detail}", file=sys.stderr)
             had_error = True
         else:
             print(f"{result} {did}")
@@ -1085,7 +1109,7 @@ def ratify_main(argv: list[str] | None = None) -> int:
         domain_changed = domain_changed or _ratified_domain(store, did, result)
         if result.startswith("error"):
             detail = result.split(":", 1)[1].strip() if ":" in result else result
-            print(f"error {did}: {detail}")
+            print(f"error {did}: {detail}", file=sys.stderr)
             had_error = True
         else:
             print(f"{result} {did}")
@@ -1165,7 +1189,8 @@ def sync_main(argv: list[str] | None = None) -> int:
     call) consuming the one-shot cold-reload heal and discarding its report would be worse
     than one that always pays the rebind ladder's cost, so ``--check`` never reads a
     version-skip as "clean" the way a plain sync legitimately can. The two flags compose
-    (``--json --check``); the operational-error exit-1 paths below are unchanged. See
+    (``--json --check``); on an operational error (exit 1) ``--json`` prints one
+    ``{"error": <message>}`` object, the message also on stderr. See
     design/superpowers/specs/2026-07-11-ci-live-findings-design.md ruling 1.
     """
     parser = argparse.ArgumentParser(
@@ -1200,14 +1225,12 @@ def sync_main(argv: list[str] | None = None) -> int:
     try:
         reader = GraphifyReader(str(graph))
     except Exception as e:
-        print(f"graph not readable ({graph}): {e}")
-        return 1
+        return _operational_error(f"graph not readable ({graph}): {e}", _json_error(args.json))
 
     try:
         store = Store(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
-        return 1
+        return _operational_error(f"store not readable ({args.db}): {e}", _json_error(args.json))
 
     try:
         # --check implies force=True: a check that can be silently pre-empted by an
@@ -1216,8 +1239,7 @@ def sync_main(argv: list[str] | None = None) -> int:
         # the rebind ladder's cost. See docs/reference/cli.md's --check section.
         report = sync(store, reader, force=args.force or args.check)
     except Exception as e:
-        print(f"sync failed: {e}")
-        return 1
+        return _operational_error(f"sync failed: {e}", _json_error(args.json))
 
     report_dict = report_as_dict(report)
 
@@ -1314,7 +1336,7 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
     try:
         profile = get_profile(profile_name)
     except ValueError as e:
-        print(str(e))
+        print(str(e), file=sys.stderr)
         return 1
 
     # A bare `--docs` (no PATH, legal now that --profile can drive discovery instead) still
@@ -1326,7 +1348,7 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
         docs_paths: list[str] = explicit_docs
         missing = [p for p in docs_paths if not Path(p).exists()]
         if missing:
-            print(f"--docs path(s) not found: {', '.join(missing)}")
+            print(f"--docs path(s) not found: {', '.join(missing)}", file=sys.stderr)
             return 1
     else:
         # Profile-only: discover files via the profile's ingest globs, which are repo-root
@@ -1350,13 +1372,13 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
     try:
         reader = GraphifyReader(str(graph))
     except Exception as e:
-        print(f"graph not readable ({graph}): {e}")
+        print(f"graph not readable ({graph}): {e}", file=sys.stderr)
         return 1
 
     try:
         store = Store(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
 
     # Resolved once here, immediately before the batch call (design D1) — one parse per
@@ -1434,6 +1456,8 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
             f"{report.skipped_superseded_frontmatter} superseded-frontmatter, "
             f"{report.skipped_outside_profile} outside-profile)"
         )
+        for reason in report.skipped_pending_reasons:
+            print(f"skipped: {reason}")
         if report.status_derived_rejected:
             print(f"{report.status_derived_rejected} would land rejected (source status: rejected)")
         if report.status_derived_proposed:
@@ -1467,14 +1491,18 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
         if report.tag_redactions:
             print(f"redacted {report.tag_redactions} secret(s) from tag values")
         # D4 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): printed
-        # LAST. The by_file lines share the block's two-space indent, so any printed after
-        # the block would read as more undecodable files.
+        # LAST, the undecodable block then the unreadable one. The by_file lines share the
+        # blocks' two-space indent, so any printed after them would read as more files.
         if report.skipped_undecodable:
             print(
                 f"{report.skipped_undecodable} file(s) skipped: not valid UTF-8, re-save as "
                 "UTF-8 to import:"
             )
             for fp in report.undecodable_files:
+                print(f"  {fp}")
+        if report.skipped_unreadable:
+            print(f"{report.skipped_unreadable} file(s) skipped: could not be read:")
+            for fp in report.unreadable_files:
                 print(f"  {fp}")
         return 0
 
@@ -1493,6 +1521,8 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
         f"{report.skipped_superseded_frontmatter} superseded-frontmatter, "
         f"{report.skipped_outside_profile} outside-profile)"
     )
+    for reason in report.skipped_pending_reasons:
+        print(f"skipped: {reason}")
     if report.status_derived_rejected:
         print(f"{report.status_derived_rejected} landed rejected (source status: rejected)")
     if report.status_derived_proposed:
@@ -1526,14 +1556,19 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
     if report.tag_redactions:
         print(f"redacted {report.tag_redactions} secret(s) from tag values")
     # D4 (design/superpowers/specs/2026-09-23-doc-import-encoding-design.md): printed last
-    # on stdout, after the degenerate-parent line — the auto-ratify-failures loop below
-    # goes to stderr, so this stays the last stdout line either way.
+    # on stdout (undecodable block, then unreadable block), after the degenerate-parent
+    # line — the auto-ratify-failures loop below goes to stderr, so these stay the last
+    # stdout lines either way.
     if report.skipped_undecodable:
         print(
             f"{report.skipped_undecodable} file(s) skipped: not valid UTF-8, re-save as "
             "UTF-8 to import:"
         )
         for fp in report.undecodable_files:
+            print(f"  {fp}")
+    if report.skipped_unreadable:
+        print(f"{report.skipped_unreadable} file(s) skipped: could not be read:")
+        for fp in report.unreadable_files:
             print(f"  {fp}")
     for entry in report.auto_ratify_failures:
         print(f"auto-ratify failure: {entry}", file=sys.stderr)
@@ -1594,7 +1629,7 @@ def import_main(argv: list[str] | None = None) -> int:
         "--dry-run",
         action="store_true",
         help="list what would be imported; write no records (opening the store may still "
-        "initialise or migrate it, or rebuild index.db)",
+        "initialise it or rebuild index.db)",
     )
     parser.add_argument("--limit", type=int, default=None, metavar="N")
     parser.add_argument(
@@ -1651,17 +1686,21 @@ def import_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.limit is not None and args.limit < 0:
-        print(f"--limit must be >= 0 (got {args.limit})")
+        print(f"--limit must be >= 0 (got {args.limit})", file=sys.stderr)
         return 1
     if args.section_limit is not None and args.section_limit < _MIN_SECTION_LIMIT:
-        print(f"--section-limit must be >= {_MIN_SECTION_LIMIT} (got {args.section_limit})")
+        print(
+            f"--section-limit must be >= {_MIN_SECTION_LIMIT} (got {args.section_limit})",
+            file=sys.stderr,
+        )
         return 1
 
     if args.docs is not None or args.profile is not None:
         if args.path is not None:
             print(
                 "--docs/--profile and --path are mutually exclusive (--path is the "
-                "rationale-mode graph-prefix filter; it has no meaning against markdown files)"
+                "rationale-mode graph-prefix filter; it has no meaning against markdown files)",
+                file=sys.stderr,
             )
             return 1
         return _import_docs_mode(args)
@@ -1673,13 +1712,13 @@ def import_main(argv: list[str] | None = None) -> int:
     try:
         reader = GraphifyReader(str(graph))
     except Exception as e:
-        print(f"graph not readable ({graph}): {e}")
+        print(f"graph not readable ({graph}): {e}", file=sys.stderr)
         return 1
 
     try:
         store = Store(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
 
     # Rationale mode ignores --docs-only flags (--tag/--section-limit) and, unlike --docs
@@ -1764,10 +1803,10 @@ def _domains_bootstrap(args: argparse.Namespace) -> int:
     (computed from the already-finished report) ever printed.
     """
     if args.min_members < 1:
-        print(f"--min-members must be >= 1 (got {args.min_members})")
+        print(f"--min-members must be >= 1 (got {args.min_members})", file=sys.stderr)
         return 1
     if args.limit is not None and args.limit < 0:
-        print(f"--limit must be >= 0 (got {args.limit})")
+        print(f"--limit must be >= 0 (got {args.limit})", file=sys.stderr)
         return 1
 
     args.db = resolve_store_path(args.db)
@@ -1777,13 +1816,13 @@ def _domains_bootstrap(args: argparse.Namespace) -> int:
     try:
         reader = GraphifyReader(str(graph))
     except Exception as e:
-        print(f"graph not readable ({graph}): {e}")
+        print(f"graph not readable ({graph}): {e}", file=sys.stderr)
         return 1
 
     try:
         store = Store(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
 
     effective_limit = None if args.limit == 0 else args.limit
@@ -1873,7 +1912,7 @@ def _domains_add(args: argparse.Namespace) -> int:
             provenance=Provenance(source="manual"),
         )
     except ValidationError as e:
-        print(f"error: {format_validation_error(e)}")
+        print(f"error: {format_validation_error(e)}", file=sys.stderr)
         return 1
 
     args.db = resolve_store_path(args.db)
@@ -1881,14 +1920,14 @@ def _domains_add(args: argparse.Namespace) -> int:
     try:
         store = Store(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
 
     parent_id = None
     if args.parent is not None:
         parent = store.find_domain_by_slug(args.parent)
         if parent is None:
-            print("error: --parent does not resolve to any domain")
+            print("error: --parent does not resolve to any domain", file=sys.stderr)
             return 1
         parent_id = parent.domain_id
 
@@ -1955,22 +1994,28 @@ def _domains_snapshot(args: argparse.Namespace) -> int:
     # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.4)
     """
     if args.domain and not args.refresh:
-        print("error: --domain needs --refresh")
+        print("error: --domain needs --refresh", file=sys.stderr)
         return 1
     if args.build_with and args.refresh:
-        print("error: --build-with takes the first snapshot; --refresh reads the current graph")
+        print(
+            "error: --build-with takes the first snapshot; --refresh reads the current graph",
+            file=sys.stderr,
+        )
         return 1
     args.db = resolve_store_path(args.db, warn_on_create=not args.dry_run)
     if args.dry_run:
         # Opening a Store creates or backfills committed files; a dry run writes none.
         reason = open_would_write(args.db)
         if reason is not None:
-            print(f"error: {reason}; --dry-run writes nothing, so it does not open it")
+            print(
+                f"error: {reason}; --dry-run writes nothing, so it does not open it",
+                file=sys.stderr,
+            )
             return 1
     try:
         store = Store(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
     with store:
         return _take_domain_snapshot(args, store)
@@ -1982,30 +2027,37 @@ def _take_domain_snapshot(args: argparse.Namespace, store: Store) -> int:
     try:
         existing, existing_signature = domain_snapshot.read_snapshot(store_dir)
     except domain_snapshot.SnapshotError as e:
-        print(f"error: {path} is not a readable snapshot ({e}); fix it or restore it from git")
+        print(
+            f"error: {path} is not a readable snapshot ({e}); fix it or restore it from git",
+            file=sys.stderr,
+        )
         return 1
     if existing is not None and not args.refresh and not args.dry_run:
         print(
             f"error: a domain snapshot already exists (taken {existing.taken_at.isoformat()}); "
             "pass --refresh to re-freeze the current membership, or --refresh --domain SLUG "
-            "for one domain"
+            "for one domain",
+            file=sys.stderr,
         )
         return 1
     if existing is None and args.refresh:
         print(
-            "error: there is no domain snapshot to refresh; run `sidegraph-domains snapshot` first"
+            "error: there is no domain snapshot to refresh; run `sidegraph-domains snapshot` first",
+            file=sys.stderr,
         )
         return 1
     accepted = {d.slug for d in store.iter_domains(status=DomainStatus.ACCEPTED)}
     unknown = sorted(set(args.domain or ()) - accepted)
     if unknown:
-        print(f"error: --domain names no accepted domain: {', '.join(unknown)}")
+        print(f"error: --domain names no accepted domain: {', '.join(unknown)}", file=sys.stderr)
         return 1
     with tempfile.TemporaryDirectory(prefix="sidegraph-snapshot-") as tmp:
         if args.build_with:
             repo = find_store_project_repo(store_dir, timeout=10.0)
             if repo is None:
-                print("error: --build-with needs the store inside a git repository")
+                print(
+                    "error: --build-with needs the store inside a git repository", file=sys.stderr
+                )
                 return 1
             print(
                 f"building the graph of HEAD with Graphify {args.build_with}; this can take "
@@ -2017,7 +2069,7 @@ def _take_domain_snapshot(args: argparse.Namespace, store: Store) -> int:
                     _store_project_root(store_dir), args.build_with, Path(tmp)
                 )
             except GraphBuildError as e:
-                print(f"error: {e}")
+                print(f"error: {e}", file=sys.stderr)
                 return 1
         else:
             graph = _resolve_cli_graph(args.graph, args.db)
@@ -2025,12 +2077,12 @@ def _take_domain_snapshot(args: argparse.Namespace, store: Store) -> int:
         try:
             reader = GraphifyReader(str(graph))
         except Exception as e:
-            print(f"graph not readable ({graph}): {e}")
+            print(f"graph not readable ({graph}): {e}", file=sys.stderr)
             return 1
         if existing is None and not args.accept_current_engine and not args.dry_run:
             refusal = _snapshot_engine_refusal(reader)
             if refusal is not None:
-                print(refusal)
+                print(refusal, file=sys.stderr)
                 return 1
         head = _current_head(store_dir)
         minimum = domain_snapshot.SNAPSHOT_MIN_SIDEGRAPH
@@ -2067,7 +2119,7 @@ def _take_domain_snapshot(args: argparse.Namespace, store: Store) -> int:
                     size = domain_snapshot.write_snapshot(store_dir, snap)
                     store.invalidate_domain_membership()
         except ValueError as e:  # SnapshotError included
-            print(f"error: {e}")
+            print(f"error: {e}", file=sys.stderr)
             return 1
     if args.dry_run:
         # What --refresh (with a snapshot) or a first run (without one) would freeze; nothing
@@ -2139,7 +2191,7 @@ def domains_main(argv: list[str] | None = None) -> int:
         "--dry-run",
         action="store_true",
         help="list what would be proposed; write no records (opening the store may still "
-        "initialise or migrate it, or rebuild index.db)",
+        "initialise it or rebuild index.db)",
     )
 
     add = sub.add_parser("add", help="Manually propose a domain.")
@@ -2226,7 +2278,7 @@ def compact_main(argv: list[str] | None = None) -> int:
     ``Store.compact``'s docstring). ``--dry-run`` lists what would be compacted, hot files it
     would keep on mismatch, and leftover hot files from an interrupted prior run it would
     clean up, without writing an archive segment or removing hot files; opening the store may
-    still initialise or migrate it, or rebuild ``index.db``.
+    still initialise it or rebuild ``index.db``.
 
     On a format-2 store (marker major 2) the command runs maintenance (``Store.maintain``)
     instead: ``--settled-days`` and ``--any-branch`` apply there, ``--older-than`` is refused;
@@ -2261,8 +2313,8 @@ def compact_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="list what would be compacted; write no segment and remove no hot file (a "
-        "legacy store may still be migrated on open, and index.db rebuilt). On a format-2 store "
+        help="list what would be compacted; write no segment and remove no hot file (index.db "
+        "may still be rebuilt on open). On a format-2 store "
         "it writes nothing tracked: it lists what maintenance would fold, move, delete and "
         "write. A path holding no store is refused, never created",
     )
@@ -2290,27 +2342,28 @@ def compact_main(argv: list[str] | None = None) -> int:
     try:
         marker = store_marker(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
     if marker is not None and marker.major == 2:
         return _compact_format2(args)
     if args.older_than is not None and args.older_than < 0:
-        print(f"--older-than must be >= 0 (got {args.older_than})")
+        print(f"--older-than must be >= 0 (got {args.older_than})", file=sys.stderr)
         return 1
     if marker is None and _not_a_store(Path(args.db)):
-        print(f"no store at {args.db}: sidegraph-compact never creates one")
-        return 2
+        print(f"no store at {args.db}: sidegraph-compact never creates one", file=sys.stderr)
+        return 1
     if args.settled_days is not None or args.any_branch:
         flag = "--settled-days" if args.settled_days is not None else "--any-branch"
         print(
             f"{flag} applies to a format 2 store only; this store uses the pre-0.17 layout "
-            "(use --older-than to limit what is archived)"
+            "(use --older-than to limit what is archived)",
+            file=sys.stderr,
         )
-        return 2
+        return 1
     try:
         store = Store(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
     code = _compact_format1(args, store)
     if code == 0:
@@ -2326,9 +2379,9 @@ def migrate_main(argv: list[str] | None = None) -> int:
     maintenance with no age limit. The format marker is published first and durably, so every
     later interruption leaves a store ``sidegraph-migrate`` (while ``HEAD``'s marker is below 2)
     or ``sidegraph-compact --settled-days 0`` completes. Run it on the default branch with the
-    store committed; it never commits. Exit 0 on a completed run, 2 on a refusal (nothing
-    written, a store that does not open included) or a stop, 1 when another writer holds the
-    store or reading or writing it fails (an I/O error).
+    store committed; it never commits. Exit 0 on a completed run, 1 on a refusal (nothing
+    written, a store that does not open included), a stop, a busy store or a failed read or
+    write (an I/O error).
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.1)
     """
     from .maintenance import render_report
@@ -2366,29 +2419,40 @@ def migrate_main(argv: list[str] | None = None) -> int:
     args.db = resolve_store_path(args.db)
     root = Path(args.db)
     if not (root / "format").exists() and _not_a_store(root) and not has_shard_files(root):
-        print(f"no store at {args.db}: sidegraph-migrate never creates one")
-        return 2
+        print(f"no store at {args.db}: sidegraph-migrate never creates one", file=sys.stderr)
+        return 1
     try:
         report = migrate(root, shards=args.shards, dry_run=args.dry_run, any_branch=args.any_branch)
     except MigrationRefused as e:
         for reason in e.reasons:
-            print(f"refused: {reason}")
-        return 2
+            print(f"refused: {reason}", file=sys.stderr)
+        return 1
     except maintenance_clock.ClockError as e:
-        print(f"refused: {e}")
-        return 2
+        print(f"refused: {e}", file=sys.stderr)
+        return 1
     except (OSError, ValueError, sqlite3.Error) as e:
         if _is_busy(e):
-            print(f"cannot migrate ({args.db}): the store is busy, try again")
+            print(f"cannot migrate ({args.db}): the store is busy, try again", file=sys.stderr)
         else:
-            print(f"cannot migrate ({args.db}): {e}")
+            print(f"cannot migrate ({args.db}): {e}", file=sys.stderr)
             if _marker_switched(root):
                 print(
-                    "The format marker is already switched: run sidegraph-migrate again to finish."
+                    "The format marker is already switched: run sidegraph-migrate again to finish.",
+                    file=sys.stderr,
                 )
         return 1
     print(render_report(report), end="")
-    return 2 if report.stopped else 0
+    _echo_stop_reasons(report)
+    return 1 if report.stopped else 0
+
+
+def _echo_stop_reasons(report: MaintenanceReport) -> None:
+    """A stopped run exits 1 with its report on stdout; the reasons also go to stderr, so a
+    caller that discards stdout still sees why (the one-stream rule: messages on stderr)."""
+    if report.stopped:
+        print(f"Stopped: {report.stopped}", file=sys.stderr)
+    if report.checks_stopped:
+        print(f"Drift checks stopped: {report.checks_stopped}", file=sys.stderr)
 
 
 def _marker_switched(root: Path) -> bool:
@@ -2404,7 +2468,7 @@ def _not_a_store(root: Path) -> bool:
     """A path that holds no store and no legacy data: missing, or a directory with no marker
     and no record. ``sidegraph-compact`` refuses it instead of creating a store there."""
     if root.is_file():
-        return False  # a legacy single-file store: opening it migrates it, as before
+        return False  # a legacy single-file store: opening it is refused with a message
     if not root.is_dir():
         return True
     return not (root / "decisions.db").is_file() and not store_has_any_records(root)
@@ -2432,43 +2496,44 @@ def _is_busy(exc: BaseException) -> bool:
 
 def _compact_format2(args: argparse.Namespace) -> int:
     """The format-2 flow of ``sidegraph-compact``: ``Store.maintain`` plus the default-branch
-    condition, which this command owns. Exit 0 on a completed run, 2 on a refusal or a stop
-    (the reason is printed), 1 when the store cannot be opened or written or is busy. Every
+    condition, which this command owns. Exit 0 on a completed run, 1 on a refusal or a stop
+    (the reason is printed) and when the store cannot be opened or written or is busy. Every
     refusal happens before the store is opened.
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.2)
     """
     if args.older_than is not None:
         print(
             "--older-than applies to the pre-0.17 layout only; this store is format 2: "
-            "use --settled-days DAYS"
+            "use --settled-days DAYS",
+            file=sys.stderr,
         )
-        return 2
+        return 1
     settled_days = 7 if args.settled_days is None else args.settled_days
     if settled_days < 0:
-        print(f"--settled-days must be >= 0 (got {settled_days})")
-        return 2
+        print(f"--settled-days must be >= 0 (got {settled_days})", file=sys.stderr)
+        return 1
     try:
         wt = maintenance_clock.resolve_work_tree(args.db)
         if wt is not None and not args.any_branch:
             refusal = maintenance_clock.branch_refusal(wt)
             if refusal is not None:
-                print(f"refused: {refusal}")
-                return 2
+                print(f"refused: {refusal}", file=sys.stderr)
+                return 1
     except maintenance_clock.ClockError as e:
-        print(f"refused: {e}")
-        return 2
+        print(f"refused: {e}", file=sys.stderr)
+        return 1
     if args.dry_run:
         blocker = _format2_dry_run_blocker(Path(args.db))
         if blocker is not None:
-            print(f"refused: a dry run writes nothing, and {blocker}")
-            return 2
+            print(f"refused: a dry run writes nothing, and {blocker}", file=sys.stderr)
+            return 1
     try:
         store = Store(args.db)
     except Exception as e:
         if _is_busy(e):
-            print(f"cannot compact ({args.db}): the store is busy, try again")
+            print(f"cannot compact ({args.db}): the store is busy, try again", file=sys.stderr)
         else:
-            print(f"store not readable ({args.db}): {e}")
+            print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
     try:
         report = store.maintain(
@@ -2478,21 +2543,22 @@ def _compact_format2(args: argparse.Namespace) -> int:
             fold_checks=True,
         )
     except maintenance_clock.ClockError as e:
-        print(f"refused: {e}")
-        return 2
+        print(f"refused: {e}", file=sys.stderr)
+        return 1
     except sqlite3.Error as e:
         if _is_busy(e):
-            print(f"cannot compact ({args.db}): the store is busy, try again")
+            print(f"cannot compact ({args.db}): the store is busy, try again", file=sys.stderr)
         else:
-            print(f"cannot compact ({args.db}): {e}")
+            print(f"cannot compact ({args.db}): {e}", file=sys.stderr)
         return 1
     except (OSError, ValueError) as e:
-        print(f"cannot compact ({args.db}): {e}")
+        print(f"cannot compact ({args.db}): {e}", file=sys.stderr)
         return 1
     finally:
         store.close()
     print(render_report(report), end="")
-    return 2 if report.stopped or report.checks_stopped else 0
+    _echo_stop_reasons(report)
+    return 1 if report.stopped or report.checks_stopped else 0
 
 
 def _compact_format1(args: argparse.Namespace, store: Store) -> int:
@@ -2504,7 +2570,7 @@ def _compact_format1(args: argparse.Namespace, store: Store) -> int:
     try:
         report = store.compact(older_than_days=args.older_than, dry_run=args.dry_run)
     except ValueError as e:
-        print(f"cannot compact ({args.db}): {e}")
+        print(f"cannot compact ({args.db}): {e}", file=sys.stderr)
         return 1
 
     if args.dry_run:
@@ -2586,7 +2652,7 @@ def require_main(argv: list[str] | None = None) -> int:
     <version>`` (``Store.raise_requirement``, under the store's writer reservation) and prints
     the commit command. Refuses a version that is not ``X.Y.Z``, one above this Sidegraph's own
     version, and one below the store's current requirement; asking for the current requirement
-    again changes nothing. Never creates or migrates a store: one without a ``format`` marker is
+    again changes nothing. Never creates a store: one without a ``format`` marker is
     refused. Exit 0 on success (a no-op included), 1 when refused or when there is no store.
     # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)
     """
@@ -2637,13 +2703,35 @@ def require_main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _operational_error(message: str, report: dict[str, object] | None) -> int:
+    """The exit-1 path of every ``--json`` command: the message on stderr, and under ``--json``
+    (``report`` not None) also one JSON object on stdout — ``report``'s keys plus ``error``,
+    the same message — so a CI step parsing stdout always gets JSON. ``report`` is ``{}``
+    unless the success shape has keys an aborted run can honestly fill (verify, doctor).
+    See docs/reference/cli.md, "Exit codes and streams"."""
+    print(message, file=sys.stderr)
+    if report is not None:
+        print(json.dumps({**report, "error": message}, indent=2))
+    return 1
+
+
+def _json_error(as_json: bool) -> dict[str, object] | None:
+    """The ``report`` for :func:`_operational_error` of a command whose error object carries
+    only ``error``."""
+    return {} if as_json else None
+
+
+def _violation_dicts(violations: list[Violation]) -> list[dict[str, str]]:
+    return [{"code": v.code, "path": v.path, "detail": v.detail} for v in violations]
+
+
 def verify_main(argv: list[str] | None = None) -> int:
     """``sidegraph-verify`` — store integrity lint (design/superpowers/specs/
     2026-07-11-ci-integrity-design.md ruling 2). Two layers, combined into one report:
 
     - **Snapshot layer** (always runs): reads the store's canonical files directly
       (``verify.verify_snapshot`` — pure read, no ``Store()``, so a lint run can never
-      itself write to ``index.db`` or migrate a legacy store) and reports every schema/
+      itself write to ``index.db``) and reports every schema/
       referential-integrity violation found.
     - **Transition layer** (``--against <git-ref>``, additive): ``verify.verify_against``
       classifies every store file that changed vs ``<git-ref>`` against the store's OWN
@@ -2661,8 +2749,10 @@ def verify_main(argv: list[str] | None = None) -> int:
 
     ``--json`` prints ``{"clean": bool, "violations": [{"code", "path", "detail"}, ...]}`` as
     one JSON object to stdout — nothing else — same "pure JSON on stdout" convention as
-    ``sidegraph-sync --json``. Human output (the default) is one line per violation,
-    ``<code>  <path>  <detail>``, then a one-line summary.
+    ``sidegraph-sync --json``; on an operational error it is that object with ``clean`` false,
+    the violations found before the error, and an ``error`` key (``_operational_error``). Human
+    output (the default) is one line per violation, ``<code>  <path>  <detail>``, then a
+    one-line summary.
 
     Exit contract: 0 clean, 1 operational error (unreadable store dir / bad git ref), 2
     violations found.
@@ -2697,15 +2787,19 @@ def verify_main(argv: list[str] | None = None) -> int:
     try:
         violations = verify_snapshot(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
-        return 1
+        return _operational_error(
+            f"store not readable ({args.db}): {e}",
+            {"clean": False, "violations": []} if args.json else None,
+        )
 
     if args.against is not None:
         try:
             violations = violations + verify_against(args.db, args.against)
         except Exception as e:
-            print(f"verify --against {args.against!r} failed: {e}")
-            return 1
+            return _operational_error(
+                f"verify --against {args.against!r} failed: {e}",
+                {"clean": False, "violations": _violation_dicts(violations)} if args.json else None,
+            )
 
     if args.json:
         # Pure JSON on stdout — nothing else — mirrors sidegraph-sync --json.
@@ -2756,11 +2850,15 @@ def doctor_main(argv: list[str] | None = None) -> int:
     ``--json`` prints ``{"clean", "violations", "findings", "skipped"}`` (plus
     ``drift_groups`` when per-record code-drift is grouped) as one JSON
     object to stdout — nothing else (the sidegraph-verify/-sync convention). ``clean``
-    is true only when violations AND findings are both empty. Exit contract: 0 healthy
+    is true only when violations AND findings are both empty. On an operational error
+    ``--json`` still prints one object: those keys, ``clean`` false, no findings, and an
+    ``error`` key (``_operational_error``). Exit contract: 0 healthy
     (advisory findings alone stay 0 without ``--check``), 1 operational error (including
-    a negative ``--stale-days``, rejected before the store is touched — same hard-usage
+    a negative ``--stale-days`` or one too large to date, rejected before the store is
+    touched — same hard-usage
     treatment as ``sidegraph-import --limit``), 2 strict violations or, with ``--check``,
-    advisory findings other than :data:`doctor.CHECK_EXEMPT_CODES` (``maintenance-due``).
+    advisory findings other than :data:`doctor.CHECK_EXEMPT_CODES` (``maintenance-due``,
+    ``deprecated-auto-accept``, ``superseded-no-live-successor``).
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-doctor",
@@ -2784,7 +2882,8 @@ def doctor_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="advisory findings also exit 2, except maintenance-due (default: report only; "
+        help="advisory findings also exit 2, except the exempt findings (maintenance-due, "
+        "deprecated-auto-accept, superseded-no-live-successor) (default: report only; "
         "skipped checks never fail)",
     )
     parser.add_argument(
@@ -2813,23 +2912,42 @@ def doctor_main(argv: list[str] | None = None) -> int:
         "(read-only; missing or unreadable skips them and says so)",
     )
     args = parser.parse_args(argv)
+
+    def error_report(violations: list[Violation]) -> dict[str, object] | None:
+        if not args.json:
+            return None
+        return {
+            "clean": False,
+            "violations": _violation_dicts(violations),
+            "findings": [],
+            "skipped": ["advisory-checks"],  # as the early stop below reports it
+        }
+
     if args.stale_days < 0:
         # Reject before touching the store — a bad flag must not affect anything.
-        print(f"--stale-days must be >= 0, got {args.stale_days}")
-        return 1
+        return _operational_error(
+            f"--stale-days must be >= 0, got {args.stale_days}", error_report([])
+        )
+    try:
+        # The subtraction curate's stale-proposal check makes: refuse a threshold it overflows.
+        datetime.now(UTC) - timedelta(days=args.stale_days)
+    except OverflowError:
+        return _operational_error(
+            f"--stale-days is too large to date, got {args.stale_days}", error_report([])
+        )
     args.db = resolve_store_path(args.db, warn_on_create=False)
 
     try:
         violations = verify_snapshot(args.db)
     except Exception as e:
-        print(f"store not readable ({args.db}): {e}")
-        return 1
+        return _operational_error(f"store not readable ({args.db}): {e}", error_report([]))
     if args.against is not None:
         try:
             violations = violations + verify_against(args.db, args.against)
         except Exception as e:
-            print(f"doctor --against {args.against!r} failed: {e}")
-            return 1
+            return _operational_error(
+                f"doctor --against {args.against!r} failed: {e}", error_report(violations)
+            )
 
     stop_note: str | None = None
     if symlinked_internals(Path(args.db)):
@@ -2904,6 +3022,10 @@ def doctor_main(argv: list[str] | None = None) -> int:
         except sqlite3.Error:  # an unreadable index is a skipped check, never a crash
             statuses_known = False
         index_usable = index is not None
+    except OSError as e:
+        # The advisory checks read records verify has already walked; one that fails on the
+        # file system now is the operational error verify would have reported.
+        return _operational_error(f"store not readable ({args.db}): {e}", error_report(violations))
     finally:
         if index is not None:
             index.close()
@@ -3008,8 +3130,8 @@ def viz_main(argv: list[str] | None = None) -> int:
     ``--no-superseded`` omits terminal-status records (shown dimmed by default). Truncation
     past ``--max-nodes`` is warned on stderr and recorded in ``stats.truncated`` — never
     silent. Exit 0 on success (a store WITH problems still exits 0 — the problems are the
-    output), 2 on an operational error (uninitialized store, a store that cannot be opened,
-    unwritable output).
+    output), 1 on an operational error (uninitialized store, a store that cannot be opened,
+    unwritable output); under ``--json`` it prints one ``{"error": <message>}`` object too.
 
     # see design/superpowers/specs/2026-07-12-decision-graph-viz-design.md
     """
@@ -3055,25 +3177,34 @@ def viz_main(argv: list[str] | None = None) -> int:
     args.db = resolve_store_path(args.db, warn_on_create=False)
 
     if not _looks_already_initialized(Path(args.db)):
-        print(
-            f"no store at {args.db} — run `sidegraph-init` first",
-            file=sys.stderr,
+        return _operational_error(
+            f"no store at {args.db} — run `sidegraph-init` first", _json_error(args.json)
         )
-        return 2
 
     try:
         store = Store(args.db)
     except Exception as e:
         display_path = " ".join(str(args.db).split())
         message = " ".join(str(e).split())
-        print(f"store not readable ({display_path}): {message}", file=sys.stderr)
-        return 2
-    graph = build_graph(
-        store,
-        include_superseded=args.include_superseded,
-        only_problems=args.only_problems,
-        max_nodes=args.max_nodes,
-    )
+        return _operational_error(
+            f"store not readable ({display_path}): {message}", _json_error(args.json)
+        )
+    try:
+        graph = build_graph(
+            store,
+            include_superseded=args.include_superseded,
+            only_problems=args.only_problems,
+            max_nodes=args.max_nodes,
+        )
+    except (ValidationError, sqlite3.Error, OSError) as e:
+        # An index that opens but holds a row that does not read, or a store file the read
+        # fails on, is the same unreadable store; any other builder error is a bug and
+        # propagates.
+        display_path = " ".join(str(args.db).split())
+        message = " ".join(str(e).split())
+        return _operational_error(
+            f"store not readable ({display_path}): {message}", _json_error(args.json)
+        )
 
     if args.json:
         print(json.dumps(to_json(graph), indent=2))
@@ -3086,7 +3217,7 @@ def viz_main(argv: list[str] | None = None) -> int:
         out_json.write_text(json.dumps(to_json(graph), indent=2), encoding="utf-8")
     except OSError as e:
         print(f"cannot write output ({args.out}): {e}", file=sys.stderr)
-        return 2
+        return 1
 
     st = graph.stats
     print(
@@ -3113,8 +3244,9 @@ def stats_main(argv: list[str] | None = None) -> int:
 
     ``--json`` prints the serialized report and nothing else; a figure the text withholds
     (recording off, no render journal, no readable graph) is ``null`` there, never a zero.
+    On an operational error it prints one ``{"error": <message>}`` object instead.
     Exit 0 on success (a silent
-    store still exits 0 — the silence is the output), 2 on an operational error: a bad
+    store still exits 0 — the silence is the output), 1 on an operational error: a bad
     ``--window``, no store index (never created here), an index SQLite cannot read, or a
     record row in it that does not parse (named by table and record id). An
     index from before the render journal, and a graph that is missing or unreadable, are
@@ -3157,8 +3289,9 @@ def stats_main(argv: list[str] | None = None) -> int:
             raise ValueError
         datetime.now(UTC) - timedelta(days=args.window)
     except (ValueError, OverflowError):
-        print(f"--window must be a positive number of days, got {args.window}", file=sys.stderr)
-        return 2
+        return _operational_error(
+            f"--window must be a positive number of days, got {args.window}", _json_error(args.json)
+        )
 
     store_dir = Path(resolve_store_path(args.db, warn_on_create=False))
     index = store_dir / "index.db"
@@ -3166,20 +3299,26 @@ def stats_main(argv: list[str] | None = None) -> int:
     try:
         os.stat(index)
     except (FileNotFoundError, NotADirectoryError):
-        print(f"no store index at {index} — run `sidegraph-init` first", file=sys.stderr)
-        return 2
+        return _operational_error(
+            f"no store index at {index} — run `sidegraph-init` first", _json_error(args.json)
+        )
     except OSError as e:
-        print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
-        return 2
+        return _operational_error(
+            f"cannot read the store index ({index}): {e}", _json_error(args.json)
+        )
     if not path_is_file(index):
-        print(f"no store index at {index} — run `sidegraph-init` first", file=sys.stderr)
-        return 2
+        return _operational_error(
+            f"no store index at {index} — run `sidegraph-init` first", _json_error(args.json)
+        )
     try:
         require_listable_record_dirs(store_dir)
-    except PermissionError as e:
-        # The index is fine; a record directory is not, and the person has to chmod that.
-        print(f"cannot read the store ({e.filename}): {e.strerror}", file=sys.stderr)
-        return 2
+    except OSError as e:
+        # The index is fine; a record directory is not: unlistable (chmod it), or a symlink
+        # loop or an I/O error that the probe passes on as it is.
+        return _operational_error(
+            f"cannot read the store ({e.filename or store_dir}): {e.strerror or e}",
+            _json_error(args.json),
+        )
 
     graph_path = _resolve_cli_graph(args.graph, store_dir)
     _graph_hint(args.graph, graph_path)
@@ -3188,15 +3327,24 @@ def stats_main(argv: list[str] | None = None) -> int:
             store_dir, graph_path if path_exists(graph_path) else None, window_days=args.window
         )
     except (sqlite3.Error, PermissionError) as e:
-        print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
-        return 2
+        return _operational_error(
+            f"cannot read the store index ({index}): {e}", _json_error(args.json)
+        )
     except StoreRequirementError as e:
-        print(f"cannot read the store ({store_dir}): {e}", file=sys.stderr)
-        return 2
+        return _operational_error(
+            f"cannot read the store ({store_dir}): {e}", _json_error(args.json)
+        )
     except UnreadableRecordError as e:
         # Named by table and record id: the message is all the person has to go on.
-        print(f"cannot read the store index ({index}): {e}", file=sys.stderr)
-        return 2
+        return _operational_error(
+            f"cannot read the store index ({index}): {e}", _json_error(args.json)
+        )
+    except OSError as e:
+        # The record walk (listing and stat of canonical files) failed past the probe above.
+        return _operational_error(
+            f"cannot read the store ({e.filename or store_dir}): {e.strerror or e}",
+            _json_error(args.json),
+        )
 
     # Both renderers are newline-terminated; a `print` here would double it.
     sys.stdout.write(render_json(report) if args.json else render_text(report))
@@ -3215,7 +3363,7 @@ def export_okf_main(argv: list[str] | None = None) -> int:
     ``--out`` that is the current directory, an unwritable, missing or non-directory parent,
     or a previous export that cannot be renamed aside is written in place instead, and a
     write failure there can leave a partial export. A symlinked out dir and anything else
-    are refused. Exit 0 on success, 2 on an operational error (uninitialized
+    are refused. Exit 0 on success, 1 on an operational error (uninitialized
     store — never auto-created; a store that cannot be opened; refused or unwritable out dir
     or its parent).
 
@@ -3235,7 +3383,7 @@ def export_okf_main(argv: list[str] | None = None) -> int:
 
     if not _looks_already_initialized(Path(args.db)):
         print(f"no store at {args.db} — run `sidegraph-init` first", file=sys.stderr)
-        return 2
+        return 1
 
     try:
         store = Store(args.db)
@@ -3243,14 +3391,14 @@ def export_okf_main(argv: list[str] | None = None) -> int:
         display_path = " ".join(str(args.db).split())
         message = " ".join(str(e).split())
         print(f"store not readable ({display_path}): {message}", file=sys.stderr)
-        return 2
+        return 1
     bundle = build_bundle(store)
     out_dir = Path(args.out)
     try:
         write_bundle(bundle, out_dir)
     except (OSError, ValueError) as e:
         print(str(e), file=sys.stderr)
-        return 2
+        return 1
 
     def _count(section: str) -> int:
         return sum(1 for p in bundle if p.startswith(f"{section}/") and p != f"{section}/index.md")
@@ -3349,7 +3497,8 @@ def blame_main(argv: list[str] | None = None) -> int:
 
     Exit codes: 0 on success (JSON or table printed), 1 on an operational git failure
     (not a git repo, unknown file/range, git not installed — G9's CLI error surface;
-    unlike the hook, an explicit user command reports this instead of degrading).
+    unlike the hook, an explicit user command reports this instead of degrading), or an invalid
+    ``--range``; under ``--json`` an exit 1 prints one ``{"error": <message>}`` object too.
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-blame",
@@ -3365,10 +3514,16 @@ def blame_main(argv: list[str] | None = None) -> int:
     line_range = None
     if args.range:
         parts = args.range.split(",")
-        if len(parts) != 2 or not all(p.strip().lstrip("-").isdigit() for p in parts):
-            print(f"sidegraph-blame: invalid --range {args.range!r}, expected A,B", file=sys.stderr)
-            return 1
-        line_range = (int(parts[0]), int(parts[1]))
+        try:
+            # isdigit() admits what int() refuses (a superscript digit; "--1" after lstrip).
+            if len(parts) != 2 or not all(p.strip().lstrip("-").isdigit() for p in parts):
+                raise ValueError
+            line_range = (int(parts[0]), int(parts[1]))
+        except ValueError:
+            return _operational_error(
+                f"sidegraph-blame: invalid --range {args.range!r}, expected A,B",
+                _json_error(args.json),
+            )
 
     cwd = Path.cwd()
     db_path = Path(resolve_store_path(args.db, warn_on_create=False))
@@ -3386,12 +3541,11 @@ def blame_main(argv: list[str] | None = None) -> int:
             print(f"sidegraph-blame: {stamp_note}. No records are joined.", file=sys.stderr)
     hunks = gitio.blame_report(args.file, cwd, db_path, line_range)
     if hunks is None:
-        print(
+        return _operational_error(
             f"sidegraph-blame: git blame failed for {args.file!r} (not a git repo, unknown "
             "file/range, or git not installed)",
-            file=sys.stderr,
+            _json_error(args.json),
         )
-        return 1
 
     rows: list[dict] = [
         {

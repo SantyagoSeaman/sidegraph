@@ -1,5 +1,7 @@
 # Semantic docs layer
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 Graphify can index both source code and the documentation that explains it. Its structural
 and semantic passes produce different kinds of nodes; Sidegraph can anchor decisions to
 either. This guide covers when to build the semantic layer and when to import existing
@@ -23,10 +25,22 @@ treat a `concept` exactly like a code symbol.
 
 ## Two-pass workflow
 
+macOS or Linux:
+
 ```bash
 # Fast path — every commit, free, no API key
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+graphify update .
+
+# Semantic pass — when docs/diagrams change, or periodically
+graphify extract . --backend claude
+```
+
+Windows PowerShell:
+
+```powershell
+# Fast path — every commit, free, no API key
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
 
 # Semantic pass — when docs/diagrams change, or periodically
@@ -94,9 +108,17 @@ writing it over `graphify-out/graph.json` replaces the ids your anchors were res
 
 To rebuild after a noisy extract, use Graphify's supported overwrite path:
 
+macOS or Linux:
+
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+graphify update . --force
+```
+
+Windows PowerShell:
+
+```powershell
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update . --force
 ```
 
@@ -184,9 +206,18 @@ directory prefixes, or is that exact file); `--limit N` caps how many are proces
 after `graphify extract .`. Volume there tends to be far smaller — the reference ADR corpus
 produced **20** rationale nodes — so a full unfiltered import is usually fine:
 
+macOS or Linux:
+
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+graphify extract . --backend claude
+sidegraph-import
+```
+
+Windows PowerShell:
+
+```powershell
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify extract . --backend claude
 sidegraph-import
 ```
@@ -229,22 +260,44 @@ extracted into the graph* into decisions, `--docs` turns *markdown files on disk
 decisions, one per qualifying document — the natural fit for an existing folder of ADRs or
 specs that were never going through Graphify's semantic pass at all.
 
+macOS or Linux:
+
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .                              # make sure the graph is current first
 sidegraph-import --docs docs/adr --dry-run
 sidegraph-import --docs docs/adr
 ```
 
-Each document has an independent 8 MiB byte limit, checked before hashing, decoding,
-parsing or redaction. Exactly 8 MiB is allowed; larger files are skipped whole and named in
-both real and dry-run reports, with no prefix import or raw fallback. A multi-file import
-can exceed 4 MiB total and produce more than 100 records. Tags and other free-text options
-are bounded separately before normalization: 256 KiB UTF-8 per string, depth 32 and 4,096
-visited nodes per item, with shared 4 MiB string and 65,536-node request limits. Violations
-fail safely before a record write. The existing `--section-limit` post-redaction summary
-option remains unchanged.
+Windows PowerShell:
+
+```powershell
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
+graphify update .                              # make sure the graph is current first
+sidegraph-import --docs docs/adr --dry-run
+sidegraph-import --docs docs/adr
+```
+
+Oversized documents are skipped whole and named in the report. Review skipped inputs before
+accepting an import result. See [document limits](../reference/cli.md#importing-decision-shaped-markdown---docs)
+and the [resource contract](../reference/security-internals.md#resource-limits-and-redaction-runtime)
+for exact limits and validation order.
+
+**Re-running reads content, not the status.** An unchanged document is skipped, and an
+edited one supersedes or replaces its record. A document whose status changes and nothing else
+is skipped too. The status is read only from frontmatter `status:` or a bold `**Status:**`
+line in the top metadata; a `## Status` section, a MADR `* Status:` item or a plain `Status:`
+line is not read as one. A record that landed `proposed` stays proposed after its ADR moves to
+`Accepted`, so ratify it in Sidegraph. A record whose ADR moves to `Deprecated` or `Superseded`
+keeps the status it had, because the importer skips history documents. Close an accepted one
+in Sidegraph: supersede its accepted, open head (`supersede_decision`) if something replaces
+it, or retire it
+(`retire_decision`) if nothing does. For proposals or closed history, follow the
+[status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
+The one status change a re-import acts on is a flip to or
+from `rejected`. The
+[Idempotency rules](../reference/cli.md#importing-decision-shaped-markdown---docs) give each
+case.
 
 See [`reference/cli.md`](../reference/cli.md#importing-decision-shaped-markdown---docs) for
 the full flag reference (qualifying-document rules, anchor resolution, idempotency, output

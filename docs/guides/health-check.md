@@ -1,66 +1,61 @@
 # Check a Sidegraph installation
 
+[Glossary](../concepts/glossary.md)
+
 Use `/sidegraph:health-check` to collect one read-only report for the current repository.
 It covers plugin wiring, runtime versions, Graphify, store integrity, anchor advisories, and
 inventory and usage. `UNKNOWN` means the evidence could not be established; it remains a
 warning and never becomes a clean result.
 
-## Runtime requirement
+For example, a real scratch run returned `overall: warning`. Its sections reported plugin wiring, runtime and Graphify warnings. The collector could not safely establish the active MCP identity or the installed Graphify version. It also found a known version difference: the PATH install reported 0.22.0 while the running collector reported 0.23.0. This calls for checking the missing evidence. It does not show that the store is broken. See the [captured report](../reference/examples.md#health-report).
 
-The skill runs its local `scripts/collect.py` helper with `-B` under an already identified
-Python interpreter. In a development checkout, the supported paths are:
+Read the six sections, choose the highest-priority recommendation and run it explicitly. Then repeat the health check to see whether the evidence changed.
+
+## Run the check
+
+1. Start your coding agent in the repository where Sidegraph is installed.
+2. Invoke the health-check skill, or ask: "Run the Sidegraph health check for this repository and explain the highest-priority recommendation."
+3. Read the report's plugin wiring, runtime, Graphify, store integrity, anchor advisories and inventory/usage sections.
+4. Run a recommended follow-up only after reviewing its scope, then repeat the check.
+
+A clean result requires evidence. `UNKNOWN` stays a warning. If the skill cannot identify an existing suitable Python interpreter, it reports limited coverage and manual recommendations instead of installing anything. Supply a known existing interpreter or use the manual commands below.
+
+For a manual store check, run these from the repository with the optional CLI installed:
 
 ```bash
-"<project>/.venv/bin/python" -B "<skill-directory>/scripts/collect.py" --project "<launch-directory>" --host claude
+sidegraph-verify
+sidegraph-doctor
 ```
 
-For Codex, pass `--host codex`; use `unknown` when the attached host is not known. On Windows,
-use the existing `<project>/.venv/Scripts/python.exe`. Installed use requires a
-known interpreter from attached host launch metadata or metadata for an identified Sidegraph
-environment. The collector does not guess a Python on `PATH`, run an unknown Sidegraph
-executable, or use `uv`/`uvx` as its launcher. If no suitable interpreter is known, the skill
-shows all six sections as `warning`, states that collection is limited, includes safe static evidence already available, lists
-manual recommendations, and stops. The same fallback applies when the helper exits nonzero,
-prints error JSON, or cannot import required inspection helpers; show only the error class and
-do not echo exception text. Cached package files alone do not authorize provisioning.
+`sidegraph-verify` checks store contracts. `sidegraph-doctor` adds curation and advisory findings. These commands do not prove that the host's live MCP connection answered.
 
-The skill resolves the Git root to select the interpreter, then passes the original launch
-directory as `--project` so Claude plugin-scope checks retain the launch context. The optional
-`--store`, `--graph`, and `--plugin-root` arguments are for
-paths already known to the host or user; the collector does not search unrelated profiles.
+This is the section-status excerpt from the real scratch report captured on 2026-11-02:
+
+| Section | Result |
+|---|---|
+| `plugin_and_wiring` | `warning` |
+| `versions` | `warning` |
+| `graphify` | `warning` |
+| `store_integrity` | `OK` |
+| `anchors_and_entities` | `OK` |
+| `inventory_and_usage` | `OK` |
+
+The report's `overall` was `warning`. Plugin wiring checks registrations, runtime compares package evidence, Graphify checks the recorded engine, integrity checks store contracts, anchor advisories flag targets needing review, and inventory/usage counts stored records and recorded activity. `broken` means a reported failure. `warning` can mean missing evidence. Read the reason before choosing a recommendation.
+
+## Runtime requirement
+
+The collector needs an identified Python environment that can import Sidegraph. Sidegraph requires Python 3.13 or later. The skill identifies an existing interpreter from the checkout or attached installation metadata. If it cannot establish one, it shows limited coverage and manual recommendations; it does not install a runtime.
+
+See the [detailed contract](../reference/health-check.md#runtime-requirement).
 
 ## Evidence and limits
 
-The report separates the collector package, plugin manifest, optional PATH installation,
-Graphify-recorded engine version, and any already observed active MCP evidence. Static
-registration is not proof that a running server answered. The workflow never starts a server
-or calls retrieval tools to test connectivity.
+A configured MCP server is not proof that it answered. If active-server evidence is unknown, confirm the host connection separately. Usage counts show recorded activity, not usefulness or saved time. If another process changed protected inputs during collection, repeat the report after that work finishes.
 
-The collector fingerprints the canonical store, index and sidecars, settings, plugin
-manifests, graph inputs, and actual Git index around its process. This is a stable-source
-check, not an atomic snapshot; concurrent writes make preservation evidence unstable without
-identifying which process changed it. Host hooks surrounding tool invocation are outside the
-collector's preservation boundary.
-
-If the index is absent, canonical-only doctor curation still runs, and index-dependent
-findings and stats are marked skipped. If an existing index has WAL/SHM sidecars, an
-unrecognized header, an unreadable header, or a nonempty rollback journal, all doctor
-advisory and stats paths that could open it are skipped. A regular rollback-mode index allows
-the existing doctor and stats checks to run. Cold or stale index qualifications are retained.
-
-The six report sections distinguish contract violations from advisory findings and missing
-coverage. Inventory counts come from canonical readers. Pending age is unknown for malformed
-record identifiers. Usage reports summarize recorded activity only; delivery counts do not
-show usefulness, prevented errors, or saved time. Records on unmerged or remote-only branches
-are not exhaustively checked.
+See the [detailed contract](../reference/health-check.md#evidence-and-limits).
 
 ## Manual follow-up
 
-Recommendations are prioritized and deduplicated, with a reason, explicit scope, argv, working
-directory, and environment for a manual command or skill to run after the report. Render argv
-with the attached shell's native quoting; paths are never embedded into shell snippets. The
-health check never executes recommendations. Ordinary doctor and stats reads
-outside this collector can create SQLite sidecars for a WAL database, so inspect such an
-index separately after the writing session. Ending a session does not guarantee a persistent
-journal-mode change. Do not recommend an upgrade from an unknown version or install the
-optional PATH CLI solely because it is absent.
+Review the prioritized recommendations. Each supplies a reason, scope, command arguments and working directory. Run only the follow-up you choose, then collect again. The collector never executes these fixes itself.
+
+See the [detailed contract](../reference/health-check.md#manual-follow-up).

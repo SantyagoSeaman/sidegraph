@@ -29,6 +29,7 @@ from sidegraph.schema import (
     DecisionStatus,
     Descriptor,
     Domain,
+    DomainStatus,
     Entity,
     Provenance,
 )
@@ -337,10 +338,10 @@ def test_domain_group_drop_counts_toward_domains_retired(tmp_path, capsys):
 def test_domain_group_supersede_domain_counts_toward_domains_retired(tmp_path, capsys):
     """Amendment 16b: an auto-accepted domain retired through ``Store.supersede_domain``
     (D5's OTHER retirement transition, not just ``ratify_domains(drop=...)``) also counts
-    — ``domains retired 1/1 (100%)``. The successor (proposed, unstamped) is ignored, not
+    — ``domains retired 1/1 (100%)``. The successor (accepted, unstamped) is ignored, not
     counted in either denominator. I1: the line is also asserted string-equal AFTER
     ``store.compact()`` archives the superseded domain (the unstamped successor stays
-    proposed, so it is never compacted) — a hot-only reader would silently drop this
+    accepted, so it is never compacted) — a hot-only reader would silently drop this
     domain from the count on compact."""
     db = tmp_path / "store"
     store = Store(format1_store(db))
@@ -357,6 +358,7 @@ def test_domain_group_supersede_domain_counts_toward_domains_retired(tmp_path, c
         slug="trading",
         title="Trading (rescoped)",
         summary="Order execution path, rescoped by a human.",
+        status=DomainStatus.ACCEPTED,
         supersedes=dom.domain_id,
         provenance=Provenance(source="human"),
     )

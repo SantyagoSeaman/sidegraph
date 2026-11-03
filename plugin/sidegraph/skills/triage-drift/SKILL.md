@@ -13,7 +13,7 @@ description: >-
 since capture, or a previous scoped check no longer applies. The store cannot tell whether the change
 invalidated the record — file hashes move on every refactor while the decision stays
 true, and (the dangerous converse) logic can change semantics without the drift flag
-firing at all. This skill is the judgment pass the flag exists to trigger: read the
+firing at all. This skill is the judgment step the flag exists to trigger: read the
 record, read the code as it is now, decide.
 
 Distinct from `sidegraph:heal-anchors`: that skill repairs *bindings* (orphaned/ambiguous
@@ -73,9 +73,9 @@ for the explicit current list.
 
 Triage in batches — a 35-record queue does not need 35 interrupts. Group verdicts and
 **put every question to the human into one message** (same discipline as
-`sidegraph:heal-anchors`). Make exactly one `record_drift_check` or one supersession per
-record, each with its own rationale and `files` scope: two records never share a rationale or
-a call, even when one file change re-armed both.
+`sidegraph:heal-anchors`). Settle each record once using the status-sensitive routes below.
+Each recorded check or successor has its own rationale and scope: two records never share
+a rationale or a call, even when one file change re-armed both.
 
 ## Per record: read both sides, then route
 
@@ -85,7 +85,13 @@ a call, even when one file change re-armed both.
 2. **Read the anchored code at HEAD** — the actual current implementation, not the diff.
    `git diff <provenance.commit> HEAD -- <file>` helps locate *what* changed, but the
    verdict comes from whether the record's claims still hold, not from how big the diff is.
-3. **Route to one of three verdicts:**
+3. **Check status before writing.** Supersession requires an accepted predecessor with
+   `valid_to` unset. For a wrong proposal, ask the human to drop it with `ratify(drop=[...])`,
+   then freshly propose corrected knowledge without superseding that dropped proposal.
+   For a closed record, preserve it as history and find the accepted, open head of its
+   chain. Supersede that head when its content needs replacement. If no live head exists,
+   restate current knowledge as a fresh anchored proposal.
+4. **Route the current subject to one of three verdicts:**
 
    - **(a) Still true.** Inspect the current implementation and any dependencies that
      support the claim. Record the explicit assertion using the current full Git HEAD:
@@ -136,8 +142,8 @@ a call, even when one file change re-armed both.
      - Not for code files. Declared sections are for markdown only.
      - Report the declared sections per file in your summary line.
    - **(b) Content now wrong or too broad.** The code change genuinely invalidated or
-     narrowed the record. Propose the successor — never write it directly on your own
-     initiative:
+     narrowed an accepted, open record. Propose its successor — never write it directly
+     on your own initiative:
 
      ```python
      propose_decisions(drafts=[{
@@ -153,13 +159,14 @@ a call, even when one file change re-armed both.
      or approved the successor text in this conversation. For an invalidated *fact*,
      the same split applies with `supersede_fact`.
    - **(c) The anchored code is gone entirely** — deleted, not changed. Run
-     `sidegraph:heal-anchors` to distinguish a rename from a lost subject. For accepted
-     decisions, propose a meaningful supersession that explains the obsolete scope and
-     anchors what remains true. `ratify(drop=...)` only rejects proposed decisions/facts;
-     it cannot retire an accepted decision. If there is no meaningful successor, report
-     that limitation to the human and retain history; do not invent an empty successor
-     or edit status/valid_to in canonical files. Accepted domains have their own supported
-     drop path; do not generalize that exception to decisions.
+     `sidegraph:heal-anchors` to distinguish a rename from a lost subject. For accepted, open
+     decisions, propose a meaningful supersession when part of the rule still holds
+     elsewhere, anchored to what remains true. When nothing does, or the record duplicates
+     another live one, recommend `retire_decision(id, reason, duplicate_of=...)` and call
+     it once the human agrees: the record moves to `deprecated` with the reason and stays in
+     history. `ratify(drop=...)` only rejects proposed decisions/facts. Never invent an
+     empty successor or edit status/valid_to in canonical files. Accepted domains have
+     their own supported drop path.
 
 ## Calibrate the effort
 
@@ -175,17 +182,18 @@ the claim holds. Spend more judgment where the change touches the claim or depen
 **Prime suspects: records born during a review whose implementation has since landed.**
 A gotcha captured while reviewing spec N describes the code *before* N's fix — correct at
 capture, false within days, by design. When an implementation wave ships, re-check the
-records its spec review produced (the first maintenance pass found exactly two of these,
+records its spec review produced (the first maintenance run found exactly two of these,
 and they were the only genuine invalidations in 42 flags); ideally this re-check is part
 of the wave's own definition of done, not a later triage's discovery.
 
 ## Report shape
 
-End with one summary the human can act on in a single pass: checked (decision id, returned check id, revision, inspected scope and cache-clear outcome), still true but
+End with one summary the human can act on at once: checked (decision id, returned check id, revision, inspected scope and cache-clear outcome), still true but
 check unavailable (id and reason), proposed supersessions (old id → new draft title, awaiting
-`sidegraph:ratify-decisions`), handed to heal-anchors (ids), and unresolved obsolete subjects
-(ids + current status + reason). Recommend `ratify(drop=[...])` only for proposed
-decisions/facts, or domains whose drop path explicitly permits it.
+`sidegraph:ratify-decisions`), handed to heal-anchors (ids), retired or recommended for
+`retire_decision` (ids + reason), and unresolved obsolete subjects (ids + current status +
+reason). Recommend `ratify(drop=[...])` only for proposed decisions/facts, or domains whose
+drop path explicitly permits it.
 
 ## See also
 

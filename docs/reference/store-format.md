@@ -1,11 +1,19 @@
 # Store format
 
+> **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
+
 The decision store is a public contract, not an implementation detail — it is meant to be
 **committed to the repo it documents**, merged by ordinary `git merge`, and read by tooling
 other than Sidegraph itself over time. This page specifies the on-disk layout and the rules
 that govern writing to it. Implemented in
 [`src/sidegraph/store.py`](../../src/sidegraph/store.py); the record types it persists are in
 [data model](../concepts/data-model.md).
+
+For routine work, commit the authoritative record data and leave `index.db` out of Git. A **binding** links a record to a durable target identity. A **shard** is a file of packed record bodies. Both individual records and shard lines are canonical data. The index is rebuilt from them.
+
+If branches add different record IDs, keep both records. For conflicting edits of the same ID, read both versions and resolve to one legal state while preserving supersession history. Resolve the actual JSON or shard conflict in Git, then run `sidegraph-verify`. Do not resolve a status disagreement by deleting the older record. A changed accepted, open decision needs a successor linked through `supersedes`. For a proposal or closed record, follow [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings). Run `sidegraph-doctor` after the strict verifier to inspect advisory findings.
+
+For an existing format-1 store, use the [0.17 migration checklist](../guides/migrating-to-0.17.md) before changing the layout. `sidegraph-migrate` performs the supported format transition. `sidegraph-compact` performs maintenance on a packed store. Neither command commits for you. Back up the committed store and coordinate compatible clients before a migration.
 
 ## Layout: file-per-record JSON, plus a derived local index
 
@@ -24,7 +32,7 @@ record in both formats. A store may additionally be **packed** (format 2): see
 ├── domains/<ulid>.json      # one file per Domain — full row minus the volatile `communities` field
 ├── entities/<ulid>.json     # one file per Entity — identity only (no last_seen_* fields)
 ├── bindings/<record_ulid>.json  # one file per record (decision or fact): its durable anchor set (community bindings excluded), no status
-├── initiatives/<ulid>.json  # one file per Initiative — full row (nothing volatile on this model)
+├── initiatives/<ulid>.json  # legacy before 0.24: not loaded; retained history, deletion protected
 ├── verifications/<id>.json  # committed, optional: scoped drift checks (see "Scoped drift checks" below)
 ├── verifications/packed.shard  # format 2 only, once maintenance has run: folded drift checks, one per line
 ├── shards/                  # format 2 only, once maintenance has run: 00.shard … (N−1).shard, packed records
@@ -35,10 +43,17 @@ record in both formats. A store may additionally be **packed** (format 2): see
                              # (+ index.db-journal, a 0-byte rollback journal kept beside it)
 ```
 
-The six record directories (`decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`,
-`initiatives/`) are created empty the first time a `Store` opens a fresh path — a brand-new
-`.sidegraph/` has all six present even before the first decision is written. `archive/`,
-`verifications/` and `shards/` appear only when something is first written to them.
+The five record directories (`decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`)
+are created empty the first time a `Store` opens a fresh path — a brand-new `.sidegraph/` has
+all five present even before the first decision is written. `archive/`, `verifications/` and
+`shards/` appear only when something is first written to them.
+
+**`initiatives/` is retired.** Stores written before 0.24 may hold `initiatives/<ulid>.json`
+files. A new store does not create the directory. Sidegraph does not load, index, pack,
+rewrite or validate their working-tree JSON content. A malformed body is not a content
+finding. Leave the files as committed history. `sidegraph-verify --against` still protects
+recognized baseline initiative files from deletion with `illegal-deletion`.
+`sidegraph-migrate` and `sidegraph-compact` leave them in place.
 
 A record's id **is** its filename, so an id must be a single path segment: it starts with a
 letter or digit, continues with letters, digits, `.`, `_` or `-`, and is at most 128
@@ -110,7 +125,7 @@ an ordinary, human-readable git conflict in one small JSON file — not a corrup
 | `Domain` — everything except `communities` | `AnchorBinding.status` (`live`/`degraded`/`orphaned`) |
 | `Entity` — `entity_id`/`canonical_name`/`kind`/`descriptor`, for every entity EXCEPT a `community:*` abstract entity (index-only — see below) | `Domain.communities` |
 | `AnchorBinding` set per decision or fact — `entity_id`/`tier`/`relation`/`weight`, no `status`, EXCLUDING any binding whose entity is a `community:*` abstract entity | `toc_cache` (the `SessionStart` table-of-contents render), `code_drift_cache` (the drifted record ids per capture commit, with the `first_seen_since`, `first_seen` and `first_seen_absent` stamps and the `first_seen_checked` marks behind the SessionStart recency clause) |
-| `Initiative` — full row | the per-session capture ledger (`capture_sessions`, dedup markers) |
+| — | the per-session capture ledger (`capture_sessions`, dedup markers) |
 | `archive/*.jsonl` segments (once compaction has run) | `last_synced_graph_version` (the graph version plus the resolver revision, `<graph version>:r<N>`; raising the revision reruns the first sync after an upgrade), `pending_uncommitted_moves` (the entities a sync left as `moved_uncommitted`, with the git `HEAD` it saw, so the next sync after `HEAD` moves re-verifies them), `pending_tier1_reconcile` (the `(record, vacated community)` pairs whose Tier-1 reconcile failed, as JSON; every sync retries them first; a pair is cleared once its reconcile completes, and kept, silently, while a live or degraded Tier-2 anchor of the record has no recorded community), `schema_version`, the canonical-digest freshness stamp, `skipped_canonical_files` (the files the last reload left out; see [Digest integrity](#digest-integrity)) |
 | `domain-snapshot.json` (once `sidegraph-domains snapshot` has run) | `domain_members` (each accepted domain's effective membership: node id, file, community), with `domain_membership_stamp`, `domain_membership_failed`, `domain_membership_populated` and `domain_snapshot_signature` in `meta` |
 | — | retrieval telemetry (`retrieval_shows`, `retrieval_seeds` — records that reached a render or that the PreToolUse hook printed, areas that were asked about; see [Retrieval telemetry](#retrieval-telemetry) below) |
@@ -166,12 +181,9 @@ written) and no `last_seen_*` baseline either (`index.db` is gitignored, never c
 first `sidegraph-sync` against the live graph self-heals: it re-resolves every *tracked*
 Tier-2 leaf and re-derives that leaf's Tier-1 community binding from scratch, purely in the
 index — the same adopted/orphan-path repointing machinery that runs on every ordinary sync,
-not a special case. **Residual:** a Tier-1 community binding with no Tier-2 leaf at all — the
-case for an ambiguous-match anchor whose candidates share one community (`resolve_and_bind`
-only creates a leaf on `resolved`/`unresolved`, never on `ambiguous`) — has nothing for sync
-to re-resolve *from*, so it is not regenerated post-clone; a decision anchored only that way
-effectively loses its anchor until a fresh capture touches the same reference again. See
-[surviving refactors](../guides/surviving-refactors.md#fresh-clone-recovery).
+not a special case. For portable applicability, disambiguate an ambiguous reference and pair
+its precise target with a durable file anchor. Check the capture result and verify retrieval
+from the committed store. See [fresh-clone recovery](anchoring-internals.md#fresh-clone-recovery).
 
 **Legacy committed binding entries decay lazily; legacy committed entity files do not decay at
 all.** A store written by pre-0.6.0 code may still have `community:*` entries sitting in its
@@ -325,7 +337,8 @@ From 0.14.0, every entry point checks the marker before it reads the store: open
 before each tool call once the file changed, the PreToolUse, SubagentStart and Stop hooks,
 `sidegraph-stats`, `sidegraph-doctor`, `sidegraph-blame` and the commit-message hook. Each
 refuses a store that requires a newer version (`This store requires Sidegraph >= X.Y.Z; this is
-A.B.C.`). A dev or local build counts as its release, so `0.14.0.dev1` meets `>= 0.14.0`. A
+A.B.C.`). A write checks it once more under the writer lock, so a writer that was already
+waiting when another process raised the requirement refuses instead of landing one more record. A dev or local build counts as its release, so `0.14.0.dev1` meets `>= 0.14.0`. A
 `1.0.0` marker without exactly one such line, or a `0.x` marker with a second line, is malformed
 and refused too. The marker must be a real regular file, never a symlink, and at most
 4 KiB; reading it is bounded, and an explicit raise cannot write a marker over that limit.
@@ -759,49 +772,19 @@ compaction moves stays retrievable afterward — the append-only invariant holds
 
 Recommended on the default branch, as periodic team hygiene, not on every commit.
 
-## Migration to schema 0.4.0 (from schema 0.2.x and 0.3.x)
+## Legacy single-file stores
 
-Opening a legacy single-file SQLite store (`decisions.db`, or any store stamped
-`schema_version` `0.2.0`/`0.3.0`) triggers a one-time, fail-closed export into the canonical
-layout:
+Opening a legacy single-file SQLite store (a bare `*.db` path, or a directory holding
+`decisions.db`) is refused with an error that names the path and the stamped `schema_version`
+(or `unknown` when it cannot be read). Nothing is written or renamed. Such a store predates
+Sidegraph 0.1.0, which already wrote one file per record. To keep its records, open it once
+with Sidegraph 0.23.x, which migrates it into the canonical layout, then upgrade. A directory
+that holds only a `decisions.db.migrated-backup` left by that migration opens normally.
 
-1. Every row in the legacy file is read **and Pydantic-validated in full** before a single byte
-   is written anywhere. A garbled row raises immediately, naming the offending table and id,
-   and the legacy file is untouched — safe to retry later, never partially migrated.
-2. Only once every row is known-good is the export written, into a private staging area first
-   (so a crash mid-export never corrupts either the legacy file or a real store directory).
-3. The legacy file is renamed to `<name>.migrated-backup` (e.g.
-   `decisions.db.migrated-backup`) — **never deleted**, matching the store's own append-only
-   ethos even for its own retired format. In the directory case (`<store>/decisions.db`) the
-   staged subdirectories move into the store first and the rename comes last, so an
-   interruption leaves the legacy file in place and the next open migrates again, which is
-   safe to repeat. In the bare-file case (`Store("old.db")`) the rename has to come first,
-   because the store path is the legacy file itself. Just before it, a sentinel
-   `<name>.migration-incomplete` is written beside the legacy file, naming the staging
-   directory and the backup, and deleted after the last move. If the migration dies after the
-   rename, the staging directory is kept, and the next open refuses with a message naming it
-   and the backup, so the staged files can be moved into place by hand and the sentinel
-   deleted (an empty staging directory means the migration had finished: delete it and the
-   sentinel). A sentinel younger than 60 seconds means a migration is running now: the open
-   refuses with "retry in a minute" and touches nothing, whatever state the legacy file is
-   in. Deleting that sentinel early is unsafe: the next open would take whatever directory is
-   there and never read the staged records back. Only an older sentinel gets the stale
-   cleanup or the manual-recovery message. A sentinel left by an interruption before the
-   rename is stale once it is older than that: the next open removes it, and the staging
-   directory it names only when that is a directory next to the legacy file with a
-   `.sidegraph-migrating-` name.
-   Every legacy row's id (and every binding's `record_id`) must also be a safe id, or the
-   migration fails closed before anything is staged. A row whose JSON omits its id takes its
-   SQL primary key as the id, and that key must be safe too.
-4. `index.db` is rebuilt from the freshly written canonical files, `SCHEMA_VERSION` is stamped
-   at the running code's current version, and one line prints to stderr naming the source,
-   destination, and backup path.
-
-Volatile fields are **not** carried over from the legacy `index.db` — only canonical
-(identity/content) data migrates; the next sync re-derives engine mappings from the live graph,
-same as any other cold reload. A store already in the canonical (file-per-record) layout never
-triggers this legacy-file migration step, as always — see the next section for what DOES
-happen on open when such a store's stamp is merely older than the running code's.
+A migration by 0.23.x that stopped part-way leaves `<name>.migration-incomplete` beside the
+store path, naming the staging directory that holds the records and the backup. Opening such a
+path is refused with an error that names all three; finish the migration with Sidegraph 0.23.x,
+then upgrade.
 
 ## `SCHEMA_VERSION` and exact-match policy
 
@@ -833,8 +816,13 @@ code alike, so bumping would force a reload for nothing. Fields added this way s
 `provenance.commit` (capture-time git SHA), `Domain.seed_anchors`, and — since 2026-08-04 —
 `ratified_by` / `ratified_at` on `Decision`, `Fact` and `Domain` (stamped by the ratify
 transitions; `null` on every record ratified before the field existed, and **never
-backfilled** — a guessed ratifier would defeat the point of recording one). A field that
-changes an existing field's meaning, or that a reader must have, is a version bump instead.
+backfilled** — a guessed ratifier would defeat the point of recording one), and — since 0.24.0 —
+`Decision.retired` (`{reason, duplicate_of}`, written only by `retire_decision` together with
+`accepted -> deprecated`; `null` everywhere else). A field that changes an existing field's
+meaning, or that a reader must have, is a version bump instead. No version bump does not mean
+no requirement: since the [mixed-version rule](stability.md#mixed-versions), a release that adds
+a field raises the store requirement every team commits (`retired` needs 0.24.0), because an
+older client rewriting a record would drop the field.
 
 ## The sync-clean invariant
 
@@ -857,7 +845,7 @@ that sub-claim holds with zero exceptions.
 The one thing sync *does* legitimately write to a committed file is the rebind ladder's
 `moved` rung (see [surviving refactors](../guides/surviving-refactors.md#the-rebind-ladder)):
 a leaf whose name survived but whose file moved gets its `descriptor.file_path` updated and
-its own `entities/<id>.json` rewritten to match — verified live, REF-1. That's a
+its own `entities/<id>.json` rewritten to match. That's a
 durable-identity update, the same kind `upsert_entity` would apply for any other rename, not
 regenerable engine-coupling state — so it's outside this invariant's scope, not a violation of
 it: the sync report names it (`moved: <name>() (<old path> -> <new path>)`), and the new file
@@ -873,16 +861,25 @@ engine-coupling state — specifically, community labels — could still touch g
   live record (only compaction and `sidegraph-migrate` remove a hot file, and only after the
   same content is durably archived or held by a shard line — see above).
 - **Supersede = append successor, then close predecessor.** `add_decision(decision)`, when
-  `decision.supersedes` is set, validates the predecessor and writes the successor first. It
-  then sets the still-open predecessor's `valid_to` and flips it to `superseded`. Both writes
+  `decision.supersedes` is set, validates the predecessor and writes the successor first. The
+  target must be the live head (`accepted`, open) and a record takes one pending successor at
+  a time; otherwise the write is refused with nothing written (see
+  [the supersession invariant](../concepts/data-model.md#the-supersession-invariant), which
+  also covers facts and domains). It then sets the predecessor's `valid_to` and flips it to
+  `superseded`, for every successor except a `proposed` one (a `rejected` doc-import
+  successor included): a `proposed` successor leaves an accepted predecessor open, `ratify` closes it
+  when it accepts the successor, and `drop` never touches it. Accepted domain predecessors follow the
+  waiting rule through `ratify_domains`. A dropped domain closes in the supersession call. Both writes
   run under one serialized `Store._mutation`, but two canonical JSON replacements are not a
   cross-file filesystem transaction. Successor-first ordering ensures an interrupted write
   cannot durably close a predecessor before the successor exists; the tolerated failure shape
   is two live records, which verification and a retry can resolve.
 - **Status transitions, not rewrites.** `ratify(id)` flips `proposed -> accepted`. `drop(id)`
   flips `proposed -> rejected` and closes `valid_to`. Both raise if the decision isn't
-  currently `proposed`; decision *content* (`context`, `choice`, `rejected`, ...) is never
-  mutated after write, only `status`/`valid_to` and successor linkage. A simple transition
+  currently `proposed`. `retire(id, reason, duplicate_of)` flips `accepted -> deprecated`,
+  closes `valid_to` and sets `retired`; it raises unless the decision is `accepted`. Decision
+  *content* (`context`, `choice`, `rejected`, ...) is never mutated after write, only
+  `status`/`valid_to`, the ratifier stamp, `retired` and successor linkage. A simple transition
   rewrites that decision file; ratifying a deferred supersession may also close its predecessor,
   and decision ratification/drop may cascade into supporting fact files as described next.
 - **Fact status transitions mirror a decision's.** `ratify_fact(id)`/`drop_fact(id)` flip a
@@ -898,9 +895,10 @@ engine-coupling state — specifically, community labels — could still touch g
   untouched by that flip. An `Entity`'s `last_seen_*` fields are likewise index-only.
 - **Domain status transitions, not rewrites.** `ratify_domains` flips `proposed -> accepted`
   (and mints the paired `domain:<slug>` entity), `proposed -> dropped` or `accepted -> dropped`. Editing a `Domain`'s
-  description is a new committed file: `supersede_domain` closes the predecessor (status ->
-  `superseded`) and writes a successor with `supersedes` set, both in the same call — mirroring
-  `add_decision`'s supersede path. The only other sanctioned mutation is
+  description creates a successor with `supersedes` set. A proposed successor leaves its accepted
+  predecessor active until `ratify_domains` accepts the successor and closes the predecessor
+  (`superseded`). Other permitted transitions, including a dropped predecessor, close it in
+  the supersession call. The only other sanctioned mutation is
   `refresh_domain_communities`, which `sidegraph-sync` uses to update ONLY the index-only
   `communities` field (REPLACE semantics) on every `accepted` domain, and which also runs
   immediately when a domain is accepted and a graph is readable; `title`, `summary`,
@@ -915,7 +913,7 @@ engine-coupling state — specifically, community labels — could still touch g
 
 **May:**
 - Write `.sidegraph/domain-snapshot.json`: only `sidegraph-domains snapshot`.
-- Append new `decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`, `initiatives/`
+- Append new `decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`
   files.
 - Flip `Decision.status`/`Fact.status` (and, index-only, `AnchorBinding.status`) through the
   documented transitions — each a rewrite of that one record's own committed file. A fact's
@@ -1103,3 +1101,99 @@ unknown-check retention ledger. Capture changes outside inspected coverage are r
 including non-regular anchor paths; a partial check cannot clear those capture warnings.
 Unpublished `.tmp` crash debris is not inspection history and is excluded from the
 uncommitted-store recommendation; inspect it locally rather than committing it.
+
+## `schema_version` — a public contract
+
+`SCHEMA_VERSION` (currently `0.6.0`, defined in `store_layout.py` and re-exported by
+`schema.py`) names the record/table layout. The index's `meta.schema_version` is `0.6.0`
+without a minimum Sidegraph requirement, or `0.6.0+requires` with one. A format-2 store (packed shards, since 0.17.0) has its index
+stamped `0.7.0+format2` instead. A full reload and an
+explicit requirement raise set the stamp from the marker. The fast freshness path checks
+that expected stamp: the other accepted stamp triggers a reload, and an unknown stamp is
+refused. `_RELOADABLE_SCHEMA_VERSIONS` (`0.4.0`, `0.5.0`, whose canonical files are fully
+forward-compatible) also trigger a reload and restamping. See
+[store format](store-format.md#schema_version-and-exact-match-policy) for the
+exact mechanics.
+
+**Legacy single-file stores:** a pre-0.1.0 single-file SQLite store (a bare `decisions.db`, or any store stamped `0.2.0`/`0.3.0`) is refused on open, untouched. Open it once with Sidegraph 0.23.x to migrate it, then upgrade; see
+[store format: legacy single-file stores](store-format.md#legacy-single-file-stores). From 0.17 there is an explicit transition, `sidegraph-migrate`, which packs the
+per-record files into `shards/` (format 2); the old layout stays served until you run it, and the
+records keep their content byte for byte (see the
+[migration guide](../guides/migrating-to-0.17.md)). Any other mismatch (a newer/future version, or an unrecognized string) is a hard rejection: use a fresh store.
+
+## Initiatives — a Tier-0 anchor, not a record type
+
+The high-level capture APIs use an initiative as a flat Tier-0 abstract entity named
+`initiative:<label>`. Passing a draft's `initiative` field creates that entity and binding,
+after the name is redacted and trimmed; a whitespace-only or all-secret name binds nothing.
+Omitting it creates neither, except on the propose path, where an omitted or empty
+`initiative` may take the branch-derived name before it reaches this step; the storage layer
+does not do so implicitly.
+
+There is no current `Initiative` record or `initiatives/` directory in a new store. Older
+stores may contain legacy files. They are not loaded, indexed or content-validated, but
+transition verification still protects recognized baseline files from deletion. Leave them
+as committed history. See the retired directory description near the top of this page.
+
+## `DriftCheck` — attributed auxiliary inspection
+
+An optional file under `.sidegraph/verifications/` records an explicit agent
+judgment that an existing decision still holds. It preserves the decision and original
+capture provenance; it never ratifies a proposal or proves semantic truth. It is outside
+the shared canonical digest/index record tables. A check file is never edited, but on a
+format-2 store `sidegraph-compact` may pack it into `verifications/packed.shard` (the same JSON
+body, one line) and drop it once it is dead: its decision has a newer check or is retired. See
+[scoped checks](store-format.md#scoped-drift-checks) and
+[`record_drift_check`](mcp-tools.md#record_drift_check).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | literal `1` | Version of the auxiliary assertion and fixed subject-digest definition; independent of the store format version. |
+| `id` | ULID | Generated check identity, also its immutable filename (or, once packed, its line's key). Highest generated id is the deterministic per-decision selection rule, not causal ordering. |
+| `decision_id` | str | Existing decision id; terminal or archived decisions remain valid history references. |
+| `checked_at` | aware datetime | UTC time at which the assertion was recorded. |
+| `checked_commit` | str | Full inspected Git HEAD object id, retained as provenance even after squash/clone removes the object locally. |
+| `provenance` | `Provenance` | Source `agent`, commit equals checked revision; author/session currently unknown. |
+| `rationale` | str | Nonblank explanation, redacted before validation; at most 4000 characters. |
+| `required_files` | list[str] | Exact current required anchor-file set, separate from optional inspected dependencies. |
+| `checked_files` | list[`CheckedCodeFile`] | Explicit inspected regular-file snapshots, covering every required file; 1–256 unique safe paths. |
+| `subject_digest` | str | SHA-256 of fixed immutable decision/provenance fields and durable leaf descriptors; excludes lifecycle and volatile mapping/status fields. |
+| `declared_sections` | list[`DeclaredSectionFile`] | Optional per-file section scope for markdown files, `[]` for a plain whole-file check; at most 64 entries, each path one of `checked_files`. |
+
+Changed inspected files/modes or required scope re-arm review; for a file with declared sections, a change to a declared or also-watched section, or to the file's link definitions, re-arms instead of any change to the file. A matching snapshot after
+an unrelated commit remains covered. A mistaken semantic assertion cannot be detected
+from these hashes; a genuine successor corrects the decision and preserves the check as
+history. Optional comparison failure has the bounded behavior described in store-format.
+
+## `CheckedCodeFile` — inspected Git tree entry
+
+Nested in `DriftCheck`; this stores repository metadata, never source bodies or engine
+mappings. The total checked-path budget is 16384 UTF-8 bytes.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | str | Safe repository-relative forward-slash path, at most 1024 UTF-8 bytes. |
+| `blob_id` | str | Full Git content address of the inspected file. |
+| `mode` | `100644` \| `100755` | Regular-file Git mode; mode changes participate in applicability. |
+
+## `DeclaredSectionFile` — declared sections of one checked file
+
+Nested in `DriftCheck`; this stores locators and digests, never heading text or source
+bodies. A scheme or role this release does not know is accepted and compared by whole blob.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | str | One of the check's `checked_files`; unique across entries. |
+| `scheme` | token | How sections are located; `md1` (markdown block structure) is the one scheme this release resolves. |
+| `refs_hash` | hex \| `null` | `md1`: digest of the file's link reference definitions. |
+| `sections` | list[`DeclaredSection`] | 1–256 sections; at most 1024 across the check. |
+
+## `DeclaredSection` — one declared or also-watched section
+
+Nested in `DeclaredSectionFile`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `heading_hash` | hex | `md1`: digest of the heading chain that locates the section. |
+| `role` | token | `declared` (the checker read it) or `watch` (a sibling the claim depends on). |
+| `text_hash` | hex | `md1`: digest of the section's text, subsections included. |

@@ -1,11 +1,21 @@
 # Naming your domains
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 The practical walkthrough for turning a graph's nameless community structure into the named
 mental model the `SessionStart` TOC and `drill_down` serve from. See
 [mind model](../concepts/mind-model.md) for why this layer exists; this guide is the "do this,
 in this order" version.
 
 ## The fast path: ask your agent
+
+The `sidegraph:setup` skill offers to name domains immediately after verifying the wiring,
+before its optional graph-refresh and review-policy questions. It asks one line once per
+setup flow, only when there are no accepted or proposed domains and the graph has
+communities. Accepting starts the naming conversation below; it does not authorize writes.
+Declining or deferring continues setup, and ordinary later sessions do not repeat the offer.
+An explicit new setup request starts a new setup flow; you can also invoke naming directly
+at any time.
 
 Once a graph exists (see [step 1](#1-build-the-graph)), the recommended way to name domains
 is conversational, not a CLI dry-run-then-hand-curate loop. In a Claude Code session started
@@ -79,10 +89,19 @@ The one-time cost is the agent's reasoning over the candidate list (~10–15k to
 
 ## 1. Build the graph
 
+macOS or Linux:
+
 ```bash
 cd /path/to/your/repo
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+graphify update .
+```
+
+Windows PowerShell:
+
+```powershell
+cd /path/to/your/repo
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
 ```
 
@@ -219,9 +238,9 @@ neither named usefully nor available for a future, better-tuned bootstrap pass t
 ### Recovering from a mass-drop
 
 The `supersede_domain` MCP tool is the direct fix now — no hand-written `Store` script
-required. The underlying mechanism is unchanged: superseding a dropped (or badly-proposed)
-domain flips it to `superseded`, which removes it from `_claimed_communities`'s scan (that
-function explicitly excludes only `superseded` domains); giving the successor **no matching
+required. The underlying mechanism is unchanged: superseding a dropped domain (drop a badly-proposed one
+first) flips it to `superseded`, which removes it from the community-claim check (that
+check excludes only superseded domains); giving the successor **no matching
 `path_prefixes`/`seed_anchors`** leaves its `communities` at the model default, `[]`, so the
 freed community stops being claimed — a subsequent `sidegraph-domains bootstrap` run will
 reconsider it (if it still clears `--min-members`/`--paths`):
@@ -237,8 +256,8 @@ supersede_domain(
 ```
 
 The successor lands `status=proposed` (the same one-gate rule every domain write follows) —
-it never needs to be ratified for the freeing to take effect: `_claimed_communities` excludes
-only `superseded` domains, and an empty `communities` list contributes nothing to that set
+it never needs to be ratified for the freeing to take effect: the community-claim check excludes
+only superseded domains, and an empty `communities` list contributes nothing to that set
 regardless of the successor's own status. This is the one place where being selective about
 `--accept` up front is cheaper than fixing it after the fact — prefer listing candidates and
 picking real ones over `--all` on a large auto-proposed batch.

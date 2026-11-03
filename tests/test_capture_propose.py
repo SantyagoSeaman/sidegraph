@@ -85,7 +85,7 @@ def test_propose_no_reader_orphaned_anchor_and_initiative(tmp_path):
     assert init.canonical_name == "initiative:metadata-platform"
 
 
-def test_propose_supersedes_closes_predecessor(tmp_path):
+def test_propose_supersedes_defers_close_until_ratified(tmp_path):
     store = Store(tmp_path / "t.db")
     old = store.add_decision(
         Decision(
@@ -93,12 +93,15 @@ def test_propose_supersedes_closes_predecessor(tmp_path):
             kind=DecisionKind.ADR,
             context="c",
             choice="x",
+            status=DecisionStatus.ACCEPTED,
             valid_from=datetime.now(UTC),
             provenance=Provenance(source="manual"),
         )
     )
     results = propose([_draft(title="new way", supersedes=old.id, anchors=[])], store, None)
     assert results[0].status == "written"
+    assert store.get_decision(old.id).status == DecisionStatus.ACCEPTED
+    store.ratify(results[0].decision_id)
     assert store.get_decision(old.id).status == DecisionStatus.SUPERSEDED
 
 
@@ -569,7 +572,7 @@ def test_post_write_failure_keeps_the_batch_going(tmp_path, monkeypatch):
 def test_accepted_record_reason_names_what_cannot_be_added(tmp_path, monkeypatch):
     store = Store(tmp_path / "t.db")
     monkeypatch.setattr(capture, "_bind_orphaned", _raise_once(OSError("disk full")))
-    [r] = propose([_draft()], store, None, auto_accept=True)
+    [r] = propose([_draft()], store, None, ratify_policy=RatifyPolicy.LEGACY_ACCEPT)
     assert r.status == "written"
     assert "add_anchors" in r.reason
     assert "initiative and tags cannot be added" in r.reason
@@ -614,7 +617,7 @@ def test_accepted_fact_reason_names_add_anchors_not_drop(tmp_path, monkeypatch):
     store = Store(tmp_path / "t.db")
     monkeypatch.setattr(capture, "_bind_orphaned", _raise_once(OSError("disk full")))
     facts = [{"statement": "fact number 1", "source": "src", "anchors": [{"name": "Thing1"}]}]
-    [r] = propose_facts(facts, store, None, auto_accept=True)
+    [r] = propose_facts(facts, store, None, ratify_policy=RatifyPolicy.LEGACY_ACCEPT)
     assert r.status == "written" and r.fact_id is not None
     assert "add_anchors" in r.reason
     assert "drop" not in r.reason

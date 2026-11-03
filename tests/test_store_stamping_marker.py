@@ -50,6 +50,7 @@ import pytest
 import sidegraph.store as store_module
 from sidegraph.schema import Decision, DecisionKind, Provenance
 from sidegraph.store import _CANONICAL_SUBDIRS, _STAMPING_MARKER_NAME, Store
+from sidegraph.store_layout import LEGACY_SUBDIRS
 from tests.store_format2_support import format1_store
 
 
@@ -281,12 +282,12 @@ def test_forced_interleaving_keeps_the_earlier_marker_not_the_last_writer(tmp_pa
     )
 
 
-@pytest.mark.parametrize("subdir", _CANONICAL_SUBDIRS)
+@pytest.mark.parametrize("subdir", (*_CANONICAL_SUBDIRS, *LEGACY_SUBDIRS))
 def test_marker_never_acquired_regardless_of_which_subdir_holds_the_record(tmp_path, subdir):
     """Review round 2, Minor 5: kills the mutant that restricts ``_store_has_any_records``
     to ``decisions/`` alone, which survived all of fix round 1's tests because every one of
     them happened to use a decision as its "existing record". A bare file in ANY of the
-    six canonical subdirs must block the marker — a domains-only store (the normal shape
+    canonical (and retired) subdirs must block the marker — a domains-only store (the normal shape
     right after ``sidegraph-domains bootstrap``, before any decision exists) is real, not
     hypothetical.
 

@@ -38,7 +38,7 @@ def test_missing_store_is_error_but_empty_admitted_store_is_success(tmp_path, ca
 
     missing = tmp_path / "missing"
     out = tmp_path / "docs"
-    assert main(["--db", str(missing), "--out", str(out)]) == 2
+    assert main(["--db", str(missing), "--out", str(out)]) == 1
     assert not missing.exists() and not out.exists()
     with Store(tmp_path / ".sidegraph"):
         pass
@@ -59,7 +59,7 @@ def test_bad_configuration_is_rejected_before_output(tmp_path, capsys, options):
 
     db = seed(tmp_path)
     before = bytes_under(db)
-    assert main(["--db", str(db), "--out", str(tmp_path / "docs"), *options]) == 2
+    assert main(["--db", str(db), "--out", str(tmp_path / "docs"), *options]) == 1
     assert not (tmp_path / "docs").exists() and bytes_under(db) == before
     assert capsys.readouterr().err
 
@@ -134,7 +134,7 @@ def test_invalid_template_input_is_refused_without_writes(tmp_path, capsys, kind
         template.mkdir()
     before = bytes_under(db)
     assert (
-        main(["--db", str(db), "--out", str(tmp_path / "docs"), "--template", str(template)]) == 2
+        main(["--db", str(db), "--out", str(tmp_path / "docs"), "--template", str(template)]) == 1
     )
     assert not (tmp_path / "docs").exists() and bytes_under(db) == before
 
@@ -326,8 +326,10 @@ def test_operational_failure_reports_partial_batch_and_preserves_remaining_files
         return original_replace(source, target)
 
     monkeypatch.setattr("sidegraph.adr_files.os.replace", fail_second)
-    assert main([*args, "--template", str(template)]) == 2
-    report = json.loads(capsys.readouterr().out)
+    assert main([*args, "--template", str(template)]) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert "second update failure" in captured.err
     assert report["applied"] is False and report["partial_write_possible"] is True
     assert "second update failure" in report["error"]
     assert calls == ["ADR.md", "RULE.md"]
@@ -336,3 +338,12 @@ def test_operational_failure_reports_partial_batch_and_preserves_remaining_files
     assert (out / "index.md").read_bytes() == before["index.md"]
     assert not list(out.glob(".sidegraph-adr-*"))
     assert bytes_under(db) == source_before
+
+
+def test_json_refusal_keeps_the_report_on_stdout_and_the_message_on_stderr(tmp_path, capsys):
+    from sidegraph.adr_cli import main
+
+    assert main(["--db", str(tmp_path / "nope"), "--out", str(tmp_path / "o"), "--json"]) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["error"]
+    assert captured.err.strip() == json.loads(captured.out)["error"]

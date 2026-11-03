@@ -1,5 +1,7 @@
 # Releasing Sidegraph
 
+> **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
+
 How a release is cut, end to end. This page is for the maintainer running one, and for
 anyone curious how the version they installed came to exist. Only the maintainer can
 actually push a tag or a public snapshot. See [`SECURITY.md`](../../SECURITY.md) and
@@ -65,6 +67,15 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
    Run the host version tests before the slower release checks. The release preflight
    (`tools/preflight_release.py`) refuses a checkout with uncommitted changes, so it runs
    in step 8, after the commit.
+   If the release adds a field to a stored record (`Decision`, `Fact`, `Domain`, `Entity`,
+   `AnchorBinding`, `DriftCheck` or a model nested in them), or changes what one
+   serialises, the guard (`tests/test_record_fields.py`) fails until
+   `RECORD_FIELDS_REQUIREMENT` in `src/sidegraph/store_layout.py` is raised to this release and
+   the snapshot is regenerated (`uv run python tests/test_record_fields.py --write`). The
+   CHANGELOG entry must then say that all clients must upgrade and that every team runs
+   `sidegraph-require --sidegraph X.Y.Z` and commits `.sidegraph/format` before anyone on the
+   new version writes; nothing raises a store's requirement for them, and until they do an older
+   client can still drop the field. See [Stability](stability.md#mixed-versions).
 3. `uv run pytest -q`. Full suite green. Then `uv run pytest tests/private -q` in the development
    repository: the slow rare-case set that PR CI skips; a release may add tests to it.
 4. `uv run pre-commit run --all-files`. Lint, format, types, and staged secret scanning
@@ -94,7 +105,79 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
    is untagged in the **public** repository and `CHANGELOG.md` dates it (see "The public
    main moves only at releases" below). Refresh `demo` separately when required.
 
-Only after all nine steps pass is the public snapshot ready to tag.
+Only after all nine steps and any requested [desktop smoke](#desktop-smoke-when-requested)
+pass is the public snapshot ready to tag.
+
+### Desktop smoke when requested
+
+Run this check only when the owner requests it for a particular release. Start just after
+step 9 and finish before tagging. Record the pushed public snapshot commit, app/OS,
+installation route, expected results and observed evidence. Before starting, create a
+separate local Git scratch repository for each surface and commit a source file in each.
+Run steps 1–4 in each surface and its own repository. A result belongs only to the surface
+where it was observed.
+
+1. Install or update Sidegraph for that scratch repository using
+   the [desktop integration steps](../integrations/desktop-apps.md). For Claude, use a
+   marketplace entry already added through Claude Code. Before installing, refresh it from
+   a terminal with `claude plugin marketplace update sidegraph`, then install into this
+   repository. For Codex, use the verified CLI installation and hook-trust path before
+   opening the app. If its marketplace is already present, run
+   `codex plugin marketplace upgrade sidegraph` rather than adding it again.
+   For existing installs, use the [Claude Code update recipe](../getting-started/claude-code-setup.md#update-an-existing-plugin)
+   or [Codex update recipe](../getting-started/codex-setup.md#keep-the-plugin-updated).
+   Open and trust that repository in the app as the integration steps direct. Preserve
+   the install scope and enable any project/local installation in this scratch repository.
+   Review changed hooks, then close and relaunch the app from the GUI.
+2. Ask the agent to run the Sidegraph setup skill in that repository. Confirm the graph
+   and store were created. Ask it to use `add_decision` to create one test record with a
+   graph-resolved anchor: an entity name and its repository-relative `file_path`. Save the
+   returned record `id`. Confirm `status` is `accepted` and both `anchors_skipped` and
+   `anchors_orphaned` are empty. Then start a fresh session in that surface and confirm
+   the opening map.
+3. Read the version from the installed plugin manifest and the opening context's
+   `Sidegraph X.Y.Z` line. Both must match the candidate version. Check source commits too:
+   version equality alone cannot distinguish same-version re-cuts. Match the installed
+   plugin source commit to the snapshot, or compare hashes of its loaded manifests, MCP
+   configuration, hooks and skills with that snapshot if install metadata has no commit.
+   Locate the running MCP server's Python environment from its process information. Read
+   its `site-packages/sidegraph-*.dist-info/direct_url.json`, rather than a project Python
+   installation. Its `vcs_info.commit_id` must match the pushed snapshot. For SessionStart,
+   immediately read the [launch-commit file](hooks.md#the-launch-commit-file) it records
+   from its own source metadata. That value must match the snapshot too. Recheck it before
+   each hot-hook check. Run surfaces one at a time with other Sidegraph sessions closed,
+   because the file is shared across projects. A launch warning, missing artifact or
+   unresolved source identity is incomplete evidence. For Claude, retain the
+   installed-plugin entry's commit too.
+4. Call `get_task_context` for the anchored file and confirm the saved test-record `id`
+   is returned.
+5. In Claude Desktop's local Code tab, ask the agent to Read that file for the first time
+   in this session. Retain the PreToolUse transcript block naming the saved record `id`,
+   or matching journal evidence in `.sidegraph/index.db`: a
+   [`retrieval_events`](store-format.md#retrieval_events-derived-index-only) row with
+   `kind='inject'`, `key` equal to the file, `detail` equal to the record id and the current
+   `session_id`; or a `delivery_occurrences` row for that session with `surface='hook_read'`
+   joined to a `delivery_placements` row for that record (`occurrence` equals the header's
+   `id`). See
+   [delivery evidence](store-format.md#delivery-evidence-derived-index-only). Journal
+   recording requires `SIDEGRAPH_TELEMETRY` not to be `off`; use transcript evidence when
+   it is disabled. Missing evidence is not a pass. Codex has no Sidegraph read hook, so
+   mark this item not applicable and retain its explicit retrieval result from step 4.
+6. In a fresh interactive Codex thread, send at least two real work prompts and retain the
+   Stop capture prompt as that thread's rollout `hook_prompt` or in-app Hook feedback
+   entry. Answers to agent questions and hook feedback do not count as work
+   prompts. See the [capture gates](hooks.md#sidegraph-stop).
+
+Use separate result rows for the Code tab and Codex view of the ChatGPT desktop app.
+All applicable checks in a requested smoke must pass before tagging. Skipped, unsupported
+or unobserved checks do not count as passes. The Codex read-hook item is not applicable.
+The macOS live evidence does not establish native Windows desktop-app results.
+
+If a requested check fails, stop before tagging. Keep the same version and dated release
+heading, put the fix's changelog entry under that heading, and repeat steps 2–9 through a
+new release-preparation pull request, merged internal main and public snapshot. This
+includes the tests, private suite, pre-commit, build, wheel smoke and online preflight.
+Then repeat this whole desktop smoke against the new snapshot.
 
 ### The public main moves only at releases
 
@@ -116,8 +199,8 @@ its tag deleted in both the public checkout and its origin before the next `--pu
 otherwise the push is refused.
 
 Between the release-preparation commit and the tag, every `--push` is a re-cut of that same
-release, and the tag goes on the last one. Tag promptly after the push, so the window stays
-short.
+release, and the tag goes on the last one. Start any requested desktop smoke immediately
+after the push, then tag promptly once the required checks pass, so the window stays short.
 
 Never push the public `main` by hand: the gate lives in `tools/release-public.sh`, and a
 manual `git push` from the public checkout bypasses it.

@@ -1,101 +1,48 @@
 # Anchoring
 
+> **Start here:** Read the opening explanation, then follow only the detail needed for your current task. [Glossary](glossary.md).
+
 Anchoring is how a `Decision` attaches to the code or docs it's actually about, so retrieval
 can surface it when an agent's task touches that entity. Implemented in
 [`src/sidegraph/anchoring.py`](../../src/sidegraph/anchoring.py) (capture-time resolution) and
 [`src/sidegraph/sync.py`](../../src/sidegraph/sync.py) (rebind after the graph changes).
 
+To anchor a new record, give the agent the target and its repository-relative path. For example: "Record this gotcha against the `cache_key` function in `cache.py` and against `cache.py`: resource names can collide between projects, so include the project in the key."
+
+That pattern supplies two anchors:
+
+```json
+[
+  {"name": "cache_key", "file_path": "cache.py"},
+  {"name": "cache.py", "file_path": "cache.py"}
+]
+```
+
+Check the write result. In the captured scratch run these anchors produced `bindings: 3`, `anchors_skipped: []` and `anchors_orphaned: []`. A nonempty skipped list means an ambiguous reference needs attention. A nonempty orphaned list means a target did not resolve. Correct its spelling or build the missing graph before trusting graph-based delivery. After a rename, rebuild and run `sidegraph-sync`, then review its report.
+
 ## Descriptors: name + file
 
-An anchor reference is a `Descriptor`: a `name` (symbol name or, for docs, a heading text or
-the file name itself) and an optional `file_path`. This is deliberately minimal — current
-Graphify releases (verified on 0.9.6 and 0.9.90) emit no signatures, qualified names, or
-enclosing-module info, so `name` + `file_path` is all identity has to work with.
-`canonicalize()` normalizes both sides of a match
-(lowercase, strip a leading `.`, drop call-decoration like `()`), so `.foo()` in a decision's
-anchor matches the graph node named `foo`.
+Name the symbol, heading or file and give its repository-relative file path. For example, use `{"name": "cache_key", "file_path": "cache.py"}` for a function. Pair it with a file anchor so a later symbol rename does not make the record unreachable.
 
-**`Type.member` names.** Graphify labels a method `.foo()` and links it to its type with a
-`method` edge (an enum case with `case_of`), so a name written `Type.foo` has no exact match.
-When none is found and the descriptor has a `file_path`, `resolve()` falls back to the member.
-It is for code identifiers only: the owner (its last segment, so `Outer.Inner.foo` reads as
-`Inner`) and the member must both be identifiers, and the candidate must be a `code` node, so
-prose with a dot in it, a numbered heading or `verify-release.sh` never reads as a member.
-The name is split at its last `.`, `::` or `#`, the node in that file whose label is the member
-is found (case kept), a candidate the graph ties to a different type is rejected, and, of
-several, those tied to the named type are kept. Anything that does not narrow to exactly one
-node is `unresolved`, the orphaned, healable leaf a bare miss has always been, never
-`ambiguous`. So is a name with a case-only twin in the file (a struct `Message` beside a
-method `.message()`): the store dedups an anchor by its lowercased name, so the two spellings
-are one entity, and binding either node would put the other's record on it. Without a file the
-member fallback never runs. A path-qualified name (`src/pkg/mod.py`) has its own rung after
-it: with the anchor's own `file_path` it resolves to that file's node, and it is stored under
-the basename. On newer Graphify, where a file with a shared basename is labelled by a path
-suffix (`pkg/mod.py`), that engine label also resolves without a file.
+See [implementation details](../reference/anchoring-internals.md#descriptors-name--file).
 
 ## Lazy `Entity` creation
 
-An `Entity` is created the first time a decision references it — via
-`store.find_entity(name, file_path)` (dedup lookup) falling back to a fresh `Entity` — never
-ahead of time. This keeps the store proportional to what's actually been decided about,
-not a mirror of the whole graph. Abstract entities (communities, initiatives) are
-get-or-created the same way, keyed by `canonical_name` (e.g. `community:19`,
-`initiative:feature-aaa`) and reused across decisions. A `community:*` abstract entity never
-gets a canonical file, though: Leiden renumbers communities on every rebuild, so community
-identity is index-only, derived state — a snapshot label, not a durable one (see [store
-format](../reference/store-format.md#community-bindings-are-derived-not-committed)).
-`initiative:*`/`domain:*`/`tag:*` abstract entities are unaffected and get a committed file
-the same way any other entity does.
+Sidegraph creates durable target identities only when records reference them. Rebuilding the graph does not create one store entity for every graph node.
+
+See [implementation details](../reference/anchoring-internals.md#lazy-entity-creation).
 
 ## Multi-anchor at capture
 
-`resolve_and_bind(record_id, ref, reader, store, relation=None)` resolves one
-`Descriptor` against the current graph and can create up to two bindings for it in one call:
+A record can point to a precise target, its broader area and an abstract work label. If one target changes, another anchor may still make the record retrievable.
 
-- **Tier-2 (leaf)** — the concrete entity itself, when the resolve either succeeded or failed
-  outright (not when ambiguous).
-- **Tier-1 (group)** — the entity's Leiden community, whenever one is known — see
-  [domain-aware Tier-1](#domain-aware-tier-1) below for what actually gets bound once a domain
-  has claimed that community.
-
-`relation` (optional; `creates` \| `modifies` \| `affects` \| `deprecates` \| `considered`,
-default `"affects"`) overrides the default on the Tier-2 and Tier-1 bindings created for *this*
-anchor. See [data model](data-model.md#anchorbinding--tiered-link).
-
-The **Tier-0 initiative** binding is not made per anchor. When the decision names an owning
-initiative (or the propose path derives one from the current branch of the project's
-repository: the directory that holds the store, or its symlink), the write path binds it once,
-`live`, whatever the reader and the anchors: the name is redacted first, and a blank or
-all-secret name binds nothing.
-
-A decision typically ends up multi-anchored: a leaf plus its community (or domain), optionally
-plus an initiative — so a single rebuild that only shifts the leaf still leaves the group anchor
-live.
+See [implementation details](../reference/anchoring-internals.md#multi-anchor-at-capture).
 
 ## Domain-aware Tier-1
 
-Once a [`Domain`](../concepts/mind-model.md) has been ratified and covers an anchor's current
-community, the Tier-1 binding goes to the domain's paired `domain:<slug>` entity **instead of**
-the bare `community:<id>` entity — `store.find_domain_by_community(result.community)` is
-checked first, and only falls through to the legacy `community:<id>` entity when no accepted
-domain claims that community. A domain-covered Tier-1 binding is always `status="live"`: once a
-domain has claimed the community, Tier-1 confidence comes from the domain's curation, not from
-whether this particular leaf resolved cleanly (an ambiguous-but-shared-community leaf still
-gets a `live` domain binding, where the legacy path would have marked it `degraded`).
+When an accepted domain covers the target, the group anchor uses that durable domain name. Otherwise it uses the current graph community. Domain names survive community renumbering.
 
-A store without any ratified domains behaves *exactly* as before this existed — the
-domain check is a no-op fallthrough until at least one domain is accepted and covers the
-community in question. New memory automatically lands on durable, named abstractions once
-domains are named; decisions anchored before that point keep their `community:<id>` binding
-(not migrated), and retrieval still finds them via the [community
-fallback](retrieval.md#bucket-c-domains-and-communities).
-
-The two Tier-1 outcomes differ in durability, not just naming: a domain-covered binding points
-at the domain's own `domain:<slug>` entity, which is a committed, human-named identity; the
-bare `community:<id>` fallback points at a `community:*` entity that is index-only/derived
-(snapshot labels, not identities — see [store
-format](../reference/store-format.md#community-bindings-are-derived-not-committed)) and is
-silently re-pointed, never written to git, whenever Leiden renumbers.
+See [implementation details](../reference/anchoring-internals.md#domain-aware-tier-1).
 
 ## Tier semantics
 
@@ -107,7 +54,7 @@ silently re-pointed, never written to git, whenever Leiden renumbers.
 
 ## Graceful degradation ladder: resolved -> ambiguous -> orphaned
 
-Sidegraph never guesses. `reader.resolve()` returns exactly one of three statuses, and each
+Sidegraph never guesses. Resolution returns one of three statuses, and each
 drives different bindings:
 
 | Resolve status | Tier-2 leaf | Tier-1 community |
@@ -156,49 +103,9 @@ same-name match in a file that arrived with the old one's removal, then orphaned
 
 ## What happens on rename or move
 
-The sync job (triggered lazily on read — see [retrieval](retrieval.md#lazy-sync-on-read))
-re-resolves every concrete entity through a deterministic ladder (`rebind_entity` in
-`sync.py`), gated on a graph-version check so the full pass is skipped when nothing changed (entities
-remembered under `pending_uncommitted_moves` are still re-verified once `HEAD` has moved):
+Rebuild the graph after a refactor and run `sidegraph-sync`. Exact matches stay live. A verified committed file move can be followed. A missing target is orphaned, and an ambiguous target is degraded. The record remains in the store. Review the report using the [refactor guide](../guides/surviving-refactors.md).
 
-1. **Exact** — `resolve(name, file_path)` still resolves uniquely -> **rebound** (or
-   **unchanged** if the node id didn't move); leaf bindings heal to `live`; the entity's
-   community baseline is re-pointed if Leiden renumbered it (index-only — see [Community
-   re-pointing](../guides/surviving-refactors.md#community-re-pointing)).
-2. **Ambiguous** — leaf bindings flip to `degraded`; the node mapping is left untouched
-   (never guess); community is re-pointed if a shared one is still resolvable.
-3. **Moved** — exact fails but a name-only retry resolves uniquely, *and* the hit is the
-   same name (decoration such as `()` or a leading `.` stripped from both sides, **case
-   kept**), *and* the new file has the same suffix as the old `descriptor.file_path` (e.g.
-   `.py` -> `.py`, `.md` -> `.md`), *and* the old `file_path` is confirmed gone from the
-   checkout, *and* git's history shows the new file arriving in the same change that
-   removed the old one -> `descriptor.file_path` is updated to follow the file, leaf
-   bindings heal to `live`.
-   **Suffix guard:** a unique name-only hit whose file suffix *differs* from the old one
-   (e.g. a vanished code symbol whose name happens to collide with a doc heading) is a
-   **collision, not a move** — it is never adopted, and falls through to orphaned instead.
-   Cross-type unique hits are not trusted. **Disk guard:** so is a hit whose old file is
-   still there — a symbol renamed *inside* a surviving file is not a move, however unique
-   the name-only hit elsewhere looks, and "can't verify" counts as "still there" (see [why
-   `moved` checks the disk](../guides/surviving-refactors.md#why-moved-checks-the-disk)).
-   **Name guard:** the name-only lookup ignores case, so a deleted type `Priority` can find
-   an old member `.priority` in an unrelated file. That is a different symbol, not a move,
-   and is never adopted. **Arrival guard:** a new path that already existed before the old
-   one was removed is a collision, not a move. So is an old path git cannot account for
-   (never committed, or beyond the history a shallow clone holds): any git answer that is
-   not a clear yes refuses. A refused move falls through to orphaned, which
-   `sidegraph:heal-anchors` repairs.
-   This rung resolves by name only, so a `Type.member` anchor cannot follow its file being
-   moved; the bare member name can.
-4. **Orphaned** — nothing resolves; leaf bindings flip to `orphaned`. Sync still tries to
-   derive the entity's current community from its surviving file's nodes (useful when a
-   symbol renamed but its file didn't move); that derivation only happens when the file's
-   nodes agree on a single community — otherwise it abstains rather than guess.
-
-All of these are status transitions on existing `AnchorBinding` rows or updates to `Entity`
-mapping fields — nothing is ever deleted. A decision whose leaf anchors are *all* orphaned is
-flagged "possibly stale" in the sync report, but stays retrievable through any surviving
-Tier-1/Tier-0 binding.
+See [implementation details](../reference/anchoring-internals.md#what-happens-on-rename-or-move).
 
 ## See also
 

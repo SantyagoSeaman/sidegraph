@@ -25,12 +25,11 @@ if TYPE_CHECKING:
         Domain,
         DomainStatus,
         Entity,
-        Initiative,
         Provenance,
     )
     from .store import Store
 
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 # name -> the submodule that defines it
 _LAZY = {
@@ -42,7 +41,6 @@ _LAZY = {
     "Domain": "schema",
     "DomainStatus": "schema",
     "Entity": "schema",
-    "Initiative": "schema",
     "Provenance": "schema",
     "Store": "store",
 }
@@ -56,7 +54,6 @@ __all__ = [
     "Domain",
     "DomainStatus",
     "Entity",
-    "Initiative",
     "Provenance",
     "Store",
     "__version__",

@@ -135,7 +135,22 @@ def test_t10_the_manifest_points_grok_at_its_hooks_file() -> None:
     assert manifest["hooks"] == "./grok/hooks.json"
     assert (_PLUGIN / manifest["hooks"]).is_file()
     claude = _load(_PLUGIN / ".claude-plugin" / "plugin.json")
-    assert {k: v for k, v in manifest.items() if k != "hooks"} == claude
+    # Anthropic's directory reads these listing fields from the Claude manifest only; Claude
+    # Code ignores them at load time, so the Grok manifest does not carry them.
+    listing_only = {
+        "icon",
+        "documentationUrl",
+        "supportUrl",
+        "privacyPolicyUrl",
+        "termsOfServiceUrl",
+    }
+    assert not listing_only & manifest.keys()
+    # The directory listing reads them from the Claude manifest; the icon must exist.
+    assert {"icon", "documentationUrl", "supportUrl", "privacyPolicyUrl"} <= claude.keys()
+    assert (_PLUGIN / claude["icon"]).is_file()
+    assert {k: v for k, v in manifest.items() if k != "hooks"} == {
+        k: v for k, v in claude.items() if k not in listing_only
+    }
 
 
 # --- T3, T4: the Bash handler, run in a real shell ---------------------------------------------

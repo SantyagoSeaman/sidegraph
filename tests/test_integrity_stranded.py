@@ -156,7 +156,9 @@ def empty_branch(top: Path, name: str, age: timedelta) -> None:
 
 
 def test_the_two_checks_follow_refresh_hook_missing_and_have_their_surfaces():
-    assert [c.id for c in CHECKS][-5:-2] == ["refresh-hook-missing", UNCOMMITTED, BRANCH_ONLY]
+    ids = [c.id for c in CHECKS]
+    at = ids.index("refresh-hook-missing")
+    assert ids[at : at + 3] == ["refresh-hook-missing", UNCOMMITTED, BRANCH_ONLY]
     assert check_for(UNCOMMITTED).surfaces == frozenset({"session", "doctor", "stats"})
     assert check_for(BRANCH_ONLY).surfaces == frozenset({"session"})
 

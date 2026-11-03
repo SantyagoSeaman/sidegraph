@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NamedTuple
 
+from .store_layout import interrupted_migration_sentinel
+
 #: The canonical, directory-based store convention (design §1) — the primary default.
 DEFAULT_STORE_DIR = ".sidegraph"
 
@@ -42,8 +44,8 @@ _deprecation_warned = False
 def _dispatch_sidegraph_db(value: str, anchor) -> str:
     """Apply the ``SIDEGRAPH_DB`` legacy-dispatch rule (pinned from review):
 
-    - an existing legacy ``*.db`` FILE -> pass through unchanged; ``Store`` migrates it
-      on open (see ``Store._migrate_legacy``).
+    - an existing legacy ``*.db`` FILE -> pass through unchanged; ``Store`` refuses
+      it on open (see ``Store._refuse_legacy_store``).
     - an existing DIRECTORY (canonical layout or not — ``Store`` already knows how to
       open or populate either shape) -> use it directly, never its parent.
     - a NONEXISTENT path whose leaf ends in ``.db`` (case-insensitive) and sits inside a
@@ -78,6 +80,10 @@ def _dispatch_sidegraph_db(value: str, anchor) -> str:
     if path_is_file(path) or path_is_dir(path):
         return anchored
     if path_is_symlink(path):
+        return anchored
+    if _interrupted(anchored):
+        # An interrupted 0.23.x migration: keep the path so Store's guard refuses it, instead
+        # of falling back to a different store whose sentinel is not there.
         return anchored
     if Path(value).parent == Path("."):
         return anchor(DEFAULT_STORE_DIR)
@@ -174,6 +180,12 @@ class StoreLocation(NamedTuple):
     base: str | None
 
 
+def _interrupted(path: str) -> bool:
+    """A 0.23.x migration of the store at ``path`` was interrupted (its sentinel exists): the
+    destination is selected, so opening it refuses rather than a lookup moving elsewhere."""
+    return interrupted_migration_sentinel(path) is not None
+
+
 def _present_by_lstat(path: str) -> bool:
     """``os.lstat`` finds ``path``: a symlink counts, even a dangling one (the rule
     ``_dispatch_sidegraph_db`` follows). Only "no such entry" reads as absent, so a path under
@@ -243,7 +255,8 @@ def ancestor_store(base: str, value: str) -> StoreLocation | None:
         try:
             os.lstat(candidate)
         except OSError:
-            continue
+            if not _interrupted(candidate):
+                continue
         return StoreLocation(candidate, current)
     return None
 
@@ -301,7 +314,11 @@ def resolve_store_location(
     def _located(value: str) -> StoreLocation:
         anchored = _anchor(value)
         base = _base(value)
-        if search_ancestors and base is not None and not _present_by_lstat(anchored):
+        if (
+            search_ancestors
+            and base is not None
+            and not (_present_by_lstat(anchored) or _interrupted(anchored))
+        ):
             found = ancestor_store(base, value)
             if found is not None:
                 return found
@@ -422,9 +439,9 @@ def graph_path_for_store(graph_path: str | Path, store_path: str | Path) -> Path
 
     The project root is the store path's PARENT. Only a legacy single-FILE store living
     inside a store directory needs one more level up: an existing file, a path ending in
-    ``.db`` that is not created yet, or an existing directory ending in ``.db`` (what such a
-    file becomes when the first open migrates it, so the hop must survive that). An absent
-    path without that suffix (a new store directory such as ``.sidegraph/nested``) is a
+    ``.db`` that is not created yet, or an existing directory ending in ``.db`` (what a
+    store migrated by Sidegraph 0.23.x or earlier looks like, so the hop keeps serving it).
+    An absent path without that suffix (a new store directory such as ``.sidegraph/nested``) is a
     directory-to-be, not a legacy file.
 
     A name check on ".sidegraph" was tried and rejected (review R2-4): ``--db mystore`` is a
@@ -449,7 +466,7 @@ def _store_project_root(store_path: str | Path) -> Path:
     legacy_file = (
         path_is_file(store)
         or (not path_exists(store) and store.suffix.lower() == ".db")
-        # a migrated legacy store is a DIRECTORY that keeps its `.db` name
+        # a store migrated by <= 0.23.x is a DIRECTORY that keeps its `.db` name
         or (path_is_dir(store) and store.suffix.lower() == ".db")
     )
     if legacy_file and (root.name == ".sidegraph" or path_is_file(root / "format")):

@@ -65,6 +65,7 @@ from .store import (
     skipped_segment_text,
 )
 from .store_format import (
+    FORMAT2_MIN_SIDEGRAPH,
     FORMAT_MARKER_NAME,
     Inventory,
     inventory_from_disk,
@@ -74,9 +75,14 @@ from .store_format import (
 from .store_layout import (
     GITATTRIBUTES_NAME,
     PACKED_CHECKS_NAME,
+    RECORD_FIELDS_REQUIREMENT,
     SHARDS_SUBDIR,
     VERIFICATIONS_SUBDIR,
+    InterruptedMigrationError,
+    LegacyStoreError,
     StoreRequirementError,
+    release_tuple,
+    requirement_met,
     store_marker,
     store_requirement,
 )
@@ -258,6 +264,10 @@ def _first_line(error: BaseException) -> str:
 def _open_error_fix(error: BaseException, store_dir: Path) -> str:
     """The sentence that tells the human what to do about a store that would not open. The first
     match wins, and the order matters: ``json.JSONDecodeError`` is a ``ValueError``."""
+    if isinstance(error, InterruptedMigrationError):
+        return "Finish the interrupted migration with Sidegraph 0.23.x, then upgrade."
+    if isinstance(error, LegacyStoreError):
+        return "Open the store once with Sidegraph 0.23.x to migrate it, then upgrade."
     if isinstance(error, StoreRequirementError) and error.required is not None:
         return f"Upgrade Sidegraph to >= {error.required}, then start a new session."
     if isinstance(error, StoreRequirementError) and error.kind == "missing":
@@ -1478,6 +1488,32 @@ def _detect_branch_only_records(inputs: Inputs) -> Problem | None:
 #: passes ``CHECKS[:5] + host_checks(location) + CHECKS[5:]``.
 STORE_UNREADABLE = Check("store-unreadable", frozenset({"session"}), _detect_store_unreadable)
 
+# -- deprecated-auto-accept ----------------------------------------------------------------
+
+
+def _detect_deprecated_auto_accept(inputs: Inputs) -> Problem | None:
+    """``SIDEGRAPH_AUTO_ACCEPT=on`` is set: the deprecated switch that lands agent captures
+    accepted with no ratifier stamp and no live-anchor requirement. Only the exact value ``on``
+    is the switch, so only it is reported. The replacement is ``SIDEGRAPH_RATIFY_POLICY=auto-all``.
+    """
+    if os.environ.get("SIDEGRAPH_AUTO_ACCEPT") != "on":
+        return None
+    text = (
+        "Sidegraph: SIDEGRAPH_AUTO_ACCEPT is deprecated. Set SIDEGRAPH_RATIFY_POLICY=auto-all "
+        "instead (it stamps who ratified, but requires a live anchor on each record), or unset "
+        "SIDEGRAPH_AUTO_ACCEPT to review captures by hand. It still works until it is removed."
+    )
+    return Problem(
+        check="deprecated-auto-accept",
+        severity="advisory",
+        summary="SIDEGRAPH_AUTO_ACCEPT is deprecated",
+        fix="SIDEGRAPH_RATIFY_POLICY=auto-all",
+        line=text,
+        notice=text,
+        findings=(("SIDEGRAPH_AUTO_ACCEPT", text),),
+    )
+
+
 # -- store-not-migrated and maintenance-due ------------------------------------------------
 
 # More per-record files than this makes the soft notice due: the number is the author's choice,
@@ -1532,6 +1568,21 @@ def _holds_any_record(store_dir: Path) -> bool:
         return False
 
 
+def _holds_packed_record(store_dir: Path) -> bool:
+    """Whether a canonical shard holds a line: a store packed by maintenance has no per-record
+    file left. An empty ``*.shard`` file holds nothing."""
+    try:
+        with os.scandir(store_dir / SHARDS_SUBDIR) as entries:
+            return any(
+                e.name.endswith(".shard")
+                and e.is_file(follow_symlinks=False)
+                and e.stat(follow_symlinks=False).st_size > 0
+                for e in entries
+            )
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def _marker_or_not_run(store_dir: Path) -> Any:
     """The parsed format marker (``None`` when there is none); a marker that does not parse is
     ``store-unreadable``'s to report, so these checks are not run."""
@@ -1564,6 +1615,47 @@ def _detect_store_not_migrated(inputs: Inputs) -> Problem | None:
         severity="degraded",
         summary="store not migrated to the packed layout",
         fix="sidegraph-migrate",
+        line=text,
+        notice=text,
+        findings=((str(inputs.store_dir), text),),
+    )
+
+
+def _detect_record_fields_requirement(inputs: Inputs) -> Problem | None:
+    """A store whose ``requires-sidegraph`` is below :data:`RECORD_FIELDS_REQUIREMENT`: a client
+    older than the release that added a record field would rewrite a record and drop the field.
+    Silent until a release has raised the constant above the requirement every store already
+    carries (``FORMAT2_MIN_SIDEGRAPH``), so no existing store is told anything for no reason.
+    Silent too while the running Sidegraph is older than the constant (a development build of
+    the release that raises it): ``sidegraph-require`` refuses a requirement above the running
+    release, so the advice could not be followed.
+    The fix is the owner's explicit, committed ``sidegraph-require`` (nothing raises it for them).
+    see docs/reference/stability.md ("Mixed versions")"""
+    need = release_tuple(RECORD_FIELDS_REQUIREMENT)
+    floor = release_tuple(FORMAT2_MIN_SIDEGRAPH)
+    if need is None or floor is None or need <= floor:
+        return None
+    if not requirement_met(RECORD_FIELDS_REQUIREMENT):
+        return None
+    marker = _marker_or_not_run(inputs.store_dir)
+    if marker is None or not (
+        _holds_any_record(inputs.store_dir) or _holds_packed_record(inputs.store_dir)
+    ):
+        return None
+    have = release_tuple(marker.requirement) if marker.requirement else None
+    if have is not None and have >= need:
+        return None
+    fix = f"sidegraph-require --sidegraph {RECORD_FIELDS_REQUIREMENT}"
+    text = (
+        f"Sidegraph: the store does not require Sidegraph {RECORD_FIELDS_REQUIREMENT} or later, "
+        "which added a record field; an older client would drop it when it rewrites a record. "
+        f"Run `{fix}` and commit `.sidegraph/format`."
+    )
+    return Problem(
+        check="record-fields-requirement",
+        severity="advisory",
+        summary="store requirement is below the release that added a record field",
+        fix=fix,
         line=text,
         notice=text,
         findings=((str(inputs.store_dir), text),),
@@ -1654,6 +1746,16 @@ CHECKS: tuple[Check, ...] = (
         "store-uncommitted", frozenset({"session", "doctor", "stats"}), _detect_store_uncommitted
     ),
     Check("branch-only-records", frozenset({"session"}), _detect_branch_only_records),
+    Check(
+        "deprecated-auto-accept",
+        frozenset({"session", "doctor"}),
+        _detect_deprecated_auto_accept,
+    ),
+    Check(
+        "record-fields-requirement",
+        frozenset({"doctor"}),
+        _detect_record_fields_requirement,
+    ),
     Check("store-not-migrated", frozenset({"session", "doctor"}), _detect_store_not_migrated),
     Check("maintenance-due", frozenset({"session", "doctor"}), _detect_maintenance_due),
 )

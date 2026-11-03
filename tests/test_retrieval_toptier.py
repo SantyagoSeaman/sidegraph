@@ -7,7 +7,6 @@ from sidegraph.schema import (
     Decision,
     DecisionKind,
     DecisionStatus,
-    Initiative,
     Provenance,
     Scope,
 )
@@ -19,7 +18,6 @@ FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
 def test_top_tier_map_lists_communities_and_global_mistakes(tmp_path):
     r = GraphifyReader(FIXTURE)
     s = Store(tmp_path / "t.db")
-    s.upsert_initiative(Initiative(name="Trading Core"))
     g = Decision(
         title="never block the event loop",
         kind=DecisionKind.CONSTRAINT,
@@ -37,7 +35,7 @@ def test_top_tier_map_lists_communities_and_global_mistakes(tmp_path):
     # prepended once regardless of which renderer produced the rest of the text -- this
     # renderer itself only needs to still emit its own header.
     assert "# Sidegraph — project memory" in text
-    assert "Trading Core" in text  # initiative
+    assert "## Initiatives" not in text
     assert "## Global mistakes & constraints" in text
     assert "never block the event loop" in text  # global mistake
     assert "Communities" in text  # community section

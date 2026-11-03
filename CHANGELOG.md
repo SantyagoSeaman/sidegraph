@@ -7,6 +7,213 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-11-03
+
+### Changed (Contract change)
+
+- **Action required before anyone writes with 0.24.0:** every client must upgrade, and each
+  team runs `sidegraph-require --sidegraph 0.24.0` and commits `.sidegraph/format` before
+  anyone on the new version writes. In particular, do this before the first `retire_decision`.
+  This release adds a field to stored decisions (`retired`, below). An older client rewrites a
+  record through its own model and drops a field it does not know, and nothing raises a store's
+  requirement for you. Upgrade every teammate, CI pin and plugin install first, and do not lower
+  the marker by hand. Until the store requires 0.24.0:
+  - `retire_decision` refuses, naming the command to run.
+  - `sidegraph-doctor` reports the new `record-fields-requirement` finding, and
+    **`sidegraph-doctor --check` exits `2` on it**.
+
+  A store that 0.24.0 creates already requires 0.24.0, and so does the marker
+  `sidegraph-migrate` writes, so older clients refuse those stores. See
+  [Mixed versions](docs/reference/stability.md#mixed-versions).
+- **CLI exit codes.**
+  - **Exit `1`, not `2`, for refusals and operational errors:** `sidegraph-compact`,
+    `sidegraph-migrate`, `sidegraph-stats`, `sidegraph-viz` and `sidegraph-export-okf` now exit
+    `1` on a refusal or an operational error. So does a stopped `compact` or `migrate` run, and
+    so does `sidegraph-export-adr` on an I/O or value error.
+  - **`2` now means findings:** `sidegraph-verify` violations, `sidegraph-doctor` findings and
+    `sidegraph-sync --check`, plus argparse usage errors. `sidegraph-export-adr` still exits `2`
+    when its plan holds conflicts.
+  - **Out-of-range values:** an out-of-range `sidegraph-stats --window` or
+    `sidegraph-doctor --stale-days` exits `1` before the store is touched. A value that is not a
+    number at all is still a usage error with exit `2`.
+
+  See [Exit codes and streams](docs/reference/cli.md#exit-codes-and-streams).
+- **Error messages go to stderr.**
+  - **Which commands:** store, graph and flag errors from `sidegraph-init`, `sidegraph-ratify`,
+    `sidegraph-sync`, `sidegraph-import`, `sidegraph-domains`, `sidegraph-compact`,
+    `sidegraph-migrate`, `sidegraph-verify` and `sidegraph-doctor` now print on stderr instead
+    of stdout. So do `sidegraph-export-adr`'s message under `--json` and failures of
+    `sidegraph-init --hooks` / `--remove-hooks`.
+  - **Reports stay on stdout:** findings, a stopped run's report and the ids `ratify`
+    processed. A stopped `compact` or `migrate` run also prints its stop reason on stderr.
+- **`--json` always prints one JSON object.** On an operational error (exit `1`),
+  `sidegraph-sync`, `sidegraph-stats`, `sidegraph-viz` and `sidegraph-blame` print
+  `{"error": <message>}` instead of leaving stdout empty.
+  - **`verify` and `doctor`:** `sidegraph-verify` and `sidegraph-doctor` print their usual shape
+    with `clean: false` and an `error` key.
+  - **Tracebacks:** paths that used to end in a traceback now print the error object: an
+    unreadable index row in `viz`, a bad `blame` range, an oversized `--stale-days`, or a
+    symlink loop in a record directory.
+- **Supersession follows one rule: a predecessor closes when its successor is accepted.**
+  - **Proposals no longer close their predecessor:** a superseding proposal leaves its accepted
+    predecessor live under every ratify policy, `manual` included. Ratifying the proposal closes
+    the predecessor, and dropping it leaves the predecessor untouched. Before, dropping such a
+    proposal left the old decision `superseded` with no live successor.
+  - **Only the live head can be superseded:** this covers decisions, facts and domains.
+    Superseding a proposal or a closed record is refused, and the message names the live
+    successor when there is one.
+  - **One pending successor at a time:** a record takes one pending successor at a time. A
+    dropped domain can still be superseded, for mass-drop recovery.
+  - **Domains:** `supersede_domain` now leaves an accepted domain live until its successor is
+    ratified.
+  - **Cross-branch conflicts:** `ratify` refuses a successor whose predecessor already has
+    another live head.
+
+  See [the supersession invariant](docs/concepts/data-model.md#the-supersession-invariant).
+- **`ratify` answers a record that is already settled from its current status.**
+  - **A repeated verdict is a no-op:** it returns `already accepted`, `already rejected` or
+    (for a domain) `already dropped` instead of an error. The opposite verdict returns a
+    specific refusal. For an accepted decision, that refusal names supersession or
+    `retire_decision`.
+  - **CLI:** `sidegraph-ratify` prints `already accepted <id>` and the like without failing the
+    exit code.
+  - **Concurrent writers:** a record that another writer settled between the read and the write
+    is re-read and answered the same way.
+- `retrieve_decisions` leaves out `deprecated` (retired) decisions by default, as it already did
+  for `superseded` and `rejected`. Pass `status="deprecated"` or `include_superseded=True` to see
+  them.
+- Without a graph, `add_decision` and `supersede_decision` no longer drop the requested
+  anchors. Each one binds as an orphaned leaf, reported in `anchors_orphaned` with reason
+  `no-graph`, and the next ordinary sync heals it once a graph holds the name. `add_fact` and
+  `supersede_fact` now also report `reason: "no-graph"` on those entries.
+- `sidegraph-import --docs` on a document whose stored record is still a proposal:
+  - **An edited document:** the stale proposal is dropped and a fresh record is written with no
+    `supersedes` link.
+  - **A document flipped to `rejected`:** it is skipped and reported, and the proposal is left
+    for you to ratify or drop.
+  - **Another pending proposal on the same record:** when another pending proposal already
+    supersedes the accepted record, the document is skipped with that proposal's id
+    (`skipped-pending-proposal`).
+
+### Added
+
+- **Contract change:** a new MCP tool, `retire_decision(id, reason, duplicate_of=None)`. It
+  closes an accepted decision that has nothing to be replaced with: a duplicate, or a decision
+  whose subject is gone.
+  - **The record:** moves to `deprecated`, gets `valid_to`, and gains a `retired` object with
+    `reason` and `duplicate_of`.
+  - **Duplicates:** the kept record gains the duplicate's live and degraded anchors, so the
+    rule still surfaces for those files.
+  - **Visibility:** retrieval, `get_task_context`, `query_decisions`, `drill_down`, the hooks
+    and sync's possibly-stale report stop serving the record. `get_entity_history` and
+    `retrieve_decisions(status="deprecated")` still show it with its reason.
+  - **Exports:** `sidegraph-export-adr` and `sidegraph-export-okf` show the retirement.
+  - **Refusals:** the tool refuses below the store requirement above, and while a proposed
+    successor or a proposed supporting fact is pending.
+
+  See [`retire_decision`](docs/reference/mcp-tools.md#retire_decision).
+- `list_facts` takes a `supports` filter: decision ids, returning the facts attached to any of
+  them. An unknown id matches nothing.
+- The ratification queue (`list_proposed`, `sidegraph-ratify`) shows a `supersedes:` line, with
+  the id and title of the record that ratifying the proposal will close.
+- `sidegraph-doctor` reports `superseded-no-live-successor`: a superseded decision or fact whose
+  successors were all rejected, left by the old drop behaviour. The heal is a fresh record, and
+  the finding stays as history, so `--check` never fails on it.
+- `sidegraph-doctor` reports `record-fields-requirement` when the store requires less than the
+  release that last added a record field. See the action required above.
+
+### Deprecated
+
+- `SIDEGRAPH_AUTO_ACCEPT` keeps its exact behaviour and will be removed in a later release,
+  announced here. Use `SIDEGRAPH_RATIFY_POLICY=auto-all` instead, which stamps `ratified_by` and
+  still requires a live anchor. While `SIDEGRAPH_AUTO_ACCEPT=on`:
+  - SessionStart prints a notice.
+  - `sidegraph-doctor` reports `deprecated-auto-accept`; `--check` never fails on it.
+  - each `written` `propose_decisions` result carries a `deprecation` key.
+
+### Removed
+
+- **Contract change:** the `ratify_decisions` MCP tool, an exact alias of `ratify` deprecated
+  since 0.1.0. Call `ratify`.
+- Pre-0.1.0 single-file SQLite stores (`decisions.db`, stamped `0.2.0` / `0.3.0`) are no longer
+  migrated on open.
+  - **Refusal:** every command and SessionStart refuses them, naming the remedy: open the store
+    once with 0.23.x to migrate it, then upgrade. `sidegraph-init` exits `1` with
+    `store not writable`.
+  - **Interrupted migrations:** a store whose 0.23.x migration was interrupted is refused
+    instead of opening as an empty store.
+- The `Initiative` record type and `sidegraph.Initiative` are removed (nothing wrote one).
+  - **New stores:** they no longer get an `initiatives/` directory.
+  - **Existing stores:** a store that still holds `initiatives/*.json` opens, verifies, syncs,
+    compacts and migrates as before, and those files are left untouched.
+  - **Unchanged:** `initiative:<label>` anchors are unchanged.
+
+### Fixed
+
+- The SessionStart and PreToolUse output now stays within host limits.
+  - **The limits:** each context string is capped at 9,500 characters (Claude Code replaces
+    anything over 10,000 with a file path and a preview). The whole printed SessionStart line is
+    held to 14 KiB (Muse discards hook output over 16 KiB).
+  - **SessionStart over the limit:** whole map entries are dropped in a fixed order, and one
+    closing line counts them and names the tool that lists each kind.
+  - **PreToolUse over the limit:** a file whose block would not fit is left out for a later
+    read, and a closing line points to `get_task_context`.
+
+  See [Output size budget](docs/reference/hooks.md#output-size-budget).
+- `sidegraph-bootstrap` imports ADRs saved with a UTF-8 byte-order mark. They used to parse
+  silently to zero records.
+- An unreadable document no longer aborts a `sidegraph-import --docs` run. A dangling `*.md`
+  link, a permission error or a path that cannot be probed is counted as `skipped_unreadable`
+  and listed under `N file(s) skipped: could not be read:`. A FIFO named `*.md` is skipped the
+  same way instead of hanging the run.
+- On a format-2 store, `sidegraph-verify` and `sidegraph-doctor` no longer crash with
+  `PermissionError` on a record file that cannot be stat'ed, and no longer report such a store
+  as clean. The entry is reported as `parse-error` or `bad-archive-segment`.
+- A write queued behind `sidegraph-require` or `sidegraph-migrate` now rechecks the format
+  marker once it holds the store lock, so it can no longer land one write that the new marker
+  refuses.
+- Record writes are flushed to disk with their directory, and so are new store directories and
+  the format marker. A record reported as written now survives a power loss.
+- Large `sidegraph-migrate` and `sidegraph-compact` runs, dry runs included, no longer slow down
+  quadratically with the number of files.
+- The setup skill offers domain naming once, after verifying the wiring and before the optional
+  configuration questions, when graph communities exist and no live domains do.
+
+### Changed
+
+- The PyPI description and the plugin manifests now describe Sidegraph as "The project's
+  decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to
+  your code."
+- The plugin folder has a README for Anthropic's plugin directory: what Sidegraph runs, stores,
+  sends and fetches, where it works and how to remove it. A new privacy page covers the same
+  ground, and the Claude manifest names an icon, documentation, support and privacy links.
+- The release runbook includes an owner-requested desktop smoke check after the public snapshot
+  push and before tagging, with per-surface evidence and fix-forward recovery.
+- Desktop integration steps cover Claude Desktop's local Code tab and the Codex view of the
+  ChatGPT desktop app, with per-surface capabilities and macOS live-run boundaries.
+- Troubleshooting maps symptoms and every doctor finding to a cause and next action. The
+  installation guide separates operating-system CI coverage from host-session and desktop GUI
+  checks. Linked capture, ratification, drift and anchor skills use status-sensitive proposal
+  and successor recovery.
+- Documentation adds a shared glossary, start-here guidance, captured output examples and a
+  host feature matrix. Detailed hook, retrieval, sync and health contracts move to reference
+  pages while existing links remain usable.
+- The CLI reference documents a status-only re-import: when only a document's status changes,
+  `sidegraph-import --docs` leaves the stored record's status alone, except for a change to or
+  from `rejected`.
+- The README introduces the project decision graph, quotes the two Laws of Software Architecture
+  and shows captured PreToolUse output under How it works.
+
+### Security
+
+- **The lockfile moves `joserfc` from 1.7.2 to 1.8.0.** It comes in through Authlib and FastMCP,
+  and Sidegraph does not import it. The update fixes
+  [GHSA-jpxq-7h8p-2q76](https://github.com/advisories/GHSA-jpxq-7h8p-2q76) (high: an unbounded
+  JWE `recipients` array exhausts the CPU) and
+  [GHSA-9pg5-8c7x-5hfx](https://github.com/advisories/GHSA-9pg5-8c7x-5hfx) (medium: the compact
+  JWS size guard allocates attacker-sized segments before it rejects them). The runtime
+  dependency floors are unchanged.
+
 ## [0.23.0] — 2026-10-31
 
 ### Security
@@ -2685,7 +2892,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.21.0...v0.21.1

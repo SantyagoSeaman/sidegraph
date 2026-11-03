@@ -2,7 +2,7 @@ import subprocess
 
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import Seed, get_task_context
-from sidegraph.server import _propose_decisions_impl, _ratify_decisions_impl
+from sidegraph.server import _propose_decisions_impl, _ratify_impl
 from sidegraph.store import Store
 from sidegraph.sync import sync
 
@@ -145,7 +145,7 @@ def test_rebuild_heals_moved_and_flags_renamed(tmp_path):
         session_id="s-sync",
     )
     assert [r["status"] for r in results] == ["written", "written"]
-    _ratify_decisions_impl(store, accept=[r["decision_id"] for r in results])
+    _ratify_impl(store, accept=[r["decision_id"] for r in results])
 
     # Rebuild: node ids shift, mover_fn moves c.py -> d.py, old_fn is renamed away.
     reader_b = GraphifyReader(_write_graph(tmp_path, "b.json", GRAPH_B))

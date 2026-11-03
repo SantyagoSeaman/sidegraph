@@ -29,6 +29,18 @@ from tests.drift_checks_support import git, project  # noqa: F401
 SRC = Path(__file__).resolve().parents[1] / "src"
 
 
+@pytest.fixture(autouse=True)
+def _no_record_fields_advisory(monkeypatch):
+    """These tests pin doctor's exact output on a format-1 fixture store. That store requires
+    no record-fields release, so from the release that raises the constant it also gets the
+    ``record-fields-requirement`` advisory, a finding about the marker, not about drift.
+    see tests/test_record_fields_notice.py for that finding's own tests"""
+    from sidegraph import integrity
+    from sidegraph.store_format import FORMAT2_MIN_SIDEGRAPH
+
+    monkeypatch.setattr(integrity, "RECORD_FIELDS_REQUIREMENT", FORMAT2_MIN_SIDEGRAPH)
+
+
 def _count_git_calls(monkeypatch, call) -> int:
     """Run ``call`` with the global ``subprocess.run`` spied; count calls whose argv[0] is git."""
     real = subprocess.run

@@ -55,6 +55,7 @@ def _decision(store: Store, kind: DecisionKind, **overrides) -> Decision:
     base = dict(
         title="t",
         kind=kind,
+        status=DecisionStatus.ACCEPTED,
         context="c",
         choice="ch",
         valid_from=datetime.now(UTC),

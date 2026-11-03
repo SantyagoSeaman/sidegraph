@@ -1,6 +1,8 @@
 import json
 import sqlite3
 
+import pytest
+
 from sidegraph.cli import ratify_main
 from sidegraph.retrieval import TOC_CACHE_KEY
 from sidegraph.schema import DecisionStatus, Descriptor, Domain, DomainStatus, Provenance
@@ -43,14 +45,14 @@ def test_cli_drop_rejects(tmp_path, capsys):
 def test_cli_error_on_unknown_id(tmp_path, capsys):
     db, _, _ = _seed(tmp_path)
     assert ratify_main(["--db", str(db), "--accept", "nope"]) == 1
-    assert "error nope" in capsys.readouterr().out
+    assert "error nope" in capsys.readouterr().err
 
 
 def test_cli_partial_failure_still_processes_the_rest(tmp_path, capsys):
     db, store, did = _seed(tmp_path)
     assert ratify_main(["--db", str(db), "--accept", did, "nope"]) == 1
-    out = capsys.readouterr().out
-    assert f"accepted {did}" in out and "error nope" in out
+    captured = capsys.readouterr()
+    assert f"accepted {did}" in captured.out and "error nope" in captured.err
     assert store.get_decision(did).status == DecisionStatus.ACCEPTED
 
 
@@ -64,7 +66,7 @@ def test_cli_store_open_failure_exits_nonzero(tmp_path, capsys):
     conn.commit()
     conn.close()
     assert ratify_main(["--db", str(db)]) == 1
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 # -- domains: listing sections + accept/drop through the routing impl (mind-model layer M2)
@@ -521,3 +523,111 @@ def test_ratify_reader_resolves_the_project_root_across_store_layouts(tmp_path):
         graph_dir.mkdir(parents=True, exist_ok=True)
         (graph_dir / "graph.json").write_text('{"nodes": [], "edges": []}')
         assert cli_mod._ratify_reader("graphify-out/graph.json", db_path) is not None, db_path
+
+
+def test_cli_repeat_verdict_is_a_no_op_not_a_failure(tmp_path, capsys):
+    db, _store, did = _seed(tmp_path)
+    assert ratify_main(["--db", str(db), "--accept", did]) == 0
+    capsys.readouterr()
+    assert ratify_main(["--db", str(db), "--accept", did]) == 0
+    assert f"already accepted {did}" in capsys.readouterr().out
+
+
+def test_cli_repeat_drop_says_already_rejected(tmp_path, capsys):
+    db, _store, did = _seed(tmp_path)
+    assert ratify_main(["--db", str(db), "--drop", did]) == 0
+    capsys.readouterr()
+    assert ratify_main(["--db", str(db), "--drop", did]) == 0
+    assert f"already rejected {did}" in capsys.readouterr().out
+
+
+def test_cli_opposite_verdict_is_a_specific_error(tmp_path, capsys):
+    db, _store, did = _seed(tmp_path)
+    ratify_main(["--db", str(db), "--drop", did])
+    capsys.readouterr()
+    assert ratify_main(["--db", str(db), "--accept", did]) == 1
+    assert f"error {did}: already rejected; it cannot be accepted" in capsys.readouterr().err
+
+
+def test_cli_repeat_domain_accept_is_a_no_op(tmp_path, capsys):
+    db, _store, domain_id = _seed_domain(tmp_path)
+    assert ratify_main(["--db", str(db), "--accept", domain_id]) == 0
+    capsys.readouterr()
+    assert ratify_main(["--db", str(db), "--accept", domain_id]) == 0
+    assert f"already accepted {domain_id}" in capsys.readouterr().out
+
+
+_RACE_METHODS = {
+    ("decision", "accept"): "ratify",
+    ("decision", "drop"): "drop",
+    ("fact", "accept"): "ratify_fact",
+    ("fact", "drop"): "drop_fact",
+    ("domain", "accept"): "ratify_domains",
+    ("domain", "drop"): "ratify_domains",
+}
+
+
+def _seed_kind(tmp_path, kind):
+    if kind == "domain":
+        db, store, id_ = _seed_domain(tmp_path)
+        return db, id_
+    if kind == "decision":
+        db, store, id_ = _seed(tmp_path)
+        return db, id_
+    from datetime import UTC, datetime
+
+    from sidegraph.schema import Fact
+
+    db, store, _did = _seed(tmp_path)
+    fact = store.add_fact(
+        Fact(
+            statement="a fact",
+            source="benchmark run",
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="agent"),
+        )
+    )
+    return db, fact.id
+
+
+@pytest.mark.parametrize("kind", ["decision", "fact", "domain"])
+@pytest.mark.parametrize(
+    ("winner", "action", "expected", "code"),
+    [
+        ("accept", "accept", "already accepted {id}", 0),
+        ("drop", "drop", "{done} {id}", 0),
+        ("drop", "accept", "error {id}: already {state}; it cannot be accepted", 1),
+        ("accept", "drop", "error {id}: already accepted; it cannot be dropped", 1),
+    ],
+)
+def test_cli_lost_race_is_classified_by_the_new_status(
+    tmp_path, capsys, monkeypatch, kind, winner, action, expected, code
+):
+    """Another writer commits the same or the opposite verdict between the CLI's lookup
+    and its mutation: the failed mutation is re-read, not printed raw."""
+    if kind == "domain" and (winner, action) == ("accept", "drop"):
+        pytest.skip("an accepted domain can still be dropped")
+    db, id_ = _seed_kind(tmp_path, kind)
+    method = _RACE_METHODS[(kind, action)]
+    winner_method = _RACE_METHODS[(kind, winner)]
+    original = getattr(Store, method)
+    fired = []
+
+    def settle_first(self, *args, **kwargs):
+        if not fired:
+            fired.append(True)
+            other = Store(db)
+            if kind == "domain":
+                getattr(other, winner_method)(**{winner: [id_]})
+            else:
+                getattr(other, winner_method)(id_)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Store, method, settle_first)
+    assert ratify_main(["--db", str(db), f"--{action}", id_]) == code
+    assert fired
+    done = "already dropped" if kind == "domain" else "already rejected"
+    state = "dropped" if kind == "domain" else "rejected"
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert expected.format(id=id_, done=done, state=state) in out

@@ -1,8 +1,10 @@
 # Installation
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 Install **Sidegraph** for the decision store, MCP server, CLI, and host hooks. Add
 **Graphify** for anchors to files and symbols and for structural context. Without a graph
-the store, the session map and listings still work, but records cannot be anchored to code
+the store, the session map and listings still work, but new concrete anchors remain unresolved
 (see [Without the graph](#without-the-graph)); the complete workflow below installs both.
 
 ## Prerequisites
@@ -16,6 +18,8 @@ the store, the session map and listings still work, but records cannot be anchor
   lifecycle hooks; [Muse](../integrations/muse.md) adds the session map and a
   subagent brief through two hooks.
   Other stdio MCP clients can call the tools directly; the CLI also works without a host.
+
+See [Platform coverage](#platform-coverage) for the operating system matrix and its CI scope.
 
 ### Windows
 
@@ -232,10 +236,12 @@ updates and the MCP runtime are separate: the default runtime follows the public
 `main`, which advances at releases, and that does not refresh cached skills, manifests or hook
 definitions. Use your host's update recipe after a release, then start a new session.
 
-| Host | Automatic session memory | Checked |
+| Host | Automatic session memory | Host-session evidence |
 |---|---|---|
 | Claude Code | yes: hooks, capture reminders, context on reads | macOS and Windows |
-| Codex | yes: hooks, after you approve them | macOS and Windows |
+| Claude Desktop (Code tab) | yes: the same hooks as Claude Code | macOS |
+| Codex CLI | yes: hooks, after you approve them | macOS and Windows |
+| Codex view of the ChatGPT desktop app | yes: hooks trusted through the CLI in the verified route | macOS |
 | Grok Build | yes: hooks, capture reminders, context on reads; the session map through the MCP server | macOS |
 | Muse | partly: session map and subagent brief, after you approve them | macOS |
 | OpenCode V2 | no: MCP and skills | macOS |
@@ -261,6 +267,17 @@ claude plugin update sidegraph@sidegraph
 
 Keep the same install scope; see the [Claude Code guide](claude-code-setup.md#update-an-existing-plugin).
 Start a new session after updating, or use `/reload-plugins` and review its prompts.
+
+### Claude Desktop
+
+Use the local Code tab. Follow the [desktop installation and first-run steps](../integrations/desktop-apps.md#claude-desktop-local-code-tab).
+The macOS live run verified project installation from Discover, setup, hooks and MCP.
+
+### Codex desktop view
+
+Use the [Codex view of the ChatGPT desktop app](../integrations/desktop-apps.md#codex-view-of-the-chatgpt-desktop-app).
+The verified macOS route uses a plugin installed and hooks trusted through the CLI.
+The guide separates that evidence from an untested first app-only install.
 
 ### Codex
 
@@ -397,9 +414,8 @@ host's [update recipe](#host-plugins-install-and-update); Claude Code and Codex 
 
 Skip the Graphify install and `graphify update`, run `sidegraph-init` as usual, and answer no
 to its *Keep the code graph fresh?* question. The store, the SessionStart map, the proposal
-queue, store listings and global memory still work. Anchoring does not: `add_decision` keeps
-no anchors without a graph, a proposed draft keeps only an orphaned anchor that waits for a
-graph, and retrieval for a file or a symbol finds nothing (a seed that names a descriptor
+queue, store listings and global memory still work. Anchoring does not: `add_decision` and a
+proposed draft keep only an orphaned anchor that waits for a graph, and retrieval for a file or a symbol finds nothing (a seed that names a descriptor
 already stored with a record still finds it). There is no structural map, no automatic domain
 candidates and no following of moved code. The loop of capturing a record for a file and
 recalling it when that file is read needs the graph. See
@@ -412,10 +428,11 @@ recalling it when that file is read needs the graph. See
   it lists what is wrong with the store, the graph and the wiring.
   [Troubleshooting](../guides/troubleshooting.md) explains each message, and the
   [verification checklist](../guides/verifying-your-setup.md) walks the whole workflow.
-- `get_task_context` finds nothing for a function: there is no graph yet, or the record was
-  saved before the graph existed. Build the graph first (`graphify update .`). A proposed
-  draft's orphaned anchors then heal with `sidegraph-sync`; a record written directly with
-  `add_decision` kept no anchors, so add them with `add_anchors`.
+- `get_task_context` finds nothing for a function: inspect the capture result and selected
+  store. If the anchors are orphaned because no graph existed, build the graph and run
+  `sidegraph-sync`. Direct captures and proposals both keep those unresolved leaves. If a
+  record has no anchors at all, add precise ones with `add_anchors`. See
+  [anchor recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
 - The agent has no Sidegraph tools: start a new session after installing, approve the
   plugin's prompts (Codex: its hooks too), and in Claude Code check `/mcp`.
 
@@ -423,7 +440,8 @@ recalling it when that file is read needs the graph. See
 
 Remove the plugin with your host's plugin command (`/plugin uninstall sidegraph@sidegraph` in
 Claude Code, `grok plugin uninstall sidegraph` in Grok Build).
-`sidegraph-init --remove-hooks` removes the git hook. The records in `.sidegraph/` are your
+`sidegraph-init --remove-hooks` removes the git hook (with the plugin alone, run it as
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --remove-hooks`). The records in `.sidegraph/` are your
 project's memory and are committed: delete them only if you mean to lose them.
 `graphify-out/` can always be deleted and rebuilt.
 
@@ -470,10 +488,19 @@ exact rules.
 
 ## Install Graphify
 
+macOS or Linux:
+
 ```bash
 uv tool install "graphifyy==0.9.90"   # note the double-y package name; the CLI is `graphify`
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+graphify --version                    # sanity check
+```
+
+Windows PowerShell:
+
+```powershell
+uv tool install "graphifyy==0.9.90"   # note the double-y package name; the CLI is `graphify`
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify --version                    # sanity check
 ```
 
@@ -497,21 +524,29 @@ Graphify's output, corpus types, and troubleshooting.
 
 ## Platform coverage
 
-On every pull request that is ready for review (not a draft), on `main` and before every
-publish, the automated matrix runs the full suite on Linux with Python 3.13 and 3.14. Native
-Windows x64 (`windows-2022`) runs a selected portable core/MCP suite on both versions:
-Store mutation/rollback and cross-process conflicts, UTF-8 and descriptor cleanup,
-MCP result contracts, invocation admission, and wheel-probe guards. It also builds and
-installs a non-editable wheel outside the checkout, checks its package bytes against the
-artifact, runs a CLI, and exchanges real MCP stdio messages in a Unicode/spaced directory.
-The exact selection is in [the CI workflow](../../.github/workflows/ci.yml).
+Sidegraph's CLI requires Python 3.13 or later. Host launchers add their own prerequisites.
+The table separates automated CLI/hook checks from a complete agent session. A passing
+package or launcher check does not establish desktop GUI behavior.
+
+| OS | CLI and automated coverage | Hook coverage | CI evidence |
+|---|---|---|---|
+| Linux | Full pytest suite on Python 3.13 and 3.14 | Hook entry points and POSIX command contracts in the full suite | [`ci.yml` job `test`](../../.github/workflows/ci.yml), `ubuntu-latest` |
+| Windows | Selected portable core and MCP contracts, plus an installed-wheel stdio smoke, on Python 3.13 and 3.14 | Native `commandWindows`, payload-encoding and failure-diagnostic tests in that selection | [`ci.yml` job `windows-core`](../../.github/workflows/ci.yml), `windows-2022` |
+| macOS | CLI host-session campaign below (0.14.0), plus host evidence above | Host-session checks in that campaign; no hook job in public CI | No macOS job in the public [`ci.yml`](../../.github/workflows/ci.yml) |
+
+The public workflow runs `test` and `windows-core` on ready pull requests, main pushes and
+reusable-workflow calls. Draft pull requests skip those jobs. Windows runs the named
+selection, not the entire Unix integration suite. The jobs above do not launch the Claude
+Desktop or ChatGPT desktop GUI. See [host installation checks](#host-plugins-install-and-update)
+for the checked surfaces and [Windows](#windows) for launcher prerequisites.
 
 For the 0.14.0 release-candidate campaign, real Claude Code and Codex sessions ran with the
 installed plugin, in fresh host profiles, on Windows Server 2022 x64 and macOS 15 arm64,
 each with Python 3.13 and 3.14. Each run was the full plugin session for both hosts: the
-plugin's MCP server, `SessionStart` context, records before a Read, a bundled skill, a
+plugin's MCP server, `SessionStart` context, a bundled skill, a
 subagent brief, the `Stop` capture prompt, capture and ratification, and recall in a fresh
-session. The project folder and host profile paths contained a non-ASCII character.
+session. Claude Code also delivers records on supported reads. Codex uses explicit MCP
+retrieval. The project folder and host profile paths contained a non-ASCII character.
 
 **0.14.0 publication gate:** Claude Code 2.1.296 and Codex CLI 0.162.1 on all four cells
 above, including a Windows 3.14 cell with PowerShell 7 unavailable for preflight and both

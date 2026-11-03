@@ -61,7 +61,7 @@ why-question has two layers, and the reader deserves both, clearly separated:
 
 When history for an entity comes back empty but the question smells area-level, widen
 once: `retrieve_decisions(query="<one or two topic words>", include_superseded=True)`
-lists the records on that topic (mistakes ranked first, superseded/rejected included, cut
+lists the records on that topic (mistakes ranked first, superseded/rejected/retired included, cut
 at a budget) — read its `hint`, and scan the titles, before declaring the store silent.
 
 ## Answer shape

@@ -30,6 +30,7 @@ from sidegraph.schema import (
     DecisionStatus,
     Descriptor,
     Domain,
+    DomainStatus,
     Entity,
     Fact,
     Provenance,
@@ -246,9 +247,14 @@ def test_supersede_via_store_api_is_clean(store: Store):
     """The normal, non-corrupted path -- add_decision(supersedes=...) closes the
     predecessor and writes the successor atomically -- must NOT trip either supersedes
     check; pins that the checks mirror the real rule rather than something stricter."""
-    old = store.add_decision(_decision())
+    old = store.add_decision(_decision(status=DecisionStatus.ACCEPTED))
     store.add_decision(
-        _decision(title="v2", supersedes=old.id, valid_from=datetime(2026, 2, 1, tzinfo=UTC))
+        _decision(
+            title="v2",
+            status=DecisionStatus.ACCEPTED,
+            supersedes=old.id,
+            valid_from=datetime(2026, 2, 1, tzinfo=UTC),
+        )
     )
     assert verify_snapshot(store.path) == []
 
@@ -586,7 +592,7 @@ def test_cli_json_clean_shape(tmp_path, capsys):
 
 def test_cli_exit_1_on_unreadable_store_dir(tmp_path, capsys):
     rc = verify_main(["--db", str(tmp_path / "does-not-exist")])
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert rc == 1
     assert "not readable" in out
 
@@ -865,9 +871,8 @@ def test_renaming_one_side_of_a_supersede_chain_reports_only_the_renamed_file(
 ):
     """A accepted, superseded by B, fact F supports A. Renaming one file to ``.<name>`` must not
     fan out into findings at the untouched files, which only the rename can heal."""
-    a = store.add_decision(_decision(title="a"))
-    store.ratify(a.id)
-    b = store.add_decision(_decision(title="b", supersedes=a.id))
+    a = store.add_decision(_decision(title="a", status=DecisionStatus.ACCEPTED))
+    b = store.add_decision(_decision(title="b", status=DecisionStatus.ACCEPTED, supersedes=a.id))
     store.add_fact(_fact(supports=[a.id]))
     assert verify_snapshot(store.path) == []
     moved = _decision_path(store, a.id if direction == "predecessor-renamed" else b.id)
@@ -882,11 +887,19 @@ def test_renaming_one_side_of_a_fact_or_domain_chain_reports_only_the_renamed_fi
     store: Store, kind, renamed
 ):
     if kind == "facts":
-        old = store.add_fact(_fact(statement="p"))
-        new = store.add_fact(_fact(statement="q", supersedes=old.id))
+        old = store.add_fact(_fact(statement="p", status=DecisionStatus.ACCEPTED))
+        new = store.add_fact(
+            _fact(statement="q", status=DecisionStatus.ACCEPTED, supersedes=old.id)
+        )
         ids = (old.id, new.id)
     else:
-        dom = Domain(slug="core", title="Core", summary="s", provenance=Provenance(source="m"))
+        dom = Domain(
+            slug="core",
+            title="Core",
+            summary="s",
+            status=DomainStatus.ACCEPTED,
+            provenance=Provenance(source="m"),
+        )
         old = store.add_domain(dom)
         new = store.supersede_domain(
             old.domain_id,
@@ -894,6 +907,7 @@ def test_renaming_one_side_of_a_fact_or_domain_chain_reports_only_the_renamed_fi
                 slug="core",
                 title="Core 2",
                 summary="s",
+                status=DomainStatus.ACCEPTED,
                 supersedes=old.domain_id,
                 provenance=Provenance(source="m"),
             ),
@@ -1015,7 +1029,7 @@ def _crossing_store(store: Store) -> None:
     would leave a cross-reference dangling, which is the noise a link must not cause."""
     d1 = store.add_decision(_decision())
     store.ratify(d1.id)
-    d2 = store.add_decision(_decision(title="v2", supersedes=d1.id))
+    d2 = store.add_decision(_decision(title="v2", status=DecisionStatus.ACCEPTED, supersedes=d1.id))
     entity = store.upsert_entity(
         Entity(canonical_name="f_widget", descriptor=Descriptor(name="f_widget", file_path="a.py"))
     )
@@ -1185,7 +1199,7 @@ def test_a_bad_ref_with_a_symlinked_store_dir_is_still_an_operational_error(
     _git_init(store.path.parent)
 
     assert main(["--db", str(store.path), "--against", "no-such-ref"]) == 1
-    assert "no-such-ref" in capsys.readouterr().out
+    assert "no-such-ref" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("main", [verify_main, doctor_main])
@@ -1397,7 +1411,7 @@ def test_an_unsearchable_store_is_not_readable_not_a_missing_marker(
 
     main = verify_main if cmd == "verify" else doctor_main
     assert main(["--db", str(store_dir)]) == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert out.splitlines()[0] == (
         f"store not readable ({store_dir}): [Errno 13] Permission denied: '{store_dir}'"
     )
@@ -1415,7 +1429,7 @@ def test_a_store_dir_without_the_search_bit_is_not_readable_end_to_end(cmd, mode
     try:
         main = verify_main if cmd == "verify" else doctor_main
         assert main(["--db", str(store_dir)]) == 1
-        out = capsys.readouterr().out
+        out = capsys.readouterr().err
     finally:
         store_dir.chmod(0o755)
     # names the directory to chmod, not the marker (whose own mode is fine)
@@ -1435,7 +1449,7 @@ def test_an_unsearchable_parent_is_not_readable_not_a_missing_directory(cmd, tmp
     try:
         main = verify_main if cmd == "verify" else doctor_main
         assert main(["--db", str(store_dir)]) == 1
-        out = capsys.readouterr().out
+        out = capsys.readouterr().err
     finally:
         parent.chmod(0o755)
     assert out.splitlines()[0].startswith(f"store not readable ({store_dir}): ")
@@ -1549,7 +1563,7 @@ def _assert_empty_dir_without_search_bit_is_unreadable(cmd, subdir, tmp_path, ca
     record_dir.chmod(0o400)
     try:
         rc = (doctor_main if cmd == "doctor" else verify_main)(["--db", str(store.path)])
-        out = capsys.readouterr().out
+        out = capsys.readouterr().err
     finally:
         record_dir.chmod(0o755)
     assert rc == 1
@@ -1569,7 +1583,7 @@ def _assert_unreadable_dir_reported_once(cmd, mode, subdir, tmp_path, capsys):
         if cmd == "verify-against":
             argv += ["--against", "HEAD"]
         rc = (doctor_main if cmd == "doctor" else verify_main)(argv)
-        out = capsys.readouterr().out
+        out = capsys.readouterr().err
     finally:
         record_dir.chmod(0o755)
     assert rc == 1
@@ -1603,7 +1617,7 @@ def test_an_unreadable_archive_directory_is_not_readable_either(tmp_path, capsys
     _chmod_or_skip(archive, 0o000)
     try:
         rc = verify_main(["--db", str(store.path)])
-        out = capsys.readouterr().out
+        out = capsys.readouterr().err
     finally:
         archive.chmod(0o755)
     assert rc == 1
@@ -1641,6 +1655,7 @@ def _domain(slug: str, **overrides) -> Domain:
         slug=slug,
         title=slug.title(),
         summary="s",
+        status=DomainStatus.ACCEPTED,
         provenance=Provenance(source="manual"),
         **overrides,
     )

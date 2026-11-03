@@ -64,21 +64,21 @@ def run(store: Path, *args: str) -> int:
 def test_older_than_refused_on_format2(git_repo, capsys):
     store = committed_store(git_repo)
     before = shard_bytes(store)
-    assert run(store, "--older-than", "3") == 2
-    assert "--settled-days" in capsys.readouterr().out
+    assert run(store, "--older-than", "3") == 1
+    assert "--settled-days" in capsys.readouterr().err
     assert shard_bytes(store) == before  # refused before any write
 
 
 def test_settled_days_refused_on_format1(tmp_path, capsys):
     store = format1_store(tmp_path / "s")
-    assert run(store, "--settled-days", "0") == 2
-    assert "--older-than" in capsys.readouterr().out
+    assert run(store, "--settled-days", "0") == 1
+    assert "--older-than" in capsys.readouterr().err
 
 
 def test_any_branch_refused_on_format1(tmp_path, capsys):
     store = format1_store(tmp_path / "s")
-    assert run(store, "--any-branch") == 2
-    assert "format 2" in capsys.readouterr().out
+    assert run(store, "--any-branch") == 1
+    assert "format 2" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("dry", [False, True])
@@ -93,19 +93,19 @@ def test_format1_compact_adds_migration_advice(tmp_path, capsys, dry):
 
 def test_negative_settled_days_refused(git_repo, capsys):
     store = committed_store(git_repo)
-    assert run(store, "--settled-days", "-1") == 2
-    assert "--settled-days must be >= 0" in capsys.readouterr().out
+    assert run(store, "--settled-days", "-1") == 1
+    assert "--settled-days must be >= 0" in capsys.readouterr().err
 
 
 def test_default_branch_required_unless_any_branch(git_repo, capsys):
     store = committed_store(git_repo)
     git(git_repo, "switch", "-q", "-c", "topic")
     before = shard_bytes(store)
-    assert run(store, "--settled-days", "0") == 2
-    out = capsys.readouterr().out
+    assert run(store, "--settled-days", "0") == 1
+    out = capsys.readouterr().err
     assert "topic" in out and "default branch" in out and "--any-branch" in out
     assert shard_bytes(store) == before and (store / "decisions" / "D1.json").exists()
-    assert run(store, "--settled-days", "0", "--dry-run") == 2  # dry run is judged the same
+    assert run(store, "--settled-days", "0", "--dry-run") == 1  # dry run is judged the same
     capsys.readouterr()
     assert run(store, "--settled-days", "0", "--any-branch") == 0
     assert not (store / "decisions" / "D1.json").exists()
@@ -114,8 +114,8 @@ def test_default_branch_required_unless_any_branch(git_repo, capsys):
 def test_detached_head_refused(git_repo, capsys):
     store = committed_store(git_repo)
     git(git_repo, "checkout", "-q", "--detach")
-    assert run(store, "--settled-days", "0") == 2
-    assert "detached" in capsys.readouterr().out
+    assert run(store, "--settled-days", "0") == 1
+    assert "detached" in capsys.readouterr().err
 
 
 def test_origin_head_names_the_default_branch(git_repo, tmp_path, capsys):
@@ -131,7 +131,7 @@ def test_origin_head_names_the_default_branch(git_repo, tmp_path, capsys):
     assert run(clone / ".sidegraph", "--settled-days", "0") == 0  # origin/HEAD says trunk
     capsys.readouterr()
     git(clone, "switch", "-q", "-c", "main")  # a name that is no longer the default here
-    assert run(clone / ".sidegraph", "--settled-days", "0") == 2
+    assert run(clone / ".sidegraph", "--settled-days", "0") == 1
 
 
 def test_committed_marker_switch_completed_by_settled_days_0(git_repo, capsys):  # T-C1
@@ -168,14 +168,15 @@ def test_dry_run_says_planned_and_writes_nothing(git_repo, capsys):
     assert not (store / "shards").exists() and (store / "decisions" / "D1.json").exists()
 
 
-def test_stopped_run_exits_2_and_prints_reason(git_repo, capsys):
+def test_stopped_run_exits_1_and_prints_reason(git_repo, capsys):
     store = committed_store(git_repo)
     (store / "shards").mkdir()
     (store / "shards" / "00.shard").write_bytes(b"not json\n")  # a bad-shard-line refuses
     commit_all(git_repo, "bad shard", date=OLD)
-    assert run(store) == 2
-    out = capsys.readouterr().out
-    assert "Stopped: refused" in out and "bad-shard-line" in out
+    assert run(store) == 1
+    captured = capsys.readouterr()
+    assert "Stopped: refused" in captured.out and "bad-shard-line" in captured.out
+    assert "refused" in captured.err and "bad-shard-line" in captured.err  # the reason, on stderr
 
 
 def test_shallow_clone_prints_notice(git_repo, tmp_path, capsys):
@@ -195,7 +196,7 @@ def test_shallow_clone_prints_notice(git_repo, tmp_path, capsys):
 def test_outside_git_needs_settled_days_0_and_has_no_branch_rule(tmp_path, capsys):
     store = make_store(tmp_path)
     put_file(store, "decision", decision_body("D1"))
-    assert run(store) == 2
+    assert run(store) == 1
     assert "--settled-days 0" in capsys.readouterr().out
     assert run(store, "--settled-days", "0") == 0
     assert not (store / "decisions" / "D1.json").exists()
@@ -209,7 +210,7 @@ def test_publish_oserror_exits_1_with_message(git_repo, capsys, monkeypatch):
 
     monkeypatch.setattr(store_module.Store, "maintain", boom)
     assert run(store) == 1
-    assert "No space left" in capsys.readouterr().out
+    assert "No space left" in capsys.readouterr().err
 
 
 def tree_state(root: Path) -> dict[str, tuple[int, int, bytes]]:
@@ -238,8 +239,8 @@ def test_dry_run_refuses_a_store_that_opening_would_write_into(git_repo, capsys)
     (store / ".gitignore").unlink()
     commit_all(git_repo, "no gitignore", date=OLD)
     before = tree_state(store)
-    assert run(store, "--dry-run") == 2
-    assert ".gitignore" in capsys.readouterr().out
+    assert run(store, "--dry-run") == 1
+    assert ".gitignore" in capsys.readouterr().err
     assert tree_state(store) == before
 
 
@@ -247,22 +248,22 @@ def test_dry_run_refuses_a_store_that_opening_would_write_into(git_repo, capsys)
 def test_missing_and_empty_paths_are_refused_not_created(tmp_path, capsys, dry):
     flags = ["--settled-days", "0", *(["--dry-run"] if dry else [])]
     missing = tmp_path / "nowhere"
-    assert run(missing, *flags) == 2
+    assert run(missing, *flags) == 1
     assert not missing.exists()
     empty = tmp_path / "empty"
     empty.mkdir()
-    assert run(empty, *flags) == 2
+    assert run(empty, *flags) == 1
     assert list(empty.iterdir()) == []
-    assert "never creates" in capsys.readouterr().out
+    assert "never creates" in capsys.readouterr().err
 
 
 def test_older_than_negative_is_refused_by_format_first(git_repo, tmp_path, capsys):
     store = committed_store(git_repo)
-    assert run(store, "--older-than", "-1") == 2
-    assert "--settled-days" in capsys.readouterr().out
+    assert run(store, "--older-than", "-1") == 1
+    assert "--settled-days" in capsys.readouterr().err
     f1 = format1_store(tmp_path / "f1")
     assert run(f1, "--older-than", "-1") == 1
-    assert "--older-than must be >= 0" in capsys.readouterr().out
+    assert "--older-than must be >= 0" in capsys.readouterr().err
 
 
 def test_busy_store_exits_1_without_traceback_and_retry_succeeds(git_repo, capsys, monkeypatch):
@@ -278,7 +279,7 @@ def test_busy_store_exits_1_without_traceback_and_retry_succeeds(git_repo, capsy
     finally:
         rival.execute("ROLLBACK")
         rival.close()
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "busy" in out and "Traceback" not in out
     assert (store / "decisions" / "D1.json").exists()  # nothing was done
     assert run(store) == 0
@@ -323,7 +324,7 @@ def test_commit_instruction_only_when_something_was_written(git_repo, capsys):
     # a stop that wrote nothing
     (store / "shards" / "00.shard").write_bytes(b"not json\n")
     commit_all(git_repo, "bad shard", date=OLD)
-    assert run(store) == 2
+    assert run(store) == 1
     assert "commit them yourself" not in capsys.readouterr().out
 
 
@@ -435,7 +436,7 @@ def test_open_while_a_rival_holds_the_writer_lock_is_busy_not_unreadable(
     finally:
         rival.execute("ROLLBACK")
         rival.close()
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "busy" in out and "not readable" not in out and "Traceback" not in out
     assert run(store) == 0
 
@@ -458,7 +459,7 @@ def test_stopped_run_that_already_wrote_says_so(git_repo, capsys, monkeypatch):
             commit_all(git_repo, "moved head", date=OLD)
 
     monkeypatch.setattr(maintenance, "stage", stage)
-    assert run(store) == 2
+    assert run(store) == 1
     out = capsys.readouterr().out
     assert "Stopped:" in out and "written or removed" in out
     assert "The run stopped after writing these files" in out
@@ -484,12 +485,13 @@ def store_with_checks(repo: Path, checks=((C1, "D1"),), packed=None) -> Path:
     return store
 
 
-def test_check_fold_stop_exits_2(git_repo, capsys, monkeypatch):  # P4 CLI half
+def test_check_fold_stop_exits_1(git_repo, capsys, monkeypatch):  # P4 CLI half
     monkeypatch.setattr(sidegraph, "__version__", "0.21.0")
     store = store_with_checks(git_repo)
-    assert run(store, "--settled-days", "0") == 2
-    out = capsys.readouterr().out
-    assert "Drift checks stopped" in out
+    assert run(store, "--settled-days", "0") == 1
+    captured = capsys.readouterr()
+    assert "Drift checks stopped" in captured.out
+    assert "Drift checks stopped" in captured.err  # the reason, on stderr
     assert (store / "verifications" / f"{C1}.json").exists()
 
 
@@ -616,9 +618,9 @@ def test_dry_run_lists_unlanded_checks(git_repo, tmp_path, capsys, pin_version_0
 def test_dry_and_real_stop_text_for_a_too_old_runtime_agree(git_repo, capsys, monkeypatch):
     monkeypatch.setattr(sidegraph, "__version__", "0.21.0")
     store = store_with_checks(git_repo)
-    assert run(store, "--settled-days", "0", "--dry-run") == 2
+    assert run(store, "--settled-days", "0", "--dry-run") == 1
     dry = capsys.readouterr().out
-    assert run(store, "--settled-days", "0") == 2
+    assert run(store, "--settled-days", "0") == 1
     real = capsys.readouterr().out
     line = next(x for x in dry.splitlines() if x.startswith("Drift checks stopped"))
     assert line in real.splitlines()

@@ -323,7 +323,7 @@ def test_codex_session_start_runs_under_a_posix_shell(
             [shell, "-c", command],
             cwd=repo,
             env={**env, "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"},
-            timeout=30,
+            timeout=_LAUNCH_TIMEOUT,
         )
 
     ok = run({"uvx": 'printf \'{"host":"%s","dir":"%s"}\\n\' "$SIDEGRAPH_HOST" "$SIDEGRAPH_DIR"'})
@@ -363,8 +363,23 @@ def _stub(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+# How long a launch may take before the test calls it stuck. A launch is a few shell forks and
+# takes a fraction of a second, but on a loaded machine (a full suite on a busy runner) one was
+# measured at 5 s. A command that really hangs never finishes, so a bound this far above the
+# worst launch costs nothing but the time a regression takes to show.
+_LAUNCH_TIMEOUT = 60.0
+# After SIGKILL to the group the pipes close at once, so the drain needs no launch-sized bound
+# (a long one would let a leaked, short-lived child exit on its own before the test looks).
+_KILL_DRAIN_TIMEOUT = 10.0
+
+
 def _run_in_group(
-    argv: list[str], *, cwd: Path, env: dict[str, str], timeout: float
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+    ready: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """``subprocess.run`` that cannot leave a process behind.
 
@@ -372,6 +387,9 @@ def _run_in_group(
     (``head`` on a FIFO inside ``$(...)``) outlives the test, and a regression that hangs 20
     cases leaves 20 stuck processes. The command runs in its own session, and on a timeout (or
     any other interruption) the whole process group is killed.
+
+    With ``ready``, ``timeout`` starts only once that path exists (the command's own signal that
+    it has started), and a start slower than ``_LAUNCH_TIMEOUT`` is an error, not a timeout.
     """
     proc = subprocess.Popen(
         argv,
@@ -383,11 +401,17 @@ def _run_in_group(
         start_new_session=True,
     )
     try:
+        if ready is not None:
+            deadline = time.monotonic() + _LAUNCH_TIMEOUT
+            while not ready.exists():
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"{ready.name} not written within {_LAUNCH_TIMEOUT} s")
+                time.sleep(0.02)
         out, err = proc.communicate(timeout=timeout)
     except BaseException:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate(timeout=5)
+        proc.communicate(timeout=_KILL_DRAIN_TIMEOUT)
         raise
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
@@ -397,10 +421,16 @@ def test_t2_a_timed_out_command_leaves_no_process_behind(tmp_path: Path) -> None
     """The cleanup the FIFO case relies on, tested directly: the grandchild of a command that
     timed out is gone, not just the shell."""
     pidfile = tmp_path / "grandchild.pid"
-    script = f"sleep 60 & echo $! > '{pidfile}'; wait"
+    # The grandchild outlives any bound here, so only the group kill can end it. The pidfile is
+    # the readiness signal: the short timeout starts once the shell has got that far.
+    script = f"sleep 600 & echo $! > '{pidfile}.tmp'; mv '{pidfile}.tmp' '{pidfile}'; wait"
     with pytest.raises(subprocess.TimeoutExpired):
         _run_in_group(
-            ["/bin/sh", "-c", script], cwd=tmp_path, env={"PATH": "/bin:/usr/bin"}, timeout=1
+            ["/bin/sh", "-c", script],
+            cwd=tmp_path,
+            env={"PATH": "/bin:/usr/bin"},
+            timeout=1,
+            ready=pidfile,
         )
     pid = int(pidfile.read_text())
     for _ in range(40):  # SIGKILL is asynchronous
@@ -447,7 +477,7 @@ def _from_value(
         [shell, "-c", command],
         cwd=tmp_path,
         env=env,
-        timeout=5,  # a FIFO the command opened would block forever
+        timeout=_LAUNCH_TIMEOUT,
     )
     assert result.returncode == 0, (result.returncode, result.stderr)
     lines = result.stdout.splitlines()
@@ -584,7 +614,13 @@ def test_t2_a_fifo_is_not_read(
     record = tmp_path / "cache" / "sidegraph" / "launch-commit"
     record.parent.mkdir(parents=True)
     os.mkfifo(record)
-    assert _from_value(shell, command, tmp_path) == _expected(command, None)
+    # A read of the FIFO never returns, so a command that does it is still running at the bound
+    # however long its start took: the bound is the completion one, not a race with the start.
+    try:
+        launched = _from_value(shell, command, tmp_path)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"the command was still blocked after {_LAUNCH_TIMEOUT} s: it read the FIFO")
+    assert launched == _expected(command, None)
 
 
 @pytest.mark.slow  # runs the hot command in a real shell

@@ -148,7 +148,8 @@ class TestDecisionMapping:
         s1 = str(ULID.from_datetime(NOW + timedelta(seconds=1)))
         s2 = str(ULID.from_datetime(NOW + timedelta(seconds=2)))
         s.add_decision(_decision(title="Fork A", id=s1, supersedes=old.id))
-        s.add_decision(_decision(title="Fork B", id=s2, supersedes=old.id))
+        with s._mutation():  # a second heir arrives through a git merge, never through a write
+            s._write_decision(_decision(title="Fork B", id=s2, supersedes=old.id))
         text = build_bundle(s)[f"decisions/old-way-{old.id.lower()}.md"]
         assert text.index("Fork A") < text.index("Fork B")
 

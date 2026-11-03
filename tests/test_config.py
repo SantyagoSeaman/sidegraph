@@ -74,7 +74,7 @@ def test_warn_on_create_false_suppresses_the_creation_notice(tmp_path, monkeypat
 
 
 def test_sidegraph_db_existing_legacy_file_passes_through_unchanged(tmp_path, monkeypatch):
-    """A real legacy single-file store -- Store migrates it on open, so the resolver must
+    """A real legacy single-file store -- Store refuses it on open, so the resolver must
     hand it back verbatim, never redirected to its parent."""
     _reset(monkeypatch)
     legacy = tmp_path / "sidegraph.db"
@@ -110,6 +110,19 @@ def test_sidegraph_db_nonexistent_decisions_db_rescued_to_parent_dir(tmp_path, m
     monkeypatch.setenv("SIDEGRAPH_DB", ".sidegraph/decisions.db")
     resolved = resolve_store_path()
     assert resolved == ".sidegraph"
+
+
+def test_sidegraph_db_keeps_a_path_with_an_interrupted_migration_sentinel(tmp_path, monkeypatch):
+    """The original file was renamed away but the replacement directory was never created: the
+    path does not exist, so the `.db` rescue would pick `.sidegraph` and check the wrong
+    sentinel. The configured path must stay so Store's guard fires."""
+    _reset(monkeypatch)
+    monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".sidegraph").mkdir()
+    (tmp_path / ".sidegraph" / "decisions.db.migration-incomplete").write_text("{}")
+    monkeypatch.setenv("SIDEGRAPH_DB", ".sidegraph/decisions.db")
+    assert resolve_store_path() == ".sidegraph/decisions.db"
 
 
 def test_sidegraph_db_nonexistent_bare_filename_falls_through_to_default_store_dir(
@@ -269,3 +282,25 @@ def test_sidegraph_db_dangling_db_link_is_returned_as_given_not_its_parent(tmp_p
         Store(resolve_store_path()).close()
     assert sorted(os.listdir(proj)) == ["store.db"]
     assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.parametrize("spelling", [".sidegraph/decisions.db/", ".sidegraph/decisions.db/."])
+def test_a_trailing_separator_on_sidegraph_db_keeps_the_interrupted_path(
+    tmp_path, monkeypatch, capsys, spelling
+):
+    """`decisions.db/` names the same store as `decisions.db`: the sentinel is looked up beside
+    the normalized leaf, so `sidegraph-init` refuses instead of scaffolding the parent."""
+    from sidegraph.cli import init_main
+
+    _reset(monkeypatch)
+    monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".sidegraph").mkdir()
+    (tmp_path / ".sidegraph" / "decisions.db.migration-incomplete").write_text("{}")
+    before = sorted(str(p) for p in tmp_path.rglob("*"))
+    monkeypatch.setenv("SIDEGRAPH_DB", spelling)
+
+    assert init_main(["--no-settings", "--no-hooks"]) == 1
+
+    assert "interrupted" in capsys.readouterr().err
+    assert sorted(str(p) for p in tmp_path.rglob("*")) == before

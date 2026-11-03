@@ -15,6 +15,7 @@ def _decision(**overrides) -> Decision:
     base = dict(
         title="Use file-per-record JSON",
         kind=DecisionKind.ADR,
+        status=DecisionStatus.ACCEPTED,  # only an accepted record can be superseded
         context="ctx",
         choice="choice",
         valid_from=datetime.now(UTC),
@@ -229,7 +230,7 @@ def test_compact_extra_field_warning_is_not_corruption(tmp_path, capsys):
 def test_cli_compact_older_than_negative_rejected(tmp_path, capsys):
     db = tmp_path / "t.db"
     assert compact_main(["--db", str(db), "--older-than", "-1"]) == 1
-    assert "--older-than must be >= 0" in capsys.readouterr().out
+    assert "--older-than must be >= 0" in capsys.readouterr().err
     # rejected before any store I/O -- nothing was created
     assert not db.exists()
 
@@ -242,7 +243,7 @@ def test_cli_compact_store_open_failure_exits_nonzero(tmp_path, capsys):
     conn.commit()
     conn.close()
     assert compact_main(["--db", str(db)]) == 1
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 def test_cli_compact_older_than_skips_too_recent_and_says_so(tmp_path, capsys):
@@ -280,7 +281,7 @@ def test_cli_compact_over_a_corrupt_archive_segment_exits_nonzero_naming_it(tmp_
 
     assert compact_main(["--db", str(db)]) == 1
 
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert str(segment) in out
     assert "line 1" in out
 
@@ -296,5 +297,5 @@ def test_cli_compact_dry_run_over_a_corrupt_archive_segment_exits_nonzero_too(tm
 
     assert compact_main(["--db", str(db), "--dry-run"]) == 1
 
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert f"cannot compact ({db}): corrupt archive segment {segment} at line 1" in out

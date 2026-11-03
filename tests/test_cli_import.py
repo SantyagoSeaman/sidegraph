@@ -121,7 +121,7 @@ def test_cli_import_empty_import_exits_zero(tmp_path, capsys):
 
 def test_cli_import_unreadable_graph_exits_one(tmp_path, capsys):
     assert import_main(["--db", str(tmp_path / "t.db"), "--graph", str(tmp_path / "no.json")]) == 1
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 def test_cli_import_store_open_failure_exits_one(tmp_path, capsys):
@@ -135,7 +135,7 @@ def test_cli_import_store_open_failure_exits_one(tmp_path, capsys):
     conn.commit()
     conn.close()
     assert import_main(["--db", str(db), "--graph", str(graph)]) == 1
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 _MULTI_FILE_GRAPH = {
@@ -201,7 +201,7 @@ def test_cli_import_negative_limit_rejected(tmp_path, capsys):
     graph = _write_graph(tmp_path, "g.json", GRAPH)
     db = tmp_path / "t.db"
     assert import_main(["--db", str(db), "--graph", str(graph), "--limit", "-1"]) == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "--limit" in out
     # A rejected negative --limit must not create a store as a side effect.
     assert not db.exists()
@@ -635,7 +635,7 @@ def test_cli_import_docs_and_path_mutually_exclusive(tmp_path, capsys):
         ]
     )
     assert rc == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     # Task 4 (--profile) extended this guard/message to also cover --profile; text updated
     # accordingly (behavior — exit 1, no store created — is unchanged).
     assert "--docs/--profile and --path are mutually exclusive" in out
@@ -689,6 +689,49 @@ def test_cli_import_encoding_undecodable_file_named_and_run_continues(tmp_path, 
     assert len(list(store.iter_decisions())) == 1
 
 
+def test_cli_import_unreadable_file_named_and_run_continues(tmp_path, capsys):
+    graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
+    db = tmp_path / "t.db"
+    link = tmp_path / "docs" / "0001-dangling.md"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(tmp_path / "missing-target.md")
+    _write_md(tmp_path, "docs/0002-good.md", _adr_md("Use SQLite"))
+
+    rc = import_main(
+        ["--db", str(db), "--graph", str(graph), "--docs", str(tmp_path / "docs"), "--any-doc"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 file(s) skipped: could not be read:" in out
+    assert f"  {link}" in out
+    assert len(list(Store(db).iter_decisions())) == 1
+
+
+def test_cli_import_unreadable_file_named_in_dry_run(tmp_path, capsys):
+    graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
+    db = tmp_path / "t.db"
+    link = tmp_path / "docs" / "0001-dangling.md"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(tmp_path / "missing-target.md")
+    _write_md(tmp_path, "docs/0002-good.md", _adr_md("Use SQLite"))
+
+    rc = import_main(
+        [
+            "--db",
+            str(db),
+            "--graph",
+            str(graph),
+            "--docs",
+            str(tmp_path / "docs"),
+            "--dry-run",
+            "--any-doc",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.rstrip("\n").endswith(f"1 file(s) skipped: could not be read:\n  {link}")
+
+
 def test_cli_import_encoding_undecodable_file_named_in_dry_run(tmp_path, capsys):
     graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
     db = tmp_path / "t.db"
@@ -740,7 +783,7 @@ def test_cli_import_docs_missing_path_exits_one(tmp_path, capsys):
         ]
     )
     assert rc == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "not found" in out
     assert not db.exists()
 
@@ -949,7 +992,7 @@ def test_cli_import_docs_section_limit_below_minimum_rejected(tmp_path, capsys):
         ]
     )
     assert rc == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "--section-limit must be >= 200" in out
     assert not db.exists()  # rejected flag must not create a store as a side effect
 
@@ -1003,7 +1046,7 @@ def test_cli_import_docs_unreadable_graph_exits_one(tmp_path, capsys):
         ]
     )
     assert rc == 1
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 def test_cli_import_docs_store_open_failure_exits_one(tmp_path, capsys):
@@ -1018,7 +1061,7 @@ def test_cli_import_docs_store_open_failure_exits_one(tmp_path, capsys):
     conn.commit()
     conn.close()
     assert import_main(["--db", str(db), "--graph", str(graph), "--docs", str(doc)]) == 1
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 # -- BUG F: absolute --docs path resolved against os.getcwd() silently misses the graph's
@@ -1118,7 +1161,7 @@ def test_import_unknown_profile_is_a_clean_usage_error(tmp_path, capsys):
         ]
     )
     assert rc == 1
-    assert "unknown flow profile 'bogus'" in capsys.readouterr().out
+    assert "unknown flow profile 'bogus'" in capsys.readouterr().err
 
 
 def test_import_help_profile_list_matches_profiles_registry(capsys):
@@ -1512,9 +1555,10 @@ def test_cli_import_docs_un_rejecting_a_doc_revives_it(tmp_path, capsys):
     """Review R3-1: handling only accepted→rejected left the mirror hole. Once rejected
     records became visible to the ref lookup, a doc un-rejected back to `accepted` matched on
     content and was skipped FOREVER: the corpus says adopted, the store keeps saying refused.
-    The revival supersedes the refusal in the record chain without an illegal rejected ->
-    superseded transition (review ask 3), reports `imported 1, superseded 0` (review R5-1: the
-    `supersedable` keying regressed three rounds in five), and is itself idempotent."""
+    The revival keeps the refusal as history without an illegal rejected -> superseded
+    transition (review ask 3) and without linking it (only a live head can be superseded),
+    reports `imported 1, superseded 0` (review R5-1: the `supersedable` keying regressed
+    three rounds in five), and is itself idempotent."""
     graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
     db = tmp_path / "t.db"
     body = "# Submit path\n\n## Context\n\nc\n\n## Decision\n\nCalls `submit_order` on success.\n"
@@ -1530,7 +1574,7 @@ def test_cli_import_docs_un_rejecting_a_doc_revives_it(tmp_path, capsys):
     assert "imported 1 decision(s), superseded 0" in out, out
     records = {d.status.value: d for d in Store(db).iter_decisions()}
     assert sorted(records) == ["accepted", "rejected"]  # the refusal stays as history
-    assert records["accepted"].supersedes == records["rejected"].id
+    assert records["accepted"].supersedes is None  # a rejected record is not a live head
     assert records["rejected"].status.value == "rejected"  # untouched, still history
 
     assert import_main(argv) == 0  # and the revival is itself idempotent
@@ -1630,10 +1674,10 @@ def test_cli_import_docs_edited_and_flipped_with_dead_anchors_still_closes(tmp_p
     assert store.bindings_for_record(rejected.id)
 
 
-def test_cli_import_docs_propose_flip_leaves_a_linked_chain(tmp_path, capsys):
-    """Review R3-2: under `--propose` the flip reached the pre-existing
-    edit-again-while-pending path, which drops the proposal itself, leaving two unlinked
-    rejected records and a report claiming a supersession of nothing."""
+def test_cli_import_docs_propose_flip_skips_a_pending_proposal(tmp_path, capsys):
+    """Review R3-2, under the supersession invariant: a pending proposal cannot be superseded,
+    so a doc flipped to `rejected` while its record is still proposed is skipped, with the
+    reason in the output, and the proposal is left for a human to drop or ratify."""
     graph = _write_graph(tmp_path, "g.json", _DOC_MENTION_GRAPH)
     db = tmp_path / "t.db"
     body = "# Submit path\n\n## Context\n\nc\n\n## Decision\n\nCalls `submit_order` on success.\n"
@@ -1641,15 +1685,13 @@ def test_cli_import_docs_propose_flip_leaves_a_linked_chain(tmp_path, capsys):
     argv = ["--db", str(db), "--graph", str(graph), "--docs", str(doc), "--any-doc", "--propose"]
     assert import_main(argv) == 0
     assert [d.status.value for d in Store(db).iter_decisions()] == ["proposed"]
+    capsys.readouterr()
 
     doc.write_text(f"---\nstatus: rejected\n---\n{body}", encoding="utf-8")
     assert import_main(argv) == 0
-    capsys.readouterr()
-    store = Store(db)
-    records = sorted(store.iter_decisions(), key=lambda d: d.id)
-    assert len(records) == 2
-    assert records[1].supersedes == records[0].id, "the chain must be linked, not two orphans"
-    assert records[1].status.value == "rejected"
+    out = capsys.readouterr().out
+    assert "pending proposal" in out, out
+    assert [d.status.value for d in Store(db).iter_decisions()] == ["proposed"]
 
 
 # -- repo-relative keying from a subdirectory of a git work tree --------------------------

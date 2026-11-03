@@ -530,25 +530,47 @@ def _with_session_start_timeout(tmp_path: Path, ms: int) -> Path:
     return copy
 
 
+# SessionStart tables to try, shortest first. The stub reports a pid only once its Python has
+# started, which on a loaded machine can take longer than a 1 s budget: the adapter then kills it
+# before it reports and still answers ``{}``, but the run cannot show the kill. Such a run is
+# repeated with a longer budget, so the check never races the stub's start-up.
+_BUDGET_TABLES_MS = (2000, 5000, 15000)
+
+
+def _outlive_the_budget(rig: Rig, report: str) -> tuple[float, float, int]:
+    """Run the adapter on a stub that sleeps 30 s, under each table of ``_BUDGET_TABLES_MS`` in
+    turn, until the stub writes a pid to the file named by its ``report`` variable. Every run
+    must answer ``{}``. Returns the table in seconds, the adapter's elapsed time, and the pid."""
+    for table_ms in _BUDGET_TABLES_MS:
+        attempt = rig.tmp / f"table-{table_ms}"
+        attempt.mkdir()
+        short = _with_session_start_timeout(attempt, table_ms)
+        pidfile = attempt / "reported.pid"
+
+        started = time.monotonic()
+        result = rig.run(
+            rig.payload(),
+            env=rig.env(STUB_SLEEP="30", **{report: str(pidfile)}),
+            muse_dir=short,
+            timeout=table_ms / 1000 + 20,
+        )
+        elapsed = time.monotonic() - started
+
+        assert result.returncode == 0 and result.stdout.strip() == b"{}"
+        reported = pidfile.read_text().strip() if pidfile.exists() else ""
+        if reported:
+            return table_ms / 1000, elapsed, int(reported)
+    pytest.fail(f"the stub never reported a pid within a {_BUDGET_TABLES_MS[-1]} ms table")
+
+
 def test_a_child_that_outlives_the_timeout_is_killed_and_the_adapter_answers_empty_json(
     rig: Rig,
 ) -> None:
-    """The table is 2 s, so the child's budget is 1 s; the stub sleeps 30 s."""
-    short = _with_session_start_timeout(rig.tmp, 2000)
-    pidfile = rig.tmp / "stub.pid"
-
-    started = time.monotonic()
-    result = rig.run(
-        rig.payload(),
-        env=rig.env(STUB_SLEEP="30", STUB_PIDFILE=str(pidfile)),
-        muse_dir=short,
-    )
-    elapsed = time.monotonic() - started
-
-    assert result.returncode == 0 and result.stdout.strip() == b"{}"
-    pid = int(pidfile.read_text())
+    """The table is 2 s, so the child's budget is 1 s (longer only when the stub was too slow to
+    report); the stub sleeps 30 s."""
+    table, elapsed, pid = _outlive_the_budget(rig, "STUB_PIDFILE")
     try:
-        assert elapsed < 2.0 + 1.0, "the adapter answered after Muse would have killed it"
+        assert elapsed < table + 1.0, "the adapter answered after Muse would have killed it"
         _assert_gone(pid)
     finally:
         _kill(pid)
@@ -571,21 +593,9 @@ def _kill(pid: int) -> None:
 def test_a_timeout_kills_the_whole_process_group(rig: Rig) -> None:
     """A plain ``subprocess`` timeout kills ``uvx`` only; the runtime it started would live on,
     and holding the pipe open would also stall the adapter past the budget."""
-    short = _with_session_start_timeout(rig.tmp, 2000)
-    pidfile = rig.tmp / "grandchild.pid"
-
-    started = time.monotonic()
-    result = rig.run(
-        rig.payload(),
-        env=rig.env(STUB_SLEEP="30", STUB_GRANDCHILD=str(pidfile)),
-        muse_dir=short,
-    )
-    elapsed = time.monotonic() - started
-
-    pid = int(pidfile.read_text())
+    table, elapsed, pid = _outlive_the_budget(rig, "STUB_GRANDCHILD")
     try:
-        assert result.stdout.strip() == b"{}"
-        assert elapsed < 4, "the grandchild held the pipe open: the group was not killed"
+        assert elapsed < table + 2.0, "the grandchild held the pipe open: the group was not killed"
         _assert_gone(pid)
     finally:
         _kill(pid)

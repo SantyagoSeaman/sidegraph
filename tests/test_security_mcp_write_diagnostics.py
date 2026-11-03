@@ -119,20 +119,26 @@ def test_prevalidation_does_not_invoke_write_body_and_preserves_default_executio
     assert calls[0]["author"] is None
 
 
-@pytest.mark.parametrize("name", ["ratify", "ratify_decisions"])
+@pytest.mark.parametrize("name", ["ratify"])
 def test_returned_ratification_failure_does_not_echo_exception(store, monkeypatch, name):
-    existing = server._add_decision_impl(store, None, **decision_args())
+    # A PROPOSED decision, so the injected failure is actually reached (an accepted one is
+    # answered "already accepted" before Store.ratify is called).
+    draft = dict(title="ordinary", kind="adr", context="context", choice="choice", anchors=[])
+    existing = server._propose_decisions_impl(store, None, [draft])[0]["decision_id"]
     before = canonical(store)
-    original_status = store.get_decision(existing["id"]).status
+    original_status = store.get_decision(existing).status
+    invoked = []
 
     def fail(*args, **kwargs):
+        invoked.append(args)
         raise ValueError(MARKER)
 
     monkeypatch.setattr(store, "ratify", fail)
-    result = call(name, dict(accept=[existing["id"]]))
+    result = call(name, dict(accept=[existing]))
+    assert invoked
     assert canonical(store) == before
     with Store(store.path) as reopened:
-        assert reopened.get_decision(existing["id"]).status == original_status
+        assert reopened.get_decision(existing).status == original_status
     assert MARKER not in rendered(result)
     assert "error" in rendered(result)
 

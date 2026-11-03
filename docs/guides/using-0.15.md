@@ -1,5 +1,7 @@
 # Using Sidegraph 0.15
 
+> **Start here:** This historical page describes the 0.15 upgrade. Follow Update first, then choose ADR export, usage statistics or drift inspection from the linked guides. Drift means a claim needs checking after code changes. [Glossary](../concepts/glossary.md).
+
 0.15 adds ADR export and maintenance, auditable delivery statistics, explicit drift
 inspections, eligible fact delivery, and fixes for repeated automatic context and exact-file
 memory outside the graph. File/entity/domain selection still applies; task-query ranking

@@ -260,15 +260,14 @@ def test_t9_a_fresh_clone_without_an_index_gets_the_standing_lines_and_no_index(
     assert _tree(sd) == before
 
 
-def test_t10_a_legacy_store_is_not_migrated_by_the_map(tmp_path, monkeypatch):
-    """Red against opening the store: ``Store()`` migrates a legacy ``decisions.db`` to the
-    canonical layout, a write the map path must never make (pre-release panel). A real 0.3.0
-    store, so a guarded writable open would succeed in migrating it."""
-    from tests.test_store_migration import _0_3_0_SCHEMA_SQL, _build_legacy_db
+def test_t10_a_legacy_store_is_left_untouched_by_the_map(tmp_path, monkeypatch):
+    """A legacy ``decisions.db`` directory gets no map and no write from the map path
+    (pre-release panel)."""
+    from tests.test_store_migration import _legacy_db
 
     sd = tmp_path / ".sidegraph"
     sd.mkdir()
-    _build_legacy_db(sd / "decisions.db", _0_3_0_SCHEMA_SQL, "0.3.0", with_domain=True)
+    _legacy_db(sd / "decisions.db", "0.3.0")
     before = _tree(sd)
     text = _map_without_open_store(tmp_path, monkeypatch, sd)
     assert text == f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}"
@@ -328,3 +327,25 @@ def test_t13b_a_store_whose_read_raises_gets_the_standing_lines(monkeypatch):
 
     monkeypatch.setattr(server, "_store", Locked())
     assert mcp_entry._grok_session_map() == f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}"
+
+
+@pytest.mark.slow
+def test_later_grok_sessions_do_not_repeat_the_setup_offer(tmp_path: Path) -> None:
+    """Guard against an initialize reminder; see the name-domains-offer design note."""
+    from sidegraph.engine.reader import GraphifyReader
+    from sidegraph.retrieval import build_toc
+
+    sd = tmp_path / ".sidegraph"
+    store = Store(sd)
+    try:
+        reader = GraphifyReader(Path("tests/fixtures/mini_graph.json"))
+        cache = build_toc(store, reader)
+        assert cache["domains"] == []
+        store.set_meta(TOC_CACHE_KEY, json.dumps(cache))
+    finally:
+        store.close()
+    for _ in range(2):
+        text = _initialize(tmp_path, sd, "grok-shell-sidegraph")
+        assert text is not None
+        assert "sidegraph:name-domains" not in text
+        assert len(text) <= mcp_entry.GROK_MAP_MAX_CHARS

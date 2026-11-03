@@ -36,8 +36,7 @@ if TYPE_CHECKING:
 # (file-per-record canonical layout + derived local index — see
 # docs/reference/store-format.md): a repo-committed single SQLite file cannot be merged by
 # git, and sync was rewriting the committed db on every graph rebuild. Legacy 0.2.x/0.3.x
-# single-file stores are migrated forward on ``Store.__init__`` (eagerly, not deferred to
-# first write — see store.py's ``_migrate_legacy``).
+# single-file stores are refused on ``Store.__init__`` (see store.py's ``_refuse_legacy_store``).
 #
 # NOT bumped for ``Domain.seed_anchors`` (durable domain membership, §2a amendment —
 # design/superpowers/specs/2026-07-08-domain-onboarding-design.md): purely additive,
@@ -62,6 +61,13 @@ SCHEMA_VERSION = "0.6.0"
 # Set to "1" on canonical reload and cleared by a completed sync: binding statuses are
 # placeholders until then. Shared by Store and the dependency-light hook index.
 VOLATILE_STALE_KEY = "volatile_stale"
+# A generation counter bumped when a binding is born orphaned for want of a graph, and the
+# generation the last completed sync started from. They differ while an orphan still awaits a
+# rebind: sync's version gate must not skip then, yet (unlike VOLATILE_STALE_KEY) retrieval
+# keeps serving every resolved binding. Sync acknowledges the generation it READ at its start,
+# so an orphan born during the pass leaves the counters apart for the next one.
+REBIND_PENDING_KEY = "rebind_pending_gen"
+REBIND_DONE_KEY = "rebind_done_gen"
 DRIFT_CACHE_KEY = "code_drift_cache"
 # How long a record the refresh stopped seeing keeps its first-seen stamp, so a transient
 # absence (a failed capture group, an orphan then rebind) does not re-announce it as new.
@@ -183,7 +189,13 @@ def checked_marks(prev: object) -> set[str]:
 
 # The canonical, git-committed record directories (relative to Store.path). Order matters
 # only for readability; digest/reload iterate them in this order.
-CANONICAL_SUBDIRS = ("decisions", "facts", "domains", "entities", "bindings", "initiatives")
+CANONICAL_SUBDIRS = ("decisions", "facts", "domains", "entities", "bindings")
+
+# Directories an older Sidegraph wrote and none writes or reads any more (``Initiative`` records,
+# retired in 0.24). Never created, never indexed, never rewritten or removed; the guards that
+# ask "does this store hold anything" and "is every internal entry a real directory" still
+# count them, so retired data is not mistaken for an empty store.
+LEGACY_SUBDIRS = ("initiatives",)
 
 # Compaction (design §7): immutable archive segments. NOT one of CANONICAL_SUBDIRS above —
 # segments are packed multi-record files, not one-file-per-record, and the directory only
@@ -222,6 +234,18 @@ VERIFICATIONS_SUBDIR = "verifications"
 # see design/superpowers/specs/2026-10-29-packed-drift-checks-design.md (D5, D9)
 PACKED_CHECKS_NAME = "packed.shard"
 PACKED_CHECKS_REQUIREMENT = "0.22.0"
+
+# The minimum Sidegraph a store must require so that no client old enough to drop a record field
+# rewrites it. An older client rewrites a record through its own model and silently drops a field
+# it does not know, so a release that adds one raises this constant to itself, and every team
+# then runs `sidegraph-require --sidegraph <that release>` (nothing raises a store's marker
+# automatically). `tests/test_record_fields.py` fails when the stored models' serialisation
+# changes without it; `sidegraph-doctor` names a store whose marker is below it.
+# Baseline: the requirement every store already carries (``FORMAT2_MIN_SIDEGRAPH``). The last
+# field added before the rule (0.20.0, ``DriftCheck.declared_sections``) is optional and ignored
+# by older readers, so no existing store is asked for anything.
+# see docs/reference/stability.md ("Mixed versions")
+RECORD_FIELDS_REQUIREMENT = "0.24.0"
 
 # The format marker: a one-line ``<path>/format`` file (see ``Store._ensure_format_marker``).
 FORMAT_MARKER_NAME = "format"
@@ -285,6 +309,7 @@ _SHARD_FILE_SUFFIX = ".shard"
 SQLITE_SIDECAR_NAMES = ("index.db-journal", "index.db-wal", "index.db-shm")
 STORE_INTERNAL_NAMES = (
     *CANONICAL_SUBDIRS,
+    *LEGACY_SUBDIRS,
     ARCHIVE_SUBDIR,
     VERIFICATIONS_SUBDIR,
     FORMAT_MARKER_NAME,
@@ -396,6 +421,7 @@ def require_listable_record_dirs(store_dir: Path) -> None:
     empty directory is probed too), and each raises on every Python where the 3.14 pathlib
     predicates go quiet. A missing path, or one that is not a directory, is left to
     the walkers (the store creates directories lazily)."""
+    # LEGACY_SUBDIRS is left out: no walker reads it, so an unlistable one empties no pool.
     for name in (*CANONICAL_SUBDIRS, ARCHIVE_SUBDIR, VERIFICATIONS_SUBDIR, SHARDS_SUBDIR):
         record_dir = store_dir / name
         try:
@@ -442,6 +468,16 @@ def symlinked_internals(store_path: Path) -> list[str]:
 
 _LINE_CLIP_MARKER = "…"
 _WHITESPACE_RE = re.compile(r"\s")
+
+
+class LegacyStoreError(ValueError):
+    """The path is a pre-0.1.0 single-file SQLite store, which Sidegraph refuses to open. A
+    ``ValueError``, so callers that report an unopenable store keep working."""
+
+
+class InterruptedMigrationError(LegacyStoreError):
+    """A migration by Sidegraph 0.23.x stopped before it finished: its ``.migration-incomplete``
+    sentinel sits beside the store path, and the records are in a staging directory."""
 
 
 class StoreRequirementError(ValueError):
@@ -936,22 +972,40 @@ def snapshot_signature(store_dir: str | os.PathLike[str]) -> str:
         return "unreadable"
 
 
+def interrupted_migration_sentinel(path: str | os.PathLike[str]) -> Path | None:
+    """The ``<name>.migration-incomplete`` file beside ``path`` that marks an interrupted
+    0.23.x migration, or ``None``. The name comes from the normalized leaf (a trailing ``/`` or
+    ``/.`` names the same store), and a symlinked ``path`` is checked beside both the supplied
+    path and its resolved target, which is where the migration left it."""
+    for candidate in (os.path.abspath(path), os.path.realpath(path)):
+        absolute = Path(candidate)  # "." and ".." name a directory too
+        if not absolute.name:
+            continue
+        sentinel = absolute.with_name(absolute.name + ".migration-incomplete")
+        try:
+            if sentinel.is_file():
+                return sentinel
+        except OSError:
+            continue  # an unreadable parent directory: no sentinel can be seen there
+    return None
+
+
 def open_would_write(store_dir: str | os.PathLike[str]) -> str | None:
     """Why opening ``store_dir`` as a ``Store`` would write a committed file, or ``None``:
-    ``Store.__init__`` creates a missing store, migrates a legacy single-file one (or a
-    ``decisions.db`` inside), resolves a migration sentinel, and backfills a missing canonical
-    subdirectory, format marker or ``.gitignore``, and writes ``stamping_live_since`` into a
-    store with neither that marker nor any record. For callers that promise to write nothing
+    ``Store.__init__`` creates a missing store, refuses a legacy single-file one (or a
+    ``decisions.db`` inside), and backfills a missing canonical subdirectory, format marker or
+    ``.gitignore``, and writes ``stamping_live_since`` into a store with neither that marker
+    nor any record. For callers that promise to write nothing
     (``sidegraph-domains snapshot --dry-run``)."""
     root = Path(store_dir)
     if root.is_file():
-        return f"{root} is a legacy single-file store, and opening it migrates it"
-    if root.name and root.absolute().with_name(root.name + ".migration-incomplete").exists():
-        return f"{root} has an unfinished migration"
+        return f"{root} is a legacy single-file store, which Sidegraph refuses to open"
+    if interrupted_migration_sentinel(root) is not None:
+        return f"{root} has an interrupted migration, which Sidegraph refuses to open"
     if not root.is_dir():
         return f"there is no store at {root}"
     if (root / "decisions.db").is_file():
-        return f"{root} holds a legacy decisions.db, and opening it migrates it"
+        return f"{root} holds a legacy decisions.db, which Sidegraph refuses to open"
     missing = [
         n
         for n in (*CANONICAL_SUBDIRS, FORMAT_MARKER_NAME, GITIGNORE_NAME)
@@ -971,7 +1025,7 @@ def store_has_any_records(store_dir: str | os.PathLike[str]) -> bool:
     ``store._store_has_any_records``, which now delegates).
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.1)"""
     root = Path(store_dir)
-    for sub in CANONICAL_SUBDIRS:
+    for sub in (*CANONICAL_SUBDIRS, *LEGACY_SUBDIRS):
         d = root / sub
         if d.is_dir() and any(d.glob("*.json")):
             return True

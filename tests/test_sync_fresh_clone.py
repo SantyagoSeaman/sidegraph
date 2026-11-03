@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 
 from sidegraph.engine.reader import GraphifyReader
-from sidegraph.server import _propose_decisions_impl, _ratify_decisions_impl
+from sidegraph.server import _propose_decisions_impl, _ratify_impl
 from sidegraph.store import Store
 from sidegraph.sync import sync
 
@@ -43,7 +43,7 @@ def _canonical_snapshot(store_path) -> dict[str, tuple[bytes, int, int]]:
     """relpath -> (content, size, mtime_ns) for every canonical (git-committed) file --
     mirrors test_sync_clean.py's `_snapshot_canonical_dir` helper."""
     out: dict[str, tuple[bytes, int, int]] = {}
-    for sub in ("decisions", "domains", "entities", "bindings", "initiatives"):
+    for sub in ("decisions", "domains", "entities", "bindings"):
         d = store_path / sub
         if not d.is_dir():
             continue
@@ -77,7 +77,7 @@ def test_fresh_clone_regenerates_community_binding_index_only(tmp_path):
     )
     assert results[0]["status"] == "written"
     decision_id = results[0]["decision_id"]
-    _ratify_decisions_impl(store, accept=[decision_id])
+    _ratify_impl(store, accept=[decision_id])
 
     # index-only per Task 1: a live Tier-1 community:1 binding exists in the index right now...
     tier1 = [b for b in store.bindings_for_record(decision_id) if b.tier == 1]

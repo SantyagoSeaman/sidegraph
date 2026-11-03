@@ -47,6 +47,15 @@ from .store import (
 from .store_layout import DRIFT_CACHE_KEY, index_stamp_problem, is_safe_record_id
 from .store_view import SUBDIR_OF, is_packed_store, records_of, shared_view
 from .verify import (
+    BAD_ARCHIVE_SEGMENT,
+    BAD_SHARD_LINE,
+    BAD_VALIDITY_WINDOW,
+    DUPLICATE_PACKED_RECORD,
+    FILENAME_ID_MISMATCH,
+    PARSE_ERROR,
+    SHARD_CONFLICT,
+    SYMLINKED_STORE_ENTRY,
+    UNSAFE_RECORD_ID,
     _check_archive_dir,
     _is_regular_record_file,
     _iter_json_files,
@@ -54,6 +63,7 @@ from .verify import (
     _packed_inventory,
     _run_git,
     find_store_project_repo,
+    verify_snapshot,
 )
 
 if TYPE_CHECKING:
@@ -67,6 +77,7 @@ ORPHANED_BINDING = "orphaned-binding"
 STALE_PROPOSAL = "stale-proposal"
 UNREFERENCED_ENTITY = "unreferenced-entity"
 EXPIRED_OPEN_VALIDITY = "expired-open-validity"
+SUPERSEDED_WITHOUT_LIVE_SUCCESSOR = "superseded-no-live-successor"
 DUPLICATE_ENTITY = "duplicate-entity"
 CODE_DRIFT = "code-drift"
 STALE_INSTRUCTIONS = "stale-instructions"
@@ -80,10 +91,17 @@ PLUGIN_OFF_IN_SUBDIRECTORIES = "plugin-off-in-subdirectories"
 REFRESH_HELPER_OUTDATED = "refresh-helper-outdated"
 STORE_NOT_MIGRATED = "store-not-migrated"
 MAINTENANCE_DUE = "maintenance-due"
+DEPRECATED_AUTO_ACCEPT = "deprecated-auto-accept"
+RECORD_FIELDS_REQUIREMENT_CODE = "record-fields-requirement"
 # Findings ``--check`` never escalates to exit 2: still printed, still in ``--json``, still a
 # session notice. ``maintenance-due`` is routine upkeep on a healthy packed store, so a CI
 # gate must not go red on it (owner decision, 2026-10-27). ``store-not-migrated`` still counts.
-CHECK_EXEMPT_CODES = frozenset({MAINTENANCE_DUE})
+# ``deprecated-auto-accept`` is a deprecation notice, not a store problem.
+# ``superseded-no-live-successor`` can never clear (the restated record has no link to the old
+# one), so a gate that failed on it would fail forever.
+CHECK_EXEMPT_CODES = frozenset(
+    {MAINTENANCE_DUE, DEPRECATED_AUTO_ACCEPT, SUPERSEDED_WITHOUT_LIVE_SUCCESSOR}
+)
 
 # The registry's check id -> the finding code doctor prints. They differ where one check yields
 # findings of one record each: check ``orphaned-records`` is one problem, code ``orphaned-record``
@@ -101,6 +119,8 @@ _FINDING_CODE = {
     "refresh-helper-outdated": REFRESH_HELPER_OUTDATED,
     "store-not-migrated": STORE_NOT_MIGRATED,
     "maintenance-due": MAINTENANCE_DUE,
+    "deprecated-auto-accept": DEPRECATED_AUTO_ACCEPT,
+    "record-fields-requirement": RECORD_FIELDS_REQUIREMENT_CODE,
 }
 
 # Name reported in ``CurationReport.skipped`` when index.db is absent or unusable — the
@@ -627,6 +647,94 @@ def _check_expired_open(decisions: list[tuple[Path, dict]], now: datetime) -> li
             )
         )
     return findings
+
+
+def _check_superseded_without_live_successor(
+    decisions: list[tuple[Path, dict]],
+    facts: list[tuple[Path, dict]],
+    archived_decisions: dict[str, list[tuple[Path, dict]]],
+    root: Path,
+) -> list[Finding]:
+    """superseded-no-live-successor: a ``superseded`` decision or fact that has successors,
+    every one of them ``rejected`` -- the live record is gone from retrieval.
+
+    A store from before the propose-then-drop fix could end here: under manual ratification a
+    proposed successor closed the predecessor when it was written, and dropping the proposal
+    then left it closed with nothing to continue it. A successor in any other status keeps the
+    chain healthy: ``accepted``, ``proposed``, ``deprecated`` (retired on purpose) or itself
+    ``superseded`` (judged on its own successors). No successor at all is verify's
+    ``superseded-without-successor``, not repeated here.
+
+    The advice restates a record, so it is only given when the successor set is fully known:
+    when ``verify_snapshot`` reports any record source it could not read in full (a file that
+    does not parse, a model-invalid record, a bad archive segment or shard line, a conflict),
+    the whole check is withheld until that is healed. Verify runs only once a candidate exists.
+    Archived decisions count on both sides of the link: compaction moves a rejected successor
+    out of ``decisions/``. A record in both places is reported once, at its hot file."""
+    findings: list[Finding] = []
+    hot_ids = {d["id"] for _, d in decisions if isinstance(d.get("id"), str)}
+    archived_only = [
+        entries[0] for rid, entries in archived_decisions.items() if rid not in hot_ids and entries
+    ]
+    for kind, hot, archived in (
+        ("decision", decisions, archived_only),
+        ("fact", facts, []),
+    ):
+        successors: dict[str, list[object]] = {}
+        for _, rec in [*hot, *archived]:
+            parent = rec.get("supersedes")
+            if isinstance(parent, str):
+                successors.setdefault(parent, []).append(rec.get("status"))
+        for path, rec in [*hot, *archived]:
+            rid = rec.get("id")
+            if not isinstance(rid, str) or rec.get("status") != "superseded":
+                continue
+            statuses = successors.get(rid)
+            if not statuses or any(s != "rejected" for s in statuses):
+                continue
+            findings.append(
+                Finding(
+                    SUPERSEDED_WITHOUT_LIVE_SUCCESSOR,
+                    str(path),
+                    f"{kind} is superseded but every successor is rejected, so no live "
+                    f"{kind} carries its knowledge. It cannot be superseded again "
+                    f"(supersede_{kind} takes only a live head): restate it with add_{kind} "
+                    f"as a fresh record, anchored like the original",
+                    record_id=rid,
+                    record_type=kind,
+                )
+            )
+    if findings and _record_sources_unreadable(root):
+        return []
+    return findings
+
+
+# Violations that mean a record source was not read in full, or that the store's reader leaves
+# a record out (a model check it fails, a filename that is not its id), so a successor may be
+# missing or of unknown status. These are every code verify gives a per-record file, archive
+# line or shard line the reader drops. Semantic violations (a dangling reference, a missing
+# successor) are not here: the records they name were read.
+_UNREADABLE_SOURCE_CODES = frozenset(
+    {
+        FILENAME_ID_MISMATCH,
+        BAD_VALIDITY_WINDOW,
+        PARSE_ERROR,
+        BAD_ARCHIVE_SEGMENT,
+        BAD_SHARD_LINE,
+        UNSAFE_RECORD_ID,
+        SHARD_CONFLICT,
+        DUPLICATE_PACKED_RECORD,
+        SYMLINKED_STORE_ENTRY,
+    }
+)
+
+
+def _record_sources_unreadable(root: Path) -> bool:
+    """True when verify finds a record source it could not read in full, or cannot run."""
+    try:
+        return any(v.code in _UNREADABLE_SOURCE_CODES for v in verify_snapshot(root))
+    except OSError:
+        return True
 
 
 def _check_binding_statuses(store_dir: Path) -> tuple[list[Finding], list[str]]:
@@ -2355,9 +2463,11 @@ def _curate(
     # effective records, archive segments included.
     archived_decisions: dict[str, dict] = {}
     archived_domains: dict[str, dict] = {}
+    archived_decision_entries: dict[str, list[tuple[Path, dict]]] = {}
     if not is_packed_store(root):
         archived = _check_archive_dir(root / "archive")
         archived_decisions, archived_domains = archived.decisions, archived.domains
+        archived_decision_entries = archived.decision_entries
     decision_status_by_id: dict[str, str] = {
         did: status
         for did, payload in archived_decisions.items()
@@ -2386,6 +2496,9 @@ def _curate(
     findings += _check_unreferenced_entities(entities, bindings)
     findings += _check_duplicate_entities(entities, bindings)
     findings += _check_expired_open(decisions, now)
+    findings += _check_superseded_without_live_successor(
+        decisions, facts, archived_decision_entries, root
+    )
     surfaced_findings, surfaced_skipped = _check_never_surfaced(root)
     findings += surfaced_findings
     skipped += surfaced_skipped

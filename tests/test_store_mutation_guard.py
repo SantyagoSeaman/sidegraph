@@ -30,7 +30,6 @@ from sidegraph.schema import (
     DriftCheck,
     Entity,
     Fact,
-    Initiative,
     Provenance,
 )
 from sidegraph.store import Store
@@ -468,6 +467,25 @@ def _case_prune_telemetry_events(store: Store) -> tuple[str, object]:
     return "DELETE FROM render_events", lambda: store.prune_telemetry_events(older_than_days=0)
 
 
+def _case_retire(store: Store) -> tuple[str, object]:
+    import sidegraph
+    from sidegraph.store_layout import RECORD_FIELDS_REQUIREMENT
+
+    d = store.add_decision(_decision("case-retire-target"))
+    store.raise_requirement(RECORD_FIELDS_REQUIREMENT, running=RECORD_FIELDS_REQUIREMENT)
+
+    def thunk() -> object:
+        # Run as the release that added ``retired``; a development build only refuses.
+        running = sidegraph.__version__
+        sidegraph.__version__ = RECORD_FIELDS_REQUIREMENT
+        try:
+            return store.retire(d.id, reason="obsolete")
+        finally:
+            sidegraph.__version__ = running
+
+    return "INSERT INTO decisions", thunk
+
+
 def _case_raise_requirement(store: Store) -> tuple[str, object]:
     # The only SQL inside raise_requirement's reservation is BEGIN IMMEDIATE itself: the failure
     # lands after the reservation opens and before the marker is published.
@@ -486,12 +504,6 @@ def _case_prune_meta_prefixes(store: Store) -> tuple[str, object]:
     store.set_meta("case-prune:legacy", "1")
     return "DELETE FROM meta", lambda: store.prune_meta_prefixes(
         ("case-prune:",), older_than=timedelta(days=30)
-    )
-
-
-def _case_upsert_initiative(store: Store) -> tuple[str, object]:
-    return "INSERT INTO initiatives", lambda: store.upsert_initiative(
-        Initiative(name="case-initiative")
     )
 
 
@@ -524,7 +536,7 @@ def _case_delete_meta(store: Store) -> tuple[str, object]:
 
 
 def _case_supersede_domain(store: Store) -> tuple[str, object]:
-    old = store.add_domain(_domain("case-supersede-old"))
+    old = store.add_domain(_domain("case-supersede-old", status="accepted"))
     new = _domain("case-supersede-new", supersedes=old.domain_id)
     return "INSERT INTO domains", lambda: store.supersede_domain(old.domain_id, new)
 
@@ -568,6 +580,7 @@ def _case_record_drift_check(store: Store) -> tuple[str, object]:
 # the patch, over the real connection -- only the returned thunk is meant to run under it.
 _ROLLBACK_CASES = {
     "add_decision": _case_add_decision,
+    "retire": _case_retire,
     "record_drift_check": _case_record_drift_check,
     "upsert_entity": _case_upsert_entity,
     "get_or_create_abstract_entity": _case_get_or_create_abstract_entity,
@@ -587,7 +600,6 @@ _ROLLBACK_CASES = {
     "record_render_event": _case_record_render_event,
     "_delivery_write": _case_delivery_write,
     "prune_telemetry_events": _case_prune_telemetry_events,
-    "upsert_initiative": _case_upsert_initiative,
     "compact": _case_compact,
     "maintain": _case_maintain,
     "set_meta": _case_set_meta,

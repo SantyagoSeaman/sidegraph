@@ -22,6 +22,7 @@ def test_add_and_supersede_domain_store_the_basename(tmp_path):
     store = Store(tmp_path / ".sidegraph")
     added = _add_domain_impl(store, None, "store", "Store", "The store.", seed_anchors=[SEED])
     assert store.get_domain(added["domain_id"]).seed_anchors == FOLDED
+    store.ratify_domains(accept=[added["domain_id"]])  # only an accepted domain is superseded
     succ = _supersede_domain_impl(
         store, None, "store", "store2", "Store", "The store.", seed_anchors=[SEED]
     )

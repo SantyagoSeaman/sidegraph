@@ -17,7 +17,6 @@ from sidegraph.schema import (
     Domain,
     DomainStatus,
     Entity,
-    Initiative,
     Provenance,
     Scope,
 )
@@ -86,7 +85,7 @@ def _bind_domain(store: Store, record_id: str, slug: str, status: str = "live") 
 def test_build_toc_empty_store(tmp_path):
     store = Store(tmp_path / "t.db")
     toc = build_toc(store, None)
-    assert toc == {"domains": [], "initiatives": [], "global_mistakes": []}
+    assert toc == {"domains": [], "global_mistakes": []}
 
 
 def test_build_toc_reader_is_optional(tmp_path):
@@ -318,9 +317,8 @@ def test_build_toc_only_accepted_domains_included(tmp_path):
     assert {d["slug"] for d in toc["domains"]} == {"accepted-one"}
 
 
-def test_build_toc_initiatives_and_global_mistakes(tmp_path):
+def test_build_toc_global_mistakes(tmp_path):
     store = Store(tmp_path / "t.db")
-    store.upsert_initiative(Initiative(name="Trading Core", description="core exec path"))
     _decision(
         store,
         DecisionKind.CONSTRAINT,
@@ -331,7 +329,7 @@ def test_build_toc_initiatives_and_global_mistakes(tmp_path):
     _decision(store, DecisionKind.ADR, title="not a mistake", scope=Scope.GLOBAL)
 
     toc = build_toc(store, None)
-    assert toc["initiatives"] == [{"name": "Trading Core", "description": "core exec path"}]
+    assert "initiatives" not in toc
     assert len(toc["global_mistakes"]) == 1
     assert "never block the event loop" in toc["global_mistakes"][0]
 
@@ -351,7 +349,6 @@ def test_render_toc_renders_domain_title_summary_and_mistake_count():
                 "subdomains": 0,
             },
         ],
-        "initiatives": [],
         "global_mistakes": [],
     }
     text = render_toc(cache)
@@ -377,7 +374,6 @@ def test_render_toc_includes_subdomain_count_when_present():
                 "subdomains": 2,
             },
         ],
-        "initiatives": [],
         "global_mistakes": [],
     }
     text = render_toc(cache)
@@ -396,7 +392,6 @@ def test_render_toc_omits_subdomain_count_when_zero():
                 "subdomains": 0,
             },
         ],
-        "initiatives": [],
         "global_mistakes": [],
     }
     text = render_toc(cache)
@@ -427,7 +422,6 @@ def test_render_toc_truncates_long_summary():
                 "subdomains": 0,
             },
         ],
-        "initiatives": [],
         "global_mistakes": [],
     }
     text = render_toc(cache)
@@ -435,7 +429,8 @@ def test_render_toc_truncates_long_summary():
     assert "…" in text
 
 
-def test_render_toc_renders_initiatives_and_global_mistakes():
+def test_render_toc_renders_global_mistakes_and_ignores_a_cached_initiatives_key():
+    # a toc_cache written before 0.24 still carries "initiatives"; it renders nothing
     cache = {
         "domains": [],
         "initiatives": [{"name": "Trading Core", "description": "core exec path"}],
@@ -443,13 +438,13 @@ def test_render_toc_renders_initiatives_and_global_mistakes():
     }
     text = render_toc(cache)
     assert "## Domains" not in text  # no domains -> section omitted
-    assert "Trading Core" in text
-    assert "core exec path" in text
+    assert "## Initiatives" not in text
+    assert "Trading Core" not in text
     assert "watch for stale cache" in text
 
 
 def test_render_toc_empty_cache_still_has_header():
-    text = render_toc({"domains": [], "initiatives": [], "global_mistakes": []})
+    text = render_toc({"domains": [], "global_mistakes": []})
     assert "# Sidegraph — project memory" in text
     assert "## Domains" not in text
 
@@ -469,7 +464,6 @@ def test_render_toc_dedupes_when_summary_exactly_equals_title():
                 "subdomains": 0,
             },
         ],
-        "initiatives": [],
         "global_mistakes": [],
     }
     text = render_toc(cache)
@@ -493,7 +487,6 @@ def test_render_toc_keeps_both_parts_when_summary_only_starts_with_title():
                 "subdomains": 0,
             },
         ],
-        "initiatives": [],
         "global_mistakes": [],
     }
     text = render_toc(cache)

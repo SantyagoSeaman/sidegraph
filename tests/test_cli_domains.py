@@ -132,7 +132,7 @@ def test_cli_domains_bootstrap_invalid_flag_rejected(tmp_path, capsys, flag, val
     graph = _setup_graph(tmp_path, labels=LABELS)
     db = tmp_path / "t.db"
     assert domains_main(["bootstrap", "--db", str(db), "--graph", str(graph), flag, value]) == 1
-    assert flag in capsys.readouterr().out
+    assert flag in capsys.readouterr().err
     assert not db.exists()
 
 
@@ -143,7 +143,7 @@ def test_cli_domains_bootstrap_unreadable_graph_exits_one(tmp_path, capsys):
         )
         == 1
     )
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 def test_cli_domains_bootstrap_empty_graph_exits_zero(tmp_path, capsys):
@@ -376,7 +376,7 @@ def test_cli_domains_add_unresolvable_parent_exits_one(tmp_path, capsys):
         )
         == 1
     )
-    assert "does not resolve" in capsys.readouterr().out
+    assert "does not resolve" in capsys.readouterr().err
 
 
 def test_cli_domains_add_slug_collision_reported_as_skip(tmp_path, capsys):
@@ -433,7 +433,7 @@ def test_cli_domains_add_invalid_slug_exits_one(tmp_path, capsys):
         )
         == 1
     )
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "error" in out
     assert not db.exists()
 
@@ -455,7 +455,7 @@ def test_cli_domains_store_open_failure_exits_one(tmp_path, capsys, subcommand):
         "add": ["add", "--slug", "payments", "--title", "Payments", "--summary", "s"],
     }[subcommand]
     assert domains_main([argv[0], "--db", str(db), *argv[1:]]) == 1
-    assert "not readable" in capsys.readouterr().out
+    assert "not readable" in capsys.readouterr().err
 
 
 # -- ratify schedules a heal when membership could not be resolved ----------------------

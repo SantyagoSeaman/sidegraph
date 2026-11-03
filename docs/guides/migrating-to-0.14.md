@@ -1,5 +1,7 @@
 # Migrate to Sidegraph 0.14
 
+> **Start here:** Use this historical guide for the coordinated 0.14 client and Graphify migration. Update clients first, protect installed skills, snapshot domain membership, then rebuild and compare. A domain is a named project area. [Glossary](../concepts/glossary.md).
+
 Sidegraph stores decision history beside your code. Domains name the project areas that
 memory covers. An anchor binding links a stored record to code or a document; an orphaned
 binding is a link that no longer resolves.
@@ -28,11 +30,7 @@ The public `@main` source moves with releases; see
 
 ## 1. Update every Sidegraph client and protect installed skills
 
-Set `GRAPHIFY_NO_AUTO_REFRESH=1` **before any Graphify command**. Otherwise newer Graphify
-may replace the agent skills it installed, including local edits. Set it both for this
-shell and for future shells; persistent changes alone do not affect existing processes.
-
-macOS/Linux, and Git Bash (choose the profile your shell actually loads):
+Protect installed skills using the [Graphify refresh setting](../integrations/graphify.md#building-the-graph) before running Graphify.
 
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1

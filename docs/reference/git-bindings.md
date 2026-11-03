@@ -1,11 +1,17 @@
 # Git bindings: commit trailers + `sidegraph-blame`
 
+> **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
+
 Commit trailers carry pointers to decision memory; `sidegraph-blame` joins blame hunks
 back to those records so you can inspect the reasoning associated with a line's history.
 Both are read-only over records: neither creates, mutates, or supersedes a `Decision` or
 `Fact`. A trailer or a blame hunk names a ULID; the record's content always lives in the
 store — never in git history itself. A wrong pointer is corrected by store-side
 supersession, never by rewriting a commit.
+
+A **trailer** is a named line at the end of a Git commit message. `Sidegraph-Decision:` points to a stored decision by its ID. It does not copy the decision into the commit. A **blame hunk** identifies the commit associated with a region of a file.
+
+To use this flow, install the optional CLI, install one of the hooks below, then make a plain interactive commit. Review the commented candidates and uncomment only the decisions that commit implements. Use `sidegraph-blame` afterwards to inspect a file's decision pointers. In a fresh clone, the committed records and trailers travel with Git; install the local hook again if you want new candidates.
 
 The seam for both is [`src/sidegraph/gitio.py`](../../src/sidegraph/gitio.py) — the only
 module that runs git subprocesses for these two features (`capture._capture_commit` and

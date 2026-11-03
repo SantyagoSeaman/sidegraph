@@ -34,6 +34,7 @@ from sidegraph.store import Store, _domain_canonical_payload, _entity_identity_p
 from sidegraph.store_format import (
     inventory_from_disk,
     marker_text,
+    new_store_requirement,
 )
 from sidegraph.store_layout import (
     StoreRequirementError,
@@ -667,7 +668,9 @@ def test_row20_pre_migration_branch_raised_the_requirement(git_repo):
         check_store_requirement(c.store)
     c.commit("resolved to major 1", T2)
     migrate(c.store, dry_run=False, any_branch=True)
-    assert marker_text(2, "0.17.0", 64) == c.read("format").decode("utf-8")
+    # migrate stamps the running release's floor: 0.17.0 before 0.24.0, 0.24.0 from then on
+    expected = marker_text(2, new_store_requirement(), 64)
+    assert expected == c.read("format").decode("utf-8")
     c.commit("completed", T2)
     check_store_requirement(c.store)  # the store is readable again
     assert verify_snapshot(c.store) == []

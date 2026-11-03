@@ -54,6 +54,15 @@ _NUMBER_WORDS = [
     "eighteen",
     "nineteen",
     "twenty",
+    "twenty-one",
+    "twenty-two",
+    "twenty-three",
+    "twenty-four",
+    "twenty-five",
+    "twenty-six",
+    "twenty-seven",
+    "twenty-eight",
+    "twenty-nine",
 ]
 
 
@@ -561,23 +570,42 @@ def test_stability_page_schema_version_and_upgrade_sets_match_the_code():
     it never orphans a store" -- and it names the exact versions that do each. Derived from
     schema.SCHEMA_VERSION and store's own frozensets so the promise cannot outlive them."""
     from sidegraph.schema import SCHEMA_VERSION
-    from sidegraph.store import _MIGRATABLE_SCHEMA_VERSIONS, _RELOADABLE_SCHEMA_VERSIONS
+    from sidegraph.store import _LEGACY_SINGLE_FILE_SCHEMA_VERSIONS, _RELOADABLE_SCHEMA_VERSIONS
 
     doc = _stability_doc()
     assert f"**{SCHEMA_VERSION}**" in doc
-    for version in _MIGRATABLE_SCHEMA_VERSIONS:
+    for version in _LEGACY_SINGLE_FILE_SCHEMA_VERSIONS:
         assert f"`{version}`" in doc, f"migratable {version} missing from stability.md"
     for version in _RELOADABLE_SCHEMA_VERSIONS:
         assert f"`{version}`" in doc, f"reloadable {version} missing from stability.md"
 
 
-def test_stability_page_lists_every_deprecated_mcp_tool():
-    """`ratify_decisions` is the page's evidence that the MCP surface is Provisional -- a tool
-    deprecated before 1.0 shipped. Any FUTURE deprecation is the same evidence and must appear
-    too, or the page keeps arguing from one stale example."""
+_DEPRECATED_HEADING = re.compile(r"^## `([a-z_]+)` \(deprecated\)", re.M)
+
+
+def test_deprecated_heading_parser_matches_a_synthetic_heading():
+    """The deprecated-tool test below is vacuous while no tool is deprecated; this keeps its
+    heading regex proven so a future deprecation cannot slip past an unmatched pattern."""
+    assert set(_DEPRECATED_HEADING.findall("## `some_tool` (deprecated)\n\ntext\n")) == {
+        "some_tool"
+    }
+
+
+def test_mcp_tools_page_lead_count_matches_registered_tools():
+    """mcp-tools.md opens with "<Number word> tools"; derive it from the registered tools."""
+    actual = len(_mcp_tool_names())
+    assert actual < len(_NUMBER_WORDS), f"{actual} tools: extend _NUMBER_WORDS"
+    word = _NUMBER_WORDS[actual].capitalize()
     doc_text = (_ROOT / "docs" / "reference" / "mcp-tools.md").read_text(encoding="utf-8")
-    deprecated = set(re.findall(r"^## `([a-z_]+)` \(deprecated\)", doc_text, re.M))
-    assert deprecated, "parsed zero deprecated tools from mcp-tools.md's headings"
+    assert f"\n{word} tools, all defined in" in doc_text
+
+
+def test_stability_page_lists_every_deprecated_mcp_tool():
+    """A tool deprecated before 1.0 is the evidence that the MCP surface is Provisional. Any
+    deprecation must appear on the stability page, or the page keeps arguing from a stale
+    example. With no deprecated tool today the set is empty and the loop is vacuous."""
+    doc_text = (_ROOT / "docs" / "reference" / "mcp-tools.md").read_text(encoding="utf-8")
+    deprecated = set(_DEPRECATED_HEADING.findall(doc_text))
     stability = _stability_doc()
     for name in deprecated:
         assert f"`{name}`" in stability, f"{name} is deprecated but stability.md never says so"
@@ -625,14 +653,17 @@ def test_profile_count_claims_match_profiles_module():
 # codes); model fields are exactly that shape too, and were the one such set with no
 # mirror. Prose still needs human review; a missing ROW no longer does.
 
-_DATA_MODEL_DOC = _ROOT / "docs" / "concepts" / "data-model.md"
+_DATA_MODEL_DOCS = (
+    _ROOT / "docs" / "concepts" / "data-model.md",
+    _ROOT / "docs" / "reference" / "store-format.md",
+)
 
 # Models documented in prose rather than as a field table. `Provenance` is described
 # inline under Decision ("`Provenance`: `source` (an open `str` …)"); `Descriptor` is a
 # two-field shape spelled out wherever it appears (`{name, file_path?}`). Both are
 # deliberate: a table for either would be longer than the sentence that explains it.
 # Anything else missing a table is a gap, not a style choice — hence the assertion below.
-_PROSE_DOCUMENTED_MODELS = {"Provenance", "Descriptor"}
+_PROSE_DOCUMENTED_MODELS = {"Provenance", "Descriptor", "Retirement"}
 
 _DOC_SECTION_RE = re.compile(r"^## `(\w+)`", re.M)
 _DOC_FIELD_ROW_RE = re.compile(r"^\|\s*`([a-z_]+)`\s*\|", re.M)
@@ -651,8 +682,8 @@ def _schema_models() -> dict[str, type]:
 
 
 def _documented_model_fields() -> dict[str, set[str]]:
-    """``{model name: {field names}}`` from data-model.md's per-model tables."""
-    text = _DATA_MODEL_DOC.read_text(encoding="utf-8")
+    """``{model name: {field names}}`` from the concept and reference field tables."""
+    text = "\n".join(path.read_text(encoding="utf-8") for path in _DATA_MODEL_DOCS)
     out: dict[str, set[str]] = {}
     for section in re.split(r"^## ", text, flags=re.M)[1:]:
         name_match = re.match(r"`(\w+)`", section)

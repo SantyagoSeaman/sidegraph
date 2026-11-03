@@ -1,5 +1,7 @@
 # Migrate to Sidegraph 0.17
 
+> **Start here:** Use this guide to move an existing store to the packed layout. Read the team checklist before running the migration. Shards pack settled records; the derived index remains local. [Glossary](../concepts/glossary.md).
+
 Sidegraph keeps its memory in `.sidegraph/`, a folder you commit beside your code. Until 0.17
 every record was its own small JSON file, so a store with a year of history held thousands of
 files. From 0.17 a store can be **packed**: records that have settled are folded, byte for
@@ -28,8 +30,10 @@ Do these in order. The first four prevent every problem the later sections descr
 1. **Land or close open pull requests that edit existing records.** A pull request that edits a
    record main is about to fold meets a modify/delete conflict, which GitHub's web editor
    cannot resolve. Pull requests that only add new records are not affected.
-2. **Update every Sidegraph client to 0.17 or later** (see [plugin and CLI](#plugin-and-cli)),
-   and move your CI's Sidegraph source to the release.
+2. **Update every Sidegraph client to the release that runs the migration** (0.17 or later; see
+   [plugin and CLI](#plugin-and-cli)), and move your CI's Sidegraph source to that release.
+   The migration's `format` marker requires the migrating release's floor, described
+   [below](#run-the-migration).
 3. **Stop every process older than 0.17 that touches the checkout**: MCP servers and editor
    sessions started before the update. Hooks are per call and need no stopping. Anything older
    than 0.14 matters most: a server of that age that was already running does not recheck
@@ -101,7 +105,7 @@ Use `--shards 256` for a store you expect to grow past about 25,000 records (sha
 small); `--shards 16` for a tiny one. The number is chosen once; a store keeps the count its
 shard files show.
 
-The command refuses, with exit code 2 and the reason, when the checkout is not on the default
+The command refuses, with exit code 1 and the reason (on stderr), when the checkout is not on the default
 branch (pass `--any-branch` to override), when anything under `.sidegraph/` is uncommitted,
 when a record file is unreadable or its name does not match its id, or when a symlink sits
 inside the store. It first writes the new `format` marker, then folds; if it is interrupted,
@@ -110,7 +114,8 @@ Outside a git work tree there is no default branch and no clock, and no git hist
 to: back up the store first (copy the folder), then run it.
 
 The marker requires Sidegraph `>= 0.17.0` from now on, so nobody on an older version can write
-to the store by accident.
+to the store by accident. Sidegraph 0.24.0 or later writes `>= 0.24.0` instead, because its
+records carry fields older clients do not know.
 
 ## After the migration
 

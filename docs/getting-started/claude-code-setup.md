@@ -1,5 +1,7 @@
 # Claude Code setup
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 Connect Sidegraph to [Claude Code](https://docs.claude.com/en/docs/claude-code).
 Two ways to get there: the **plugin** (one step, recommended) or **manual registration** (MCP
 server + hooks registered separately — for fine control, or a source checkout). For how these

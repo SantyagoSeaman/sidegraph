@@ -1,7 +1,7 @@
 [project]
 name = "sidegraph"
-version = "0.23.0"
-description = "Own the memory, rent the graph — a durable decision/lessons layer as a sidecar over a code-graph engine."
+version = "0.24.0"
+description = "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code."
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"

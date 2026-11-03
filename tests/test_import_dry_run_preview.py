@@ -266,12 +266,11 @@ def _import_pair(
     ("label", "seed_status", "run_status", "run_graph", "policy", "expected"),
     [
         ("fresh", None, "accepted", _GRAPH_WITH_SYMBOL, RatifyPolicy.AUTO_ALL, 1),
-        # Case A: first imported `rejected`, re-imported `accepted` with --propose. The write
-        # is `written` yet carries `supersedes` (the rejected record), so auto-low-risk
-        # refuses it in the real run.
-        ("case-A", "rejected", "accepted", _GRAPH_WITH_SYMBOL, RatifyPolicy.AUTO_LOW_RISK, 0),
-        # ... and the same case under auto-all, which admits a superseding draft by shape:
-        # the 0 above is the supersedes gate, not some other refusal.
+        # Case A: first imported `rejected`, re-imported `accepted` with --propose. A rejected
+        # record is not a predecessor, so the write is a fresh `written` one with no `supersedes`
+        # and auto-low-risk admits it in the real run, as the dry run predicts.
+        ("case-A", "rejected", "accepted", _GRAPH_WITH_SYMBOL, RatifyPolicy.AUTO_LOW_RISK, 1),
+        # ... and the same case under auto-all.
         ("case-A-auto-all", "rejected", "accepted", _GRAPH_WITH_SYMBOL, RatifyPolicy.AUTO_ALL, 1),
         # Case B: the symbol left the graph, so the new record inherits the rejected record's
         # live bindings and has no anchor of its own.
@@ -429,7 +428,7 @@ _REJECTED_2024 = _proposal("rejected", "Because.")
             (2, 0, 0, 1),
         ),
         # Identical content, the first copy rejected and the second open: a status flip, so a
-        # write that supersedes the rejected record rather than a skipped repeat ...
+        # fresh write (a rejected record is no predecessor) rather than a skipped repeat ...
         (
             "two-archived-first-rejected",
             {_ARCHIVED_2024: _REJECTED_2024, _ARCHIVED_2025: _proposal(None, "Because.")},
@@ -437,13 +436,13 @@ _REJECTED_2024 = _proposal("rejected", "Because.")
             RatifyPolicy.AUTO_ALL,
             (2, 0, 0, 1),
         ),
-        # ... and because it carries `supersedes`, auto-low-risk refuses it in the real run.
+        # ... which carries no `supersedes`, so auto-low-risk admits it in the real run too.
         (
             "two-archived-first-rejected-low-risk",
             {_ARCHIVED_2024: _REJECTED_2024, _ARCHIVED_2025: _proposal(None, "Because.")},
             None,
             RatifyPolicy.AUTO_LOW_RISK,
-            (2, 0, 0, 0),
+            (2, 0, 0, 1),
         ),
         # Different content, the first copy written and auto-ratified: the live copy supersedes it.
         (

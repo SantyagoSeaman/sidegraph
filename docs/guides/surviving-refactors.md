@@ -1,17 +1,14 @@
 # Surviving refactors
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 Code and docs change; the store's job is to keep decisions anchored — or to say plainly that
-it can't, never to guess. This is the sync/rebinding job (`src/sidegraph/sync.py`).
+it cannot, never to guess. Rebuild the graph, then sync the record bindings.
 
 ## Rebuild, then sync
 
-Rebuilding the graph is the engine's job — `graphify update .` in the terminal (LLM-free,
-incremental). The sync half is Sidegraph's, and you rarely need to run it by hand: both
-`get_task_context` and `sidegraph-session-start` call `maybe_sync()` on the read path, so a
-stale mapping heals itself on the next tool call or session start, best-effort — but that
-lazy path is silent (a sync failure there just degrades to un-synced retrieval; nothing is
-ever reported). When you want to **see** the rebind report immediately (e.g. right after a
-rebuild), two equivalent paths:
+Rebuild the graph after code or document changes. Sidegraph checks for changed graph mappings
+on retrieval and at session start. To inspect the result immediately, choose one path:
 
 - **MCP-first, from inside a session:** call the `sync_anchors` MCP tool —
   `sync_anchors(force=True)` re-runs even when the graph version hasn't changed; omit
@@ -21,9 +18,18 @@ rebuild), two equivalent paths:
   [`heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md) skill leads with.
 - **CLI fallback**, for scripted/CI use or outside a session (commands are shown by name; see [running the CLIs](../reference/cli.md#running-the-clis-beside-the-plugin) for the `uvx` form):
 
+  macOS or Linux:
+
   ```bash
   export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-  $env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+  graphify update .            # rebuild graphify-out/graph.json (LLM-free, incremental)
+  sidegraph-sync        # re-resolve every tracked entity; prints the report
+  ```
+
+  Windows PowerShell:
+
+  ```powershell
+  $env:GRAPHIFY_NO_AUTO_REFRESH = "1"
   graphify update .            # rebuild graphify-out/graph.json (LLM-free, incremental)
   sidegraph-sync        # re-resolve every tracked entity; prints the report
   ```
@@ -36,169 +42,28 @@ rebuild), two equivalent paths:
   project's; to sync a store copied elsewhere against the real checkout, run from the
   checkout and pass `--graph graphify-out/graph.json`.
 
-Sync is gated on `graph_version` — `<built_at_commit>:<content hash>` when the corpus is a
-git repo, or a `content:<hash>` fallback for non-git corpora (see
-[`reference/configuration.md`](../reference/configuration.md)): if the graph hasn't changed
-since the last sync, both the CLI and the lazy read-path trigger skip the full pass —
-except that an entity remembered under `pending_uncommitted_moves` (a move the last pass
-left as `moved_uncommitted`) is re-verified once `HEAD` has moved, in a narrow pass over just
-those entities, and **unless** a canonical reload (`git pull`, merge, branch switch, even a bare `touch`) has reset the
-store's volatile state (domain `communities`, entity `last_seen_*`, binding statuses) since
-the last sync; that always reruns the pass once automatically, even though `graph_version`
-itself hasn't moved. The content hash is folded into both forms because Graphify can rewrite
-`graph.json` without bumping `built_at_commit` (e.g. rebuilding against a dirty working
-tree) — a bare commit would miss that the content changed and let sync silently serve stale
-anchors.
+If the graph has not changed, a routine sync can skip the full pass. After committing a file
+move, sync checks pending moves again. Use `--force` when you need an unconditional check.
+See [sync triggers](../reference/anchoring-internals.md#sync-triggers) for the version and
+reload rules.
 
 ## The rebind ladder
 
-Every tracked concrete `Entity` (one with a `descriptor`) is re-resolved through a
-deterministic ladder, one rung at a time, and the first rung that fires wins:
+An exact match stays live. A verified committed file move can follow its target. An ambiguous name degrades, and a missing target becomes orphaned. Sidegraph keeps the record in every case.
 
-| Status | What happened | What Sidegraph does |
-|---|---|---|
-| `unchanged` | Exact `name`+`file_path` match, same node id as last sync | Leaf binding stays `live`; still checks for community re-pointing (below). |
-| `rebound` | Exact `name`+`file_path` match, but the node id changed | Leaf binding stays/returns to `live`, mapping refreshed to the new node id. |
-| `moved` | No exact match, but a *unique* name-only match exists **with the same name** (decoration stripped, case kept) **in a file of the same suffix**, **the entity's old `file_path` is confirmed gone from disk**, that same move is **independently confirmed by committed git history** (old path absent, new path tracked — both at `HEAD`), AND git shows the new path **arriving with the old path's removal** | The entity's `descriptor.file_path` is updated to follow it; leaf binding heals to `live`. A same-name hit in a file of a *different* suffix (e.g. a vanished code symbol colliding with an unrelated doc heading) is treated as a collision, not a move, and falls through to orphaned instead — as does any hit whose old path is still on disk, a hit that is only a case-insensitive match (a deleted type `Priority` against an old member `.priority`), and a new path that was already there before the old one went (below). |
-| `moved_uncommitted` | Same disk-level evidence as `moved` (unique same-suffix hit of the same name, old path gone from disk), but git's committed history at `HEAD` does not yet confirm it — an uncommitted delete, rename, or stash on this one working tree — and the new path is not already in `HEAD` (one that is was there before the old path went, so no commit can make it a move: that is `orphaned`) | Nothing is touched — the binding, descriptor, and node mapping are all left exactly as they were. Commit the move (or set `SIDEGRAPH_TRUST_DIRTY_TREE=on`, see below). Sidegraph remembers the entity, and the first sync after `HEAD` moves re-verifies it even if the graph was not rebuilt. If the old path is back on disk (the rename was reverted or stashed) the leaf is left untouched, and the entity stays watched until a later `HEAD` change or a rebuild settles it. A new file that takes the old path before the move is committed and synced hides the move: it surfaces as `orphaned` after the next graph rebuild. |
-| `ambiguous` | More than one node now matches (identical path-less external stubs count as one match) | Leaf binding flips to `degraded` (not deleted). If every candidate shares one community, that community is still used for re-pointing. |
-| `orphaned` | No match, or only a name match that cannot be followed as a move (including identical path-less external stubs for an entity whose file disappeared) | Leaf binding flips to `orphaned`. If the entity's file still exists and its nodes agree on a single community, that community is used for re-pointing (see below) — Sidegraph is not guessing which node the entity *became*, only where its code still lives. |
-
-None of this ever deletes a binding — only its `status` changes (`live` / `degraded` /
-`orphaned`), which is why the ladder can run repeatedly without losing history.
-
-### Why `moved` checks the disk
-
-A unique same-name, same-suffix hit is not on its own evidence of a move: the entity's own
-file may still be sitting right there, with only the *symbol* renamed inside it, while an
-unrelated file elsewhere happens to define something with the old name. Adopting that hit
-would silently re-anchor the decision onto code it was never about. So the rung requires a
-second, independent signal — the old `descriptor.file_path` no longer exists in the checkout —
-before it follows a name.
-
-"Confirmed gone" is not the same as "unknown". Sidegraph locates the checkout from the
-**graph's** own location (`git rev-parse --show-toplevel` next to `graph.json`, not next to
-the store — a store directory is routinely copied elsewhere for inspection). When that lookup
-can't answer — a corpus with no `.git` at all, or git unavailable — the rung **fails closed**
-for the whole pass: nothing is adopted, and every candidate that would have moved lands
-`orphaned` instead. A real move that degrades to `orphaned` is visible in `sidegraph-doctor`
-and repairable with [`sidegraph:heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md);
-a wrong adoption is silent, and silence is the worse failure.
-
-The disk check alone is not enough, though: it reflects whatever this one working tree
-looks like *right now*, and an uncommitted `rm`/`git mv`/`git stash` makes the old path
-disappear from disk just as convincingly as a real, shared move. Since `moved` rewrites the
-entity's canonical, **repo-committed** `descriptor` — the same file every other clone reads —
-trusting a purely local, unshared change there would let one person's dirty tree silently
-corrupt the team's memory. So the rung requires a *third* signal before it adopts: the same
-move confirmed by **committed** history, via `git cat-file -e HEAD:<path>` — the old path
-absent from `HEAD`'s tree, and the new path present in it. When the disk-level evidence looks
-like a move but git's `HEAD` doesn't yet back it up, the rung reports `moved_uncommitted` and
-leaves everything untouched instead of guessing; committing the move (or, on a fresh
-repository with no commits yet, making one) heals it the normal way, no different from any
-other rung. The entity is remembered along with `HEAD`, so the first sync after `HEAD` moves
-re-verifies it — lazily or explicitly, and even when the graph was not rebuilt. If the rename
-was reverted or stashed instead, the old path is back on disk and the leaf is left as it was.
-For the rare case of someone who has verified their own working tree and wants the old,
-disk-only behavior back, `SIDEGRAPH_TRUST_DIRTY_TREE=on` is a documented, off-by-default
-escape hatch scoped to exactly this one check.
-
-Committed history that shows the old path gone and the new path present is still not a move:
-a file that was there all along says the same. A type deleted along with its file, whose name
-matches (ignoring case) an old member in some unrelated file, looks exactly like that. So the
-rung asks two more questions before it adopts. First, is the hit the same symbol? The name
-must be equal once the decoration both sides carry (`()`, a leading `.`) is stripped, with
-**case kept**: `Priority` is not `.priority`. Second, did the new path arrive with the old
-one's removal? Sidegraph finds the commit on the main line of history (`git log
---first-parent -m`, so a branch merged with `--no-ff` counts as one change) that deleted the
-old path, and requires its first parent to lack the new path and the commit itself to hold
-it. Any other answer refuses: a git call that fails, a history with no deletion in it (the
-old path was never committed, say a gitignored directory), a shallow clone whose boundary
-hides the answer, or a new path added long after the deletion. Moves out of a path git never
-held are therefore reported `orphaned`, and `heal-anchors` re-anchors them. With
-`SIDEGRAPH_TRUST_DIRTY_TREE=on`, where the old path is still in `HEAD`, the new path must be
-absent from `HEAD` instead: new in the working tree. A refused move falls through to
-`orphaned`. `moved_uncommitted` is kept for a move that can still come true: the old path
-is gone from the working tree and the new path is not in `HEAD` yet.
-
-Git's history alone does not show some real moves as one change, so these are refused too.
-Each ends `orphaned`, and `heal-anchors` re-anchors it:
-
-- **The add and the delete in two commits on the first-parent line.** The new file lands in
-  one commit and the old one goes in the next, whether both are on the main branch, or a branch
-  is merged fast-forward or rebase-merged (a `--no-ff` merge is judged as one change and is
-  adopted).
-- **A second move before any sync ran.** The file went `A` to `B` to `C` while the descriptor
-  still names `A`: the commit that deleted `A` did not add `C`.
-- **An old path that was re-added and then deleted again.** The latest deletion is the one
-  that is judged, and it need not be the move.
-
-If an earlier release adopted a false move, it rewrote an entity's `descriptor.file_path`.
-List those rewrites with
-`git log -p --diff-filter=M -- .sidegraph/entities/ .sidegraph/shards/ | grep -E '^(commit |[-+].*"file_path")'`
-and check each one against the rule above. The second path covers a format-2 store, where
-maintenance has packed entities into one-line records inside shard files.
+See the [detailed contract](../reference/anchoring-internals.md#the-rebind-ladder).
 
 ## Community re-pointing
 
-Leiden community ids are **snapshot labels, not identities** — a rebuild can renumber every
-community (observed on a real repo: `149 → 19 → 256` across three successive rebuilds).
-So on every sync, for every entity with an *observed* community that differs from its last-seen
-baseline, Sidegraph:
+A rebuild can renumber communities. Sync refreshes these area-level links in the local index.
 
-1. Creates (or reuses) a Tier-1 abstract entity for the new `community:<id>`, and adds a
-   `live` binding to it for every decision leaf-bound to that entity.
-2. Reconciles the old `community:<id>` per record, once the whole pass has run: its
-   binding flips to `orphaned` (never deleted) only when no other live or degraded leaf of that same
-   record still sits in that community. While a sibling leaf does, the old row stays `live`.
-
-An unknown community baseline on a live or degraded sibling makes reconcile leave the old row
-live. A live path-less leaf successfully mapped on the current graph with no community is known
-to hold none, so it does not block reconciliation. A degraded leaf or a mapping left from an
-earlier graph provides no such evidence. When stubs that once shared a community split, the
-resolved leaf vacates that group; its row is retired unless a sibling still holds it or an
-unknown baseline makes reconcile abstain.
-
-Both of those are **index-only**: the `community:<id>` entity and the Tier-1 binding pointing
-at it are derived state, not committed to a canonical file — old or new. Repointing a hundred
-decisions across a Leiden renumbering never produces a git diff; it's the exact same
-sync-clean guarantee that covers `Entity.last_seen_*` and `AnchorBinding.status` (see [store
-format](../reference/store-format.md#community-bindings-are-derived-not-committed)). A
-domain-covered Tier-1 binding is unaffected by any of this — it points at the domain's own
-committed `domain:<slug>` entity instead, which sync never touches.
-
-This runs regardless of which ladder rung the entity landed on — even an `orphaned` entity
-gets re-pointed to its surviving file's community when one is unambiguous, and an
-`ambiguous` entity gets re-pointed if its candidates share a community. A `sync` run with
-re-pointed bindings prints `re-pointed N community binding(s)` — the count is per-anchor
-bindings re-pointed, not distinct decisions (a decision with more than one leaf bound to the
-same entity would count more than once).
+See the [detailed contract](../reference/anchoring-internals.md#community-re-pointing).
 
 ## Fresh-clone recovery
 
-A fresh `git clone` of a repo with a committed `.sidegraph/` has no community state at all —
-`community:*` bindings and entities were never written to a canonical file to begin with (see
-above), and `index.db` itself is gitignored, so it isn't cloned either; there is no
-`last_seen_community` baseline anywhere on disk. This is by design, not a gap to work around:
-the very first graph rebuild (`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set) followed by `sidegraph-sync` after the clone self-heals it. With no
-baseline, every *tracked* entity's community comparison starts from `None`, so the ordinary
-rebind ladder above re-resolves each Tier-2 leaf against the live graph (typically landing on
-`rebound`, since the cold reload also resets `last_seen_node_id`) and re-derives that leaf's
-Tier-1 `community:<id>` binding from scratch, purely in the index — no new code path, just the
-same repointing machinery running with an empty baseline instead of a stale one. Nothing about
-a fresh clone requires the old store to have committed a "community fallback" anywhere; the
-committed anchor set a clone actually inherits (Tier-2 leaves, Tier-0, `domain:*` Tier-1) is
-exactly what regenerating community state needs to work from.
+After cloning a repository with its committed store, rebuild the graph and run `sidegraph-sync` to regenerate local mappings.
 
-**Residual: leafless Tier-1 bindings aren't covered.** Regeneration is driven by re-resolving
-*tracked* (Tier-2) entities — an ambiguous-match anchor whose candidates all share one
-community never gets a Tier-2 leaf in the first place (`resolve_and_bind` only creates a leaf
-entity on `resolved`/`unresolved`, never on `ambiguous` — see
-[anchoring](../concepts/anchoring.md#graceful-degradation-ladder-resolved---ambiguous---orphaned)),
-so its bare Tier-1 community binding has nothing for sync to re-derive from and does not come
-back after a clone. A decision anchored *only* that way effectively loses its anchor across a
-fresh clone until a new capture touches the same reference again. This is a current
-limitation of leafless community bindings.
+See the [detailed contract](../reference/anchoring-internals.md#fresh-clone-recovery).
 
 ## Reading and healing `stale decisions` warnings
 
@@ -210,45 +75,49 @@ keep a decision retrievable via community/initiative fallback, but they don't vo
 underlying claim; the leaf-only check is what flags "the concrete thing this refers to is
 gone, go look."
 
-Two ways to heal a flagged decision (the
-[`sidegraph:heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md) skill walks an
-agent through this triage, finding by finding):
+Choose the action that matches the record and the code. The
+[`sidegraph:heal-anchors`](../../plugin/sidegraph/skills/heal-anchors/SKILL.md) skill walks
+this triage finding by finding:
 
-- **Restore the name** (undo the rename, or re-add the removed symbol/heading) and rebuild
-  the graph (`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set), then re-run `sidegraph-sync` — the orphaned anchor heals back to `rebound` (or
-  `unchanged`) once an exact match exists again.
-- **Supersede the decision** (`supersede_decision`, or `supersedes` in a `propose_decisions`
-  draft) if the code it described is genuinely gone for good — this appends a fresh record
-  and closes the old one, keeping the "tried before, abandoned because…" history intact
-  rather than leaving a dangling warning forever.
+- **The record still holds, but its target moved or was renamed.** Use
+  [`add_anchors`](../reference/mcp-tools.md#add_anchors) with the precise current name and
+  file path. This appends bindings and keeps older ones as history. A damaged binding stays
+  reported until sync re-resolves its original target. If the old name
+  should still exist, restore it, rebuild the graph with `GRAPHIFY_NO_AUTO_REFRESH=1` and
+  sync again.
+- **An accepted, open decision's content changed.** Write a real successor with explicit fresh
+  anchors. A `propose_decisions` draft with `supersedes` leaves the accepted predecessor
+  active until ratification. A direct accepted `supersede_decision` replacement closes it
+  in that call. Omitting fresh anchors inherits the old bindings, including orphaned ones.
+  See the [supersession invariant](../concepts/data-model.md#the-supersession-invariant).
+- **The knowledge is obsolete with no replacement.** For an accepted decision, use
+  [`retire_decision`](../reference/mcp-tools.md#retire_decision) after checking its version,
+  pending-successor and evidence guards. For an obsolete proposal, use
+  [`ratify(drop=[...])`](../reference/mcp-tools.md#ratify). A pending proposal is not a live
+  accepted head to supersede.
+
+For a proposal whose content is wrong, ask the human to drop it with `ratify(drop=[...])`,
+then propose corrected knowledge without superseding the dropped proposal. Keep a closed
+record as history. Find the accepted, open head of its chain before proposing a successor.
+If there is no live head, restate current knowledge as a fresh anchored record. These
+rules also apply to an accepted decision whose `valid_to` is already set.
+
+Keep the historical records. Healing a target and changing a claim are different actions.
 
 ## Facts anchor the same way
 
-A `Fact`'s bindings are ordinary `AnchorBinding` rows too — same table, keyed on the same
-`record_id` column a decision's bindings use (see
-[`reference/store-format.md`](../reference/store-format.md)). The rebind ladder and community
-re-pointing above don't know or care whether `record_id` points at a `Decision` or a `Fact`: a
-fact anchored to a renamed function degrades to `ambiguous`/`orphaned` and heals back to `live`
-on the exact same rules — nothing fact-specific to run. The one thing to get right is
-`supersede_fact`: omitting `anchors` inherits the predecessor's bindings **verbatim** — same
-`entity_id`/`tier`/`weight`/`relation`/`status`, including an already-`orphaned` one, carried
-over as-is (identical to `supersede_decision`'s own default). Don't omit `anchors` when the
-point of the supersession is to re-anchor a fact whose predecessor had degraded — pass fresh
-ones explicitly, or the successor inherits the same orphaned binding and starts out already
-needing another sync pass.
+Sync treats fact anchors like decision anchors. Use `add_anchors` for binding repair. If
+the fact's content changed, apply the status checks above and provide fresh anchors for a
+real successor.
+
+See the [detailed contract](../reference/anchoring-internals.md#facts-anchor-the-same-way).
 
 ## The never-guess promise
 
-Nothing in the rebind ladder silently re-anchors a decision to a *different* entity that
-merely looks plausible. `moved` only fires on a **unique** name-only hit **that is the same
-name, case kept,** within the same file type **whose old path is confirmed gone from disk AND
-confirmed by committed git history, with the new path arriving in the change that removed
-the old one** (see [why `moved` checks the disk](#why-moved-checks-the-disk)); anything with more than one
-candidate is `ambiguous`, not resolved; anything unverifiable stays `orphaned`; and disk-level
-evidence git's `HEAD` doesn't yet back up reports `moved_uncommitted` rather than adopting on
-a dirty tree. An `ambiguous` or
-`orphaned` entity's `last_seen_node_id` is **never** touched by the community re-pointing
-path — only community/Tier-1 bindings move, never the leaf's node mapping. If Sidegraph can't
-say for certain "this is the same thing," it says so (`ambiguous`/`orphaned`) instead of
-guessing — a false rebind is worse than an honestly degraded one, because it would surface a
-decision against the wrong code with no way to tell.
+Sync follows only moves it can verify. Review an ambiguous or orphaned result and use the heal-anchors skill to repair it.
+
+See the [detailed contract](../reference/anchoring-internals.md#the-never-guess-promise).
+
+### Why `moved` checks the disk
+
+See [the detailed contract](../reference/anchoring-internals.md#why-moved-checks-the-disk).

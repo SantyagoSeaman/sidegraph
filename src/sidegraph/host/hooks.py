@@ -60,6 +60,7 @@ from .diagnostics import HookDiagnostics
 if TYPE_CHECKING:
     from ..hot_index import HotIndex, Record
     from ..integrity import Check, Problem, RunResult
+    from ..retrieval import MapSection
 
 CAPTURE_NUDGE = (
     "Sidegraph: if this session produced a durable decision, lesson, or gotcha — or a "
@@ -105,6 +106,267 @@ def version_line() -> str:
     from .. import __version__
 
     return f"Sidegraph {__version__}"
+
+
+# Two host limits hold every SessionStart, and the output is trimmed to whichever binds first.
+# Claude Code caps a hook's `additionalContext` and `systemMessage` strings at 10,000 characters
+# each and replaces a longer one with a file path and a 2,000-character preview the model is not
+# asked to read (https://code.claude.com/docs/en/hooks); 9,500 characters (Python `len`, code
+# points) leaves a margin. Claude Code likely counts UTF-16 units, where an astral character
+# (an emoji) is two: the byte budget keeps that safe, since such a character costs 12 bytes here.
+# Muse discards a hook's output over 16 KiB and its adapter gives up at 15 KiB
+# (plugin/sidegraph/muse/hook.py), so the whole printed line (JSON envelope, `systemMessage`,
+# trailing newline) is held to 14 KiB of UTF-8. `json.dumps` escapes non-ASCII as `\uXXXX`, so
+# a Cyrillic name costs one character but six bytes: ASCII maps hit the character cap first,
+# non-ASCII ones the byte cap. Both are measured on what is printed, never estimated.
+HOOK_CONTEXT_MAX_CHARS = 9500
+SESSION_START_OUTPUT_BUDGET = 14 * 1024
+
+# The map sections an over-budget SessionStart trims, lowest priority first: the section's
+# heading, the noun for its entries, and the call that lists them all (None: no tool lists that
+# exact set). Inside a section, entries go by their rank, then from the tail (a domain map drops
+# subdomains, then domains with no mistakes, then the rest). Unratified proposals go first (the
+# status line still counts them), then the long lists of areas, then recorded memory, global
+# mistakes last.
+_MAP_TRIM_ORDER: tuple[tuple[str, str, str | None], ...] = (
+    ("## Unratified proposals", "unratified proposal", "list_proposed"),
+    ("## Domains", "domain", "list_domains"),
+    ("## Communities", "community", None),
+    ("## Known facts", "fact", "list_facts"),
+    ("## Recorded decisions", "decision", 'retrieve_decisions(status="accepted")'),
+    (
+        "## Global mistakes & constraints",
+        "mistake",
+        'retrieve_decisions(kind=["gotcha", "constraint", "lesson"])',
+    ),
+)
+# Room kept for the omission line while entries are dropped by their measured cost.
+_OMISSION_RESERVE = 512
+# When the protected lines alone break a limit, each status line and notice is clipped to this.
+_PROTECTED_LINE_CHARS = 300
+
+
+def _plural(count: int, noun: str) -> str:
+    if count == 1:
+        return f"1 {noun}"
+    return f"{count} {noun[:-1]}ies" if noun.endswith("y") else f"{count} {noun}s"
+
+
+def _omission_line(omitted: dict[str, int]) -> str:
+    """The closing line naming what a trim left out and where to find it; ``""`` for nothing."""
+    total = sum(omitted.values())
+    if not total:
+        return ""
+    parts = []
+    for heading, noun, tool in _MAP_TRIM_ORDER:
+        count = omitted.get(heading, 0)
+        if count:
+            parts.append(_plural(count, noun) + (f" ({tool})" if tool else ""))
+    return (
+        f"Sidegraph: {_plural(total, 'map entry')} omitted to fit the hook output limit: "
+        + ", ".join(parts)
+        + "."
+    )
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _session_line(system: str | None, context: str | None) -> str:
+    """A SessionStart JSON line: ``systemMessage`` and ``hookSpecificOutput`` each when given."""
+    output: dict = {}
+    if system is not None:
+        output["systemMessage"] = system
+    if context is not None:
+        output["hookSpecificOutput"] = {
+            "hookEventName": "SessionStart",
+            "additionalContext": context,
+        }
+    return json.dumps(output)
+
+
+def _cut(value: str, fits_with: Callable[[str], bool]) -> str:
+    """The longest prefix of ``value``, ended by ``…``, that ``fits_with`` accepts. The cut is on
+    the string, before any escaping, so it never falls inside a character."""
+    low, high = 0, len(value)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if fits_with(value[:mid] + "…"):
+            low = mid
+        else:
+            high = mid - 1
+    return value[:low] + "…"
+
+
+def _bounded_output(
+    system: str | None,
+    context: str | None,
+    budget: int = SESSION_START_OUTPUT_BUDGET,
+    max_chars: int = HOOK_CONTEXT_MAX_CHARS,
+) -> str:
+    """The one way a SessionStart answer is printed (without its newline): :func:`_session_line`
+    unchanged when both strings are at most ``max_chars`` characters and the line at most
+    ``budget`` bytes, newline counted. Otherwise the last resort: notices over half the bytes
+    are cut to half (the other half is the context's), then the context, then the notices are cut
+    to the longest prefix that fits. ``{}`` if the result still breaks a limit.
+    """
+
+    def fits(system: str | None, context: str | None) -> bool:
+        return (
+            len(system or "") <= max_chars
+            and len(context or "") <= max_chars
+            and len(_session_line(system, context).encode("utf-8")) + 1 <= budget
+        )
+
+    if fits(system, context):
+        return _session_line(system, context)
+    if system is not None and context is not None and not fits(system, ""):
+        half = budget // 2
+        system = _cut(
+            system,
+            lambda m: len(m) <= max_chars and len(_session_line(m, "").encode("utf-8")) + 1 <= half,
+        )
+    if context is not None:
+        context = _cut(context, lambda t: fits(system, t))
+    if system is not None and not fits(system, context):
+        system = _cut(system, lambda m: fits(m, context))
+    return _session_line(system, context) if fits(system, context) else "{}"
+
+
+def _fit_session_output(
+    head: str,
+    sections: Sequence[MapSection],
+    status: Sequence[str],
+    notices: Sequence[str],
+    budget: int = SESSION_START_OUTPUT_BUDGET,
+    max_chars: int = HOOK_CONTEXT_MAX_CHARS,
+) -> str:
+    """The SessionStart JSON line (without its newline). ``additionalContext`` is ``head``, the
+    map rendered from ``sections`` and the ``status`` lines; ``systemMessage`` the ``notices``.
+
+    Both strings are held to ``max_chars`` characters and the line to ``budget`` bytes with the
+    newline counted. Under both limits the line is what the hook printed before the budget
+    existed. Over either, in order, until it fits:
+
+    1. whole map entries are dropped in :data:`_MAP_TRIM_ORDER`, then any dropped entry that
+       still fits is put back (one long entry does not empty its section);
+    2. the whole map goes;
+    3. each status line and notice is clipped to :data:`_PROTECTED_LINE_CHARS`;
+    4. the context, then the notices, are cut to fit, at a character (never inside a UTF-8
+       sequence: the cut is on the string, the escaping after it).
+
+    The context ends with one line naming what was omitted, when anything was. The returned
+    line is checked against both limits; ``{}`` if it somehow still breaks one.
+    """
+    from ..retrieval import MapSection, one_line, render_sections
+
+    def compose(kept: Sequence[MapSection] | None, lines: Sequence[str], note: str) -> str:
+        text = head.rstrip("\n") if kept is None else head + render_sections(kept)
+        text += "".join(f"\n\n{line}" for line in lines)
+        return f"{text}\n\n{note}" if note else text
+
+    def serialize(text: str, system: str) -> str:
+        return _session_line(system or None, text)
+
+    def fits(text: str, system: str, printed: str) -> bool:
+        return (
+            len(text) <= max_chars
+            and len(system) <= max_chars
+            and len(printed.encode("utf-8")) + 1 <= budget
+        )
+
+    system = _clip("\n".join(notices), max_chars)
+    text = compose(sections, status, "")
+    printed = serialize(text, system)
+    if fits(text, system, printed):
+        return printed
+
+    # 1. Whole entries, by their measured cost: one serialization, not one per entry.
+    rank = {heading: n for n, (heading, _, _) in enumerate(_MAP_TRIM_ORDER)}
+    order = sorted(
+        ((s, e) for s, section in enumerate(sections) for e in range(len(section.entries))),
+        key=lambda se: (
+            rank.get(sections[se[0]].heading, len(rank)),
+            sections[se[0]].entries[se[1]].rank,
+            -se[1],
+        ),
+    )
+
+    def costs(s: int, e: int) -> tuple[int, int]:
+        line = one_line(sections[s].entries[e].text) + "\n"
+        return len(json.dumps(line).encode("utf-8")) - 2, len(line)
+
+    def heading_costs(s: int) -> tuple[int, int]:
+        heading = sections[s].heading + "\n\n"
+        return len(json.dumps(heading).encode("utf-8")) - 2, len(heading)
+
+    def kept_sections(dropped: set[tuple[int, int]]) -> list[MapSection]:
+        return [
+            MapSection(
+                section.heading,
+                tuple(entry for e, entry in enumerate(section.entries) if (s, e) not in dropped),
+            )
+            for s, section in enumerate(sections)
+        ]
+
+    def omitted_of(dropped: set[tuple[int, int]]) -> dict[str, int]:
+        omitted: dict[str, int] = {}
+        for s, _ in dropped:
+            omitted[sections[s].heading] = omitted.get(sections[s].heading, 0) + 1
+        return omitted
+
+    def render(dropped: set[tuple[int, int]]) -> tuple[str, str]:
+        text = compose(kept_sections(dropped), status, _omission_line(omitted_of(dropped)))
+        return text, serialize(text, system)
+
+    left = [len(section.entries) for section in sections]
+    byte_room = budget - _OMISSION_RESERVE - (len(printed.encode("utf-8")) + 1)
+    char_room = max_chars - _OMISSION_RESERVE - len(text)
+    dropped: set[tuple[int, int]] = set()
+    for s, e in order:
+        if byte_room >= 0 and char_room >= 0:
+            break
+        b, c = costs(s, e)
+        left[s] -= 1
+        if not left[s]:
+            hb, hc = heading_costs(s)
+            b, c = b + hb, c + hc
+        dropped.add((s, e))
+        byte_room, char_room = byte_room + b, char_room + c
+    # Put back, most valuable first, what still fits in the room the trim left.
+    for s, e in reversed([se for se in order if se in dropped]):
+        b, c = costs(s, e)
+        if not left[s]:
+            hb, hc = heading_costs(s)
+            b, c = b + hb, c + hc
+        if b <= byte_room and c <= char_room:
+            dropped.discard((s, e))
+            left[s] += 1
+            byte_room, char_room = byte_room - b, char_room - c
+    text, printed = render(dropped)
+    for se in order:
+        if fits(text, system, printed):
+            return printed
+        if se not in dropped:
+            dropped.add(se)
+            text, printed = render(dropped)
+    if fits(text, system, printed):
+        return printed
+
+    # 2. The whole map. 3. Each protected line clipped.
+    note = _omission_line(
+        {section.heading: len(section.entries) for section in sections if section.entries}
+    )
+    text = compose(None, status, note)
+    printed = serialize(text, system)
+    if not fits(text, system, printed):
+        system = "\n".join(_clip(notice, _PROTECTED_LINE_CHARS) for notice in notices)
+        text = compose(None, [_clip(line, _PROTECTED_LINE_CHARS) for line in status], note)
+        printed = serialize(text, system)
+
+    # 4. The last resort: the strings are cut to fit.
+    return _bounded_output(system or None, text, budget, max_chars)
 
 
 # D7.2 (staleness-machinery wave, E7 observation): a user's own project/personal
@@ -580,17 +842,7 @@ def _report_unreadable_store(location: StoreLocation, error: BaseException, now:
         print(json.dumps({}))
         return
     problem = result.problems[0]
-    print(
-        json.dumps(
-            {
-                "systemMessage": problem.notice,
-                "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
-                    "additionalContext": problem.line,
-                },
-            }
-        )
-    )
+    print(_bounded_output(problem.notice, problem.line))
 
 
 def _notice_is_due(stamp: str | None, severity: str, now: datetime) -> bool:
@@ -1239,6 +1491,7 @@ def session_start() -> None:
     stage = "startup"
     try:
         from ..config import (
+            _interrupted,
             _present_by_lstat,
             default_graph_path,
             missing_store_message,
@@ -1248,9 +1501,10 @@ def session_start() -> None:
         from ..retrieval import (
             TOC_CACHE_KEY,
             build_toc,
-            render_toc,
-            top_tier_map,
-            unratified_mistakes,
+            live_global_mistakes,
+            render_sections,
+            toc_sections,
+            top_tier_sections,
         )
         from ..store import Store
 
@@ -1262,8 +1516,10 @@ def session_start() -> None:
             search_ancestors=True,
             warn_on_create=False,
         )
-        if not _present_by_lstat(location.path):
-            print(json.dumps({"systemMessage": missing_store_message(location.path)}))
+        # An interrupted migration is checked first: a store that was moved aside is "missing"
+        # by lstat, but the opening below names the interruption and its remedy.
+        if not _present_by_lstat(location.path) and not _interrupted(location.path):
+            print(_bounded_output(missing_store_message(location.path), None))
             return
         # A store that cannot open used to print `{}` and switch memory off with no word to
         # anyone. Only a lock another process holds keeps that: it passes by itself.
@@ -1381,7 +1637,7 @@ def session_start() -> None:
         # version) — render_toc is called under its own try/except so a shape it can't
         # handle degrades to the legacy map too, rather than escaping to the outer handler
         # and losing store-only content along with it (never-crash AND graceful-degrade).
-        text = None
+        sections = None
         stage = "cache"
         try:
             cache = json.loads(store.get_meta(TOC_CACHE_KEY) or "null")
@@ -1401,25 +1657,28 @@ def session_start() -> None:
                 cache = None
         if isinstance(cache, dict) and cache.get("domains"):
             try:
-                # Domain/initiative summaries remain cache-owned, but unratified global
-                # mistakes must reflect the live Store even when the graph is unavailable
-                # and lazy sync cannot refresh an older cache that predates this key.
+                # Domain/initiative summaries remain cache-owned, but the global mistakes
+                # (accepted and unratified) must reflect the live Store even when the graph
+                # is unavailable and lazy sync cannot refresh the cache: a retired or
+                # superseded one must not be served from it.
                 try:
-                    cache = {**cache, "unratified": unratified_mistakes(store)}
+                    cache = {**cache, **live_global_mistakes(store)}
                 except Exception as error:
                     diagnostics.report("cache", error)
                     raise
-                text = render_toc(cache)
+                sections = toc_sections(cache)
+                render_sections(sections)  # a shape it cannot render falls back here
             except Exception:
-                text = None
-        if text is None:
+                sections = None
+        if sections is None:
             stage = "render"
-            text = top_tier_map(store, reader)
+            sections = top_tier_sections(store, reader)
         # Standing instruction goes first, ahead of either renderer's content — see
         # STANDING_SEARCH_INSTRUCTION's docstring for why it lives here and not in the
         # renderers. The version line follows it, so a session names the package it runs.
         # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D1)
-        text = f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}\n\n{text}"
+        head = f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}\n\n"
+        status: list[str] = []
 
         # Drift refresh (drift→supersede D4): it runs UNCONDITIONALLY — it is what keeps the
         # retrieval markers' cache fresh; SIDEGRAPH_DRIFT_NUDGE=off gates the PROSE only (spec I5,
@@ -1483,20 +1742,14 @@ def session_start() -> None:
                         diagnostics.report("cleanup", error)
             for problem in result.problems:
                 if problem.line:
-                    text += f"\n\n{problem.line}"
+                    status.append(problem.line)
             notices = _due_notices(store, result, now, recorded, diagnostics)
         except Exception as error:
             diagnostics.report("integrity", error)
 
-        output: dict = {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": text,
-            }
-        }
-        if notices:
-            output = {"systemMessage": "\n".join(notices), **output}
-        print(json.dumps(output))
+        # The one composition point every host's SessionStart shares: the size budget is
+        # applied here, after all sections are rendered.
+        print(_fit_session_output(head, sections, status, notices))
     except Exception as error:
         diagnostics.report(stage, error)
         print(json.dumps({}))
@@ -1821,6 +2074,15 @@ _PRETOOL_KEY_RETENTION_DAYS = 30
 # the several processes Claude Code spawns for one Bash line cannot add up past it.
 _FILES_PER_AGENT = 10
 _FILES_PER_CALL = 3
+
+# The block is held to HOOK_CONTEXT_MAX_CHARS (Claude Code's 10,000-character cap, see above).
+# Three files of three records each come to about 5,000 characters plus six times the longest
+# path (it appears in the header and the "More" line), so only paths of some 750 characters
+# reach the cap. A file whose block would not fit is left out unclaimed, for a later read.
+_PRETOOL_OMITTED = (
+    "Sidegraph: the records of {count} more file(s) were left out to fit the hook output "
+    "limit; get_task_context(files=[…]) returns them."
+)
 
 # How much of a record the block carries: the title and the first sentence of the choice, each
 # clipped at a word boundary. Two records, or three when the first two are both mistakes.
@@ -2322,6 +2584,15 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
         hot.report("delivery", error)
 
     chosen: list[tuple[str, list[Record]]] = []
+    # Room for the guard line and the omission line; a block's length without `seen` is its
+    # longest, so the same files fit in every process of one Bash line.
+    room = (
+        HOOK_CONTEXT_MAX_CHARS
+        - len(MEMORY_GUARD_LINE)
+        - len(_PRETOOL_OMITTED.format(count=9999))
+        - 1
+    )
+    left_out = 0
     for rel in dict.fromkeys(files):
         if rel not in anchored:
             continue
@@ -2331,6 +2602,11 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
             # hooks choose different three-file sets. No claims have been made yet.
             return None
         if records:
+            size = len(_records_block(rel, records)) + 1
+            if size > room:
+                left_out += 1
+                continue
+            room -= size
             chosen.append((rel, records))
             if len(chosen) == _FILES_PER_CALL:
                 break
@@ -2363,8 +2639,12 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
             hot.report("claim", error)
             break  # contention refusal: deliver what is already claimed, claim no more
     if not blocks:
-        return None
+        # Nothing delivered, so nothing to journal; the files left out still deserve the
+        # pointer to get_task_context.
+        return _PRETOOL_OMITTED.format(count=left_out) if left_out else None
     text = "\n".join([MEMORY_GUARD_LINE, *blocks])
+    if left_out:
+        text += "\n" + _PRETOOL_OMITTED.format(count=left_out)
     _journal_delivery(
         payload, index, "hook_read", winning, lambda error: hot.report("delivery", error)
     )

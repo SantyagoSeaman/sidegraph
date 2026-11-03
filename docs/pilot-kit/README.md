@@ -1,9 +1,15 @@
 # Pilot kit
 
+> **Start here:** Run Stage 0 from a copy of this Sidegraph checkout before starting the pilot. If it clears, freeze the questions and your thresholds, then follow the stages in order. The kit is a procedure you run, with prompts and one pre-flight script. [Glossary](../concepts/glossary.md).
+
 This directory is an **evaluation protocol**, not an automated harness. It provides prompts,
 rubric conventions, isolation requirements, and suggested decision gates for testing
 Sidegraph on your repository. Budget roughly two engineer-days of active work plus two to
 three weeks of ordinary shadow capture.
+
+A **store** is the repository's committed record data. **Ratification** is review that accepts or rejects a proposal. A **shadow store** holds pilot captures separately from the store working agents read. The two **arms** are otherwise comparable sessions with delivery enabled or disabled. A **rubric** is the frozen list of facts an answer must satisfy.
+
+Before collecting answers, prepare a worksheet with each question, repeat number, anonymous answer ID and rubric. Keep the ID-to-arm mapping separately. Record review time as you do it. The judge produces per-answer judgments; the kit does not supply an automated analysis harness.
 
 Order matters. Stage 0 can disqualify your corpus before you install anything.
 
@@ -31,7 +37,7 @@ Rubric conventions: [`rubric-template.md`](rubric-template.md).
 
 Use a separate store such as `.sidegraph-shadow/` and keep it out of the normal host wiring.
 Do not enable the `SessionStart`, `SubagentStart`, or `PreToolUse` hooks for the measured
-sessions. Give the agent an explicit end-of-session capture instruction and allow only
+sessions. Ask the agent at the end: "Propose only the durable decisions, rejected alternatives and gotchas learned in this session, with anchors to the relevant files." Allow only
 the write-side
 `propose_decisions` MCP path; deny `get_task_context`, `query_decisions`,
 `retrieve_decisions`, `list_facts`, `drill_down`, and other store reads. Start the shadow MCP
@@ -90,9 +96,7 @@ your results:
 | Answer quality | Blinded quality with memory falls below the no-memory arm by more than a margin **you set before stage 3** — the kit ships no default number, because cost and quality moved independently across the measured corpora |
 | Cadence | Check actual record receipt, including in subagents, **monthly**; track explicit retrieval calls separately. Receipt does not by itself establish that the agent used a record |
 
-The earlier reminder-based protocol used a **40%** ceiling on sessions without a
-retrieval call (the measured post-improvement pooled share was 26%). Current hooks can
-deliver records without that call, so the old proxy cannot serve as the delivery gate.
+The [historical retrieval proxy](../reference/operations.md#historical-pilot-retrieval-proxy) explains why explicit tool-call counts are kept separate.
 Inspect saved hook output and agent transcripts for actual record receipt; a session-start
 map or a suggestion to retrieve is not a delivered record. Freeze the delivery unit and
 limit before stage 3, and keep explicit tool-call counts as a separate diagnostic.

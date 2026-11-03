@@ -1,5 +1,7 @@
 # Quickstart
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 This is one complete loop: build the graph, create the store, connect one host, record one
 anchored gotcha, and retrieve it in a new session. It assumes Graphify is installed as described in
 [Installation](installation.md). Commands are written with the `uvx` prefix the plugin uses, so
@@ -20,12 +22,21 @@ Sidegraph client first.
 
 ## 1. Build the graph and store
 
+macOS or Linux:
+
 ```bash
-export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+export GRAPHIFY_NO_AUTO_REFRESH=1
 graphify update .
-echo "graphify-out/" >> .gitignore          # macOS, Linux
-Add-Content .gitignore "graphify-out/"      # Windows PowerShell: use this line instead, not >>
+echo "graphify-out/" >> .gitignore
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
+```
+
+Windows PowerShell:
+
+```powershell
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
+graphify update .
+Add-Content .gitignore "graphify-out/"
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
 ```
 
@@ -138,8 +149,10 @@ The loop is now working. After cloning, each teammate builds the graph, runs `si
 and installs the plugin. In a clone, `sidegraph-init` leaves the committed records and settings
 alone and only installs the graph hook.
 
-Next, run the short
-[verification checklist](../guides/verifying-your-setup.md), then
-[name domains](../guides/naming-your-domains.md) if you want a table of contents of your memory. Claude Code, Codex and Muse also inject it at
-SessionStart; Grok Build receives it through the MCP server's instructions; OpenCode retrieves it
-explicitly through MCP.
+Run the short [verification checklist](../guides/verifying-your-setup.md). If you use the
+`sidegraph:setup` skill, it offers to [name domains](../guides/naming-your-domains.md) once
+as soon as wiring is verified, before optional configuration questions, when the graph has
+communities and no accepted or proposed domains exist. Later ordinary sessions do not
+repeat that offer; you can request domain naming directly at any time. The resulting table
+of contents reaches Claude Code, Codex and Muse through SessionStart, Grok Build through the
+MCP server's instructions, and OpenCode through explicit MCP calls.

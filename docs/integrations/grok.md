@@ -1,5 +1,7 @@
 # Grok Build
 
+> **Start here:** Install the host plugin, start a new session in your repository, then [verify it](../guides/verifying-your-setup.md). [Glossary](../concepts/glossary.md).
+
 Sidegraph's plugin installs into Grok Build through its plugin marketplace.
 You get the MCP tools and the shared skills, and records are delivered when the agent reads,
 searches, edits or writes a file or starts a subagent (see [Hooks on Grok](#hooks-on-grok)).
@@ -95,7 +97,8 @@ This is a stopgap for a gap in Grok, not how Sidegraph is meant to deliver the m
 narrower than the hook:
 
 - It carries the standing instruction, the version line and the domain table of contents from
-  the store's cache. It has none of the status lines SessionStart adds: no integrity notices,
+  the store's cache, with the global mistakes and proposals read from the store as they are
+  now, so a retired or superseded one is not shown. It has none of the status lines SessionStart adds: no integrity notices,
   no pending-ratification line, no drift line, no stale-graph warning.
 - On a store with no named domains yet, it carries only the standing instruction and the version
   line, not the community listing SessionStart shows there: building that listing needs the code

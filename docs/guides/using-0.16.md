@@ -1,5 +1,7 @@
 # Using Sidegraph 0.16
 
+> **Start here:** This historical page describes the 0.16 upgrade. Follow Update first. Use the health-check skill for an installation report and list_domains when you need to find a named area. [Glossary](../concepts/glossary.md).
+
 Sidegraph 0.16.0 adds bounded full-domain listings, honest uncomputed stats, a read-only
 installation health report, lower repeated descriptor-lookup cost, immediate refusal of hook
 SQLite lock contention, and clearer reporting of retained hot files during compaction. See the

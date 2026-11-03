@@ -1,8 +1,12 @@
 # Question-authoring prompt (run this FIRST, in a store-blind session)
 
+[Glossary](../concepts/glossary.md)
+
 Copy this verbatim into a fresh agent session opened **in the repository under test**,
 with the store directory denied. The blindness is the whole point: questions written by
 anyone who has seen the store measure the store, not the workload.
+
+Copy only the prompt between the two horizontal rules below. Run it in the repository under test; there is no path placeholder to replace.
 
 ---
 
@@ -22,7 +26,7 @@ repository over the next month, spread across these six shapes (roughly 3/3/3/3/
 
 For each question also write a **rubric**: 3–5 bullets naming the specific facts a
 complete answer must contain. Rubrics are written now, before any answer exists, and
-must be checkable against the repository.
+must be checkable against the repository. Label optional depth with `Bonus:`. A missing bonus alone does not make an otherwise correct answer partial.
 
 Output JSON only: `[{"id":"q01","shape":"rationale","prompt":"…","rubric":["…","…"]}, …]`
 

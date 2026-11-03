@@ -1145,3 +1145,83 @@ def test_prep_flushes_existing_files_through_writable_handles_on_windows(tmp_pat
     monkeypatch.setattr(maintenance, "fsync_fd", windows_flush)
     report = maintain(store)
     assert report.stopped is None
+
+
+class _CountedList(list):
+    """A report list that counts membership tests: each one scans the whole list."""
+
+    scans = 0
+
+    def __contains__(self, item: object) -> bool:
+        type(self).scans += 1
+        return super().__contains__(item)
+
+
+@pytest.mark.parametrize("files", [20, 40])
+def test_step4_work_per_removed_file_does_not_grow_with_the_bucket(tmp_path, monkeypatch, files):
+    """Removing a file costs O(1) parsing and no scan of the report lists: each bucket image is
+    parsed at most once while the deletions run (the witness bytes are still read from disk
+    before every unlink), and the publisher never tests membership in ``wrote`` or ``folded``.
+    Re-parsing the bucket per deletion, or scanning a list of every path so far, made a large
+    migration quadratic."""
+    store = make_store(tmp_path)
+    for rid in ids_in_bucket(3, files, prefix="Q"):  # one bucket: the worst case
+        put_file(store, "decision", decision_body(rid))
+    decodes = {"step4": 0}
+    in_step4: list[bool] = []
+    real_decode, real_delete, real_report = (
+        maintenance._identity_and_body,
+        maintenance._delete,
+        maintenance.report_from_plan,
+    )
+
+    def counted_decode(raw: bytes):
+        if in_step4:
+            decodes["step4"] += 1
+        return real_decode(raw)
+
+    def flagged_delete(run, report):
+        in_step4.append(True)
+        try:
+            real_delete(run, report)
+        finally:
+            in_step4.clear()
+
+    def counted_report(*args, **kwargs):
+        report = real_report(*args, **kwargs)
+        report.wrote, report.folded = _CountedList(report.wrote), _CountedList(report.folded)
+        return report
+
+    _CountedList.scans = 0
+    monkeypatch.setattr(maintenance, "_identity_and_body", counted_decode)
+    monkeypatch.setattr(maintenance, "_delete", flagged_delete)
+    monkeypatch.setattr(maintenance, "report_from_plan", counted_report)
+    report = maintain(store)
+    assert report.stopped is None and len(report.deleted_files) == files
+    assert decodes["step4"] <= files  # one parse of the bucket, not one per removed file
+    assert _CountedList.scans == 0
+
+
+@pytest.mark.parametrize("files", [20, 40])
+def test_dry_run_lists_each_deletion_without_scanning(tmp_path, monkeypatch, files):
+    """The dry run's ``wrote`` list gains each deleted path in O(1): ``simulate_writes`` never
+    tests membership in a list that grows with the store (a scan per deletion made every dry
+    run of a large migration quadratic). Every list it builds is counted."""
+    store = make_store(tmp_path)
+    for rid in ids_in_bucket(3, files, prefix="Q"):
+        put_file(store, "decision", decision_body(rid))
+    real = maintenance.simulate_writes
+
+    def counted(*args, **kwargs):
+        monkeypatch.setattr(maintenance, "list", _CountedList, raising=False)
+        try:
+            return real(*args, **kwargs)
+        finally:
+            monkeypatch.delattr(maintenance, "list")
+
+    _CountedList.scans = 0
+    monkeypatch.setattr(maintenance, "simulate_writes", counted)
+    report = Store(store).maintain(settled_days=0, dry_run=True, any_branch=True)
+    assert report.stopped is None
+    assert sum(rel.startswith("decisions/") for rel in report.wrote) == files
+    assert _CountedList.scans == 0

@@ -25,6 +25,7 @@ from sidegraph.schema import (
     DecisionStatus,
     Descriptor,
     Domain,
+    DomainStatus,
     Entity,
     Provenance,
     Scope,
@@ -301,16 +302,18 @@ def test_a14_no_seeds_and_nothing_to_say_names_the_accepted_domains(tmp_path):
     _domain(store, "payments", "Payments")
     _domain(store, "auth", "Auth")
     gone = _domain(store, "legacy", "Legacy")
-    store.supersede_domain(
+    heir = store.supersede_domain(
         gone.domain_id,
         Domain(
             slug="legacy",
             title="Legacy",
             summary="s",
+            status=DomainStatus.ACCEPTED,
             supersedes=gone.domain_id,
             provenance=Provenance(source="manual"),
         ),
     )
+    store.ratify_domains(drop=[heir.domain_id])  # leave the superseded one with no live heir
     _domain(store, "proposed-only", "Proposed only", accept=False)
 
     out = _call(tmp_path, reader, store=store)

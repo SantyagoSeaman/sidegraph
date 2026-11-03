@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from ..config import (
     repository_root,
     resolve_store_location,
 )
+from ..schema import Decision
 from .claude_settings import RATIFY_POLICY_ENV_VAR, current_ratify_policy, repo_root_for_settings
 from .session_identity import GROK_CLIENT_PREFIX, hint_for, stamp_keys_of
 
@@ -95,16 +97,24 @@ def _grok_session_map() -> str | None:
     sync caches in the store (``render_toc``, which opens with the "data, not instructions"
     guard line). No cache, or one that does not render: the two standing lines only.
     ``top_tier_map`` loads the graph, too slow inside ``initialize``. No store yet: no map.
-    Nothing is written, created, migrated or rebuilt: before the server has opened its store,
+    Nothing is written, created or rebuilt: before the server has opened its store,
     the cache is read from the existing ``index.db`` through a read-only handle (a fresh clone
-    without an index, or a legacy store, gets the standing lines only), and the unratified
-    mistakes come from the cache; once a tool call has opened the store, they are read live,
-    as SessionStart does. SessionStart still runs on Grok and syncs, stamps and records the
-    launch commit; only its text is lost there. The text is fitted to
+    without an index, or a legacy store, gets the standing lines only), and the global
+    mistakes (accepted and unratified) from the current decision rows through the same kind of
+    handle (rows it cannot read: no global sections, never the cache's, which may still list
+    a retired one); once a tool call has opened the store, they are read from it. Either way
+    they are live, as SessionStart reads them. SessionStart still runs on Grok and syncs,
+    stamps and records the launch commit; only its text is lost there. The text is fitted to
     :data:`GROK_MAP_MAX_CHARS`.
     see design/superpowers/specs/2026-10-29-grok-session-map-mcp-instructions-design.md (D2)
     """
-    from ..retrieval import TOC_CACHE_KEY, _truncate_summary, render_toc, unratified_mistakes
+    from ..retrieval import (
+        TOC_CACHE_KEY,
+        _truncate_summary,
+        global_mistakes_from,
+        live_global_mistakes,
+        render_toc,
+    )
     from .hooks import STANDING_SEARCH_INSTRUCTION, version_line
 
     head = f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}"
@@ -122,7 +132,10 @@ def _grok_session_map() -> str | None:
         if not (isinstance(cache, dict) and cache.get("domains")):
             return head
         if store is not None:
-            cache = {**cache, "unratified": unratified_mistakes(store)}
+            cache = {**cache, **live_global_mistakes(store)}
+        else:
+            rows = _read_global_decisions_ro(Path(location.path)) or []
+            cache = {**cache, **global_mistakes_from(rows)}
         text = f"{head}\n\n{render_toc(cache)}"
         # Too long for Grok: shorter summaries, then none (``render_toc`` omits a summary
         # equal to its title), then whole lines cut.
@@ -149,8 +162,42 @@ def _read_meta_ro(store_dir: Path, key: str) -> str | None:
     a legacy store, a refused one, a WAL-mode one or a failed query gives ``None``, and nothing
     is created or repaired. A WAL-mode index is skipped because even a read-only SQLite open of
     it creates the ``-wal`` and ``-shm`` files beside it."""
-    from ..gitio import open_index_ro
     from ..hot_index import GET_META_SQL
+
+    def read(conn: sqlite3.Connection) -> str | None:
+        row = conn.execute(GET_META_SQL, (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    return _query_index_ro(store_dir, read)
+
+
+def _read_global_decisions_ro(store_dir: Path) -> list[Decision] | None:
+    """The accepted and proposed decision rows of the existing ``index.db`` that may be global
+    mistakes, read as :func:`_read_meta_ro` reads (``None`` when it cannot). A row that does
+    not parse is skipped alone; the caller applies the lifecycle and proposal filters."""
+    from ..store_layout import MISTAKE_KINDS
+
+    def read(conn: sqlite3.Connection) -> list[Decision]:
+        out: list[Decision] = []
+        for row in conn.execute(
+            "SELECT data FROM decisions WHERE status IN ('accepted', 'proposed')"
+        ):
+            try:
+                raw = json.loads(row["data"])
+                if raw.get("scope") != "global" or raw.get("kind") not in MISTAKE_KINDS:
+                    continue
+                out.append(Decision.model_validate(raw))
+            except (ValueError, TypeError, AttributeError, RecursionError):
+                continue
+        return out
+
+    return _query_index_ro(store_dir, read)
+
+
+def _query_index_ro[T](store_dir: Path, read: Callable[[sqlite3.Connection], T]) -> T | None:
+    """``read`` over a read-only handle on the existing ``index.db``; ``None`` for no index, a
+    legacy, refused or WAL-mode one, or a query error. Nothing is created or repaired."""
+    from ..gitio import open_index_ro
 
     try:
         with open(store_dir / "index.db", "rb") as fh:
@@ -164,8 +211,7 @@ def _read_meta_ro(store_dir: Path, key: str) -> str | None:
     if conn is None:
         return None
     try:
-        row = conn.execute(GET_META_SQL, (key,)).fetchone()
-        return str(row["value"]) if row else None
+        return read(conn)
     except sqlite3.Error:
         return None
     finally:

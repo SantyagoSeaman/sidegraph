@@ -3,7 +3,7 @@ see design/superpowers/specs/2026-07-10-ratification-ux-and-mcp-gaps-design.md""
 
 import pytest
 
-from sidegraph.capture import propose, propose_facts
+from sidegraph.capture import RatifyPolicy, propose, propose_facts
 from sidegraph.schema import DecisionStatus
 from sidegraph.store import Store
 
@@ -27,7 +27,7 @@ def _draft(**kw):
 
 
 def test_propose_auto_accept_lands_accepted_with_agent_provenance(store):
-    results = propose([_draft()], store, None, auto_accept=True)
+    results = propose([_draft()], store, None, ratify_policy=RatifyPolicy.LEGACY_ACCEPT)
     d = store.get_decision(results[0].decision_id)
     assert d.status == DecisionStatus.ACCEPTED
     assert d.provenance.source == "agent"  # history never lies
@@ -36,14 +36,14 @@ def test_propose_auto_accept_lands_accepted_with_agent_provenance(store):
 def test_propose_auto_accept_covers_attached_and_standalone_facts(store):
     draft = _draft()
     draft["facts"] = [{"statement": "s1", "source": "src1"}]
-    results = propose([draft], store, None, auto_accept=True)
+    results = propose([draft], store, None, ratify_policy=RatifyPolicy.LEGACY_ACCEPT)
     d_id = results[0].decision_id
     assert all(f.status == DecisionStatus.ACCEPTED for f in store.facts_for_decision(d_id))
     standalone = propose_facts(
         [{"statement": "s2", "source": "src2", "supports": [d_id]}],
         store,
         None,
-        auto_accept=True,
+        ratify_policy=RatifyPolicy.LEGACY_ACCEPT,
     )
     assert store.get_fact(standalone[0].fact_id).status == DecisionStatus.ACCEPTED
 

@@ -28,7 +28,6 @@ from sidegraph.schema import (
     Domain,
     Entity,
     Fact,
-    Initiative,
     Provenance,
 )
 from sidegraph.store import Store, _atomic_write_json
@@ -44,6 +43,8 @@ def _decision(title: str = "an adr", **overrides) -> Decision:
         valid_from=datetime.now(UTC),
         provenance=Provenance(source="manual"),
     )
+    if "supersedes" in overrides:
+        base["status"] = "accepted"  # only an accepted successor closes
     base.update(overrides)
     return Decision(**base)
 
@@ -66,6 +67,8 @@ def _domain(slug: str = "a-domain", **overrides) -> Domain:
         summary="A domain used for canonical-stat testing.",
         provenance=Provenance(source="manual"),
     )
+    if "supersedes" in overrides:
+        base["status"] = "accepted"  # only an accepted successor closes
     base.update(overrides)
     return Domain(**base)
 
@@ -114,13 +117,8 @@ def _case_bindings(store: Store) -> tuple[str, str]:
     return "bindings", d.id
 
 
-def _case_initiative(store: Store) -> tuple[str, str]:
-    i = store.upsert_initiative(Initiative(name="case-initiative"))
-    return "initiatives", i.id
-
-
 def _case_archive_segment(store: Store) -> tuple[str, str]:
-    old = store.add_decision(_decision("case-archive-old"))
+    old = store.add_decision(_decision("case-archive-old", status="accepted"))
     store.add_decision(_decision("case-archive-new", supersedes=old.id))  # closes `old`
     report = store.compact()
     assert report.segment_path is not None
@@ -133,7 +131,6 @@ _STAT_CASES = {
     "domain": _case_domain,
     "entity": _case_entity,
     "bindings": _case_bindings,
-    "initiative": _case_initiative,
     "archive_segment": _case_archive_segment,
 }
 
@@ -183,7 +180,7 @@ def _all_canonical_files(store: Store) -> list[tuple[str, str]]:
     """Every ``(subdir, stem)`` this store's canonical directories currently hold, hot
     records plus archive segments -- mirrors the reload's own set of directories."""
     out: list[tuple[str, str]] = []
-    for sub in ("decisions", "facts", "domains", "entities", "bindings", "initiatives"):
+    for sub in ("decisions", "facts", "domains", "entities", "bindings"):
         d = store.path / sub
         if d.is_dir():
             out.extend((sub, f.stem) for f in d.glob("*.json"))
@@ -204,8 +201,7 @@ def test_reload_rebuilds_canonical_stat_for_every_file_it_read(tmp_path):
     setup.add_decision(_decision("reload-decision"))
     setup.add_fact(_fact("reload-fact"))
     setup.add_domain(_domain("reload-domain"))
-    setup.upsert_initiative(Initiative(name="reload-initiative"))
-    old = setup.add_decision(_decision("reload-archive-old"))
+    old = setup.add_decision(_decision("reload-archive-old", status="accepted"))
     setup.add_decision(_decision("reload-archive-new", supersedes=old.id))
     setup.compact()  # writes an archive segment -- exercised by the reload below too
     setup.close()
@@ -226,7 +222,7 @@ def test_compact_deletes_the_stat_row_of_hot_files_it_removes(tmp_path):
     """``compact`` removes a hot file's canonical_stat row in the same step it unlinks the
     file -- the row must not outlive the file it describes as gone."""
     store = Store(format1_store(tmp_path / "s"))
-    old = store.add_decision(_decision("compact-old"))
+    old = store.add_decision(_decision("compact-old", status="accepted"))
     store.add_decision(_decision("compact-new", supersedes=old.id))  # closes `old`
     assert _stat_row(store, "decisions", old.id) is not None  # present before compact
 
@@ -242,7 +238,7 @@ def test_compact_keeps_the_stat_row_of_a_hot_file_it_keeps_on_mismatch(tmp_path)
     (never destroy data) -- and its canonical_stat row is left alone too, since the file it
     describes is still exactly the file on disk."""
     store = Store(format1_store(tmp_path / "s"))
-    old = store.add_decision(_decision("compact-tamper-old"))
+    old = store.add_decision(_decision("compact-tamper-old", status="accepted"))
     store.add_decision(_decision("compact-tamper-new", supersedes=old.id))
     row_before = _stat_row(store, "decisions", old.id)
     assert row_before is not None
@@ -266,7 +262,7 @@ def test_compact_keeps_the_stat_row_of_a_hot_file_it_keeps_on_mismatch(tmp_path)
 
 def test_compact_rechecks_hot_file_after_segment_publication(tmp_path, monkeypatch):
     store = Store(format1_store(tmp_path / "s"))
-    old = store.add_decision(_decision("publish-recheck-old"))
+    old = store.add_decision(_decision("publish-recheck-old", status="accepted"))
     store.add_decision(_decision("publish-recheck-new", supersedes=old.id))
     hot_path = store.path / "decisions" / f"{old.id}.json"
     publisher = store._write_archive_segment

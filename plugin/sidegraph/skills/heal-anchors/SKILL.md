@@ -6,7 +6,7 @@ description: >-
 
 # Heal anchors
 
-Code and docs moved; the sync pass re-resolved every tracked entity and reported —
+Code and docs moved; the sync run re-resolved every tracked entity and reported —
 honestly, never guessing — what it could no longer follow. Sidegraph auto-heals everything
 it can prove (`rebound`, `moved`, community re-pointing); everything else is routed to a
 human, and this skill is how you walk them through it. CLI commands below run through
@@ -18,7 +18,7 @@ Rebuild the graph first — sync against a stale graph is noise: run `graphify u
 
 **MCP-first:** from inside a session, call `sync_anchors(force=True)` — the diagnostic/heal
 counterpart to `sidegraph-sync`, run as a tool instead of a shell command. `force=True`
-re-runs the rebind pass even when `graph_version` already matches the store's last-synced
+re-runs the rebind step even when `graph_version` already matches the store's last-synced
 stamp (e.g. right after a graph rebuild, or after hand-editing a domain's
 `path_prefixes`); omit it to respect the version gate on a routine re-check.
 
@@ -26,10 +26,10 @@ stamp (e.g. right after a graph rebuild, or after hand-editing a domain's
 "counts", "repointed", "outcomes", "stale_decisions", "empty_domains", "overbroad_domains",
 "slug_conflicts", "domains_refreshed", "domain_failures", "snapshot_splits"}` (see
 [`docs/reference/mcp-tools.md`](../../../../docs/reference/mcp-tools.md#sync_anchors) for
-the full shape). `synced: false` with no `force` means the pass was skipped outright
+the full shape). `synced: false` with no `force` means the run was skipped outright
 (`graph_version` unchanged) — every other field is then an *empty* default, not a stale
 prior report; re-call with `force=True` to get real data. (Without `force`, a move left
-`moved_uncommitted` is also re-verified once `HEAD` moves, as a narrow pass over just those
+`moved_uncommitted` is also re-verified once `HEAD` moves, as a narrow re-check of just those
 entities; the `force=True` call above already re-runs everything, so it makes that moot.)
 `outcomes` only ever lists entities worth a human's attention — never the `unchanged`/`rebound` majority:
 
@@ -39,7 +39,7 @@ entities; the `force=True` call above already re-runs everything, so it makes th
 - **`orphaned`** — needs judgment (see findings 1–2 below); cross-check `stale_decisions`
   for whether this took a whole decision down with it.
 - **`error`** — the entity raised during rebind; that one entity's `detail` carries the
-  exception text, and one bad entity never aborts the rest of the pass.
+  exception text, and one bad entity never aborts the rest of the run.
 
 **CLI fallback** (outside a session, scripted/CI use, or reviewing as plain text):
 
@@ -65,26 +65,31 @@ store write or a source change: confirm before acting.
 
 1. **`possibly stale decisions (all anchors gone — verify):`** — every leaf anchor of the
    listed decision is orphaned. Verify first (read the decision with `get_entity_history`,
-   or `retrieve_decisions(ids=[...])`, and look at the current code); then one of two heals:
+   or `retrieve_decisions(ids=[...])`, and look at the current code). Check status using the
+   [record-authoring rules](../record-decision/SKILL.md#reversing-an-earlier-decision), then choose a heal:
    - **Restore the name** — the symbol/heading was renamed or dropped and the decision is
      still true of the code. Restoring it is a **source change**: propose the edit to the
      human, never do it silently. Then run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, followed by `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync` — the anchor
      heals back to `rebound`/`unchanged` on an exact match.
-   - **Supersede** — the code it described is genuinely gone. `supersede_decision(...)`
-     with **explicit fresh `anchors` pointing at the successor code**. Do NOT omit
-     `anchors` here: omitting inherits the predecessor's bindings verbatim — *including
-     their orphaned status* — which reproduces exactly the problem you're healing.
-   If an accepted decision has no meaningful successor, report the obsolete subject to
-   the human and retain its history. `ratify(drop=...)` rejects only proposed decisions
-   and facts; it cannot retire an accepted decision. Do not edit canonical status fields.
+   - **Supersede an accepted, open decision** — the code it described moved into new code
+     and the rule changed with it. `supersede_decision(...)` with **explicit fresh `anchors` pointing at the successor
+     code**. Do NOT omit `anchors` here: omitting inherits the predecessor's bindings
+     verbatim — *including their orphaned status* — which reproduces exactly the problem
+     you're healing.
+   - **Retire** — the subject is gone and no successor would say anything new (or the
+     decision duplicates another live record). With the human's agreement,
+     `retire_decision(id, reason, duplicate_of=<kept id, for a duplicate>)`: the record moves
+     to `deprecated`, keeps the reason, stops surfacing and leaves this stale list, and stays
+     in history. `ratify(drop=...)` rejects only proposed decisions and facts. Do not edit
+     canonical status fields.
 2. **A lone `orphaned: <name> (no match)`** whose decision is NOT in the stale block —
    multi-anchor did its job: another anchor still holds the decision live. No action
    needed unless the orphaned one was the load-bearing anchor.
 3. **`ambiguous: <name> (...)`** — the name now matches several nodes; the leaf is
    `degraded`, not lost (and community re-pointing still works when all candidates share
-   one community). If the decision should point at one specific node, supersede it with a
-   precise `{"name", "file_path"}` anchor; if it's genuinely about all of them, leaving it
-   degraded is honest and fine.
+   one community). If the record should point at one specific node, use `add_anchors` with
+   a precise name and file path. This repairs bindings without replacing the claim. If it
+   genuinely concerns all candidates, leaving it degraded is honest and fine.
 4. **`possibly empty domains — re-scope or supersede:`** — an accepted domain resolved to
    zero communities and its paths match nothing. Either re-scope:
    `supersede_domain(old_slug_or_id=..., new_slug=..., new_title=..., new_summary=...,
@@ -108,18 +113,18 @@ store write or a source change: confirm before acting.
    `ratify(drop=[<loser-id>])` — domain drop legitimately works on an *accepted* domain.
 7. **`domains that FAILED to refresh (fix, then re-run with --force):`** — an accepted
    domain's refresh itself raised (a malformed `seed_anchors` descriptor, the domain
-   vanishing mid-pass, a lock-contended write, an invalid `.sidegraph/domain-snapshot.json`).
+   vanishing mid-run, a lock-contended write, an invalid `.sidegraph/domain-snapshot.json`).
    The domain's membership is left exactly as it was, not zeroed, and isolated — one broken
    domain never costs any other domain its heal. Until the cause is fixed, every later sync,
    lazy or explicit, reports the failure again; the refresh itself reruns only when the graph,
    the snapshot or a domain's status changes. Fix the named cause (correct the descriptor,
    resolve the concurrent-supersede race, restore the snapshot from git), then re-run with
    `--force`/`sync_anchors(force=True)` to confirm it cleared. One entry with slug `*`
-   ("every accepted domain") under this finding means the whole pass failed: fix the named
+   ("every accepted domain") under this finding means the domain refresh failed for every accepted domain: fix the named
    cause the same way. When another process held the store instead, the report says
    `domain membership not refreshed: the store's writer was busy; the next sync runs it`
    (`busy: true` on the `*` entry from `sync_anchors`): nothing failed, there is nothing to
-   heal, and the next sync runs the pass.
+   heal, and the next sync runs the membership refresh.
 
 8. **`snapshot domains split between parts — neither part holds the frozen membership until
    it is refreshed:`** (`snapshot_splits` in the report, `snapshot-split` in
@@ -157,8 +162,11 @@ content-free `supersede_decision`/`supersede_fact` carrying fresh anchors), whic
 history with a successor that says nothing new about the actual decision.
 
 **(b) The decision's content is actually outdated.** The code changed in a way that makes
-the recorded `choice`/`consequences` wrong now — not just relocated. Propose a superseding
-record; never write one directly:
+the recorded `choice`/`consequences` wrong now. Check its status first. For a wrong
+proposal, ask the human to drop it, then propose corrected knowledge without superseding
+the dropped proposal. Preserve closed records and find the accepted, open head of the
+chain. If no live head exists, restate current knowledge as a fresh anchored proposal.
+For an accepted predecessor with `valid_to` unset, propose a superseding record:
 
 ```python
 propose_decisions(drafts=[{
@@ -169,19 +177,20 @@ propose_decisions(drafts=[{
 ```
 
 This lands the successor `status=proposed` — a human still reviews and ratifies its
-*content*. Note: under the `manual` policy (the one the headless recipe pins) `store.add_decision` closes the
-*predecessor's own record* (`accepted` → `superseded`) in the very same call (under an auto
-policy it stays open until the successor is ratified — automatically, or later by a human) —
-that's the ordinary append-only
-supersede mechanic every write path shares, not a ratification; only the successor's new text
-is gated on a human's `ratify`. Never call `supersede_decision`/`supersede_fact` (the direct,
+*content*. Note: under every policy, `manual` (the one the headless recipe pins)
+included, the *predecessor's own record* stays `accepted` and open until the successor is
+ratified (automatically, or later by a human), and dropping the proposal leaves it
+untouched (only a live, accepted decision can be superseded, one pending successor at a
+time) — the predecessor closes (`accepted` → `superseded`) at the moment its successor
+is accepted, so an unreviewed proposal never retires a live decision. Never call `supersede_decision`/`supersede_fact` (the direct,
 immediately-`accepted` MCP tools) from an unattended/CI context — unlike `propose_decisions`,
 they skip the ratify gate entirely.
 
 **(c) The subject is genuinely gone.** Confirm that it was deleted rather than renamed
-or moved. Check the record's current status. For an accepted decision, propose a meaningful
-supersession when something remains true or successor code exists; otherwise report the
-obsolete subject and retain its history. There is no accepted-decision retirement API.
+or moved. Check the record's current status. For an accepted, open decision, propose a meaningful
+supersession when something remains true or successor code exists; otherwise recommend
+`retire_decision(id, reason)` and call it once the human agrees: the record moves to
+`deprecated` with the reason and stays in history.
 `ratify(drop=[<id>])` and `sidegraph-ratify --drop <id>` reject only proposed decisions/facts.
 Recommend those only for proposed records, and leave the verdict to the human. Domain drop
 has its separate accepted-domain exception. Never edit canonical status or valid_to fields.
@@ -203,15 +212,16 @@ policy would ratify through `propose_decisions` with no `ratify` call at all, wh
 ```bash
 claude -p 'Run the heal-anchors playbook: call sync_anchors(force=True), then for every
 orphaned/ambiguous entity and every stale decision, follow the triage tree — add_anchors
-for code that moved, propose_decisions(supersedes=...) for content that is genuinely
-outdated, and a status-aware summary for obsolete subjects. Recommend drop only for
-proposed decisions/facts or a supported domain drop; retain accepted decision history when
-there is no meaningful successor. Do not call ratify. Summarize every action taken and every recommendation at the end.' \
+for code that moved, propose_decisions(supersedes=...) for an accepted, open decision
+whose content is genuinely outdated, and a status-aware summary for obsolete subjects. Recommend drop only for
+proposed decisions/facts or a supported domain drop; for an accepted decision with no
+meaningful successor, recommend retire_decision with a reason. Do not call ratify or
+retire_decision. Summarize every action taken and every recommendation at the end.' \
   --model claude-sonnet-5 \
   --mcp-config mcp-config.json --strict-mcp-config \
   --tools "Read,Grep,Glob" \
   --allowedTools "mcp__sidegraph__*" \
-  --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__ratify_decisions,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact,mcp__sidegraph__record_drift_check,mcp__sidegraph__propose_domains" \
+  --disallowedTools "mcp__sidegraph__ratify,mcp__sidegraph__add_decision,mcp__sidegraph__supersede_decision,mcp__sidegraph__retire_decision,mcp__sidegraph__supersede_fact,mcp__sidegraph__supersede_domain,mcp__sidegraph__add_domain,mcp__sidegraph__add_fact,mcp__sidegraph__record_drift_check,mcp__sidegraph__propose_domains" \
   --output-format stream-json --verbose
 ```
 
@@ -219,7 +229,7 @@ there is no meaningful successor. Do not call ratify. Summarize every action tak
 the deny list does not name (`Edit`, `Write`, any `Bash`), which voids the allowlist; only
 the `--disallowedTools` deny list still holds under it. **The `--disallowedTools` deny list is the
 load-bearing guard**: it names the exact write-gate tools this playbook must never call
-unattended — `ratify`/`ratify_decisions`, `add_decision`/`supersede_decision`,
+unattended — `ratify`, `add_decision`/`supersede_decision`/`retire_decision`,
 `add_fact`/`supersede_fact`, `add_domain`/`supersede_domain`, `record_drift_check`,
 `propose_domains` — and blocks them regardless
 of the machine's ambient permission configuration. The `--allowedTools` wildcard is scoping,

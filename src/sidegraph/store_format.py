@@ -25,10 +25,13 @@ from .store_layout import (
     ARCHIVE_SUBDIR,
     FORMAT_MARKER_NAME,
     NOT_A_FILE_REASON,
+    RECORD_FIELDS_REQUIREMENT,
     SHARDS_SUBDIR,
     is_regular_file,
     is_safe_record_id,
+    release_tuple,
     require_listable_record_dirs,
+    requirement_met,
     stat_entry,
 )
 
@@ -38,6 +41,21 @@ FORMAT2_MARKER_VERSION = "2.0.0"
 FORMAT2_INDEX_STAMP = "0.7.0+format2"
 # The Sidegraph a fresh store requires: the first release that reads format 2.
 FORMAT2_MIN_SIDEGRAPH = "0.17.0"
+
+
+def new_store_requirement(running: str | None = None) -> str:
+    """What a store this Sidegraph creates or packs requires: :data:`FORMAT2_MIN_SIDEGRAPH`, raised
+    to ``RECORD_FIELDS_REQUIREMENT`` once the running release has reached it. A store made by
+    the release that added a record field has no older client to protect, and a development
+    build below that release never stamps a requirement it would then refuse.
+    see docs/reference/stability.md ("Mixed versions")"""
+    floor, fields = release_tuple(FORMAT2_MIN_SIDEGRAPH), release_tuple(RECORD_FIELDS_REQUIREMENT)
+    assert floor is not None and fields is not None
+    if fields > floor and requirement_met(RECORD_FIELDS_REQUIREMENT, running):
+        return RECORD_FIELDS_REQUIREMENT
+    return FORMAT2_MIN_SIDEGRAPH
+
+
 SHARD_TYPES = ("decision", "fact", "entity", "domain", "bindings")
 GITATTRIBUTES_LINE = "*.shard -text"
 
@@ -280,7 +298,11 @@ class ShardListing:
     case_collisions: list[str]
 
 
-def _regular_files(directory: Path) -> list[Path]:
+def _regular_files(
+    directory: Path, on_unreadable: Callable[[Path, OSError], None] | None = None
+) -> list[Path]:
+    """The regular files of ``directory``. An entry whose ``lstat`` fails propagates the error,
+    or, with ``on_unreadable``, is reported to it and left out."""
     try:
         entries = sorted(directory.iterdir(), key=lambda p: p.name)
     except (FileNotFoundError, NotADirectoryError):
@@ -292,15 +314,24 @@ def _regular_files(directory: Path) -> list[Path]:
                 out.append(entry)
         except FileNotFoundError:
             continue  # removed between listing and stat
+        except OSError as exc:
+            if on_unreadable is None:
+                raise
+            on_unreadable(entry, exc)
     return out
 
 
-def list_shard_files(shards_dir: Path, n: int | None) -> ShardListing:
+def list_shard_files(
+    shards_dir: Path,
+    n: int | None,
+    on_unreadable: Callable[[Path, OSError], None] | None = None,
+) -> ShardListing:
     """Classify the regular files of ``shards_dir`` by lower-cased name. ``n`` is the marker's
     shard count (``None``: accept any two-hex-digit bucket). ``*.tmp`` and non-``.shard`` files
-    are ignored.
+    are ignored. An entry that cannot be stat-ed is reported to ``on_unreadable`` and left out
+    (it propagates without one).
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.3)"""
-    return classify_shard_files(_regular_files(shards_dir), n)
+    return classify_shard_files(_regular_files(shards_dir, on_unreadable), n)
 
 
 def classify_shard_files(files: Iterable[Path], n: int | None) -> ShardListing:
@@ -660,10 +691,11 @@ def inventory_from_disk(
     marker says major 2, or when ``assume_major=2`` (migration, under a major-1 or absent
     marker); ``assume_shards`` is then the shard count that classifies the files (a name
     beyond it is a stray), as the marker's would. Every file is ``stat``-ed before it is read.
-    A file whose read fails propagates the error, except when ``on_unreadable`` is given: it is
-    then called with the store-relative path and the error, and the file counts as not a regular
-    file (``sidegraph-verify`` reports it as a finding instead of aborting). A marker that does
-    not parse raises :class:`MalformedMarker`, or reads as no marker with ``lenient_marker``.
+    A file whose stat or read fails propagates the error, except when ``on_unreadable`` is
+    given: it is then called with the store-relative path and the error, and the file counts as
+    not a regular file (``sidegraph-verify`` reports it as a finding instead of aborting). A
+    marker that does not parse raises :class:`MalformedMarker`, or reads as no marker with
+    ``lenient_marker``.
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.3)"""
     store_dir = Path(store_dir)
     # a directory that cannot be listed would read as "no records": refuse before any walk
@@ -690,6 +722,12 @@ def inventory_from_disk(
             st = stat_entry(path)
         except FileNotFoundError:
             return  # removed between listing and stat
+        except OSError as exc:  # a symlink into a directory that cannot be searched
+            if on_unreadable is None:
+                raise
+            on_unreadable(rel, exc)
+            entries.append(_Entry(rel, None))
+            return
         stats[rel] = (st.st_ino, st.st_size, st.st_mtime_ns)  # before the read, never after
         if not is_regular_file(st):
             entries.append(_Entry(rel, None))
@@ -710,7 +748,13 @@ def inventory_from_disk(
     major = assume_major if assume_major is not None else (marker.major if marker else None)
     if major == 2:
         n = marker.shards if marker is not None and marker.major == 2 else assume_shards
-        found = list_shard_files(store_dir / SHARDS_SUBDIR, n)
+        found = list_shard_files(
+            store_dir / SHARDS_SUBDIR,
+            n,
+            None
+            if on_unreadable is None
+            else lambda entry, exc: on_unreadable(f"{SHARDS_SUBDIR}/{entry.name}", exc),
+        )
         for path in {p for p in [*found.buckets.values(), *found.strays]}:
             take(path, f"{SHARDS_SUBDIR}/{path.name}")
     archive_dir = store_dir / ARCHIVE_SUBDIR

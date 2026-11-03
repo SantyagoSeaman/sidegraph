@@ -35,7 +35,11 @@ from sidegraph.schema import (
     Provenance,
 )
 from sidegraph.store import SKIPPED_CANONICAL_KEY, VOLATILE_STALE_KEY, Store
-from sidegraph.store_layout import StoreRequirementError
+from sidegraph.store_layout import (
+    InterruptedMigrationError,
+    LegacyStoreError,
+    StoreRequirementError,
+)
 from tests.test_store_requirement import above_running
 
 NOW = datetime.now(UTC)
@@ -207,6 +211,8 @@ def test_registry_order_is_the_sessionstart_line_order():
         "refresh-hook-missing",
         "store-uncommitted",
         "branch-only-records",
+        "deprecated-auto-accept",
+        "record-fields-requirement",
         "store-not-migrated",
         "maintenance-due",
     ]
@@ -253,6 +259,14 @@ def _validation_error() -> ValidationError:
             ),
             "This store was written by a different Sidegraph version: upgrade Sidegraph (or use "
             "the version that wrote it).",
+        ),
+        (
+            LegacyStoreError("a legacy single-file store"),
+            "Open the store once with Sidegraph 0.23.x to migrate it, then upgrade.",
+        ),
+        (
+            InterruptedMigrationError("an interrupted migration"),
+            "Finish the interrupted migration with Sidegraph 0.23.x, then upgrade.",
         ),
         (
             StoreRequirementError(

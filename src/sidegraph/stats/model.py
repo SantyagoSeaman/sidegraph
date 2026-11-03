@@ -73,7 +73,7 @@ _TERMINAL_DOMAIN_STATUSES = frozenset({DomainStatus.SUPERSEDED, DomainStatus.DRO
 # `store._ARCHIVE_SUBDIR` (private there, mirrored here for the same reason as the statuses
 # above); a test pins the two together, because a subdirectory missing from this walk is a
 # pull the staleness check cannot see.
-_CANONICAL_SUBDIRS = ("decisions", "facts", "domains", "entities", "bindings", "initiatives")
+_CANONICAL_SUBDIRS = ("decisions", "facts", "domains", "entities", "bindings")
 _ARCHIVE_SUBDIR = "archive"
 
 

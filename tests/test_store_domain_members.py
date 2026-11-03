@@ -74,6 +74,7 @@ def test_a_dropped_or_superseded_domain_loses_its_members(tmp_path):
             provenance=Provenance(source="manual"),
         ),
     )
+    store.ratify_domains(accept=[d.domain_id for d in store.iter_domains() if d.supersedes])
     assert store.domain_member_ids(a.domain_id) == set()
     assert store.domain_member_ids(b.domain_id) == set()
 

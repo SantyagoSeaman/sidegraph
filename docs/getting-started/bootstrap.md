@@ -1,5 +1,7 @@
 # Bootstrap existing project rationale
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 `sidegraph-bootstrap` turns supported ADR/spec documents into reviewed Sidegraph memory and
 then asks production retrieval to surface one accepted, live-anchored decision. It runs
 locally and does not require an account or model API.
@@ -9,9 +11,18 @@ Commands use the `uvx` prefix the plugin uses; with the CLI installed ([Option A
 The 10–15 minute path is a launch target that has not yet been measured across first-user
 sessions.
 
+macOS or Linux:
+
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
+graphify update .
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --host claude-code
+```
+
+Windows PowerShell:
+
+```powershell
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --host claude-code
 ```
@@ -49,22 +60,10 @@ explicit `--docs` paths inside that root, and explicit `--include` files. It rej
 supplied outside paths and resolved symlink targets outside the root. Reports use stable
 repository-relative paths; an outside path is redacted to `<outside-repository>/<name>`.
 
-The default size limit is 512,000 bytes. Bootstrap excludes `.git/`, `.sidegraph/`, `.venv/`,
-`venv/`, `node_modules/`, `vendor/`, `dist/`, `build/`, `target/`, `graphify-out/`, `_build/`,
-and `coverage/`, plus binary files and unreadable or over-limit files. Binary detection reads
-only a 4,096-byte prefix. `--include FILE` may override the directory or size exclusion for a
-known text file; it does not widen the rest of the scan. Only regular files are eligible,
-including in-repository aliases to regular files. FIFO, socket, device and directory
-inputs are excluded as nonregular even when included. The scanner rechecks the frozen
-resolved target against the root and excluded directories before opening.
-
-Source validation uses one unbuffered descriptor and strict incremental UTF-8 decoding.
-Ordinary files consume at most the size limit plus one overflow byte; an included file is
-bounded by its opened size plus one, and observed growth beyond that size is excluded as
-`changed-during-scan`. Binary sniffing consumes at most the first 4,096 bytes. Available
-nonblocking and no-follow open flags defend final-component FIFO/link replacement on
-platforms that provide them. This does not promise atomic ancestor-directory containment
-or an atomic content snapshot; planning/apply reads later remain separate.
+Generated directories, binary files, unreadable files and oversized files are excluded.
+Use `--include FILE` only for a known text file you intend to review. It does not permit
+paths outside the repository or nonregular inputs. See the
+[scanner limits and validation contract](../reference/security-internals.md#bootstrap-source-validation).
 
 The preview lists a candidate count
 followed by each candidate's title, source, context, choice, rejected alternatives,
@@ -230,13 +229,25 @@ is available, run the supported-document path against it:
 This command installs from the public `main`, which advances at releases. To pin a version, see
 [how to pin mutable development references](installation.md#mutable-development-references).
 
+macOS or Linux:
+
 ```bash
 git clone --branch demo https://github.com/SantyagoSeaman/sidegraph.git sidegraph-demo
 cd sidegraph-demo
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
-$env:GRAPHIFY_NO_AUTO_REFRESH = "1"      # Windows PowerShell: use this line instead
 graphify update .
 uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap \
+  --profile superpowers --host claude-code --report bootstrap-report.md
+```
+
+Windows PowerShell:
+
+```powershell
+git clone --branch demo https://github.com/SantyagoSeaman/sidegraph.git sidegraph-demo
+cd sidegraph-demo
+$env:GRAPHIFY_NO_AUTO_REFRESH = "1"
+graphify update .
+uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap `
   --profile superpowers --host claude-code --report bootstrap-report.md
 ```
 

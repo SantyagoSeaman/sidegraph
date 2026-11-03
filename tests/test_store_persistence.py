@@ -201,7 +201,7 @@ def test_index_deleted_resets_volatile_fields_to_cold_defaults(tmp_path):
 def test_add_decision_close_predecessor_writes_successor_before_flipping_predecessor(
     tmp_path, monkeypatch
 ):
-    """CRITICAL-adjacent regression: add_decision's close_predecessor path must write the
+    """CRITICAL-adjacent regression: add_decision's close path must write the
     SUCCESSOR canonically before flipping the predecessor's status -- the old (buggy) order
     flipped+wrote the predecessor to SUPERSEDED first, so a successor-write failure left a
     durable "superseded with zero successors" record on disk (the next digest reload adopts
@@ -209,9 +209,9 @@ def test_add_decision_close_predecessor_writes_successor_before_flipping_predece
     must instead leave the tolerated deferred shape -- both records live, successor simply
     absent."""
     store = Store(tmp_path / "s")
-    old = store.add_decision(_decision(title="predecessor"))
+    old = store.add_decision(_decision(title="predecessor", status="accepted"))
 
-    new = _decision(title="successor", supersedes=old.id)
+    new = _decision(title="successor", supersedes=old.id, status=DecisionStatus.ACCEPTED)
 
     import sidegraph.store as store_module
 
@@ -234,7 +234,7 @@ def test_add_decision_close_predecessor_writes_successor_before_flipping_predece
     reopened = Store(path)
     try:
         reloaded_old = reopened.get_decision(old.id)
-        assert reloaded_old.status == DecisionStatus.PROPOSED  # unchanged, never flipped
+        assert reloaded_old.status == DecisionStatus.ACCEPTED  # unchanged, never flipped
         assert reloaded_old.valid_to is None
         assert reopened.get_decision(new.id) is None  # successor never landed
     finally:

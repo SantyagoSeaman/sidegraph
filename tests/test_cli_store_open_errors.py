@@ -1,10 +1,11 @@
 """A store that exists but cannot be opened is an operational error for sidegraph-viz and
 sidegraph-export-okf: one ``store not readable (<path>): <error>`` line on stderr, nothing on
-stdout (``--json`` included), exit 2, nothing written.
+stdout (``--json`` prints that line as one ``{"error": ...}`` object), exit 1, nothing written.
 See design note: docs/reference/cli.md, sections sidegraph-viz and sidegraph-export-okf."""
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -49,14 +50,22 @@ def _okf(db: Path, tmp_path: Path) -> int:
     return export_okf_main(["--db", str(db), "--out", str(tmp_path / "bundle")])
 
 
+def _assert_stdout(cmd, out: str, err: str) -> None:
+    """Text output leaves stdout empty; ``--json`` prints the stderr line as ``{"error"}``."""
+    if cmd is _viz_json:
+        assert json.loads(out) == {"error": err.rstrip("\n")}
+    else:
+        assert out == ""
+
+
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("cmd", [_viz_json, _viz_html, _okf], ids=["viz-json", "viz", "okf"])
-def test_unopenable_store_is_one_line_exit_2(cmd, kind, tmp_path, capsys) -> None:
+def test_unopenable_store_is_one_line_exit_1(cmd, kind, tmp_path, capsys) -> None:
     db, fragment = _broken_store(tmp_path, kind)
     rc = cmd(db, tmp_path)
     out, err = capsys.readouterr()
-    assert rc == 2, (rc, out, err)
-    assert out == ""
+    assert rc == 1, (rc, out, err)
+    _assert_stdout(cmd, out, err)
     lines = err.splitlines()
     assert len(lines) == 1, err
     assert lines[0].startswith(f"store not readable ({' '.join(str(db).split())}): "), err
@@ -77,9 +86,9 @@ def test_multiline_open_error_is_one_line(cmd, tmp_path, capsys, monkeypatch) ->
         raise ValueError("line one\nline two")
 
     monkeypatch.setattr("sidegraph.cli.Store", fail_open)
-    assert cmd(db, tmp_path) == 2
+    assert cmd(db, tmp_path) == 1
     out, err = capsys.readouterr()
-    assert out == ""
+    _assert_stdout(cmd, out, err)
     display_path = " ".join(str(db).split())
     assert err == f"store not readable ({display_path}): line one line two\n"
     assert not (tmp_path / "g.html").exists()
@@ -93,9 +102,9 @@ def test_multiline_store_path_is_displayed_on_one_line(cmd, tmp_path, capsys) ->
     db = tmp_path / "project\nname" / ".sidegraph"
     Store(db).close()
     (db / "format").write_text("sidegraph-store 9.0.0\n", encoding="utf-8")
-    assert cmd(db, tmp_path) == 2
+    assert cmd(db, tmp_path) == 1
     out, err = capsys.readouterr()
-    assert out == ""
+    _assert_stdout(cmd, out, err)
     assert len(err.splitlines()) == 1
     assert err.startswith(f"store not readable ({' '.join(str(db).split())}): ")
     assert "major '9'" in err

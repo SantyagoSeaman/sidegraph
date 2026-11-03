@@ -598,14 +598,17 @@ def test_t14_a_size_cut_names_the_budget_and_not_the_limit(big_store):
     assert "raise limit" not in answer["hint"]
 
 
-def test_t14_a_bound_at_its_maximum_is_not_offered(store, big_store):
+def test_t14_a_bound_at_its_maximum_is_not_offered(store, big_store, monkeypatch):
+    # The smallest record serialises to a little over 400 characters, so 100 of them no longer
+    # fit the 40000 ceiling: a lower maximum keeps the count the binding bound.
+    monkeypatch.setattr(server_module, "_LISTING_LIMIT_MAX", 90)
     for i in range(120):
         _add(store, f"t{i}", kind="adr", hours_ago=i + 1, whole_seconds=True)
 
-    by_count = _ask(store, status="accepted", limit=100, budget_chars=40000)  # 120 tiny: count cuts
-    by_size = _ask(big_store, query="payload", limit=100, budget_chars=40000)  # the size cuts
+    by_count = _ask(store, status="accepted", limit=90, budget_chars=40000)  # 120 tiny: count cuts
+    by_size = _ask(big_store, query="payload", limit=90, budget_chars=40000)  # the size cuts
 
-    assert by_count["returned"] == 100 and by_size["returned"] < 100
+    assert by_count["returned"] == 90 and by_size["returned"] < 90
     assert "limit" in by_count["hint"] and "raise" not in by_count["hint"]
     assert "character budget" in by_size["hint"] and "raise" not in by_size["hint"]
     assert "Narrow" in by_count["hint"] and "Narrow" in by_size["hint"]

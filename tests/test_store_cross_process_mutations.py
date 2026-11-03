@@ -236,7 +236,7 @@ def test_second_step_busy_does_not_claim_the_whole_tool_wrote_nothing(tmp_path, 
 def test_domain_parent_lookup_waits_for_the_publication_reservation(tmp_path):
     root = tmp_path / "store"
     with Store(root) as first, Store(root) as second, ThreadPoolExecutor() as pool:
-        old = first.add_domain(_domain("parent"))
+        old = first.add_domain(_domain("parent", status="accepted"))
         attempted, looked_up = threading.Event(), threading.Event()
         second._conn.set_trace_callback(
             lambda sql: attempted.set() if sql.upper().startswith("BEGIN") else None
@@ -256,6 +256,7 @@ def test_domain_parent_lookup_waits_for_the_publication_reservation(tmp_path):
             assert attempted.wait(1), "server did not reserve before parent lookup"
             assert not looked_up.is_set()
             first.supersede_domain(old.domain_id, replacement)
+            first.ratify_domains(accept=[replacement.domain_id])
         result = future.result(timeout=5)
         assert second.get_domain(result["domain_id"]).parent_id == replacement.domain_id
 

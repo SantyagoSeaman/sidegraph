@@ -29,6 +29,7 @@ from sidegraph.store_layout import (
     store_requirement,
 )
 from tests.store_format2_support import legacy_store
+from tests.store_record_support import _decision
 
 
 def running_release() -> str:
@@ -251,7 +252,7 @@ def test_the_marker_rewrite_is_atomic(tmp_path, monkeypatch):
         with pytest.raises(OSError, match="simulated crash"):
             store.raise_requirement(running_release())
     assert marker.read_bytes() == before
-    assert list((tmp_path / "s").glob("format.*.tmp"))
+    assert not list((tmp_path / "s").glob("format.*.tmp"))  # a failed publish cleans its tmp
 
 
 def test_two_raises_at_once_never_lower_the_requirement(tmp_path, monkeypatch):
@@ -436,13 +437,13 @@ def test_a_refused_directory_is_untouched_before_cleanup(tmp_path):
     } == before
 
 
-def test_a_refused_directory_does_not_migrate_its_legacy_database(tmp_path):
-    from tests.test_store_migration import _0_2_0_SCHEMA_SQL, _build_legacy_db
+def test_a_refused_directory_leaves_its_legacy_database_untouched(tmp_path):
+    from tests.test_store_migration import _legacy_db
 
     store_dir = tmp_path / "s"
     store_dir.mkdir()
     legacy = store_dir / "decisions.db"
-    _build_legacy_db(legacy, _0_2_0_SCHEMA_SQL, "0.2.0")
+    _legacy_db(legacy, "0.2.0")
     write_requirement_marker(store_dir, above_running())
     before = {p.name: p.read_bytes() for p in store_dir.iterdir()}
     with pytest.raises(StoreRequirementError):
@@ -612,3 +613,121 @@ def test_outer_rollback_leaves_the_marker_raised_and_next_refresh_repairs_the_st
         assert _index_stamp(store.path) == SCHEMA_VERSION
         store.refresh_if_stale()
         assert _index_stamp(store.path) == REQUIRED_INDEX_STAMP
+
+
+def _record_files(store_dir: Path) -> set[Path]:
+    return {p for p in store_dir.rglob("*.json") if "index" not in p.name}
+
+
+def test_a_writer_opened_before_a_raise_refuses_its_write_and_creates_no_record(tmp_path):
+    """A requirement raised after open, with no refresh in between, is seen under the lock."""
+    with Store(tmp_path / "s") as store:
+        before = _record_files(store.path)
+        write_requirement_marker(store.path, above_running())
+        with pytest.raises(StoreRequirementError) as raised:
+            store.add_decision(_decision())
+        assert str(raised.value) == (
+            f"This store requires Sidegraph >= {above_running()}; this is {__version__}."
+        )
+        assert _record_files(store.path) == before
+
+
+def test_a_write_under_an_unchanged_marker_still_succeeds(tmp_path):
+    with Store(tmp_path / "s") as store:
+        written = store.add_decision(_decision())
+        assert store.get_decision(written.id) is not None
+        write_requirement_marker(store.path, running_release())
+        again = store.add_decision(_decision("another adr"))
+        assert store.get_decision(again.id) is not None
+
+
+def test_a_nested_mutation_does_not_read_the_marker_again(tmp_path, monkeypatch):
+    with Store(tmp_path / "s") as store:
+        calls: list[int] = []
+        real = store_module._format_marker_signature
+        monkeypatch.setattr(
+            store_module,
+            "_format_marker_signature",
+            lambda path: calls.append(1) or real(path),
+        )
+        with store._mutation():
+            outer = len(calls)
+            with store._mutation():
+                pass
+        assert outer == 1
+        assert len(calls) == 1
+
+
+def test_a_nested_scope_that_takes_the_reservation_itself_rechecks_the_marker(tmp_path):
+    """An outer deferred scope has not reserved; the nested immediate one does, at depth 2."""
+    with Store(tmp_path / "s") as store:
+        before = _record_files(store.path)
+        write_requirement_marker(store.path, above_running())
+        with pytest.raises(StoreRequirementError), store._mutation(immediate=False):
+            store.add_decision(_decision())
+        assert _record_files(store.path) == before
+        assert not store._conn.in_transaction
+
+
+def test_a_writer_queued_on_the_lock_refuses_a_requirement_raised_while_it_waited(tmp_path):
+    """The check must run once the reservation is held: a handle blocked in BEGIN IMMEDIATE
+    sees the marker the holder raised before releasing."""
+    path = tmp_path / "s"
+    with Store(path) as holder, Store(path) as writer:
+        outcome: list[BaseException | None] = []
+
+        def write() -> None:
+            try:
+                writer.add_decision(_decision())
+                outcome.append(None)
+            except BaseException as exc:
+                outcome.append(exc)
+
+        before = _record_files(path)
+        attempted = threading.Event()
+        writer._conn.set_trace_callback(
+            lambda sql: attempted.set() if sql.upper().startswith("BEGIN") else None
+        )
+        with holder._mutation():
+            thread = threading.Thread(target=write)
+            thread.start()
+            # The trace fires as the writer issues BEGIN IMMEDIATE, which the holder's
+            # reservation then blocks: raising the requirement only after it proves the
+            # writer is queued on the lock rather than still before it.
+            assert attempted.wait(30), "the writer never issued BEGIN IMMEDIATE"
+            holder.raise_requirement("99.0.0", running="99.0.0")
+        thread.join(30)
+        assert not thread.is_alive()
+        assert len(outcome) == 1 and isinstance(outcome[0], StoreRequirementError), outcome
+        assert _record_files(path) == before
+        assert not writer._conn.in_transaction
+
+
+def test_a_write_in_a_checkout_marker_window_waits_for_the_marker(tmp_path, monkeypatch):
+    """Git unlinks ``format`` before writing its replacement: the recheck awaits it, as open."""
+    with Store(tmp_path / "s") as store:
+        marker = store.path / "format"
+        text = marker.read_text(encoding="utf-8")
+        marker.unlink()
+        waited: list[Path] = []
+
+        def await_marker(store_dir, **_kwargs):
+            waited.append(store_dir)
+            marker.write_text(text, encoding="utf-8")
+
+        monkeypatch.setattr(store_module.checkout_window, "await_marker", await_marker)
+        written = store.add_decision(_decision())
+        assert waited == [store.path]
+        assert store.get_decision(written.id) is not None
+
+
+def test_a_missing_marker_after_the_wait_still_refuses_shards_below_major_two(
+    tmp_path, monkeypatch
+):
+    with Store(legacy_store(tmp_path / "s")) as store:
+        (store.path / "format").unlink()
+        (store.path / "shards").mkdir(exist_ok=True)
+        (store.path / "shards" / "0.shard").write_text("", encoding="utf-8")
+        monkeypatch.setattr(store_module.checkout_window, "await_marker", lambda *_a, **_k: None)
+        with pytest.raises(StoreRequirementError, match="sidegraph-migrate"):
+            store.add_decision(_decision())

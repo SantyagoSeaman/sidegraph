@@ -29,7 +29,12 @@ from sidegraph.schema import (
     Entity,
     Provenance,
 )
-from sidegraph.store import Store, _archive_record_line, _domain_canonical_payload
+from sidegraph.store import (
+    Store,
+    SupersessionConflictError,
+    _archive_record_line,
+    _domain_canonical_payload,
+)
 from sidegraph.store_layout import hot_archive_difference, hot_matches_archive
 from tests.store_format2_support import format1_store
 
@@ -49,6 +54,8 @@ def _decision(**overrides) -> Decision:
         valid_from=datetime.now(UTC),
         provenance=Provenance(source="manual"),
     )
+    if "supersedes" in overrides:
+        base["status"] = "accepted"  # only an accepted successor closes
     base.update(overrides)
     return Decision(**base)
 
@@ -60,6 +67,8 @@ def _domain(**overrides) -> Domain:
         summary="Handles order settlement and refunds.",
         provenance=Provenance(source="manual"),
     )
+    if "supersedes" in overrides:
+        base["status"] = "accepted"  # only an accepted successor closes
     base.update(overrides)
     return Domain(**base)
 
@@ -96,7 +105,9 @@ def test_only_terminal_status_decisions_and_domains_are_selected(store: Store) -
     accepted_seed = store.add_decision(_decision(title="accepted seed"))
     store.ratify(accepted_seed.id)
 
-    superseded_old = store.add_decision(_decision(title="superseded predecessor"))
+    superseded_old = store.add_decision(
+        _decision(title="superseded predecessor", status="accepted")
+    )
     store.add_decision(_decision(title="successor", supersedes=superseded_old.id))
 
     rejected_seed = store.add_decision(_decision(title="to reject"))
@@ -110,7 +121,7 @@ def test_only_terminal_status_decisions_and_domains_are_selected(store: Store) -
     store.add_domain(_domain(slug="d-proposed"))
     domain_accepted = store.add_domain(_domain(slug="d-accepted"))
     store.ratify_domains(accept=[domain_accepted.domain_id])
-    domain_superseded_old = store.add_domain(_domain(slug="d-superseded"))
+    domain_superseded_old = store.add_domain(_domain(slug="d-superseded", status="accepted"))
     store.supersede_domain(
         domain_superseded_old.domain_id,
         _domain(slug="d-superseded", supersedes=domain_superseded_old.domain_id),
@@ -163,14 +174,14 @@ def test_proposed_and_accepted_records_never_compact(store: Store) -> None:
 
 
 def test_second_compact_writes_a_new_segment_first_left_byte_identical(store: Store) -> None:
-    old1 = store.add_decision(_decision(title="d1"))
+    old1 = store.add_decision(_decision(title="d1", status="accepted"))
     store.add_decision(_decision(title="d1-succ", supersedes=old1.id))
     report1 = store.compact()
     assert report1.segment_path is not None
     seg1 = store.path / report1.segment_path
     seg1_bytes_before = seg1.read_bytes()
 
-    old2 = store.add_decision(_decision(title="d2"))
+    old2 = store.add_decision(_decision(title="d2", status="accepted"))
     store.add_decision(_decision(title="d2-succ", supersedes=old2.id))
     report2 = store.compact()
 
@@ -185,10 +196,10 @@ def test_second_compact_writes_a_new_segment_first_left_byte_identical(store: St
 def test_records_sorted_by_ulid_within_segment(store: Store) -> None:
     olds = []
     for i in range(4):
-        o = store.add_decision(_decision(title=f"d{i}"))
+        o = store.add_decision(_decision(title=f"d{i}", status="accepted"))
         store.add_decision(_decision(title=f"d{i}-succ", supersedes=o.id))
         olds.append(o)
-    dom_old = store.add_domain(_domain(slug="d-super"))
+    dom_old = store.add_domain(_domain(slug="d-super", status="accepted"))
     store.supersede_domain(dom_old.domain_id, _domain(slug="d-super", supersedes=dom_old.domain_id))
 
     report = store.compact()
@@ -208,7 +219,7 @@ def test_records_sorted_by_ulid_within_segment(store: Store) -> None:
 
 
 def test_crash_window_leftover_hot_file_cleaned_up_without_new_segment(store: Store) -> None:
-    old = store.add_decision(_decision(title="d1"))
+    old = store.add_decision(_decision(title="d1", status="accepted"))
     store.add_decision(_decision(title="d1-succ", supersedes=old.id))
     hot_path = _hot_decision_path(store, old.id)
     original_bytes = hot_path.read_bytes()
@@ -291,7 +302,7 @@ def test_older_than_filters_decisions_by_valid_to_and_always_excludes_domains(
 
 def _snapshot(store: Store) -> dict:
     out = {}
-    for sub in ("decisions", "domains", "entities", "bindings", "initiatives"):
+    for sub in ("decisions", "domains", "entities", "bindings"):
         d = store.path / sub
         if not d.is_dir():
             continue
@@ -306,7 +317,7 @@ def _snapshot(store: Store) -> dict:
 
 
 def test_dry_run_writes_nothing_digest_unchanged(store: Store) -> None:
-    old = store.add_decision(_decision(title="d1"))
+    old = store.add_decision(_decision(title="d1", status="accepted"))
     store.add_decision(_decision(title="d1-succ", supersedes=old.id))
     digest_before = store.get_meta("canonical_digest")
     files_before = _snapshot(store)
@@ -328,6 +339,7 @@ def test_archived_decision_round_trips_every_field_including_cyrillic(store: Sto
     text = "решение — с грабли́ми"
     old = store.add_decision(
         _decision(
+            status="accepted",
             title=text,
             context=f"context: {text}",
             choice=f"choice: {text}",
@@ -366,7 +378,9 @@ def test_archived_decision_round_trips_every_field_including_cyrillic(store: Sto
 
 
 def test_archived_domain_round_trips_canonical_fields(store: Store) -> None:
-    old = store.add_domain(_domain(slug="payments", title="Payments", summary="v1 summary"))
+    old = store.add_domain(
+        _domain(slug="payments", title="Payments", summary="v1 summary", status="accepted")
+    )
     store.supersede_domain(
         old.domain_id,
         _domain(
@@ -460,7 +474,7 @@ def test_reload_prefers_hot_file_over_conflicting_archive_entry_and_warns(tmp_pa
 def test_compact_leaves_mismatched_leftover_hot_file_untouched_and_warns(
     store: Store, capsys
 ) -> None:
-    old = store.add_decision(_decision(title="original"))
+    old = store.add_decision(_decision(title="original", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     report1 = store.compact()
     assert report1.decisions_compacted == 1
@@ -509,7 +523,7 @@ def test_hot_archive_difference_preserves_boolean_contract(hot, archived, expect
 
 
 def test_compact_kept_leftover_count_ignores_fresh_age_and_status_filter(store: Store):
-    old = store.add_decision(_decision(title="archived leftover"))
+    old = store.add_decision(_decision(title="archived leftover", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     assert store.compact().decisions_compacted == 1
 
@@ -530,7 +544,7 @@ def test_compact_kept_leftover_count_ignores_fresh_age_and_status_filter(store: 
 def test_compact_skipped_hot_leftover_is_not_counted_as_kept(tmp_path):
     path = tmp_path / "s"
     store = Store(format1_store(path))
-    old = store.add_decision(_decision(title="archived old"))
+    old = store.add_decision(_decision(title="archived old", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     assert store.compact().decisions_compacted == 1
     hot_path = _hot_decision_path(store, old.id)
@@ -572,7 +586,13 @@ def test_superseded_decision_and_bindings_fully_retrievable_after_compact_and_re
 ) -> None:
     entity = store.upsert_entity(Entity(canonical_name="widget"))
     old = store.add_decision(
-        _decision(title="old approach", context="ctx", choice="choice A", rejected="reason A")
+        _decision(
+            title="old approach",
+            context="ctx",
+            choice="choice A",
+            rejected="reason A",
+            status="accepted",
+        )
     )
     store.add_binding(
         AnchorBinding(record_id=old.id, entity_id=entity.entity_id, tier=2, status="live")
@@ -654,7 +674,7 @@ def test_compact_git_status_shows_only_removed_hot_files_and_new_segment(tmp_pat
     _git("init", "-q", cwd=repo)
 
     store = Store(format1_store(repo / ".sidegraph"))
-    old = store.add_decision(_decision(title="old"))
+    old = store.add_decision(_decision(title="old", status="accepted"))
     store.add_decision(_decision(title="new", supersedes=old.id))
     store.close()
 
@@ -700,7 +720,7 @@ def _strip_newer_keys(path) -> None:
 
 
 def _old_decision(store: Store) -> Decision:
-    old = store.add_decision(_decision(title="legacy"))
+    old = store.add_decision(_decision(title="legacy", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     _strip_newer_keys(_hot_decision_path(store, old.id))
     return old
@@ -766,7 +786,7 @@ def test_compact_keeps_and_warns_on_an_unknown_extra_key_holding_a_value(
 def test_second_compact_cleans_a_leftover_that_differs_only_by_absent_keys(
     store: Store, capsys
 ) -> None:
-    old = store.add_decision(_decision(title="legacy"))
+    old = store.add_decision(_decision(title="legacy", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     hot = _hot_decision_path(store, old.id)
     original = hot.read_text(encoding="utf-8")
@@ -781,7 +801,7 @@ def test_second_compact_cleans_a_leftover_that_differs_only_by_absent_keys(
 
 
 def test_second_compact_keeps_a_leftover_that_differs_for_real(store: Store, capsys) -> None:
-    old = store.add_decision(_decision(title="legacy"))
+    old = store.add_decision(_decision(title="legacy", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     hot = _hot_decision_path(store, old.id)
     original = hot.read_text(encoding="utf-8")
@@ -800,7 +820,7 @@ def test_second_compact_keeps_a_leftover_that_differs_for_real(store: Store, cap
 def test_reload_does_not_warn_for_a_hot_file_that_differs_only_by_absent_keys(
     store: Store, capsys
 ) -> None:
-    old = store.add_decision(_decision(title="legacy"))
+    old = store.add_decision(_decision(title="legacy", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     hot = _hot_decision_path(store, old.id)
     original = hot.read_text(encoding="utf-8")
@@ -844,7 +864,7 @@ _HOT_ONLY_KEYS = [
 def test_compact_keeps_a_hot_file_holding_a_key_the_archive_lacks(
     store: Store, capsys, mutate
 ) -> None:
-    old = store.add_decision(_decision(title="newer-version"))
+    old = store.add_decision(_decision(title="newer-version", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     hot = _hot_decision_path(store, old.id)
     _mutate_hot(hot, mutate)
@@ -857,7 +877,7 @@ def test_compact_keeps_a_hot_file_holding_a_key_the_archive_lacks(
 def test_leftover_hot_file_holding_a_key_the_archive_lacks_is_kept(
     store: Store, capsys, mutate
 ) -> None:
-    old = store.add_decision(_decision(title="newer-version"))
+    old = store.add_decision(_decision(title="newer-version", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     hot = _hot_decision_path(store, old.id)
     original = hot.read_text(encoding="utf-8")
@@ -903,7 +923,7 @@ def test_leftover_with_an_empty_string_against_an_archived_null_is_kept(
 ) -> None:
     # `""` is a value, not an empty shape: a mutant treating every falsy value as empty
     # would clean this file.
-    old = store.add_decision(_decision(title="legacy"))
+    old = store.add_decision(_decision(title="legacy", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     hot = _hot_decision_path(store, old.id)
     original = hot.read_text(encoding="utf-8")
@@ -965,7 +985,7 @@ def _expected_segment_name(date_str: str, seq: int, content: str) -> str:
 
 
 def test_publish_retries_under_next_seq_when_target_name_pre_exists(store: Store) -> None:
-    old = store.add_decision(_decision(title="d1"))
+    old = store.add_decision(_decision(title="d1", status="accepted"))
     store.add_decision(_decision(title="d1-succ", supersedes=old.id))
     decision = store.get_decision(old.id)
     assert decision is not None
@@ -997,7 +1017,7 @@ def test_publish_retries_under_next_seq_when_target_name_pre_exists(store: Store
 def test_publish_failure_leaves_no_partial_segment_and_never_removes_hot_files(
     store: Store, monkeypatch
 ) -> None:
-    old = store.add_decision(_decision(title="d1"))
+    old = store.add_decision(_decision(title="d1", status="accepted"))
     store.add_decision(_decision(title="d1-succ", supersedes=old.id))
     hot_path = _hot_decision_path(store, old.id)
 
@@ -1033,15 +1053,14 @@ def test_supersede_never_resurrects_archived_rejected_predecessor(store: Store, 
     hot_path = _hot_decision_path(store, old.id)
     assert not hot_path.is_file()
 
-    successor = store.add_decision(_decision(title="successor", supersedes=old.id))
-
-    # never resurrected as a fresh hot file
+    # A rejected record is not a live head: superseding it is refused outright, so nothing
+    # is written and the archived record is never resurrected as a fresh hot file.
+    with pytest.raises(SupersessionConflictError, match="no longer current"):
+        store.add_decision(_decision(title="successor", supersedes=old.id))
     assert not hot_path.is_file()
     reloaded_old = store.get_decision(old.id)
     assert reloaded_old is not None
     assert reloaded_old.status == DecisionStatus.REJECTED  # unchanged, still terminal
-    # the relationship is still recorded on the successor (append-only semantics)
-    assert store.get_decision(successor.id).supersedes == old.id
 
     # a cold reopen must not warn about a hot/archive mismatch -- there IS no hot file
     path = store.path
@@ -1057,8 +1076,7 @@ def test_supersede_never_resurrects_archived_rejected_predecessor(store: Store, 
 def test_supersede_still_closes_a_still_open_accepted_predecessor(store: Store) -> None:
     """The guard must not overreach: an OPEN (accepted/proposed) predecessor is closed
     exactly as before -- only an ALREADY-terminal one is protected."""
-    old = store.add_decision(_decision(title="predecessor"))
-    store.ratify(old.id)  # -> ACCEPTED (still open)
+    old = store.add_decision(_decision(title="predecessor", status="accepted"))
     successor = store.add_decision(_decision(title="successor", supersedes=old.id))
 
     assert store.get_decision(old.id).status == DecisionStatus.SUPERSEDED
@@ -1069,7 +1087,7 @@ def test_supersede_still_closes_a_still_open_accepted_predecessor(store: Store) 
 
 
 def test_compact_fsyncs_segment_content_and_archive_directory(store: Store, monkeypatch) -> None:
-    old = store.add_decision(_decision(title="d1"))
+    old = store.add_decision(_decision(title="d1", status="accepted"))
     store.add_decision(_decision(title="d1-succ", supersedes=old.id))
 
     import sidegraph.store as store_module
@@ -1094,7 +1112,7 @@ def test_compact_fsyncs_segment_content_and_archive_directory(store: Store, monk
 
 
 def test_segment_filename_has_date_seq_hash_shape(store: Store) -> None:
-    old = store.add_decision(_decision(title="d1"))
+    old = store.add_decision(_decision(title="d1", status="accepted"))
     store.add_decision(_decision(title="d1-succ", supersedes=old.id))
     report = store.compact()
     name = Path(report.segment_path).name
@@ -1111,13 +1129,13 @@ def test_segment_filename_has_date_seq_hash_shape(store: Store) -> None:
 
 def test_same_day_cross_branch_compacts_get_different_names_no_collision(tmp_path) -> None:
     store_a = Store(format1_store(tmp_path / "a"))
-    old_a = store_a.add_decision(_decision(title="branch A decision"))
+    old_a = store_a.add_decision(_decision(title="branch A decision", status="accepted"))
     store_a.add_decision(_decision(title="branch A succ", supersedes=old_a.id))
     report_a = store_a.compact()
     store_a.close()
 
     store_b = Store(format1_store(tmp_path / "b"))
-    old_b = store_b.add_decision(_decision(title="branch B decision"))
+    old_b = store_b.add_decision(_decision(title="branch B decision", status="accepted"))
     store_b.add_decision(_decision(title="branch B succ", supersedes=old_b.id))
     report_b = store_b.compact()
     store_b.close()
@@ -1190,7 +1208,7 @@ def test_seq_numbering_recognizes_legacy_bare_segment_names(store: Store) -> Non
     archive_dir.mkdir(parents=True, exist_ok=True)
     (archive_dir / f"{date_str}-3.jsonl").write_text("", encoding="utf-8")  # legacy, bare
 
-    old = store.add_decision(_decision(title="d1"))
+    old = store.add_decision(_decision(title="d1", status="accepted"))
     store.add_decision(_decision(title="d1-succ", supersedes=old.id))
     report = store.compact()
 
@@ -1234,7 +1252,7 @@ def test_corrupt_archive_segment_error_names_path_and_line(tmp_path) -> None:
 
 
 def test_fresh_candidate_hot_file_changed_externally_is_never_deleted(store: Store, capsys) -> None:
-    old = store.add_decision(_decision(title="original"))
+    old = store.add_decision(_decision(title="original", status="accepted"))
     store.add_decision(_decision(title="successor", supersedes=old.id))
     hot_path = _hot_decision_path(store, old.id)
 
@@ -1259,7 +1277,7 @@ def test_fresh_candidate_hot_file_changed_externally_is_never_deleted(store: Sto
 
 
 def test_compact_dry_run_after_hot_becomes_unparseable_is_read_only(store: Store) -> None:
-    old = store.add_decision(_decision(title="invalid-dry-run-old"))
+    old = store.add_decision(_decision(title="invalid-dry-run-old", status="accepted"))
     store.add_decision(_decision(title="invalid-dry-run-successor", supersedes=old.id))
     hot_path = _hot_decision_path(store, old.id)
     hot_path.write_text("not json\n", encoding="utf-8")

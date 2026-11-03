@@ -13,7 +13,7 @@ task-aware retrieval + decision memory riding on the engine's entity graph.
 continuing participant in the project. A core feature must preserve, organize, or deliver
 accumulated project understanding. Document search by itself is not the product.
 
-Sidegraph is pre-1.0 (v0.23.0) — the full loop (capture, ratification, mistakes-first
+Sidegraph is pre-1.0 (v0.24.0) — the full loop (capture, ratification, mistakes-first
 retrieval, refactor-surviving re-anchoring, semantic docs layer, mind-model domains, and the
 facts evidence layer) ships and is exercised end-to-end, but interfaces may still move before
 a stable release. See
@@ -54,7 +54,7 @@ beside them.
 
 ```
 src/sidegraph/
-├── schema.py        # Pydantic models: Entity, Decision, Fact, AnchorBinding, Domain, Initiative
+├── schema.py        # Pydantic models: Entity, Decision, Fact, AnchorBinding, Domain
 ├── store.py         # owned append-only store (per-record JSON files, packed into shards by maintenance); enforces invariants on write
 ├── retrieval.py     # multi-altitude, budget-bounded, task-aware read path (mistakes first)
 ├── domain_snapshot.py  # committed domain-membership snapshot: format and matching rules
@@ -87,7 +87,7 @@ src/sidegraph/
   portable core never imports `host/`.
 
 See [`docs/concepts/data-model.md`](docs/concepts/data-model.md) for the record types
-(`Entity`, `Decision`, `Fact`, `AnchorBinding`, `Domain`, `Initiative`) and
+(`Entity`, `Decision`, `Fact`, `AnchorBinding`, `Domain`) and
 [`docs/concepts/anchoring.md`](docs/concepts/anchoring.md) /
 [`docs/concepts/retrieval.md`](docs/concepts/retrieval.md) for how they're anchored and read.
 

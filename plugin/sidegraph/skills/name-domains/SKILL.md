@@ -17,6 +17,10 @@ obviously right are NOT a pick. Wait for an actual reply naming a set (or "merge
 "rename that one", "I'll choose myself"). Same discipline as the `sidegraph:ratify-decisions`
 gate: present and wait, never auto-write.
 
+When the human accepts the setup skill's early offer, begin this conversation now and
+return to setup afterward. That yes starts curation; it is not a pick of a domain set and
+does not authorize `propose_domains` or `ratify`.
+
 ## Flow
 
 1. **Call `list_domain_candidates()`** with no filters — let yourself narrow in conversation,
@@ -100,8 +104,8 @@ gate: present and wait, never auto-write.
    (no `parent_slug`: offered sets are flat — hierarchy is a `manage-domains` follow-up, not
    part of this flow). Then, only after that write, call
    `ratify(accept=[...])` with the returned `domain_id`s whose `ratified_by` is null (under
-   `auto-all` the rest are already accepted, and `ratify` would return `error: … is not
-   proposed` for them) —
+   `auto-all` the rest are already accepted, and `ratify` would only answer `already
+   accepted` for them) —
    turning the pick into an accepted, TOC-visible set in the same turn (ratify also resolves
    each domain's `seed_anchors` into members immediately, so `drill_down` shows real
    membership right away, without waiting for a separate sync; on a store that already has a

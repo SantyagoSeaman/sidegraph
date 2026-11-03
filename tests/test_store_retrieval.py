@@ -7,7 +7,6 @@ from sidegraph.schema import (
     DecisionStatus,
     Descriptor,
     Entity,
-    Initiative,
     Provenance,
     Scope,
 )
@@ -88,10 +87,3 @@ def test_find_abstract_entity(tmp_path):
     a = s.get_or_create_abstract_entity("community:18")
     assert s.find_abstract_entity("community:18").entity_id == a.entity_id
     assert s.find_abstract_entity("community:99") is None
-
-
-def test_iter_initiatives(tmp_path):
-    s = Store(tmp_path / "t.db")
-    s.upsert_initiative(Initiative(name="Metadata Platform"))
-    names = [i.name for i in s.iter_initiatives()]
-    assert names == ["Metadata Platform"]

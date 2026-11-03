@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             "summary": {},
         }
         report["error"] = str(exc)
-        code = 2
+        code = 1
     report["applied"] = applied
     report["partial_write_possible"] = attempted and not applied
     if attempted and not applied:
@@ -226,7 +226,10 @@ def main(argv: list[str] | None = None) -> int:
             "Write failed; earlier files or a new partial file may remain. Review before retrying."
         )
     if args.json:
+        # The machine report stays on stdout whatever the code; the message goes to stderr too.
         print(json.dumps(report, ensure_ascii=False, indent=2))
+        if report.get("error"):
+            print(report["error"], file=sys.stderr)
     else:
         for change in report["changes"]:
             print(

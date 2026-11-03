@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from sidegraph.capture import RatifyPolicy
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import TOC_CACHE_KEY
 from sidegraph.schema import Descriptor, Domain, DomainStatus, Provenance
@@ -12,11 +13,12 @@ from sidegraph.server import (
     _list_proposed_impl,
     _propose_decisions_impl,
     _propose_domains_impl,
-    _ratify_decisions_impl,
     _ratify_impl,
+    _supersede_decision_impl,
     propose_decisions,
 )
 from sidegraph.store import Store
+from sidegraph.sync import rebind_entity
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
 
@@ -39,7 +41,7 @@ def test_propose_list_ratify_roundtrip(tmp_path):
     listing = _list_proposed_impl(store)
     assert did in listing and "Lock around order placement" in listing
 
-    out = _ratify_decisions_impl(store, accept=[did])
+    out = _ratify_impl(store, accept=[did])
     assert out[did] == "accepted"
     assert "No proposed decisions" in _list_proposed_impl(store)
 
@@ -77,7 +79,7 @@ def test_write_tool_docstrings_name_anchors_orphaned():
 
 def test_ratify_impl_reports_errors_per_id(tmp_path):
     store = Store(tmp_path / "t.db")
-    out = _ratify_decisions_impl(store, accept=["missing"], drop=["also-missing"])
+    out = _ratify_impl(store, accept=["missing"], drop=["also-missing"])
     assert out["missing"].startswith("error")
     assert out["also-missing"].startswith("error")
 
@@ -87,7 +89,7 @@ def test_ratify_accept_and_drop_same_id_does_not_clobber(tmp_path):
     results = _propose_decisions_impl(store, None, [dict(DRAFT, anchors=[])])
     did = results[0]["decision_id"]
 
-    out = _ratify_decisions_impl(store, accept=[did], drop=[did])
+    out = _ratify_impl(store, accept=[did], drop=[did])
     assert out[did] == "accepted (drop ignored)"
     assert store.get_decision(did).status.value == "accepted"
 
@@ -98,7 +100,7 @@ def test_retrieve_decisions_excludes_rejected(tmp_path):
     store = Store(tmp_path / "t.db")
     results = _propose_decisions_impl(store, None, [dict(DRAFT, anchors=[])])
     did = results[0]["decision_id"]
-    _ratify_decisions_impl(store, drop=[did])
+    _ratify_impl(store, drop=[did])
     # dropped (rejected) records leave the default listing...
     assert did not in {d["id"] for d in _retrieve_decisions_impl(store)}
     # ...but remain visible when superseded/rejected history is requested
@@ -375,7 +377,7 @@ def test_propose_decisions_tags_and_layer_round_trip(tmp_path):
     assert did in bound_decisions
 
     # tags survive ratification unchanged (drafts carry through)
-    _ratify_decisions_impl(store, accept=[did])
+    _ratify_impl(store, accept=[did])
     assert store.get_decision(did).layer == "business"
     assert did in {d.id for d in store.valid_decisions_for_entity(needs_review.entity_id)}
 
@@ -524,7 +526,9 @@ def test_auto_accept_env_resolution(monkeypatch):
 
 def test_propose_decisions_impl_auto_accept_lands_accepted(tmp_path):
     store = Store(tmp_path / "t.db")
-    results = _propose_decisions_impl(store, None, [dict(DRAFT, anchors=[])], auto_accept=True)
+    results = _propose_decisions_impl(
+        store, None, [dict(DRAFT, anchors=[])], ratify_policy=RatifyPolicy.LEGACY_ACCEPT
+    )
     did = results[0]["decision_id"]
     assert store.get_decision(did).status.value == "accepted"
 
@@ -876,3 +880,355 @@ def test_add_decision_redacts_initiative(tmp_path):
     for f in tmp_path.rglob("*.json"):
         assert SECRET_INITIATIVE not in f.read_text()
     assert any(e["canonical_name"] == "initiative:proj-[REDACTED]" for e in out["entities"])
+
+
+# -- ratify on a record that is already settled: idempotent no-op vs specific refusal -----
+
+
+def _settled_ids(store):
+    """One proposed decision, fact and domain, each as an id (nothing ratified yet)."""
+    from datetime import UTC, datetime
+
+    from sidegraph.schema import Fact
+
+    did = _propose_decisions_impl(store, None, [dict(DRAFT, anchors=[])])[0]["decision_id"]
+    fact = store.add_fact(
+        Fact(
+            statement="a fact",
+            source="benchmark run",
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="agent"),
+        )
+    )
+    domain_id = _add_domain_impl(store, None, slug="payments", title="Payments", summary="s.")[
+        "domain_id"
+    ]
+    return {"decision": did, "fact": fact.id, "domain": domain_id}
+
+
+@pytest.mark.parametrize("kind", ["decision", "fact", "domain"])
+def test_ratify_repeat_accept_is_already_accepted(tmp_path, kind):
+    store = Store(tmp_path / "t.db")
+    id_ = _settled_ids(store)[kind]
+    assert _ratify_impl(store, accept=[id_])[id_] == "accepted"
+    assert _ratify_impl(store, accept=[id_])[id_] == "already accepted"
+
+
+@pytest.mark.parametrize("kind", ["decision", "fact"])
+def test_ratify_repeat_drop_is_already_rejected(tmp_path, kind):
+    store = Store(tmp_path / "t.db")
+    id_ = _settled_ids(store)[kind]
+    assert _ratify_impl(store, drop=[id_])[id_] == "dropped"
+    assert _ratify_impl(store, drop=[id_])[id_] == "already rejected"
+
+
+def test_ratify_repeat_drop_of_a_domain_is_already_dropped(tmp_path):
+    store = Store(tmp_path / "t.db")
+    id_ = _settled_ids(store)["domain"]
+    assert _ratify_impl(store, drop=[id_])[id_] == "dropped"
+    assert _ratify_impl(store, drop=[id_])[id_] == "already dropped"
+
+
+@pytest.mark.parametrize("kind", ["decision", "fact", "domain"])
+def test_ratify_accept_after_drop_is_a_specific_refusal(tmp_path, kind):
+    store = Store(tmp_path / "t.db")
+    id_ = _settled_ids(store)[kind]
+    _ratify_impl(store, drop=[id_])
+    state = "dropped" if kind == "domain" else "rejected"
+    assert _ratify_impl(store, accept=[id_])[id_] == (
+        f"error: already {state}; it cannot be accepted"
+    )
+
+
+@pytest.mark.parametrize("kind", ["decision", "fact"])
+def test_ratify_drop_after_accept_is_a_specific_refusal(tmp_path, kind):
+    store = Store(tmp_path / "t.db")
+    id_ = _settled_ids(store)[kind]
+    _ratify_impl(store, accept=[id_])
+    refusal = "error: already accepted; it cannot be dropped"
+    if kind == "decision":  # a decision is closed by supersession or retire_decision instead
+        refusal += (
+            "; supersede it if it changed, or retire it with retire_decision if it is a "
+            "duplicate or its subject is gone"
+        )
+    assert _ratify_impl(store, drop=[id_])[id_] == refusal
+
+
+def test_ratify_drop_of_an_accepted_domain_still_works(tmp_path):
+    store = Store(tmp_path / "t.db")
+    id_ = _settled_ids(store)["domain"]
+    _ratify_impl(store, accept=[id_])
+    assert _ratify_impl(store, drop=[id_])[id_] == "dropped"
+
+
+def test_ratify_repeat_domain_accept_does_not_rebuild_the_toc(tmp_path):
+    store = Store(tmp_path / "t.db")
+    id_ = _settled_ids(store)["domain"]
+    _ratify_impl(store, accept=[id_])
+    store.set_meta(TOC_CACHE_KEY, "sentinel")
+    assert _ratify_impl(store, accept=[id_])[id_] == "already accepted"
+    assert store.get_meta(TOC_CACHE_KEY) == "sentinel"
+
+
+@pytest.mark.parametrize("kind", ["decision", "fact", "domain"])
+@pytest.mark.parametrize(
+    ("winner", "action", "expected"),
+    [
+        ("accept", "accept", "already accepted"),
+        ("drop", "accept", "error: already {state}; it cannot be accepted"),
+    ],
+)
+def test_ratify_lost_race_reports_the_new_status(
+    tmp_path, monkeypatch, kind, winner, action, expected
+):
+    """Another process settles the record between our read and our write: the first read
+    says proposed, the store refuses, and the answer comes from a re-read."""
+    store = Store(tmp_path / "t.db")
+    id_ = _settled_ids(store)[kind]
+    getter = {"decision": "get_decision", "fact": "get_fact", "domain": "get_domain"}[kind]
+    stale = getattr(store, getter)(id_)
+    other = Store(tmp_path / "t.db")
+    _ratify_impl(other, **{winner: [id_]})
+
+    real = getattr(store, getter)
+    # A decision id is looked up twice before the write (pass 1's routing check, then
+    # _ratify_one); a fact or domain id once.
+    stale_reads = [None] * (2 if kind == "decision" else 1)
+
+    def first_read_is_stale(rid):
+        if stale_reads and rid == id_:
+            stale_reads.pop()
+            return stale
+        return real(rid)
+
+    monkeypatch.setattr(store, getter, first_read_is_stale)
+    state = "dropped" if kind == "domain" else "rejected"
+    assert _ratify_impl(store, **{action: [id_]})[id_] == expected.format(state=state)
+
+
+# -- no graph present: add_decision / supersede_decision keep their anchors as orphans -----
+
+
+def _no_graph_orphans(out: dict, name: str) -> None:
+    assert out["anchors_skipped"] == []
+    assert [(e["canonical_name"], e["tier"], e["reason"]) for e in out["anchors_orphaned"]] == [
+        (name, 2, "no-graph")
+    ]
+    assert out["bindings"] == 1
+
+
+def test_add_decision_impl_no_reader_binds_the_anchor_as_an_orphaned_leaf(tmp_path):
+    """Red against the silent no-op: with no graph, the requested anchor used to vanish
+    (``bindings: 0``, nothing reported); propose/add_fact/add_anchors bind an orphaned leaf."""
+    store = Store(tmp_path / "t.db")
+    out = _add_decision_impl(
+        store,
+        None,
+        "title",
+        "adr",
+        "ctx",
+        "choice",
+        anchors=[{"name": "run", "file_path": "pkg/run.py"}],
+    )
+    _no_graph_orphans(out, "run")
+    (binding,) = store.bindings_for_record(out["id"])
+    assert binding.status == "orphaned" and binding.tier == 2
+
+
+def test_supersede_decision_impl_no_reader_binds_explicit_anchors_as_orphans(tmp_path):
+    store = Store(tmp_path / "t.db")
+    old = _add_decision_impl(store, None, "old", "adr", "ctx", "choice")
+    out = _supersede_decision_impl(
+        store,
+        None,
+        old["id"],
+        "new",
+        "adr",
+        "ctx",
+        "choice",
+        anchors=[{"name": "run", "file_path": "pkg/run.py"}],
+    )
+    _no_graph_orphans(out, "run")
+    (binding,) = store.bindings_for_record(out["id"])
+    assert binding.status == "orphaned"
+
+
+def test_add_decision_impl_no_reader_invalid_anchor_still_refuses_the_whole_call(tmp_path):
+    store = Store(tmp_path / "t.db")
+    with pytest.raises(ValueError):
+        _add_decision_impl(
+            store,
+            None,
+            "title",
+            "adr",
+            "ctx",
+            "choice",
+            anchors=[{"name": "ok"}, {"name": "bad", "relation": "nonsense"}],
+        )
+    assert list(store.iter_decisions()) == []
+
+
+def test_no_graph_orphan_from_add_decision_heals_when_a_graph_has_the_anchor(tmp_path):
+    store = Store(tmp_path / "t.db")
+    out = _add_decision_impl(
+        store,
+        None,
+        "title",
+        "adr",
+        "ctx",
+        "choice",
+        anchors=[{"name": "run", "file_path": "pkg/run.py"}],
+    )
+    graph = {
+        "built_at_commit": "x",
+        "nodes": [
+            {
+                "id": "n1",
+                "label": "run()",
+                "norm_label": "run()",
+                "file_type": "code",
+                "source_file": "pkg/run.py",
+                "community": 1,
+            }
+        ],
+        "links": [],
+    }
+    path = tmp_path / "g.json"
+    path.write_text(json.dumps(graph))
+    entity = store.find_entity("run", "pkg/run.py")
+    assert entity is not None
+    rebind_entity(entity, store, GraphifyReader(path))
+    (leaf,) = [b for b in store.bindings_for_record(out["id"]) if b.tier == 2]
+    assert leaf.status == "live"
+
+
+def _sync_graph(tmp_path):
+    path = tmp_path / "g.json"
+    path.write_text(
+        json.dumps(
+            {
+                "built_at_commit": "x",
+                "nodes": [
+                    {
+                        "id": "n1",
+                        "label": "run()",
+                        "norm_label": "run()",
+                        "file_type": "code",
+                        "source_file": "pkg/run.py",
+                        "community": 1,
+                    }
+                ],
+                "links": [],
+            }
+        )
+    )
+    return GraphifyReader(path)
+
+
+@pytest.mark.parametrize(
+    "writer", ["add_decision", "supersede_decision", "add_fact", "propose", "add_anchors"]
+)
+def test_no_graph_orphan_heals_on_an_ordinary_sync_of_the_same_graph(tmp_path, writer):
+    """The sync gate compares graph versions; an orphan born while the graph was missing must
+    still be rebound when the identical graph returns, without ``force``."""
+    from sidegraph.server import _add_anchors_impl, _add_fact_impl
+    from sidegraph.sync import sync
+
+    store = Store(tmp_path / "t.db")
+    reader = _sync_graph(tmp_path)
+    sync(store, reader)  # the graph was synced once; then it went missing
+    anchors = [{"name": "run", "file_path": "pkg/run.py"}]
+    if writer == "add_decision":
+        out = _add_decision_impl(store, None, "t", "adr", "c", "ch", anchors=anchors)
+    elif writer == "supersede_decision":
+        old = _add_decision_impl(store, None, "old", "adr", "c", "ch")
+        out = _supersede_decision_impl(
+            store, None, old["id"], "t", "adr", "c", "ch", anchors=anchors
+        )
+    elif writer == "propose":
+        draft = {"title": "t", "kind": "gotcha", "context": "c", "choice": "ch"}
+        out = _propose_decisions_impl(store, None, [{**draft, "anchors": anchors}])[0]
+        out = {"id": out["decision_id"]}
+    elif writer == "add_anchors":
+        bare = _add_decision_impl(store, None, "t", "adr", "c", "ch")
+        out = {"id": bare["id"]}
+        _add_anchors_impl(store, None, bare["id"], anchors)
+    else:
+        out = _add_fact_impl(store, None, statement="s", source="src", anchors=anchors)
+    leaf = [b for b in store.bindings_for_record(out["id"]) if b.tier == 2]
+    assert [b.status for b in leaf] == ["orphaned"]
+
+    report = sync(store, reader)  # same graph, no force
+    assert not report.skipped
+    leaf = [b for b in store.bindings_for_record(out["id"]) if b.tier == 2]
+    assert [b.status for b in leaf] == ["live"]
+
+
+def test_no_graph_write_does_not_silence_existing_live_memory(tmp_path):
+    """A pending rebind must only bypass sync's version gate: the hot index keeps serving the
+    records whose bindings were already computed."""
+    from sidegraph.hot_index import HotIndex
+    from tests.test_hot_index import _synced_hot_pair
+
+    root, _reader, entities, _record = _synced_hot_pair(tmp_path)
+    store = Store(root)
+    try:
+        _add_decision_impl(
+            store,
+            None,
+            "t",
+            "adr",
+            "c",
+            "ch",
+            anchors=[{"name": "later", "file_path": "later.py"}],
+        )
+    finally:
+        store.close()
+    index = HotIndex.open(root)
+    assert index is not None
+    try:
+        titles = [r.decision["title"] for r in index.records_for([e.entity_id for e in entities])]
+        assert titles == ["Legitimate live memory"]
+        assert index.memory_counts()[0] >= 1
+    finally:
+        index.close()
+
+
+def test_an_orphan_born_during_a_sync_pass_still_gets_the_next_ordinary_pass(tmp_path, monkeypatch):
+    import sidegraph.sync as sync_module
+    from sidegraph.sync import sync
+
+    store = Store(tmp_path / "t.db")
+    reader = _sync_graph(tmp_path)
+    sync(store, reader)
+    real = sync_module._stale_decisions
+    born: list[str] = []
+
+    def orphan_after_the_snapshot(s):
+        # a second connection writes after the pass took its snapshot, before it completes
+        other = Store(tmp_path / "t.db")
+        try:
+            born.append(
+                _add_decision_impl(
+                    other,
+                    None,
+                    "t",
+                    "adr",
+                    "c",
+                    "ch",
+                    anchors=[{"name": "run", "file_path": "pkg/run.py"}],
+                )["id"]
+            )
+        finally:
+            other.close()
+        return real(s)
+
+    monkeypatch.setattr(sync_module, "_stale_decisions", orphan_after_the_snapshot)
+    sync(store, reader, force=True)
+    monkeypatch.setattr(sync_module, "_stale_decisions", real)
+    assert born
+
+    report = sync(store, reader)  # ordinary: same graph, no force
+    assert not report.skipped
+    leaf = [b for b in store.bindings_for_record(born[0]) if b.tier == 2]
+    assert [b.status for b in leaf] == ["live"]

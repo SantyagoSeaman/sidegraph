@@ -1,0 +1,1400 @@
+{
+ "models": {
+  "AnchorBinding": {
+   "description": "A tiered, status-tracked link from a record (decision or fact) to an entity.\n\nOne decision may have several bindings (multi-anchor). Retrieval resolves the best\n``live`` binding; degradation is recorded here (status flips), never by deleting.",
+   "properties": {
+    "entity_id": {
+     "title": "Entity Id",
+     "type": "string"
+    },
+    "record_id": {
+     "title": "Record Id",
+     "type": "string"
+    },
+    "relation": {
+     "default": "affects",
+     "enum": [
+      "creates",
+      "modifies",
+      "affects",
+      "deprecates",
+      "considered"
+     ],
+     "title": "Relation",
+     "type": "string"
+    },
+    "status": {
+     "default": "live",
+     "title": "Status",
+     "type": "string"
+    },
+    "tier": {
+     "maximum": 2,
+     "minimum": 0,
+     "title": "Tier",
+     "type": "integer"
+    },
+    "weight": {
+     "default": 1.0,
+     "maximum": 1.0,
+     "minimum": 0.0,
+     "title": "Weight",
+     "type": "number"
+    }
+   },
+   "required": [
+    "record_id",
+    "entity_id",
+    "tier"
+   ],
+   "title": "AnchorBinding",
+   "type": "object",
+   "x-default-factories": {}
+  },
+  "CheckedCodeFile": {
+   "description": "A reviewed Git tree entry; no source bytes or engine mappings.",
+   "properties": {
+    "blob_id": {
+     "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+     "title": "Blob Id",
+     "type": "string"
+    },
+    "mode": {
+     "enum": [
+      "100644",
+      "100755"
+     ],
+     "title": "Mode",
+     "type": "string"
+    },
+    "path": {
+     "title": "Path",
+     "type": "string"
+    }
+   },
+   "required": [
+    "path",
+    "blob_id",
+    "mode"
+   ],
+   "title": "CheckedCodeFile",
+   "type": "object",
+   "x-default-factories": {}
+  },
+  "Decision": {
+   "$defs": {
+    "DecisionKind": {
+     "enum": [
+      "adr",
+      "lesson",
+      "constraint",
+      "gotcha"
+     ],
+     "title": "DecisionKind",
+     "type": "string"
+    },
+    "DecisionStatus": {
+     "enum": [
+      "proposed",
+      "accepted",
+      "superseded",
+      "rejected",
+      "deprecated"
+     ],
+     "title": "DecisionStatus",
+     "type": "string"
+    },
+    "Provenance": {
+     "description": "Where a decision came from. Always present on write.",
+     "properties": {
+      "author": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Author"
+      },
+      "commit": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Commit"
+      },
+      "graph_version": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Graph Version"
+      },
+      "ref": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ref"
+      },
+      "session_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Session Id"
+      },
+      "source": {
+       "title": "Source",
+       "type": "string"
+      }
+     },
+     "required": [
+      "source"
+     ],
+     "title": "Provenance",
+     "type": "object"
+    },
+    "Retirement": {
+     "description": "Why an accepted decision was retired (``accepted -> deprecated``) rather than superseded:\na duplicate of another live record (``duplicate_of``), or a rule whose subject is gone.\nWritten once, by ``Store.retire``, together with that status move.",
+     "properties": {
+      "duplicate_of": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Duplicate Of"
+      },
+      "reason": {
+       "title": "Reason",
+       "type": "string"
+      }
+     },
+     "required": [
+      "reason"
+     ],
+     "title": "Retirement",
+     "type": "object"
+    },
+    "Scope": {
+     "enum": [
+      "repo",
+      "module",
+      "global"
+     ],
+     "title": "Scope",
+     "type": "string"
+    }
+   },
+   "description": "The memory: an ADR, lesson, constraint, or gotcha with temporal validity.\n\nAppend-only; never hard-deleted. A reversal sets ``valid_to`` on the old record and\ncreates a new one whose ``supersedes`` points at it. ``rejected`` captures what was tried\n\u2014 what was tried and abandoned \u2014 which is exactly what retrieval surfaces first.",
+   "properties": {
+    "choice": {
+     "title": "Choice",
+     "type": "string"
+    },
+    "consequences": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Consequences"
+    },
+    "context": {
+     "title": "Context",
+     "type": "string"
+    },
+    "id": {
+     "title": "Id",
+     "type": "string"
+    },
+    "kind": {
+     "$ref": "#/$defs/DecisionKind"
+    },
+    "layer": {
+     "anyOf": [
+      {
+       "enum": [
+        "business",
+        "technical"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Layer"
+    },
+    "provenance": {
+     "$ref": "#/$defs/Provenance"
+    },
+    "ratified_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ratified At"
+    },
+    "ratified_by": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ratified By"
+    },
+    "rejected": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Rejected"
+    },
+    "retired": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Retirement"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "scope": {
+     "$ref": "#/$defs/Scope",
+     "default": "repo"
+    },
+    "status": {
+     "$ref": "#/$defs/DecisionStatus",
+     "default": "proposed"
+    },
+    "supersedes": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Supersedes"
+    },
+    "title": {
+     "title": "Title",
+     "type": "string"
+    },
+    "valid_from": {
+     "format": "date-time",
+     "title": "Valid From",
+     "type": "string"
+    },
+    "valid_to": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Valid To"
+    }
+   },
+   "required": [
+    "title",
+    "kind",
+    "context",
+    "choice",
+    "valid_from",
+    "provenance"
+   ],
+   "title": "Decision",
+   "type": "object",
+   "x-default-factories": {
+    "id": "<varies: str>"
+   }
+  },
+  "DeclaredSection": {
+   "description": "One declared or also-watched section: scheme-defined locator and content digest.",
+   "properties": {
+    "heading_hash": {
+     "maxLength": 128,
+     "minLength": 1,
+     "pattern": "^[0-9a-f]+$",
+     "title": "Heading Hash",
+     "type": "string"
+    },
+    "role": {
+     "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
+     "title": "Role",
+     "type": "string"
+    },
+    "text_hash": {
+     "maxLength": 128,
+     "minLength": 1,
+     "pattern": "^[0-9a-f]+$",
+     "title": "Text Hash",
+     "type": "string"
+    }
+   },
+   "required": [
+    "heading_hash",
+    "role",
+    "text_hash"
+   ],
+   "title": "DeclaredSection",
+   "type": "object",
+   "x-default-factories": {}
+  },
+  "DeclaredSectionFile": {
+   "$defs": {
+    "DeclaredSection": {
+     "description": "One declared or also-watched section: scheme-defined locator and content digest.",
+     "properties": {
+      "heading_hash": {
+       "maxLength": 128,
+       "minLength": 1,
+       "pattern": "^[0-9a-f]+$",
+       "title": "Heading Hash",
+       "type": "string"
+      },
+      "role": {
+       "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
+       "title": "Role",
+       "type": "string"
+      },
+      "text_hash": {
+       "maxLength": 128,
+       "minLength": 1,
+       "pattern": "^[0-9a-f]+$",
+       "title": "Text Hash",
+       "type": "string"
+      }
+     },
+     "required": [
+      "heading_hash",
+      "role",
+      "text_hash"
+     ],
+     "title": "DeclaredSection",
+     "type": "object"
+    }
+   },
+   "description": "The sections of one checked file the checker declared (path must be checked).",
+   "properties": {
+    "path": {
+     "maxLength": 1024,
+     "minLength": 1,
+     "title": "Path",
+     "type": "string"
+    },
+    "refs_hash": {
+     "anyOf": [
+      {
+       "maxLength": 128,
+       "minLength": 1,
+       "pattern": "^[0-9a-f]+$",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Refs Hash"
+    },
+    "scheme": {
+     "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
+     "title": "Scheme",
+     "type": "string"
+    },
+    "sections": {
+     "items": {
+      "$ref": "#/$defs/DeclaredSection"
+     },
+     "maxItems": 256,
+     "minItems": 1,
+     "title": "Sections",
+     "type": "array"
+    }
+   },
+   "required": [
+    "path",
+    "scheme",
+    "sections"
+   ],
+   "title": "DeclaredSectionFile",
+   "type": "object",
+   "x-default-factories": {}
+  },
+  "Descriptor": {
+   "description": "What :meth:`GraphifyReader.resolve` needs to find an entity's current node.\n\nGraphify (verified on 0.9.6 and 0.9.90) emits no signatures/qual-names/enclosing-module,\nso identity is ``name`` + optional ``file_path`` (see ``docs/integrations/graphify.md``).",
+   "properties": {
+    "file_path": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "File Path"
+    },
+    "name": {
+     "title": "Name",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "title": "Descriptor",
+   "type": "object",
+   "x-default-factories": {}
+  },
+  "Domain": {
+   "$defs": {
+    "Descriptor": {
+     "description": "What :meth:`GraphifyReader.resolve` needs to find an entity's current node.\n\nGraphify (verified on 0.9.6 and 0.9.90) emits no signatures/qual-names/enclosing-module,\nso identity is ``name`` + optional ``file_path`` (see ``docs/integrations/graphify.md``).",
+     "properties": {
+      "file_path": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File Path"
+      },
+      "name": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "title": "Descriptor",
+     "type": "object"
+    },
+    "DomainStatus": {
+     "enum": [
+      "proposed",
+      "accepted",
+      "superseded",
+      "dropped"
+     ],
+     "title": "DomainStatus",
+     "type": "string"
+    },
+    "Provenance": {
+     "description": "Where a decision came from. Always present on write.",
+     "properties": {
+      "author": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Author"
+      },
+      "commit": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Commit"
+      },
+      "graph_version": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Graph Version"
+      },
+      "ref": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ref"
+      },
+      "session_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Session Id"
+      },
+      "source": {
+       "title": "Source",
+       "type": "string"
+      }
+     },
+     "required": [
+      "source"
+     ],
+     "title": "Provenance",
+     "type": "object"
+    }
+   },
+   "description": "The owned abstraction: a named area of the system with WHY-IT-EXISTS prose.\n\nPaired with an abstract :class:`Entity` (``canonical_name=f\"domain:{slug}\"``) minted\nat acceptance, so :class:`AnchorBinding` machinery works unchanged (Tier-1 decisions\nbind to the domain entity). Append-only, like :class:`Decision`: editing a summary is\na new ``Domain`` row with ``supersedes`` set; the slug (and its paired entity) is\nstable across that revision (see\n``docs/concepts/mind-model.md#domain-lifecycle``).",
+   "properties": {
+    "communities": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Communities",
+     "type": "array"
+    },
+    "domain_id": {
+     "title": "Domain Id",
+     "type": "string"
+    },
+    "parent_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Parent Id"
+    },
+    "path_prefixes": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Path Prefixes",
+     "type": "array"
+    },
+    "provenance": {
+     "$ref": "#/$defs/Provenance"
+    },
+    "ratified_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ratified At"
+    },
+    "ratified_by": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ratified By"
+    },
+    "seed_anchors": {
+     "items": {
+      "$ref": "#/$defs/Descriptor"
+     },
+     "title": "Seed Anchors",
+     "type": "array"
+    },
+    "slug": {
+     "title": "Slug",
+     "type": "string"
+    },
+    "status": {
+     "$ref": "#/$defs/DomainStatus",
+     "default": "proposed"
+    },
+    "summary": {
+     "title": "Summary",
+     "type": "string"
+    },
+    "supersedes": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Supersedes"
+    },
+    "title": {
+     "title": "Title",
+     "type": "string"
+    }
+   },
+   "required": [
+    "slug",
+    "title",
+    "summary",
+    "provenance"
+   ],
+   "title": "Domain",
+   "type": "object",
+   "x-default-factories": {
+    "communities": [],
+    "domain_id": "<varies: str>",
+    "path_prefixes": [],
+    "seed_anchors": []
+   }
+  },
+  "DriftCheck": {
+   "$defs": {
+    "CheckedCodeFile": {
+     "description": "A reviewed Git tree entry; no source bytes or engine mappings.",
+     "properties": {
+      "blob_id": {
+       "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+       "title": "Blob Id",
+       "type": "string"
+      },
+      "mode": {
+       "enum": [
+        "100644",
+        "100755"
+       ],
+       "title": "Mode",
+       "type": "string"
+      },
+      "path": {
+       "title": "Path",
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "blob_id",
+      "mode"
+     ],
+     "title": "CheckedCodeFile",
+     "type": "object"
+    },
+    "DeclaredSection": {
+     "description": "One declared or also-watched section: scheme-defined locator and content digest.",
+     "properties": {
+      "heading_hash": {
+       "maxLength": 128,
+       "minLength": 1,
+       "pattern": "^[0-9a-f]+$",
+       "title": "Heading Hash",
+       "type": "string"
+      },
+      "role": {
+       "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
+       "title": "Role",
+       "type": "string"
+      },
+      "text_hash": {
+       "maxLength": 128,
+       "minLength": 1,
+       "pattern": "^[0-9a-f]+$",
+       "title": "Text Hash",
+       "type": "string"
+      }
+     },
+     "required": [
+      "heading_hash",
+      "role",
+      "text_hash"
+     ],
+     "title": "DeclaredSection",
+     "type": "object"
+    },
+    "DeclaredSectionFile": {
+     "description": "The sections of one checked file the checker declared (path must be checked).",
+     "properties": {
+      "path": {
+       "maxLength": 1024,
+       "minLength": 1,
+       "title": "Path",
+       "type": "string"
+      },
+      "refs_hash": {
+       "anyOf": [
+        {
+         "maxLength": 128,
+         "minLength": 1,
+         "pattern": "^[0-9a-f]+$",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Refs Hash"
+      },
+      "scheme": {
+       "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
+       "title": "Scheme",
+       "type": "string"
+      },
+      "sections": {
+       "items": {
+        "$ref": "#/$defs/DeclaredSection"
+       },
+       "maxItems": 256,
+       "minItems": 1,
+       "title": "Sections",
+       "type": "array"
+      }
+     },
+     "required": [
+      "path",
+      "scheme",
+      "sections"
+     ],
+     "title": "DeclaredSectionFile",
+     "type": "object"
+    },
+    "Provenance": {
+     "description": "Where a decision came from. Always present on write.",
+     "properties": {
+      "author": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Author"
+      },
+      "commit": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Commit"
+      },
+      "graph_version": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Graph Version"
+      },
+      "ref": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ref"
+      },
+      "session_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Session Id"
+      },
+      "source": {
+       "title": "Source",
+       "type": "string"
+      }
+     },
+     "required": [
+      "source"
+     ],
+     "title": "Provenance",
+     "type": "object"
+    }
+   },
+   "description": "Immutable auxiliary assertion that an existing decision was checked at a revision.\n\nThis neither changes the decision nor certifies its semantic truth or ratification.\nVersion1 owns the enumerated subject-digest definition in drift_checks.py.",
+   "properties": {
+    "checked_at": {
+     "format": "date-time",
+     "title": "Checked At",
+     "type": "string"
+    },
+    "checked_commit": {
+     "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+     "title": "Checked Commit",
+     "type": "string"
+    },
+    "checked_files": {
+     "items": {
+      "$ref": "#/$defs/CheckedCodeFile"
+     },
+     "maxItems": 256,
+     "minItems": 1,
+     "title": "Checked Files",
+     "type": "array"
+    },
+    "decision_id": {
+     "title": "Decision Id",
+     "type": "string"
+    },
+    "declared_sections": {
+     "items": {
+      "$ref": "#/$defs/DeclaredSectionFile"
+     },
+     "maxItems": 64,
+     "title": "Declared Sections",
+     "type": "array"
+    },
+    "id": {
+     "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+     "title": "Id",
+     "type": "string"
+    },
+    "provenance": {
+     "$ref": "#/$defs/Provenance"
+    },
+    "rationale": {
+     "maxLength": 4000,
+     "minLength": 1,
+     "title": "Rationale",
+     "type": "string"
+    },
+    "required_files": {
+     "items": {
+      "type": "string"
+     },
+     "maxItems": 256,
+     "minItems": 1,
+     "title": "Required Files",
+     "type": "array"
+    },
+    "schema_version": {
+     "const": 1,
+     "title": "Schema Version",
+     "type": "integer"
+    },
+    "subject_digest": {
+     "pattern": "^[0-9a-f]{64}$",
+     "title": "Subject Digest",
+     "type": "string"
+    }
+   },
+   "required": [
+    "schema_version",
+    "decision_id",
+    "checked_at",
+    "checked_commit",
+    "provenance",
+    "rationale",
+    "required_files",
+    "checked_files",
+    "subject_digest"
+   ],
+   "title": "DriftCheck",
+   "type": "object",
+   "x-default-factories": {
+    "declared_sections": [],
+    "id": "<varies: str>"
+   }
+  },
+  "Entity": {
+   "$defs": {
+    "Descriptor": {
+     "description": "What :meth:`GraphifyReader.resolve` needs to find an entity's current node.\n\nGraphify (verified on 0.9.6 and 0.9.90) emits no signatures/qual-names/enclosing-module,\nso identity is ``name`` + optional ``file_path`` (see ``docs/integrations/graphify.md``).",
+     "properties": {
+      "file_path": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "File Path"
+      },
+      "name": {
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "title": "Descriptor",
+     "type": "object"
+    },
+    "EntityKind": {
+     "enum": [
+      "concrete",
+      "abstract"
+     ],
+     "title": "EntityKind",
+     "type": "string"
+    }
+   },
+   "description": "Internal identity + engine mapping. Minted once, ``entity_id`` never changes.\n\nCreated **lazily** \u2014 only when a decision first references it \u2014 to stay bounded.\n``last_seen_node_id`` maps our durable id onto Graphify's shifting, path-derived node\nid and is refreshed on each engine rebuild; ``last_seen_community`` records the observed\nLeiden community as of that same rebuild \u2014 communities are snapshot labels Leiden\nrenumbers every rebuild, so this baseline is what sync uses to re-point Tier-1 bindings\n(see ``docs/concepts/data-model.md``).",
+   "properties": {
+    "canonical_name": {
+     "title": "Canonical Name",
+     "type": "string"
+    },
+    "descriptor": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Descriptor"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "entity_id": {
+     "title": "Entity Id",
+     "type": "string"
+    },
+    "kind": {
+     "$ref": "#/$defs/EntityKind",
+     "default": "concrete"
+    },
+    "last_seen_community": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Last Seen Community"
+    },
+    "last_seen_graph_version": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Last Seen Graph Version"
+    },
+    "last_seen_node_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Last Seen Node Id"
+    }
+   },
+   "required": [
+    "canonical_name"
+   ],
+   "title": "Entity",
+   "type": "object",
+   "x-default-factories": {
+    "entity_id": "<varies: str>"
+   }
+  },
+  "Fact": {
+   "$defs": {
+    "DecisionStatus": {
+     "enum": [
+      "proposed",
+      "accepted",
+      "superseded",
+      "rejected",
+      "deprecated"
+     ],
+     "title": "DecisionStatus",
+     "type": "string"
+    },
+    "Provenance": {
+     "description": "Where a decision came from. Always present on write.",
+     "properties": {
+      "author": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Author"
+      },
+      "commit": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Commit"
+      },
+      "graph_version": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Graph Version"
+      },
+      "ref": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ref"
+      },
+      "session_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Session Id"
+      },
+      "source": {
+       "title": "Source",
+       "type": "string"
+      }
+     },
+     "required": [
+      "source"
+     ],
+     "title": "Provenance",
+     "type": "object"
+    }
+   },
+   "description": "A compact, non-derivable piece of knowledge that informed decisions.\n\nOnly facts the code graph cannot derive belong here: empirics (benchmarks, observed\nbehavior), external constraints (API limits, library capabilities), trial-learned\nknowledge. \"The code does X\" is the engine's job \u2014 never store it. Falsifiable:\nreversal is supersession, never deletion.\n# see design/superpowers/specs/2026-07-10-facts-layer-design.md",
+   "properties": {
+    "id": {
+     "title": "Id",
+     "type": "string"
+    },
+    "provenance": {
+     "$ref": "#/$defs/Provenance"
+    },
+    "ratified_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ratified At"
+    },
+    "ratified_by": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ratified By"
+    },
+    "source": {
+     "title": "Source",
+     "type": "string"
+    },
+    "statement": {
+     "title": "Statement",
+     "type": "string"
+    },
+    "status": {
+     "$ref": "#/$defs/DecisionStatus",
+     "default": "proposed"
+    },
+    "supersedes": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Supersedes"
+    },
+    "supports": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Supports",
+     "type": "array"
+    },
+    "valid_from": {
+     "format": "date-time",
+     "title": "Valid From",
+     "type": "string"
+    },
+    "valid_to": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Valid To"
+    }
+   },
+   "required": [
+    "statement",
+    "source",
+    "valid_from",
+    "provenance"
+   ],
+   "title": "Fact",
+   "type": "object",
+   "x-default-factories": {
+    "id": "<varies: str>",
+    "supports": []
+   }
+  },
+  "Provenance": {
+   "description": "Where a decision came from. Always present on write.",
+   "properties": {
+    "author": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Author"
+    },
+    "commit": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Commit"
+    },
+    "graph_version": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Graph Version"
+    },
+    "ref": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ref"
+    },
+    "session_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Session Id"
+    },
+    "source": {
+     "title": "Source",
+     "type": "string"
+    }
+   },
+   "required": [
+    "source"
+   ],
+   "title": "Provenance",
+   "type": "object",
+   "x-default-factories": {}
+  },
+  "Retirement": {
+   "description": "Why an accepted decision was retired (``accepted -> deprecated``) rather than superseded:\na duplicate of another live record (``duplicate_of``), or a rule whose subject is gone.\nWritten once, by ``Store.retire``, together with that status move.",
+   "properties": {
+    "duplicate_of": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Duplicate Of"
+    },
+    "reason": {
+     "title": "Reason",
+     "type": "string"
+    }
+   },
+   "required": [
+    "reason"
+   ],
+   "title": "Retirement",
+   "type": "object",
+   "x-default-factories": {}
+  }
+ },
+ "requirement": "0.24.0"
+}

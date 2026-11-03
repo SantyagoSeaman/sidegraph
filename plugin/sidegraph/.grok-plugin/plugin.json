@@ -1,8 +1,8 @@
 {
   "name": "sidegraph",
   "displayName": "Sidegraph",
-  "version": "0.23.0",
-  "description": "Durable decision/lessons memory over your code graph — ADRs, gotchas, and constraints that survive refactors, retrieved mistakes-first.",
+  "version": "0.24.0",
+  "description": "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code.",
   "author": {
     "name": "SantyagoSeaman",
     "url": "https://github.com/SantyagoSeaman"

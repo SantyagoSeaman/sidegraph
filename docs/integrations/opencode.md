@@ -1,5 +1,7 @@
 # OpenCode V2
 
+[Glossary](../concepts/glossary.md)
+
 Follow the [OpenCode installation guide](../../.opencode/INSTALL.md) for the native Git
 package install, configuration and update commands. Prerequisites are OpenCode V2, `uv`
 and Git; the current native baseline is 2.0.29.

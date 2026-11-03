@@ -49,7 +49,7 @@ def test_a_first_snapshot_of_a_mention_edge_graph_is_refused(tmp_path, capsys, o
     root, graph = _project(tmp_path, mention_graph(), "mention")
     marker = (root / "format").read_text(encoding="utf-8")
     assert _run("--db", str(root), "--graph", str(graph)) == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "--build-with 0.9.6" in out and "--accept-current-engine" in out
     assert not domain_snapshot.snapshot_path(root).exists()
     assert (root / "format").read_text(encoding="utf-8") == marker
@@ -83,7 +83,7 @@ def test_a_refused_requirement_writes_no_snapshot(tmp_path, capsys, monkeypatch)
     monkeypatch.setattr(sidegraph, "__version__", "0.13.0")
     root, graph = _project(tmp_path, legacy_graph(), "legacy")
     assert _run("--db", str(root), "--graph", str(graph)) == 1
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert out.count("\n") == 1 and out.startswith("error: cannot require Sidegraph >= 0.14.0")
     assert not domain_snapshot.snapshot_path(root).exists()
 
@@ -93,7 +93,7 @@ def test_a_second_run_needs_refresh(tmp_path, capsys, openable):
     assert _run("--db", str(root), "--graph", str(graph)) == 0
     capsys.readouterr()
     assert _run("--db", str(root), "--graph", str(graph)) == 1
-    assert "pass --refresh" in capsys.readouterr().out
+    assert "pass --refresh" in capsys.readouterr().err
     assert _run("--db", str(root), "--graph", str(graph), "--refresh") == 0
 
 
@@ -116,11 +116,11 @@ def test_refresh_domain_rederives_one_domain_by_its_full_rules(tmp_path, capsys,
 def test_flags_are_checked_before_anything_is_written(tmp_path, capsys, openable):
     root, graph = _project(tmp_path, legacy_graph(), "legacy")
     assert _run("--db", str(root), "--graph", str(graph), "--domain", "payments") == 1
-    assert "--domain needs --refresh" in capsys.readouterr().out
+    assert "--domain needs --refresh" in capsys.readouterr().err
     assert _run("--db", str(root), "--graph", str(graph)) == 0
     capsys.readouterr()
     assert _run("--db", str(root), "--graph", str(graph), "--refresh", "--domain", "nope") == 1
-    assert "no accepted domain: nope" in capsys.readouterr().out
+    assert "no accepted domain: nope" in capsys.readouterr().err
     with pytest.raises(SystemExit) as e:
         _run("--graph", str(graph), "--build-with", "0.9.6")
     assert e.value.code == 2
@@ -211,12 +211,12 @@ def test_dry_run_never_creates_or_backfills_the_store(tmp_path, capsys):
     graph = write_graph(tmp_path, "legacy.json", legacy_graph())
     missing = tmp_path / "none" / ".sidegraph"
     assert _run("--db", str(missing), "--graph", str(graph), "--dry-run") == 1
-    assert "there is no store at" in capsys.readouterr().out
+    assert "there is no store at" in capsys.readouterr().err
     assert not missing.exists()
     root, _legacy = _project(tmp_path, legacy_graph(), "legacy")
     (root / "format").unlink()
     assert _run("--db", str(root), "--graph", str(graph), "--dry-run") == 1
-    assert "format" in capsys.readouterr().out
+    assert "format" in capsys.readouterr().err
     assert not (root / "format").exists()
 
 
@@ -228,7 +228,7 @@ def test_dry_run_never_stamps_an_empty_store(tmp_path, capsys):
     Store(format1_store(root)).close()
     (root / "stamping_live_since").unlink()
     assert _run("--db", str(root), "--graph", str(graph), "--dry-run") == 1
-    assert "stamping_live_since" in capsys.readouterr().out
+    assert "stamping_live_since" in capsys.readouterr().err
     assert not (root / "stamping_live_since").exists()
 
 
@@ -275,7 +275,7 @@ def test_a_pull_while_the_command_computes_is_never_overwritten(
     monkeypatch.setattr(sync_mod._MembershipView, "membership", membership)
     capsys.readouterr()
     assert _run("--db", str(root), "--graph", str(legacy), "--refresh") == 1
-    assert "changed while this command ran" in capsys.readouterr().out
+    assert "changed while this command ran" in capsys.readouterr().err
     assert domain_snapshot.load_snapshot(root).store_commit == "f" * 40
 
 
@@ -295,7 +295,7 @@ def test_refresh_requires_every_part_of_a_split(tmp_path, capsys, openable, part
     capsys.readouterr()
 
     assert _run("--db", str(root), "--graph", str(graph), "--refresh", *part_flags) == 1
-    assert "--domain billing-a --domain billing-b" in capsys.readouterr().out
+    assert "--domain billing-a --domain billing-b" in capsys.readouterr().err
     assert (path.read_bytes(), (root / "format").read_bytes()) == before
     with Store(format1_store(root)) as store:
         report = sync(store, GraphifyReader(graph), force=True)

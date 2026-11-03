@@ -231,7 +231,7 @@ def test_copy_sync_hint_when_store_anchored_graph_is_missing(tmp_path, monkeypat
 
     captured = capsys.readouterr()
     assert rc != 0
-    assert f"graph not readable ({copy / 'graphify-out' / 'graph.json'}" in captured.out
+    assert f"graph not readable ({copy / 'graphify-out' / 'graph.json'}" in captured.err
     assert f"no graph at {copy / 'graphify-out' / 'graph.json'}" in captured.err
     assert f"{repo / 'graphify-out' / 'graph.json'} exists" in captured.err
     assert f"--graph {repo / 'graphify-out' / 'graph.json'}" in captured.err
@@ -354,7 +354,7 @@ def test_sidegraph_db_dangling_link_scaffolds_nothing(typed_graph, tmp_path, mon
     rc = sync_main(["--graph", str(graph)] if typed_graph else [])
 
     assert rc != 0
-    assert "store not readable" in capsys.readouterr().out
+    assert "store not readable" in capsys.readouterr().err
     assert sorted(os.listdir(proj)) == [".sidegraph", "graphify-out"]
     assert not (tmp_path / "nowhere").exists()
 
@@ -413,50 +413,7 @@ def test_an_empty_typed_graph_is_treated_as_absent(typed, two_projects, monkeypa
     assert cli._resolve_cli_graph(typed, a / ".sidegraph") == graph_a
 
 
-# -- init and sync agree for a legacy single-file --db -----------------------------------------
-
-
-def test_init_reports_the_same_graph_as_sync_for_a_legacy_file_store(tmp_path, monkeypatch, capsys):
-    import sqlite3
-
-    from sidegraph.cli import _resolve_cli_graph
-    from tests.test_store_migration import _0_2_0_SCHEMA_SQL
-
-    proj = tmp_path / "proj"
-    graph = _write_graph(proj, "commitLg", 2)
-    legacy = proj / ".sidegraph" / "decisions.db"
-    legacy.parent.mkdir(parents=True)
-    conn = sqlite3.connect(legacy)
-    conn.executescript(_0_2_0_SCHEMA_SQL)
-    conn.execute("INSERT INTO meta VALUES ('schema_version', '0.2.0')")
-    conn.commit()
-    conn.close()
-    monkeypatch.chdir(tmp_path)
-    assert _resolve_cli_graph(None, legacy) == graph  # what sync resolves, before any migration
-
-    assert init_main(["--db", str(legacy), "--no-settings"]) == 0
-
-    assert f"found graph: {graph}" in capsys.readouterr().out
-
-
-# -- the legacy hop survives the migration of `.sidegraph/decisions.db` -------------------------
-
-
-def _legacy_db_store(proj: Path) -> Path:
-    """`<proj>/.sidegraph/decisions.db` as a 0.2.0 single file (the first open migrates it to
-    a DIRECTORY with the same name)."""
-    import sqlite3
-
-    from tests.test_store_migration import _0_2_0_SCHEMA_SQL
-
-    legacy = proj / ".sidegraph" / "decisions.db"
-    legacy.parent.mkdir(parents=True)
-    conn = sqlite3.connect(legacy)
-    conn.executescript(_0_2_0_SCHEMA_SQL)
-    conn.execute("INSERT INTO meta VALUES ('schema_version', '0.2.0')")
-    conn.commit()
-    conn.close()
-    return legacy
+# -- the `.db` directory hop still serves a store migrated by Sidegraph 0.23.x ----------------
 
 
 def _stamp(store_path: Path) -> str | None:
@@ -467,33 +424,21 @@ def _stamp(store_path: Path) -> str | None:
         store.close()
 
 
-def test_a_migrated_legacy_store_reads_the_project_graph_and_ignores_one_in_dot_sidegraph(
+def test_a_db_named_store_directory_reads_the_project_graph_not_one_in_dot_sidegraph(
     tmp_path, monkeypatch
 ):
+    """`.sidegraph/decisions.db/` is what 0.23.x left after migrating a single file: a store
+    DIRECTORY keeping its `.db` name. Its project root is still two levels up."""
     proj = tmp_path / "proj"
     graph = _write_graph(proj, "commitProj", 2)
-    legacy = _legacy_db_store(proj)
+    migrated = proj / ".sidegraph" / "decisions.db"
+    Store(migrated).close()
+    assert migrated.is_dir()
     monkeypatch.chdir(tmp_path)
-    assert sync_main(["--db", str(legacy)]) == 0  # migrates: the file becomes a directory
-    assert legacy.is_dir()
-    assert sync_main(["--db", str(legacy)]) == 0  # the same path, now a `.db` directory
-    assert _stamp(legacy) == _version(graph)
     _write_graph(proj / ".sidegraph", "commitWrong", 3)  # a different graph, wrong place
 
-    assert sync_main(["--db", str(legacy)]) == 0
-    assert _stamp(legacy) == _version(graph)
-
-
-def test_init_then_sync_on_a_legacy_db_store_read_the_same_graph(tmp_path, monkeypatch):
-    proj = tmp_path / "proj"
-    graph = _write_graph(proj, "commitProj", 2)
-    legacy = _legacy_db_store(proj)
-    monkeypatch.chdir(tmp_path)
-
-    assert init_main(["--db", str(legacy), "--no-settings"]) == 0
-    assert legacy.is_dir()
-    assert sync_main(["--db", str(legacy)]) == 0
-    assert _stamp(legacy) == _version(graph)
+    assert sync_main(["--db", str(migrated)]) == 0
+    assert _stamp(migrated) == _version(graph)
 
 
 # -- an unreadable working directory skips the hint ---------------------------------------------

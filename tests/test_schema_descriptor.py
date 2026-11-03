@@ -35,12 +35,8 @@ CREATE TABLE capture_sessions (session_id TEXT PRIMARY KEY, captured_at TEXT NOT
 
 
 def test_store_rejects_mismatched_schema_version(tmp_path):
-    """A legacy single-file store (see store._migrate_legacy) whose stamped
-    schema_version isn't in store._MIGRATABLE_SCHEMA_VERSIONS is a hard rejection — no
-    migration path beyond the one forward step from 0.2.x/0.3.x (see
-    tests/test_store_migration.py for the versions that DO migrate). 0.2.0/0.3.0 (the two
-    immediately-prior releases) are the only forward-migratable versions; a real 0.1.0 store
-    (the full pre-0.3 schema) stays a hard rejection."""
+    """A legacy single-file store, whatever its stamped schema_version, is refused (see
+    tests/test_store_migration.py)."""
     import sqlite3
 
     from sidegraph.store import Store

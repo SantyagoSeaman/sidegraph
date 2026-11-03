@@ -5,7 +5,7 @@ from sidegraph.retrieval import Seed, get_task_context
 from sidegraph.server import (
     _list_proposed_impl,
     _propose_decisions_impl,
-    _ratify_decisions_impl,
+    _ratify_impl,
 )
 from sidegraph.store import Store
 
@@ -46,7 +46,7 @@ def test_full_capture_loop_propose_ratify_retrieve(tmp_path):
     assert "Rate-limit retries" in rendered and "[unratified]" in rendered
 
     # 4. Ratify: the tag disappears; the decision stays mistakes-first.
-    assert _ratify_decisions_impl(store, accept=[did])[did] == "accepted"
+    assert _ratify_impl(store, accept=[did])[did] == "accepted"
     ctx2 = get_task_context([Seed(file_path="adapters/bitfinex.py")], store, reader)
     rendered2 = ctx2.render()
     assert "Rate-limit retries" in rendered2

@@ -1,9 +1,13 @@
 # Judging prompt (run per bundle, on a blinded answer set)
 
+[Glossary](../concepts/glossary.md)
+
 The judge must never learn which arm produced which answer. Prepare the blinded set by
 hand or with a small script: give every answer an opaque id (two random letters), shuffle
 the entries, and keep the id-to-arm mapping in a separate file the judge never sees. Hand
 the judge only the blinded set.
+
+Before invoking the judge, replace `<bundle path>`, `<repo path>` and `<output path>` in the prompt below. Confirm the bundle includes each question and its frozen rubric. Give the judge the anonymous answers and permitted evidence, then retain its per-answer table beside the bundle. Keep the condition mapping out of that material.
 
 ---
 

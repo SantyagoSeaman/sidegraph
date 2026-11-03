@@ -1,12 +1,29 @@
 # Data model
 
-Sidegraph's store holds five record types — implemented in
+> **Start here:** Read the opening explanation, then follow only the detail needed for your current task. [Glossary](glossary.md).
+
+The core record shapes are `Entity`, `Decision`, `Fact`, `AnchorBinding` and `Domain`. They are implemented in
 [`src/sidegraph/schema.py`](../../src/sidegraph/schema.py), enforced in
-[`src/sidegraph/store.py`](../../src/sidegraph/store.py) — plus a flat `Initiative`
-container used as the Tier-0 anchor (see [anchoring](anchoring.md), and its own table at
-the end of this page). This page is the
+[`src/sidegraph/store.py`](../../src/sidegraph/store.py). An `initiative:<label>` is a Tier-0 anchor that capture makes (see [anchoring](anchoring.md), and [Initiatives](#initiatives--a-tier-0-anchor-not-a-record-type)). This page is the
 user-facing walk-through; see [decision memory](decision-memory.md) for why these fields
 exist at all, and [mind model](mind-model.md) for what `Domain` is *for*.
+
+For ordinary capture, use the MCP write tools rather than authoring these JSON rows by hand. For `add_decision`, supply the title, kind, context and choice, plus rejected alternatives and anchors when they apply. Sidegraph generates the record identity, timestamps, provenance and bindings. An anchor is a name with an optional repository-relative file path.
+
+For example, the real scratch capture supplied:
+
+```json
+{
+  "title": "Include the project in cache keys",
+  "kind": "gotcha",
+  "context": "Two projects can use the same resource name.",
+  "choice": "Build cache keys from both project and resource name.",
+  "rejected": "Using the resource name alone allows cross-project collisions.",
+  "anchors": [{"name": "cache_key", "file_path": "cache.py"}, {"name": "cache.py", "file_path": "cache.py"}]
+}
+```
+
+Use `gotcha` for a concrete trap, `lesson` for learned guidance, `constraint` for a limit that choices must respect, and `adr` for a design choice with its reasons. To reverse an accepted, open decision, supersede it with the replacement and its rationale. Keep the old row as history. For proposals or closed records, use the [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
 
 ## `Entity` — durable identity vs. the engine's shifting node ids
 
@@ -41,7 +58,7 @@ contract; the examples below illustrate model values rather than exact committed
 | `id` | ULID | Record identity. |
 | `title` | str | Short label. |
 | `kind` | `adr` \| `lesson` \| `constraint` \| `gotcha` | What kind of memory this is. |
-| `status` | `proposed` \| `accepted` \| `superseded` \| `rejected` \| `deprecated` | Lifecycle state. `proposed` = awaiting ratification (by a human, or by an auto-ratification policy where one is configured — `SIDEGRAPH_RATIFY_POLICY`) — it surfaces in retrieval tagged `[unratified]` and ranked last **while it is inside the surfacing window** (default 30 days; `SIDEGRAPH_PROPOSAL_WINDOW_DAYS`), and not at all in regulated mode (`SIDEGRAPH_UNRATIFIED=off`) — see [retrieval-in-sessions](../guides/retrieval-in-sessions.md#why-an-unratified-draft-still-shows-up-and-what-the-tag-means). Withheld from rendering never means removed: the record stays in the store, in the ratify queue and its counter, and is ratifiable at any time. `accepted` = live and untagged; `superseded` = closed by a successor; `rejected` = dropped at ratification; `deprecated` is declared in the schema for future use. |
+| `status` | `proposed` \| `accepted` \| `superseded` \| `rejected` \| `deprecated` | Lifecycle state. `proposed` = awaiting ratification (by a human, or by an auto-ratification policy where one is configured — `SIDEGRAPH_RATIFY_POLICY`) — it surfaces in retrieval tagged `[unratified]` and ranked last **while it is inside the surfacing window** (default 30 days; `SIDEGRAPH_PROPOSAL_WINDOW_DAYS`), and not at all in regulated mode (`SIDEGRAPH_UNRATIFIED=off`) — see [retrieval-in-sessions](../guides/retrieval-in-sessions.md#why-an-unratified-draft-still-shows-up-and-what-the-tag-means). Withheld from rendering never means removed: the record stays in the store, in the ratify queue and its counter, and is ratifiable at any time. `accepted` = live and untagged; `superseded` = closed by a successor; `rejected` = dropped at ratification; `deprecated` = retired by [`retire_decision`](../reference/mcp-tools.md#retire_decision) (a duplicate, or a decision whose subject is gone), closed with no successor and carrying `retired`. A `deprecated` decision is closed: retrieval, `get_task_context` and the hooks no longer serve it, and history views (`get_entity_history`, `retrieve_decisions(status="deprecated")`) still show it. |
 | `context` | str | Why this decision was needed. |
 | `choice` | str | What was decided. |
 | `rejected` | str \| `null` | What was tried/considered and abandoned, and why. |
@@ -54,6 +71,7 @@ contract; the examples below illustrate model values rather than exact committed
 | `provenance` | `Provenance` | Always present; see below. |
 | `ratified_by` | str \| `null` | Who accepted it, stamped by the ratify transitions (best-effort `git config user.name`) — or `auto:<policy>` (e.g. `auto:auto-low-risk`) when an auto-ratification policy accepted it at write time. `null` = ratified before this field existed, or the identity was unavailable — never a guess. Additive since 2026-08-04; old files load unchanged. |
 | `ratified_at` | datetime \| `null` | When it was accepted. With `valid_from` this gives queue latency, which `sidegraph-doctor` reports as `time-to-ratify`. |
+| `retired` | `Retirement` \| `null` | Why a retired decision was closed, set only by `retire_decision` together with `accepted -> deprecated`; `null` on every other record. A `Retirement` holds `reason` (str, redacted) and `duplicate_of` (the ULID of the accepted decision that stays, or `null` when the subject is gone). Since 0.24.0; a store holding one needs every client on 0.24.0 or later ([mixed versions](../reference/stability.md#mixed-versions)). |
 
 `Provenance`: `source` (an open `str`, not a fixed enum — for a `Decision` specifically,
 shipped writers stamp `human` (`add_decision`/`supersede_decision` — the asking human was the
@@ -70,11 +88,43 @@ server could tell, and `null` otherwise (always `null` for CLI writes). A wrong 
 is not repaired in place; the store is append-only. See
 [session attribution](../reference/hooks.md#session-attribution).
 
-Invariants enforced on write (`store.add_decision`): `valid_to >= valid_from`; a decision that
-supersedes another closes the predecessor (`valid_to` set, `status` flipped to `superseded`)
-in the same write; nothing is ever hard-deleted. The exception is an imported, edited ADR that
-arrives as a `proposed` successor: the accepted predecessor stays open (`accepted`, no
-`valid_to`) until the successor is ratified, and is closed then.
+Invariants enforced on write (`store.add_decision`): `valid_to >= valid_from`; nothing is
+ever hard-deleted; `retired` only on a `deprecated` decision; and the supersession invariant
+below.
+
+#### The supersession invariant
+
+Decisions, facts and domains share live-head and pending-successor rules. Their closure
+fields differ:
+
+- **Only the live head can be superseded.** The target must be `accepted`. Decisions and facts must also be
+  open (`valid_to` unset). Domains have no `valid_to` field. Superseding a `proposed` record is refused (`<id> is a pending proposal; amend
+  it by dropping it and proposing again, or ratify it first`); superseding a closed one
+  (`superseded`, `rejected`, `deprecated`, `dropped`) is refused and names its live successor
+  when there is one (`<id> is no longer current; supersede its live successor <head id>
+  instead`). The one exception: a `dropped` domain may still be superseded (the mass-drop
+  recovery in the [naming guide](../guides/naming-your-domains.md#recovering-from-a-mass-drop)).
+- **At most one pending successor per record.** While a `proposed` successor exists, any
+  further successor (another proposal, or a direct accepted replacement that would strand it)
+  is refused (`<id> already has a pending successor <P>; ratify or drop it first`). This
+  holds for a `dropped` domain too.
+- **Decision and fact closure.** A non-proposed successor closes its predecessor in the
+  same write (`valid_to` set, `status` changed to `superseded`, at the successor's
+  `valid_from`). This includes a rejected imported successor. A proposed successor leaves
+  the accepted predecessor open until ratification accepts the successor. Dropping that
+  proposal leaves the predecessor untouched.
+- **Domain closure.** A proposed successor of an accepted domain waits for ratification,
+  which marks the predecessor `superseded`. A dropped domain used for recovery becomes
+  `superseded` in the supersession call, while its successor still awaits review. Neither
+  transition writes `valid_to`, because domains have no temporal-validity field.
+- **`ratify` re-checks decisions and facts for merges.** Two branches can each add a pending
+  successor; after they merge, accepting a successor whose predecessor chain already has a live
+  head (followed through superseded records) is refused (`<A> is already superseded by <X>;
+  supersede that one instead`), and so is accepting one whose predecessor is still `proposed`.
+  Ratifying a decision checks the facts it would accept first, before anything is written.
+  Accepting a domain whose slug another, unrelated accepted domain holds is refused too; a
+  single pending same-slug revision of its accepted holder is no slug conflict, two revisions
+  of one holder are.
 
 ### Example `Decision` (illustrative values)
 
@@ -110,7 +160,7 @@ arrives as a `proposed` successor: the accepted predecessor stays open (`accepte
 | `statement` | str | The fact itself — 1-2 sentences, hard-compact. |
 | `source` | str | Required epistemics: how it's known ("benchmark run 2026-07-09", "httpx docs", "trial-learned in session"). |
 | `supports` | list[ULID] | `Decision` ids this fact informed. Empty = standalone (must instead carry an anchor to be reachable — see below). |
-| `status` | `proposed` \| `accepted` \| `superseded` \| `rejected` \| `deprecated` | Reuses `DecisionStatus`; `deprecated` is unused for facts, same as for `Decision`. `proposed` surfaces in retrieval tagged `[unratified]` under the same window/regulated-mode limits as a proposed `Decision` (see its `status` row). |
+| `status` | `proposed` \| `accepted` \| `superseded` \| `rejected` \| `deprecated` | Reuses `DecisionStatus`; `deprecated` is unused for facts (only a `Decision` is retired, by `retire_decision`). `proposed` surfaces in retrieval tagged `[unratified]` under the same window/regulated-mode limits as a proposed `Decision` (see its `status` row). |
 | `valid_from` | datetime | Start of temporal validity. |
 | `valid_to` | datetime \| `null` | End of temporal validity; `null` = still open. |
 | `supersedes` | ULID \| `null` | The `Fact` this one replaces, if any — falsification is supersession, never an edit or a delete. |
@@ -252,110 +302,36 @@ for how this differs from a `Domain`.
 
 ## `schema_version` — a public contract
 
-`SCHEMA_VERSION` (currently `0.6.0`, defined in `store_layout.py` and re-exported by
-`schema.py`) names the record/table layout. The index's `meta.schema_version` is `0.6.0`
-without a minimum Sidegraph requirement, or `0.6.0+requires` with one. A format-2 store (packed shards, since 0.17.0) has its index
-stamped `0.7.0+format2` instead. A full reload and an
-explicit requirement raise set the stamp from the marker. The fast freshness path checks
-that expected stamp: the other accepted stamp triggers a reload, and an unknown stamp is
-refused. `_RELOADABLE_SCHEMA_VERSIONS` (`0.4.0`, `0.5.0`, whose canonical files are fully
-forward-compatible) also trigger a reload and restamping. See
-[store format](../reference/store-format.md#schema_version-and-exact-match-policy) for the
-exact mechanics.
+Store and record versions identify compatibility contracts. Use supported commands and coordinate client upgrades before raising a store requirement.
 
-**The one migration path:** a legacy single-file SQLite store — either a bare `decisions.db`
-or any store stamped `0.2.0`/`0.3.0` — is still readable. Opening it triggers a one-time,
-fail-closed export **on open** (every row Pydantic-validated in full before any byte is
-written; a garbled row raises and leaves the legacy file untouched) into the canonical
-file-per-record layout, stamped at the running code's current `SCHEMA_VERSION`; the legacy
-file is renamed to `<name>.migrated-backup` (never deleted) rather than removed. Both `0.2.0`
-and `0.3.0` sources go through this same export, not a stamp-only rewrite — see
-[store format: migration to schema 0.4.0](../reference/store-format.md#migration-to-schema-040-from-schema-02x-and-03x)
-for the full four-step sequence. From 0.17 there is a second, explicit transition, `sidegraph-migrate`, which packs the
-per-record files into `shards/` (format 2); the old layout stays served until you run it, and the
-records keep their content byte for byte (see the
-[migration guide](../guides/migrating-to-0.17.md)). Any other mismatch (a version older than `0.2.0`, a
-newer/future version, or an unrecognized string) is a hard rejection: use a fresh store.
+See the [field contract](../reference/store-format.md#schema_version--a-public-contract).
 
-## `Initiative` — the Tier-0 grouping container
+## Initiatives — a Tier-0 anchor, not a record type
 
-The high-level capture APIs use an initiative as a flat Tier-0 abstract entity named
-`initiative:<label>`. Passing a draft's `initiative` field creates that entity and binding,
-after the name is redacted and trimmed; a whitespace-only or all-secret name binds nothing.
-Omitting it creates neither, except on the propose path, where an omitted or empty
-`initiative` may take the branch-derived name before it reaches this step; the storage layer
-does not do so implicitly.
+An initiative groups decisions about a piece of work. It is an abstract anchor label rather than an independent record.
 
-The `Initiative` model below is a separate low-level persisted record supported by
-`Store.upsert_initiative`. Current MCP capture paths do not create one, so do not expect an
-`initiatives/<id>.json` file merely because a decision has an `initiative:*` binding.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `id` | ULID | Record identity. |
-| `name` | str | The label as written at capture — a branch name or a short phrase. |
-| `description` | str \| `null` | Optional one-liner; usually absent for branch-derived initiatives. |
-| `tags` | list[str] | Stored strings on the low-level record; `upsert_initiative` does not slugify them or create `tag:*` entities. |
+See the [field contract](../reference/store-format.md#initiatives--a-tier-0-anchor-not-a-record-type).
 
 ## `DriftCheck` — attributed auxiliary inspection
 
-An optional file under `.sidegraph/verifications/` records an explicit agent
-judgment that an existing decision still holds. It preserves the decision and original
-capture provenance; it never ratifies a proposal or proves semantic truth. It is outside
-the shared canonical digest/index record tables. A check file is never edited, but on a
-format-2 store `sidegraph-compact` may pack it into `verifications/packed.shard` (the same JSON
-body, one line) and drop it once it is dead: its decision has a newer check or is retired. See
-[scoped checks](../reference/store-format.md#scoped-drift-checks) and
-[`record_drift_check`](../reference/mcp-tools.md#record_drift_check).
+A drift check records an agent assertion that a decision still holds, the inspected revision and the rationale. It does not identify the inspector or rewrite the decision.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `schema_version` | literal `1` | Version of the auxiliary assertion and fixed subject-digest definition; independent of the store format version. |
-| `id` | ULID | Generated check identity, also its immutable filename (or, once packed, its line's key). Highest generated id is the deterministic per-decision selection rule, not causal ordering. |
-| `decision_id` | str | Existing decision id; terminal or archived decisions remain valid history references. |
-| `checked_at` | aware datetime | UTC time at which the assertion was recorded. |
-| `checked_commit` | str | Full inspected Git HEAD object id, retained as provenance even after squash/clone removes the object locally. |
-| `provenance` | `Provenance` | Source `agent`, commit equals checked revision; author/session currently unknown. |
-| `rationale` | str | Nonblank explanation, redacted before validation; at most 4000 characters. |
-| `required_files` | list[str] | Exact current required anchor-file set, separate from optional inspected dependencies. |
-| `checked_files` | list[`CheckedCodeFile`] | Explicit inspected regular-file snapshots, covering every required file; 1–256 unique safe paths. |
-| `subject_digest` | str | SHA-256 of fixed immutable decision/provenance fields and durable leaf descriptors; excludes lifecycle and volatile mapping/status fields. |
-| `declared_sections` | list[`DeclaredSectionFile`] | Optional per-file section scope for markdown files, `[]` for a plain whole-file check; at most 64 entries, each path one of `checked_files`. |
-
-Changed inspected files/modes or required scope re-arm review; for a file with declared sections, a change to a declared or also-watched section, or to the file's link definitions, re-arms instead of any change to the file. A matching snapshot after
-an unrelated commit remains covered. A mistaken semantic assertion cannot be detected
-from these hashes; a genuine successor corrects the decision and preserves the check as
-history. Optional comparison failure has the bounded behavior described in store-format.
+See the [field contract](../reference/store-format.md#driftcheck--attributed-auxiliary-inspection).
 
 ## `CheckedCodeFile` — inspected Git tree entry
 
-Nested in `DriftCheck`; this stores repository metadata, never source bodies or engine
-mappings. The total checked-path budget is 16384 UTF-8 bytes.
+Each checked file records the committed file identity inspected by a drift check.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `path` | str | Safe repository-relative forward-slash path, at most 1024 UTF-8 bytes. |
-| `blob_id` | str | Full Git content address of the inspected file. |
-| `mode` | `100644` \| `100755` | Regular-file Git mode; mode changes participate in applicability. |
+See the [field contract](../reference/store-format.md#checkedcodefile--inspected-git-tree-entry).
 
 ## `DeclaredSectionFile` — declared sections of one checked file
 
-Nested in `DriftCheck`; this stores locators and digests, never heading text or source
-bodies. A scheme or role this release does not know is accepted and compared by whole blob.
+A section-scoped inspection names the relevant sections of a Markdown file instead of treating every section as equally relevant.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `path` | str | One of the check's `checked_files`; unique across entries. |
-| `scheme` | token | How sections are located; `md1` (markdown block structure) is the one scheme this release resolves. |
-| `refs_hash` | hex \| `null` | `md1`: digest of the file's link reference definitions. |
-| `sections` | list[`DeclaredSection`] | 1–256 sections; at most 1024 across the check. |
+See the [field contract](../reference/store-format.md#declaredsectionfile--declared-sections-of-one-checked-file).
 
 ## `DeclaredSection` — one declared or also-watched section
 
-Nested in `DeclaredSectionFile`.
+A declared section identifies content the inspection covers or also watches for changes.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `heading_hash` | hex | `md1`: digest of the heading chain that locates the section. |
-| `role` | token | `declared` (the checker read it) or `watch` (a sibling the claim depends on). |
-| `text_hash` | hex | `md1`: digest of the section's text, subsections included. |
+See the [field contract](../reference/store-format.md#declaredsection--one-declared-or-also-watched-section).

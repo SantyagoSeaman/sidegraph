@@ -145,7 +145,13 @@ def test_pretooluse_doctor_adr_stats_equal_before_and_after_migration(
     """T-P1. Red: doctor's ``_iter_records`` on files only (the migrated store has no
     ``decisions/`` files, so the fact reads as supporting nothing); ADR export dropping the
     packed decisions (the exported ADR and constraint vanish); any reader with its own
-    precedence."""
+    precedence. From 0.24.0 the migration also stamps the record-fields requirement, which
+    clears doctor's record-fields-requirement advisory; that is a marker change, not a reader
+    difference, so the advisory is held off here (tests/test_record_fields_notice.py)."""
+    from sidegraph import integrity
+    from sidegraph.store_format import FORMAT2_MIN_SIDEGRAPH
+
+    monkeypatch.setattr(integrity, "RECORD_FIELDS_REQUIREMENT", FORMAT2_MIN_SIDEGRAPH)
     monkeypatch.chdir(tmp_path)
     before = (
         _pretool(world, monkeypatch, capsys, "src/a.py", SESSION_BEFORE),

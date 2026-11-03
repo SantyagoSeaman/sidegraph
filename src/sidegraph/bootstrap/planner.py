@@ -267,7 +267,9 @@ def plan_sources(
         # profile's `title_pattern` rides along, threaded exactly like `dialect`.
         normalized_path = profile.normalized_rel_path(file_path)
         parsed_docs, reason = parse_decision_docs(
-            source_bytes.decode("utf-8"),
+            # `utf-8-sig`, as `sidegraph-import --docs` decodes: a leading BOM would
+            # otherwise stop the H1 from matching and drop the ADR with no signal.
+            source_bytes.decode("utf-8-sig"),
             normalized_path,
             dialect=profile.dialect,
             title_pattern=profile.title_pattern,

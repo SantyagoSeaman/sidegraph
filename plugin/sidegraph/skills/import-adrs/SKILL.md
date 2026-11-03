@@ -33,11 +33,11 @@ memory empty. CLI commands below run through
   One anchored `Decision` per qualifying document, anchored via its backtick-quoted
   mentions plus the document's own file node. This is also the right answer for
   decision-dense docs that name code line-by-line — import them as memory, do NOT run
-  Graphify's semantic pass over them (mention-nodes collide with code nodes; see
+  Graphify's semantic extraction over them (mention-nodes collide with code nodes; see
   [semantic docs](../../../../docs/guides/semantic-docs.md#when-your-docs-reference-your-code-heavily)).
 - **Default (rationale) mode** — for reasoning already in the graph: code docstrings/
-  comments come free from the AST pass; ADR/SAD *prose* rationale needs a prior
-  semantic pass (`graphify extract . --backend <b>` with the environment variable
+  comments come free from the AST extraction; ADR/SAD *prose* rationale needs a prior
+  semantic extraction (`graphify extract . --backend <b>` with the environment variable
   `GRAPHIFY_NO_AUTO_REFRESH=1` set; one API key, costs real money — see
   [semantic docs](../../../../docs/guides/semantic-docs.md)). Volume can be large (a
   reference repo yielded 492 rationale nodes) — filter with `--path PREFIX`/`--limit N`.
@@ -112,7 +112,13 @@ Then run it without `--dry-run`.
 
 - Re-run the same command with `--dry-run` — everything should now count as
   `skipped: existing` (import is idempotent; an *edited* doc supersedes its old record on
-  a re-import, keeping history).
+  a re-import, keeping history). A change to a doc's status alone is not an edit: the
+  stored record keeps its status, except on a flip to or from `rejected`. Only frontmatter
+  `status:` or a top-metadata `**Status:**` line is read as status (not a `## Status`
+  section, a MADR `* Status:` item or a plain `Status:` line). Ratify a record whose ADR
+  became Accepted. For one whose ADR became Deprecated/Superseded, supersede it
+  (`supersede_decision`) if something replaces it, or retire it (`retire_decision`) if
+  nothing does.
 - Spot-check retrieval: `get_task_context(files=["<one imported doc's path>"])` should
   surface its decision; with domains named, `drill_down` on a covering domain should list
   imported decisions for that area.
@@ -124,5 +130,5 @@ Then run it without `--dry-run`.
 - [`docs/reference/cli.md`](../../../../docs/reference/cli.md#sidegraph-import) — every
   flag, qualifying-document rule, anchor-resolution rule, and output shape.
 - [`docs/guides/semantic-docs.md`](../../../../docs/guides/semantic-docs.md) — the
-  two-pass engine workflow behind rationale mode, and cost/cache expectations.
+  two-step engine workflow behind rationale mode, and cost/cache expectations.
 - `sidegraph:record-decision` — one-at-a-time capture for what the importer can't parse.

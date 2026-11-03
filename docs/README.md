@@ -1,14 +1,18 @@
 # Sidegraph documentation
 
-Sidegraph stores durable decisions and non-derivable facts beside the repository they
-describe. Start with the task you have now; [`llms.txt`](llms.txt) is the flat index for an
-agent.
+[Glossary](concepts/glossary.md)
+
+Sidegraph keeps the project's decision graph for AI coding agents: decisions, rejected
+alternatives and gotchas, anchored to your code. Sessions, subagents and different tools share it,
+and each learns at that code what was decided and why.
+
+Start with the task you have now. [llms.txt](llms.txt) is the flat index for an agent.
 
 ## Install and prove it works
 
 1. [Install Sidegraph and Graphify](getting-started/installation.md).
 2. Follow the [end-to-end quickstart](getting-started/quickstart.md).
-3. Use the recommended host path for [Claude Code](getting-started/claude-code-setup.md),
+3. For desktop coding, use the [desktop guide](integrations/desktop-apps.md). Use the recommended host path for [Claude Code](getting-started/claude-code-setup.md),
    [Codex](getting-started/codex-setup.md) or [Grok Build](integrations/grok.md), or the narrower
    paths for [OpenCode V2](../.opencode/INSTALL.md) (MCP and skills) and
    [Muse](integrations/muse.md) (MCP, skills, the session map and a subagent brief).
@@ -45,6 +49,10 @@ it is optional background on evidence, limits, and repository fit.
 
 ## Understand the model
 
+- [Glossary](concepts/glossary.md) — the vocabulary used throughout these pages.
+- [Captured outputs](reference/examples.md) — real map, retrieval, binding, sync and health examples.
+- [Host feature support](integrations/support.md) — delivery paths and setup links.
+
 - [Decision memory](concepts/decision-memory.md) — what belongs in the store.
 - [Mind model](concepts/mind-model.md) — domains, TOC, and drill-down.
 - [Data model](concepts/data-model.md) — persisted record shapes.
@@ -61,6 +69,7 @@ it is optional background on evidence, limits, and repository fit.
 - [Stability levels](reference/stability.md)
 - [Git bindings](reference/git-bindings.md)
 - [Security internals](reference/security-internals.md)
-- Integrations: [Claude Code](integrations/claude-code.md),
+- [Privacy](privacy.md)
+- Integrations: [Desktop coding surfaces](integrations/desktop-apps.md), [Claude Code](integrations/claude-code.md),
   [Codex](integrations/codex.md), [OpenCode V2](integrations/opencode.md),
   [Muse](integrations/muse.md), [Grok Build](integrations/grok.md), [Graphify](integrations/graphify.md)

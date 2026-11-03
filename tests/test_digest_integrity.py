@@ -57,7 +57,6 @@ from sidegraph.schema import (
     Domain,
     Entity,
     Fact,
-    Initiative,
     Provenance,
 )
 from sidegraph.store import Store, _atomic_write_json
@@ -389,10 +388,6 @@ def _case_add_binding(store: Store):
     store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2))
 
 
-def _case_upsert_initiative(store: Store):
-    store.upsert_initiative(Initiative(name="still-stamps-initiative"))
-
-
 def _case_ratify_status_flip(store: Store):
     proposed = store.add_decision(_decision("still-stamps-ratify", status=DecisionStatus.PROPOSED))
     store.ratify(proposed.id)
@@ -404,7 +399,6 @@ _STILL_STAMPS_CASES = {
     "upsert_entity_new": _case_upsert_entity_new,
     "add_domain": _case_add_domain,
     "add_binding": _case_add_binding,
-    "upsert_initiative": _case_upsert_initiative,
     "ratify_status_flip": _case_ratify_status_flip,
 }
 
@@ -457,8 +451,10 @@ def test_compact_still_stamps_despite_index_richer_than_disk(tmp_path):
     equality check (table/index has an entry the disk walk didn't see -> refuse), which
     this design deliberately does not implement (D2)."""
     store = Store(format1_store(tmp_path / "s"))
-    old = store.add_decision(_decision("compact-stamps-old"))
-    store.add_decision(_decision("compact-stamps-new", supersedes=old.id))
+    old = store.add_decision(_decision("compact-stamps-old", status=DecisionStatus.ACCEPTED))
+    store.add_decision(
+        _decision("compact-stamps-new", supersedes=old.id, status=DecisionStatus.ACCEPTED)
+    )
     before = store.get_meta("canonical_digest")
 
     store.compact()

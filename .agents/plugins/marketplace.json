@@ -1,6 +1,6 @@
 {
   "name": "sidegraph",
-  "description": "Sidegraph — durable decision memory for AI coding agents.",
+  "description": "Sidegraph: the project's decision graph for AI coding agents.",
   "plugins": [
     {
       "name": "sidegraph",
@@ -8,7 +8,7 @@
         "source": "local",
         "path": "./plugin/sidegraph"
       },
-      "description": "Durable decision/lessons memory over your code graph — captured in-session, ratified before it is trusted, retrieved mistakes-first, surviving refactors."
+      "description": "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code."
     }
   ]
 }

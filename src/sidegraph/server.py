@@ -46,7 +46,6 @@ from . import (
 from .anchoring import anchor_descriptor, anchor_roots, orphan_reason, resolve_and_bind
 from .anchoring import entity_summaries as _entity_summaries
 from .capture import (
-    AnchorDraft,
     RatifyPolicy,
     _bind_initiative,
     _bind_orphaned,
@@ -70,6 +69,7 @@ from .capture import propose_domains as _propose_domain_drafts
 from .config import (
     DEFAULT_GRAPH,
     UNATTRIBUTED_SESSION,
+    _interrupted,
     _present_by_lstat,
     _repository_boundary,
     borrowed_graph_candidate,
@@ -119,7 +119,13 @@ from .schema import (
     file_anchor_descriptors,
     is_safe_record_id,
 )
-from .store import VOLATILE_STALE_KEY, Store
+from .store import (
+    VOLATILE_STALE_KEY,
+    Store,
+    SupersessionConflictError,
+    settled_after_failure,
+    settled_ratify_result,
+)
 from .sync import (
     activate_accepted_domain,
     ensure_domain_membership,
@@ -192,7 +198,7 @@ _store_lock = threading.Lock()
 
 def _missing_store_setup(path: str) -> str | None:
     """Refuse implicit creation below or outside the selected logical Git root."""
-    if not _present_by_lstat(path):
+    if not _present_by_lstat(path) and not _interrupted(path):
         parent = os.path.dirname(os.path.abspath(path))
         if _repository_boundary(parent) != parent:
             return missing_store_message(path)
@@ -370,11 +376,11 @@ _WRITE_TOOLS = frozenset(
         "record_drift_check",
         "add_decision",
         "supersede_decision",
+        "retire_decision",
         "add_fact",
         "supersede_fact",
         "propose_decisions",
         "ratify",
-        "ratify_decisions",
         "add_domain",
         "supersede_domain",
         "propose_domains",
@@ -809,14 +815,37 @@ def _resolve_anchors(
 
     ``resolve_and_bind`` already carries the ``reader.resolve()`` outcome on its return
     value (``anchoring.AnchorResolution``), so this never re-resolves a ref just to learn
-    why no leaf binding was created. No-op (``([], [])``) when there's no reader — anchoring
-    is best-effort throughout this module, and neither "ambiguous" nor "orphaned" is
-    meaningful with no graph to resolve against.
+    why no leaf binding was created. With no reader nothing can be ambiguous, but no anchor
+    is dropped either: each named one binds an orphaned Tier-2 leaf (``_bind_orphaned``, as
+    ``propose_decisions`` does) and is reported in ``orphaned`` with reason ``"no-graph"``;
+    the next sync heals it once a graph holds the name.
     """
     skipped: list[dict] = []
     orphaned: list[dict] = []
     if anchors:
         anchors = _anchor_dicts(anchors, reader, store)
+    if anchors and reader is None:
+        for raw in anchors:
+            if not raw.get("name"):
+                continue
+            before = {b.entity_id for b in store.bindings_for_record(record_id)}
+            _bind_orphaned(
+                record_id,
+                Descriptor(name=raw["name"], file_path=raw.get("file_path")),
+                store,
+                relation=raw.get("relation"),
+            )
+            orphaned.extend(
+                {**s, "reason": "no-graph"}
+                for s in _entity_summaries(
+                    store,
+                    [
+                        b
+                        for b in store.bindings_for_record(record_id)
+                        if b.tier == 2 and b.entity_id not in before
+                    ],
+                )
+            )
     if anchors and reader is not None:
         for raw in anchors:
             name = raw.get("name")
@@ -1216,7 +1245,8 @@ def add_decision(
     precise Tier-2 leaf was created for them; empty when every anchor resolved cleanly or no
     graph is present. ``anchors_orphaned`` is
     ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
-    to nothing (always ``[]`` when no graph is present).
+    to nothing; with no graph present every anchor lands here with reason ``"no-graph"`` and
+    heals on the next sync.
     The leaf is still written. Graph-bound retrieval, ``drill_down`` and the PreToolUse
     hook skip that binding. An exact file request can still return eligible memory as
     ``[file-bound]`` when an available graph lacks the declared file; its symbol anchors
@@ -1266,7 +1296,7 @@ def _supersede_decision_impl(
     exactly where a reversal matters most. Two paths, never both:
 
     - ``anchors`` given -> resolve_and_bind the successor to ONLY those refs (same as
-      add_decision; best-effort, skipped if no reader). Reuses ``_resolve_anchors`` so this
+      add_decision; best-effort, orphaned leaves if no reader). Reuses ``_resolve_anchors`` so this
       path reports the same per-anchor ``anchors_skipped`` feedback ``add_decision`` does
       (Gate finding: this used to discard ``resolve_and_bind``'s per-anchor result outright,
       so an ambiguous explicit anchor on a supersede silently produced no Tier-2 leaf and no
@@ -1422,7 +1452,8 @@ def supersede_decision(
     node got no precise Tier-2 leaf), always ``[]`` when ``anchors`` is omitted since
     inheritance never resolves against the graph. ``anchors_orphaned`` is
     ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
-    to nothing (always ``[]`` when no graph is present).
+    to nothing; with no graph present every anchor lands here with reason ``"no-graph"`` and
+    heals on the next sync.
     The leaf is still written. Graph-bound retrieval, ``drill_down`` and the PreToolUse
     hook skip that binding. An exact file request can still return eligible memory as
     ``[file-bound]`` when an available graph lacks the declared file; its symbol anchors
@@ -1450,6 +1481,59 @@ def supersede_decision(
     )
 
 
+def _retire_decision_impl(
+    store: Store, decision_id: str, reason: str, duplicate_of: str | None = None
+) -> dict:
+    """Testable core: redact ``reason``, then ``Store.retire`` (which owns every refusal and
+    carries a duplicate's anchors over to the kept record)."""
+    preflight_direct(decision_id, reason, duplicate_of)
+    reason, redactions = redact(reason)
+    decision, added = store.retire(decision_id, reason, duplicate_of=duplicate_of)
+    assert decision.valid_to is not None  # retire always closes the record
+    return _with_commit_hint(
+        store,
+        {
+            "id": decision.id,
+            "status": decision.status.value,
+            "valid_to": decision.valid_to.isoformat(),
+            "duplicate_of": duplicate_of,
+            "anchors_added": _entity_summaries(store, added),
+            "redactions": redactions,
+        },
+    )
+
+
+@mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
+def retire_decision(id: str, reason: str, duplicate_of: str | None = None) -> dict:
+    """Retire an accepted decision that has nothing to be replaced with: it moves to
+    ``deprecated``, its ``valid_to`` is set to now unless already set, and it keeps ``reason``
+    (redacted) as ``retired.reason``.
+
+    Use it for a duplicate (pass ``duplicate_of``, the id of the accepted record that stays)
+    and for a decision whose subject is gone (the code or practice it governed no longer
+    exists). When the decision was wrong or changed, call ``supersede_decision`` instead: a
+    successor carries the new rule. A proposal is dropped with ``ratify(drop=[...])``.
+
+    For a duplicate, the kept record first gains the duplicate's live and degraded anchors it
+    lacks or holds only as orphaned or weaker ones, so the rule keeps surfacing for the
+    duplicate's files; ``anchors_added`` lists them
+    (``{"entity_id", "canonical_name", "tier"}``).
+
+    The record is never deleted. Default retrieval, ``get_task_context`` and the hooks stop
+    serving it; ``get_entity_history`` and ``retrieve_decisions(status="deprecated")`` still
+    show it, with ``retired: {reason, duplicate_of}``.
+
+    Refused, with nothing written, while the store requires an older Sidegraph than the
+    release that added ``retired`` (run ``sidegraph-require`` first), and for an unknown id, a
+    record that is not ``accepted``, a blank ``reason``, a ``duplicate_of`` that is not another
+    accepted, open decision, a pending successor, or a proposed fact supporting the record.
+    Returns ``{"id", "status": "deprecated", "valid_to", "duplicate_of", "anchors_added",
+    "redactions"}``.
+    """
+    return _retire_decision_impl(_get_store(), id, reason, duplicate_of=duplicate_of)
+
+
 def _bind_fact_anchors(
     fact_id: str,
     anchors: list[dict] | None,
@@ -1459,42 +1543,11 @@ def _bind_fact_anchors(
     """Anchor a fact's explicit ``anchors``, returning ``(ambiguous, orphaned)`` — the same
     two buckets ``_resolve_anchors`` gives ``add_decision``.
 
-    With a reader, this IS ``_resolve_anchors``. With no reader, bind an orphaned Tier-2
-    leaf per anchor instead of ``_resolve_anchors``'s no-op — facts must not repeat
-    ``add_decision``'s no-graph anchors-silently-dropped asymmetry
-    (design/superpowers/specs/2026-07-10-facts-layer-design.md) — and report those leaves
-    in the orphaned bucket too: a graph-less run produces a dead anchor exactly as an
-    unresolved name does, and the caller has the same reason to know. Shared by
-    ``_add_fact_impl`` and ``_supersede_fact_impl``'s explicit-anchors path so both give the
-    same guarantee.
+    This IS ``_resolve_anchors``, which with no reader binds an orphaned Tier-2 leaf per
+    anchor (reason ``"no-graph"``) instead of dropping it, for decisions and facts alike.
+    Shared by ``_add_fact_impl`` and ``_supersede_fact_impl``'s explicit-anchors path.
     """
-    if not anchors:
-        return [], []
-    if reader is not None:
-        return _resolve_anchors(fact_id, anchors, reader, store)
-    anchors = _anchor_dicts(anchors, None, store)
-    orphaned: list[dict] = []
-    for raw in anchors:
-        if not raw.get("name"):
-            continue
-        before = {b.entity_id for b in store.bindings_for_record(fact_id)}
-        _bind_orphaned(
-            fact_id,
-            AnchorDraft.model_validate(raw),
-            store,
-            relation=raw.get("relation"),
-        )
-        orphaned.extend(
-            _entity_summaries(
-                store,
-                [
-                    b
-                    for b in store.bindings_for_record(fact_id)
-                    if b.tier == 2 and b.entity_id not in before
-                ],
-            )
-        )
-    return [], orphaned
+    return _resolve_anchors(fact_id, anchors, reader, store)
 
 
 def _add_fact_impl(
@@ -1589,8 +1642,8 @@ def add_fact(
     ``{"name", "file_path", "relation"?}`` ref shape ``add_decision`` takes; resolved against
     the current Graphify graph and bound
     when a graph is present. With no graph, an anchor still gets an ORPHANED Tier-2 leaf
-    (unlike ``add_decision``, which silently skips anchors with no reader) — a fact must
-    never write unreachable, so the binding heals once a graph exists.
+    (as ``add_decision`` does) — a record must never write unreachable, so the binding
+    heals once a graph exists.
 
     Every text field (statement/source) is redacted first, same secret patterns as
     ``add_decision``'s.
@@ -1603,9 +1656,8 @@ def add_fact(
     matched more than one node, since there is nothing to be ambiguous against otherwise.
     ``anchors_orphaned`` is
     ``[{"entity_id", "canonical_name", "tier": 2, "reason"}, ...]`` — the anchors that resolved
-    to nothing against a graph. With no graph present every anchor lands here instead, as
-    ``{"entity_id", "canonical_name", "tier": 2}`` with no ``reason`` key; it heals on the
-    next sync once a graph exists.
+    to nothing against a graph. With no graph present every anchor lands here instead, with
+    reason ``"no-graph"``; it heals on the next sync once a graph exists.
     The leaf is still written. Graph-bound retrieval, ``drill_down`` and the PreToolUse
     hook skip that binding. An exact file request can still return eligible memory as
     ``[file-bound]`` when an available graph lacks the declared file; its symbol anchors
@@ -1775,8 +1827,8 @@ def supersede_fact(
 
     Returns ``{"id", "statement", "status", "redactions", "entities", "anchors_skipped",
     "anchors_orphaned", "supersedes"}`` — same shape as ``add_fact``'s plus ``supersedes`` (the
-    predecessor's id); ``anchors_orphaned`` entries follow ``add_fact``'s rule (no ``reason``
-    key when no graph is present) and the same ``add_anchors`` repair.
+    predecessor's id); ``anchors_orphaned`` entries follow ``add_fact``'s rule (reason
+    ``"no-graph"`` for every anchor when no graph is present) and the same ``add_anchors`` repair.
     """
     return _supersede_fact_impl(
         _get_store(),
@@ -1797,7 +1849,8 @@ def _retrieve_decisions_impl(store, include_superseded: bool = False) -> list[di
         decisions = [
             d
             for d in decisions
-            if d.status not in (DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED)
+            if d.status
+            not in (DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED, DecisionStatus.DEPRECATED)
         ]
     # The proposal-surfacing policy applies HERE too (practitioner re-review round 2). This
     # raw listing is deliberately unranked — but "unranked" is a ranking exemption, not a
@@ -1824,7 +1877,13 @@ _LISTING_BUDGET_MAX = 40000
 # see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D1)
 _HARD_CAP = 40000
 # The statuses a listing hides unless it is asked for them (``include_superseded``, ``status``).
-_HISTORY = frozenset({DecisionStatus.SUPERSEDED.value, DecisionStatus.REJECTED.value})
+_HISTORY = frozenset(
+    {
+        DecisionStatus.SUPERSEDED.value,
+        DecisionStatus.REJECTED.value,
+        DecisionStatus.DEPRECATED.value,
+    }
+)
 _ROW_KEYS = ("id", "kind", "status", "title", "valid_from")
 _SEARCHED_FIELDS = ("title", "context", "choice", "rejected", "consequences")
 _MISTAKE_RANK = {DecisionKind.GOTCHA.value: 0, DecisionKind.LESSON.value: 1}
@@ -2309,8 +2368,8 @@ def _listing_hint(
         if has_query:
             text += " Every word of query must occur in a record: try one or two distinctive words."
         if history_hint:
-            text += " Superseded and rejected records are searched only with status=[...] or"
-            text += " include_superseded=True."
+            text += " Superseded, rejected and retired records are searched only with"
+            text += " status=[...] or include_superseded=True."
         parts.append(text)
     elif cut is not None and returned == 0:
         text = f"{matched} matched, but the first one does not fit in budget_chars={budget}."
@@ -2542,13 +2601,13 @@ def retrieve_decisions(
 
     Filters combine with AND, and an empty one is ignored. ``status`` and ``kind`` take one
     value or a list (status: proposed, accepted, superseded, rejected, deprecated; kind: adr,
-    lesson, constraint, gotcha) and ``status`` replaces the default, which hides superseded
-    and rejected records. ``files`` are repo-relative paths, read the way ``get_task_context``
-    reads them (a basename or a directory works); records anchored to them match, and
-    ``unresolved_files`` says, for each path nothing could read, why and what to try instead
-    (``reason``, ``candidates``). ``query`` words must all occur
-    in a record's text. ``ids`` returns those records, superseded ones too. History of one
-    topic: ``query="<words>", include_superseded=True``.
+    lesson, constraint, gotcha) and ``status`` replaces the default, which hides superseded,
+    rejected and retired (deprecated) records. ``files`` are repo-relative paths, read the way
+    ``get_task_context`` reads them (a basename or a directory works); records anchored to them
+    match, and ``unresolved_files`` says, for each path nothing could read, why and what to try
+    instead (``reason``, ``candidates``). ``query`` words must all occur in a record's text.
+    ``ids`` returns those records, superseded ones too. History of one topic:
+    ``query="<words>", include_superseded=True``.
     """
     # A `ToolResult` return is what keeps FastMCP from declaring an output schema and sending the
     # JSON a second time as `structuredContent` (design D1; the smoke test reads the wire).
@@ -2597,6 +2656,7 @@ def _fact_listing(
     files: list[str] | None = None,
     query: str | None = None,
     ids: list[str] | None = None,
+    supports: list[str] | None = None,
     limit: int = 25,
     budget_chars: int = 24000,
     borrowed_from: Path | None = None,
@@ -2612,6 +2672,7 @@ def _fact_listing(
     statuses = _listing_values(status, DecisionStatus, "status")
     wanted_files = _listing_texts(files)
     wanted_ids = _listing_texts(ids)
+    wanted_supports = _listing_texts(supports)
     terms = (query or "").lower().split()
     everything = _list_facts_impl(store, include_superseded=True)
     counts: dict[str, int] = {}
@@ -2628,6 +2689,9 @@ def _fact_listing(
         pool = [f for f in pool if f["status"] in statuses]
     elif history_hidden:
         pool = [f for f in pool if f["status"] not in _HISTORY]
+    if wanted_supports:
+        supported = set(wanted_supports)
+        pool = [f for f in pool if supported.intersection(f["supports"])]
     unresolved: list[dict] = []
     if wanted_files:
         entity_ids, unresolved = _listing_entities(store, reader, wanted_files, borrowed_from)
@@ -2647,6 +2711,7 @@ def _fact_listing(
             ("files", f"[{', '.join(wanted_files)}]" if wanted_files else ""),
             ("query", f'"{" ".join(terms)}"' if terms else ""),
             ("ids", f"[{', '.join(wanted_ids)}]" if wanted_ids else ""),
+            ("supports", f"[{', '.join(wanted_supports)}]" if wanted_supports else ""),
         )
         if value
     )
@@ -2673,6 +2738,7 @@ def list_facts(
     files: list[str] | None = None,
     query: str | None = None,
     ids: list[str] | None = None,
+    supports: list[str] | None = None,
     limit: int = 25,
     budget_chars: int = 24000,
 ) -> ToolResult:
@@ -2689,6 +2755,8 @@ def list_facts(
     repo-relative paths, read the way ``get_task_context`` reads them; facts anchored to them
     match, and ``unresolved_files`` says, for each path nothing could read, why. ``query`` words
     must all occur in ``statement`` or ``source``. ``ids`` returns those facts exactly.
+    ``supports`` is a list of decision ids: only facts attached to (supporting) any of them
+    match; an unknown id matches nothing.
     """
     # Read-only: the graph is read without the lazy sync that `retrieve_decisions` runs.
     reader = _load_reader() if _listing_texts(files) else None
@@ -2700,6 +2768,7 @@ def list_facts(
         files=files,
         query=query,
         ids=ids,
+        supports=supports,
         limit=limit,
         budget_chars=budget_chars,
         borrowed_from=None,
@@ -2809,9 +2878,9 @@ def _get_entity_history_impl(store: Store, entity_id: str) -> list[dict]:
             fact = store.get_fact(b.record_id)
             if fact is not None:
                 records.append(("fact", fact))
-    # History keeps superseded and rejected records (the "tried before" chain), but a proposal
-    # obeys the surfacing policy here as in every other raw listing: regulated mode and the
-    # window exist to keep unreviewed text away from the agent.
+    # History keeps superseded, rejected and retired records (the "tried before" chain), but a
+    # proposal obeys the surfacing policy here as in every other raw listing: regulated mode and
+    # the window exist to keep unreviewed text away from the agent.
     records = [
         pair
         for pair in records
@@ -3737,8 +3806,10 @@ def query_decisions(
 
 def _auto_accept() -> bool:
     """True iff ``SIDEGRAPH_AUTO_ACCEPT=on`` (point-of-use env read — never cached at
-    import, and never read inside ``capture.py``, which stays pure and takes the resolved
-    bool as a keyword instead). Any value other than the literal ``"on"`` (including unset)
+    import, and never read inside ``capture.py``, which stays pure; ``_capture_policy``
+    folds it into the policy it passes down). Deprecated: ``SIDEGRAPH_RATIFY_POLICY=auto-all``
+    is the replacement (it still requires a live anchor and stamps the ratifier; this switch
+    does neither). Any value other than the literal ``"on"`` (including unset)
     is off. When on, agent-proposed decisions and facts (``propose_decisions``) land
     ``status=accepted`` directly instead of ``proposed``, bypassing the human ratification
     queue — provenance still stamps ``source="agent"``, so history never lies about
@@ -3766,6 +3837,24 @@ def _ratify_policy() -> RatifyPolicy:
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1
     """
     return parse_ratify_policy(os.environ.get("SIDEGRAPH_RATIFY_POLICY"))
+
+
+# The note a ``written`` propose result carries while the deprecated switch is on: the MCP
+# server's environment is where the variable is usually set, and hooks/doctor may not see it.
+_AUTO_ACCEPT_DEPRECATION = (
+    "SIDEGRAPH_AUTO_ACCEPT is deprecated: set SIDEGRAPH_RATIFY_POLICY=auto-all instead "
+    "(it stamps the ratifier but needs a live anchor on each record) and unset it."
+)
+
+
+def _capture_policy() -> RatifyPolicy:
+    """The policy ``propose_decisions`` writes under: ``RatifyPolicy.LEGACY_ACCEPT`` when the
+    deprecated ``SIDEGRAPH_AUTO_ACCEPT=on`` is set (it wins over ``SIDEGRAPH_RATIFY_POLICY``,
+    as it always has), else ``_ratify_policy()``. Domains never go through here:
+    ``propose_domains`` reads the policy variable alone, so the switch never touches them.
+    Called once per request, like ``_ratify_policy``.
+    """
+    return RatifyPolicy.LEGACY_ACCEPT if _auto_accept() else _ratify_policy()
 
 
 def _telemetry_enabled() -> bool:
@@ -3968,7 +4057,6 @@ def _propose_decisions_impl(
     session_id: str | None = None,
     author: str | None = None,
     facts: list[dict] | None = None,
-    auto_accept: bool = False,
     ratify_policy: RatifyPolicy = RatifyPolicy.MANUAL,
 ) -> list[dict]:
     """Testable core for propose_decisions (see capture.propose/propose_facts).
@@ -3978,13 +4066,11 @@ def _propose_decisions_impl(
     run through ``capture.propose_facts`` after every decision draft has been processed, and
     their result dicts appended after the decision results, never interleaved.
 
-    ``auto_accept`` (default ``False``) is the resolved ``SIDEGRAPH_AUTO_ACCEPT`` bool (see
-    ``_auto_accept``/design/superpowers/specs/2026-07-10-ratification-ux-and-mcp-gaps-design.md)
-    — passed through to both ``propose`` and ``propose_facts`` unchanged, so decision drafts,
-    their attached facts, and standalone facts all land ``accepted`` together when it's on.
-
-    ``ratify_policy`` (default ``RatifyPolicy.MANUAL``) is the resolved
-    ``SIDEGRAPH_RATIFY_POLICY`` value (design D1, ``server._ratify_policy()``) — the SAME
+    ``ratify_policy`` (default ``RatifyPolicy.MANUAL``) is the resolved policy (design D1,
+    ``server._capture_policy()``: ``SIDEGRAPH_RATIFY_POLICY``, or ``LEGACY_ACCEPT`` for the
+    deprecated ``SIDEGRAPH_AUTO_ACCEPT=on``, see design/superpowers/specs/
+    2026-07-10-ratification-ux-and-mcp-gaps-design.md, under which decision drafts, their
+    attached facts, and standalone facts all land ``accepted`` together) — the SAME
     object is passed through to both ``propose`` and ``propose_facts`` unchanged, the whole
     point being that one MCP ``propose_decisions`` request samples the policy exactly once,
     not once per core call.
@@ -4010,7 +4096,6 @@ def _propose_decisions_impl(
             reader,
             session_id=session_id,
             author=author,
-            auto_accept=auto_accept,
             ratify_policy=ratify_policy,
         )
     ]
@@ -4023,7 +4108,6 @@ def _propose_decisions_impl(
                 reader,
                 session_id=session_id,
                 author=author,
-                auto_accept=auto_accept,
                 ratify_policy=ratify_policy,
             )
         )
@@ -4081,7 +4165,7 @@ def _format_proposed_decision_block(store: Store, d: Decision) -> str:
     # surfacing window is only humane if the queue says which items it has stopped
     # serving — otherwise a reviewer cannot tell an urgent backlog from an inert one, and
     # the window reads as a silent drop. The record stays listed and ratifiable either way.
-    head = format_proposal(d)
+    head = format_proposal(d, store.get_decision(d.supersedes) if d.supersedes else None)
     if not proposal_surfaces(d):
         # On the TITLE line, where the eye lands — not at the end of a multi-line block.
         first, _, rest = head.partition("\n")
@@ -4249,26 +4333,32 @@ def propose_decisions(
     reason starts with "internal error" may have left the record on disk; do not re-propose
     it in the same session.
 
-    Auto-accept: when the ``SIDEGRAPH_AUTO_ACCEPT`` environment variable is set to ``"on"``
+    Auto-accept (deprecated; use ``SIDEGRAPH_RATIFY_POLICY=auto-all``, which still needs a live
+    anchor): when the ``SIDEGRAPH_AUTO_ACCEPT`` environment variable is set to ``"on"``
     (off by default), every decision draft, its attached facts, and every standalone fact
     land ``status=accepted`` directly instead of ``proposed`` — the pending-ratification
     queue is bypassed for this call. Provenance still stamps ``source="agent"`` regardless,
     so history never lies about authorship. Domain drafts (``propose_domains``) are NEVER
     affected by this flag. When both it and SIDEGRAPH_RATIFY_POLICY are set, this flag
-    wins. See design/superpowers/specs/
+    wins; each written result then carries a ``deprecation`` note. See design/superpowers/specs/
     2026-07-10-ratification-ux-and-mcp-gaps-design.md for the trade-off (auto-accept removes
     the store's only noise filter; recommended for solo use, not team stores).
     """
-    return _propose_decisions_impl(
+    policy = _capture_policy()
+    results = _propose_decisions_impl(
         _get_store(),
         _load_reader(),
         drafts,
         session_id=session_id,
         author=author,
         facts=facts,
-        auto_accept=_auto_accept(),
-        ratify_policy=_ratify_policy(),
+        ratify_policy=policy,
     )
+    if policy is RatifyPolicy.LEGACY_ACCEPT:
+        for element in results:
+            if element.get("status") == "written":
+                element["deprecation"] = _AUTO_ACCEPT_DEPRECATION
+    return results
 
 
 @mcp.tool(annotations=_READ_ONLY, output_schema=None)
@@ -4289,12 +4379,17 @@ def list_proposed(budget_chars: int = 24000) -> str:
     return _hard_cap(_list_proposed_impl(_get_store(), budget), [], "Raise budget_chars.")
 
 
+_RATIFY_FAILED = "error: ratification failed; reopen the store and inspect status before retrying"
+
+
 def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
     """Route one id to a decision, a fact, or a domain by lookup (decision first, then
     fact, then domain) and apply ``action`` ("accept" | "drop"). Unknown ids get a generic
-    error entry — never guess which kind an id belongs to. Known non-proposed decisions
-    and facts get a fixed status explanation. Unexpected mutation failures retain the
-    conservative recovery message rather than exposing raw causes.
+    error entry — never guess which kind an id belongs to. A known record that is not
+    pending gets ``settled_ratify_result``'s answer ("already accepted" for a repeat, a specific
+    refusal otherwise). Unexpected mutation failures retain the conservative recovery
+    message rather than exposing raw causes; a failure that a re-read shows to be a lost
+    race against another ratification is reported by that new status instead.
 
     Returns ``(result, cascaded)`` — ``cascaded`` is the list of :class:`Fact` records that
     rode a DECISION's verdict in this call (``Store.ratify``/``Store.drop``'s own cascade;
@@ -4305,30 +4400,22 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
     decision = store.get_decision(id_)
     if decision is not None:
         if decision.status != DecisionStatus.PROPOSED:
-            return (
-                f"error: decision is not proposed (status: {decision.status.value}); "
-                "ratify cannot change it",
-                [],
-            )
+            return settled_ratify_result("decision", decision.status.value, action), []
         try:
             if action == "accept":
                 _decision, cascaded = store.ratify(id_)
                 return "accepted", cascaded
             _decision, cascaded = store.drop(id_)
             return "dropped", cascaded
+        except SupersessionConflictError as e:
+            return f"error: {e}", []
         except ValueError:
-            return (
-                "error: ratification failed; reopen the store and inspect status before retrying",
-                [],
-            )
+            raced = settled_after_failure(store, "decision", id_, action, decision.status.value)
+            return raced or _RATIFY_FAILED, []
     fact = store.get_fact(id_)
     if fact is not None:
         if fact.status != DecisionStatus.PROPOSED:
-            return (
-                f"error: fact is not proposed (status: {fact.status.value}); "
-                "ratify cannot change it",
-                [],
-            )
+            return settled_ratify_result("fact", fact.status.value, action), []
         try:
             if action == "accept":
                 store.ratify_fact(id_)
@@ -4336,28 +4423,31 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
                 store.drop_fact(id_)
             return ("accepted" if action == "accept" else "dropped"), []
         except ValueError:
-            return (
-                "error: ratification failed; reopen the store and inspect status before retrying",
-                [],
-            )
-    if store.get_domain(id_) is not None:
+            raced = settled_after_failure(store, "fact", id_, action, fact.status.value)
+            return raced or _RATIFY_FAILED, []
+    domain = store.get_domain(id_)
+    if domain is not None:
+        # A domain drop also works on an accepted one; every other non-proposed state is settled.
+        if domain.status != DomainStatus.PROPOSED and not (
+            action == "drop" and domain.status == DomainStatus.ACCEPTED
+        ):
+            return settled_ratify_result("domain", domain.status.value, action), []
         result = (
             store.ratify_domains(accept=[id_])
             if action == "accept"
             else store.ratify_domains(drop=[id_])
         )
-        return (
-            "error: ratification failed; reopen the store and inspect status before retrying"
-            if result[id_].startswith("error")
-            else result[id_]
-        ), []
+        if result[id_].startswith("error"):
+            raced = settled_after_failure(store, "domain", id_, action, domain.status.value)
+            return raced or _RATIFY_FAILED, []
+        return result[id_], []
     return "error: unknown id (not a pending decision, fact, or domain)", []
 
 
 def _ratified_domain(store: Store, id_: str, result: str) -> bool:
     """True iff ``id_`` was routed to (and actually landed on) a domain, not a decision or
     an unknown id — used to gate the TOC cache refresh below to real domain changes only."""
-    if result.startswith("error"):
+    if result.startswith(("error", "already")):
         return False
     return store.get_decision(id_) is None and store.get_domain(id_) is not None
 
@@ -4370,7 +4460,7 @@ def _ratify_impl(
 ) -> dict[str, str]:
     """Testable core for the unified ``ratify`` tool: one gate covering decisions, facts,
     AND domains (§4, "one gate, no exceptions"; facts layer 2026-07-10). Accept-before-drop,
-    same id in both -> drop is ignored (mirrors ``_ratify_decisions_impl``'s convention).
+    same id in both -> drop is ignored.
 
     Cascade reporting: when an accepted/dropped id routes to a decision, every fact that
     rode its verdict (``_ratify_one``'s ``cascaded`` return) gets its OWN entry in the
@@ -4397,7 +4487,7 @@ def _ratify_impl(
     whenever >= 1 domain id was actually accepted or dropped in this call — a
     decisions-only ratify leaves the cache untouched (it wouldn't change the TOC anyway).
 
-    ``reader`` (the ``ratify``/``ratify_decisions`` tools' normal call, via
+    ``reader`` (the ``ratify`` tool's normal call, via
     ``_load_reader()``): when a domain is actually ACCEPTED in this call and a reader is
     present, its ``communities`` are resolved immediately from ``seed_anchors``/
     ``path_prefixes`` (``sync.refresh_domain_communities_now`` — §2a amendment) so
@@ -4472,32 +4562,6 @@ def _ratify_impl(
     return out
 
 
-def _ratify_decisions_impl(
-    store, accept: list[str] | None = None, drop: list[str] | None = None
-) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for did in accept or []:
-        try:
-            _decision, _cascaded = store.ratify(did)
-            out[did] = "accepted"
-        except ValueError:
-            out[did] = (
-                "error: ratification failed; reopen the store and inspect status before retrying"
-            )
-    for did in drop or []:
-        if did in out:
-            out[did] = f"{out[did]} (drop ignored)"
-            continue
-        try:
-            _decision, _cascaded = store.drop(did)
-            out[did] = "dropped"
-        except ValueError:
-            out[did] = (
-                "error: ratification failed; reopen the store and inspect status before retrying"
-            )
-    return out
-
-
 @mcp.tool(annotations=_LOCAL_WRITE)
 @safe_write
 def ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> dict[str, str]:
@@ -4509,7 +4573,10 @@ def ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> di
     ``domain:<slug>`` entity (or ->dropped, no entity minted). An id present in both lists
     is accepted; the drop is ignored (not a conflict — reported as ``"accepted (drop
     ignored)"``/etc). Unknown ids get an ``"error: ..."`` entry; one bad id never aborts the
-    rest of the batch.
+    rest of the batch. A record that already has the verdict answers ``"already accepted"`` /
+    ``"already rejected"`` (``"already dropped"`` for a domain) — a harmless no-op, not a
+    failure; the opposite verdict is ``"error: already rejected; it cannot be accepted"`` /
+    ``"error: already accepted; it cannot be dropped"``.
 
     Cascade: accepting/dropping a decision id also flips every still-proposed fact that
     supports it (facts layer 2026-07-10) — each cascaded fact id gets its OWN entry in the
@@ -4517,17 +4584,6 @@ def ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> di
     ``f"dropped (evidence of {decision_id})"``, so nothing this call touched goes
     unreported.
     """
-    return _ratify_impl(_get_store(), accept=accept, drop=drop, reader=_load_reader())
-
-
-@mcp.tool(annotations=_LOCAL_WRITE)
-@safe_write
-def ratify_decisions(
-    accept: list[str] | None = None, drop: list[str] | None = None
-) -> dict[str, str]:
-    """Deprecated alias for ``ratify`` (deprecated since 0.1.0 and still kept; despite the
-    name, it now covers facts and domains too — identical behavior to ``ratify``). Prefer
-    ``ratify``."""
     return _ratify_impl(_get_store(), accept=accept, drop=drop, reader=_load_reader())
 
 
@@ -4659,9 +4715,11 @@ def _supersede_domain_impl(
     ``path_prefixes``/``seed_anchors`` as the successor's membership-rule seed, manual
     provenance. Like every other domain-authoring path, the successor lands
     ``status=proposed`` -- domains have no exception to the one ratification gate (see
-    ``_add_domain_impl``'s own docstring): closing the predecessor happens immediately
-    (that's what "supersede" means), but the new name/scope still needs a human `ratify`
-    before it's TOC-visible.
+    ``_add_domain_impl``'s own docstring): the accepted predecessor stays live and closes
+    only when a human `ratify`s the successor, which is also what makes the new name/scope
+    TOC-visible. Only a live head can be superseded, with one pending successor at a time
+    (``Store.supersede_domain``); a DROPPED domain may still be superseded and is flipped at
+    once (the mass-drop recovery).
     """
     with store._mutation():
         preflight_direct(
@@ -4739,12 +4797,13 @@ def supersede_domain(
     A snapshot's frozen membership carries over to the sole accepted successor; new rules
     apply to covered files only after ``sidegraph-domains snapshot --refresh --domain <slug>``.
 
-    The predecessor is flipped to ``superseded`` immediately (append-only: the record
-    stays, fully retrievable, never deleted) in the same transaction that writes the
-    successor. The successor itself always lands ``status=proposed`` — same "one gate, no
-    exceptions" rule every other domain-authoring tool follows (``add_domain``,
-    ``propose_domains``): a human still calls ``ratify(accept=[...])`` before the new
-    name/scope is TOC-visible.
+    The successor always lands ``status=proposed`` — same "one gate, no exceptions" rule
+    every other domain-authoring tool follows (``add_domain``, ``propose_domains``) — and an
+    accepted predecessor stays live until a human calls ``ratify(accept=[...])`` on it, which
+    flips the predecessor to ``superseded`` (append-only: the record stays, fully retrievable,
+    never deleted). Only a live head can be superseded (a pending or closed domain is
+    refused) and it takes one pending successor at a time; a DROPPED domain is the one
+    exception, flipped to ``superseded`` at once (the mass-drop recovery).
 
     Raises (before anything is written) if: ``old_slug_or_id`` doesn't resolve to any
     domain; ``parent_slug`` is given but doesn't resolve to any domain; or ``new_slug``
@@ -5714,8 +5773,9 @@ def sync_anchors(force: bool = False) -> dict:
     "slug_conflicts": [...], "domains_refreshed": int, "domain_failures": [{"slug",
     "title", "error"}, ...], "snapshot_splits": [{"slug", "domains"}, ...]}``.
     ``synced`` is ``False`` when the pass was skipped outright
-    (``graph_version`` unchanged, no ``force``, no cold-reload flag pending, no
-    remembered ``moved_uncommitted`` entity to re-verify after ``HEAD`` moved, and no
+    (``graph_version`` unchanged, no ``force``, no cold-reload flag pending, no orphan
+    written while no graph was present awaiting its rebind, no remembered
+    ``moved_uncommitted`` entity to re-verify after ``HEAD`` moved, and no
     remembered Tier-1 community reconcile whose retry repaired the record or failed again;
     a retry that abstains reports nothing) -- when skipped, every OTHER field is an EMPTY default
     (``outcomes: []``, ``counts: ""``,
@@ -5795,7 +5855,7 @@ def verify_store() -> dict:
 
     The snapshot pass itself is a pure read over canonical files. This MCP wrapper obtains
     the ordinary already-open ``Store`` first, so store opening may create/rebuild
-    ``index.db`` or run a supported legacy migration before verification begins.
+    ``index.db`` before verification begins.
 
     Checks (snapshot layer, always everything below): every hot record file parses
     against its schema; ``schema_version`` is present and known; ``valid_to >=
@@ -5843,9 +5903,7 @@ def _add_anchors_impl(
 ) -> dict:
     """Testable core for add_anchors (design/superpowers/specs/
     2026-07-11-ci-integrity-design.md ruling 3): append bindings to an EXISTING decision
-    or fact — generalizes ``_bind_fact_anchors``'s resolve-or-orphan ladder (never the
-    silent no-op ``_resolve_anchors`` gives a no-reader ``add_decision`` call) to either
-    record kind.
+    or fact — generalizes ``_bind_fact_anchors``'s resolve-or-orphan ladder to either record kind.
 
     Routing: ``store.get_decision(record_id)``, else ``store.get_fact(record_id)``, else
     an error dict — never a raised exception, never a guess at which kind an id belongs

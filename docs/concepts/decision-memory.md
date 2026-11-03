@@ -1,5 +1,7 @@
 # Decision memory
 
+[Glossary](glossary.md)
+
 Sidegraph stores decisions, lessons, constraints, and non-derivable facts alongside the code
 and docs they concern. Committing that memory lets another developer or agent session
 retrieve the reasoning behind earlier work.
@@ -53,7 +55,7 @@ rank ahead of ADRs on the task's own entities.
 
 ## Append-only as a feature
 
-The store never hard-deletes a `Decision`. Reversing one sets `valid_to` on the old record and
+The store never hard-deletes a `Decision`. Reversing an accepted, open head sets `valid_to` on the old record and
 creates a new one with `supersedes` pointing back at it. The old record stays retrievable —
 not as noise, but as **"tried before, abandoned because…"**. That history is the product: an
 agent about to re-propose a rejected approach sees it was already tried, and why it didn't

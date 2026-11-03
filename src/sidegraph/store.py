@@ -22,7 +22,6 @@ canonical, git-committed record is now **file-per-record JSON** under ``self.pat
     entities/<ulid>.json    identity ONLY: entity_id, canonical_name, kind, descriptor
     bindings/<decision_ulid>.json   that decision's anchors: [{entity_id, tier, relation,
                              weight}] — NO status
-    initiatives/<ulid>.json full Initiative row (no volatile fields on this model)
     index.db                DERIVED, gitignored: every table below plus the volatile
                              fields (entity last_seen_*, binding status, domain
                              communities, capture ledger, toc_cache, schema/digest meta)
@@ -48,10 +47,8 @@ import contextlib
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -59,7 +56,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -78,7 +75,7 @@ from .schema import (
     Entity,
     EntityKind,
     Fact,
-    Initiative,
+    Retirement,
     Scope,
     canonicalize,
     file_anchor_name,
@@ -89,13 +86,13 @@ from .schema import (
 from .store_format import (
     DEFAULT_SHARD_COUNT,
     FORMAT2_INDEX_STAMP,
-    FORMAT2_MIN_SIDEGRAPH,
     Inventory,
     Occurrence,
     has_shard_files,
     inventory_from_disk,
     list_shard_files,
     marker_text,
+    new_store_requirement,
 )
 from .store_layout import (
     INDEX_JOURNAL_PRAGMA,
@@ -104,6 +101,8 @@ from .store_layout import (
     NOT_A_FILE_REASON,
     SHARDS_SUBDIR,
     VOLATILE_STALE_KEY,
+    InterruptedMigrationError,
+    LegacyStoreError,
     StoreRequirementError,
     check_store_requirement,
     hot_archive_difference,
@@ -152,11 +151,6 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     # Derived, like the table: it comes back with it on a rebuild and on any open.
     # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D2b)
     "CREATE INDEX IF NOT EXISTS idx_anchor_bindings_entity ON anchor_bindings (entity_id)",
-    """CREATE TABLE IF NOT EXISTS initiatives (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    data TEXT NOT NULL
-)""",
     """CREATE TABLE IF NOT EXISTS capture_sessions (
     session_id TEXT PRIMARY KEY,
     captured_at TEXT NOT NULL
@@ -230,11 +224,9 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
 
 _SCHEMA_SQL = ";\n".join(_SCHEMA_STATEMENTS) + ";\n"
 
-# Legacy (pre-0.4.0) single-SQLite-file stores that are safe to migrate forward on open (see
-# ``Store._migrate_legacy`` and docs/reference/store-format.md#migration-to-040-from-02x-and-03x).
-# Anything else (unknown/garbled/future versions) is a hard rejection — migration
-# tooling beyond this one forward step remains deferred (CLAUDE.md invariant #3).
-_MIGRATABLE_SCHEMA_VERSIONS = frozenset({"0.2.0", "0.3.0"})
+# Schema stamps of the retired single-SQLite-file stores. Opening such a store is refused (see
+# ``Store._refuse_legacy_store``); ``sidegraph-verify`` still accepts the stamps on a marker.
+_LEGACY_SINGLE_FILE_SCHEMA_VERSIONS = frozenset({"0.2.0", "0.3.0"})
 
 # Stores stamped with these versions have fully forward-compatible canonical files;
 # on open we rebuild the derived index (which re-stamps SCHEMA_VERSION) instead of
@@ -273,10 +265,7 @@ _DOMAIN_SNAPSHOT_NAME = store_layout.DOMAIN_SNAPSHOT_NAME
 # Terminal = a status after which append-only rules guarantee the record can never change
 # again (see CLAUDE.md invariant #2 and design §7). PROPOSED/ACCEPTED decisions can still be
 # ratified/dropped/superseded; PROPOSED/ACCEPTED domains can still be ratified/superseded —
-# neither is ever a compaction candidate. DEPRECATED has no write path today (dead enum
-# value — nothing in this codebase ever sets it) but is terminal by the same definition, so
-# it is included for forward-compat rather than silently left hot forever the day something
-# does start setting it.
+# neither is ever a compaction candidate. DEPRECATED is what :meth:`Store.retire` sets.
 _TERMINAL_DECISION_STATUSES = frozenset(
     {DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED, DecisionStatus.DEPRECATED}
 )
@@ -324,11 +313,6 @@ _RACE_TOLERANT_ATTEMPTS = 3
 # crash less than a minute ago survives until the next open after that. Harmless -- the sweep
 # exists to stop unbounded accumulation, not to be prompt.
 _TMP_DEBRIS_MIN_AGE_SECONDS = 60.0
-
-# A legacy migration takes seconds, so a migration sentinel younger than this is a LIVE
-# migration by another process, never a crash's leftover (design D10): the open-time check
-# refuses instead of cleaning up under it.
-_LIVE_MIGRATION_SECONDS = 60.0
 
 # Attempts Store._write_archive_segment makes to publish a new segment under an unused
 # name before giving up (review Important-1). Higher than _RACE_TOLERANT_ATTEMPTS above:
@@ -405,6 +389,14 @@ def _atomic_write_text(path: Path, text: str) -> os.stat_result:
     The name still ends in ``.tmp``, so the sweep's globs (``_sweep_stale_tmp_files``) and
     the store's own ``.gitignore`` (``*.tmp``) still cover it.
 
+    Crash-consistent: the tmp is ``os.fsync``ed before the replace publishes it and the
+    directory entry after (``maintenance.fsync_dir(full=False)``, a no-op on Windows), so a
+    record reported as written cannot come back empty or missing. Plain fsync, not the
+    maintenance publisher's full drive-cache flush: a canonical write adds or atomically
+    replaces one file and never deletes a separate record on its strength, git carries
+    long-term durability, and a full flush per record made bulk imports ~16x slower on
+    macOS. A failure while writing or flushing removes the tmp before it propagates.
+
     Returns the TMP file's stat, taken BEFORE the replace (digest-integrity design §3, the
     rule the whole ``canonical_stat`` mechanism rests on): the stat a caller records must
     describe the content it is about to publish, captured at or before the write becomes
@@ -414,12 +406,45 @@ def _atomic_write_text(path: Path, text: str) -> os.stat_result:
     inode's ``(size, mtime_ns)`` (POSIX; measured), so the tmp's pre-replace stat is exactly
     the published file's stat too — no second ``stat()`` call needed, and no window in
     which to observe someone else's replace instead of this one."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    st = tmp.stat()
-    os.replace(tmp, path)
+    try:
+        _write_synced_tmp(tmp, text)
+        st = tmp.stat()
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    maintenance.fsync_dir(path.parent, full=False)
     return st
+
+
+def _mkdir_durable(path: Path) -> None:
+    """``mkdir -p`` that also makes each NEW directory's entry durable: syncing a directory
+    persists its contents, not its own name in its parent, so a record written into a
+    directory this call created could vanish with the directory after a crash. Missing
+    ancestors are created outermost first, each followed by a plain fsync of its parent
+    (``maintenance.fsync_dir(full=False)``, a no-op on Windows). An existing directory costs
+    one ``exists`` check."""
+    missing: list[Path] = []
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        missing.append(probe)
+        probe = probe.parent
+    for created in reversed(missing):
+        created.mkdir(exist_ok=True)
+        maintenance.fsync_dir(created.parent, full=False)
+    if not missing:
+        path.mkdir(parents=True, exist_ok=True)  # same errors as before for a non-directory
+
+
+def _write_synced_tmp(tmp: Path, text: str) -> None:
+    """Write ``text`` to ``tmp`` and ``os.fsync`` it, so a later publish (``os.replace`` or
+    ``os.link``) cannot expose an empty file after a crash."""
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def write_domain_snapshot_file(store_dir: str | Path, text: str) -> int:
@@ -630,9 +655,9 @@ def _create_format_marker(path: Path, text: str) -> None:
     last_error: FileNotFoundError | None = None
     for _ in range(_RACE_TOLERANT_ATTEMPTS):
         tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
-        tmp.write_text(text, encoding="utf-8")
         try:
             try:
+                _write_synced_tmp(tmp, text)
                 os.link(tmp, path)
             except FileExistsError:
                 return
@@ -641,6 +666,7 @@ def _create_format_marker(path: Path, text: str) -> None:
                 if os.path.lexists(path):
                     return
             else:
+                maintenance.fsync_dir(path.parent, full=False)
                 return
         finally:
             with suppress(OSError):
@@ -652,7 +678,8 @@ def _create_format_marker(path: Path, text: str) -> None:
 def _store_has_any_records(path: Path) -> bool:
     """True iff the store rooted at ``path`` holds a record of ANY kind — the complete
     inventory of places one can live, per this module's own docstring layout: a hot file
-    under one of the six ``_CANONICAL_SUBDIRS`` (``*.json``), or an archive segment under
+    under one of the five ``_CANONICAL_SUBDIRS`` or the retired ``initiatives/``
+    (``*.json``), or an archive segment under
     ``_ARCHIVE_SUBDIR`` (``*.jsonl``, ``Store.compact``'s output). Both are checked because
     ``Store.compact`` can move EVERY decision/domain out of its hot directory into an
     archive segment — a store in that state has zero hot files but is emphatically not
@@ -703,6 +730,47 @@ def _binding_identity_payload(binding: AnchorBinding) -> dict:
         "relation": binding.relation,
         "weight": binding.weight,
     }
+
+
+def settled_ratify_result(kind: str, status: str, action: str) -> str:
+    """The answer for a ratify ``action`` ("accept" | "drop") aimed at a record that is no
+    longer pending — one rule for the MCP ``ratify`` tool and ``sidegraph-ratify``.
+
+    Already in the state the action would produce -> ``"already accepted"`` / ``"already
+    rejected"`` (``"already dropped"`` for a ``kind`` of ``"domain"``): an idempotent no-op,
+    not an error. In the opposite terminal state -> a specific ``error: ...`` refusal.
+    Anything else (superseded, deprecated) names the status; a domain drop's precondition
+    is "proposed or accepted", every other one "proposed".
+    """
+    wanted = "accepted" if action == "accept" else ("dropped" if kind == "domain" else "rejected")
+    if status == wanted:
+        return f"already {status}"
+    if status in ("accepted", "rejected", "dropped"):
+        verb = "accepted" if action == "accept" else "dropped"
+        refusal = f"error: already {status}; it cannot be {verb}"
+        if kind == "decision" and status == "accepted" and action == "drop":
+            refusal += (
+                "; supersede it if it changed, or retire it with retire_decision if it is a "
+                "duplicate or its subject is gone"
+            )
+        return refusal
+    needs = "proposed or accepted" if kind == "domain" and action == "drop" else "proposed"
+    return f"error: {kind} is not {needs} (status: {status}); ratify cannot change it"
+
+
+def settled_after_failure(
+    store: Store, kind: str, id_: str, action: str, seen_status: str
+) -> str | None:
+    """After a ratify mutation of ``id_`` failed, re-read it: when its status is no longer
+    the ``seen_status`` the caller routed on (another writer settled it in between),
+    return :func:`settled_ratify_result` for the new status; ``None`` when the status did
+    not change, so the failure is not explained by a lost race. Shared by the MCP tool and
+    ``sidegraph-ratify``."""
+    getter = {"decision": store.get_decision, "fact": store.get_fact, "domain": store.get_domain}
+    now = getter[kind](id_)
+    if now is None or now.status.value == seen_status:
+        return None
+    return settled_ratify_result(kind, now.status.value, action)
 
 
 def _archive_record_line(record_type: Literal["decision", "domain"], payload: dict) -> str:
@@ -1074,15 +1142,6 @@ def _ratifier_identity(actor: str | None = None) -> str | None:
         return None
 
 
-def _sentinel_age_seconds(sentinel: Path) -> float:
-    """Seconds since the sentinel was written; infinite when its mtime cannot be read, so
-    that an unreadable sentinel is treated as old (design D10)."""
-    try:
-        return time.time() - sentinel.stat().st_mtime
-    except OSError:
-        return float("inf")
-
-
 def _descriptor_name_and_path(e: Entity) -> tuple[str, str | None]:
     if e.descriptor is not None:
         return e.descriptor.name, e.descriptor.file_path
@@ -1204,6 +1263,29 @@ class DescriptorLookup:
         return _choose_pathless(candidates)
 
 
+def _single_pending_revisions(rows: Sequence[Any]) -> set[str]:
+    """Ids of the ``proposed`` rows (same-slug group) that are the ONE pending revision of an
+    ``accepted`` holder in the group: such a revision reuses its holder's slug on purpose and is
+    no conflict with it. Two revisions of one holder, or a revision of a non-accepted holder,
+    are rivals and stay in the conflict."""
+    accepted = {r["domain_id"] for r in rows if r["status"] == DomainStatus.ACCEPTED.value}
+    by_holder: dict[str, list[str]] = {}
+    for r in rows:
+        if r["status"] == DomainStatus.PROPOSED.value and r["supersedes"] in accepted:
+            by_holder.setdefault(r["supersedes"], []).append(r["domain_id"])
+    return {ids[0] for ids in by_holder.values() if len(ids) == 1}
+
+
+class SupersessionConflictError(ValueError):
+    """``Store.ratify`` refused a successor whose predecessor it cannot close; the message
+    names only record ids and the next step, so a host may show it as is."""
+
+
+class RetireRefusedError(ValueError):
+    """``Store.retire`` refused: the message names only record ids, statuses and the next step,
+    so a host may show it as is."""
+
+
 class StoreBusyError(sqlite3.OperationalError):
     """The outermost mutation could not reserve SQLite before running its body."""
 
@@ -1305,11 +1387,8 @@ class Store:
     """Thin persistence layer that owns the invariants. Use as a context manager.
 
     ``Store(path)`` accepts a directory (canonical layout; created if missing — the
-    convention, default ``.sidegraph``) or a legacy single-file store (a bare ``*.db``
-    path, or a directory containing an un-migrated ``decisions.db``): opening either
-    triggers a one-time export to the canonical layout (see ``_migrate_legacy`` and design
-    §4). This is a persistence swap, not an API change — every public method, invariant,
-    and result shape is unchanged from the pre-0.4.0 single-file store.
+    convention, default ``.sidegraph``). A legacy single-file store (a bare ``*.db`` path, or a
+    directory containing ``decisions.db``) is refused, never migrated (``_refuse_legacy_store``).
     ``creating=True`` explicitly declares new-store initialization when a Git probe times
     out. Ordinary opens refuse an unresolved timeout instead of replacing Git's marker.
     """
@@ -1348,31 +1427,24 @@ class Store:
         self._major = 1
         self._marker_signature: _MarkerSignature | None = None
         self.path = raw
-        # Per-handle policy is set before either legacy dispatch or the canonical index open.
+        # Per-handle policy is set before the legacy refusal or the canonical index open.
         # None preserves sqlite3's ordinary five-second connection default.
         self._busy_timeout_seconds = busy_timeout_seconds
 
-        # Before the legacy dispatch: `_migrate_legacy` would otherwise move records through
-        # a symlinked subdirectory before anything refused it.
         if raw.is_dir():
             refuse_symlinked_internals(raw)
-            # Refuse before migration, directory creation or debris cleanup uses this store.
+            # Refuse before the legacy refusal, directory creation or debris cleanup.
             self._check_requirement(force=True)
 
-        # A bare-file migration (``Store("old.db")``) that was interrupted after its point of
-        # no return leaves a sentinel beside the legacy file (design D10). A nameless path
-        # such as ``Store(".")`` cannot be a legacy file and has no sentinel.
-        sentinel = self._migration_sentinel_path(raw)
-        if sentinel is not None and sentinel.is_file():
-            self._check_migration_sentinel(raw, sentinel)
+        self._refuse_interrupted_migration(raw)
 
         if raw.is_file():
             self._reject_file_inside_a_store(raw)
-            self._migrate_legacy(raw)
+            self._refuse_legacy_store(raw)
         else:
             legacy = raw / "decisions.db"
             if legacy.is_file():
-                self._migrate_legacy(legacy)
+                self._refuse_legacy_store(legacy)
 
         self._ensure_canonical_subdirs()
         self._sweep_stale_tmp_files()
@@ -1449,13 +1521,14 @@ class Store:
         with self._mutation():
             refuse_symlinked_internals(self.path)
             path = _record_file(self.path, store_layout.VERIFICATIONS_SUBDIR, check.id)
-            path.parent.mkdir(parents=True, exist_ok=True)
+            _mkdir_durable(path.parent)
             tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
             try:
-                tmp.write_text(check.model_dump_json(indent=2) + "\n", encoding="utf-8")
+                _write_synced_tmp(tmp, check.model_dump_json(indent=2) + "\n")
                 os.link(tmp, path)  # exclusive whole-file publication, never replace history
             finally:
                 tmp.unlink(missing_ok=True)
+            maintenance.fsync_dir(path.parent, full=False)
             raw = self.get_meta(store_layout.DRIFT_CACHE_KEY)
             try:
                 payload = json.loads(raw) if raw is not None else None
@@ -1548,78 +1621,67 @@ class Store:
         except sqlite3.OperationalError:
             pass
 
-    # -- canonical layout / migration ----------------------------------------
+    # -- canonical layout ----------------------------------------------------
 
     @staticmethod
-    def _migration_sentinel_path(raw: Path) -> Path | None:
-        """``<name>.migration-incomplete`` beside ``raw``, or None when ``raw`` has no name
-        (``Store(".")``: ``with_name`` would raise on it)."""
-        if not raw.name:
-            return None
-        return raw.absolute().with_name(raw.name + ".migration-incomplete")
-
-    @staticmethod
-    def _check_migration_sentinel(raw: Path, sentinel: Path) -> None:
-        """Resolve a leftover migration sentinel before opening ``raw`` (design D10).
-
-        A sentinel younger than ``_LIVE_MIGRATION_SECONDS`` is another process's live
-        migration, in either state below: refuse and touch nothing (a stale cleanup here
-        deleted the live opener's staging directory). Only an older sentinel is resolved:
-
-        Legacy file still intact: the interruption came before the rename, so the sentinel
-        is stale. Remove it, and the staging directory it names ONLY when that is a real
-        directory (not a symlink) in the legacy file's own directory with a staging name: a
-        file must never choose what gets ``rmtree``-d. Legacy file gone: the migration was
-        interrupted after the rename, and the staged export is the only copy of the
-        records still to be moved, so refuse to open and say how to finish by hand. An
-        unreadable mtime counts as old."""
-        if _sentinel_age_seconds(sentinel) < _LIVE_MIGRATION_SECONDS:
-            raise ValueError(
-                f"another process is migrating {raw} now, or was a moment ago (sentinel "
-                f"{sentinel} is younger than {_LIVE_MIGRATION_SECONDS:.0f}s); nothing was "
-                "changed; retry in a minute, and do not delete the sentinel; if no other sidegraph "
-                "process is running and this persists past a minute, the next open gives the "
-                "recovery steps."
-            )
+    def _refuse_interrupted_migration(raw: Path) -> None:
+        """Refuse a path whose Sidegraph 0.23.x migration did not finish: its sentinel names
+        the staging directory that holds the records. Read-only; never cleans anything up."""
+        sentinel = store_layout.interrupted_migration_sentinel(raw)
+        if sentinel is None:
+            return
         try:
             info = json.loads(sentinel.read_text(encoding="utf-8"))
-            staging_text = str(info["staging"])
-            backup_text = str(info["backup"])
+            staging, backup = str(info["staging"]), str(info["backup"])
         except (OSError, ValueError, KeyError, TypeError):
-            staging_text = backup_text = "(unreadable sentinel)"
-        if not raw.is_file():
-            raise ValueError(
-                f"an earlier legacy migration of {raw} was interrupted (sentinel {sentinel}): "
-                f"the staged export is at {staging_text} and the original is at "
-                f"{backup_text}. Move each subdirectory of the staging directory into "
-                f"{raw}, then delete the staging directory and the sentinel. If the staging "
-                "directory is empty, the migration had finished: delete it and the sentinel."
+            staging = backup = "(unreadable sentinel)"
+        raise InterruptedMigrationError(
+            f"an earlier migration of {raw} was interrupted (sentinel {sentinel}): the staged "
+            f"export is at {staging} and the original is at {backup}. Finish the migration "
+            "with Sidegraph 0.23.x, then upgrade."
+        )
+
+    @staticmethod
+    def _refuse_legacy_store(legacy_file: Path) -> None:
+        """Refuse a pre-0.1.0 single-file SQLite store, touching nothing. The stamp is cosmetic:
+        one query on an immutable read-only connection (no sidecar files, no lock wait); any
+        failure reports it as unknown."""
+        stamped: str = "unknown"
+        try:
+            with legacy_file.open("rb") as fh:
+                is_sqlite = fh.read(16) == b"SQLite format 3\x00"
+        except OSError:
+            is_sqlite = True  # unreadable: the refusal below still names the path
+        if not is_sqlite:
+            # Not a legacy store at all: keep the generic "file is not a database" error, so
+            # the remedy "migrate with 0.23.x" is only ever offered for a real SQLite file.
+            raise sqlite3.DatabaseError(f"{legacy_file}: file is not a database")
+        try:
+            conn = sqlite3.connect(
+                f"{legacy_file.absolute().as_uri()}?mode=ro&immutable=1", uri=True, timeout=0
             )
-        staging = Path(staging_text)
-        if (
-            staging.is_dir()
-            and not staging.is_symlink()
-            and Path(os.path.abspath(staging)).parent == Path(os.path.abspath(raw)).parent
-            and staging.name.startswith(".sidegraph-migrating-")
-        ):
-            shutil.rmtree(staging, ignore_errors=True)
-        elif staging_text != "(unreadable sentinel)":
-            print(
-                f"sidegraph: WARNING stale migration sentinel {sentinel} names {staging_text}, "
-                "which is not a staging directory next to the legacy file; leaving it alone.",
-                file=sys.stderr,
-            )
-        sentinel.unlink(missing_ok=True)
+            try:
+                row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            finally:
+                conn.close()
+            if row:
+                stamped = str(row[0])
+        except sqlite3.Error:
+            pass
+        raise LegacyStoreError(
+            f"{legacy_file} is a legacy single-file store (schema_version {stamped}). This "
+            "store predates Sidegraph 0.1.0; open it once with Sidegraph 0.23.x to migrate "
+            "it, then upgrade."
+        )
 
     def _reject_file_inside_a_store(self, target: Path) -> None:
         """A file sitting inside a canonical store is an artifact OF that store — never a
-        legacy single-file store, and never something to migrate.
+        legacy single-file store.
 
         ``index.db`` is the obvious-looking "the database" file, so opening it instead of the
-        store directory is an easy mistake. It used to fall through to ``_migrate_legacy``,
-        which read the derived index's own ``schema_version`` (the CURRENT one), found it
-        outside the migratable set, and reported a mismatch between two identical strings
-        while advising the operator to discard a perfectly healthy store. Fail here instead,
+        store directory is an easy mistake. It used to be diagnosed as a legacy
+        store, with a mismatch reported between two identical strings while advising the
+        operator to discard a perfectly healthy store. Fail here instead,
         naming what to open.
 
         Detection is the format marker, not the filename: any artifact next to a valid marker
@@ -1642,7 +1704,13 @@ class Store:
 
     def _ensure_canonical_subdirs(self) -> None:
         for sub in _CANONICAL_SUBDIRS:
-            (self.path / sub).mkdir(parents=True, exist_ok=True)
+            _mkdir_durable(self.path / sub)
+        # ``_mkdir_durable`` assumes a directory that already exists was made durable, which
+        # a failed parent fsync or a paused concurrent creator can falsify. Flush the store's
+        # own entry and its subdirectories' entries once per open, existing or not, so a
+        # later write never rests on an unflushed directory; a failure raises.
+        maintenance.fsync_dir(self.path.parent, full=False)
+        maintenance.fsync_dir(self.path, full=False)
 
     def _unlink_if_stale(self, path: Path) -> None:
         """Remove ``path`` only if it is older than ``_TMP_DEBRIS_MIN_AGE_SECONDS`` (design
@@ -1763,7 +1831,7 @@ class Store:
                 if has_shard_files(self.path):
                     raise store_layout.unmigrated_shards_error(self.path)
                 if not _store_has_any_records(self.path):
-                    text = marker_text(2, FORMAT2_MIN_SIDEGRAPH, DEFAULT_SHARD_COUNT)
+                    text = marker_text(2, new_store_requirement(), DEFAULT_SHARD_COUNT)
                 else:
                     text = f"{_FORMAT_MARKER_PREFIX}{SCHEMA_VERSION}\n"
                 _create_format_marker(marker, text)
@@ -1790,7 +1858,7 @@ class Store:
         store, recorded by a version that already writes this file.
 
         "Genuinely new" is derived, not assumed: a store is new here iff, at the moment
-        this runs (after ``_ensure_canonical_subdirs`` has created the six canonical
+        this runs (after ``_ensure_canonical_subdirs`` has created the five canonical
         subdirectories, so they exist to check), it holds NO record of any kind —
         ``_store_has_any_records`` checks every hot canonical subdir AND ``archive/``,
         which together are the complete inventory of where a record can live (module
@@ -1862,9 +1930,13 @@ class Store:
         stamp = datetime.now(UTC).isoformat()
         tmp = marker.with_name(f"{marker.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
         with suppress(OSError):  # advisory write only -- never fail Store.open (Minor 2)
-            tmp.write_text(f"{stamp}\n", encoding="utf-8")
-            with suppress(FileExistsError):  # keep-first: another opener already won
+            _write_synced_tmp(tmp, f"{stamp}\n")
+            try:
                 os.link(tmp, marker)
+            except FileExistsError:  # keep-first: another opener already won
+                pass
+            else:
+                maintenance.fsync_dir(marker.parent, full=False)
         # The cleanup needs its own suppression, not the block above (fix round 2
         # re-review, Minor A): `missing_ok=True` only tolerates a MISSING file, so an
         # unlink that raises for any other reason -- a read-only directory being the
@@ -1887,291 +1959,12 @@ class Store:
             return
         _atomic_write_text_race_tolerant(gitignore, _GITIGNORE_CONTENT)
 
-    def _migrate_legacy(self, legacy_file: Path) -> None:
-        """One-time export of a legacy single-file SQLite store (schema_version in
-        ``_MIGRATABLE_SCHEMA_VERSIONS``) into the canonical file-per-record layout at
-        ``self.path`` (design §4). Raises (without touching the legacy file) if its stamp
-        isn't forward-migratable. On success, renames the legacy file to
-        ``<name>.migrated-backup`` (never deleted — the store never destroys data) and
-        prints one stderr notice.
-
-        Fail-closed: every legacy row is read AND pydantic-validated in FULL before a
-        single byte is written anywhere or the legacy file is touched. A garbled row
-        raises a clear error naming the offending table and id, leaving the legacy db
-        exactly as it was — retryable, never partially migrated. Only once every row is
-        known-good is the export written, and only into a private staging directory (see
-        below); the legacy file's RENAME to ``.migrated-backup`` comes last in the directory case,
-        so an interruption leaves it and the next open re-migrates (design D10 covers the
-        bare-file case, where the rename must come first).
-
-        Staging, not writing ``self.path`` directly, is required because ``self.path`` can
-        BE ``legacy_file`` itself (the bare-file dispatch, e.g. ``Store("old.db")``) — a
-        plain file, not yet a directory a canonical subdir could be created under. Writing
-        to an isolated temp directory first (same filesystem as ``legacy_file`` so the
-        final move is a cheap, atomic-per-entry rename) sidesteps that ordering constraint
-        entirely while still keeping every write fully isolated from the real store until
-        the data is proven good.
-
-        Volatile fields (entity ``last_seen_*``, binding ``status``, domain
-        ``communities``) are NOT carried over: only canonical (identity/content) files are
-        written here, and ``__init__``'s freshness check (index missing -> reload) rebuilds
-        the index from exactly those files afterwards, exactly like any other
-        canonical-only rebuild — the next sync re-derives volatile state from the live
-        graph, same as design §3's git-pull-absorption path.
-        """
-        if self._busy_timeout_seconds is None:
-            conn = sqlite3.connect(str(legacy_file))
-        else:
-            conn = sqlite3.connect(str(legacy_file), timeout=self._busy_timeout_seconds)
-        conn.row_factory = sqlite3.Row
-        try:
-            row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-            stamped = row["value"] if row else None
-            if stamped not in _MIGRATABLE_SCHEMA_VERSIONS:
-                # State the condition actually being tested. The old wording compared the
-                # stamp against the RUNNING CODE's version, which is not what this branch
-                # checks — so a file stamped with the current version produced the nonsense
-                # "'0.6.0' != '0.6.0'", and its "use a fresh store" advice would have
-                # discarded real data. Say what this migrator handles and stop.
-                handled = ", ".join(repr(v) for v in sorted(_MIGRATABLE_SCHEMA_VERSIONS))
-                raise ValueError(
-                    f"{legacy_file} is stamped schema_version {stamped!r}, which this "
-                    f"migration path does not handle — it migrates {handled} single-file "
-                    "stores only (migration tooling beyond that is deferred)."
-                )
-            legacy_rows = self._read_legacy_rows(conn)
-        finally:
-            conn.close()
-
-        # Validate EVERYTHING before touching the filesystem at all — a garbled row raises
-        # here, before the staging directory even exists.
-        validated = self._validate_legacy_rows(legacy_file, legacy_rows)
-
-        staging = Path(tempfile.mkdtemp(prefix=".sidegraph-migrating-", dir=legacy_file.parent))
-        # Bare-file case: ``self.path`` IS the legacy file, so it must be renamed away before
-        # the staged directories can move in. A sentinel beside it, written BEFORE that
-        # point of no return, tells the next open the staged export is all that is left.
-        bare = legacy_file == self.path
-        sentinel = self._migration_sentinel_path(legacy_file) if bare else None
-        backup = legacy_file.with_name(legacy_file.name + ".migrated-backup")
-        created_sentinel = False  # True only once THIS call made the sentinel file
-        try:
-            for sub in _CANONICAL_SUBDIRS:
-                (staging / sub).mkdir(parents=True, exist_ok=True)
-
-            for entity in validated["entities"]:
-                _atomic_write_json(
-                    _record_file(staging, "entities", entity.entity_id),
-                    _entity_identity_payload(entity),
-                )
-            for decision in validated["decisions"]:
-                _atomic_write_json(
-                    _record_file(staging, "decisions", decision.id),
-                    decision.model_dump(mode="json"),
-                )
-            for domain in validated["domains"]:
-                _atomic_write_json(
-                    _record_file(staging, "domains", domain.domain_id),
-                    _domain_canonical_payload(domain),
-                )
-            for initiative in validated["initiatives"]:
-                _atomic_write_json(
-                    _record_file(staging, "initiatives", initiative.id),
-                    initiative.model_dump(mode="json"),
-                )
-
-            by_decision: dict[str, list[dict]] = {}
-            for binding in validated["anchor_bindings"]:
-                by_decision.setdefault(binding.record_id, []).append(
-                    _binding_identity_payload(binding)
-                )
-            for record_id, items in by_decision.items():
-                ordered = sorted(items, key=lambda x: (x["tier"], x["entity_id"]))
-                _atomic_write_json(_record_file(staging, "bindings", record_id), ordered)
-
-            # -- commit (design D10). Directory case: move the staged subdirectories in
-            # FIRST and rename the legacy file LAST, so an interruption leaves the legacy
-            # file and the next open simply re-migrates (per-file ``os.replace`` makes that
-            # idempotent). Bare-file case: the rename must come first (see above), guarded
-            # by the sentinel, which is unlinked again if the rename itself raises.
-            #
-            # The sentinel is created EXCLUSIVELY and unlinked only by the call that created
-            # it: two openers of one legacy file share its path, and a plain overwrite let
-            # the loser delete the winner's sentinel (design D10). The open-time
-            # check (`_check_migration_sentinel`) refuses a sentinel younger than
-            # `_LIVE_MIGRATION_SECONDS` as a live migration, so it never cleans up under
-            # one; only a live migration older than that (not a realistic case for a
-            # seconds-long move) could still be called stale. No cross-process lock.
-            if sentinel is not None:
-                try:
-                    try:
-                        fh = sentinel.open("x", encoding="utf-8")
-                    except FileExistsError:
-                        raise ValueError(
-                            f"another process is migrating {legacy_file} (sentinel {sentinel} "
-                            "exists); retry once it has finished."
-                        ) from None
-                    created_sentinel = True
-                    with fh:
-                        fh.write(
-                            json.dumps({"staging": str(staging.absolute()), "backup": str(backup)})
-                        )
-                    legacy_file.rename(backup)
-                except BaseException:
-                    if created_sentinel:
-                        sentinel.unlink(missing_ok=True)
-                    raise
-
-            self.path.mkdir(parents=True, exist_ok=True)
-            for sub in _CANONICAL_SUBDIRS:
-                target = self.path / sub
-                if target.exists():
-                    # pre-existing subdir (empty by construction of the dispatch above, or
-                    # left by an interrupted earlier attempt) — move each staged file into
-                    # it individually.
-                    for f in (staging / sub).iterdir():
-                        os.replace(f, target / f.name)
-                else:
-                    os.replace(staging / sub, target)
-
-            if sentinel is not None:
-                sentinel.unlink(missing_ok=True)
-            else:
-                legacy_file.rename(backup)
-        finally:
-            # Keep staging only when the export is now the sole copy: the sentinel exists
-            # and the legacy path is no longer a file (it is a directory again, or gone).
-            if not (
-                sentinel is not None
-                and created_sentinel
-                and sentinel.exists()
-                and not legacy_file.is_file()
-            ):
-                shutil.rmtree(staging, ignore_errors=True)
-
-        print(
-            f"sidegraph: migrated legacy store {legacy_file} (schema {stamped}) -> "
-            f"canonical layout at {self.path} (backup: {backup})",
-            file=sys.stderr,
-        )
-
-    @staticmethod
-    def _read_legacy_rows(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
-        """Every row of every legacy table as ``(primary_key, data_json)`` pairs — the
-        primary key travels alongside the payload purely so a validation failure (see
-        ``_validate_legacy_rows``) can name the offending row even when its JSON itself is
-        the thing that's garbled."""
-
-        def _table_exists(name: str) -> bool:
-            return (
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-                ).fetchone()
-                is not None
-            )
-
-        return {
-            "entities": [
-                (r["entity_id"], r["data"])
-                for r in conn.execute("SELECT entity_id, data FROM entities")
-            ],
-            "decisions": [
-                (r["id"], r["data"]) for r in conn.execute("SELECT id, data FROM decisions")
-            ],
-            "anchor_bindings": [
-                # legacy (0.2.0/0.3.0) tables literally have a `decision_id` column -- this
-                # reads the real on-disk legacy schema, not the current AnchorBinding model.
-                (f"{r['decision_id']}:{r['entity_id']}", r["data"])
-                for r in conn.execute("SELECT decision_id, entity_id, data FROM anchor_bindings")
-            ],
-            "initiatives": (
-                [(r["id"], r["data"]) for r in conn.execute("SELECT id, data FROM initiatives")]
-                if _table_exists("initiatives")
-                else []
-            ),
-            "domains": (
-                [
-                    (r["domain_id"], r["data"])
-                    for r in conn.execute("SELECT domain_id, data FROM domains")
-                ]
-                if _table_exists("domains")
-                else []
-            ),
-        }
-
-    _LEGACY_ROW_MODELS: dict[str, type[BaseModel]] = {
-        "entities": Entity,
-        "decisions": Decision,
-        "domains": Domain,
-        "initiatives": Initiative,
-        "anchor_bindings": AnchorBinding,
-    }
-
-    # The field of each legacy model that becomes a canonical filename (a binding's file is
-    # named after its ``record_id``).
-    _LEGACY_ID_FIELD: dict[str, str] = {
-        "entities": "entity_id",
-        "decisions": "id",
-        "domains": "domain_id",
-        "initiatives": "id",
-        "anchor_bindings": "record_id",
-    }
-
-    @classmethod
-    def _validate_legacy_rows(
-        cls, legacy_file: Path, rows: dict[str, list[tuple[str, str]]]
-    ) -> dict[str, list]:
-        """Pydantic-validate every legacy row BEFORE any canonical file is written or the
-        legacy file is renamed (fail-closed migration, design §4): a single garbled row
-        raises a clear ``ValueError`` naming the offending table and id, and nothing about
-        the legacy db has been touched yet — the caller can simply retry later."""
-        out: dict[str, list] = {}
-        for table, model in cls._LEGACY_ROW_MODELS.items():
-            validated = []
-            for row_id, data in rows.get(table, []):
-                try:
-                    if table == "anchor_bindings":
-                        # A genuine 0.2.0/0.3.0-era row was serialized by code that named
-                        # this field `decision_id` (the AnchorBinding rename post-dates
-                        # every _MIGRATABLE_SCHEMA_VERSIONS store) -- normalize the legacy
-                        # key before validating against the current model.
-                        payload = json.loads(data)
-                        if "decision_id" in payload and "record_id" not in payload:
-                            payload["record_id"] = payload.pop("decision_id")
-                        validated.append(model.model_validate(payload))
-                    else:
-                        # The SQL primary key is the row's stable identity. It is checked
-                        # raw (before any model default could mint an id), and it fills an
-                        # id the JSON omits: `default_factory` would otherwise mint a fresh
-                        # ULID per validation, so a retried migration wrote a second file.
-                        if not is_safe_record_id(row_id):
-                            raise ValueError(
-                                f"unsafe record id {row_id!r}: must be a single path segment"
-                            )
-                        payload = json.loads(data)
-                        if isinstance(payload, dict):
-                            payload.setdefault(cls._LEGACY_ID_FIELD[table], row_id)
-                        validated.append(model.model_validate_json(json.dumps(payload)))
-                    # Every id becomes a filename (design D9): refuse before staging exists.
-                    record_id = getattr(validated[-1], cls._LEGACY_ID_FIELD[table])
-                    if not is_safe_record_id(record_id):
-                        raise ValueError(
-                            f"unsafe record id {record_id!r}: must be a single path segment"
-                        )
-                except Exception as e:
-                    raise ValueError(
-                        f"legacy store {legacy_file} has an invalid row in table "
-                        f"{table!r} (id={row_id!r}): {e}"
-                    ) from e
-            out[table] = validated
-        return out
-
     # -- canonical file writers (git-committed) ------------------------------
 
     def _record_canonical_stat(self, subdir: str, stem: str, st: os.stat_result) -> None:
         """Insert/update ``canonical_stat``'s row for ``(subdir, stem)`` — called from
-        every one of the seven canonical writers, in the SAME transaction as the canonical
-        file write and (for six of the seven) the caller's own index write (digest-integrity
+        every one of the six canonical writers, in the SAME transaction as the canonical
+        file write and (for five of the six) the caller's own index write (digest-integrity
         design, Task 1). Recording it HERE, beside the file write, rather than at the
         caller's index-write site, is what makes the ordering between the two stop
         mattering (design D4a): ``upsert_entity``/``_write_domain`` touch the digest BEFORE
@@ -2279,14 +2072,6 @@ class Store:
             _domain_canonical_payload(domain),
         )
         self._record_canonical_stat("domains", domain.domain_id, st)
-
-    def _write_initiative_canonical(self, initiative: Initiative) -> None:
-        self._refuse_if_skipped("initiatives", initiative.id)
-        st = _atomic_write_json(
-            _record_file(self.path, "initiatives", initiative.id),
-            initiative.model_dump(mode="json"),
-        )
-        self._record_canonical_stat("initiatives", initiative.id, st)
 
     def _write_bindings_file(self, record_id: str, items: list[dict]) -> None:
         self._refuse_if_skipped("bindings", record_id)
@@ -2570,7 +2355,7 @@ class Store:
         the TOC cache) are untouched — they are pure local bookkeeping with no canonical
         file to rebuild from, not tied to the digest at all.
 
-        The RECORD tables (entities/decisions/facts/domains/anchor_bindings/initiatives)
+        The RECORD tables (entities/decisions/facts/domains/anchor_bindings)
         are dropped and recreated here, not just cleared with ``DELETE FROM`` — a real
         pre-0.5.0 store's ``index.db`` was built by OLDER code against an OLDER
         ``_SCHEMA_SQL`` (e.g. ``anchor_bindings.decision_id`` before this branch renamed
@@ -2647,6 +2432,8 @@ class Store:
         self._conn.execute("DROP TABLE IF EXISTS facts")
         self._conn.execute("DROP TABLE IF EXISTS anchor_bindings")
         self._conn.execute("DROP TABLE IF EXISTS domains")
+        # Stores written before 0.24 left an ``initiatives`` table in ``index.db``; the index is
+        # derived, so the reset drops it and nothing recreates it.
         self._conn.execute("DROP TABLE IF EXISTS initiatives")
         self._conn.execute("DROP TABLE IF EXISTS domain_members")
         # canonical_stat is DROPped with the record tables, not upserted over:
@@ -2752,10 +2539,6 @@ class Store:
             # there is no branch left to wedge on it (spec item 7). So does a
             # file that was skipped: this reload examined it in its current state.
             self._record_canonical_stat("bindings", record_id, st)
-        for f in sorted((self.path / "initiatives").glob("*.json")):
-            initiative = load("initiatives", f, "id", Initiative)
-            if initiative is not None:
-                self._index_write_initiative(initiative)
 
         # Archive segments (design Task 2 item 3): stat every segment BEFORE
         # `_archived_records()` reads its content below, same stat-before-read
@@ -2830,9 +2613,9 @@ class Store:
         per-record file, else a shard line, else a legacy archive line), so a record only packed
         in a shard loads and a writer's later per-record file wins. An identity the inventory
         quarantined (``Effective.reason`` is set) is left out and joins the skip list once, by
-        ``(type, id)``, so every writer and MCP check refuses it. Initiatives are never packed
-        and keep their per-record-file load. ``canonical_stat`` rows come from ``inv.stats``,
-        taken before each read (a shard file under ``("shards", <lower-cased name>)``).
+        ``(type, id)``, so every writer and MCP check refuses it. ``canonical_stat`` rows come
+        from ``inv.stats``, taken before each read (a shard file under
+        ``("shards", <lower-cased name>)``).
         # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.3, §5.4, §7.3)
         """
         self._reset_record_tables()
@@ -2904,25 +2687,6 @@ class Store:
             if rel.startswith(_ARCHIVE_SUBDIR + "/") and rel not in inv.images
         )
 
-        for f in sorted((self.path / "initiatives").glob("*.json")):
-            st = stat_entry(f)  # before the read, as every loop of the reload does
-            record, problem = (
-                (None, _non_file_reason(f, st))
-                if not is_regular_file(st)
-                else _parse_record_file(f, "id", Initiative)
-            )
-            self._record_canonical_stat("initiatives", f.stem, st)
-            if problem is not None:
-                skipped.append(
-                    {
-                        "path": f"initiatives/{f.name}",
-                        "reason": problem,
-                        "size": st.st_size,
-                        "mtime_ns": st.st_mtime_ns,
-                    }
-                )
-            elif record is not None:
-                self._index_write_initiative(record)
         self._finish_rebuild(skipped, digest)
 
     def _index_effective(self, record_type: str, record_id: str, raw: object) -> None:
@@ -3000,17 +2764,19 @@ class Store:
         by ``domain_id`` (ULID, so also creation order) for a deterministic report."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT domain_id, slug FROM domains WHERE status IN (?, ?)",
+                "SELECT domain_id, slug, status, supersedes FROM domains WHERE status IN (?, ?)",
                 (DomainStatus.PROPOSED.value, DomainStatus.ACCEPTED.value),
             ).fetchall()
-        by_slug: dict[str, list[str]] = {}
+        by_slug: dict[str, list[sqlite3.Row]] = {}
         for row in rows:
-            by_slug.setdefault(row["slug"], []).append(row["domain_id"])
-        return [
-            {"slug": slug, "domain_ids": sorted(ids)}
-            for slug, ids in sorted(by_slug.items())
-            if len(ids) > 1
-        ]
+            by_slug.setdefault(row["slug"], []).append(row)
+        out: list[dict] = []
+        for slug, group in sorted(by_slug.items()):
+            exempt = _single_pending_revisions(group)
+            live = [r["domain_id"] for r in group if r["domain_id"] not in exempt]
+            if len(live) > 1:
+                out.append({"slug": slug, "domain_ids": sorted(live)})
+        return out
 
     def domain_slug_conflicts(self) -> list[dict]:
         """Slugs currently held by more than one live domain — see
@@ -3046,7 +2812,8 @@ class Store:
         It says nothing about earlier mutations in a multi-step caller. Body and COMMIT
         failures may follow canonical publication, which SQLite rollback cannot undo.
         COMMIT stays inside the try, and BaseException rollback releases the connection
-        even on interruption. Explicit immediate=False is for deferred composition only;
+        even on interruption. Every scope that takes the reservation itself re-checks the format
+        marker under it, at any depth. Explicit immediate=False is for deferred composition only;
         public canonical writers use the immediate default.
 
         ``large_cache=True`` raises the page cache to 64 MB until the owning transaction
@@ -3060,9 +2827,11 @@ class Store:
                 if large_cache and self._cache_restore is None:
                     self._cache_restore = int(self._conn.execute("PRAGMA cache_size").fetchone()[0])
                     self._conn.execute(f"PRAGMA cache_size = {-_LARGE_PAGE_CACHE_KIB}")
+                reserved = False
                 if immediate and not self._conn.in_transaction:
                     try:
                         self._conn.execute("BEGIN IMMEDIATE")
+                        reserved = True
                     except sqlite3.OperationalError as exc:
                         code = getattr(exc, "sqlite_errorcode", 0)
                         if (
@@ -3075,6 +2844,20 @@ class Store:
                             busy.sqlite_errorname = getattr(exc, "sqlite_errorname", "SQLITE_BUSY")
                             raise busy from None
                         raise
+                if reserved:
+                    # A writer queued on the lock may hold a marker observed before another
+                    # process raised the requirement or migrated the store: judge it again now
+                    # that this writer is the one. An unchanged marker costs one lstat and a
+                    # shard-directory listing. A changed one that is refused leaves the
+                    # rollback below nothing to undo; one that is accepted (a format switch)
+                    # is cached, and the next refresh reloads the index, as it does for a pull.
+                    # A marker Git has unlinked for a checkout is awaited, as at open.
+                    if (
+                        not os.path.lexists(self.path / _FORMAT_MARKER_NAME)
+                        and not self._allow_unmigrated_shards
+                    ):
+                        checkout_window.await_marker(self.path, creating=self._creating)
+                    self._check_requirement()
                 yield
                 if self._mutation_depth == 1:
                     self._commit()
@@ -3187,13 +2970,6 @@ class Store:
             "INSERT INTO anchor_bindings (record_id, entity_id, data) VALUES (?, ?, ?) "
             "ON CONFLICT(record_id, entity_id) DO UPDATE SET data=excluded.data",
             (binding.record_id, binding.entity_id, binding.model_dump_json()),
-        )
-
-    def _index_write_initiative(self, initiative: Initiative) -> None:
-        self._conn.execute(
-            "INSERT INTO initiatives (id, name, data) VALUES (?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET name=excluded.name, data=excluded.data",
-            (initiative.id, initiative.name, initiative.model_dump_json()),
         )
 
     def _index_get_binding(self, record_id: str, entity_id: str) -> AnchorBinding | None:
@@ -3431,28 +3207,134 @@ class Store:
 
     # -- decisions ----------------------------------------------------------
 
-    def add_decision(self, decision: Decision, *, close_predecessor: bool = True) -> Decision:
+    def _check_supersede_target(
+        self,
+        table: str,
+        id_col: str,
+        noun: str,
+        new_id: str,
+        new_status: str,
+        target_id: str,
+        target_status: str,
+        target_open: bool,
+        *,
+        allow_dropped: bool = False,
+    ) -> None:
+        """The write-time supersession invariant (decisions, facts, domains):
+
+        A. a record is superseded only while it is the LIVE HEAD (``accepted`` and open).
+           A pending proposal is refused ("drop it and propose again, or ratify it first");
+           a closed record is refused with its live successor named when one can be found.
+           ``allow_dropped`` is the one exception: a ``dropped`` domain may still be
+           superseded (the mass-drop recovery).
+        B. a record has at most one pending successor: ANY further successor (proposed, or
+           accepted, which would strand the pending one) is refused while one exists —
+           for a dropped domain too.
+
+        Reads the ``supersedes`` column of ``table``; nothing is written."""
+        if not (allow_dropped and target_status == "dropped"):
+            if target_status == "proposed":
+                raise SupersessionConflictError(
+                    f"{noun} {target_id} is a pending proposal; amend it by dropping it and "
+                    "proposing again, or ratify it first"
+                )
+            if target_status != "accepted" or not target_open:
+                head = self._live_head_after(table, id_col, target_id)
+                raise SupersessionConflictError(
+                    f"{noun} {target_id} is no longer current; supersede its live successor "
+                    f"{head} instead"
+                    if head
+                    else f"{noun} {target_id} is no longer current and cannot be superseded"
+                )
+        pending = self._pending_successor(table, id_col, target_id, exclude_id=new_id)
+        if pending is not None:
+            raise SupersessionConflictError(
+                f"{noun} {target_id} already has a pending successor {pending}; "
+                "ratify or drop it first"
+            )
+
+    def _pending_successor(
+        self, table: str, id_col: str, record_id: str, *, exclude_id: str | None = None
+    ) -> str | None:
+        """The id of a ``proposed`` record superseding ``record_id`` (lowest id), or ``None``."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {id_col} FROM {table} WHERE supersedes = ? AND status = 'proposed' "
+                f"AND {id_col} != ? ORDER BY {id_col} LIMIT 1",
+                (record_id, exclude_id or ""),
+            ).fetchone()
+        return row[id_col] if row is not None else None
+
+    def pending_decision_successor(
+        self, decision_id: str, *, exclude_id: str | None = None
+    ) -> str | None:
+        """The id of a pending (``proposed``) decision superseding ``decision_id``, if any
+        (other than ``exclude_id``)."""
+        return self._pending_successor("decisions", "id", decision_id, exclude_id=exclude_id)
+
+    def _live_head_after(self, table: str, id_col: str, record_id: str) -> str | None:
+        """The live head of the chain that continues ``record_id``: follow its ``accepted``
+        or ``superseded`` successors (bounded; an ``accepted`` one is preferred at a fork) and
+        return the last ``accepted`` record met, or ``None`` when there is none."""
+        current, head, seen = record_id, None, {record_id}
+        for _ in range(64):
+            with self._lock:
+                row = self._conn.execute(
+                    f"SELECT {id_col}, status FROM {table} WHERE supersedes = ? "
+                    "AND status IN ('accepted', 'superseded') "
+                    f"ORDER BY status = 'accepted' DESC, {id_col} LIMIT 1",
+                    (current,),
+                ).fetchone()
+            if row is None or row[id_col] in seen:
+                break
+            current = row[id_col]
+            seen.add(current)
+            if row["status"] == "accepted":
+                head = current
+        return head
+
+    def _refuse_stale_predecessor(
+        self,
+        table: str,
+        id_col: str,
+        noun: str,
+        record_id: str,
+        predecessor_id: str,
+        predecessor_status: str,
+    ) -> None:
+        """Refuse to accept ``record_id`` when its predecessor cannot be closed by it: the
+        predecessor is itself still ``proposed`` (accepting would leave the accepted record it
+        ultimately replaces open beside it), or the chain from the predecessor already has
+        another live head (accepting too would leave two contradictory live successors).
+        A dropped/rejected predecessor with no live head is fine: nothing to close."""
+        if predecessor_status == "proposed":
+            raise SupersessionConflictError(
+                f"{noun} {record_id!r} cannot be ratified: its predecessor {predecessor_id} "
+                "is still proposed; ratify or drop it first"
+            )
+        head = self._live_head_after(table, id_col, predecessor_id)
+        if head is not None and head != record_id:
+            raise SupersessionConflictError(
+                f"{noun} {record_id!r} cannot be ratified: {predecessor_id} is already "
+                f"superseded by {head}; supersede that one instead"
+            )
+
+    def add_decision(self, decision: Decision) -> Decision:
         """Append a decision, enforcing the write-path invariants.
 
-        If ``decision`` supersedes another, the predecessor is closed (its ``valid_to`` is
-        set and its status flipped to ``superseded``) in the same transaction — keeping the
-        "a superseded decision must have a successor" invariant true at all times. This is
-        the default (``close_predecessor=True``) and unchanged for every existing caller
-        (``capture.propose``, ``server._supersede_decision_impl``, doc-import's non-
-        ``--propose`` path).
+        One rule: a predecessor closes when its successor becomes accepted. If ``decision``
+        supersedes another and is written in any status except ``proposed`` (``accepted``,
+        or ``rejected`` for a doc-import ``status: rejected``), the predecessor is closed
+        (its ``valid_to`` is set and its status flipped to ``superseded``) in the same
+        transaction, at ``max(decision.valid_from, predecessor.valid_from)`` — keeping the
+        "a superseded decision must have a successor" invariant true at all times. A
+        ``proposed`` successor closes nothing: the predecessor stays exactly as it is
+        until :meth:`ratify` accepts the successor, and :meth:`drop` never touches it.
 
-        The close only ever applies to a predecessor that is STILL OPEN (status
-        ``accepted`` or ``proposed`` — mirrors :meth:`ratify`'s own guard). A predecessor
-        that is ALREADY terminal (``superseded``/``rejected``/``deprecated`` — see design
-        §7) is left completely untouched: its hot file (which may already have been
-        compacted into an archive segment — see :meth:`compact`) is never rewritten, and
-        its status never flips again. Without this guard, superseding an archived
-        ``rejected`` decision would resurrect a mutated copy of it as a fresh hot file —
-        permanently a shared-value mismatch from compaction's point of view (every
-        teammate's next cold reload would report both copies, and the record could never
-        compact again). The successor's ``supersedes`` field still records the
-        intended relationship either way — append-only semantics: the link is a fact that
-        happened, even when the target itself can no longer be edited.
+        The close only ever applies to a predecessor that is STILL OPEN (``accepted`` or
+        ``proposed``); a terminal one is never rewritten (its hot file may already sit in an
+        archive segment — see :meth:`compact`). A terminal or pending target is in any case
+        refused up front by :meth:`_check_supersede_target`: only the live head is superseded.
 
         The SUCCESSOR is written FIRST, and the predecessor is only flipped afterwards
         (mirrors :meth:`ratify`'s order): if the successor's write fails partway, nothing
@@ -3461,13 +3343,9 @@ class Store:
         absent) rather than a durable "superseded with zero successors" record that a later
         digest reload would silently adopt as-is.
 
-        ``close_predecessor=False`` (doc-import's ``--propose`` + edited-doc path, design
-        §3 option (b)) writes the successor with ``supersedes`` set but leaves the
-        predecessor exactly as it is — an accepted decision must never be silently closed
-        by a mere proposal nobody has reviewed yet. The existence check below (``supersedes``
-        must reference a real decision) still runs either way; only the CLOSE side effect is
-        skipped. The predecessor closes later, when a human actually ratifies the successor
-        — see :meth:`ratify`'s deferred-supersession logic.
+        The existence check below (``supersedes`` must reference a real decision) runs for
+        every status; only the CLOSE side effect depends on it. See :meth:`ratify` for the
+        deferred close and its two refusals.
 
         Raises if ``decision.id`` already exists: this method is append-only, and without
         the guard an existing id would silently rewrite the row via the ``ON CONFLICT DO
@@ -3488,11 +3366,21 @@ class Store:
                     raise ValueError(
                         f"supersedes references unknown decision {decision.supersedes!r}"
                     )
+                self._check_supersede_target(
+                    "decisions",
+                    "id",
+                    "decision",
+                    decision.id,
+                    decision.status.value,
+                    predecessor.id,
+                    predecessor.status.value,
+                    predecessor.valid_to is None,
+                )
 
             self._write_decision(decision)
 
             if (
-                close_predecessor
+                decision.status != DecisionStatus.PROPOSED
                 and predecessor is not None
                 and predecessor.status in (DecisionStatus.ACCEPTED, DecisionStatus.PROPOSED)
             ):
@@ -3605,15 +3493,16 @@ class Store:
     # same transaction (see add_decision for the parallel). A fact's `supports` links it to
     # the decision(s) it informed — every id must reference an existing Decision.
 
-    def add_fact(self, fact: Fact, *, close_predecessor: bool = True) -> Fact:
+    def add_fact(self, fact: Fact) -> Fact:
         """Append a fact, enforcing the write-path invariants — mirrors :meth:`add_decision`.
 
         Every id in ``fact.supports`` must reference an existing :class:`Decision` (facts
         inform decisions; the reverse link isn't a thing). If ``fact`` supersedes another
         fact, the predecessor is closed (``valid_to`` set, status flipped to
         ``superseded``) in the same transaction — same "a superseded record must have a
-        successor" guarantee ``add_decision`` gives, and the same STILL-OPEN guard (only a
-        predecessor with status ``accepted``/``proposed`` is closed). The SUCCESSOR is
+        successor" guarantee ``add_decision`` gives, the same STILL-OPEN guard (only a
+        predecessor with status ``accepted``/``proposed`` is closed) and the same rule: a
+        ``proposed`` successor closes nothing until it is ratified. The SUCCESSOR is
         written FIRST, mirroring ``add_decision``'s crash-ordering rationale.
 
         Raises if ``fact.id`` already exists: append-only, mirroring ``add_decision`` — an
@@ -3635,11 +3524,21 @@ class Store:
                 predecessor = self.get_fact(fact.supersedes)
                 if predecessor is None:
                     raise ValueError(f"supersedes references unknown fact {fact.supersedes!r}")
+                self._check_supersede_target(
+                    "facts",
+                    "id",
+                    "fact",
+                    fact.id,
+                    fact.status.value,
+                    predecessor.id,
+                    predecessor.status.value,
+                    predecessor.valid_to is None,
+                )
 
             self._write_fact(fact)
 
             if (
-                close_predecessor
+                fact.status != DecisionStatus.PROPOSED
                 and predecessor is not None
                 and predecessor.status in (DecisionStatus.ACCEPTED, DecisionStatus.PROPOSED)
             ):
@@ -3853,15 +3752,16 @@ class Store:
     def valid_decisions_for_entity(
         self, entity_id: str, as_of: datetime | None = None
     ) -> list[Decision]:
-        """Currently-valid, non-superseded decisions bound to entity_id via a live|degraded
-        binding (orphaned bindings are skipped). ``as_of`` defaults to now (UTC)."""
+        """Currently-valid decisions (not superseded, rejected or retired) bound to entity_id via
+        a live|degraded binding (orphaned bindings are skipped). ``as_of`` defaults to now
+        (UTC)."""
         as_of = as_of or datetime.now(UTC)
         out: list[Decision] = []
         for b in self.bindings_for_entity_group(entity_id):
             if b.status not in ("live", "degraded"):
                 continue
             d = self.get_decision(b.record_id)
-            if d is None or d.status in (DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED):
+            if d is None or d.status in _TERMINAL_DECISION_STATUSES:
                 continue
             if d.valid_to is None or d.valid_to > as_of:
                 out.append(d)
@@ -3877,13 +3777,14 @@ class Store:
         return out
 
     def decisions_by_scope(self, scope: Scope, as_of: datetime | None = None) -> list[Decision]:
-        """Currently-valid, non-superseded decisions with the given scope."""
+        """Currently-valid decisions (not superseded, rejected or retired) with the given
+        scope."""
         as_of = as_of or datetime.now(UTC)
         out: list[Decision] = []
         for d in self.iter_decisions():
             if (
                 d.scope == scope
-                and d.status not in (DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED)
+                and d.status not in _TERMINAL_DECISION_STATUSES
                 and (d.valid_to is None or d.valid_to > as_of)
             ):
                 out.append(d)
@@ -3905,12 +3806,6 @@ class Store:
             if e.kind == EntityKind.ABSTRACT
         ]
         return min(matches, key=lambda e: e.entity_id) if matches else None
-
-    def iter_initiatives(self) -> Iterator[Initiative]:
-        with self._lock:
-            rows = self._conn.execute("SELECT data FROM initiatives").fetchall()
-        for row in rows:
-            yield Initiative.model_validate_json(row["data"])
 
     def iter_concrete_entities(self) -> Iterator[Entity]:
         """Concrete entities with a descriptor — the sync job's rebind population."""
@@ -3941,6 +3836,11 @@ class Store:
         with self._mutation():
             if self.get_domain(domain.domain_id) is not None:
                 raise ValueError(f"domain {domain.domain_id} already exists — use supersede_domain")
+            if domain.supersedes:
+                raise ValueError(
+                    "add_domain cannot write a successor; use supersede_domain, which "
+                    "enforces the live-head invariant"
+                )
             self._validate_domain_write(domain)
             self._write_domain(domain)
             if domain.status == DomainStatus.ACCEPTED:
@@ -3948,10 +3848,12 @@ class Store:
         return domain
 
     def supersede_domain(self, old_id: str, new_domain: Domain) -> Domain:
-        """Append-only reversal: close ``old_id`` (status -> superseded) and write
-        ``new_domain`` (whose ``supersedes`` must equal ``old_id``) in the same
-        transaction. The same slug is allowed because the successor's slug-uniqueness
-        check excludes ``old_id`` — see ``_validate_domain_write``'s ``exclude_id``.
+        """Append-only reversal: write ``new_domain`` (whose ``supersedes`` must equal
+        ``old_id``) and, unless it is a ``proposed`` successor of an accepted domain, close
+        ``old_id`` (status -> superseded) in the same transaction; a proposed successor
+        closes an accepted predecessor later, when :meth:`ratify_domains` accepts it. The
+        same slug is allowed because the successor's slug-uniqueness check excludes
+        ``old_id`` — see ``_validate_domain_write``'s ``exclude_id``.
 
         The successor is validated FIRST, before the predecessor's row is touched: if
         validation raises (e.g. a slug collision against some *other* live domain, or a
@@ -3982,10 +3884,26 @@ class Store:
                 raise ValueError(
                     f"domain {new_domain.domain_id} already exists — successor must be a new domain"
                 )
+            self._check_supersede_target(
+                "domains",
+                "domain_id",
+                "domain",
+                new_domain.domain_id,
+                new_domain.status.value,
+                old.domain_id,
+                old.status.value,
+                True,
+                allow_dropped=True,
+            )
             self._validate_domain_write(new_domain, exclude_id=old_id)
             self._write_domain(new_domain)
-            old.status = DomainStatus.SUPERSEDED
-            self._write_domain(old)
+            # A predecessor closes when its successor is accepted: a proposed successor
+            # leaves the accepted head alone until `ratify_domains` accepts it. The one
+            # exception is a DROPPED predecessor (the mass-drop recovery): it holds no live
+            # domain, and flipping it now is what frees its community.
+            if new_domain.status != DomainStatus.PROPOSED or old.status == DomainStatus.DROPPED:
+                old.status = DomainStatus.SUPERSEDED
+                self._write_domain(old)
             self._uncertify_membership()
         return new_domain
 
@@ -4011,11 +3929,16 @@ class Store:
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT domain_id FROM domains WHERE slug = ? AND status IN (?, ?)",
+                "SELECT domain_id, status, supersedes FROM domains "
+                "WHERE slug = ? AND status IN (?, ?)",
                 (domain.slug, DomainStatus.PROPOSED.value, DomainStatus.ACCEPTED.value),
             ).fetchall()
+            # A lone pending revision of an accepted holder is not a separate claim on the slug.
+            exempt = _single_pending_revisions(rows)
             blocking = sorted(
-                r["domain_id"] for r in rows if r["domain_id"] not in (domain.domain_id, exclude_id)
+                r["domain_id"]
+                for r in rows
+                if r["domain_id"] not in (domain.domain_id, exclude_id, *exempt)
             )
             if blocking:
                 raise ValueError(
@@ -4236,7 +4159,7 @@ class Store:
         actor: str | None = None,
     ) -> dict[str, str]:
         """Bulk ratification of proposed domains — mirrors the decisions ratify result
-        shape (server.py's ``_ratify_decisions_impl``): a dict of domain_id -> outcome
+        shape (server.py's ``_ratify_impl``): a dict of domain_id -> outcome
         string ("accepted" | "dropped" | "error: ..."), so a batch partially succeeds
         instead of one bad id aborting the rest.
 
@@ -4290,10 +4213,28 @@ class Store:
                         d = self.get_domain(domain_id)
                         if d is None or d.status != DomainStatus.PROPOSED:
                             raise ValueError(f"domain {domain_id!r} is not proposed")
+                        rival = self._conn.execute(
+                            "SELECT domain_id FROM domains WHERE slug = ? AND status = ? "
+                            "AND domain_id NOT IN (?, ?) ORDER BY domain_id LIMIT 1",
+                            (d.slug, DomainStatus.ACCEPTED.value, d.domain_id, d.supersedes or ""),
+                        ).fetchone()
+                        if rival is not None:
+                            raise ValueError(
+                                f"slug {d.slug!r} is already held by accepted domain "
+                                f"{rival['domain_id']}; drop one of them first"
+                            )
                         d.status = DomainStatus.ACCEPTED
                         d.ratified_at = datetime.now(UTC)
                         d.ratified_by = _ratifier_identity(actor)
                         self._write_domain(d)
+                        if d.supersedes:
+                            old = self.get_domain(d.supersedes)
+                            if old is not None and old.status in (
+                                DomainStatus.PROPOSED,
+                                DomainStatus.ACCEPTED,
+                            ):
+                                old.status = DomainStatus.SUPERSEDED
+                                self._write_domain(old)
                         self.get_or_create_abstract_entity(f"domain:{d.slug}")
                         self._uncertify_membership()
                     out[domain_id] = "accepted"
@@ -4360,16 +4301,23 @@ class Store:
         """Flip a proposed decision to accepted (the human's one-tap gesture).
 
         Deferred supersession (design §3 option (b), shared by every ratify path — MCP
-        ``ratify``/``ratify_decisions`` and ``sidegraph-ratify`` alike, since both route
-        through this method): when the now-accepted decision ``supersedes`` a predecessor
-        that is STILL OPEN (status ``accepted`` or ``proposed`` — i.e. never closed at
-        write time, see ``add_decision(close_predecessor=False)``), that predecessor is
-        closed (``valid_to`` + status ``superseded``) in this SAME operation — this is what
-        actually performs the supersession a doc-import ``--propose`` deferred. A
-        predecessor that's already ``superseded`` (the ordinary path, where
-        ``add_decision`` closed it immediately at write time) is left alone — a no-op here,
-        not a double-close. Dropping the proposal instead (:meth:`drop`) never touches the
-        predecessor at all.
+        ``ratify`` and ``sidegraph-ratify`` alike, since both route
+        through this method): a ``proposed`` successor closes nothing at write time (see
+        :meth:`add_decision`), so when the now-accepted decision ``supersedes`` a predecessor
+        that is STILL OPEN (status ``accepted``), that predecessor is closed (``valid_to`` +
+        status ``superseded``) in this SAME operation, at the ratification time. A
+        predecessor that's already ``superseded`` (a store written before the close was
+        deferred) is left alone — a no-op here, not a double-close. Dropping the proposal
+        instead (:meth:`drop`) never touches the predecessor at all.
+
+        Two refusals (:class:`SupersessionConflictError`, nothing written): the predecessor
+        is itself still ``proposed`` ("ratify or drop it first" — accepting the successor
+        would leave the accepted record at the chain's root open beside it), or the
+        predecessor's chain already has another live head, followed through superseded records
+        ("supersede that one instead" — two accepted successors would contradict each other).
+        A dropped predecessor is no conflict: accepting closes nothing. Every proposed fact
+        this decision's ratification would cascade gets the same check first, before anything
+        is written.
 
         ``actor`` (keyword-only, design D2/T17): an explicit stamp for this ratification,
         used by auto-ratification (the ``"auto:<policy>"`` stamp, never called by a human
@@ -4394,6 +4342,13 @@ class Store:
             d = self.get_decision(decision_id)
             if d is None or d.status != DecisionStatus.PROPOSED:
                 raise ValueError(f"decision {decision_id!r} is not proposed")
+
+            if d.supersedes:
+                self._refuse_conflicting_successor(d)
+            # Preflight every cascaded fact before anything is written.
+            for fact in self.iter_proposed_facts():
+                if decision_id in fact.supports and fact.supersedes:
+                    self._refuse_conflicting_fact_successor(fact)
 
             if cascade_guard is not None:
                 cascade_candidates = [
@@ -4427,8 +4382,28 @@ class Store:
                     fact.ratified_at = d.ratified_at
                     fact.ratified_by = d.ratified_by
                     self._write_fact(fact)
+                    self._close_fact_predecessor(fact)
                     cascaded.append(fact)
         return d, cascaded
+
+    def _refuse_conflicting_successor(self, d: Decision) -> None:
+        """Run :meth:`_refuse_stale_predecessor` for decision ``d`` (a no-op when its
+        predecessor record is missing)."""
+        assert d.supersedes
+        predecessor = self.get_decision(d.supersedes)
+        if predecessor is not None:
+            self._refuse_stale_predecessor(
+                "decisions", "id", "decision", d.id, predecessor.id, predecessor.status.value
+            )
+
+    def _refuse_conflicting_fact_successor(self, f: Fact) -> None:
+        """The fact twin of :meth:`_refuse_conflicting_successor`."""
+        assert f.supersedes
+        predecessor = self.get_fact(f.supersedes)
+        if predecessor is not None:
+            self._refuse_stale_predecessor(
+                "facts", "id", "fact", f.id, predecessor.id, predecessor.status.value
+            )
 
     def drop(self, decision_id: str) -> tuple[Decision, list[Fact]]:
         """Reject a proposed decision. Append-only: sets valid_to + rejected, never deletes.
@@ -4466,6 +4441,111 @@ class Store:
             for sid in fact.supports
         )
 
+    def retire(
+        self, decision_id: str, reason: str, duplicate_of: str | None = None
+    ) -> tuple[Decision, list[AnchorBinding]]:
+        """Retire an accepted decision: status ``deprecated``, ``valid_to`` set to now unless
+        already set, and ``retired = {reason, duplicate_of}``. Append-only: the record stays,
+        as history.
+
+        For a decision with nothing new to say in a successor: a duplicate of another live
+        record (``duplicate_of``, an open ``accepted`` decision other than this one), or a rule
+        whose subject is gone. For a duplicate, the kept record first gains a binding to every
+        entity the duplicate reaches (a ``live`` or ``degraded`` binding the kept record does
+        not already have, or has only as an orphaned or weaker one, which the duplicate's
+        binding replaces), so the rule keeps surfacing where the duplicate did; those bindings
+        are returned with the retired decision.
+
+        Refused (:class:`RetireRefusedError`, nothing written) while the store requires less
+        than ``RECORD_FIELDS_REQUIREMENT`` (an older client would not know ``retired``), and
+        for an unknown id, a record that is not ``accepted``, a blank ``reason``, a bad
+        ``duplicate_of``, a pending successor or a proposed fact that supports the decision
+        (ratify or drop it first). An id is named in a refusal only when it is a stored record.
+        The caller redacts ``reason``.
+        see docs/reference/stability.md ("Mixed versions")
+        """
+        with self._mutation():
+            required = self._check_requirement()
+            have = store_layout.release_tuple(required) if required is not None else None
+            need = store_layout.release_tuple(store_layout.RECORD_FIELDS_REQUIREMENT)
+            if have is None or need is None or have < need:
+                held = (
+                    f"this store requires Sidegraph >= {required}"
+                    if required is not None
+                    else "this store sets no minimum Sidegraph"
+                )
+                raise RetireRefusedError(
+                    f"{held}; run `sidegraph-require --sidegraph "
+                    f"{store_layout.RECORD_FIELDS_REQUIREMENT}` and commit `.sidegraph/format` "
+                    "before retiring"
+                )
+            d = self.get_decision(decision_id)
+            if d is None:
+                raise RetireRefusedError("id names no decision")
+            if d.status != DecisionStatus.ACCEPTED:
+                raise RetireRefusedError(
+                    f"decision {decision_id} is {d.status.value}, not accepted; only an "
+                    "accepted decision can be retired (drop a proposal with ratify)"
+                )
+            if not reason.strip():
+                raise RetireRefusedError("a reason is required to retire a decision")
+            if duplicate_of is not None:
+                if duplicate_of == decision_id:
+                    raise RetireRefusedError("a decision cannot be a duplicate of itself")
+                kept = self.get_decision(duplicate_of)
+                if kept is None:
+                    raise RetireRefusedError("duplicate_of names no decision")
+                if kept.status != DecisionStatus.ACCEPTED or kept.valid_to is not None:
+                    raise RetireRefusedError(
+                        f"duplicate_of: decision {duplicate_of} is not an accepted, open "
+                        "decision; name the live record that stays"
+                    )
+            pending = self.pending_decision_successor(decision_id)
+            if pending is not None:
+                raise RetireRefusedError(
+                    f"decision {decision_id} has a pending successor {pending}; ratify or "
+                    "drop it first"
+                )
+            for fact in self.iter_proposed_facts():
+                if decision_id in fact.supports:
+                    raise RetireRefusedError(
+                        f"decision {decision_id} has pending evidence: proposed fact {fact.id} "
+                        "supports it; ratify or drop it first"
+                    )
+            added: list[AnchorBinding] = []
+            if duplicate_of is not None:
+                # A kept binding to the same entity counts only when it is at least as strong:
+                # an orphaned or degraded one would leave the entity with less than it had.
+                strength = {"live": 2, "degraded": 1}
+                kept_strength = {
+                    b.entity_id: strength.get(b.status, 0)
+                    for b in self.bindings_for_record(duplicate_of)
+                }
+                for b in self.bindings_for_record(decision_id):
+                    if (
+                        b.status not in strength
+                        or kept_strength.get(b.entity_id, -1) >= strength[b.status]
+                    ):
+                        continue
+                    added.append(
+                        self.add_binding(
+                            AnchorBinding(
+                                record_id=duplicate_of,
+                                entity_id=b.entity_id,
+                                tier=b.tier,
+                                weight=b.weight,
+                                status=b.status,
+                                relation=b.relation,
+                            )
+                        )
+                    )
+                    kept_strength[b.entity_id] = strength[b.status]
+            d.status = DecisionStatus.DEPRECATED
+            d.valid_to = d.valid_to or max(datetime.now(UTC), d.valid_from)
+            d.retired = Retirement(reason=reason, duplicate_of=duplicate_of)
+            self._write_decision(d)
+        return d, added
+
     def ratify_fact(self, fact_id: str, *, actor: str | None = None) -> Fact:
         """Flip a proposed fact to accepted directly (no supporting decision involved).
 
@@ -4478,11 +4558,29 @@ class Store:
             f = self.get_fact(fact_id)
             if f is None or f.status != DecisionStatus.PROPOSED:
                 raise ValueError(f"fact {fact_id!r} is not proposed")
+            if f.supersedes:
+                self._refuse_conflicting_fact_successor(f)
             f.status = DecisionStatus.ACCEPTED
             f.ratified_at = datetime.now(UTC)
             f.ratified_by = _ratifier_identity(actor)
             self._write_fact(f)
+            self._close_fact_predecessor(f)
         return f
+
+    def _close_fact_predecessor(self, fact: Fact) -> None:
+        """Close the still-open fact ``fact`` supersedes, now that ``fact`` is accepted."""
+        if not fact.supersedes:
+            return
+        predecessor = self.get_fact(fact.supersedes)
+        if predecessor is not None and predecessor.status in (
+            DecisionStatus.ACCEPTED,
+            DecisionStatus.PROPOSED,
+        ):
+            predecessor.status = DecisionStatus.SUPERSEDED
+            predecessor.valid_to = predecessor.valid_to or max(
+                datetime.now(UTC), predecessor.valid_from
+            )
+            self._write_fact(predecessor)
 
     def drop_fact(self, fact_id: str) -> Fact:
         """Reject a proposed fact directly. Append-only: sets valid_to + rejected."""
@@ -4721,15 +4819,6 @@ class Store:
         self._delivery_write(delivery_ledger.prune)
         return deleted
 
-    # -- initiatives --------------------------------------------------------
-
-    def upsert_initiative(self, initiative: Initiative) -> Initiative:
-        with self._mutation():
-            self._write_initiative_canonical(initiative)
-            self._index_write_initiative(initiative)
-            self._touch_digest()
-        return initiative
-
     # -- compaction (design §7) ------------------------------------------------
     #
     # Terminal-status decisions/domains never change again under append-only rules, so they
@@ -4737,8 +4826,8 @@ class Store:
     # ``archive/<date>-<seq>.jsonl`` segment and removes their individual hot files in the
     # same operation — CLAUDE.md invariant #2 (append-only) still holds: the records MOVE,
     # they are never lost or mutated (``_reload_index_from_canonical`` above and the loader
-    # helpers below still surface them exactly as before). Entities, bindings, and
-    # initiatives stay hot in v1 — a compacted decision's bindings remain live, ordinary hot
+    # helpers below still surface them exactly as before). Entities and bindings
+    # stay hot in v1 — a compacted decision's bindings remain live, ordinary hot
     # files (retrieval of superseded history still needs them). Explicit, human-run
     # maintenance only: nothing in sync/retrieval/ratify calls this.
 
@@ -4761,8 +4850,7 @@ class Store:
 
         A malformed line (review Minor-5: a merge-mangled segment, truncated write, or hand
         edit) raises a ``ValueError`` naming the offending segment PATH and LINE NUMBER — a
-        bare ``JSONDecodeError`` gives no clue which of potentially many segments is at fault
-        (mirrors ``_validate_legacy_rows``'s "name the offending row" convention).
+        bare ``JSONDecodeError`` gives no clue which of potentially many segments is at fault.
 
         With ``tolerate_corrupt_lines`` the line is skipped instead, with a warning, and its
         number is appended to ``bad_lines`` when one is given: only the reload asks for this,
@@ -4951,7 +5039,7 @@ class Store:
         content_hash12 = hashlib.sha256(content_bytes).hexdigest()[:12]
 
         archive_dir = self.path / _ARCHIVE_SUBDIR
-        archive_dir.mkdir(parents=True, exist_ok=True)
+        _mkdir_durable(archive_dir)
         date_str = datetime.now(UTC).date().isoformat()
 
         tmp = archive_dir / f"archive-segment.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp"

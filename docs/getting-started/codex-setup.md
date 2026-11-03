@@ -1,5 +1,7 @@
 # Codex setup
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 Connect Sidegraph to the [OpenAI Codex CLI](https://developers.openai.com/codex/cli).
 Codex CLI ships GA hooks with the same event vocabulary as Claude Code (including
 `additionalContext` on `SessionStart`), so the same Sidegraph entry points serve both hosts.

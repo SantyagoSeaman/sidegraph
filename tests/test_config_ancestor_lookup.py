@@ -16,6 +16,7 @@ import pytest
 
 import sidegraph.config as config
 from sidegraph.store import Store
+from sidegraph.store_layout import InterruptedMigrationError
 
 
 def _open_once(path: Path) -> Path:
@@ -263,3 +264,24 @@ def test_a_dangling_symlink_in_an_ancestor_is_found_as_given(tmp_path):
     assert location.path == str(root / ".sidegraph")
     assert location.base == str(root)
     assert not os.path.lexists(root / "sub" / ".sidegraph")
+
+
+# -- an interrupted migration selects its destination ------------------------------------
+
+
+def test_a_missing_local_store_with_a_sentinel_is_selected_not_the_ancestor(repo, monkeypatch):
+    monkeypatch.setenv("SIDEGRAPH_DIR", ".sidegraph")
+    (repo / "sub" / ".sidegraph.migration-incomplete").write_text("{}")
+    location = _location(repo / "sub")
+    assert location.path == str(repo / "sub" / ".sidegraph")
+    with pytest.raises(InterruptedMigrationError):
+        Store(location.path)
+
+
+def test_an_intermediate_ancestor_with_a_sentinel_is_selected(repo, monkeypatch):
+    monkeypatch.setenv("SIDEGRAPH_DIR", ".sidegraph")
+    (repo / "sub" / "deep").mkdir()
+    (repo / "sub" / ".sidegraph.migration-incomplete").write_text("{}")
+    found = config.ancestor_store(str(repo / "sub" / "deep"), ".sidegraph")
+    assert found == config.StoreLocation(str(repo / "sub" / ".sidegraph"), str(repo / "sub"))
+    assert _location(repo / "sub" / "deep").path == str(repo / "sub" / ".sidegraph")

@@ -73,7 +73,11 @@ see it).
    id never aborts the rest (`"error: ..."` per id). Accepting a domain also mints its
    `domain:<slug>` entity and immediately rebuilds the `SessionStart` TOC cache; a
    decisions-only call leaves the cache untouched. Report the per-id results — including
-   any cascaded fact entries the call reports back (see below).
+   any cascaded fact entries the call reports back (see below). `"already accepted"` /
+   `"already rejected"` / `"already dropped"` means the record already had that verdict (for
+   example the ratify policy accepted it at write time): nothing is wrong, nothing changed.
+   `"error: already <status>; it cannot be <verb>"` is the opposite verdict on a settled
+   record, a real refusal to relay.
 
 ## Facts ride their decision (cascade)
 
@@ -103,7 +107,8 @@ verdict — one human gate, not two:
 There is no in-place edit for a proposal. Two clean paths:
 
 - **Drop + re-propose** — `ratify(drop=[id])`, then `propose_decisions(drafts=[...])` with
-  the corrected draft. Stays gated: the fixed version comes back through this same queue.
+  the corrected draft without superseding the dropped proposal. Stays gated: the fixed
+  version comes back through this same queue.
 - **Drop + `add_decision`** — only when the human has explicitly dictated or approved the
   corrected text in this conversation. `add_decision` lands `status=accepted` immediately,
   and that's legitimate here: the human was the gate. Never use this path for a fix the
@@ -112,13 +117,26 @@ There is no in-place edit for a proposal. Two clean paths:
 Don't "accept then supersede" as an edit — it writes a pointless supersession chain for a
 record that was never valid in the first place.
 
+## Superseding proposals
+
+A proposal that `supersedes` an accepted predecessor shows a `supersedes: <id> <title>`
+line: accepting it closes that predecessor at ratification time, and dropping it leaves
+that predecessor live. Under any ratify policy an accepted predecessor stays accepted
+until then. A record has at
+most one pending successor, and decisions/facts must be accepted with `valid_to` unset
+to be superseded. Domains follow their separate dropped-domain exception. There is no chain
+to order. If accepting is refused because the predecessor is no longer the live head (a
+merge brought in a rival successor), present the refusal ("supersede that one instead") to
+the human; do not work around it.
+
 ## Drop semantics (they differ by kind)
 
 - **Decision drop** requires `proposed` — flips to `rejected`, append-only (`valid_to`
   set, record kept, still retrievable as "considered and rejected"). An *accepted*
-  decision is memory — you retire it with `supersede_decision`, never a drop.
+  decision is memory, never dropped: supersede its accepted, open head when it changed,
+  `retire_decision` when it is a duplicate or its subject is gone.
 - **Fact drop** — same rule as a decision, requires `proposed` — flips to `rejected`,
-  append-only. An *accepted* fact is memory — falsify it with `supersede_fact`, never a
+  append-only. Falsify an accepted fact's open head with `supersede_fact`, never a
   drop (see `sidegraph:record-decision`'s Facts section). Dropping a fact directly (its
   own id) and a fact dropping via a decision's cascade land in the same state; only the
   reported reason string differs (`"dropped"` vs `"dropped (evidence of <decision_id>)"`).

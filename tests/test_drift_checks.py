@@ -684,7 +684,7 @@ def test_ratify_drop_accepted_decision_explains_status_without_mutation(project)
     _root, store, decision = project
     before = decision.model_dump(mode="json")
     result = server._ratify_impl(store, drop=[decision.id])
-    assert "not proposed" in result[decision.id]
+    assert "already accepted; it cannot be dropped" in result[decision.id]
     assert "accepted" in result[decision.id]
     assert "reopen" not in result[decision.id]
     assert store.get_decision(decision.id).model_dump(mode="json") == before
@@ -926,3 +926,63 @@ def test_tree_entries_all_keeps_an_ancestor_directory_beside_its_descendant(tmp_
         "src": "040000",
         "src/sidegraph": "040000",
     }
+
+
+def test_a_drift_check_is_flushed_before_link_and_directory_after(project, monkeypatch):
+    """The check is committed data: its tmp is fsynced before ``os.link`` publishes it."""
+    import os
+    from pathlib import Path
+
+    from sidegraph import maintenance
+
+    root, store, decision = project
+    require_check(root, decision.id)
+    events: list[tuple] = []
+    real_fsync, real_link = os.fsync, os.link
+
+    def _fsync(fd):
+        events.append(("fsync", "file"))
+        real_fsync(fd)
+
+    def _link(src, dst, **kw):
+        events.append(("link", os.path.basename(dst)))
+        real_link(src, dst, **kw)
+
+    monkeypatch.setattr(os, "fsync", _fsync)
+    monkeypatch.setattr(os, "link", _link)
+    monkeypatch.setattr(
+        maintenance,
+        "fsync_dir",
+        lambda p, *, full=True: events.append(("fsync_dir", Path(p).name, full)),
+    )
+    check = _another_check(store)
+    store.record_drift_check(check, clear_cached_advisory=False)
+    at = events.index(("link", f"{check.id}.json"))
+    assert events[at - 1] == ("fsync", "file")
+    assert events[at + 1] == ("fsync_dir", "verifications", False)
+
+
+def test_the_first_drift_check_enters_verifications_durably(project, monkeypatch):
+    """``verifications/`` is created by the first check: its parent is synced after the
+    creation, before the check is reported written."""
+    import os
+    from pathlib import Path
+
+    from sidegraph import maintenance
+
+    root, store, decision = project
+    assert not (store.path / "verifications").exists()
+    events: list[tuple] = []
+    real_link = os.link
+
+    def _link(src, dst, **kw):
+        events.append(("link", os.path.basename(dst)))
+        real_link(src, dst, **kw)
+
+    monkeypatch.setattr(os, "link", _link)
+    monkeypatch.setattr(
+        maintenance, "fsync_dir", lambda p, *, full=True: events.append(("fsync_dir", Path(p)))
+    )
+    require_check(root, decision.id)
+    link_at = next(i for i, e in enumerate(events) if e[0] == "link" and e[1].endswith(".json"))
+    assert ("fsync_dir", store.path) in events[:link_at]

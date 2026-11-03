@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "name": "sidegraph",
-  "version": "0.23.0",
-  "description": "Durable decisions, facts and lessons over your code graph.",
+  "version": "0.24.0",
+  "description": "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code.",
   "compat": {
     "source": "native",
     "manifestDir": ".muse-plugin"

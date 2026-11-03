@@ -1,19 +1,26 @@
 # Troubleshooting: what Sidegraph tells you, and what to do
 
-Sidegraph used to degrade without a word. The graph fell hundreds of commits behind, records
-were written with every anchor orphaned, a merge conflict in a record file switched memory off
-for the whole store (today it leaves out only that file, and names it), and the only place any of
-it showed was a line in the model's context. Now one list of integrity checks runs at every
-session start and says what needs fixing, to the person as well as to the model.
+> **Start here:** Match the message or check code to the table below, read its cause and run the suggested fix. A store is the committed record data. The index is a disposable local cache. Do not delete the store to clear a warning. [Glossary](../concepts/glossary.md).
 
-- **The model** gets one status line per problem, at every session start, in the context the hook
-  injects. The model forgets between sessions, so these are not rationed.
-- **You** get a notice, shown by the host as a warning, for the problems that need you. A notice
-  comes at most once a day for each check, comes again at once when a problem gets worse, and
-  stops when the check finds nothing. The text names the fix.
+For commands following `@main`, see [pinning mutable development references](../getting-started/installation.md#mutable-development-references).
 
-`sidegraph-doctor` lists the same problems record by record, and `sidegraph-stats` leads with a
-`HEALTH` line. Both read the store without writing to it.
+Sidegraph reports store, graph and host problems separately. First match the symptom,
+then inspect the diagnostic that can establish its cause. Keep the committed store.
+The SQLite index is derived and can be rebuilt when it is the damaged component.
+
+| Symptom | Likely cause | First action |
+|---|---|---|
+| No Sidegraph tools or opening context | Plugin scope, hook trust, executable discovery or repository selection | Follow [host verification](verifying-your-setup.md#case-1--host-wiring). OpenCode has no opening map. |
+| Tools answer but no record appears for a file | No matching record, an unresolved anchor or the wrong store | Inspect the capture result and [verify anchored retrieval](verifying-your-setup.md#case-2--durable-capture-and-retrieval). |
+| A host says Sidegraph could not start | A launcher failed before the hook entry point | Run the [hook diagnostic](../reference/hooks.md#if-you-see-this-message) in the host environment. |
+| A graph or anchor warning appears | Missing, stale or differently rooted graph, or a changed target | Find the exact code in [the checks](#the-checks), rebuild from the root when needed, then sync. |
+| Doctor reports strict violations | Canonical data or transition verification failed | Read `sidegraph-verify` before attempting curation. Restore the named data from Git when appropriate. |
+| Doctor lists skipped checks | Required index or graph evidence was unavailable, or the advisory pass stopped early | Restore that evidence and repeat the check. Skipped evidence does not prove health. |
+
+SessionStart gives the agent status lines. Problems needing a person can also produce a
+notice, normally at most once a day per check. The [hooks reference](../reference/hooks.md#notices-for-the-human)
+owns the notice rules. `sidegraph-doctor` gives record-level diagnostics, while
+`sidegraph-stats` provides a health overview.
 
 ## Windows plugin launch
 
@@ -22,8 +29,8 @@ at session start, check the [Windows setup boundary](../getting-started/installa
 The bundled MCP launchers start `uvx` (or `uv`) directly, so they need `uv` on the PATH the
 host gives its subprocesses; Claude Code runs its hooks through Git Bash, so they need Git for
 Windows at its default options. Codex hooks use a PowerShell command on Windows, which parses
-in both Windows PowerShell 5.1 and PowerShell 7. None of this needs a PATH change or
-PowerShell 7, even if the agent host itself runs in PowerShell.
+in both Windows PowerShell 5.1 and PowerShell 7. PowerShell 7 is optional. The MCP launchers and Codex hooks do not require an
+additional POSIX shell; executable discovery still depends on the host PATH.
 
 From the Windows environment used to launch the host, inspect executable discovery:
 
@@ -66,36 +73,69 @@ established by core/installed-wheel CI; the native Windows route is verified wit
 
 ## The checks
 
-| Check | Severity | What it means | Shows in | Fix |
-|---|---|---|---|---|
-| `store-unreadable` | broken | The store cannot be opened, so memory is off for the session | session notice and line | `sidegraph-verify`, or remove the damaged index |
-| `pending-ratification` | advisory | Proposals await a human's verdict | session line; a notice once the oldest is 30 days old | `sidegraph-ratify` |
-| `code-drift` | advisory | Records need content review after code or check-scope changes | session line | `sidegraph-doctor` |
-| `graph-borrowed` | advisory | A linked worktree reads the main checkout's graph | session line | none needed |
-| `graph-stale` | degraded | The graph was built at a commit `HEAD` has moved past | session line and notice, doctor, stats | `graphify update .` |
-| `stray-store` | degraded | A subdirectory launch created a second, empty store | session line and notice | remove the empty store |
-| `graph-missing` | advisory | There is no graph, or it cannot be read | session line | `graphify update .` |
-| `engine-version` | advisory | The graph was built by an untested Graphify release, or has mention edges while the store has no minimum Sidegraph version | session line, doctor | pin a tested Graphify release, or follow the 0.14 migration guide |
-| `orphaned-records` | degraded or advisory | Open records whose every code anchor is orphaned | session line; notice and stats when degraded; doctor | `sidegraph-doctor` |
-| `store-files-skipped` | degraded | Store files the last reload could not index | session line and notice, stats | `sidegraph-verify` |
-| `refresh-helper-outdated` | advisory | The hook runs a helper an older Sidegraph wrote | session line and notice, doctor | `sidegraph-init` |
-| `refresh-hook-missing` | advisory | No git hook keeps the code graph fresh | session line and notice | `sidegraph-init --hooks`, or `--no-hooks` to stop the reminder |
-| `store-uncommitted` | degraded | Store files nobody committed for a day | session line and notice, doctor, stats | commit `.sidegraph/` in a pull request |
-| `branch-only-records` | advisory | Records that exist only on unmerged branches | session line; a notice when a branch is a week old | merge the branch |
-| `store-not-migrated` | degraded | The store uses the pre-0.17 layout and holds records | session line and notice, doctor | `sidegraph-migrate` on the default branch |
-| `maintenance-due` | advisory | A packed store has work for maintenance | session line and notice, doctor | `sidegraph-compact` |
-| `version-skew` | advisory | The running package and the plugin manifest are different versions | session line and notice | update the plugin, or restart the session |
-| `path-skew` | advisory | A `sidegraph-*` on `PATH` is a different version than the session | session line and notice | `uv tool upgrade sidegraph`, or `uv tool uninstall sidegraph` |
-| `plugin-off-in-subdirectories` | advisory | Claude sessions started below the repository root run without the plugin | session line, doctor; a notice only with case (b) | enable it in `.claude/settings.local.json` at the root, or in user settings |
+Run `sidegraph-doctor` in the repository whose store you are inspecting. Start with its
+strict verification section, then use the exact finding code below. Doctor reports these
+findings without repairing the store. The [CLI contract](../reference/cli.md#sidegraph-doctor)
+explains JSON output, exit codes and skipped evidence.
 
-Severity decides who is told. **Broken** means memory does not work now. **Degraded** means it
-works worse than it should, so you get a notice and `sidegraph-stats` shows it (except `store-not-migrated` and `stray-store`, which are on the session line and the notice, and in doctor for `store-not-migrated`). **Advisory**
-means something worth knowing, which the model's line and the commands above report. Eight
-advisory checks also send a notice, because the fix is yours to decide: a proposal queue that
-has waited 30 days, an outdated refresh helper, a missing refresh hook, records on a branch that has not moved for a
-week, a plugin and a package of different versions, a second Sidegraph on `PATH` of another version,
-a plugin that is off in a nested
-directory with settings of its own, and a packed store with maintenance due.
+| Doctor finding | Likely cause | Next action |
+|---|---|---|
+| `dangling-record` | An open record has no committed anchors. A fact also has no live supporting decision. | Inspect the write result, then add accurate anchors with `add_anchors`. Restore a skipped binding file before adding replacements. |
+| `degraded-binding` | A binding's last recorded status is degraded. This can come from ambiguous leaf resolution or its shared-community fallback. | Choose a precise target name and file path, then use [`add_anchors`](../reference/mcp-tools.md#add_anchors). An ambiguous sync outcome reports a candidate count. Doctor reports the recorded status rather than a candidate list. New anchors retain older bindings. A damaged binding stays reported until sync re-resolves its original target. See the [resolution ladder](../reference/anchoring-internals.md#the-rebind-ladder). |
+| `orphaned-binding` | The binding's last recorded status is orphaned. Capture or sync could not resolve its target. | Check whether the target moved or disappeared. Adding an anchor keeps the old binding as history. A damaged binding stays reported until sync re-resolves its original target. Rebuild and use the [healing guide](surviving-refactors.md#reading-and-healing-stale-decisions-warnings). |
+| `orphaned-record` | Every code anchor of an open record is orphaned. | If the graph is stale, rebuild it first. Otherwise inspect the record and heal its anchors. See [orphaned records](#orphaned-records). |
+| `stale-proposal` | A proposed decision or domain has waited beyond the selected age threshold. | Review it with `list_proposed` or `sidegraph-ratify`, then accept it or drop it explicitly. |
+| `unreferenced-entity` | No committed binding refers to the entity. | Inspect its identity and history before further capture. This is curation advice, not permission to delete canonical history. There is no automatic doctor repair. |
+| `duplicate-entity` | Several entity identities describe the same target. | Inspect the ids and binding counts in the finding, and check precise name/file anchors before further writes. Keep historical records. See the [identity contract](../reference/cli.md#sidegraph-doctor). |
+| `expired-open-validity` | A decision has passed its validity end while its status is still open. | Review its current meaning. Follow the linked version and refusal guards before [`retire_decision`](../reference/mcp-tools.md#retire_decision) for an accepted decision that has ended. Use [`ratify(drop=[...])`](../reference/mcp-tools.md#ratify) for an obsolete proposal. |
+| `superseded-no-live-successor` | Every successor of a superseded decision or fact was rejected. | Restate the knowledge as a fresh anchored record. The old finding stays as history. See [recovery](#superseded-no-live-successor). |
+| `code-drift` | A record-specific change, or a store-level note about unavailable comparison evidence. | First distinguish the record finding from the store-level evidence note. Follow [content review](#code-drift) for the appropriate action. |
+| `never-surfaced` | An accepted decision has no recorded showing despite queries on its files. | Call `get_task_context` with those files. Inspect its anchors and the supplied `memory_budget` and `structure_budget` parameters. Retry with a larger memory budget when appropriate before changing the record. See [retrieval](retrieval-in-sessions.md). |
+| `stale-instructions` | An injected instructions file quotes wording from a superseded decision. | Compare the text with the successor and update instructions if they still teach the abandoned rule. A historical quotation alone is not proof of a contradiction. |
+| `unratified-accept` | An accepted agent-authored record has no ratifier stamp within the checkable period. | Inspect provenance and the capture policy before judging it. Replace deprecated auto-accept configuration if present. Do not backfill the store creation marker. |
+| `graph-root-mismatch` | Graph paths appear relative to a subdirectory instead of the repository root. | Rebuild from the repository root with `GRAPHIFY_NO_AUTO_REFRESH=1`, then run `sidegraph-sync`. |
+| `snapshot-split` | Several accepted domains inherit one frozen snapshot area. | Run the refresh command printed by doctor for every named part, review the snapshot change and commit it. See [snapshot reference](../reference/cli.md#sidegraph-domains-snapshot). |
+| `graph-stale` | HEAD differs from the graph build commit and a covered file changed or appeared. | [Rebuild the graph](#graph-stale) from the root with the refresh guard, then sync. |
+| `engine-version` | The graph uses an untested engine version, or its store needs the matching migration. | Read the finding, pin a tested Graphify release and follow the [engine guidance](#engine-version). |
+| `store-uncommitted` | Canonical store files have remained outside commits. | Review the store diff and commit the canonical changes in the same pull request as the work. Keep the derived index ignored. See [commit guidance](#store-uncommitted). |
+| `plugin-off-in-subdirectories` | Claude project scope leaves nested launches without Sidegraph. | Enable the plugin in root local settings or user settings after reviewing the scope. See [scope recovery](#plugin-off-in-subdirectories). |
+| `refresh-helper-outdated` | A Git hook uses an older refresh helper. | Run `sidegraph-init` to refresh the helper while preserving the recorded hook choice. See [helper recovery](#refresh-helper-outdated). |
+| `store-not-migrated` | A nonempty store uses the earlier file layout. | Follow the team migration checklist, then run `sidegraph-migrate` on the default branch. See [migration](#store-not-migrated). |
+| `maintenance-due` | A packed store has routine packing or cleanup work. | Run `sidegraph-compact` on the default branch and review the diff. This finding does not escalate the doctor check exit code. See [maintenance](#maintenance-due). |
+| `deprecated-auto-accept` | The legacy `SIDEGRAPH_AUTO_ACCEPT=on` switch is set. | Choose the intended ratification policy, then unset the legacy switch where it is configured. See [policy migration](#deprecated-auto-accept). |
+| `record-fields-requirement` | The store requirement predates fields the running client can write. | Upgrade all writers to the version named in the finding, run `sidegraph-require --sidegraph X.Y.Z` and commit the format marker. |
+
+An entry in the JSON `skipped` list means that check did not run. It is not a clean result
+for that check. Restore the evidence or resolve the reason the advisory pass stopped, then
+inspect the report again. Store-level `code-drift` notes saying "check skipped" are findings,
+not entries in that list. See [content review](#code-drift).
+
+For `binding-status`, `never-surfaced` or `orphaned-records`, restore the derived index and
+current binding evidence with `sidegraph-sync`. If `graph` is also skipped, build the graph
+from the repository root first, then sync. Sync needs a readable graph to recompute binding
+statuses. Doctor can still inspect previously computed statuses without that graph. For
+`advisory-checks`, resolve the reported error, symlink or version requirement before
+repeating doctor. Follow the report's reason when it names a narrower condition.
+
+Strict violations such as `parse-error` are a separate namespace. Use the
+[verification-code reference](../reference/cli.md#sidegraph-verify) for those.
+
+SessionStart also uses the notice codes below. Some aggregate several doctor findings,
+and others concern the live host rather than stored records.
+
+| Session notice or line | Likely cause | Next action |
+|---|---|---|
+| `store-unreadable` | The selected store cannot open | Follow the [named recovery](#store-unreadable). Remove only a damaged derived index when that is the diagnosed cause. |
+| `pending-ratification` | Proposals await review | Review with `sidegraph-ratify` or the ratify tool. |
+| `graph-borrowed` | This worktree uses the main checkout graph | No repair is required. Build a worktree graph when branch-only code needs to appear. |
+| `stray-store` | A nested empty store hides the intended repository store | Verify that it is empty, then remove only that extra store. See [stray-store](#stray-store). |
+| `graph-missing` | No readable graph was found | Build the graph from the repository root. See [graph-missing](#graph-missing). |
+| `orphaned-records` | One or more open records lost all concrete anchors | Inspect the corresponding `orphaned-record` doctor findings. |
+| `store-files-skipped` | Canonical files could not be indexed | Run `sidegraph-verify`, resolve the named files and reopen the store. |
+| `refresh-hook-missing` | No Git hook keeps a graph current | Choose `sidegraph-init --hooks` or `--no-hooks`. See [hook setup](#refresh-hook-missing). |
+| `branch-only-records` | Records remain only on unmerged branches | Merge the intended branch through the normal pull request flow. |
+| `version-skew` | Plugin and runtime versions differ | Follow the direction-specific [version checks](#version-skew), then start a new session. |
+| `path-skew` | The optional CLI install differs from the session runtime | Follow the [CLI update or removal path](#path-skew). |
 
 ### store-unreadable
 
@@ -138,12 +178,30 @@ notice.
 
 ### code-drift
 
-Records needing content review after code changed or a prior scoped check stopped applying.
-The line says how many. Inspect current code: record an explicit `record_drift_check` if the
-claim still holds, or propose a real successor if it does not. There is no user notice.
-`sidegraph-doctor` lists them as `code-drift` findings, grouped by the drifted file with one `git diff` per distinct
-change (`sidegraph-doctor --flat` prints one line per record instead), and the `sidegraph:triage-drift` skill walks them.
-`SIDEGRAPH_DRIFT_NUDGE=off` silences the line.
+A record-specific finding means anchored code changed or a previous scoped inspection no
+longer applies. Inspect the current claim. Use `record_drift_check` if it still holds, or
+follow the [status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings)
+if it changed. The drift-check tool requires a stamped, open
+subject and an exact inspected Git revision. See its [write contract](../reference/mcp-tools.md#record_drift_check).
+
+A store-path line saying "not checkable" or "check skipped" has no decision id to inspect.
+It reports unavailable comparison evidence, such as missing Git, an unavailable scoped
+check or records that predate commit stamping. It does not prove a claim changed. Restore
+Git or the missing comparison evidence where possible and rerun doctor.
+
+For records that predate commit stamping, the capture revision is absent historical
+provenance. There is no comparison evidence to restore. That note remains while the check
+counts those open legacy records. Close them only for a genuine content replacement,
+retirement or proposal-drop reason. Do not backfill provenance or invent a content-free
+successor to clear the note.
+
+These store-level notes are `code-drift` findings, so `sidegraph-doctor --check` exits 2
+on them. They are separate from the JSON `skipped` list. See the
+[doctor output contract](../reference/cli.md#sidegraph-doctor).
+
+The default text groups record findings by drifted file. `--flat` prints one line per
+record. The `sidegraph:triage-drift` skill walks the content checks.
+`SIDEGRAPH_DRIFT_NUDGE=off` silences the session line.
 
 ### graph-borrowed
 
@@ -170,7 +228,7 @@ the empty store, as the notice names it, to use the repository's.
 ### graph-missing
 
 No code graph where Sidegraph looked, or one that could not be read. Memory still works from the
-store, but it cannot match files to records or anchor new ones. Build the graph from the
+store, but graph-based matching and concrete target resolution are unavailable. Build the graph from the
 repository root by running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set. This is advisory, because a corpus of documents only runs
 without a graph. It is a model line only, and `sidegraph-doctor` reports it as a skipped check,
 never as a finding.
@@ -193,8 +251,11 @@ Its domain snapshot also sets the minimum version, which clears this line.
 Open decisions and facts whose every leaf anchor is orphaned: retrieval reaches them only through
 their file or domain. If the graph is stale, rebuilding it re-anchors them. Otherwise
 `sidegraph-doctor` lists each record as an `orphaned-record` finding, and the
-`sidegraph:heal-anchors` skill repairs them, by re-anchoring with `add_anchors` or by superseding a
-record whose code is gone.
+`sidegraph:heal-anchors` skill walks the
+[status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings):
+add precise anchors when the claim still holds, propose a meaningful successor for an
+accepted, open record whose claim changed, or review retirement when a decision's subject
+is gone. Invalidated proposals go to human review for dropping.
 
 The severity depends on how old the records are. **Three or more written in the last 14 days** is
 degraded: anchoring is failing now, as when a batch of proposals lands with its anchors orphaned
@@ -205,6 +266,31 @@ The statuses live in the derived index and are recomputed by a sync. Right after
 a `git pull` that changed a record, every anchor reads live until the next sync, so the check does
 not run then and a recorded notice is kept. `sidegraph-doctor` lists `binding-status` and `orphaned-records`
 among its skipped checks until then; `sidegraph-sync` recomputes the statuses.
+
+### superseded-no-live-successor
+
+A decision or fact is `superseded`, it has successors, and every one of them is `rejected`, so
+retrieval shows nothing for it. Stores written before the live-head rule can hold this: under
+manual ratification a successor proposal closed the old record when it was written, and
+dropping the proposal later left the old record closed with nothing to continue it. That
+propose-then-drop sequence no longer produces it. A successor that is `accepted`, still
+`proposed`, `deprecated` (retired on purpose) or itself `superseded` keeps the chain healthy.
+A superseded record with no successor at all is `sidegraph-verify`'s
+`superseded-without-successor`, not this finding.
+
+The advice restates a record, so doctor gives it only when the successors are fully known. While
+`sidegraph-verify` reports a record it could not read in full (`parse-error`,
+`bad-validity-window`, `filename-id-mismatch`, `bad-archive-segment`, `bad-shard-line`,
+`unsafe-record-id`, `shard-conflict`, `duplicate-packed-record` or `symlinked-store-entry`), or
+cannot run, the finding is withheld
+for the whole store. Heal what verify reports, and the finding appears if it still applies.
+
+The record cannot be superseded again, because `supersede_decision` and `supersede_fact` take
+only a live head. Restate it as a fresh record with `add_decision` or `add_fact`, copying the
+context, choice and rejected alternatives (or the statement and source) from the superseded
+record and anchoring it the same way. The new record has no link to the old one, so the finding
+stays on the old record as history. It is advisory and never fails `sidegraph-doctor --check`,
+which would otherwise fail forever. Doctor never rewrites a record.
 
 ### store-files-skipped
 
@@ -339,6 +425,16 @@ lines or maintenance would pack them. The check does not consult git, so a recor
 still has to settle (or is untracked) is not predicted. It reads the shard files once; a store
 with more than 200 per-record files (drift-check files included) is decided from the directory listing.
 
+### deprecated-auto-accept
+
+`SIDEGRAPH_AUTO_ACCEPT=on` is set in the environment of the session or of `sidegraph-doctor` (an MCP server started with its own `env` block is not seen here; its `propose_decisions` results carry a `deprecation` note instead). The
+variable still works exactly as before (agent captures land `accepted`, with no ratifier stamp,
+whether or not they have a live anchor) but it is deprecated and will be removed in a later release, announced in the
+CHANGELOG. The replacement is `SIDEGRAPH_RATIFY_POLICY=auto-all`: eligible captures
+self-ratify with a `ratified_by` stamp, and a capture with no live anchor stays `proposed` for a
+human to review. Set the new variable where you set the old one and unset the old one. Doctor
+lists one finding, at `SIDEGRAPH_AUTO_ACCEPT`; `--check` reports it but does not exit `2` on it.
+
 ### version-skew
 
 The package that runs the hooks and the MCP server is not the version of the plugin that wired
@@ -444,26 +540,4 @@ line.
 
 ## The launch-commit file
 
-The plugin's `Stop`, `PreToolUse` and `SubagentStart` hooks (and Codex's `Stop` and
-`SubagentStart`, Grok Build's `Stop`, `PreToolUse` and `SubagentStart`, and Muse's
-`SubagentStart`) launch from a commit, not from
-`@main`, which tracks a mutable branch (see
-[Mutable development references](../getting-started/installation.md#mutable-development-references)):
-`uv` re-resolves a branch reference on every call and serves a commit from its cache.
-`SessionStart` writes the commit.
-
-- **What it is.** The 40 hex characters of a commit, in
-  `${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit`, one per machine. Only a Sidegraph
-  installed from `@main` writes it, so an install pinned to a tag or SHA (a CI run, a pilot), an
-  editable install and a PyPI install never repoint the plugin. The reading side is the same: a
-  plugin pinned to a tag or commit ignores the file and launches its own ref.
-- **Deleting it is safe.** With no valid file the hooks launch `@main`, as they did before, and
-  the next `SessionStart` writes it again. The hooks use the file only if it is a regular file
-  of 40 lowercase hex characters (one trailing newline is accepted), so a damaged one is
-  ignored.
-- **A slow hook call.** A value you edited by hand that looks like a commit but is not one makes
-  every `Stop`, `PreToolUse` and `SubagentStart` call wait about six seconds for `uv` to fail before the hook
-  answers `{}`. Delete the file, or start a session so `SessionStart` overwrites it.
-- **After `uv cache clean`.** The cached commit is gone: the next call fetches it again, online.
-  Offline it fails into the guard and answers `{}`, which is also what an offline `@main` call
-  does.
+If a hook uses a stale or invalid cached commit, start a new session or remove the launch-commit file. See the [launch-commit contract](../reference/hooks.md#the-launch-commit-file) for its path, validation and recovery steps.

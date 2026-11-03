@@ -1,5 +1,7 @@
 # Codex CLI integration
 
+> **Start here:** Install the host plugin, start a new session in your repository, then [verify it](../guides/verifying-your-setup.md). [Glossary](../concepts/glossary.md).
+
 The deep dive on how Sidegraph wires into the OpenAI Codex CLI. For the copy-paste happy
 path, see [`getting-started/codex-setup.md`](../getting-started/codex-setup.md).
 
@@ -46,6 +48,8 @@ reads — see [`claude-code.md`](claude-code.md#environment-variables) for their
 
 ## Hooks (GA)
 
+For a manual setup on macOS, Linux or WSL, add this file. Native Windows users should use the plugin path below.
+
 Project-scoped, at `.codex/hooks.json`:
 
 ```json
@@ -85,81 +89,15 @@ Project-scoped, at `.codex/hooks.json`:
 }
 ```
 
-The `cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"` prefix stands in for the
-`cd "${CLAUDE_PROJECT_DIR}"` prefix of the Claude Code hooks — Codex hook entries, like Claude Code's,
-have no dedicated `cwd`/`env` fields, so the working directory has to be pinned inside the
-command itself. The `|| pwd` fallback matters because Sidegraph explicitly supports non-git
-corpora (a plain folder of docs Graphify was pointed at directly — see
-[`graphify.md`](graphify.md#non-git-and-doc-only-corpora)): a bare
-`git rev-parse --show-toplevel` fails outside a git repo and would leave `cd` with no argument,
-breaking the hook entirely, whereas falling back to `pwd` at least keeps the relative
-`SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH` paths anchored to wherever Codex launched the hook from.
-`sidegraph-session-start` emits the same `additionalContext` payload described in
-[`claude-code.md`](claude-code.md#sessionstart--sidegraph-session-start) (communities,
-initiatives, global mistakes); `sidegraph-stop` emits the same guarded block-to-distill
-nudge, once per session and again after 30 minutes and 10 new commits (see
-[`reference/hooks.md`](../reference/hooks.md#re-arm-after-more-work)). `sidegraph-subagent-start`
-gives each subagent Codex starts a short brief, because a subagent gets no `SessionStart`
-context: the `get_task_context(files=[…])` call to make, and one sentence on how many records
-memory holds and in how many files (see the
-[hooks reference](../reference/hooks.md#sidegraph-subagent-start); `SIDEGRAPH_SUBAGENT_BRIEF=off`
-disables it). `sidegraph-stop` and `sidegraph-subagent-start` degrade silently on any failure.
-`sidegraph-session-start` does too, with one exception: a store that cannot be opened. It then
-sends a notice (a `systemMessage` that names the cause and the fix) and tells the model that
-memory tools will fail, because a broken store should not go unseen. A missing store is never created by a hook:
-`SessionStart` sends a notice that asks for an explicit `sidegraph-init`, and a missing graph only shortens the map; neither blocks the session.
+Use the plugin path below for native hook wiring. The JSON above is the complete manual POSIX recipe. The reference explains its behavior. SessionStart supplies a map, SubagentStart introduces retrieval, and Stop can remind an interactive agent to capture learning. Sidegraph does not register a Codex file-read hook.
 
-Each command ends with a guard, `|| printf '{}\n'` on `Stop` and `SubagentStart` and, on `SessionStart`,
-`|| printf '%s\n' '{"systemMessage":"…"}'`. It covers the part the Python entry points cannot:
-a command that never reaches Python. On `Stop`, Codex treats a hook that exits 2 with text on
-stderr as a block and feeds that text back to the model, and `uv` exits 2 on some of its own
-errors (a project it cannot find, a cache it cannot write), as does `dash` when the `cd` fails.
-Without the guard such a failure keeps continuing the session. With it the hook exits 0 and
-answers `{}`, which Codex reads as "nothing to say". On `SessionStart` a failed command is only
-a failed hook, so the guard there is for the user: it answers a `systemMessage`, "Sidegraph: the
-SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a
-terminal to see the error". The price of the guard is that a failure no longer shows up as a
-failed hook, which is why `SessionStart` says so itself. Keep the guard if you adapt the recipe.
-How to run the command in a terminal is in
-[`reference/hooks.md`](../reference/hooks.md#if-you-see-this-message).
-
-`sidegraph-stop` reads Codex's own transcript, the rollout file, to decide whether the session
-is substantial enough to nudge. Only a person's interactive thread can arm it, and only once
-it holds at least two real prompts of its own: the project instructions and environment
-blocks Codex writes into a rollout, a Stop hook's own block reason fed back, and an answer to
-the agent's question do not count. A subagent, Codex's automatic reviewer and a headless
-`codex exec` run never arm it, and `codex exec` is the one that matters in automation: a Stop
-block makes a headless run continue and replaces the output you asked for with `-o`. A run
-started through the Codex TypeScript SDK is headless too: the gate recognises it by the
-rollout's `source` of `exec`, because the SDK sets an originator of its own. Observed
-on codex-cli 0.159.3, Codex fires `SubagentStop`, not `Stop`, for a subagent, and the plugin
-registers no `SubagentStop` hook, so a subagent's thread is not nudged either way. The exact
-rule is in
-[`reference/hooks.md`](../reference/hooks.md#sidegraph-stop).
-
-Codex only loads project-local `.codex/` hooks (like the ones above) when the project layer
-is marked trusted — if these hooks silently don't fire, check the trust prompt/settings before
-assuming the JSON above is wrong.
-
-No `PreToolUse` entry is offered above. Codex can invoke the event for local function tools
-(including shell, patch, and MCP calls), but it has no stable `Read`/`Grep` pair equivalent to
-Claude Code's, and the records block the `sidegraph-pre-tool-use` hook hands over for a file (see
-[`claude-code.md`](claude-code.md#pretooluse--sidegraph-pre-tool-use)) needs a tool call that
-names the file. Delivery there is deferred. Re-check the current [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks)
-before adding one; hosted tools are outside the hook surface.
+See the [full contract](../reference/codex-wiring.md#hooks-ga).
 
 ### Headless runs
 
-A `codex exec` run never arms the capture nudge, as above, so a Stop block cannot replace the
-`-o` output. If the plugin's hooks are trusted in the `CODEX_HOME` the run uses, they still run
-there, and a broken install (`uv` cannot start, the project directory is gone) answers `{}` and
-the run goes on. To run a review panel or any other automation without Sidegraph's hooks at all,
-give it a `CODEX_HOME` that holds only `auth.json`: with no plugin installed there is no
-Sidegraph hook, and a project's own `.codex/hooks.json` does not run there either, because that
-home has not trusted the project. Do not add `--dangerously-bypass-hook-trust` to that run.
-`SIDEGRAPH_CAPTURE_NUDGE=off` is narrower: it silences only the `Stop` nudge, and `SessionStart`
-still injects the memory map. Name the model with `-m`, since the clean home carries no
-`config.toml`.
+A `codex exec` run does not trigger the Stop capture reminder and does not show the interactive hook-approval prompt. Arrange reviewed approval explicitly for automation.
+
+See [details](../reference/codex-wiring.md#headless-runs).
 
 ## The auto-reviewer and memory reads
 
@@ -231,18 +169,7 @@ observed 0.162.1 metadata. Updating never grants approval to a changed command. 
 launcher's `@main` does not update cached skills, manifests or hook definitions, so this
 marketplace update remains necessary. Update Codex itself if this command is unavailable.
 
-**How the plugin launches.** The MCP server and `SessionStart` run `uvx --from
-git+https://github.com/SantyagoSeaman/sidegraph.git@main`, a mutable branch (see
-[Mutable development references](../getting-started/installation.md#mutable-development-references)).
-`Stop` and `SubagentStart` run many times a session and `uv` re-resolves a branch reference on every call, so they launch from the commit `SessionStart`
-recorded in `${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit`, falling back to `@main`
-when there is no valid record. A plugin pinned to a tag or commit ignores the record and
-launches its own ref. The file is the one the Claude Code plugin uses, so a release
-reaches a running session at the next `SessionStart` on the machine, not at its next `Stop`.
-Codex runs a hook with the session's detected shell and `-c` (`$SHELL -lc` is only a fallback),
-and a fish shell cannot parse the POSIX prefix that reads the file, so every command in the
-manifest is wrapped in `sh -c '…'`. See
-[Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file).
+**How the plugin launches.** The MCP server and SessionStart resolve the configured package source. Repeated hooks use the [shared launch-commit contract](../reference/hooks.md#the-launch-commit-file). See the [launcher reference](../reference/codex-wiring.md) when adapting the commands.
 
 **Native Windows.** The MCP server needs no shell: `codex/mcp.json` starts `uvx` (`uv` in the
 development manifest) directly with an argument list. Each hook carries a second key,
@@ -264,7 +191,7 @@ shape: `.agents/plugins/marketplace.json` at the repo root, and
 (`plugin/sidegraph/codex/mcp.json`), the hooks config
 (`plugin/sidegraph/codex/hooks.json`), and the skills directory (all 14 skills, each with
 its own `agents/openai.yaml` declaring the `sidegraph` MCP dependency and whether Codex may
-invoke it implicitly). No `PreToolUse` entry ships, for the reason given above.
+invoke it implicitly). No `PreToolUse` entry ships because Codex has no stable file-read tool pair equivalent to Claude Code's Read/Grep pair. Call `get_task_context` explicitly for file records.
 
 **The cwd risk this page used to defer on is resolved, not sidestepped.** Codex plugin MCP
 servers and hooks do not get a project-root variable. That was confirmed live with `codex mcp
@@ -278,33 +205,4 @@ to the project: `CLAUDE_PROJECT_DIR` when set, else the git top-level, else the 
 anchoring, not a plugin-provided variable, is what keeps `SIDEGRAPH_DIR`/`SIDEGRAPH_GRAPH`
 pointed at the right repo.
 
-**Native verification for the 0.14.0 release (Codex CLI 0.162.1, macOS ARM, 2026-10-15).** A fresh owned
-`CODEX_HOME` installed the public-form Sidegraph from a Git marketplace. All 30 installed
-plugin files matched committed source after the four public substitutions. The native
-registries contained the 12 skills shipped then (14 today), the expected enabled `sidegraph` MCP command/arguments/
-environment, and exactly three initially untrusted hooks. The existing native gate's
-`config/batchWrite` approval path wrote only their current hashes; all three then reported
-trusted. No project-trust write was needed for this plugin registry check.
-
-A local fixture upgrade changed the version and one skill body while keeping MCP/hook
-bytes unchanged. It updated the installed cache root without uninstalling and preserved
-all three hook hashes and trust without new writes. With the origin unavailable, upgrade
-exited 1 and retained the old version, installed bytes, enabled registration and trust.
-After the origin was restored, a fixture changing only Stop's selected command made that
-hook `modified`, with a new hash; the other two remained trusted. This is evidence of
-source-unavailable retention, not a guarantee of atomic recovery from every interrupted
-filesystem write. Fixture versions were synthetic; the committed package was not bumped.
-
-That check used an owned reserved HTTPS-shaped Git URL rewritten to a local bare origin.
-It did not repeat a public GitHub fetch, use a model, execute hooks or call MCP tools.
-The earlier 0.154.0 check verified the GitHub `owner/repo` shorthand and real MCP calls;
-those are historical observations, not fresh authenticated evidence for 0.162.1. Full
-native acceptance of the exact release candidate remains a separate Windows/macOS gate.
-
-Project trust and hook trust are separate. Project trust controls project-local settings;
-installing or enabling a plugin does not approve its hook hashes. A non-interactive
-`codex exec` run does not show the interactive approval prompt, so automation must arrange
-reviewed approval explicitly, as the native gate does in its own profile. User installation
-should use the startup warning or `/hooks`, without a trust bypass. The unchanged nested
-compatibility manifest works with 0.162.1; the current plugin contract also documents that
-compatibility form. Recheck the primary host documentation when using another Codex version.
+The [native verification record](../reference/codex-wiring.md#native-verification) describes the checked plugin install, upgrade and trust behavior.

@@ -1,5 +1,7 @@
 # Running Sidegraph in a team
 
+> **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
+
 Commit the decision store in version control alongside the code and docs it describes.
 Each `Decision`, `Fact`, `Domain`, durable `Entity`, and anchor set is a small text file
 (or, in a packed format-2 store, a line in a shard file), so changes can be reviewed and
@@ -27,8 +29,8 @@ telemetry is not reconstructible; deleting the index loses those local statistic
 loses the team's durable decisions or facts.
 
 Everything else under `.sidegraph/` (all but what its own `.gitignore` lists) **is** the
-team's memory: the record directories `decisions/`, `facts/`, `domains/`, `entities/`,
-`bindings/` and `initiatives/`, plus `shards/` in a packed store, optional `archive/`
+team's memory: the record directories `decisions/`, `facts/`, `domains/`, `entities/`
+and `bindings/` (plus `initiatives/` in a store from before 0.24, kept as history), plus `shards/` in a packed store, optional `archive/`
 segments, `verifications/`, the `format` marker and `domain-snapshot.json`. Never `.gitignore` those paths, and never treat them as disposable local cache the way you
 might Graphify's `graph.json` — that one really is regenerated on every build; the decision
 store is the opposite, deliberately durable, and is the one piece of Sidegraph's state that
@@ -55,7 +57,7 @@ local branches, with a notice when such a branch is more than a week old
 `.sidegraph/` in the same pull request as the work that produced the records, and merge the
 branch that holds the rest. Fully staged store files do not count toward `store-uncommitted`,
 so that one check never blocks the commit that fixes it. A pre-commit hook that runs
-`sidegraph-doctor --check` still fails often. `--check` makes every advisory finding except `maintenance-due` exit `2`,
+`sidegraph-doctor --check` still fails often. `--check` makes every advisory finding except the exempt ones (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`) exit `2`,
 and `code-drift` is one of them: it fires after any commit that touches a file an accepted
 record is anchored to. For a gate on the store itself, use `sidegraph-verify`. It exits `2`
 only for a violation of the store's own write rules, and `0` for a clean store whatever the
@@ -224,12 +226,19 @@ The store is append-only by design (see the [write rules](../reference/store-for
 is no operation that hard-deletes a `Decision`. When the team disagrees with a past decision,
 or a new decision reverses an old one:
 
-- Use `supersede_decision` (or `supersedes` in a `propose_decisions` draft), never a fresh,
-  unrelated record. `supersede_decision` closes the predecessor (`valid_to` set,
-  `status=superseded`) in the same call that writes the replacement — both committed files
-  land together. A `propose_decisions` draft with `supersedes` does the same under the
-  `manual` policy; under `auto-low-risk`/`auto-all` the predecessor stays open until the
-  successor is ratified.
+- For an accepted decision with `valid_to` unset, use `supersede_decision` or `supersedes`
+  in a `propose_decisions` draft. The predecessor closes
+  (`valid_to` set, `status=superseded`) at the moment its successor becomes accepted.
+  `supersede_decision` writes an accepted replacement, so it closes the predecessor in the
+  same call — both committed files land together. A `propose_decisions` draft with `supersedes`
+  lands `proposed`, under every ratify policy: the predecessor stays `accepted` and visible
+  until the successor is ratified, which closes it then. Dropping the proposal leaves the
+  predecessor exactly as it was. Only the live (accepted) head can be superseded, and it
+  takes one pending successor at a time: to amend a pending proposal, drop it and propose
+  again. For closed history, inspect its live head or restate current knowledge when none
+  exists. Follow the [status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
+  See [the supersession invariant](../concepts/data-model.md#the-supersession-invariant)
+  for facts and domains, including recovery of a dropped domain.
 - The old record stays retrievable via `get_entity_history` and the `~ tried, reverted 2026-01:
   ...` one-liners in `## Related` — "we tried this, here's why we stopped" is exactly the memory
   that keeps the next person from re-litigating a settled argument or re-discovering the same
@@ -240,9 +249,9 @@ or a new decision reverses an old one:
 
 ## Non-git corpora: works, but not committable this way
 
-Sidegraph doesn't require the corpus to be a git repo — `GraphifyReader.graph_version()` falls
-back to a `content:<hash>` of `graph.json` when there's no `built_at_commit` to read, so
-change detection and sync still work on a plain folder of docs. What breaks is the
+Sidegraph can work with a plain folder of documents. Without a recorded Git commit, it
+versions the graph by a content hash, so change detection and sync still work. See the
+[sync triggers](../reference/anchoring-internals.md#sync-triggers). What breaks is the
 team-memory story above: with no repo, there's no natural "commit the store next to the code"
 mechanism, no PR to ratify against, and no `git clone` onboarding path. The store still works
 locally (add, retrieve, sync all function the same), but you're responsible for distributing

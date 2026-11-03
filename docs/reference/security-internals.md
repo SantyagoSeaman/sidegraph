@@ -1,5 +1,7 @@
 # Security internals
 
+> **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
+
 The exact runtime rules behind [`SECURITY.md`](../../SECURITY.md): what the inspection
 history records, how redaction behaves at its edges, the input limits, which diagnostics
 stay content-free, and how Git baselines and bootstrap reads are validated. The policy, scope
@@ -70,7 +72,7 @@ strings are omitted. At most 10 errors, 8 path components and 1,024 characters a
 
 Logical MCP writes check raw admission before signature coercion and intercept exceptions
 before FastMCP warning/error logging. The finite input policy also applies to raw
-`ratify`, `ratify_decisions`, `sync_anchors` and `add_anchors` arguments. Read-tool aliases
+`ratify`, `sync_anchors` and `add_anchors` arguments. Read-tool aliases
 and diagnostic help retain their existing behavior; write errors list valid parameters
 without repeating unknown argument names. Unsupported or unaudited tool registrations
 fail closed. The compatibility adapter's tested versions are listed under
@@ -113,6 +115,10 @@ For undecodable pathname bytes, use `--json`, which escapes the path and preserv
 the non-clean exit `2`. This reporting limitation does not produce a clean exit `0`.
 
 ## Bootstrap source validation
+
+The default source size limit is 512,000 bytes. Bootstrap excludes `.git/`, `.sidegraph/`,
+`.venv/`, `venv/`, `node_modules/`, `vendor/`, `dist/`, `build/`, `target/`, `graphify-out/`,
+`_build/` and `coverage/`, plus binary, unreadable and oversized files.
 
 Bootstrap admits regular source files only. FIFO, sockets, devices and directories are
 excluded before reading; include overrides directory/size rules, never regularity, root,

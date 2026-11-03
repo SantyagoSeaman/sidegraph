@@ -178,7 +178,7 @@ def test_init_store_open_failure_exits_nonzero(tmp_path, capsys):
     conn.commit()
     conn.close()
     assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 1
-    assert "not writable" in capsys.readouterr().out
+    assert "not writable" in capsys.readouterr().err
 
 
 # -- deferred --db default resolution (review Minor 4) -------------------------------
@@ -231,39 +231,49 @@ def test_init_bare_run_with_sidegraph_db_set_still_emits_deprecation_note_once(
     assert "SIDEGRAPH_DB is deprecated" in captured.err
 
 
-# -- honest "already initialized" for an un-migrated legacy directory (review Minor 5) --
+# -- a legacy single-file directory is refused, not reported as created ---------------------
 
 
-def test_init_reports_already_initialized_for_unmigrated_legacy_directory(tmp_path, capsys):
-    """A directory holding an un-migrated legacy decisions.db (no format marker yet --
-    migration hasn't run) is a REAL pre-existing store: Store(...) migrates it in place a
-    moment later. init_main must say "already initialized", not "created store" -- the
-    latter would misreport real, pre-existing decisions as freshly created."""
+def test_init_refuses_a_directory_holding_a_legacy_decisions_db(tmp_path, capsys):
+    """A directory holding a legacy decisions.db is real pre-existing data that Store(...)
+    refuses to open: init_main must fail with the refusal, say nothing about a created store,
+    and leave the directory as it was."""
     import sqlite3
 
     db_dir = tmp_path / "legacy-store"
     db_dir.mkdir()
     legacy_file = db_dir / "decisions.db"
     conn = sqlite3.connect(str(legacy_file))
-    conn.executescript(
-        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
-        "CREATE TABLE entities (entity_id TEXT PRIMARY KEY, canonical_name TEXT NOT NULL, "
-        "data TEXT NOT NULL);"
-        "CREATE TABLE decisions (id TEXT PRIMARY KEY, status TEXT NOT NULL, supersedes TEXT, "
-        "data TEXT NOT NULL);"
-        "CREATE TABLE anchor_bindings (decision_id TEXT NOT NULL, entity_id TEXT NOT NULL, "
-        "data TEXT NOT NULL, PRIMARY KEY (decision_id, entity_id));"
-    )
+    conn.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
     conn.execute("INSERT INTO meta VALUES ('schema_version', '0.3.0')")
     conn.commit()
     conn.close()
 
-    assert init_main(["--db", str(db_dir), "--graph", str(tmp_path / "no.json")]) == 0
+    assert init_main(["--db", str(db_dir), "--graph", str(tmp_path / "no.json")]) == 1
     captured = capsys.readouterr()
-    assert "already initialized" in captured.out
+    assert "predates Sidegraph 0.1.0" in captured.err
     assert "created store" not in captured.out
-    assert "migrated" in captured.err  # Store's own migration notice still fires
-    assert (db_dir / "format").is_file()  # migration actually ran
+    assert sorted(p.name for p in db_dir.iterdir()) == ["decisions.db"]
+
+
+def test_init_refuses_an_interrupted_migration_behind_sidegraph_db(tmp_path, monkeypatch, capsys):
+    """SIDEGRAPH_DB=.sidegraph/decisions.db with the original renamed away and a sentinel left:
+    init must refuse, not scaffold an empty store in `.sidegraph`."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
+    monkeypatch.setenv("SIDEGRAPH_DB", ".sidegraph/decisions.db")
+    sd = tmp_path / ".sidegraph"
+    sd.mkdir()
+    (sd / "decisions.db.migration-incomplete").write_text(
+        json.dumps({"staging": str(tmp_path / ".sidegraph-migrating-x"), "backup": "b"}),
+        encoding="utf-8",
+    )
+    before = sorted(p.name for p in sd.iterdir())
+
+    assert init_main(["--no-settings"]) != 0
+
+    assert "interrupted" in capsys.readouterr().err
+    assert sorted(p.name for p in sd.iterdir()) == before
 
 
 # -- Task 1: init and SIDEGRAPH_RATIFY_POLICY in .claude/settings.json ---------------

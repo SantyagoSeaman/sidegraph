@@ -14,7 +14,7 @@ import subprocess
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.retrieval import TOC_CACHE_KEY
 from sidegraph.schema import Domain, DomainStatus, Provenance
-from sidegraph.server import _propose_decisions_impl, _ratify_decisions_impl
+from sidegraph.server import _propose_decisions_impl, _ratify_impl
 from sidegraph.store import Store
 from sidegraph.sync import sync
 
@@ -113,7 +113,7 @@ def _snapshot_canonical_dir(store: Store) -> dict[str, tuple[bytes, int, int]]:
     proves not just that content is byte-identical but that the file was never even
     rewritten (mtime unchanged), which is what actually keeps `git status` silent."""
     out: dict[str, tuple[bytes, int, int]] = {}
-    for sub in ("decisions", "domains", "entities", "bindings", "initiatives"):
+    for sub in ("decisions", "domains", "entities", "bindings"):
         d = store.path / sub
         if not d.is_dir():
             continue
@@ -145,7 +145,7 @@ def _store_and_reader_for_clean(tmp_path):
         ],
         session_id="s-clean-2",
     )
-    _ratify_decisions_impl(store, accept=[r["decision_id"] for r in results])
+    _ratify_impl(store, accept=[r["decision_id"] for r in results])
 
     domain = store.add_domain(
         Domain(
@@ -187,7 +187,7 @@ def test_sync_with_renumbered_graph_never_touches_canonical_files(tmp_path):
         session_id="s-clean",
     )
     assert [r["status"] for r in results] == ["written", "written"]
-    _ratify_decisions_impl(store, accept=[r["decision_id"] for r in results])
+    _ratify_impl(store, accept=[r["decision_id"] for r in results])
 
     # An accepted domain with a deliberately STALE `communities` mapping + a path_prefixes
     # stabilizer rule that DOES match the live graph -- guarantees refresh_domain_communities
@@ -270,7 +270,7 @@ def test_sync_renumbers_community_without_touching_canonical(tmp_path):
     )
     assert results[0]["status"] == "written"
     decision_id = results[0]["decision_id"]
-    _ratify_decisions_impl(store, accept=[decision_id])
+    _ratify_impl(store, accept=[decision_id])
 
     # captured at proposal time (index-only per Task 1): a live Tier-1 community:1 binding.
     tier1_before = [b for b in store.bindings_for_record(decision_id) if b.tier == 1]

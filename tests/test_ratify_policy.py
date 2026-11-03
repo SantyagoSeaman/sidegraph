@@ -1374,25 +1374,25 @@ def test_attached_fact_with_own_ambiguous_anchors_blocks_decision(store, tmp_pat
     assert store.get_fact(fact_result.fact_id).status == DecisionStatus.PROPOSED
 
 
-def test_manual_supersession_keeps_eager_close(store, tmp_path):
-    """T12: `manual` (the default) keeps today's eager close — the predecessor is
-    superseded immediately at write time, unaffected by the deferred-supersession
-    machinery this task adds for the two auto policies."""
+def test_manual_supersession_defers_close(store, tmp_path):
+    """`manual` (the default) defers the close like the auto policies: the predecessor
+    stays accepted until the proposed successor is ratified."""
     reader = _feature_graph(tmp_path)
     [first] = capture.propose([_eligible_decision_draft(title="predecessor")], store, reader)
     predecessor_id = first.decision_id
+    store.ratify(predecessor_id)
     [second] = capture.propose(
         [_eligible_decision_draft(title="successor", supersedes=predecessor_id)], store, reader
     )
     assert second.ratified_by is None
-    assert store.get_decision(predecessor_id).status == DecisionStatus.SUPERSEDED
+    assert store.get_decision(predecessor_id).status == DecisionStatus.ACCEPTED
     assert store.get_decision(second.decision_id).status == DecisionStatus.PROPOSED
 
 
 def test_superseding_gotcha_stays_proposed_low_risk(store, tmp_path):
     """T12: under `auto-low-risk`, gate 1 blocks a superseding gotcha draft outright
     (`has_supersedes=True`) — the successor stays proposed, and because
-    `close_predecessor` was correctly DEFERRED at write time, the predecessor is left
+    the close was correctly DEFERRED at write time, the predecessor is left
     exactly as it was (never closed by an ineligible proposal nobody has reviewed yet)."""
     reader = _feature_graph(tmp_path)
     [predecessor_result] = capture.propose(
@@ -1501,7 +1501,7 @@ def test_failed_auto_all_superseder_leaves_predecessor_open(store, tmp_path, mon
 def test_legacy_auto_accept_supersession_keeps_direct_precedence(store, tmp_path):
     """T12: legacy `auto_accept=True` (`SIDEGRAPH_AUTO_ACCEPT=on`) keeps its pre-existing
     direct-accepted precedence — the decision lands ACCEPTED immediately via
-    `add_decision`, `close_predecessor` stays eager, and the new auto-ratify machinery
+    `add_decision`, the predecessor closes at write time, and the new auto-ratify machinery
     never runs at all (it fires ONLY on writes that landed `proposed`) even when
     `ratify_policy` is also set to an auto value.
 
@@ -1515,7 +1515,10 @@ def test_legacy_auto_accept_supersession_keeps_direct_precedence(store, tmp_path
     uses the default `manual` policy, so its own blocks never reach the guard at all)."""
     reader = _feature_graph(tmp_path)
     [predecessor_result] = capture.propose(
-        [_eligible_decision_draft(title="predecessor")], store, reader, auto_accept=True
+        [_eligible_decision_draft(title="predecessor")],
+        store,
+        reader,
+        ratify_policy=RatifyPolicy.LEGACY_ACCEPT,
     )
     predecessor_id = predecessor_result.decision_id
     assert store.get_decision(predecessor_id).status == DecisionStatus.ACCEPTED
@@ -1532,8 +1535,7 @@ def test_legacy_auto_accept_supersession_keeps_direct_precedence(store, tmp_path
         ],
         store,
         reader,
-        auto_accept=True,
-        ratify_policy=RatifyPolicy.AUTO_ALL,
+        ratify_policy=RatifyPolicy.LEGACY_ACCEPT,
     )
     assert successor.ratified_by is None
     assert successor.auto_ratify_error is None
@@ -1561,8 +1563,7 @@ def test_legacy_auto_accept_standalone_fact_never_auto_ratifies(store, tmp_path)
         [_eligible_fact_draft()],
         store,
         reader,
-        auto_accept=True,
-        ratify_policy=RatifyPolicy.AUTO_ALL,
+        ratify_policy=RatifyPolicy.LEGACY_ACCEPT,
     )
     assert result.status == "written"
     assert store.get_fact(result.fact_id).status == DecisionStatus.ACCEPTED
@@ -3921,30 +3922,11 @@ def test_t7d_human_ratify_stores_human_identity_not_auto_stamp(tmp_path, monkeyp
     _t7d_assert_human_stamp(store_path, getter, id_)
 
 
-# -- Checkpoint-3 fix round 2, Minor 1(b): two more human ratify call sites the original six
-# T7(d) pins missed -- both found by the review reading src/ for OTHER `store.ratify*` call
+# -- Checkpoint-3 fix round 2, Minor 1(b): one more human ratify call site the original six
+# T7(d) pins missed -- found by the review reading src/ for OTHER `store.ratify*` call
 # sites, not by the AST/grep guards (which only prove where `actor` is passed, not which
 # callers exist at all). Same fixed-human-identity property, same "guard, not separately
 # proven red" status as the five non-CLI-decision pins above.
-
-
-def test_t7d_mcp_ratify_decisions_legacy_stores_human_identity_not_auto_stamp(
-    tmp_path, monkeypatch
-):
-    """Guard (Minor 1b): ``server._ratify_decisions_impl`` (``server.py:1759``, the
-    testable core of the LEGACY MCP ``ratify_decisions`` tool) is a separate human
-    ``store.ratify`` call site from ``_ratify_impl``/``_ratify_one`` -- not one of the
-    original six T7(d) pins. Same property, over a proposed DECISION. Not separately
-    proven red (see the CLI decision case's docstring)."""
-    from sidegraph.server import _ratify_decisions_impl
-
-    monkeypatch.setattr("sidegraph.store._ratifier_identity", _t7d_fake_ratifier_identity)
-    store_path = tmp_path / "s"
-    seed = Store(store_path)
-    d = _proposed(seed, "t7d legacy mcp decision")
-    out = _ratify_decisions_impl(seed, accept=[d.id])
-    assert out[d.id] == "accepted"
-    _t7d_assert_human_stamp(store_path, Store.get_decision, d.id)
 
 
 def test_t7d_doc_import_ratify_matching_proposal_stores_human_identity_not_auto_stamp(
