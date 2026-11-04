@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tomllib
@@ -68,6 +69,15 @@ def _run(package, options, tmp_path):
     return json.loads(result.stdout)
 
 
+def _npm_version(pep440: str) -> str:
+    """PEP 440 pre-release spelling to npm semver (`0.24.1rc1` -> `0.24.1-rc.1`).
+
+    A copy of the mapping the release tooling uses: this test ships, tools/ does not.
+    """
+    m = re.fullmatch(r"(\d+\.\d+\.\d+)(a|b|rc)(\d+)", pep440)
+    return f"{m[1]}-{m[2]}.{m[3]}" if m else pep440
+
+
 def test_package_exports_native_entry_at_current_version():
     _entry()
     path = ROOT / "package.json"
@@ -76,10 +86,8 @@ def test_package_exports_native_entry_at_current_version():
     assert package["name"] == "sidegraph"
     assert package["type"] == "module"
     assert package["exports"] == "./index.js"
-    assert (
-        package["version"]
-        == tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-    )
+    project_version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert package["version"] == _npm_version(project_version)
     assert not any(name in package for name in ("files", "scripts", "dependencies"))
 
 
@@ -99,20 +107,20 @@ def test_all_skills_and_future_addition_load_with_original_body_and_absolute_pat
     assert result["disposed"] == ["mcp", "skill"]
 
 
-def test_mcp_uses_the_public_argv_and_environment(tmp_path):
+def test_mcp_uses_the_public_argv_and_no_environment(tmp_path):
     package, options, _ = _fixture(tmp_path)
     result = _run(package, options, tmp_path)
     assert result.get("error") is None
-    public = ROOT / "plugin/sidegraph/.mcp.public.json"
+    # The OpenCode entry launches the same pinned `uvx --from sidegraph==<V> --python 3.13`
+    # server as Codex, and sets no environment: the store defaults hold.
+    public = ROOT / "plugin/sidegraph/codex/mcp.public.json"
     if not public.exists():
-        public = ROOT / "plugin/sidegraph/.mcp.json"
-    expected = json.loads(public.read_text())["mcpServers"]["sidegraph"]
+        public = ROOT / "plugin/sidegraph/codex/mcp.json"
+    expected = json.loads(public.read_text())["sidegraph"]
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert expected["args"][:4] == ["--from", f"sidegraph=={version}", "--python", "3.13"]
     assert result["servers"] == {
-        "sidegraph": {
-            "type": "local",
-            "command": [expected["command"], *expected["args"]],
-            "environment": expected["env"],
-        }
+        "sidegraph": {"type": "local", "command": [expected["command"], *expected["args"]]}
     }
 
 

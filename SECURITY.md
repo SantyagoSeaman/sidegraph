@@ -53,7 +53,10 @@ scope too.
 - **Local execution.** The runtime runs with your user's permissions, makes no outbound
   network calls of its own, and is started by your agent host and, if you install them, by
   git hooks.
-- **Supply chain.** The plugin and the default runtime recipe install from
+- **Supply chain.** The Claude Code and Grok Build plugins run a runtime bundled in the plugin:
+  the Sidegraph wheel built from the release's own sources, and a lock (`runtime/uv.lock`) that
+  pins every dependency by hash and forbids building anything from source, so what runs is what
+  the release tested. The Codex and Muse plugins and the default `uvx` recipe install from
   `git+https://github.com/SantyagoSeaman/sidegraph.git@main`, a moving reference. Teams that
   need a fixed version pin a release; see
   [mutable development references](docs/getting-started/installation.md#mutable-development-references).
@@ -90,13 +93,17 @@ provider according to your repository's data policy. The runtime data boundary i
   SessionStart hook writes one 40-character commit id to
   `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`, and only when the running package was
   installed from the canonical `git+https://github.com/SantyagoSeaman/sidegraph.git@main`. That
-  covers the plugin and the manual `uvx --from …@main` recipe. A PyPI, tag, SHA or editable
+  covers the Codex and Muse plugins, Claude plugins older than the bundled runtime and the
+  manual `uvx --from …@main` recipe. The current Claude plugin, a PyPI, tag, SHA or editable
   install never writes it. Beyond those, the only filesystem writes are the standard config
   snippets you install yourself (`.mcp.json`, hook entries). See
   [`docs/reference/store-format.md`](docs/reference/store-format.md) for the full layout.
 - **Network:** the Sidegraph runtime makes no outbound network calls and sends no remote
   telemetry. Package installation, plugin installation, and updates download dependencies
-  from their configured registries or repositories. Your MCP client controls onward use of
+  from their configured registries or repositories. What the Claude Code plugin fetches, and
+  when: on the first start after an install or an update, the PyPI packages pinned by hash in
+  `runtime/uv.lock`; on a machine without Python 3.13, also a uv-managed CPython 3.13 from
+  python-build-standalone on GitHub, which the lock does not pin; nothing on later starts. Your MCP client controls onward use of
   tool results. Local retrieval telemetry is recorded in the gitignored `index.db` by default (which records
   were shown and which files were touched, never uploaded); set `SIDEGRAPH_TELEMETRY=off` to
   stop new recording. The *optional* semantic documentation pass is executed by the

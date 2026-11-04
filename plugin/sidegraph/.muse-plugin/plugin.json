@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "sidegraph",
-  "version": "0.24.0",
+  "version": "0.24.1rc1",
   "description": "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code.",
   "compat": {
     "source": "native",
@@ -91,14 +91,12 @@
         "id": "sidegraph",
         "command": [
           "uvx",
-          "--from=git+https://github.com/SantyagoSeaman/sidegraph.git@main",
+          "--from=sidegraph==0.24.1rc1",
+          "--python",
+          "3.13",
           "sidegraph-mcp",
           "--repo-root"
-        ],
-        "env": {
-          "SIDEGRAPH_DIR": ".sidegraph",
-          "SIDEGRAPH_GRAPH": "graphify-out/graph.json"
-        }
+        ]
       }
     ]
   }

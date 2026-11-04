@@ -6,10 +6,12 @@ description: >-
 
 # Stats
 
-Run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stats` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin): skills run the CLIs at the session's version, never the copy on `PATH`) and show its output **verbatim** in a fenced block. Usage figures
+Run `uvx --from sidegraph==0.24.1rc1 --python 3.13 sidegraph-stats` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin): skills run the CLIs at the plugin's pinned version, never the copy on `PATH`) and show its output **verbatim** in a fenced block. Usage figures
 come from the local, gitignored index and graph figures from the optional read-only
 `graph.json`; the command also checks the canonical store files for index staleness.
 Nothing is sent anywhere.
+
+Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 Do not restate the numbers in prose, do not round them, do not reorder the blocks, and do
 not add a summary line. The report is written to be read as printed.

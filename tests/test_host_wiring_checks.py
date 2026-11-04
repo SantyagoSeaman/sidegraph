@@ -139,7 +139,7 @@ def test_t2_equal_versions_are_clean_and_the_check_ran(tmp_path, monkeypatch):
     assert [p.check for p in result.problems if p.check == VERSION_SKEW] == []
 
 
-def test_t2_a_plugin_newer_than_the_package_says_to_restart_or_drop_the_pinned_install(
+def test_t2_a_plugin_newer_than_the_package_names_the_old_session_and_the_manual_registration(
     tmp_path, monkeypatch
 ):
     """0.10.0 is newer than 0.9.0: a string comparison says the opposite (mutation M1)."""
@@ -151,9 +151,14 @@ def test_t2_a_plugin_newer_than_the_package_says_to_restart_or_drop_the_pinned_i
     assert problem.severity == "advisory"
     assert problem.line is not None and problem.notice is not None
     assert "plugin is 0.10.0" in problem.line and "package is 0.9.0" in problem.line
+    assert "session was started before the plugin update" in problem.line
+    assert "manual registration" in problem.line
     assert "restart the session" in problem.line.lower()
-    assert "pinned install" in problem.line
+    for stale in ("@main", "stale cache", "launcher cache", "pinned install"):
+        assert stale not in problem.line
     assert "marketplace" not in problem.line
+    # The structured fix names both actions, the restart and the registration update.
+    assert "restart" in problem.fix and "registration" in problem.fix
 
 
 def test_t2_a_package_newer_than_the_plugin_says_to_update_the_plugin(tmp_path, monkeypatch):
@@ -311,11 +316,12 @@ def test_path_skew_older_path_install_is_reported(tmp_path, monkeypatch, repo_di
     assert problem.line == problem.notice
     assert problem.line == (
         f"Sidegraph: `sidegraph-session-start` on PATH ({link}) is 0.6.0 but this session runs "
-        "0.11.1. Plugin skills and hooks use the session's version through uvx; your own shell "
-        "commands use the old one. Update it with `uv tool install --reinstall "
-        "git+https://github.com/SantyagoSeaman/sidegraph.git@main`, or "
+        "0.11.1. Plugin skills and hooks use the session's version. Your own shell "
+        "commands use the old one. Update it with `uv tool install --reinstall --python 3.13 "
+        "sidegraph==0.11.1`, or "
         "remove it with `uv tool uninstall sidegraph` if you only use the plugin."
     )
+    assert "through uvx" not in problem.line
 
 
 def test_path_skew_a_newer_path_install_is_reported_too(
@@ -327,7 +333,7 @@ def test_path_skew_a_newer_path_install_is_reported_too(
 
     assert problem.line is not None
     assert "is 0.12.0 but this session runs 0.11.1" in problem.line
-    assert "your own shell commands use the newer one." in problem.line
+    assert "Your own shell commands use the newer one." in problem.line
 
 
 def test_path_skew_without_a_uv_receipt_the_tail_is_generic(

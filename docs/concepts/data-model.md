@@ -119,12 +119,25 @@ fields differ:
   transition writes `valid_to`, because domains have no temporal-validity field.
 - **`ratify` re-checks decisions and facts for merges.** Two branches can each add a pending
   successor; after they merge, accepting a successor whose predecessor chain already has a live
-  head (followed through superseded records) is refused (`<A> is already superseded by <X>;
-  supersede that one instead`), and so is accepting one whose predecessor is still `proposed`.
-  Ratifying a decision checks the facts it would accept first, before anything is written.
+  head (found through every branch of superseded records, however long) is refused
+  (`<A> is already superseded by <X>; supersede that one instead`), and so is accepting one whose
+  predecessor is still `proposed`. Ratifying a decision checks the facts it would accept first,
+  before anything is written, and refuses when two of them supersede the same fact: drop one,
+  then ratify the decision again.
   Accepting a domain whose slug another, unrelated accepted domain holds is refused too; a
   single pending same-slug revision of its accepted holder is no slug conflict, two revisions
   of one holder are.
+- **A domain can be replaced by several live domains (a split).** The write path only
+  supersedes a live head, so a split arrives with a merge of two branches that each replaced
+  the same domain, or by hand. Both replacements can be accepted, in one `ratify` call or in
+  two, and `ratify` says so: the answer for the part that completes the split reads
+  `split: <old> is now replaced by 2 live domains: <a> (<id>), <b> (<id>); each keeps its own
+  rules`, for every domain, covered by the domain snapshot or not (a covered one gets the
+  snapshot's wording instead, which says what to refresh). `sidegraph-doctor` reports it as
+  `domain-split`, an advisory that `--check` does not escalate; `sidegraph-verify` has no
+  finding for it. A part counts only while its chain reaches an accepted domain, the rule the
+  write side uses to find a live head, so a dropped part stops counting. To keep one
+  replacement, drop the others with `sidegraph-ratify --drop <id>`.
 
 ### Example `Decision` (illustrative values)
 

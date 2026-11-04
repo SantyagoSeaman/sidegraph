@@ -21,12 +21,16 @@ Four hook entry points, registered as console scripts: `sidegraph-session-start`
 `sidegraph-subagent-start` in
 [`src/sidegraph/host/subagent.py`](../../src/sidegraph/host/subagent.py). All four read a JSON
 payload from stdin and write a JSON response to stdout, per the Claude Code hooks contract. They
-take no command-line arguments: `-h` or `--help` prints a short usage text and exits `0`, and any
-other argument is a usage error on stderr that exits `2` (the command guard below turns that exit
-into its fallback output, so a host never sees it, provided the wiring is guarded: every shipped
-manifest and recipe is). `-h` is honoured anywhere in the arguments. In both cases the entry point returns
-before it reads stdin or opens the store, so typing `--help` never runs a hook. A host calls them
-without arguments. For wiring them into `.claude/settings.json`, see
+take one command-line option, `--repo-root`: it moves the process to the project root first
+(`CLAUDE_PROJECT_DIR` when the host sets it, else the git top-level of the working directory, else
+the working directory stays), so a hook launched from a subdirectory finds the project's store.
+The Claude and Grok plugins pass it; Codex and Muse do not. `-h` or `--help` prints a short usage
+text and exits `0`, and any other argument is a usage error on stderr that exits `2` (the command
+guard below turns that exit into its fallback output, so a host never sees it, provided the
+wiring is guarded: every shipped manifest and recipe is). `-h` is honoured anywhere in the
+arguments. In both cases the entry point returns before it reads stdin or opens the store, so
+typing `--help` never runs a hook. A host calls them without arguments other than `--repo-root`.
+For wiring them into `.claude/settings.json`, see
 [`getting-started/claude-code-setup.md`](../getting-started/claude-code-setup.md).
 
 Hook-owned SQLite connections use a zero-second busy timeout, so a lock held by another
@@ -38,11 +42,14 @@ Other `Store`, hot-index and read-only-index callers retain their existing defau
 
 The shell wiring commands in the plugin manifests and the setup recipes end with a shell guard
 (Muse's hooks run a Python adapter instead, which answers `{}` itself on any failure):
-`|| printf '{}\n'` on `Stop`, `PreToolUse` and `SubagentStart`, and
-`|| printf '%s\n' '{"systemMessage":"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error"}'`
-on `SessionStart`. The entry points below already print `{}` on any failure of their own (except
+`|| echo '{}'` on `Stop`, `PreToolUse` and `SubagentStart`, and
+`|| echo '{"systemMessage":"Sidegraph: the SessionStart hook could not start (uv, the first download of the plugin runtime, or a read-only plugin folder); run the hook command in a terminal to see the error"}'`
+on `SessionStart` (the Claude and Grok plugins; the Codex wiring, older Claude installs and the
+hand-wired recipes use an equivalent shell guard with the same `{}` answer and a message that
+says `uv/uvx, network or project path`). The entry points below already print `{}` on any failure of their own (except
 that `sidegraph-session-start` reports a store that cannot be opened, see
-[A store that cannot open](#a-store-that-cannot-open)), but they cannot catch one that happens before Python starts: `uv` exiting 2 on an internal error, or
+[A store that cannot open](#a-store-that-cannot-open)), but they cannot catch one that happens before Python starts: `uv` exiting 2 on an internal error, a
+first start that cannot download or install the plugin runtime, or (in wiring that still has one)
 the `cd` in front of the command failing. On `Stop`, Claude Code and Codex treat exit 2 with text on stderr
 as a block and continue the session, and Claude Code does the same on `PreToolUse` by blocking
 the tool call, so without the guard such a command could loop a session. A command that does
@@ -53,7 +60,19 @@ start is not affected.
 "Sidegraph: the SessionStart hook could not start" means the guard caught a failure before
 Python ran, and hid its error. Run the hook command from your hook configuration in a terminal,
 in the project directory, with stdin closed so the entry point does not wait for a payload, and
-read what `uv` or `uvx` prints. For the plugin and the manual recipes:
+read what `uv` or `uvx` prints. For the Claude and Grok plugins, which run the runtime bundled in
+the plugin folder (`PLUGIN_ROOT` is the folder the plugin is installed in):
+
+```bash
+SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json \
+  UV_PROJECT_ENVIRONMENT=.venv UV_PYTHON=3.13 \
+  uv run --project "$PLUGIN_ROOT/runtime" --frozen --no-dev sidegraph-session-start --repo-root </dev/null
+```
+
+The first run after a plugin update installs the runtime's pinned dependencies, so it needs the
+network once; see [the plugin's first start](../guides/troubleshooting.md#the-plugins-first-start).
+For Codex, Muse and the hand-wired non-plugin recipes, which launch from the repository's `main`
+branch:
 
 ```bash
 SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json \
@@ -62,9 +81,9 @@ SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json \
 
 The `@main` ref tracks a mutable branch; see
 [Mutable development references](../getting-started/installation.md#mutable-development-references).
-That is the `SessionStart` command.
-
-The plugin's `Stop`, `PreToolUse` and `SubagentStart` commands run the same way but from the commit `SessionStart` recorded in a `launch-commit` file (see
+That is the `SessionStart` command. Codex's `Stop` and `SubagentStart` commands (and an older
+Claude plugin's `Stop`, `PreToolUse` and `SubagentStart`) run
+the same way but from the commit `SessionStart` recorded in a `launch-commit` file (see
 [Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file)); to reproduce one by hand, put that commit where `@main`
 stands. A plugin pinned to a tag or commit ignores the file and launches its own ref.
 For a source checkout, the development form:
@@ -74,8 +93,10 @@ SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json \
   uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start </dev/null
 ```
 
-The usual causes are no network or a failed git fetch (`uvx`), `uv` or `uvx` missing from the
-PATH the host gives its hooks, and a project path that no longer exists.
+The usual causes are no network, a failed git fetch (`uvx`) or a first runtime install that
+could not finish (the Claude and Grok plugins), a uv older than 0.6.10, `uv` or `uvx` missing
+from the PATH the host gives its hooks, a read-only plugin folder, and a project path that no
+longer exists.
 
 ## Which session a hook is in
 
@@ -1324,14 +1345,25 @@ it with `muse plugins approve sidegraph`.
 
 ## Wiring
 
+The Claude Code and Grok Build plugins wire all four hooks to the runtime bundled in the plugin
+folder: each command sets the two `UV_*` values that fix the environment and the interpreter
+(`UV_PROJECT_ENVIRONMENT=.venv`, `UV_PYTHON=3.13`), runs `uv run --project
+"${CLAUDE_PLUGIN_ROOT}/runtime" --frozen --no-dev <entry point> --repo-root`, and ends with the
+command guard. No `cd` prefix and no `@main` resolution is involved, so the runtime changes only
+when the plugin updates. The development twins (`hooks/hooks.json`, `grok/hooks.json`) run the
+checkout the plugin was loaded from the same way, with `--repo-root`. Codex and Muse keep their own
+launchers (below).
+
 See [`getting-started/claude-code-setup.md`](../getting-started/claude-code-setup.md) for the
 `.mcp.json` and `.claude/settings.json` snippets that register `sidegraph-mcp` and all four
-hooks against a project.
+hooks against a project without the plugin.
 
 ## The launch-commit file
 
-The plugin's `Stop`, `PreToolUse` and `SubagentStart` hooks (and Codex's `Stop` and
-`SubagentStart`, Grok Build's `Stop`, `PreToolUse` and `SubagentStart`, and Muse's
+The launch-commit file now serves Codex, Muse and Claude installs older than the bundled runtime.
+The Claude and Grok plugins no longer read it: they run the runtime in the plugin folder. For the
+rest, the `Stop`, `PreToolUse` and `SubagentStart` hooks (Codex's `Stop` and `SubagentStart`, an
+older Claude plugin's `Stop`, `PreToolUse` and `SubagentStart`, and Muse's
 `SubagentStart`) launch from a commit, not from
 `@main`, which tracks a mutable branch (see
 [Mutable development references](../getting-started/installation.md#mutable-development-references)):

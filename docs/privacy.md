@@ -28,7 +28,9 @@ no analytics, and it sends no telemetry anywhere.
   rebuilt.
 - **Session state.** One small file, `sidegraph/launch-commit` under your user cache directory
   (`$XDG_CACHE_HOME`, or `~/.cache`): the runtime commit the last session started from. It is
-  written when Sidegraph runs from its public repository's `main` branch, as the plugin does.
+  written only when Sidegraph runs from its public repository's `main` branch, as the Codex and
+  Muse plugins and Claude plugins older than the bundled runtime do. The current Claude plugin
+  does not write it.
 - **Graph refresh log.** If you install the graph-refresh git hook, it logs Graphify's output to
   `sidegraph-graph-refresh.log` in the repository's `.git` directory.
 - **Transcripts.** At the end of a turn, the Stop hook reads the session's local transcript to
@@ -42,13 +44,19 @@ effort, not a guarantee: do not ask the agent to record secrets.
 The Sidegraph runtime opens no network connections of its own. Network access happens only
 around it:
 
-- **Starting Sidegraph.** The plugin starts the MCP server and the SessionStart hook with uv
-  from Sidegraph's public GitHub repository, so at each session start uv contacts GitHub to check
-  for a newer version and downloads it, with its dependencies from their package registries, when
-  needed (the plugin tracks a
-  [mutable branch](getting-started/installation.md#mutable-development-references)). The other hooks use the version that session start recorded, from uv's cache; without
-  that record they check GitHub too. The CLI commands the skills run always check GitHub's
-  `main`.
+- **Starting Sidegraph in Claude Code (and Grok Build).** The plugin carries its own runtime: the
+  Sidegraph wheel and a lock that pins every dependency by hash (`runtime/uv.lock` in the plugin
+  folder). The first session after an install or an update has uv download those packages from
+  PyPI into the plugin's own folder, and, on a machine without Python 3.13, a uv-managed CPython
+  3.13 from python-build-standalone on GitHub, which the lock does not pin. Nothing is fetched on
+  later starts, and the skills' CLI commands run from the same runtime.
+- **Starting Sidegraph in Codex and Muse.** Those plugins start the MCP server and the
+  SessionStart hook with uv from Sidegraph's public GitHub repository, so at each session start
+  uv contacts GitHub to check for a newer version and downloads it, with its dependencies from
+  their package registries, when needed (they track a
+  [mutable branch](getting-started/installation.md#mutable-development-references)). The other
+  hooks use the version that session start recorded, from uv's cache; without that record they
+  check GitHub too. A CLI command run in the non-plugin form `uvx --from git+…@main` always checks GitHub's `main`.
 - **Graphify.** The setup step installs Graphify from PyPI. `sidegraph-domains snapshot
   --build-with` downloads the Graphify release you name, through uv, when you run it.
 - **Your agent.** What Sidegraph returns to your agent becomes part of the conversation, which

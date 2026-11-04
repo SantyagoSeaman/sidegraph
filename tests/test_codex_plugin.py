@@ -111,9 +111,9 @@ def test_codex_mcp_config_parses_and_names_sidegraph() -> None:
 
 
 def test_codex_mcp_config_public_twin_uses_uvx_not_uv_run() -> None:
-    """Same `.public.` convention `tools/release-public.sh` already applies to
-    `plugin/sidegraph/.mcp.public.json`: the dev variant runs the working tree with `uv run`,
-    the public variant installs straight from the public repo with `uvx --from git+...`.
+    """Same `.public.` convention `tools/release-public.sh` applies to the Claude twins: the dev
+    variant of the Codex config runs the working tree with `uv run`, and the Codex public
+    variant launches the exact PyPI pin with `uvx --from sidegraph==<V> --python 3.13`.
     Both start the program directly, with no `sh`, so a Windows host that has no `sh` on PATH
     still launches it; and both pass `--repo-root`, which anchors the server to the project.
 
@@ -124,13 +124,20 @@ def test_codex_mcp_config_public_twin_uses_uvx_not_uv_run() -> None:
     of skipping."""
     base = _load_json(_MCP)["sidegraph"]
 
+    version = tomllib.loads(_PYPROJECT.read_text())["project"]["version"]
+
     def _is_public(entry: dict) -> bool:
-        return (
-            entry["command"] == "uvx"
-            and entry["args"][0] == "--from"
-            and entry["args"][1].startswith("git+https://github.com/")
-            and entry["args"][-2:] == ["sidegraph-mcp", "--repo-root"]
-        )
+        return entry == {
+            "command": "uvx",
+            "args": [
+                "--from",
+                f"sidegraph=={version}",
+                "--python",
+                "3.13",
+                "sidegraph-mcp",
+                "--repo-root",
+            ],
+        }
 
     if _MCP_PUBLIC.is_file():
         public = _load_json(_MCP_PUBLIC)["sidegraph"]

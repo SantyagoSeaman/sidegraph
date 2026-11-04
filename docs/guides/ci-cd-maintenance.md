@@ -234,7 +234,7 @@ the branch. (That holds on that checkout; on your own machine the merge base is 
 target's tip only after you merged the target into your branch.) Run `sidegraph-verify` against that value: a local run against the fork point can
 differ, and CI's answer is the one that gates the merge. Findings and their remedies:
 [migrating to 0.17](migrating-to-0.17.md). A job that runs `sidegraph-doctor --check` exits `2`
-on the `store-not-migrated` notice until the store is migrated. The `maintenance-due` notice and the
+on the `store-not-migrated` notice until the store is migrated. The `maintenance-due` notice, the `domain-split` finding and the
 `superseded-no-live-successor` finding are reported but never fail `--check`.
 
 ## Recipe 3: scheduled triage

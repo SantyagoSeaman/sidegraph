@@ -11,7 +11,13 @@ the store, the session map and listings still work, but new concrete anchors rem
 
 - **Python 3.13+** for Sidegraph (`.python-version` pins it).
 - **Python 3.10+** for Graphify.
-- [`uv`](https://docs.astral.sh/uv/) — used to install and run both.
+- [`uv`](https://docs.astral.sh/uv/) — used to install and run both. The Claude Code plugin
+  (and Grok Build, which shares its manifests) needs **uv 0.6.10 or newer**: its bundled runtime
+  uses project settings that uv 0.6.9 refuses, and a refused start is hidden by the
+  hooks' guard. `uv --version` shows yours. The plugin's lock covers macOS on Apple silicon,
+  Linux on x86-64 and arm64 with glibc, and Windows on x86-64. **Intel Macs and musl Linux
+  (Alpine) are not supported by the plugin**; use the
+  [non-plugin install](claude-code-setup.md#option-b--manual-registration) there.
 - For automatic session integration: [Claude Code](claude-code-setup.md),
   [Codex](codex-setup.md) or [Grok Build](../integrations/grok.md).
   [OpenCode V2](../../.opencode/INSTALL.md) provides MCP tools and shared skills without
@@ -63,7 +69,7 @@ The manual Codex hook recipes stay POSIX/WSL-only. If something still fails to s
 
 For MCP-only use with a client that can launch `uvx` directly, Claude Code's
 [manual MCP JSON recipe](claude-code-setup.md#1-register-the-mcp-server) starts `uvx`
-directly, as the plugin does. Set `SIDEGRAPH_DIR` and `SIDEGRAPH_GRAPH` to absolute paths for
+directly, as the Codex plugin does (the Claude plugin starts `uv run` on its bundled runtime). Set `SIDEGRAPH_DIR` and `SIDEGRAPH_GRAPH` to absolute paths for
 the intended repository, or set a working directory supported by your client. In JSON, use forward
 slashes (`C:/work/your repo/.sidegraph`) or escape each backslash
 (`C:\\work\\your repo\\.sidegraph`); keep paths with spaces as single argument values.
@@ -82,7 +88,10 @@ install different code. That is useful while trying Sidegraph. For CI, shared se
 measured pilot, replace `@main` with a release tag or commit SHA, for example
 `git+https://github.com/SantyagoSeaman/sidegraph.git@<sha>`. The plugin marketplace is the
 exception: its public manifests intentionally track `main`, and the release process moves
-that `main` only when it cuts a release. See
+that `main` only when it cuts a release. The Claude Code and Grok Build plugins no longer resolve
+`@main` at a session start: they run the runtime bundled in the plugin, so a newer Sidegraph
+reaches them when the plugin updates. Codex, Muse, OpenCode and the CLI examples keep the
+mutable reference described here. See
 [`reference/stability.md`](../reference/stability.md) for the promises made by each surface.
 
 For an existing store, follow the [0.14 migration guide](../guides/migrating-to-0.14.md)
@@ -97,11 +106,11 @@ terminal, scripts and CI. Without a plugin it is the usual setup, though the `uv
 and in [Option C](#option-c--uvx-directly-from-git) run Sidegraph with no install at all. Beside
 the Claude Code or Codex plugin
 ([Option B](#option-b--host-plugin-recommended-for-claude-code-and-codex)) it is optional: the
-plugin runs its own Sidegraph through `uvx` and its skills never use this copy, so install it only
+plugin runs its own Sidegraph (the bundled runtime in Claude Code, `uvx` in Codex) and its skills never use this copy, so install it only
 if you want to type the commands yourself.
 
-It installs from the same place as the plugin, the public repository's `main` branch, which
-changes only at releases:
+It installs from the public repository's `main` branch, which changes only at releases (the
+Codex plugin launches from the same place; the Claude Code plugin bundles its own release):
 
 ```bash
 uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main
@@ -157,11 +166,16 @@ codex plugin add sidegraph@sidegraph
 The Claude Code host installs the MCP server and all four hooks (`SessionStart`, `Stop`,
 `PreToolUse`, `SubagentStart`). Codex installs the MCP server, `SessionStart`/`Stop`/
 `SubagentStart`, and the bundled skills;
-its tool surface has no equivalent target for the Claude-specific `PreToolUse` records block. The
-plugin's bundled config installs from the public repository, not PyPI: the MCP server and
-`SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`, and the
-`Stop`, `PreToolUse` and `SubagentStart` hooks start from the commit `SessionStart` resolved. Unlike the package
-install, the plugin deliberately follows the public repository's `main` branch. See
+its tool surface has no equivalent target for the Claude-specific `PreToolUse` records block.
+The Claude Code plugin runs a runtime bundled in the plugin folder: the Sidegraph wheel of the
+plugin's version and a lock that pins every dependency, launched with `uv run --project
+"${CLAUDE_PLUGIN_ROOT}/runtime" --frozen --no-dev`. It needs uv 0.6.10 or newer, downloads the
+pinned packages on the first session after an install or an update (and a uv-managed CPython 3.13
+when the machine has none), and updates only with the plugin. The Codex plugin's bundled config
+installs from the public repository, not PyPI: the MCP server and `SessionStart` run
+`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`, and the `Stop` and
+`SubagentStart` hooks start from the commit `SessionStart` resolved. Unlike the package
+install, the Codex plugin deliberately follows the public repository's `main` branch. See
 the integration details for [Claude Code](../integrations/claude-code.md#plugin-install-path)
 or [Codex](../integrations/codex.md#plugin-install-path).
 
@@ -176,8 +190,9 @@ the bare `sidegraph-*` commands in your own terminal, install the CLI as in
 For installation and updates for every host, see the
 [host plugin recipes](#host-plugins-install-and-update). Existing Claude Code and Codex installs
 keep `sidegraph@sidegraph`; update cached assets with the host's native update commands,
-then start a new session and review any changed approvals. The runtime's `@main` does not
-refresh cached skills or manifests. OpenCode V2 uses the
+then start a new session and review any changed approvals. Codex's runtime follows `@main`,
+which does not refresh cached skills or manifests; the Claude Code plugin's runtime is part of
+the plugin and updates with it. OpenCode V2 uses the
 [canonical Git package guide](../../.opencode/INSTALL.md).
 [Muse](../integrations/muse.md) supplies MCP, skills, the session map and a subagent brief,
 and must be restarted from the intended project when switching workspaces; expanded native
@@ -231,10 +246,12 @@ deactivating the other venv first.
 
 ## Host plugins: install and update
 
-Each recipe below installs the plugin and gives the command that updates it. Host plugin
-updates and the MCP runtime are separate: the default runtime follows the public repository's
-`main`, which advances at releases, and that does not refresh cached skills, manifests or hook
-definitions. Use your host's update recipe after a release, then start a new session.
+Each recipe below installs the plugin and gives the command that updates it. For Claude Code and
+Grok Build the runtime is bundled in the plugin, so one update replaces it together with the
+skills and manifests. For Codex, Muse and OpenCode the runtime and the plugin update separately:
+the default runtime follows the public repository's `main`, which advances at releases, and that
+does not refresh cached skills, manifests or hook definitions. Use your host's update recipe
+after a release, then start a new session.
 
 | Host | Automatic session memory | Host-session evidence |
 |---|---|---|
@@ -423,7 +440,7 @@ recalling it when that file is read needs the graph. See
 
 ## If something does not work
 
-- Run `sidegraph-doctor` (as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor`,
+- Run `sidegraph-doctor` (in a terminal, as the non-plugin form `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor`,
   or by its plain name if you installed the CLI, see [Option A](#option-a--the-cli-on-your-path)):
   it lists what is wrong with the store, the graph and the wiring.
   [Troubleshooting](../guides/troubleshooting.md) explains each message, and the
@@ -440,8 +457,8 @@ recalling it when that file is read needs the graph. See
 
 Remove the plugin with your host's plugin command (`/plugin uninstall sidegraph@sidegraph` in
 Claude Code, `grok plugin uninstall sidegraph` in Grok Build).
-`sidegraph-init --remove-hooks` removes the git hook (with the plugin alone, run it as
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --remove-hooks`). The records in `.sidegraph/` are your
+`sidegraph-init --remove-hooks` removes the git hook (with no CLI installed, run it in the non-plugin
+form `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --remove-hooks`). The records in `.sidegraph/` are your
 project's memory and are committed: delete them only if you mean to lose them.
 `graphify-out/` can always be deleted and rebuilt.
 
@@ -531,7 +548,7 @@ package or launcher check does not establish desktop GUI behavior.
 | OS | CLI and automated coverage | Hook coverage | CI evidence |
 |---|---|---|---|
 | Linux | Full pytest suite on Python 3.13 and 3.14 | Hook entry points and POSIX command contracts in the full suite | [`ci.yml` job `test`](../../.github/workflows/ci.yml), `ubuntu-latest` |
-| Windows | Selected portable core and MCP contracts, plus an installed-wheel stdio smoke, on Python 3.13 and 3.14 | Native `commandWindows`, payload-encoding and failure-diagnostic tests in that selection | [`ci.yml` job `windows-core`](../../.github/workflows/ci.yml), `windows-2022` |
+| Windows | Selected portable core and MCP contracts, plus an installed-wheel stdio smoke, on Python 3.13 | Native `commandWindows`, payload-encoding and failure-diagnostic tests in that selection | [`ci.yml` job `windows-core`](../../.github/workflows/ci.yml), `windows-2022` |
 | macOS | CLI host-session campaign below (0.14.0), plus host evidence above | Host-session checks in that campaign; no hook job in public CI | No macOS job in the public [`ci.yml`](../../.github/workflows/ci.yml) |
 
 The public workflow runs `test` and `windows-core` on ready pull requests, main pushes and
@@ -557,7 +574,7 @@ published version. Muse, OpenCode and Grok Build have the narrower
 coverage in their installation guides and are outside this native matrix.
 
 On native Windows, the Claude Code hooks run through Git Bash, which comes with Git for
-Windows; the MCP launchers and the Codex hooks need no POSIX shell. The native checks run
+Windows, and the Claude plugin's runtime lock covers Windows on x86-64 only; the MCP launchers and the Codex hooks need no POSIX shell. The native checks run
 with Git for Windows installed; they do not establish support for Windows hosts without it. Graphify integration
 remains outside these checks.
 

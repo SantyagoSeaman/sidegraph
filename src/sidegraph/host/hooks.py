@@ -56,6 +56,7 @@ from ..store_layout import (
     clip_line,
 )
 from .diagnostics import HookDiagnostics
+from .project_anchor import anchor_to_project, take_repo_root_flag
 
 if TYPE_CHECKING:
     from ..hot_index import HotIndex, Record
@@ -575,9 +576,10 @@ _PACKAGE_NEWER = (
     "is stale. Update the plugin from its marketplace."
 )
 _PLUGIN_NEWER = (
-    "Sidegraph: the plugin is {plugin} but the package is {package}: this session runs an old "
-    "launcher cache or a pinned install. Restart the session so SessionStart re-resolves "
-    "`@main`, or remove the pinned install (for example `uv tool uninstall sidegraph`)."
+    "Sidegraph: the plugin is {plugin} but the package is {package}: the session was started "
+    "before the plugin update, or Sidegraph is launched from a manual registration "
+    "(`claude mcp add`, a hand-written config) that pins an older version. Restart the "
+    "session, or update that registration."
 )
 
 # `path-skew`: a `sidegraph-*` command on PATH that is not the running package's own. A persistent
@@ -640,13 +642,12 @@ def _path_install() -> _PathInstall | None:
 
 _PATH_SKEW = (
     "Sidegraph: `{command}` on PATH ({directory}) is {path_version} but this session runs "
-    "{package}. Plugin skills and hooks use the session's version through uvx; your own shell "
+    "{package}. Plugin skills and hooks use the session's version. Your own shell "
     "commands use the {which} one. {fix}"
 )
 _PATH_SKEW_FIX_UV = (
-    "Update it with `uv tool install --reinstall "
-    "git+https://github.com/SantyagoSeaman/sidegraph.git@main`, or remove it with "
-    "`uv tool uninstall sidegraph` if you only use the plugin."
+    "Update it with `uv tool install --reinstall --python 3.13 sidegraph=={__version__}`, or "
+    "remove it with `uv tool uninstall sidegraph` if you only use the plugin."
 )
 _PATH_SKEW_FIX_OTHER = "Upgrade it, or remove it if you only use the plugin."
 
@@ -713,7 +714,11 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
             check="version-skew",
             severity="advisory",
             summary="package and plugin versions differ",
-            fix="update the plugin" if template is _PACKAGE_NEWER else "restart the session",
+            fix=(
+                "update the plugin"
+                if template is _PACKAGE_NEWER
+                else "restart the session, or update the manual registration"
+            ),
             line=line,
             notice=line,
         )
@@ -734,7 +739,11 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
             path_version=installed.version,
             package=__version__,
             which="old" if path_release < package_release else "newer",
-            fix=_PATH_SKEW_FIX_UV if installed.uv_tool else _PATH_SKEW_FIX_OTHER,
+            fix=(
+                _PATH_SKEW_FIX_UV.format(__version__=__version__)
+                if installed.uv_tool
+                else _PATH_SKEW_FIX_OTHER
+            ),
         )
         return Problem(
             check="path-skew",
@@ -1477,6 +1486,8 @@ def session_start() -> None:
     there changes nothing below — see :mod:`sidegraph.host.launch` and
     design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md.
     """
+    if take_repo_root_flag(sys.argv):
+        anchor_to_project()
     if len(sys.argv) > 1:
         refuse_arguments(
             "sidegraph-session-start", "Injects the project's decision map at session start."
@@ -1888,6 +1899,8 @@ def stop() -> None:
     skips the gate and the transcript: it passed the gate once, and the re-arm rests on
     commits.
     """
+    if take_repo_root_flag(sys.argv):
+        anchor_to_project()
     if len(sys.argv) > 1:
         refuse_arguments(
             "sidegraph-stop",
@@ -2846,6 +2859,8 @@ def pre_tool_use() -> None:
     design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1-D3) and
     design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1)
     """
+    if take_repo_root_flag(sys.argv):
+        anchor_to_project()
     if len(sys.argv) > 1:
         refuse_arguments(
             "sidegraph-pre-tool-use",
@@ -2883,10 +2898,10 @@ def pre_tool_use() -> None:
 
 def _hook_usage(prog: str, summary: str) -> str:
     return (
-        f"usage: {prog} [-h]\n"
+        f"usage: {prog} [-h] [--repo-root]\n"
         f"{summary} Reads the host's JSON payload on stdin and prints a JSON answer;\n"
-        "Claude Code or Codex runs it, not you. Takes no arguments. Documented in\n"
-        "docs/reference/hooks.md.\n"
+        "Your coding agent's hooks run it, not you. Takes no arguments except --repo-root,\n"
+        "which moves it to the project root first. Documented in docs/reference/hooks.md.\n"
     )
 
 

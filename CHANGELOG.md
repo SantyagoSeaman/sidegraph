@@ -7,6 +7,63 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.24.1]
+
+### Changed
+
+- **The Claude Code plugin runs a bundled runtime.** The release now ships the Sidegraph wheel
+  and a lock that pins every dependency by hash in the plugin's `runtime/` folder, and the
+  plugin's MCP server, hooks and skills launch it with `uv run --frozen --no-dev` instead of
+  `uvx --from git+…@main`. Grok Build shares the manifests and follows. A new Sidegraph reaches
+  the plugin when the plugin updates, not at each session start. The first session after an
+  install or an update installs the pinned packages into the plugin folder (and a managed
+  CPython 3.13 when the machine has none); later starts need no network. The hooks no longer
+  `cd` in a shell: they pass `--repo-root`, which moves to the project root inside the entry
+  point. Claude plugins installed before this release keep launching from `main` until they
+  are updated. Codex, Muse and OpenCode are unchanged.
+- **uv 0.6.10 or newer** is required for the Claude Code plugin. The runtime's lock covers macOS
+  on Apple silicon, Linux (glibc) on x86-64 and arm64, and Windows on x86-64. Intel Macs and musl
+  Linux are not supported by the plugin; use the non-plugin install there. See
+  [troubleshooting](docs/guides/troubleshooting.md#the-plugins-first-start).
+- The hook entry points accept `--repo-root`, and their usage text no longer names only Claude
+  Code and Codex.
+
+### Fixed
+
+- Accepting a decision no longer accepts two competing successors of one fact. When a merge
+  brings two branches' replacements of the same fact under one proposed decision as its
+  evidence, ratifying the decision now refuses with a supersession conflict and writes
+  nothing, the same answer accepting the second fact on its own already gave. Drop one of the
+  two facts, then ratify the decision again.
+- `retire_decision` with `duplicate_of` no longer strands an accepted fact that reached
+  retrieval only through the duplicate. Such a fact (no anchor of its own that retrieval serves
+  it through, no other accepted, open decision that is global or has one) gains the duplicate's
+  anchors (the kept record's when the duplicate has none, such as a global decision or one bound
+  only to a community, domain or tag), so `get_task_context` still
+  shows it and `sidegraph-doctor` no longer reports it as `dangling-record`. The result lists
+  those facts in a new `facts_anchored` field. When no anchor can keep such a fact reachable,
+  the retirement is refused, naming the fact to anchor first.
+- `retire_decision` with `duplicate_of` now copies the duplicate's orphaned anchors to the kept
+  record (where it has no anchor to that entity) instead of dropping them. Without a graph every
+  anchor is orphaned, so before this nothing was copied and `anchors_added` came back empty with
+  no reason given. The copies heal on the next sync once their entity is in the graph, and the
+  result lists them, each with a `reason`, in a new `anchors_orphaned` field. With a graph
+  loaded, a dead anchor is not copied; one naming an existing file the graph does not index
+  is, since exact-file retrieval still serves it.
+- Ratifying a stale proposal no longer creates a second open head after a merge. The check
+  for a live successor followed one branch at a time and gave up after 64 links, so a chain
+  that forked, or ran past 64 revisions, could hide its live head. It now looks at every
+  successor branch with no length limit (a cycle in the links ends the walk), and the same
+  walk names the live successor in the "no longer current" refusal.
+- **A domain split is now visible instead of silent.** One domain replaced by two or more
+  live domains is a supported layout, and a merge of two branches that each replaced the same
+  domain under different slugs can leave one. `ratify` still accepts both, and now says so,
+  naming every part, for any domain (before, only a domain covered by the domain snapshot
+  got a note). `sidegraph-doctor` reports it as the new `domain-split` finding, which
+  `--check` does not escalate, and `sidegraph-verify` still has nothing to say about it. A
+  part counts only while its chain reaches an accepted domain, so a dropped part stops
+  counting.
+
 ## [0.24.0] — 2026-11-03
 
 ### Changed (Contract change)

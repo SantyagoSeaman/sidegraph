@@ -53,6 +53,7 @@ from pydantic import BaseModel
 
 from . import domain_snapshot
 from .doctor import SECTION_UNAVAILABLE, CodeDriftScan, scan_code_drift
+from .domain_splits import domain_splits
 from .engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader, NodeRef
 from .retrieval import (
     DRIFT_CACHE_KEY,
@@ -1309,6 +1310,33 @@ class DomainActivation:
     note: str | None = None
 
 
+_SNAPSHOT_SPLIT_PREFIX = "split from snapshot domain"
+
+
+def _split_note(domain: Domain, store: Store) -> str | None:
+    """The sentence a ratify answer adds when accepting ``domain`` made a split exist or added
+    a part to one: naming every part, saying that none of them is wrong, and how to drop one if
+    the split was not meant. Works with or without a snapshot. Silent on a plain revision of a
+    part, which leaves the layout as it was."""
+    models = {d.domain_id: d for d in store.iter_domains()}
+    splits = domain_splits(models)
+    added = store.take_split_added(domain.domain_id)
+    if added is None:  # not accepted by this process: only a direct replacement is certain
+        added = [p for p, ids in sorted(splits.items()) if domain.supersedes == p]
+    for pred_id in added:
+        ids = splits.get(pred_id)
+        if not ids or domain.domain_id not in ids:
+            continue
+        pred = models.get(pred_id)
+        parts = ", ".join(f"{models[i].slug} ({i})" for i in ids)
+        return (
+            f"split: {pred.slug if pred else pred_id} is now replaced by {len(ids)} live "
+            f"domains: {parts}; each keeps its own rules. If it should be a single "
+            "replacement, drop the extra parts with `sidegraph-ratify --drop <id>`"
+        )
+    return None
+
+
 def _snapshot_note(domain: Domain, store: Store) -> str | None:
     """The sentence a ratify answer adds when the store has a domain snapshot: the domain's
     membership is frozen, or it is a part of a split. ``None`` otherwise."""
@@ -1328,7 +1356,7 @@ def _snapshot_note(domain: Domain, store: Store) -> str | None:
             parts = sorted(d.slug for d in accepted if d.domain_id in ids)
             flags = " ".join(f"--domain {p}" for p in parts)
             return (
-                f"split from snapshot domain {split_slug}: its frozen membership applies to "
+                f"{_SNAPSHOT_SPLIT_PREFIX} {split_slug}: its frozen membership applies to "
                 f"no part until `sidegraph-domains snapshot --refresh {flags}`"
             )
     return None
@@ -1358,22 +1386,44 @@ def activate_accepted_domain(
     change another domain's membership.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D2
     """
+    # The advice is independent of graph resolution: every path carries it.
+    note = _activation_note(domain, store)
     if reader is None:
         store.set_meta(VOLATILE_STALE_KEY, "1")
-        return DomainActivation(resolved=False, overbroad=None, error=None)
+        return DomainActivation(resolved=False, overbroad=None, error=None, note=note)
     try:
         _communities, overbroad = refresh_domain_communities_now(domain, store, reader)
     except Exception as e:  # never fail a ratify because membership could not be resolved
         store.set_meta(VOLATILE_STALE_KEY, "1")
-        return DomainActivation(resolved=False, overbroad=None, error=str(e))
-    note: str | None = None
+        return DomainActivation(resolved=False, overbroad=None, error=str(e), note=note)
     if domain_snapshot.snapshot_path(store.path).is_file():
         store.set_meta(VOLATILE_STALE_KEY, "1")
+    return DomainActivation(resolved=True, overbroad=overbroad, error=None, note=note)
+
+
+def _activation_note(domain: Domain, store: Store) -> str | None:
+    """The advice a ratify answer adds for ``domain``: the snapshot's (frozen membership, or a
+    split of a covered domain, with the refresh command) and, unless that already names the
+    parts, the split note. Advice only, so a failure to read the snapshot or the domains
+    never fails a ratify (sync and verify report a broken snapshot)."""
+    note: str | None = None
+    if domain_snapshot.snapshot_path(store.path).is_file():
         try:
             note = _snapshot_note(domain, store)
-        except Exception:  # advice only: sync and verify report a broken snapshot
+        except Exception:
             note = None
-    return DomainActivation(resolved=True, overbroad=overbroad, error=None, note=note)
+    if note is None or not note.startswith(_SNAPSHOT_SPLIT_PREFIX):
+        split = _split_note_or_none(domain, store)
+        note = "; ".join(n for n in (note, split) if n) or None
+    return note
+
+
+def _split_note_or_none(domain: Domain, store: Store) -> str | None:
+    """:func:`_split_note`, advice only: a failure to read the domains never fails a ratify."""
+    try:
+        return _split_note(domain, store)
+    except Exception:
+        return None
 
 
 # A snapshot command's refusal when the file changed under it: git takes no lock, so a pull

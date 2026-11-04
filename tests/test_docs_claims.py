@@ -1008,7 +1008,8 @@ def test_readme_states_the_mechanism_and_promises_no_outcome():
 
 
 # ---------------------------------------------------------------------------
-# 8. the plugin's skills run the CLIs through uvx, never from PATH; the Quickstart does not
+# 8. the plugin's skills run the CLIs through the plugin's own runner (the bundled runtime in
+#    Claude Code and Grok, uvx on other hosts), never from PATH; the Quickstart does not
 #    install a second Sidegraph beside the plugin
 #    see design/superpowers/specs/2026-10-11-stale-path-sidegraph-design.md (D1-D3)
 # ---------------------------------------------------------------------------
@@ -1066,8 +1067,9 @@ def test_cli_reference_has_the_rule_as_a_heading():
 
 
 def test_quickstart_does_not_install_the_cli_for_plugin_users():
-    """The plugin runs Sidegraph through uvx; ``uv tool install sidegraph`` beside it is
-    optional and updated by hand. The first-run pages show no bare ``sidegraph-`` command line
+    """The plugin runs its own Sidegraph (the bundled runtime in Claude Code, uvx on other
+    hosts); ``uv tool install sidegraph`` beside it is optional and updated by hand. The
+    first-run pages show no bare ``sidegraph-`` command line
     (a plugin-first reader has none on PATH) and no ``uv tool install sidegraph`` (Graphify's
     ``graphifyy`` pin is a different package)."""
     pages = [
@@ -1423,3 +1425,101 @@ def test_readme_lists_every_cli_command():
     listed = _readme_details_names(f"All {len(commands)} CLI commands")
     assert sorted(listed) == commands
     assert f" · {len(commands)} CLI commands · " in _counted_line()
+
+
+# ---------------------------------------------------------------------------
+# 9. the Claude plugin launches a bundled runtime, not ``@main``; the pages that still show
+#    the ``uvx --from git+`` form say whose install it is
+#    see design/superpowers/specs/2026-11-03-claude-plugin-bundled-runtime-design.md §4.9
+# ---------------------------------------------------------------------------
+
+_OLD_LAUNCH_MARKERS = ("uvx --from git+", 'cd "${CLAUDE_PROJECT_DIR}"')
+_OLD_LAUNCH_EXCUSES = ("non-plugin", "Codex", "Muse", "OpenCode", "older")
+
+# Sentences that put the Claude plugin on ``uvx`` or ``@main`` without naming the host: each was
+# true before the bundled runtime and is false for Claude now.
+_PLUGIN_ON_UVX = (
+    re.compile(r"`uvx` prefix the plugin"),
+    re.compile(r"\bplugin\b[^.]{0,60}\b(?:through|via|with) `uvx`"),
+    re.compile(r"hook downloads and builds Sidegraph"),
+    re.compile(r"installs from the same place as the plugin"),
+    re.compile(r"starts `uvx` directly, as the plugin does"),
+    re.compile(r"hosts call the hooks without arguments(?!, or with)", re.I),
+)
+
+
+def _doc_pages_with_readmes() -> list[Path]:
+    pages = sorted((_ROOT / "docs").rglob("*.md"))
+    return [*pages, _ROOT / "README.md", _ROOT / "plugin" / "sidegraph" / "README.md"]
+
+
+def _sentences(paragraph: str) -> list[str]:
+    sentences: list[str] = []
+    for item in re.split(r"\n\s*[-*] ", paragraph):
+        flat = " ".join(item.split())
+        sentences.extend(re.split(r"(?<=[.!?:])\s+(?=[A-Z`*(\[])", flat))
+    return sentences
+
+
+def test_no_page_says_the_claude_plugin_launches_from_main():
+    """In a paragraph that names Claude, the sentence that carries the ``uvx --from git+`` launch
+    (or the shell ``cd`` the Claude hooks used to carry) must itself say it is the non-plugin
+    install, an older install, or another host: the shipped Claude plugin runs the bundled
+    runtime. A paragraph-wide mention of Codex does not excuse a sentence about Claude."""
+    problems: list[str] = []
+    for page in _doc_pages_with_readmes():
+        text = page.read_text(encoding="utf-8")
+        for paragraph in re.split(r"\n\s*\n", text):
+            if "Claude" not in paragraph:
+                continue
+            for sentence in _sentences(paragraph):
+                if not any(marker in sentence for marker in _OLD_LAUNCH_MARKERS):
+                    continue
+                if any(excuse in sentence for excuse in _OLD_LAUNCH_EXCUSES):
+                    continue
+                problems.append(f"{page.relative_to(_ROOT)}: {sentence[:80]!r}")
+    assert problems == []
+
+
+def test_no_page_puts_the_plugin_on_uvx_without_naming_the_host():
+    """``the uvx prefix the plugin uses`` and its kin were true for every plugin before the
+    bundled runtime; for Claude and Grok they are false now. A sentence that still says them
+    must name Codex, Muse, OpenCode or the non-plugin install."""
+    problems: list[str] = []
+    for page in _doc_pages_with_readmes():
+        text = page.read_text(encoding="utf-8")
+        for paragraph in re.split(r"\n\s*\n", text):
+            for sentence in _sentences(paragraph):
+                if not any(pattern.search(sentence) for pattern in _PLUGIN_ON_UVX):
+                    continue
+                if any(excuse in sentence for excuse in _OLD_LAUNCH_EXCUSES):
+                    continue
+                problems.append(f"{page.relative_to(_ROOT)}: {sentence[:90]!r}")
+    assert problems == []
+
+
+def test_hooks_guard_text_is_echo():
+    """The shipped command guard is ``|| echo '{}'``; the reference's guard section says so."""
+    text = (_ROOT / "docs" / "reference" / "hooks.md").read_text(encoding="utf-8")
+    section = text.split("## The command guard", 1)[1].split("\n## ", 1)[0]
+    assert "echo '{}'" in section
+    assert "printf" not in section
+
+
+def test_installation_names_the_uv_floor():
+    """The Claude plugin's runtime needs uv 0.6.10 or newer; the install page says so."""
+    text = (_ROOT / "docs" / "getting-started" / "installation.md").read_text(encoding="utf-8")
+    assert "0.6.10" in text
+
+
+@pytest.mark.parametrize("page", ["docs/privacy.md", "SECURITY.md"])
+def test_privacy_names_the_interpreter_download(page: str):
+    """On a machine without Python 3.13 the first start fetches a managed CPython from
+    python-build-standalone; the pages that list what the plugin fetches name it."""
+    assert "python-build-standalone" in (_ROOT / page).read_text(encoding="utf-8")
+
+
+def test_releasing_desktop_provenance_names_archive_info():
+    """The desktop smoke's provenance for a Claude install is the ``archive_info`` URL."""
+    text = (_ROOT / "docs" / "reference" / "releasing.md").read_text(encoding="utf-8")
+    assert "archive_info" in text

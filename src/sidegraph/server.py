@@ -72,6 +72,7 @@ from .config import (
     _interrupted,
     _present_by_lstat,
     _repository_boundary,
+    _store_project_root,
     borrowed_graph_candidate,
     default_graph_path,
     main_checkout_root,
@@ -113,6 +114,7 @@ from .schema import (
     Domain,
     DomainStatus,
     DriftCheck,
+    Entity,
     Fact,
     Provenance,
     Relation,
@@ -120,6 +122,7 @@ from .schema import (
     is_safe_record_id,
 )
 from .store import (
+    FILE_BOUND_ORPHAN,
     VOLATILE_STALE_KEY,
     Store,
     SupersessionConflictError,
@@ -1482,14 +1485,45 @@ def supersede_decision(
 
 
 def _retire_decision_impl(
-    store: Store, decision_id: str, reason: str, duplicate_of: str | None = None
+    store: Store,
+    decision_id: str,
+    reason: str,
+    duplicate_of: str | None = None,
+    reader: GraphifyReader | None = None,
 ) -> dict:
     """Testable core: redact ``reason``, then ``Store.retire`` (which owns every refusal and
-    carries a duplicate's anchors over to the kept record)."""
+    carries a duplicate's anchors over to the kept record and to the facts only it kept
+    reachable). With a graph, an orphaned anchor is carried when its entity resolves in that
+    graph (the next sync heals it, reason ``"awaiting-sync"``) or names an existing file the
+    graph does not index (exact-file retrieval still serves it, reason
+    ``"file-not-in-graph"``); a dead one is left behind. With no graph every orphaned anchor
+    is carried (reason ``"no-graph"``)."""
     preflight_direct(decision_id, reason, duplicate_of)
     reason, redactions = redact(reason)
-    decision, added = store.retire(decision_id, reason, duplicate_of=duplicate_of)
+    orphan_reason = None
+    if reader is not None:
+        project = _store_project_root(store.path)
+
+        def orphan_reason(entity: Entity) -> str | None:
+            desc = entity.descriptor
+            if desc is None:
+                return None
+            if reader.resolve(desc).status == "resolved":
+                return "awaiting-sync"
+            if (
+                desc.file_path
+                and desc.file_path not in reader.source_files()
+                and path_is_file(project / desc.file_path)
+            ):
+                return FILE_BOUND_ORPHAN
+            return None
+
+    decision, added = store.retire(
+        decision_id, reason, duplicate_of=duplicate_of, orphan_reason=orphan_reason
+    )
     assert decision.valid_to is not None  # retire always closes the record
+    kept = [b for b in added if b.record_id == duplicate_of]
+    facts = list(dict.fromkeys(b.record_id for b in added if b.record_id != duplicate_of))
     return _with_commit_hint(
         store,
         {
@@ -1497,10 +1531,23 @@ def _retire_decision_impl(
             "status": decision.status.value,
             "valid_to": decision.valid_to.isoformat(),
             "duplicate_of": duplicate_of,
-            "anchors_added": _entity_summaries(store, added),
+            "anchors_added": _entity_summaries(store, [b for b in kept if b.status != "orphaned"]),
+            "anchors_orphaned": [
+                {**summary, "reason": _carried_orphan_reason(store, summary, orphan_reason)}
+                for summary in _entity_summaries(store, [b for b in kept if b.status == "orphaned"])
+            ],
+            "facts_anchored": facts,
             "redactions": redactions,
         },
     )
+
+
+def _carried_orphan_reason(store: Store, summary: dict, orphan_reason) -> str:
+    """Why a carried orphaned anchor is still worth having: ``"no-graph"`` with no graph,
+    else what ``orphan_reason`` said when it let the anchor through."""
+    entity = store.get_entity(summary["entity_id"])
+    reason = orphan_reason(entity) if orphan_reason is not None and entity is not None else None
+    return reason or "no-graph"
 
 
 @mcp.tool(annotations=_LOCAL_WRITE)
@@ -1518,7 +1565,18 @@ def retire_decision(id: str, reason: str, duplicate_of: str | None = None) -> di
     For a duplicate, the kept record first gains the duplicate's live and degraded anchors it
     lacks or holds only as orphaned or weaker ones, so the rule keeps surfacing for the
     duplicate's files; ``anchors_added`` lists them
-    (``{"entity_id", "canonical_name", "tier"}``).
+    (``{"entity_id", "canonical_name", "tier"}``). An orphaned anchor of the duplicate's (every
+    anchor written without a graph is one) is copied as orphaned where the kept record has no
+    anchor to that entity, and heals on the next sync once its entity is in the graph: with no
+    graph every such anchor is copied (``reason: "no-graph"``), with a graph one whose entity
+    resolves there (``"awaiting-sync"``) or that names an existing file the graph does not index
+    (``"file-not-in-graph"``, still served for that exact file), never a dead one.
+    ``anchors_orphaned`` lists them (``{"entity_id", "canonical_name", "tier", "reason"}``). An
+    accepted fact that supports the duplicate and has no other route into retrieval (no anchor
+    of its own to a code entity that is live, degraded, or orphaned on an existing file outside
+    the graph; no other accepted, open decision that is global or has one; a community, domain
+    or tag binding never counts) gains the same anchors, or the kept record's when the
+    duplicate has none to give; ``facts_anchored`` lists those fact ids.
 
     The record is never deleted. Default retrieval, ``get_task_context`` and the hooks stop
     serving it; ``get_entity_history`` and ``retrieve_decisions(status="deprecated")`` still
@@ -1527,11 +1585,14 @@ def retire_decision(id: str, reason: str, duplicate_of: str | None = None) -> di
     Refused, with nothing written, while the store requires an older Sidegraph than the
     release that added ``retired`` (run ``sidegraph-require`` first), and for an unknown id, a
     record that is not ``accepted``, a blank ``reason``, a ``duplicate_of`` that is not another
-    accepted, open decision, a pending successor, or a proposed fact supporting the record.
+    accepted, open decision, a pending successor, a proposed fact supporting the record, or a
+    fact that neither record can give an anchor (anchor it with ``add_anchors`` first).
     Returns ``{"id", "status": "deprecated", "valid_to", "duplicate_of", "anchors_added",
-    "redactions"}``.
+    "anchors_orphaned", "facts_anchored", "redactions"}``.
     """
-    return _retire_decision_impl(_get_store(), id, reason, duplicate_of=duplicate_of)
+    return _retire_decision_impl(
+        _get_store(), id, reason, duplicate_of=duplicate_of, reader=_load_reader()
+    )
 
 
 def _bind_fact_anchors(

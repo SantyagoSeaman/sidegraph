@@ -37,7 +37,7 @@ _FILTER = (
     "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*\\\\[ntr]'sed '*|"
     "*[!A-Za-z0-9_]'grep '*|*\\\\[ntr]'grep '*|*[!A-Za-z0-9_]'rg '*|*\\\\[ntr]'rg '*|"
     "*[!A-Za-z0-9_]'cat '*|*\\\\[ntr]'cat '*) printf '%s\\n' \"$p\" | "
-    "{{ {cmd} ; }} ;; *) printf '{{}}\\n' ;; esac"
+    "{{ {cmd} ; }} ;; *) echo '{{}}' ;; esac"
 )
 
 
@@ -78,11 +78,14 @@ def _to_grok(claude: dict[str, Any]) -> dict[str, Any]:
                 if "SIDEGRAPH_HOST=claude" in command:
                     command = command.replace("SIDEGRAPH_HOST=claude", "SIDEGRAPH_HOST=grok")
                 else:
-                    command = command.replace(
-                        "SIDEGRAPH_DIR=.sidegraph",
-                        "SIDEGRAPH_HOST=grok SIDEGRAPH_DIR=.sidegraph",
-                        1,
+                    # The development twin starts with the store settings, the public one with
+                    # the pinned launch.
+                    anchor = (
+                        "SIDEGRAPH_DIR=.sidegraph"
+                        if "SIDEGRAPH_DIR=.sidegraph" in command
+                        else "uvx --from "
                     )
+                    command = command.replace(anchor, f"SIDEGRAPH_HOST=grok {anchor}", 1)
                 handler["command"] = command
     for event, seconds in _GROK_TIMEOUTS.items():
         for group in out["hooks"][event]:

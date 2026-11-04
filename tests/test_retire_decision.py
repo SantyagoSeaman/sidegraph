@@ -70,7 +70,15 @@ def store(tmp_path):
 
 
 def _anchored(store: Store, decision: Decision) -> Entity:
-    entity = store.upsert_entity(Entity(canonical_name="pkg.mod", kind=EntityKind.CONCRETE))
+    from sidegraph.schema import Descriptor
+
+    entity = store.upsert_entity(
+        Entity(
+            canonical_name="pkg.mod",
+            kind=EntityKind.CONCRETE,
+            descriptor=Descriptor(name="pkg.mod", file_path="pkg/mod.py"),
+        )
+    )
     store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2))
     return entity
 
@@ -433,6 +441,9 @@ def test_retiring_a_duplicate_carries_its_reach_to_the_kept_record(store: Store)
         there.entity_id,
         community.entity_id,
     }
+    assert [a["entity_id"] for a in result["anchors_orphaned"]] == [gone.entity_id]
+    kept = {b.entity_id: b.status for b in store.bindings_for_record(keep.id)}
+    assert kept[gone.entity_id] == "orphaned"
     assert {b.entity_id for b in store.bindings_for_record(dup.id)} == {
         there.entity_id,
         community.entity_id,
@@ -639,3 +650,501 @@ def test_refusals_do_not_echo_an_unknown_id(store: Store, monkeypatch, field):
     result = asyncio.run(run())
     assert result.is_error
     assert secret not in result.content[0].text
+
+
+# -- a duplicate's supporting facts --------------------------------------------------------------
+
+
+def _fact(store: Store, supports: list[str], **overrides):
+    from sidegraph.schema import Fact
+
+    base = dict(
+        statement="The remote caps at ten requests per minute",
+        source="trial",
+        supports=supports,
+        status=DecisionStatus.ACCEPTED,
+        valid_from=datetime(2026, 1, 11, tzinfo=UTC),
+        provenance=Provenance(source="human"),
+    )
+    return store.add_fact(Fact(**{**base, **overrides}))
+
+
+def test_retiring_a_duplicate_keeps_its_anchorless_fact_in_task_context(store: Store):
+    """An accepted fact with no anchors of its own reaches retrieval only through the decision
+    it supports. Retiring that decision as a duplicate must not strand it: the fact gains the
+    duplicate's bindings and still surfaces for the duplicate's files."""
+    from pathlib import Path
+
+    from sidegraph.doctor import DANGLING_RECORD, curate
+    from sidegraph.engine.reader import GraphifyReader
+    from sidegraph.retrieval import Seed, get_task_context
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    reader = GraphifyReader(Path(__file__).parent / "fixtures" / "mini_graph.json")
+    anchors = [{"name": "Trader", "file_path": "trader/exec.py"}]
+    keep = _add_decision_impl(store, reader, "Keep rule", "adr", "Context", "Rule", anchors=anchors)
+    dup = _add_decision_impl(store, reader, "Dup rule", "adr", "Context", "Rule", anchors=anchors)
+    fact = _add_fact_impl(store, reader, "Ten requests per minute", "trial", supports=[dup["id"]])
+    seeds = [Seed(file_path="trader/exec.py")]
+    assert fact["id"] in get_task_context(seeds, store, reader).shown_ids
+
+    result = _retire_decision_impl(store, dup["id"], "Duplicate", duplicate_of=keep["id"])
+
+    assert fact["id"] in get_task_context(seeds, store, reader).shown_ids
+    assert result["facts_anchored"] == [fact["id"]]
+    assert {b.entity_id for b in store.bindings_for_record(fact["id"])} == {
+        b.entity_id for b in store.bindings_for_record(dup["id"])
+    }
+    assert store.get_fact(fact["id"]).supports == [dup["id"]]  # the fact record is not rewritten
+    findings = [f for f in curate(store.path).findings if f.record_id == fact["id"]]
+    assert DANGLING_RECORD not in [f.code for f in findings]
+
+
+def _graph(tmp_path, *, twin_trader: bool = False):
+    """``mini_graph.json`` as a reader; ``twin_trader`` adds a second ``Trader`` node in another
+    file, so a bare ``Trader`` anchor is ambiguous and binds only its code community."""
+    from pathlib import Path
+
+    from sidegraph.engine.reader import GraphifyReader
+
+    graph = json.loads((Path(__file__).parent / "fixtures" / "mini_graph.json").read_text())
+    if twin_trader:
+        graph["nodes"].append({**graph["nodes"][0], "id": "twin", "source_file": "other/exec.py"})
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps(graph))
+    return GraphifyReader(path)
+
+
+_TRADER = [{"name": "Trader", "file_path": "trader/exec.py"}]
+_HELPER = [{"name": "helper()", "file_path": "util/misc.py"}]
+
+
+def _shown(store: Store, reader, record_id: str, file_path: str = "trader/exec.py") -> bool:
+    from sidegraph.retrieval import Seed, get_task_context
+
+    return record_id in get_task_context([Seed(file_path=file_path)], store, reader).shown_ids
+
+
+def _dangling(store: Store, record_id: str) -> bool:
+    from sidegraph.doctor import DANGLING_RECORD, curate
+
+    return any(
+        f.code == DANGLING_RECORD and f.record_id == record_id for f in curate(store.path).findings
+    )
+
+
+def test_retiring_a_duplicate_leaves_facts_that_stay_reachable_alone(store: Store, tmp_path):
+    """A fact with a live anchor of its own, or another accepted decision with a live anchor
+    to support, is still reachable after the retirement: it gains nothing, and still shows."""
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    reader = _graph(tmp_path)
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=_TRADER)
+    other = _add_decision_impl(store, reader, "Other", "adr", "C", "R", anchors=_TRADER)
+    anchored = _add_fact_impl(store, reader, "Own", "t", supports=[dup["id"]], anchors=_HELPER)
+    also_other = _add_fact_impl(store, reader, "Both", "t", supports=[dup["id"], other["id"]])
+    own = {b.entity_id for b in store.bindings_for_record(anchored["id"])}
+
+    result = _retire_decision_impl(store, dup["id"], "Duplicate", duplicate_of=keep["id"])
+
+    assert result["facts_anchored"] == []
+    assert {b.entity_id for b in store.bindings_for_record(anchored["id"])} == own
+    assert store.bindings_for_record(also_other["id"]) == []
+    assert _shown(store, reader, anchored["id"], "util/misc.py")
+    assert _shown(store, reader, also_other["id"])
+
+
+def test_a_fact_bound_only_to_a_code_community_is_carried(store: Store, tmp_path):
+    """An ambiguous fact anchor binds only a derived ``community:*`` entity: no canonical
+    binding file, and file-seeded retrieval does not collect it. That is no route of its own."""
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    reader = _graph(tmp_path, twin_trader=True)
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=_TRADER)
+    fact = _add_fact_impl(
+        store, reader, "Ten per minute", "t", supports=[dup["id"]], anchors=[{"name": "Trader"}]
+    )
+    assert [b.tier for b in store.bindings_for_record(fact["id"])] == [1]  # community only
+
+    result = _retire_decision_impl(store, dup["id"], "Duplicate", duplicate_of=keep["id"])
+
+    assert result["facts_anchored"] == [fact["id"]]
+    assert _shown(store, reader, fact["id"])
+    assert not _dangling(store, fact["id"])
+
+
+@pytest.mark.parametrize("supporter", ["expired-proposal", "orphaned-accepted"])
+def test_a_fact_whose_other_supporter_cannot_surface_is_carried(
+    store: Store, tmp_path, monkeypatch, supporter
+):
+    """Another open supporter is a route only when it is accepted with a live anchor: a
+    proposal out of the window is hidden, and an orphaned anchor reaches nothing."""
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    monkeypatch.delenv("SIDEGRAPH_PROPOSAL_WINDOW_DAYS", raising=False)
+    monkeypatch.delenv("SIDEGRAPH_UNRATIFIED", raising=False)
+    reader = _graph(tmp_path)
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=_TRADER)
+    expired = supporter == "expired-proposal"
+    other = store.add_decision(
+        _decision(
+            title="other",
+            status=DecisionStatus.PROPOSED if expired else DecisionStatus.ACCEPTED,
+            valid_from=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+    )
+    for b in store.bindings_for_record(dup["id"]):
+        store.add_binding(
+            AnchorBinding(
+                record_id=other.id,
+                entity_id=b.entity_id,
+                tier=b.tier,
+                status="live" if expired else "orphaned",
+            )
+        )
+    fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup["id"], other.id])
+    assert _shown(store, reader, fact["id"])
+
+    result = _retire_decision_impl(
+        store, dup["id"], "Duplicate", duplicate_of=keep["id"], reader=reader
+    )
+
+    assert result["facts_anchored"] == [fact["id"]]
+    assert _shown(store, reader, fact["id"])
+
+
+def test_only_open_accepted_facts_are_carried(store: Store):
+    """A closed fact is not carried; a deprecated or expired co-supporter is no route, so a fact
+    that also supports one is carried."""
+    keep = store.add_decision(_decision(title="keep"))
+    dup = store.add_decision(_decision(title="dup"))
+    retired = store.add_decision(_decision(title="retired"))
+    _anchored(store, retired)
+    store.retire(retired.id, "gone")
+    _anchored(store, dup)
+    closed = _fact(store, [dup.id], valid_to=datetime(2026, 1, 12, tzinfo=UTC))
+    expired = store.add_decision(
+        _decision(title="expired", valid_to=datetime(2026, 1, 12, tzinfo=UTC))
+    )
+    _anchored(store, expired)
+    with_deprecated = _fact(store, [dup.id, retired.id])
+    with_expired = _fact(store, [dup.id, expired.id])
+
+    result = _retire_decision_impl(store, dup.id, "Duplicate", duplicate_of=keep.id)
+
+    assert sorted(result["facts_anchored"]) == sorted([with_deprecated.id, with_expired.id])
+    assert store.bindings_for_record(closed.id) == []
+
+
+def test_retiring_without_duplicate_of_anchors_no_fact(store: Store):
+    """Plain retirement means the subject is gone: its evidence is not carried anywhere."""
+    d = store.add_decision(_decision())
+    _anchored(store, d)
+    fact = _fact(store, [d.id])
+
+    assert _retire_decision_impl(store, d.id, "gone")["facts_anchored"] == []
+    assert store.bindings_for_record(fact.id) == []
+
+
+def test_retiring_a_duplicate_without_a_graph_carries_its_orphaned_anchors(store: Store):
+    """Without a graph every anchor binds as an orphaned leaf (as ``add_anchors`` does), and
+    the next sync heals it by entity. The kept record takes those leaves over as they are, so
+    the duplicate's reach comes back with the graph, and the result says they are orphaned."""
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    trader = [{"name": "Trader", "file_path": "trader/exec.py"}]
+    keep = _add_decision_impl(store, None, "Keep", "adr", "C", "R", anchors=[{"name": "Other"}])
+    dup = _add_decision_impl(store, None, "Dup", "adr", "C", "R", anchors=trader)
+    fact = _add_fact_impl(store, None, "Ten requests per minute", "trial", supports=[dup["id"]])
+    (entity,) = [b.entity_id for b in store.bindings_for_record(dup["id"])]
+
+    result = _retire_decision_impl(store, dup["id"], "Duplicate", duplicate_of=keep["id"])
+
+    kept = {b.entity_id: b.status for b in store.bindings_for_record(keep["id"])}
+    assert kept[entity] == "orphaned"
+    assert result["anchors_added"] == []
+    assert [(a["entity_id"], a["reason"]) for a in result["anchors_orphaned"]] == [
+        (entity, "no-graph")
+    ]
+    assert {b.entity_id: b.status for b in store.bindings_for_record(fact["id"])} == {
+        entity: "orphaned"
+    }
+    assert result["facts_anchored"] == [fact["id"]]
+
+    from pathlib import Path
+
+    from sidegraph.engine.reader import GraphifyReader
+    from sidegraph.retrieval import Seed, get_task_context
+    from sidegraph.sync import sync
+
+    reader = GraphifyReader(Path(__file__).parent / "fixtures" / "mini_graph.json")
+    sync(store, reader)
+    shown = get_task_context([Seed(file_path="trader/exec.py")], store, reader).shown_ids
+    assert {keep["id"], fact["id"]} <= set(shown)
+
+
+def test_with_a_graph_only_orphaned_anchors_that_can_heal_are_carried(store: Store, tmp_path):
+    """With a graph loaded, an orphaned anchor whose entity resolves there is carried (the next
+    sync heals it); a dead one (its file is not in the graph) stays with the duplicate."""
+    from sidegraph.server import _add_decision_impl
+
+    gone = [{"name": "gone", "file_path": "lib/z.py"}]
+    keep = _add_decision_impl(store, None, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = _add_decision_impl(store, None, "Dup", "adr", "C", "R", anchors=_TRADER + gone)
+    names = {
+        store.get_entity(b.entity_id).canonical_name: b.entity_id
+        for b in store.bindings_for_record(dup["id"])
+    }
+
+    result = _retire_decision_impl(
+        store, dup["id"], "Duplicate", duplicate_of=keep["id"], reader=_graph(tmp_path)
+    )
+
+    assert [(a["entity_id"], a["reason"]) for a in result["anchors_orphaned"]] == [
+        (names["Trader"], "awaiting-sync")
+    ]
+    kept = {b.entity_id for b in store.bindings_for_record(keep["id"])}
+    assert names["Trader"] in kept and names["gone"] not in kept
+
+
+def test_with_a_graph_an_anchor_to_an_existing_file_outside_it_is_carried(store: Store, tmp_path):
+    """A file on disk that the graph does not index still gives exact-file (``[file-bound]``)
+    applicability: its orphaned anchor is a route, not a dead one, and is carried."""
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    (tmp_path / "ignored").mkdir()
+    (tmp_path / "ignored" / "limits.py").write_text("# outside the graph\n")
+    reader = _graph(tmp_path)
+    limits = [{"name": "limits.py", "file_path": "ignored/limits.py"}]
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=limits)
+    fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup["id"]])
+    assert _shown(store, reader, fact["id"], "ignored/limits.py")
+
+    result = _retire_decision_impl(
+        store, dup["id"], "Duplicate", duplicate_of=keep["id"], reader=reader
+    )
+
+    assert [a["reason"] for a in result["anchors_orphaned"]] == ["file-not-in-graph"]
+    assert result["facts_anchored"] == [fact["id"]]
+    assert _shown(store, reader, keep["id"], "ignored/limits.py")
+    assert _shown(store, reader, fact["id"], "ignored/limits.py")
+    assert not _dangling(store, fact["id"])
+
+
+def test_a_global_duplicate_hands_its_fact_the_kept_records_anchors(store: Store, tmp_path):
+    """A global decision surfaces its fact with no anchor at all. Retired as a duplicate, it has
+    nothing to carry, so the fact takes the kept record's anchors instead."""
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    reader = _graph(tmp_path)
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = store.add_decision(_decision(title="dup", scope=Scope.GLOBAL))
+    fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup.id])
+
+    result = _retire_decision_impl(
+        store, dup.id, "Duplicate", duplicate_of=keep["id"], reader=reader
+    )
+
+    assert result["facts_anchored"] == [fact["id"]]
+    assert _shown(store, reader, fact["id"], "util/misc.py")
+    assert not _dangling(store, fact["id"])
+
+
+def test_retire_refuses_when_no_anchor_can_keep_a_fact_reachable(store: Store):
+    """Neither the duplicate nor the kept record has an anchor to give the fact: refused, with
+    nothing written, and the message says to anchor the fact first."""
+    keep = store.add_decision(_decision(title="keep", scope=Scope.GLOBAL))
+    dup = store.add_decision(_decision(title="dup", scope=Scope.GLOBAL))
+    community = store.upsert_entity(Entity(canonical_name="community:7", kind=EntityKind.ABSTRACT))
+    store.add_binding(AnchorBinding(record_id=dup.id, entity_id=community.entity_id, tier=1))
+    fact = _fact(store, [dup.id])
+
+    with pytest.raises(RetireRefusedError, match=f"{fact.id}.*add_anchors"):
+        store.retire(dup.id, "Duplicate", duplicate_of=keep.id)
+    assert store.get_decision(dup.id).status == DecisionStatus.ACCEPTED
+    assert store.bindings_for_record(fact.id) == []
+    assert store.bindings_for_record(keep.id) == []
+
+
+def test_a_duplicate_bound_only_to_a_code_community_hands_its_fact_the_kept_anchors(
+    store: Store, tmp_path
+):
+    """A community binding gives a fact no route of its own, so a duplicate holding only one
+    has nothing to give: the fact takes the kept record's anchors."""
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    reader = _graph(tmp_path, twin_trader=True)
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=[{"name": "Trader"}])
+    assert [b.tier for b in store.bindings_for_record(dup["id"])] == [1]  # community only
+    fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup["id"]])
+
+    result = _retire_decision_impl(store, dup["id"], "Duplicate", duplicate_of=keep["id"])
+
+    assert result["facts_anchored"] == [fact["id"]]
+    assert _shown(store, reader, fact["id"], "util/misc.py")
+    assert not _dangling(store, fact["id"])
+
+
+# -- which bindings retrieval actually serves a fact through -------------------------------------
+#
+# A standalone fact surfaces through a live or degraded binding to a concrete entity, or, for an
+# exact file seed, through a binding to a concrete entity whose existing file the graph does not
+# index ([file-bound]). Abstract entities (community:*, domain:*, tag:*) only ever seed decisions.
+# As evidence, a fact surfaces under a decision that reaches a seed bucket the same way, or under
+# a global decision. Each case below states what retrieval does after the retirement.
+
+
+def _bind(store: Store, record_id: str, tmp_path, kind: str) -> str | None:
+    """Bind ``record_id`` by one binding of ``kind``; returns the file to seed for it, or None
+    when the binding gives the record no route of its own."""
+    from sidegraph.server import _add_anchors_impl
+
+    if kind in ("leaf-live", "leaf-degraded"):
+        _add_anchors_impl(store, _graph(tmp_path), record_id, _HELPER)
+        if kind == "leaf-degraded":
+            for b in store.bindings_for_record(record_id):
+                store.add_binding(b.model_copy(update={"status": "degraded"}))
+        return "util/misc.py"
+    if kind == "file-bound":
+        (tmp_path / "limits.txt").write_text("limits\n")
+        entity = _file_entity(store, "limits.txt", "limits.txt")
+        store.add_binding(
+            AnchorBinding(
+                record_id=record_id, entity_id=entity.entity_id, tier=2, status="orphaned"
+            )
+        )
+        return "limits.txt"
+    if kind == "leaf-dead":
+        entity = _file_entity(store, "gone", "lib/z.py")
+        store.add_binding(
+            AnchorBinding(
+                record_id=record_id, entity_id=entity.entity_id, tier=2, status="orphaned"
+            )
+        )
+        return None
+    if kind == "no-descriptor":  # a concrete entity retrieval has no name or file to seed by
+        entity = store.upsert_entity(Entity(canonical_name="pkg.raw", kind=EntityKind.CONCRETE))
+        store.add_binding(AnchorBinding(record_id=record_id, entity_id=entity.entity_id, tier=2))
+        return None
+    from sidegraph.schema import Descriptor
+
+    name = {"community": "community:1", "domain": "domain:trading", "tag": "tag:limits"}[kind]
+    # The store makes abstract entities without a descriptor; this one carries a file anyway
+    # (a hand-edited entity file), and retrieval still seeds only concrete entities.
+    entity = store.upsert_entity(
+        Entity(
+            canonical_name=name,
+            kind=EntityKind.ABSTRACT,
+            descriptor=Descriptor(name=name, file_path="trader/exec.py"),
+        )
+    )
+    store.add_binding(
+        AnchorBinding(
+            record_id=record_id, entity_id=entity.entity_id, tier=1 if kind == "community" else 0
+        )
+    )
+    return None
+
+
+_KINDS = [
+    "leaf-live",
+    "leaf-degraded",
+    "file-bound",
+    "leaf-dead",
+    "no-descriptor",
+    "community",
+    "domain",
+    "tag",
+]
+
+
+@pytest.mark.parametrize("kind", _KINDS)
+def test_a_facts_own_binding_counts_only_when_retrieval_serves_it(store: Store, tmp_path, kind):
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    reader = _graph(tmp_path)
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=_TRADER)
+    fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup["id"]])
+    own = _bind(store, fact["id"], tmp_path, kind)
+
+    result = _retire_decision_impl(
+        store, dup["id"], "Duplicate", duplicate_of=keep["id"], reader=reader
+    )
+
+    assert result["facts_anchored"] == ([] if own else [fact["id"]])
+    assert _shown(store, reader, fact["id"], own or "trader/exec.py")
+    assert not _dangling(store, fact["id"])
+
+
+@pytest.mark.parametrize("kind", [*_KINDS, "global"])
+def test_another_supporter_counts_only_when_retrieval_serves_it(store: Store, tmp_path, kind):
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    reader = _graph(tmp_path)
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=_TRADER)
+    scope = Scope.GLOBAL if kind == "global" else Scope.REPO
+    other = store.add_decision(_decision(title="other", scope=scope))
+    via = "trader/exec.py" if kind == "global" else _bind(store, other.id, tmp_path, kind)
+    fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup["id"], other.id])
+
+    result = _retire_decision_impl(
+        store, dup["id"], "Duplicate", duplicate_of=keep["id"], reader=reader
+    )
+
+    assert result["facts_anchored"] == ([] if via else [fact["id"]])
+    assert _shown(store, reader, fact["id"], via or "trader/exec.py")
+    assert not _dangling(store, fact["id"])
+
+
+@pytest.mark.parametrize("kind", ["domain", "tag", "community"])
+def test_an_abstract_only_duplicate_hands_its_fact_the_kept_anchors(store: Store, tmp_path, kind):
+    """A duplicate bound only to an abstract entity has nothing a fact can surface through: the
+    fact takes the kept record's concrete anchors, or the retirement is refused."""
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+
+    reader = _graph(tmp_path)
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    dup = store.add_decision(_decision(title="dup"))
+    _bind(store, dup.id, tmp_path, kind)
+    fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup.id])
+
+    result = _retire_decision_impl(
+        store, dup.id, "Duplicate", duplicate_of=keep["id"], reader=reader
+    )
+
+    assert result["facts_anchored"] == [fact["id"]]
+    assert _shown(store, reader, fact["id"], "util/misc.py")
+
+    lone = store.add_decision(_decision(title="lone", scope=Scope.GLOBAL))
+    dup2 = store.add_decision(_decision(title="dup2"))
+    _bind(store, dup2.id, tmp_path, kind)
+    stranded = _fact(store, [dup2.id])
+    with pytest.raises(RetireRefusedError, match=stranded.id):
+        store.retire(dup2.id, "Duplicate", duplicate_of=lone.id)
+
+
+@pytest.mark.parametrize("route", ["global-supporter", "own-file"])
+def test_retire_does_not_refuse_a_fact_that_keeps_a_route(store: Store, tmp_path, route):
+    """Two global records and no anchor to give: refusing is right only when the fact would be
+    lost, never when another global supporter or its own file still serves it."""
+    reader = _graph(tmp_path)
+    keep = store.add_decision(_decision(title="keep", scope=Scope.GLOBAL))
+    dup = store.add_decision(_decision(title="dup", scope=Scope.GLOBAL))
+    if route == "global-supporter":
+        fact = _fact(store, [keep.id, dup.id])
+        seed = "trader/exec.py"
+    else:
+        fact = _fact(store, [dup.id])
+        seed = _bind(store, fact.id, tmp_path, "file-bound")
+
+    result = _retire_decision_impl(store, dup.id, "Duplicate", duplicate_of=keep.id, reader=reader)
+
+    assert result["facts_anchored"] == []
+    assert _shown(store, reader, fact.id, seed)

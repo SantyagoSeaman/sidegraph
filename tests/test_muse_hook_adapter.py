@@ -1,6 +1,6 @@
-"""The Muse hook adapter: ``plugin/sidegraph/muse/`` forwards a Muse lifecycle hook to the public
-runtime (``uvx --from=… sidegraph-<entry>``) with the environment Muse does not set, and fails
-open: every failure prints ``{}`` and exits 0.
+"""The Muse hook adapter: ``plugin/sidegraph/muse/`` forwards a Muse lifecycle hook to the pinned
+runtime (``uvx --from=sidegraph==<V> --python 3.13 sidegraph-<entry>``) with the environment
+Muse does not set, and fails open: every failure prints ``{}`` and exits 0.
 
 The runtime is a stub ``uvx`` on a temporary ``PATH`` that records its argv, environment, working
 directory and stdin and prints a chosen stdout; nothing here reaches the network. The adapter runs
@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -30,9 +31,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugin" / "sidegraph"
 MUSE = PLUGIN / "muse"
-URL = "git+https://github.com/SantyagoSeaman/sidegraph.git@"
+VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+PIN = f"sidegraph=={VERSION}"
+# A launch-commit record an older SessionStart left in the cache: nothing reads it any more.
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
-OTHER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
 
 EVENTS = {
     "SessionStart": ("session_start.py", "sidegraph-session-start"),
@@ -200,11 +202,6 @@ def rig(request: pytest.FixtureRequest, tmp_path: Path) -> Rig:
     return Rig(tmp_path, python)
 
 
-def _from(call: dict[str, Any]) -> str:
-    (flag,) = [a for a in call["argv"] if a.startswith("--from=")]
-    return flag.removeprefix("--from=")
-
-
 # -- the shipped surface ---------------------------------------------------------------------
 
 
@@ -222,12 +219,13 @@ def test_the_shared_module_is_not_an_entry_and_there_is_no_package_marker() -> N
     assert "from __future__ import annotations" in (MUSE / "hook.py").read_text()
 
 
-def test_the_runtime_url_is_spelled_once_in_the_shared_module() -> None:
-    """``release-public.sh --ref`` rewrites ``sidegraph.git@main`` by text: one spelling moves."""
+def test_the_pin_is_spelled_once_in_the_shared_module() -> None:
+    """The version bump writes one literal in the adapter, as it does in every manifest."""
     text = (MUSE / "hook.py").read_text()
-    assert text.count("sidegraph.git@main") == 1
+    assert text.count(f'SOURCE = "{PIN}"') == 1
+    assert text.count("sidegraph==") == 1
     for name, _ in EVENTS.values():
-        assert "sidegraph.git@" not in (MUSE / name).read_text()
+        assert "sidegraph==" not in (MUSE / name).read_text()
 
 
 # -- forwarding ------------------------------------------------------------------------------
@@ -247,7 +245,7 @@ def test_the_adapter_forwards_payload_argv_and_stdout_verbatim(rig: Rig, event: 
     assert result.returncode == 0, result.stderr
     assert result.stdout == answer % event.encode()
     (call,) = rig.calls()
-    assert call["argv"] == [f"--from={URL}main", entry_point]
+    assert call["argv"] == [f"--from={PIN}", "--python", "3.13", entry_point]
     assert call["stdin"].encode("latin-1") == stdin
 
 
@@ -324,101 +322,41 @@ def test_a_payload_naming_another_event_prints_empty_json_and_spawns_nothing(
 
 # -- the launch source -----------------------------------------------------------------------
 
-_SHORT = COMMIT[:39]
-_BAD_RECORDS: list[Any] = [
-    pytest.param(None, id="missing"),
-    pytest.param(b"abc", id="short"),
-    pytest.param(_SHORT.encode(), id="39-hex"),
-    pytest.param((COMMIT + "0").encode(), id="41-hex"),
-    pytest.param((COMMIT + "0" * 5000).encode(), id="overlong-file"),
-    pytest.param(COMMIT.upper().encode(), id="uppercase"),
-    pytest.param(b"x" * 40, id="40-non-hex"),
-    pytest.param("é".encode() * 20, id="e-acute-x20"),
-    pytest.param(COMMIT.encode() + b"\r\n", id="crlf"),
-    pytest.param("é".encode() * 40, id="e-acute-x40"),
-    pytest.param(b"g" * 40, id="g-x40"),
-    pytest.param(COMMIT.encode() + b"\x00", id="nul-terminated"),
-    pytest.param(COMMIT.encode() + b"\x00" + b"a" * 10, id="nul-then-more-hex"),
-    pytest.param(b"", id="empty"),
-]
 
+@pytest.mark.parametrize("event", EVENTS)
+def test_every_event_launches_the_pin_whatever_is_recorded(rig: Rig, event: str) -> None:
+    """The pre-pin adapter launched a hot event from the commit SessionStart recorded. The
+    pin is exact, so a record in the cache (default or ``XDG_CACHE_HOME``) changes nothing."""
+    name, entry_point = EVENTS[event]
+    rig.record(COMMIT.encode())
+    xdg = rig.tmp / "xdg"
+    rig.record(COMMIT.encode(), base=xdg)
 
-def _subagent(rig: Rig, **kwargs: Any) -> str:
-    result = rig.run(rig.payload("SubagentStart"), entry="subagent_start.py", **kwargs)
+    result = rig.run(rig.payload(event), entry=name, env=rig.env(XDG_CACHE_HOME=str(xdg)))
+
     assert result.returncode == 0, result.stderr
     (call,) = rig.calls()
-    return _from(call)
+    assert call["argv"] == [f"--from={PIN}", "--python", "3.13", entry_point]
 
 
-def test_subagent_start_launches_from_the_recorded_commit(rig: Rig) -> None:
-    rig.record(COMMIT.encode())
-
-    assert _subagent(rig) == f"{URL}{COMMIT}"
-
-
-def test_a_record_with_one_trailing_lf_is_accepted(rig: Rig) -> None:
-    """The shell's ``$(head -c 41 …)`` drops the newline, so the reader does too."""
-    rig.record(COMMIT.encode() + b"\n")
-
-    assert _subagent(rig) == f"{URL}{COMMIT}"
-
-
-def test_session_start_always_launches_from_main_whatever_is_recorded(rig: Rig) -> None:
-    rig.record(COMMIT.encode())
-
-    rig.run(rig.payload("SessionStart"))
-
-    (call,) = rig.calls()
-    assert _from(call) == f"{URL}main"
-
-
-@pytest.mark.parametrize("content", _BAD_RECORDS)
-def test_a_record_that_is_not_exactly_forty_lowercase_hex_launches_from_main(
-    rig: Rig, content: bytes | None
-) -> None:
-    if content is not None:
-        rig.record(content)
-
-    assert _subagent(rig) == f"{URL}main"
-
-
-def test_a_directory_at_the_record_path_falls_back(rig: Rig) -> None:
-    (rig.home / ".cache" / "sidegraph" / "launch-commit").mkdir(parents=True)
-
-    assert _subagent(rig) == f"{URL}main"
-
-
-def test_a_fifo_at_the_record_path_falls_back_without_blocking(rig: Rig) -> None:
-    """``[ -f ]`` refuses a FIFO before any read; opening one would block forever. The run has a
-    deadline so a regression fails this test instead of hanging the suite."""
+def test_a_fifo_at_the_record_path_is_never_opened(rig: Rig) -> None:
+    """Nothing reads the record, so a FIFO there cannot block the hook; the run has a deadline
+    so a regression fails this test instead of hanging the suite."""
     path = rig.home / ".cache" / "sidegraph" / "launch-commit"
     path.parent.mkdir(parents=True)
     os.mkfifo(path)
 
-    assert _subagent(rig, timeout=10) == f"{URL}main"
+    result = rig.run(rig.payload("SubagentStart"), entry="subagent_start.py", timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    (call,) = rig.calls()
+    assert call["argv"][0] == f"--from={PIN}"
 
 
-def test_xdg_cache_home_decides_where_the_record_is_and_empty_means_unset(rig: Rig) -> None:
-    xdg = rig.tmp / "xdg"
-    rig.record(COMMIT.encode(), base=xdg)
-    rig.record(OTHER_COMMIT.encode())
-
-    assert _subagent(rig, env=rig.env(XDG_CACHE_HOME=str(xdg))) == f"{URL}{COMMIT}"
-    rig.log.unlink()
-    assert _subagent(rig, env=rig.env(XDG_CACHE_HOME="")) == f"{URL}{OTHER_COMMIT}"
-
-
-def test_a_fallback_pinned_to_another_ref_ignores_the_record(rig: Rig, tmp_path: Path) -> None:
-    """A snapshot cut with ``release-public.sh --ref`` rewrites the one URL spelling; the copy
-    here is rewritten the same way and must keep its ref whatever the record holds."""
-    pinned = tmp_path / "pinned-muse"
-    shutil.copytree(MUSE, pinned, ignore=shutil.ignore_patterns("__pycache__"))
-    hook = pinned / "hook.py"
-    pinned_ref = "v0.9.0"
-    hook.write_text(hook.read_text().replace("sidegraph.git@main", f"sidegraph.git@{pinned_ref}"))
-    rig.record(COMMIT.encode())
-
-    assert _subagent(rig, muse_dir=pinned) == f"{URL}v0.9.0"
+def test_the_adapter_has_no_reader_of_the_record() -> None:
+    text = (MUSE / "hook.py").read_text()
+    for needle in ("launch-commit", "XDG_CACHE_HOME", "_recorded_commit", "@main", "git+"):
+        assert needle not in text, needle
 
 
 # -- failing open ----------------------------------------------------------------------------

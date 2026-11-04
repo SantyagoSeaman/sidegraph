@@ -7,7 +7,8 @@ The deep dive on how Sidegraph wires into Claude Code. For the copy-paste happy 
 
 ## Manual MCP registration
 
-Add to the target repo's `.mcp.json` (create it if absent):
+This is the non-plugin install: the plugin below registers the server for you. Add to the target
+repo's `.mcp.json` (create it if absent):
 
 The commands below follow the current development branch. For durable environments, see
 [how to pin mutable development references](../getting-started/installation.md#mutable-development-references).
@@ -80,10 +81,19 @@ need no layout migration. Follow [Update an existing plugin](../getting-started/
 to refresh the marketplace, update the plugin at its installed scope, and start a new
 session or use `/reload-plugins`. Review the host's update summary and approval prompts before continuing.
 
-Updating the runtime from public `@main` and updating Claude Code's cached plugin files
-are separate operations. A running session keeps the skills and manifests it loaded;
-resolving a newer runtime commit does not replace them. Third-party marketplace auto-update
-is off by default, so enable it deliberately or use the explicit update commands.
+The plugin carries its own runtime: the Sidegraph wheel for its version and a lock that pins
+every dependency, in the plugin's `runtime/` folder. The runtime therefore changes only when the
+plugin does. A session start no longer picks up a newer commit from the repository's `main`
+branch; update the plugin to get a newer Sidegraph. The first session after an update installs
+the pinned dependencies into the new version's folder, which downloads them once (and, on a
+machine without Python 3.13, a uv-managed CPython 3.13); later starts need no network. The
+plugin needs uv 0.6.10 or newer, and installs made before this change keep launching from `main`
+until they are updated. A running session keeps the skills and manifests it loaded. Third-party
+marketplace auto-update is off by default, so enable it deliberately or use the explicit update
+commands. If a store was raised to a newer Sidegraph than your plugin, the hooks and the server
+refuse it until you update the plugin. See
+[troubleshooting](../guides/troubleshooting.md#the-plugins-first-start) for what a failed start
+looks like.
 
 ## Environment variables
 
@@ -125,30 +135,37 @@ Two mitigations, both config-level (no source change needed to use them):
 - **MCP servers**: `.mcp.json` supports a `"cwd"` field per server, but it is **not** part of
   Claude Code's documented MCP server schema (documented fields are `command`/`args`/`env`
   and a couple of transport-specific ones), so the plugin does not rely on it. Instead the
-  published `.mcp.json` (sourced from `plugin/sidegraph/.mcp.public.json`) starts `uvx`
-  directly, with no shell, and ends its arguments with `--repo-root` (`env` omitted below for
-  brevity):
+  published `.mcp.json` (sourced from `plugin/sidegraph/.mcp.public.json`) starts `uv run`
+  on the plugin's bundled runtime directly, with no shell, and ends its arguments with
+  `--repo-root` (`env` omitted below for brevity):
   ```json
   {
-    "command": "uvx",
-    "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp", "--repo-root"]
+    "command": "uv",
+    "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}/runtime", "--frozen", "--no-dev", "sidegraph-mcp", "--repo-root"]
   }
   ```
   `--repo-root` anchors the server to the project: `sidegraph-mcp` moves to
   `CLAUDE_PROJECT_DIR` when it is set, else to the git top-level of its cwd, else stays in its
   cwd. Because it needs no `sh`, the same entry starts on native Windows.
-- **Hooks**: hook command entries have no `cwd`/`env` fields, so the public command carries a
-  `cd` prefix: `cd "${CLAUDE_PROJECT_DIR}" && SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=... uvx --from
-  git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start`. This is
-  the content of `plugin/sidegraph/hooks/hooks.public.json`; the release renames it to
-  `hooks.json`. Repeated hook calls use the [shared launch-commit file](../reference/hooks.md#the-launch-commit-file). The development variant uses the same prefix and runs the checkout the plugin
-  was loaded from: `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.."
-  --package sidegraph --frozen --no-active`. Keep the [command guard](../reference/hooks.md#the-command-guard) when adapting a launcher.
+- **Hooks**: hook command entries have no `cwd`/`env` fields, so the public command passes
+  `--repo-root` to the entry point, which moves to `CLAUDE_PROJECT_DIR` (else the git top-level)
+  before it reads anything: `SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=... SIDEGRAPH_GRAPH=...
+  UV_PROJECT_ENVIRONMENT=.venv UV_PYTHON=3.13 uv run --project "${CLAUDE_PLUGIN_ROOT}/runtime"
+  --frozen --no-dev sidegraph-session-start --repo-root`. This is the content of
+  `plugin/sidegraph/hooks/hooks.public.json`; the release renames it to `hooks.json`. The two
+  `UV_*` values keep a `UV_PROJECT_ENVIRONMENT` or `UV_PYTHON` exported in your shell from
+  moving the runtime's environment or interpreter. The development variant runs the checkout the
+  plugin was loaded from: `UV_PROJECT_ENVIRONMENT=.venv uv run --project
+  "${CLAUDE_PLUGIN_ROOT}/../.." --package sidegraph --frozen --no-active`, also with
+  `--repo-root`. Codex, Muse and installs older than the bundled runtime still use the
+  [shared launch-commit file](../reference/hooks.md#the-launch-commit-file) and a `cd` prefix.
+  Keep the [command guard](../reference/hooks.md#the-command-guard) when adapting a launcher.
 
 
 Belt and braces: the hook entry points themselves also anchor a relative `SIDEGRAPH_DIR` to
-`CLAUDE_PROJECT_DIR` when Claude Code exports it, so even a hook invoked without the `cd` prefix
-resolves the store correctly; the graph then follows the store. The MCP server's portable core
+`CLAUDE_PROJECT_DIR` when Claude Code exports it, so even a hook invoked without `--repo-root`
+(or, in an older install, without the `cd` prefix) resolves the store correctly; the graph then
+follows the store. The MCP server's portable core
 does not do this env-anchoring itself (it stays host-agnostic): the host-seam entry point
 `sidegraph-mcp` does it when the plugin passes `--repo-root`, as above.
 

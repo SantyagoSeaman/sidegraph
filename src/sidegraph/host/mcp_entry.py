@@ -34,7 +34,12 @@ from ..config import (
     resolve_store_location,
 )
 from ..schema import Decision
-from .claude_settings import RATIFY_POLICY_ENV_VAR, current_ratify_policy, repo_root_for_settings
+from .claude_settings import RATIFY_POLICY_ENV_VAR, current_ratify_policy
+from .project_anchor import (  # noqa: F401  (REPO_ROOT_FLAG is re-exported)
+    REPO_ROOT_FLAG,
+    anchor_to_project,
+    take_repo_root_flag,
+)
 from .session_identity import GROK_CLIENT_PREFIX, hint_for, stamp_keys_of
 
 # How long the Grok session map may take before ``initialize`` is answered without it.
@@ -302,30 +307,9 @@ def apply_project_ratify_policy() -> None:
         os.environ[RATIFY_POLICY_ENV_VAR] = state.existing_value
 
 
-REPO_ROOT_FLAG = "--repo-root"
-
-
-def anchor_to_project() -> None:
-    """Move the process to the project root; the plugin manifests ask for it with ``--repo-root``.
-
-    ``CLAUDE_PROJECT_DIR`` wins when it is set, non-blank and an existing directory (what the
-    old ``cd "${CLAUDE_PROJECT_DIR}"`` launcher did). Otherwise the git top-level of the cwd
-    applies (what the old Codex ``cd "$(git rev-parse --show-toplevel)"`` did), and outside a
-    repository nothing moves. Anchoring never raises: the server starts wherever it is.
-    see design/superpowers/specs/2026-10-13-sh-free-plugin-launch-design.md (D3)
-    """
-    project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
-    try:
-        target = Path(project) if project and Path(project).is_dir() else repo_root_for_settings()
-        os.chdir(target)
-    except Exception:  # noqa: BLE001 - anchoring must never stop the MCP server
-        return
-
-
 def main() -> None:
     """Console-script entry point (``sidegraph-mcp``)."""
-    if REPO_ROOT_FLAG in sys.argv[1:]:
-        sys.argv = [a for a in sys.argv if a != REPO_ROOT_FLAG]
+    if take_repo_root_flag(sys.argv):
         anchor_to_project()
     apply_project_ratify_policy()
     server.main(prepare=install)

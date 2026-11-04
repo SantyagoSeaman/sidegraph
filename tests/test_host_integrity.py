@@ -281,8 +281,9 @@ def test_t2_an_incompatible_format_marker_gets_the_upgrade_fix(tmp_path, monkeyp
     out = start(monkeypatch, capsys, store_dir)
 
     assert out["systemMessage"].endswith(
-        "This store was written by a different Sidegraph version: upgrade Sidegraph (or use "
-        "the version that wrote it)."
+        "This store was written by a different Sidegraph version: update the Sidegraph plugin "
+        "from its marketplace, or upgrade Sidegraph where you installed it (or use the "
+        "version that wrote it)."
     )
 
 
@@ -1090,5 +1091,6 @@ def test_t2_a_store_that_requires_a_newer_sidegraph_names_the_version_to_upgrade
         f"(StoreRequirementError: This store requires Sidegraph >= {above}; this is {__version__}.)"
     ) in out["systemMessage"]
     assert out["systemMessage"].endswith(
-        f"Upgrade Sidegraph to >= {above}, then start a new session."
+        "Update the Sidegraph plugin from its marketplace, or upgrade Sidegraph where you "
+        f"installed it, to >= {above}, then start a new session."
     )

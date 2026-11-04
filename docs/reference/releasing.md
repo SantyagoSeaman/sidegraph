@@ -33,6 +33,10 @@ restate it in prose or carry it in a manifest field.
 | `package.json` | OpenCode Git package's `version`, kept in lockstep with `pyproject.toml` |
 | `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | Update any `plugins[]` entry's `version` if that optional field is present; leave it omitted otherwise |
 
+The Claude plugin launches the runtime wheel bundled under `plugin/sidegraph/runtime/`, so it
+needs `uv` 0.6.10 or newer on the user's machine. That floor is not a version string to bump;
+raise it only with a tested change to the plugin's launch command.
+
 `README.md` is deliberately absent from this table. Its Status section carries no version
 string — only a PyPI badge that reads the live index — so there is nothing there to bump and
 nothing that can go stale between releases. It used to carry a `vX.Y.Z, on PyPI as ...` line;
@@ -85,7 +89,9 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
    checkout: CI rejects shallow history and scans all reachable commits, including merge
    changes, separately from the staged hook.
 5. `uv build`. Must succeed and produce both `dist/sidegraph-X.Y.Z.tar.gz` and
-   `dist/sidegraph-X.Y.Z-py3-none-any.whl`.
+   `dist/sidegraph-X.Y.Z-py3-none-any.whl`. The snapshot step additionally builds the Claude
+   plugin's runtime wheel from the snapshot's own sources and checks its contents (step 9
+   does this; `uv build` here is the PyPI build).
 6. A real-install smoke test against the freshly built wheel, before anything is tagged:
    `uvx --from ./dist/sidegraph-X.Y.Z-py3-none-any.whl sidegraph-doctor --help`. This confirms
    the package actually installs standalone and its console scripts resolve, which `pytest`
@@ -99,14 +105,50 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
    changelog shape, clean branches, and target repository, and that `vX.Y.Z` is not already
    tagged in the **internal** checkout or its origin. Run it **after** the release changes are
    committed: running it first can only report the work you have not prepared yet.
+   Then validate the release candidate (see [Release candidate validation](#release-candidate-validation)).
 9. Cut the allowlisted public snapshot with
    `tools/release-public.sh "release: vX.Y.Z" --push`. This creates and pushes the public
    `main` commit that will receive the release tag. `--push` itself refuses unless `vX.Y.Z`
    is untagged in the **public** repository and `CHANGELOG.md` dates it (see "The public
    main moves only at releases" below). Refresh `demo` separately when required.
 
-Only after all nine steps and any requested [desktop smoke](#desktop-smoke-when-requested)
-pass is the public snapshot ready to tag.
+Only after all nine steps, the candidate validation and any requested
+[desktop smoke](#desktop-smoke-when-requested) pass is the public snapshot ready to tag.
+
+### Release candidate validation
+
+Run this between step 8 (preflight) and step 9 (the real snapshot push). The bundled Claude
+plugin runtime cannot be exercised by the repository's tests alone, so a candidate snapshot is
+cut into a scratch public repository first and checked there. The commands are the
+maintainer's; steps marked **[Owner]** are the repository owner's.
+
+1. **[Owner]** Create an empty scratch public repository on GitHub and give its name and SSH
+   URL.
+2. Clone it next to the internal checkout. Cut the candidate into it with the same script and
+   gates as a release:
+   `SIDEGRAPH_PUBLIC=<scratch checkout> SIDEGRAPH_PUBLIC_URL=<scratch SSH URL> tools/release-public.sh "rc: vX.Y.Z" --push`.
+   The script prints a NOTE for each override. The snapshot is the one step 9 will push, so
+   nothing beyond the coming release is published.
+3. **[Owner]** Run the plugin directory portal's Validate on the scratch repository.
+4. Read the result. Any blocking finding stops the release: fix it on internal `main` and
+   repeat from step 2. Findings that only hold are noted for the submission.
+5. **[Owner]** Grok gate (release-blocking): install the plugin in Grok from the scratch
+   repository on a machine with no earlier Sidegraph environment. Start a session in a
+   project subdirectory and confirm that the MCP server connects, SessionStart prints the map,
+   a Read fires PreToolUse, and `runtime/.venv` exists under Grok's plugin copy. Then run
+   `/sidegraph:stats` and confirm from the transcript that the command Grok ran starts with
+   the absolute runtime path, not `uvx --from git+…@main`. Outcomes:
+   - Hooks or the MCP server fail: release-blocking. Flip `GROK_PUBLIC_FORM` in
+     `tools/check_public_twins.py` to `"main"`, restore the Grok public hooks to the previous
+     release's `@main` form, land that through a normal pull request, and repeat from step 2.
+   - Hooks and MCP pass, but the skills take their `@main` fallback (Grok does not substitute
+     the plugin path in skill bodies): not blocking. Record Grok as a fallback host for skills
+     in the release notes.
+6. **[Owner]** Delete the scratch repository.
+
+If the portal does not accept the scratch repository, skip its Validate part and record that
+in the release issue; the Grok gate still runs from the scratch repository. Validation then
+happens on the released public `main`, and a remaining finding ships in the next release.
 
 ### Desktop smoke when requested
 
@@ -142,13 +184,15 @@ where it was observed.
    configuration, hooks and skills with that snapshot if install metadata has no commit.
    Locate the running MCP server's Python environment from its process information. Read
    its `site-packages/sidegraph-*.dist-info/direct_url.json`, rather than a project Python
-   installation. Its `vcs_info.commit_id` must match the pushed snapshot. For SessionStart,
-   immediately read the [launch-commit file](hooks.md#the-launch-commit-file) it records
-   from its own source metadata. That value must match the snapshot too. Recheck it before
-   each hot-hook check. Run surfaces one at a time with other Sidegraph sessions closed,
-   because the file is shared across projects. A launch warning, missing artifact or
-   unresolved source identity is incomplete evidence. For Claude, retain the
-   installed-plugin entry's commit too.
+   installation. For Claude, that file is an `archive_info` URL naming the wheel under the
+   installed plugin's `runtime/` folder, and the installed plugin version must equal the
+   candidate version. For Codex, its `vcs_info.commit_id` must match the pushed snapshot, and
+   for SessionStart you immediately read the
+   [launch-commit file](hooks.md#the-launch-commit-file) it records from its own source
+   metadata. That value must match the snapshot too. Recheck it before each hot-hook check.
+   Run surfaces one at a time with other Sidegraph sessions closed, because the file is
+   shared across projects. A launch warning, missing artifact or unresolved source identity
+   is incomplete evidence. For Claude, retain the installed-plugin entry's commit too.
 4. Call `get_task_context` for the anchored file and confirm the saved test-record `id`
    is returned.
 5. In Claude Desktop's local Code tab, ask the agent to Read that file for the first time
@@ -181,11 +225,13 @@ Then repeat this whole desktop smoke against the new snapshot.
 
 ### The public main moves only at releases
 
-Every plugin manifest installs from the public repository's `main`. The MCP server and
-`SessionStart` let `uv` re-resolve that branch reference at each start, and `SessionStart`
-records the commit it got for the `Stop`, `PreToolUse` and `SubagentStart` hooks to launch from, so pushing
-`main` reaches every plugin user at their next session start, on their machine, in any project
-and either host. For that reason the public `main` moves only as part of a release: `tools/release-public.sh --push`
+The Codex, Muse and OpenCode manifests install from the public repository's `main`. The MCP
+server and `SessionStart` let `uv` re-resolve that branch reference at each start, and
+`SessionStart` records the commit it got for the `Stop`, `PreToolUse` and `SubagentStart`
+hooks to launch from, so pushing `main` reaches those users at their next session start, on
+their machine, in any project. It also reaches Claude installs older than the bundled
+runtime, which still launch from `main`. Newer Claude installs run the wheel bundled in the
+plugin and update only when the plugin version changes. For that reason the public `main` moves only as part of a release: `tools/release-public.sh --push`
 refuses to push it unless the version being published is untagged in the public repository
 and `CHANGELOG.md` dates it, checked before anything is written and again right before the
 push. A docs-only or other non-release change waits for the next release, or ships in an
@@ -258,16 +304,23 @@ Green CI and a pushed tag are not proof the release actually works for a consume
 - The PyPI project page (`https://pypi.org/project/sidegraph/`) shows the new version.
 - `uv tool install sidegraph==X.Y.Z` (or `uvx --from sidegraph==X.Y.Z sidegraph-doctor
   --help`) succeeds against the real published package, not the local checkout.
-- The plugin marketplace path still installs from its intentional mutable `@main` source
-  (plugin manifests do not switch to the release tag):
+- The plugin marketplace path still installs from the public `main` (plugin manifests do not
+  switch to the release tag; the Codex and Muse manifests launch from `@main`, and the Claude and
+  Grok manifests launch the runtime bundled in the plugin):
   `/plugin marketplace add SantyagoSeaman/sidegraph` then `/plugin install
   sidegraph@sidegraph` inside Claude Code. This is the deliberate plugin exception to the
   normal [pinning guidance](../getting-started/installation.md#mutable-development-references).
 
+- After `publish.yml` succeeds, run `tools/verify-release.sh --after-publish vX.Y.Z`. It
+  clones the public repository at the tag, downloads the PyPI wheel of that version, and
+  checks that the wheel bundled under `plugin/sidegraph/runtime/` holds the same package
+  bytes. It cannot run earlier, because PyPI has no wheel for the version until the publish
+  finishes.
+
 The internal maintainer checkout also carries a network-bound install smoke script
 (`tools/verify-release.sh`; it is intentionally absent from the public snapshot) that exercises
 `sidegraph-init`, `sidegraph-bootstrap --help`, an MCP `initialize` handshake, and the
-public plugin hooks' `@main` install ref, all against the real published source. It is deliberately
+Codex plugin hooks' `@main` install ref, all against the real published source. It is deliberately
 not wired into CI, since it clones and installs over the network. The maintainer runs it by
 hand after the snapshot push, using its default `main` ref. A tag argument tests package
 installation at that tag but cannot assert that mutable plugin refs changed to it, because

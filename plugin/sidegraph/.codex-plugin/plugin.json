@@ -1,6 +1,6 @@
 {
   "name": "sidegraph",
-  "version": "0.24.0",
+  "version": "0.24.1rc1",
   "description": "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code.",
   "license": "Apache-2.0",
   "skills": "./skills/",

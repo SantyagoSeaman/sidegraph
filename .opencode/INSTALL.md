@@ -38,14 +38,12 @@ server only when that name has no explicit configuration. An existing entry, inc
         "command": [
           "uvx",
           "--from",
-          "git+https://github.com/SantyagoSeaman/sidegraph.git@main",
+          "sidegraph==0.24.1rc1",
+          "--python",
+          "3.13",
           "sidegraph-mcp",
           "--repo-root"
-        ],
-        "environment": {
-          "SIDEGRAPH_DIR": ".sidegraph",
-          "SIDEGRAPH_GRAPH": "graphify-out/graph.json"
-        }
+        ]
       }
     }
   }

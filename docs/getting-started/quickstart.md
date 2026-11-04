@@ -4,8 +4,8 @@
 
 This is one complete loop: build the graph, create the store, connect one host, record one
 anchored gotcha, and retrieve it in a new session. It assumes Graphify is installed as described in
-[Installation](installation.md). Commands are written with the `uvx` prefix the plugin uses, so
-no Sidegraph install is needed. With the optional CLI installed and kept updated
+[Installation](installation.md). Commands are written with a `uvx` prefix, so
+no Sidegraph install is needed (the Claude Code plugin runs its own bundled runtime; these are the same commands at the latest `main`). With the optional CLI installed and kept updated
 ([Option A](installation.md#option-a--the-cli-on-your-path)), the bare `sidegraph-*` names
 work too; the prose below uses those bare names, the code blocks the `uvx` form. (`@main` is a
 mutable ref; to pin it see

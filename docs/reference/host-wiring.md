@@ -190,17 +190,24 @@ memory. None of these breaks the session.
 
 **Public and development manifests differ.** The marketplace receives
 `plugin/sidegraph/.mcp.public.json` and `plugin/sidegraph/hooks/hooks.public.json`, renamed
-to the canonical filenames during the public release. Those variants run `uvx --from
-git+https://github.com/SantyagoSeaman/sidegraph.git@main …`, so the plugin deliberately
-follows the public repository rather than the PyPI package. The unsuffixed files in this
+to the canonical filenames during the public release. For Claude Code and Grok Build those
+variants run the runtime bundled in the plugin: `UV_PROJECT_ENVIRONMENT=.venv UV_PYTHON=3.13 uv
+run --project "${CLAUDE_PLUGIN_ROOT}/runtime" --frozen --no-dev <entry point> --repo-root`, with
+the Sidegraph wheel and a hash-pinned lock beside the manifest, so a newer Sidegraph arrives when
+the plugin updates and nothing is resolved at a session start. Codex and Muse run `uvx --from
+git+https://github.com/SantyagoSeaman/sidegraph.git@main …`, so those plugins deliberately
+follow the public repository rather than the PyPI package. The unsuffixed files in this
 development repository run the checkout the plugin was loaded from, with
 `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.." --package
-sidegraph --frozen --no-active`, in whatever project the session is in. The MCP entry of
-both variants starts `uvx` or `uv` directly, with no `sh`; the Claude Code hooks run through
+sidegraph --frozen --no-active` and `--repo-root`, in whatever project the session is in. The MCP entry of
+every variant starts `uvx` or `uv` directly, with no `sh`; the Claude Code hooks run through
 Git Bash on Windows. Git for Windows provides it and Claude Code finds it; if it cannot,
 `CLAUDE_CODE_GIT_BASH_PATH` points it there. Without Git Bash, Claude Code runs hooks in
 PowerShell, which cannot parse Sidegraph's POSIX hook commands.
 
-The [launch-commit contract](hooks.md#the-launch-commit-file) explains package pinning between hook calls.
+The [launch-commit contract](hooks.md#the-launch-commit-file) explains package pinning between
+hook calls for Codex, Muse and Claude installs older than the bundled runtime. A failed first
+start of the bundled runtime is covered in
+[troubleshooting](../guides/troubleshooting.md#the-plugins-first-start).
 
 Commands using `@main` follow a mutable branch. See [pinning development references](../getting-started/installation.md#mutable-development-references).

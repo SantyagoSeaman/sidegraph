@@ -5,6 +5,7 @@ import os
 
 import pytest
 
+from sidegraph import __version__
 from sidegraph.cli import init_main
 from sidegraph.host.claude_settings import RATIFY_POLICY_DEFAULT, RATIFY_POLICY_ENV_VAR
 from sidegraph.store import Store
@@ -56,13 +57,16 @@ def test_init_prints_wiring_snippets(tmp_path, capsys):
     assert "/plugin install sidegraph@sidegraph" in out
     # The no-plugin alternative is a single native command, project-scoped.
     assert "claude mcp add sidegraph -s project" in out
-    assert "uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main" in out
-    assert "sidegraph-mcp" in out
+    # ... and launches the exact PyPI pin on the interpreter the wheel closure supports.
+    assert f"-- uvx --from sidegraph=={__version__} --python 3.13 sidegraph-mcp" in out
+    assert "git+" not in out
     # Manual hook-by-hook setup lives in the docs, not in the init dump.
     assert "docs/getting-started/claude-code-setup.md" in out
     assert "mcpServers" not in out  # the old .mcp.json blob is gone
-    # SIDEGRAPH_DIR is the primary knob; the legacy SIDEGRAPH_DB pair must not appear.
-    assert "SIDEGRAPH_DIR=.sidegraph" in out
+    # No launch carries SIDEGRAPH_DIR/SIDEGRAPH_GRAPH (their values are the defaults), and the
+    # legacy SIDEGRAPH_DB pair must not appear either.
+    assert "--env" not in out
+    assert "SIDEGRAPH_DIR" not in out and "SIDEGRAPH_GRAPH" not in out
     assert "SIDEGRAPH_DB" not in out
     assert ".sidegraph/decisions.db" not in out
 

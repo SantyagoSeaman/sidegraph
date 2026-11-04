@@ -12,7 +12,7 @@ cwd, environment and stdin to a file and prints a marker. A ``.cmd`` stub would 
 stdin handling, not the hook's. Windows only; the ``windows-core`` CI job runs it.
 
 Red targets, to be proven by the CI run (no Windows machine has run them yet): break the
-``-not $?`` guard, break the pin regex, drop the ``Set-Location``. The classification of a
+``-not $?`` guard, break the pinned argv, drop the ``Set-Location``. The classification of a
 command as public or internal is checked on every platform by the unit tests below.
 """
 
@@ -20,10 +20,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +33,9 @@ windows_only = pytest.mark.skipif(sys.platform != "win32", reason="runs PowerShe
 
 _ROOT = Path(__file__).resolve().parent.parent
 _CODEX = _ROOT / "plugin" / "sidegraph" / "codex"
-_URL = "git+https://github.com/SantyagoSeaman/sidegraph.git@"
-_REF = re.compile(r"sidegraph\.git@([A-Za-z0-9._/-]+)")
+_VERSION = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+    "version"
+]
 _ENTRY = {
     "SessionStart": "sidegraph-session-start",
     "Stop": "sidegraph-stop",
@@ -44,7 +45,6 @@ _SESSION_MESSAGE = (
     "Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); "
     "run the hook command in a terminal to see the error"
 )
-_COMMIT = "f5babfb86a9562140acef8ddc61e7fe4a5933f00"
 # ASCII on purpose: the hook never reads stdin itself, so the child inherits the handle.
 _PAYLOAD = (
     json.dumps({"hook_event_name": "Stop", "session_id": "s-1", "n": [1, 2]}) + "\n"
@@ -138,7 +138,7 @@ _DEV_SESSION_MESSAGE = (
 def test_an_internal_command_is_not_taken_for_a_public_one() -> None:
     """The internal SessionStart fallback message says ``uv/uvx``; that once made it public."""
     assert _kind(_DEV_SESSION_MESSAGE) == "dev"
-    assert _kind("uvx --from git+https://x.git@main sidegraph-stop") == "public"
+    assert _kind(f"uvx --from sidegraph=={_VERSION} --python 3.13 sidegraph-stop") == "public"
 
 
 def test_every_manifest_command_is_classified_by_its_own_text() -> None:
@@ -214,20 +214,17 @@ def _run(
     path: str,
     tmp_path: Path,
     stub_env: dict[str, str] | None = None,
-    cache: bool = True,
 ) -> tuple[subprocess.CompletedProcess[bytes], Path]:
     record = tmp_path / "record.json"
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith("SIDEGRAPH_") and k not in ("UV_PROJECT_ENVIRONMENT", "XDG_CACHE_HOME")
+        if not k.startswith("SIDEGRAPH_") and k != "UV_PROJECT_ENVIRONMENT"
     }
     env["PATH"] = path
     env["USERPROFILE"] = str(tmp_path / "home")
     env["GIT_CEILING_DIRECTORIES"] = str(tmp_path.parent)
     env["STUB_RECORD"] = str(record)
-    if cache:
-        env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
     env.update(stub_env or {})
     result = subprocess.run(
         [shutil.which(shell) or shell, "-NoProfile", "-Command", command],
@@ -246,18 +243,11 @@ def _read(record: Path) -> dict[str, Any]:
     return json.loads(record.read_text(encoding="utf-8"))
 
 
-def _write_pin(tmp_path: Path, data: bytes, *, home: bool = False) -> None:
-    base = tmp_path / "home" / ".cache" if home else tmp_path / "cache"
-    target = base / "sidegraph" / "launch-commit"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
-
-
-def _expected_argv(kind: str, event: str, command: str, ref: str | None = None) -> list[str]:
+def _expected_argv(kind: str, event: str) -> list[str]:
     entry = _ENTRY[event]
     if kind == "dev":
         return ["run", "--package", "sidegraph", "--frozen", "--no-active", entry]
-    return ["--from", _URL + (ref or _REF.findall(command)[0]), entry]
+    return ["--from", f"sidegraph=={_VERSION}", "--python", "3.13", entry]
 
 
 @windows_only
@@ -277,12 +267,14 @@ def test_runs_from_the_repo_root_with_the_environment_and_the_payload(
     assert result.stdout.decode().strip() == "STUB-OUT"
     seen = _read(record)
     assert os.path.samefile(seen["cwd"], repo), seen["cwd"]
-    assert seen["env"]["SIDEGRAPH_DIR"] == ".sidegraph"
-    assert seen["env"]["SIDEGRAPH_GRAPH"] == "graphify-out/graph.json"
+    # The pinned launch sets no store path (the defaults hold); the internal one aims at the
+    # checkout's.
+    assert seen["env"]["SIDEGRAPH_DIR"] == (".sidegraph" if kind == "dev" else None)
+    assert seen["env"]["SIDEGRAPH_GRAPH"] == ("graphify-out/graph.json" if kind == "dev" else None)
     assert seen["env"]["SIDEGRAPH_HOST"] == ("codex" if event == "SessionStart" else None)
     assert seen["env"]["UV_PROJECT_ENVIRONMENT"] == (".venv" if kind == "dev" else None)
     assert bytes.fromhex(seen["stdin"]) == _PAYLOAD
-    assert seen["argv"] == _expected_argv(kind, event, command)
+    assert seen["argv"] == _expected_argv(kind, event)
 
 
 @windows_only
@@ -330,59 +322,6 @@ def test_a_launch_that_exits_non_zero_prints_the_fallback(
 @windows_only
 @pytest.mark.parametrize("shell", _SHELLS)
 @pytest.mark.parametrize(("kind", "event", "command"), _CASES)
-def test_the_recorded_commit_pins_only_the_public_hot_hooks(
-    kind: str, event: str, command: str, shell: str, repo: Path, stub_dir: Path, tmp_path: Path
-) -> None:
-    _write_pin(tmp_path, _COMMIT.encode())
-    result, record = _run(shell, command, cwd=repo, path=_path(stub=stub_dir), tmp_path=tmp_path)
-    assert result.returncode == 0, result.stderr
-    seen = _read(record)
-    ref = _REF.findall(command)[0] if kind == "public" else None
-    pinned = kind == "public" and event != "SessionStart" and ref == "main"
-    assert seen["argv"] == _expected_argv(kind, event, command, _COMMIT if pinned else ref)
-
-
-@pytest.mark.parametrize("shell", _SHELLS)
-@pytest.mark.parametrize(
-    "data",
-    [
-        pytest.param(_COMMIT.upper().encode(), id="uppercase"),
-        pytest.param(b"g" * 40, id="not-hex"),
-        pytest.param(_COMMIT[:39].encode(), id="short"),
-        pytest.param(_COMMIT.encode() + b"\n", id="41-bytes"),
-        pytest.param(b"", id="empty"),
-    ],
-)
-@windows_only
-def test_a_malformed_record_falls_back_to_the_branch(
-    data: bytes, shell: str, repo: Path, stub_dir: Path, tmp_path: Path
-) -> None:
-    command = next(c for k, e, c in (p.values for p in _CASES) if k == "public" and e == "Stop")
-    _write_pin(tmp_path, data)
-    result, record = _run(shell, command, cwd=repo, path=_path(stub=stub_dir), tmp_path=tmp_path)
-    assert result.returncode == 0, result.stderr
-    assert _read(record)["argv"] == _expected_argv("public", "Stop", command)
-
-
-@windows_only
-@pytest.mark.parametrize("shell", _SHELLS)
-def test_the_record_is_found_under_the_home_cache_without_xdg(
-    shell: str, repo: Path, stub_dir: Path, tmp_path: Path
-) -> None:
-    command = next(c for k, e, c in (p.values for p in _CASES) if k == "public" and e == "Stop")
-    ref = _REF.findall(command)[0]
-    _write_pin(tmp_path, _COMMIT.encode(), home=True)
-    result, record = _run(
-        shell, command, cwd=repo, path=_path(stub=stub_dir), tmp_path=tmp_path, cache=False
-    )
-    assert result.returncode == 0, result.stderr
-    expected = _COMMIT if ref == "main" else ref
-    assert _read(record)["argv"] == _expected_argv("public", "Stop", command, expected)
-
-
-@windows_only
-@pytest.mark.parametrize("shell", _SHELLS)
-@pytest.mark.parametrize(("kind", "event", "command"), _CASES)
 def test_a_missing_launcher_prints_the_fallback_and_exits_zero(
     kind: str, event: str, command: str, shell: str, repo: Path, tmp_path: Path
 ) -> None:
@@ -407,8 +346,8 @@ def test_outside_a_repository_the_launcher_still_runs_where_it_is(
     assert result.returncode == 0, result.stderr
     seen = _read(record)
     assert os.path.samefile(seen["cwd"], plain), seen["cwd"]
-    assert seen["env"]["SIDEGRAPH_DIR"] == ".sidegraph"
-    assert seen["argv"] == _expected_argv(kind, event, command)
+    assert seen["env"]["SIDEGRAPH_DIR"] == (".sidegraph" if kind == "dev" else None)
+    assert seen["argv"] == _expected_argv(kind, event)
 
 
 @windows_only
@@ -428,7 +367,7 @@ def test_without_git_the_launcher_still_runs_where_it_is(
     assert result.returncode == 0, result.stderr
     seen = _read(record)
     assert os.path.samefile(seen["cwd"], where), seen["cwd"]
-    assert seen["argv"] == _expected_argv(kind, event, command)
+    assert seen["argv"] == _expected_argv(kind, event)
 
 
 @windows_only

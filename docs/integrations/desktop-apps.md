@@ -31,7 +31,7 @@ from the app on a fresh machine was not exercised.
 
 The live macOS run verified project installation, setup, the opening map, MCP retrieval,
 records before an anchored file read, a subagent brief and the interactive Stop capture
-reminder. The app launched from the GUI and could find `uvx` on that machine.
+reminder. The app launched from the GUI and could find `uv` and `uvx` on that machine.
 
 ## Codex view of the ChatGPT desktop app
 
@@ -80,7 +80,7 @@ The desktop runs above cover macOS local projects. Native Windows desktop-app se
 have not been verified by these runs. The [OS coverage matrix](../getting-started/installation.md#platform-coverage)
 separates CLI and hook checks from GUI validation.
 
-If the plugin cannot launch `uvx`, inspect the environment the app gives its subprocesses
+If the plugin cannot launch `uv` (Claude) or `uvx` (Codex), inspect the environment the app gives its subprocesses
 and restart the app after correcting PATH. A successful terminal command alone does not
 establish the GUI environment. See [launcher diagnostics](../reference/hooks.md#if-you-see-this-message)
 for the launch command and failure details.

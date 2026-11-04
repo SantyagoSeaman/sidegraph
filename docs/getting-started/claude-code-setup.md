@@ -12,7 +12,7 @@ caveats — see the deep dive at
 Run these in the repo you want memory over (not the Sidegraph checkout).
 
 **Windows:** read the [Windows setup notes](installation.md#windows) first. The plugin
-starts its MCP server through `uvx` directly and Claude Code runs the hooks through Git Bash,
+starts its MCP server through `uv run` directly and Claude Code runs the hooks through Git Bash,
 so natively you need only Claude Code, uv and Git for Windows with its default options: no
 PATH change. Claude Code finds Git Bash itself; if it cannot, set `CLAUDE_CODE_GIT_BASH_PATH`.
 Native core/stdio CI does not verify the complete Claude Code plugin; WSL with a single Linux
@@ -27,18 +27,22 @@ Inside a Claude Code session, in that repo:
 /plugin install sidegraph@sidegraph
 ```
 
-The plugin follows the public repository's `main`, which advances at releases. To pin a
-version for reproducible environments, see
-[how to pin mutable development references](installation.md#mutable-development-references).
+The plugin comes from the public repository's `main`, which advances at releases. The Sidegraph
+it runs is the release the plugin version names, and it changes only when you update the plugin.
 
 Installs the MCP server and all four hooks (`SessionStart`, `Stop`, `PreToolUse`,
 `SubagentStart`) in one step, pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by
-default. It installs from the public Git repository: the MCP
-server and `SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/
-sidegraph.git@main` under the hood, and `Stop`, `PreToolUse` and `SubagentStart` start from the
-commit `SessionStart` resolved. See
-[the plugin install path](../integrations/claude-code.md#plugin-install-path) for exactly
-what gets registered and the cwd-pinning details. Skip to [Verify](#verify) once installed.
+default. It carries its own runtime: the MCP server and all four hooks run `uv run --project
+"${CLAUDE_PLUGIN_ROOT}/runtime" --frozen --no-dev` on the Sidegraph wheel and the lock that ship in
+the plugin folder. The first session after an install or an update downloads the pinned
+dependencies once (and, on a machine without Python 3.13, a uv-managed CPython 3.13); later
+sessions need no network. The plugin needs [uv](installation.md#prerequisites) 0.6.10 or newer and a
+platform the lock covers (macOS on Apple silicon, Linux on x86-64 or arm64 with glibc, Windows on
+x86-64). Intel Macs and musl Linux use [Option B](#option-b--manual-registration), the non-plugin
+install. See [the plugin install path](../integrations/claude-code.md#plugin-install-path) for
+exactly what gets registered and the cwd-pinning details, and
+[the plugin's first start](../guides/troubleshooting.md#the-plugins-first-start) if the first
+session shows no memory. Skip to [Verify](#verify) once installed.
 
 The plugin needs no other install. The CLI on your `PATH`
 ([`uv tool install` from `main`](installation.md#option-a--the-cli-on-your-path)) is
@@ -77,14 +81,17 @@ reload summary and approval prompts before continuing. Check the Sidegraph skill
 slash menu and the server in `/mcp`.
 
 Third-party marketplaces have auto-update off by default in current Claude Code. You can
-enable it for `sidegraph` in `/plugin` → Marketplaces, or use the commands above. The
-runtime's `@main` source policy does not refresh skills or manifests already loaded by the
-host. See [Claude Code's update reference](https://code.claude.com/docs/en/discover-plugins#keep-plugins-updated).
+enable it for `sidegraph` in `/plugin` → Marketplaces, or use the commands above. Updating the
+plugin replaces its runtime together with its skills and manifests; a session that is already
+running keeps the ones it loaded. The first session after an update installs the new runtime's
+dependencies. See [Claude Code's update reference](https://code.claude.com/docs/en/discover-plugins#keep-plugins-updated).
 
 ## Option B — manual registration
 
-Prefer explicit `.mcp.json`/`.claude/settings.json` files (e.g. for review in a PR), or want
-to point at a source checkout? Register the two pieces yourself.
+This is the non-plugin install, and it keeps launching `uvx` from the repository's `main` branch
+(the plugin above runs its own bundled runtime instead). Prefer explicit
+`.mcp.json`/`.claude/settings.json` files (e.g. for review in a PR), run an Intel Mac or musl
+Linux, or want to point at a source checkout? Register the two pieces yourself.
 
 ### 1. Register the MCP server
 
@@ -217,11 +224,13 @@ Add to `.claude/settings.json` (merge into an existing file):
 }
 ```
 
-These recipes keep plain `@main` on every command, which is simpler to copy. The plugin's own
-`Stop`, `PreToolUse` and `SubagentStart` commands start from the commit `SessionStart` resolved,
-which is faster on each call; see [the plugin install path](../integrations/claude-code.md#plugin-install-path).
+These non-plugin recipes keep plain `@main` on every command, which is simpler to copy; `@main`
+is a mutable branch, so to pin a version for reproducible environments see
+[how to pin mutable development references](installation.md#mutable-development-references). The
+Claude plugin runs its bundled runtime instead, with no resolution on any call; see
+[the plugin install path](../integrations/claude-code.md#plugin-install-path).
 
-From a source checkout, replace each `uvx --from git+... <entrypoint>` above with `uv run
+In these non-plugin recipes, from a source checkout, replace each `uvx --from git+... <entrypoint>` above with `uv run
 --project '/ABSOLUTE/PATH/TO/sidegraph' <entrypoint>` (see the note in step 1). Keep the trailing
 `|| printf …` on each command: Claude Code treats a hook that exits 2 with text on stderr as a
 block on `Stop` (it continues the conversation) and on `PreToolUse` (it blocks the tool call), and
@@ -291,7 +300,9 @@ outside those two directories:
 - `sidegraph-init --no-hooks` records the git config key `sidegraph.graphRefresh`.
   `--remove-hooks` clears it.
 - `sidegraph-init` may have written `SIDEGRAPH_RATIFY_POLICY` into `.claude/settings.json`.
-- The SessionStart hook keeps `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`, one
-  file shared by every project on the machine.
+- A non-plugin install's SessionStart hook keeps `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`,
+  one file shared by every project on the machine. The current Claude plugin does not write it.
+- The Claude plugin's runtime lives in the plugin's own folder under `~/.claude/plugins/`
+  (a `.venv` beside the wheel); Claude Code removes it with the plugin's old version folders.
 
 [SECURITY.md](../../SECURITY.md) lists every write.

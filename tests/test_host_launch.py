@@ -1,7 +1,9 @@
 """The launch-commit record: SessionStart notes the commit uv resolved for ``@main``, and the
-hot-path hooks launch from it (only when their fallback is on the branch: the pinned case is
-test_a1 in tests/test_public_hook_launch.py).
+hot-path hooks of a pre-update install (public 0.24.0 and earlier) launch from it. The current
+manifests launch the exact PyPI pin and read no record (tests/test_public_hook_launch.py); the
+writer stays for a migration window so the old manifests keep following the new code.
 design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md
+design/superpowers/specs/2026-11-04-pinned-pypi-launch-design.md (6.1)
 
 T3 is the writer's contract: which installs write, which write nothing, what the file holds.
 T4 is its place in ``session_start``: first, and never able to change the hook's output.
@@ -16,6 +18,8 @@ import contextlib
 import io
 import json
 import os
+import stat
+import subprocess
 import threading
 from importlib import metadata
 from pathlib import Path
@@ -60,7 +64,14 @@ def _install(monkeypatch: pytest.MonkeyPatch, direct_url: Any) -> None:
     text = (
         direct_url if isinstance(direct_url, str) or direct_url is None else json.dumps(direct_url)
     )
-    monkeypatch.setattr(metadata, "distribution", lambda name: _Dist(text))
+    real_distribution = metadata.distribution
+
+    def distribution(name: str) -> Any:
+        # Only Sidegraph's own distribution is faked: SessionStart reads others for real
+        # (`python-ulid`'s version, for one), and a blanket fake crashes it.
+        return _Dist(text) if name == "sidegraph" else real_distribution(name)
+
+    monkeypatch.setattr(metadata, "distribution", distribution)
 
 
 def test_canonical_ref_is_main() -> None:
@@ -127,6 +138,10 @@ def test_t3_an_unchanged_value_keeps_the_file(cache: Path, monkeypatch: pytest.M
             {"url": "file:///work/sidegraph", "dir_info": {"editable": True}}, id="editable"
         ),
         pytest.param({"url": "file:///work/sidegraph", "dir_info": {}}, id="file"),
+        pytest.param(
+            {"url": "file:///p/runtime/sidegraph-0.24.1-py3-none-any.whl", "archive_info": {}},
+            id="bundled-wheel",
+        ),
         pytest.param(None, id="pypi-no-direct-url"),
         pytest.param("not json", id="malformed-json"),
         pytest.param("[]", id="not-an-object"),
@@ -341,3 +356,65 @@ def test_t4_a_writer_that_raises_changes_nothing_in_the_output(
     out = _run_session_start(tmp_path / "b.db", monkeypatch, capsys)
     assert "additionalContext" in baseline  # the baseline is a real answer, not `{}`
     assert json.loads(out) == json.loads(baseline)
+
+
+# The Stop command of the Codex plugin's `hooks.public.json` as public 0.24.0 shipped it (a
+# fixture, not a read of the tree: the current manifests no longer carry it). It launches the
+# commit the record names, falling back to `@main`.
+OLD_CODEX_STOP = r"""sh -c 'f="${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit"; c=; [ -f "$f" ] && c=$(head -c 41 "$f" 2>/dev/null); case "$c" in *[!0123456789abcdef]*) c= ;; esac; [ "${#c}" -eq 40 ] || c=; u=git+https://github.com/SantyagoSeaman/sidegraph.git@main; [ -n "$c" ] && [ "${u##*@}" = main ] && u=${u%@*}@$c; cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from "$u" sidegraph-stop || printf "{}\n"' || printf '{}\n'"""  # noqa: E501
+
+
+def _launched_by(command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Run ``command`` in ``sh`` with a stub ``uvx`` first on PATH and return the stub's argv."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    argv_file = tmp_path / "uvx-argv"
+    stub = bin_dir / "uvx"
+    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{argv_file}"\n', encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    argv_file.unlink(missing_ok=True)
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    subprocess.run(["sh", "-c", command], cwd=work, check=True, capture_output=True)
+    return argv_file.read_text(encoding="utf-8").split()
+
+
+def test_an_old_manifest_follows_the_new_commit_after_promote(
+    cache: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pre-update Codex install (its Stop hook is the 0.24.0 command above) keeps launching
+    the commit the record names. After the promote moves public ``main`` to this version, the
+    install's SessionStart runs this code as an ``@main`` install, and this code must move the
+    record, or the old Stop and SubagentStart hooks stay on the old commit while SessionStart
+    runs the new one (spec 6.1).
+
+    A guard, not a red test: it passes on the tree as committed, because the writer was kept.
+    Proved to bite by deleting the ``record_launch_commit`` call from ``session_start``
+    locally: the record then stays on the stale commit and the last assertion fails."""
+    record = cache / "launch-commit"
+    cache.mkdir(parents=True)
+    record.write_bytes(OTHER_COMMIT.encode("ascii"))
+    stale = _launched_by(OLD_CODEX_STOP, tmp_path, monkeypatch)
+    assert stale[:2] == ["--from", f"git+{URL}@{OTHER_COMMIT}"]  # the fixture is a real reader
+
+    _install(monkeypatch, _git_direct_url())  # SessionStart now runs the promoted `@main` code
+    capsys.readouterr()
+    monkeypatch.setenv("SIDEGRAPH_DB", str(tmp_path / "s.db"))
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    hooks.session_start()
+    captured = capsys.readouterr()
+    # SessionStart really answered: no hook error, and a map for the model.
+    assert "sidegraph_hook_error" not in captured.err
+    assert "additionalContext" in captured.out
+
+    assert record.read_bytes() == COMMIT.encode("ascii")
+    assert _launched_by(OLD_CODEX_STOP, tmp_path, monkeypatch) == [
+        "--from",
+        f"git+{URL}@{COMMIT}",
+        "sidegraph-stop",
+    ]

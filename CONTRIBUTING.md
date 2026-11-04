@@ -60,7 +60,7 @@ and sign off each commit as described below.
 
 CI runs lint on every PR push. On a pull request that is ready for review (not a draft),
 on `main` and before publishing, it also runs the full suite on Linux with Python 3.13 and
-3.14 and a selected native Windows core/MCP suite on both versions; see
+3.14 and a selected native Windows core/MCP suite on Python 3.13; see
 [platform coverage](docs/getting-started/installation.md#platform-coverage). If your change
 touches paths, permissions, subprocesses, or shell commands, describe any additional
 platform checks you performed.

@@ -34,7 +34,7 @@ from urllib.parse import quote
 
 from ulid import ULID
 
-from . import domain_snapshot, drift_checks, integrity
+from . import domain_snapshot, domain_splits, drift_checks, integrity
 from .engine.reader import GraphifyReader
 from .githooks import GRAPH_REBUILD
 from .schema import DecisionStatus, Domain, DomainStatus, canonicalize, file_anchor_name
@@ -93,14 +93,17 @@ STORE_NOT_MIGRATED = "store-not-migrated"
 MAINTENANCE_DUE = "maintenance-due"
 DEPRECATED_AUTO_ACCEPT = "deprecated-auto-accept"
 RECORD_FIELDS_REQUIREMENT_CODE = "record-fields-requirement"
+DOMAIN_SPLIT = "domain-split"
 # Findings ``--check`` never escalates to exit 2: still printed, still in ``--json``, still a
 # session notice. ``maintenance-due`` is routine upkeep on a healthy packed store, so a CI
 # gate must not go red on it (owner decision, 2026-10-27). ``store-not-migrated`` still counts.
 # ``deprecated-auto-accept`` is a deprecation notice, not a store problem.
 # ``superseded-no-live-successor`` can never clear (the restated record has no link to the old
 # one), so a gate that failed on it would fail forever.
+# ``domain-split`` reports a supported layout (one domain replaced by several live ones), so a
+# store that has one on purpose must not fail a gate.
 CHECK_EXEMPT_CODES = frozenset(
-    {MAINTENANCE_DUE, DEPRECATED_AUTO_ACCEPT, SUPERSEDED_WITHOUT_LIVE_SUCCESSOR}
+    {MAINTENANCE_DUE, DEPRECATED_AUTO_ACCEPT, SUPERSEDED_WITHOUT_LIVE_SUCCESSOR, DOMAIN_SPLIT}
 )
 
 # The registry's check id -> the finding code doctor prints. They differ where one check yields
@@ -1758,6 +1761,50 @@ def _check_snapshot_splits(
     return out
 
 
+def _check_domain_splits(
+    root: Path, domains: list[tuple[Path, dict]], archived_domains: dict[str, dict]
+) -> list[Finding]:
+    """domain-split: a domain replaced by two or more domains that are live at once (counted
+    by :func:`domain_splits.domain_splits`: a part counts only while its chain reaches an
+    accepted head). A supported layout, so advisory and exempt from ``--check``. A split of a
+    domain the snapshot covers is ``snapshot-split``'s, which says what to refresh.
+    Pure read, like every check here."""
+    models: dict[str, Domain] = {}
+    for payload in [*archived_domains.values(), *(d for _path, d in domains)]:
+        try:
+            dom = Domain.model_validate(payload)
+        except ValueError:
+            continue
+        models[dom.domain_id] = dom
+    covered: dict[str, str] = {}
+    try:
+        snap = domain_snapshot.load_snapshot(root)
+        if snap is not None:
+            covered = snap.covered_ids()
+    except (domain_snapshot.SnapshotError, OSError):
+        pass
+    out: list[Finding] = []
+    for pred_id, ids in sorted(domain_splits.domain_splits(models).items()):
+        pred = models.get(pred_id)
+        if pred is None:
+            continue  # missing or malformed: verify reports it, not this advisory
+        if covered and domain_snapshot.snapshot_slug_of(pred, covered, models.get) is not None:
+            continue
+        parts = ", ".join(f"{models[i].slug} ({i})" for i in ids)
+        out.append(
+            Finding(
+                DOMAIN_SPLIT,
+                str(root / "domains" / f"{pred_id}.json"),
+                f"{pred.slug} is replaced by {len(ids)} live domains: {parts}; each keeps its "
+                "own rules. If it should be a single replacement, drop the extra parts with "
+                "`sidegraph-ratify --drop <id>`",
+                record_id=pred_id,
+                record_type="domain",
+            )
+        )
+    return out
+
+
 def _registry_findings(
     store_dir: Path,
     now: datetime,
@@ -2539,4 +2586,5 @@ def _curate(
     # check used to be), and records whose every code anchor is orphaned (``orphaned-record``).
     findings += _registry_findings(root, now, reader, index, host_checks)
     findings += _check_snapshot_splits(root, domains, archived_domains)
+    findings += _check_domain_splits(root, domains, archived_domains)
     return CurationReport(findings=findings, skipped=skipped, drift_groups=drift_groups_report)

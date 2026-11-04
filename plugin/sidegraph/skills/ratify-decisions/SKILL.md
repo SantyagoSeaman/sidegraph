@@ -127,7 +127,11 @@ most one pending successor, and decisions/facts must be accepted with `valid_to`
 to be superseded. Domains follow their separate dropped-domain exception. There is no chain
 to order. If accepting is refused because the predecessor is no longer the live head (a
 merge brought in a rival successor), present the refusal ("supersede that one instead") to
-the human; do not work around it.
+the human; do not work around it. If accepting a decision is refused because two of its
+evidence facts supersede the same fact ("drop one of them (in a separate call)"), ask the
+human which fact to keep, drop the other in one `ratify(drop=[...])` call, then accept the
+decision in a second call: one call runs `accept` before `drop`, so it would leave the
+decision proposed.
 
 ## Drop semantics (they differ by kind)
 
@@ -152,7 +156,8 @@ the human; do not work around it.
   Present the batch grouped, recommend a subset, let the human widen it.
 - **CLI parity:** `sidegraph-ratify` (no flags = the same pending listing;
   `--accept`/`--drop`/`--all`) is the terminal/PR-review equivalent. Run it as
-  `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-ratify`, at the session's version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `uvx --from sidegraph==0.24.1rc1 --python 3.13 sidegraph-ratify`, at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
   Point the human there when they'd rather review outside the session.
 - A proposed record is not hidden while it waits: by default it surfaces in retrieval tagged
   `[unratified]`, and ratification removes the tag without making the record appear. Two

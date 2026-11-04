@@ -151,7 +151,8 @@ See the [host feature matrix](docs/integrations/support.md) for capture reminder
 
 ## Quickstart
 
-**Needs:** Git, [uv](https://docs.astral.sh/uv/) (it provides `uvx`; install it on
+**Needs:** Git, [uv](https://docs.astral.sh/uv/) (0.6.10 or newer; it runs the Claude Code plugin's
+bundled runtime and provides `uvx` for the other hosts; install it on
 [macOS or Linux](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer)
 or [Windows](https://docs.astral.sh/uv/getting-started/installation/#winget)) and your agent.
 
