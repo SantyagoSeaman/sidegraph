@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "sidegraph",
-  "version": "0.25.0",
+  "version": "0.25.1",
   "description": "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code.",
   "compat": {
     "source": "native",
@@ -91,7 +91,7 @@
         "id": "sidegraph",
         "command": [
           "uvx",
-          "--from=sidegraph==0.25.0",
+          "--from=sidegraph==0.25.1",
           "--python",
           "3.13",
           "sidegraph-mcp",

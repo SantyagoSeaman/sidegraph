@@ -154,7 +154,7 @@ def test_a_skipped_directory_does_not_reload_on_every_open(tmp_path, monkeypatch
     monkeypatch.setattr(
         Store,
         "_reload_index_from_canonical",
-        lambda self, digest: (reloads.append(1), orig(self, digest))[1],
+        lambda self, digest, **kwargs: (reloads.append(1), orig(self, digest, **kwargs))[1],
     )
 
     with Store(db) as s:
@@ -263,7 +263,7 @@ def _count_reloads(monkeypatch) -> list[int]:
     monkeypatch.setattr(
         Store,
         "_reload_index_from_canonical",
-        lambda self, digest: (reloads.append(1), orig(self, digest))[1],
+        lambda self, digest, **kwargs: (reloads.append(1), orig(self, digest, **kwargs))[1],
     )
     return reloads
 

@@ -1411,6 +1411,7 @@ class Store:
         path: str | Path = ".sidegraph",
         *,
         busy_timeout_seconds: float | None = None,
+        stop_waiting_after_busy: bool = False,
         creating: bool = False,
         _allow_unmigrated_shards: bool = False,
     ) -> None:
@@ -1446,6 +1447,10 @@ class Store:
         # Per-handle policy is set before the legacy refusal or the canonical index open.
         # None preserves sqlite3's ordinary five-second connection default.
         self._busy_timeout_seconds = busy_timeout_seconds
+        # A hook opens with a short wait and sets this: the first writer reservation that stays
+        # refused for that wait switches the handle to no wait, so a run with several writes
+        # (SessionStart makes five) waits for a held lock once, not once per write.
+        self._stop_waiting_after_busy = stop_waiting_after_busy
 
         if raw.is_dir():
             refuse_symlinked_internals(raw)
@@ -1479,8 +1484,19 @@ class Store:
             # First, before any write: a journal-mode change after the schema/freshness writes
             # would let those transactions create and delete the journal once per open. A
             # database another tool holds in WAL cannot switch (locked); stay in its mode.
+            # Best effort, so a handle with a short wait (a hook) does not spend it here: a
+            # refusal costs that connection one create-and-delete of the journal, a wait costs
+            # the hook a lock wait for nothing.
             with contextlib.suppress(sqlite3.OperationalError):
-                self._conn.execute(INDEX_JOURNAL_PRAGMA)
+                if busy_timeout_seconds is not None:
+                    self._conn.execute("PRAGMA busy_timeout = 0")
+                try:
+                    self._conn.execute(INDEX_JOURNAL_PRAGMA)
+                finally:
+                    if busy_timeout_seconds is not None:
+                        self._conn.execute(
+                            f"PRAGMA busy_timeout = {int(busy_timeout_seconds * 1000)}"
+                        )
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA_SQL)
             self._migrate_retrieval_events_agent()
@@ -1491,6 +1507,32 @@ class Store:
         except BaseException:
             self._conn.close()
             raise
+
+    def _give_up_after_lock_refusal(self, failure: BaseException) -> None:
+        """With ``stop_waiting_after_busy``, switch the handle to no wait after an outermost
+        mutation that a held lock refused, whether at the reservation or at the commit (a reader
+        blocks a commit while the reservation is granted). A refusal that did not wait (the
+        optional no-wait evidence writes set the connection timeout to 0) leaves the policy alone.
+        """
+        if not self._stop_waiting_after_busy or not isinstance(failure, sqlite3.OperationalError):
+            return
+        code = getattr(failure, "sqlite_errorcode", 0)
+        if not isinstance(code, int) or code & 0xFF not in (
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+        ):
+            return
+        if self._conn.execute("PRAGMA busy_timeout").fetchone()[0] > 0:
+            self._give_up_waiting()
+
+    def _give_up_waiting(self) -> None:
+        """Make every later lock wait on this handle immediate, the rebuild's included. Called by
+        ``_give_up_after_lock_refusal`` when ``stop_waiting_after_busy`` is set and a lock stayed
+        refused for the handle's wait.
+        see design/superpowers/specs/2026-11-05-hook-wait-and-digest-recheck.md (D1)"""
+        with self._lock:
+            self._busy_timeout_seconds = 0.0
+            self._conn.execute("PRAGMA busy_timeout = 0")
 
     def _delivery_write(
         self,
@@ -2205,7 +2247,7 @@ class Store:
                 expected,
             )
             if verdict == "reload":
-                self._reload_index_from_canonical(current)
+                self._reload_index_from_canonical(current, recheck=True)
             elif verdict == "refuse":
                 raise ValueError(
                     unknown_stamp_message(stamped["value"] if stamped else None, expected)
@@ -2363,7 +2405,7 @@ class Store:
         ).fetchone()
         return [] if row is None else parse_skip_list(row["value"])
 
-    def _reload_index_from_canonical(self, digest: str) -> None:
+    def _reload_index_from_canonical(self, digest: str, *, recheck: bool = False) -> None:
         """Rebuild the ENTIRE index from the canonical files on disk. Every volatile field
         resets to its cold default (design §3): entity ``last_seen_*`` -> None, binding
         ``status`` -> "live" ("bindings live-as-written"), domain ``communities`` -> [].
@@ -2405,6 +2447,15 @@ class Store:
         D2 — measured, not stylistic): ``executescript`` issues an implicit ``COMMIT``
         before running its script, which would publish the just-executed DROPs and
         restore exactly this bug. Do not bring ``executescript`` back into this method.
+
+        ``recheck=True`` is for a caller whose ``digest`` came from a comparison made before
+        this process held the reservation: another process may have been between publishing a
+        canonical file and committing its index transaction, and has committed while this one
+        waited. Under the reservation no other process can be mid-publish (``_mutation`` reserves
+        before it publishes), so the stored digest and the files are read again, and an index
+        that is already current is left alone (measured: one rebuild per write by another
+        process, 58 of 60). A forced reload (a stale skip list) keeps ``recheck=False``.
+        see design/superpowers/specs/2026-11-05-hook-wait-and-digest-recheck.md (D3)
         """
         with self._lock:
             # Two concurrent rebuilds serialize on SQLite's RESERVED lock. Ordinary handles
@@ -2421,6 +2472,35 @@ class Store:
                 self._conn.execute("BEGIN IMMEDIATE")
                 try:
                     self._check_requirement()
+                    if recheck:
+                        settled, observed = self._compute_canonical_digest()
+                        stored = self._conn.execute(
+                            "SELECT value FROM meta WHERE key = ?", (_CANONICAL_DIGEST_KEY,)
+                        ).fetchone()
+                        stamped = self._conn.execute(
+                            "SELECT value FROM meta WHERE key = 'schema_version'"
+                        ).fetchone()
+                        # A matching digest is not enough: a writer's stamp ignores a file that
+                        # vanished since the index loaded it (a checkout removing a per-record
+                        # override), so the index must also hold exactly the files seen now.
+                        loaded = {
+                            (row["subdir"], row["stem"])
+                            for row in self._conn.execute("SELECT subdir, stem FROM canonical_stat")
+                        }
+                        if (
+                            index_freshness(
+                                stored["value"] if stored is not None else None,
+                                settled,
+                                stamped["value"] if stamped else None,
+                                index_stamp(self._requirement, self._major),
+                            )
+                            == "fresh"
+                            and loaded <= observed.keys()
+                            and not self._canonical_stat_mismatch(observed)
+                        ):
+                            self._conn.rollback()
+                            return
+                        digest = settled
                     if self._major == 2:
                         # Format 2: the occurrence inventory (per-record files, shard lines,
                         # legacy archive lines) and the one effective-record rule. A major
@@ -2877,10 +2957,11 @@ class Store:
                 yield
                 if self._mutation_depth == 1:
                     self._commit()
-            except BaseException:
+            except BaseException as failure:
                 self._drop_twin_map()
                 if self._mutation_depth == 1:
                     self._conn.rollback()
+                    self._give_up_after_lock_refusal(failure)
                 raise
             finally:
                 if self._mutation_depth == 1 and self._cache_restore is not None:

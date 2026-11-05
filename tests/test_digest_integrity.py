@@ -425,9 +425,9 @@ def test_every_canonical_writing_operation_still_stamps_and_reopen_is_fast_path(
     reload_calls = {"n": 0}
     original_reload = Store._reload_index_from_canonical
 
-    def _counting_reload(self, digest):
+    def _counting_reload(self, digest, **kwargs):
         reload_calls["n"] += 1
-        return original_reload(self, digest)
+        return original_reload(self, digest, **kwargs)
 
     monkeypatch.setattr(Store, "_reload_index_from_canonical", _counting_reload)
     reopened = Store(path)

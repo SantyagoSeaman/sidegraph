@@ -6,7 +6,7 @@ description: >-
 
 # Stats
 
-Run `uvx --from sidegraph==0.25.0 --python 3.13 sidegraph-stats` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin): skills run the CLIs at the plugin's pinned version, never the copy on `PATH`) and show its output **verbatim** in a fenced block. Usage figures
+Run `uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-stats` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin): skills run the CLIs at the plugin's pinned version, never the copy on `PATH`) and show its output **verbatim** in a fenced block. Usage figures
 come from the local, gitignored index and graph figures from the optional read-only
 `graph.json`; the command also checks the canonical store files for index staleness.
 Nothing is sent anywhere.

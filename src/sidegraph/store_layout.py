@@ -297,6 +297,14 @@ DOMAIN_SNAPSHOT_NAME = "domain-snapshot.json"
 # break the read-only contract of ``mode=ro`` readers) and not MEMORY/OFF (unsafe on a crash).
 INDEX_JOURNAL_PRAGMA = "PRAGMA journal_mode=TRUNCATE"
 
+# How long a hook that delivers records (PreToolUse, SessionStart, SubagentStart) waits for a lock
+# another process holds. Zero lost 39% of PreToolUse deliveries at 10 agents and 90% at 20:
+# a writer is usually gone in milliseconds. 0.5 s is the smallest value measured that
+# brings 10 agents under 2% lost; the worst case for one hook is about twice this (a wait that
+# succeeds, then one that fails). Stop and the optional peeks keep the zero wait.
+# see design/superpowers/specs/2026-11-05-hook-wait-and-digest-recheck.md (D1)
+HOOK_BUSY_SECONDS = 0.5
+
 # The format-2 shard directory and the attributes file that keeps git from rewriting shard lines
 # (``*.shard -text``). see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.1)
 SHARDS_SUBDIR = "shards"

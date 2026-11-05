@@ -22,6 +22,7 @@ import os
 import sys
 
 from ..hot_index import HotIndex
+from ..store_layout import HOOK_BUSY_SECONDS
 from .diagnostics import HookDiagnostics
 from .hooks import STANDING_SEARCH_INSTRUCTION, _read_payload, refuse_arguments
 from .project_anchor import anchor_to_project, take_repo_root_flag
@@ -74,7 +75,7 @@ def _answer(diagnostics: HookDiagnostics | None = None) -> dict:
         index = HotIndex.open(
             location.path,
             on_error=(lambda error: diagnostics.report("index", error)) if diagnostics else None,
-            busy_timeout_seconds=0.0,
+            busy_timeout_seconds=HOOK_BUSY_SECONDS,
         )
         if index is None:
             return {}

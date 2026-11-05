@@ -7,6 +7,7 @@ import io
 import json
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime
@@ -18,7 +19,9 @@ import sidegraph.host.hooks as hooks
 import sidegraph.host.launch as launch
 import sidegraph.host.subagent as subagent
 from sidegraph import doctor as doctor_mod
+from sidegraph import gitio as gitio_mod
 from sidegraph import hot_index as hot_index_mod
+from sidegraph import store_layout as store_layout_mod
 from sidegraph import sync as sync_mod
 from sidegraph.delivery import Delivery
 from sidegraph.gitio import open_index_ro
@@ -396,7 +399,7 @@ def test_cold_store_rebuild_refuses_immediate_writer_without_30_second_wait(
         reopened.close()
 
 
-def test_session_start_cold_rebuild_refuses_immediate_writer_promptly(
+def test_session_start_cold_rebuild_gives_up_on_a_long_writer_within_its_wait(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -420,7 +423,8 @@ def test_session_start_cold_rebuild_refuses_immediate_writer_promptly(
     hooks.session_start()
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.5
+    # SessionStart waits HOOK_BUSY_SECONDS, not the 30 s a default Store would.
+    assert elapsed < 2.5
     assert json.loads(capsys.readouterr().out) == {}
     assert canonical.read_bytes() == before
 
@@ -658,7 +662,7 @@ def test_session_start_lazy_sync_commit_refusal_keeps_membership_uncertified(
         context = output["hookSpecificOutput"]["additionalContext"]
         assert "A useful gotcha" in context
         assert len(opened) == 1
-        assert timeouts == [0]
+        assert timeouts == [int(store_layout_mod.HOOK_BUSY_SECONDS * 1000)]
         assert len(sync_reports) == 1
         assert isinstance(sync_reports[0], sqlite3.OperationalError)
         assert len(sync_trace_windows) == 1
@@ -924,7 +928,7 @@ _LOCK_CASES = [
         for entry, lock, cold, telemetry in _LOCK_CASES
     ],
 )
-def test_real_hook_entrypoints_refuse_held_index_locks_promptly(
+def test_real_hook_entrypoints_give_up_on_held_index_locks_within_their_wait(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -957,7 +961,9 @@ def test_real_hook_entrypoints_refuse_held_index_locks_promptly(
     output = capsys.readouterr().out
     decoded = json.loads(output)
     assert isinstance(decoded, dict)
-    assert elapsed < 0.5
+    # Stop and the optional peeks refuse at once; the three delivering hooks wait
+    # HOOK_BUSY_SECONDS for the lock, a little over once in the worst case.
+    assert elapsed < (0.5 if entry == "stop" else 2.5)
     if lock_statement == "BEGIN IMMEDIATE" and entry == "session":
         context = decoded["hookSpecificOutput"]["additionalContext"]
         assert "A useful gotcha" in context
@@ -1008,3 +1014,350 @@ def test_unlocked_stop_and_pretool_keep_healthy_delivery(
     assert canonical_before == {
         path.relative_to(store_dir): path.read_bytes() for path in store_dir.rglob("*.json")
     }
+
+
+# -- the delivering hooks wait HOOK_BUSY_SECONDS for the index --------------------------
+# see design/superpowers/specs/2026-11-05-hook-wait-and-digest-recheck.md (D1, D2)
+
+
+def _run_entry(entry: str) -> None:
+    if entry == "session":
+        hooks.session_start()
+    elif entry == "stop":
+        hooks.stop()
+    elif entry == "pretool":
+        hooks.pre_tool_use()
+    else:
+        subagent.subagent_start()
+
+
+def _idle_seconds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, entry: str) -> float:
+    """How long the entry takes on this machine with nothing locked, in a project of its own:
+    the timing tests below compare against it, so a slow runner does not fail them."""
+    root = tmp_path / "idle"
+    _store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_hook_payload(entry, source, transcript)))
+    )
+    started = time.monotonic()
+    _run_entry(entry)
+    elapsed = time.monotonic() - started
+    capsys.readouterr()
+    return elapsed
+
+
+@pytest.mark.parametrize(
+    ("entry", "lock_statement"),
+    [
+        # A writer that holds RESERVED refuses the claim write, not the reads.
+        ("pretool", "BEGIN IMMEDIATE"),
+        # A writer in COMMIT holds EXCLUSIVE, which refuses every opener.
+        ("session", "BEGIN EXCLUSIVE"),
+        ("subagent", "BEGIN EXCLUSIVE"),
+    ],
+)
+def test_delivering_hooks_wait_out_a_brief_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    held_lock,
+    entry: str,
+    lock_statement: str,
+) -> None:
+    """A lock that is gone in 150 ms must not cost the agent its records. Red against
+    the zero-wait handles: the hook prints `{}` at once while the lock is still held."""
+    root = tmp_path / "project"
+    store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_hook_payload(entry, source, transcript)))
+    )
+    held_lock(store_dir, lock_statement, delay=0.15)
+
+    _run_entry(entry)
+
+    decoded = json.loads(capsys.readouterr().out)
+    context = decoded["hookSpecificOutput"]["additionalContext"]
+    if entry == "subagent":
+        assert "1 record anchored to code in 1 file" in context
+    else:
+        assert "A useful gotcha" in context
+
+
+@pytest.mark.parametrize("entry", ["session", "pretool", "subagent"])
+def test_delivering_hooks_stay_bounded_under_a_long_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    held_lock,
+    entry: str,
+) -> None:
+    """Passes before and after the wait fix: it guards the wait against growing without bound.
+    A lock held for 30 s costs the hook at most about twice the 0.5 s wait."""
+    root = tmp_path / "project"
+    store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_hook_payload(entry, source, transcript)))
+    )
+    held_lock(store_dir, "BEGIN EXCLUSIVE")
+
+    started = time.monotonic()
+    _run_entry(entry)
+    elapsed = time.monotonic() - started
+
+    assert isinstance(json.loads(capsys.readouterr().out), dict)
+    assert elapsed < 2.5
+
+
+def test_a_failed_touch_write_does_not_withhold_the_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The touch row is telemetry; the records are the product (spec D2). Red against the
+    touch-first order: the failed write sets `write_failed`, the opener hands out no handle and
+    the same run delivers nothing."""
+    root = tmp_path / "project"
+    store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_hook_payload("pretool", source, transcript)))
+    )
+
+    def refused(self, *args, **kwargs):
+        self.write_failed = True
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(HotIndex, "record_touch", refused)
+
+    hooks.pre_tool_use()
+
+    assert "A useful gotcha" in json.dumps(json.loads(capsys.readouterr().out))
+
+
+@pytest.mark.parametrize("entry", ["pretool", "subagent"])
+def test_the_waiting_hooks_use_the_shared_constant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, entry: str
+) -> None:
+    """PreToolUse and SubagentStart open the hot index with HOOK_BUSY_SECONDS (spec D1); the
+    SessionStart Store has its own test below. Reads the timeout the entry passes."""
+    root = tmp_path / "project"
+    store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
+    seen: list[float | None] = []
+    real_open = HotIndex.open.__func__
+
+    def spy(cls, store_path, **kwargs):
+        seen.append(kwargs.get("busy_timeout_seconds"))
+        return real_open(cls, store_path, **kwargs)
+
+    monkeypatch.setattr(HotIndex, "open", classmethod(spy))
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_hook_payload(entry, source, transcript)))
+    )
+    _run_entry(entry)
+    capsys.readouterr()
+    assert seen == [store_layout_mod.HOOK_BUSY_SECONDS]
+    assert store_layout_mod.HOOK_BUSY_SECONDS == 0.5
+
+
+def test_a_hook_that_lost_one_wait_stops_waiting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    held_lock,
+) -> None:
+    """SessionStart writes five times. Under a lock held for the whole run it must wait once,
+    not five times (spec D1): red against waiting at every write, which took 2.2 s."""
+    idle = _idle_seconds(tmp_path, monkeypatch, capsys, "session")
+    root = tmp_path / "project"
+    store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_hook_payload("session", source, transcript)))
+    )
+    held_lock(store_dir, "BEGIN IMMEDIATE")
+
+    started = time.monotonic()
+    hooks.session_start()
+    elapsed = time.monotonic() - started
+
+    assert json.loads(capsys.readouterr().out)
+    # One wait of 0.5 s on top of the idle time; five waits would add 2.5 s.
+    assert elapsed < idle + 1.0, f"SessionStart waited {elapsed:.2f}s (idle {idle:.2f}s)"
+
+
+def test_session_start_waits_once_when_the_writer_arrives_after_the_dedupe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    held_lock,
+) -> None:
+    """The first write succeeds and a writer takes the reservation right after it: the telemetry
+    stamp and both prunes must not each wait again. Red against a give-up that only the first
+    write triggers (1.8 s, found by the Sol review round 1)."""
+    idle = _idle_seconds(tmp_path, monkeypatch, capsys, "session")
+    root = tmp_path / "project"
+    store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_hook_payload("session", source, transcript)))
+    )
+    real_duplicate = hooks._session_start_duplicate
+
+    def duplicate_then_a_writer_arrives(*args, **kwargs):
+        verdict = real_duplicate(*args, **kwargs)
+        held_lock(store_dir, "BEGIN IMMEDIATE")
+        return verdict
+
+    monkeypatch.setattr(hooks, "_session_start_duplicate", duplicate_then_a_writer_arrives)
+
+    started = time.monotonic()
+    hooks.session_start()
+    elapsed = time.monotonic() - started
+
+    assert json.loads(capsys.readouterr().out)
+    assert elapsed < idle + 1.0, f"SessionStart waited {elapsed:.2f}s after a late writer"
+
+
+def test_stop_waiting_after_busy_makes_the_next_reservation_immediate(
+    tmp_path: Path, held_lock
+) -> None:
+    """With the option, the first refused reservation waits the handle's timeout and every later
+    one is refused at once; without it each waits the full timeout."""
+    store_dir = tmp_path / "s"
+    Store(store_dir).close()
+    held_lock(store_dir, "BEGIN IMMEDIATE")
+
+    def two_refusals(**options) -> tuple[float, float]:
+        store = Store(store_dir, busy_timeout_seconds=0.4, **options)
+        try:
+            times = []
+            for key in ("a", "b"):
+                started = time.monotonic()
+                with pytest.raises(sqlite3.OperationalError):
+                    store.set_meta(key, "v")
+                times.append(time.monotonic() - started)
+            return times[0], times[1]
+        finally:
+            store.close()
+
+    first, second = two_refusals(stop_waiting_after_busy=True)
+    assert first >= 0.3 and second < 0.2
+    first, second = two_refusals()
+    assert first >= 0.3 and second >= 0.3
+
+
+@pytest.mark.parametrize("entry", ["session", "stop"])
+def test_the_optional_peeks_and_stop_keep_the_zero_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], entry: str
+) -> None:
+    """Only the three delivering hooks wait: SessionStart's own Store does, but its status and
+    drift peeks, and everything Stop opens, still refuse a held lock at once (spec D1). A peek
+    that started waiting would add its wait to every session start."""
+    root = tmp_path / "project"
+    store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_hook_payload(entry, source, transcript)))
+    )
+    seen: dict[str, list] = {"peek": [], "drift": [], "store": []}
+    real_peek = gitio_mod.open_index_ro
+    real_init = Store.__init__
+    drift = {
+        name: getattr(sync_mod, name)
+        for name in ("refresh_code_drift_snapshot", "refresh_code_drift_cache")
+    }
+
+    def peek(*args, **kwargs):
+        seen["peek"].append(kwargs.get("busy_timeout_seconds"))
+        return real_peek(*args, **kwargs)
+
+    def init(self, *args, **kwargs):
+        seen["store"].append(
+            (kwargs.get("busy_timeout_seconds"), kwargs.get("stop_waiting_after_busy", False))
+        )
+        return real_init(self, *args, **kwargs)
+
+    def drift_spy(name):
+        def call(*args, **kwargs):
+            seen["drift"].append(kwargs.get("busy_timeout_seconds"))
+            return drift[name](*args, **kwargs)
+
+        return call
+
+    monkeypatch.setattr(gitio_mod, "open_index_ro", peek)
+    monkeypatch.setattr(Store, "__init__", init)
+    for name in drift:
+        monkeypatch.setattr(sync_mod, name, drift_spy(name))
+
+    _run_entry(entry)
+    capsys.readouterr()
+
+    assert seen["peek"] and set(seen["peek"]) == {0.0}
+    assert set(seen["drift"]) <= {0.0}
+    first = seen["store"][0]
+    if entry == "session":
+        assert first == (store_layout_mod.HOOK_BUSY_SECONDS, True)
+    else:
+        assert first == (0.0, False)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="measured on POSIX only: on the Windows CI runner the open took 1.16 s under an "
+    "EXCLUSIVE lock and the cause was not isolated (Windows file locking differs); the "
+    "hook-level bounds in this module hold there",
+)
+def test_opening_a_store_under_an_exclusive_lock_waits_once(tmp_path: Path, held_lock) -> None:
+    """The best-effort journal-mode pragma does not spend the handle's wait: the open waits for
+    the schema statement only. Red against a pragma that waits too (1.14 s, found by the Opus
+    review round 1)."""
+    store_dir = tmp_path / "s"
+    Store(store_dir).close()
+    held_lock(store_dir, "BEGIN EXCLUSIVE")
+
+    started = time.monotonic()
+    with pytest.raises(sqlite3.OperationalError):
+        Store(store_dir, busy_timeout_seconds=0.5)
+    elapsed = time.monotonic() - started
+
+    assert 0.4 <= elapsed < 0.9, f"Store() waited {elapsed:.2f}s"
+
+
+def test_a_refused_commit_also_stops_the_waiting(tmp_path: Path, held_lock) -> None:
+    """A reader blocks a COMMIT while the reservation is granted; that refusal waited the whole
+    timeout, so the next one must not (found by the Sol review round 2). Red against a give-up
+    that only watches the reservation: the second commit waits again."""
+    store_dir = tmp_path / "s"
+    Store(store_dir).close()
+    reader = sqlite3.connect(store_dir / "index.db", isolation_level=None, timeout=0.1)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM meta").fetchall()  # a SHARED lock, kept
+    store = Store(store_dir, busy_timeout_seconds=0.4, stop_waiting_after_busy=True)
+    try:
+        times = []
+        for key in ("a", "b"):
+            started = time.monotonic()
+            with pytest.raises(sqlite3.OperationalError):
+                store.set_meta(key, "v")
+            times.append(time.monotonic() - started)
+        assert times[0] >= 0.3, f"the first refusal did not wait: {times}"
+        assert times[1] < 0.2, f"the second refusal waited again: {times}"
+    finally:
+        reader.execute("ROLLBACK")
+        reader.close()
+        store.close()
+
+
+def test_optional_evidence_refusal_leaves_the_waiting_policy_alone(
+    tmp_path: Path, held_lock
+) -> None:
+    """The optional evidence writes run with a zero connection timeout. Their refusal waited
+    for nothing, so it must not consume the handle's wait (found by the Sol review round 2):
+    after it the handle still waits for an ordinary write."""
+    store_dir = tmp_path / "s"
+    Store(store_dir).close()
+    store = Store(store_dir, busy_timeout_seconds=0.4, stop_waiting_after_busy=True)
+    try:
+        held = held_lock(store_dir, "BEGIN IMMEDIATE", delay=0.1)
+        assert store._delivery_write(lambda conn: None) is False
+        assert held.wait(2)
+        assert store._busy_timeout_seconds == 0.4
+        assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 400
+    finally:
+        store.close()

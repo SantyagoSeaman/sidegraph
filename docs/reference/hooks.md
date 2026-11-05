@@ -33,10 +33,14 @@ typing `--help` never runs a hook. A host calls them without arguments other tha
 For wiring them into `.claude/settings.json`, see
 [`getting-started/claude-code-setup.md`](../getting-started/claude-code-setup.md).
 
-Hook-owned SQLite connections use a zero-second busy timeout, so a lock held by another
-Sidegraph writer is refused immediately at the database layer. This bounds SQLite lock waits;
-graph loading, filesystem work, transcript parsing and Git still contribute to whole-hook time.
-Other `Store`, hot-index and read-only-index callers retain their existing defaults.
+Hook-owned SQLite connections bound their lock waits. `PreToolUse`, `SessionStart` and
+`SubagentStart`, the hooks that hand the agent records, wait up to half a second for a lock
+another Sidegraph process holds, because a writer is usually gone within milliseconds. A hook
+that loses its first wait refuses every later lock at once, so a run waits for a held lock once
+(about twice the half second at most when a wait succeeds before the one that fails). `Stop` and
+the optional status and drift reads refuse at once. This bounds SQLite lock waits; graph
+loading, filesystem work, transcript parsing and Git still contribute to whole-hook time. Other `Store`, hot-index and read-only-index callers retain their existing
+defaults.
 
 ## The command guard
 
@@ -625,8 +629,8 @@ lines only.
 - The decision and the write are one write transaction, so two copies of the hook registered on one
   host (different session ids, so the duplicate guard in step 1 does not apply) do not both
   send it. If the write itself fails, the notice is sent anyway: a duplicate is better than
-  silence. When the failure is a lock another process holds, the hook stops writing for that
-  start (further writes are refused promptly too) and sends the remaining due
+  silence. When the failure is a lock another process holds, the hook stops waiting for that
+  start (further writes are refused promptly) and sends the remaining due
   notices unclaimed.
 - A check that ran and found nothing deletes its row, so a problem that returns after a fix is
   reported at once. Only a row that exists is deleted, so a start with nothing recorded makes no

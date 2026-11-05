@@ -7,6 +7,23 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.25.1] — 2026-11-05
+
+### Fixed
+
+- `PreToolUse`, `SessionStart` and `SubagentStart` no longer hand the agent nothing when another
+  Sidegraph process holds the index lock for a few milliseconds. Their database handles waited
+  not at all since 0.16.0; they now wait up to half a second, and a hook that loses its first
+  wait refuses the rest at once. `PreToolUse` also delivers the records before it writes the
+  telemetry row, so a refused telemetry write can no longer take the delivery with it. With ten
+  agents in one repository the share of `PreToolUse` calls that lost their records fell from
+  39% to under 1% in a load test (90% to 1% with twenty agents).
+- One process writing a record no longer makes other processes rebuild `index.db`. A process that
+  saw a digest mismatch while a writer was between publishing a file and committing rebuilt the
+  whole index after the commit; it now checks again under the write reservation and leaves a
+  current index alone. The rebuild reset the synced bindings and silenced `PreToolUse` until the
+  next sync.
+
 ## [0.25.0] — 2026-11-05
 
 ### Changed (Contract change)
@@ -2969,7 +2986,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.1...HEAD
+[0.25.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.22.0...v0.23.0

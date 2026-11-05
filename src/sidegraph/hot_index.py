@@ -74,9 +74,8 @@ CLAIM_FILE_SQL = (
 )
 _KEY_RANGE_END = "\U0010ffff"
 
-# A rebuild holds the write lock for about 100 ms on a large store, and a hook would rather
-# drop one touch than stall the user's tool call. ``Store`` sets no pragmas of its own and
-# gets sqlite3's 5 s default; only the hook is impatient.
+# A rebuild holds the write lock for about 100 ms on a large store. ``Store`` sets no pragmas of
+# its own and gets sqlite3's 5 s default.
 BUSY_TIMEOUT_SECONDS = 1.0
 
 _SUPERSEDED = "superseded"

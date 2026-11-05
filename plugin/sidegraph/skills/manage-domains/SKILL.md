@@ -159,6 +159,6 @@ include a note for frozen membership or a split.
 - [`docs/guides/naming-your-domains.md`](../../../../docs/guides/naming-your-domains.md) —
   background on bootstrap idempotency, mass-drop recovery, and the CLI equivalents
   (`sidegraph-domains add`, `sidegraph-ratify`).
-- CLI commands run as `uvx --from sidegraph==0.25.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
+- CLI commands run as `uvx --from sidegraph==0.25.1 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
   [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.

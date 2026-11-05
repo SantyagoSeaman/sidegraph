@@ -84,10 +84,10 @@ def test_a_project_without_a_store_gets_no_store_and_no_stderr(tmp_path, monkeyp
 
 def test_a_locked_index_costs_the_hook_one_busy_wait_not_two(tmp_path, monkeypatch, capsys):
     """Another connection holds the write lock (a rebuild, a long write). Red against a hook
-    that keeps going after its touch failed: the touch insert waits out the 1 s busy timeout,
-    and then the file claim waits it out again (a Read took 2.3 s). Once a write on the shared
-    handle has failed on the lock, delivery gets no index, prints ``{}`` and never tries its own
-    write."""
+    that keeps going after its first write failed: the claim waits out the busy timeout and
+    then the touch insert waits it out again (a Read took 2.3 s). The delivery goes first, so
+    the claim is the one write that waits; once it has failed on the lock the shared handle is
+    withheld, the hook prints ``{}`` and the touch never tries its own write."""
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
     (root / FILE_A).write_text("x = 1\n")
@@ -96,13 +96,20 @@ def test_a_locked_index_costs_the_hook_one_busy_wait_not_two(tmp_path, monkeypat
     monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(root))
     claims: list[str] = []
+    touches_tried: list[str] = []
     real_claim = HotIndex.claim_file
+    real_touch = HotIndex.record_touch
 
     def spy(self, prefix, rel_path, value, cap, **kwargs):
         claims.append(prefix + rel_path)
         return real_claim(self, prefix, rel_path, value, cap, **kwargs)
 
+    def touch_spy(self, *args, **kwargs):
+        touches_tried.append("touch")
+        return real_touch(self, *args, **kwargs)
+
     monkeypatch.setattr(HotIndex, "claim_file", spy)
+    monkeypatch.setattr(HotIndex, "record_touch", touch_spy)
     payload = {
         "session_id": "locked-1",
         "tool_name": "Read",
@@ -122,7 +129,8 @@ def test_a_locked_index_costs_the_hook_one_busy_wait_not_two(tmp_path, monkeypat
 
     assert json.loads(capsys.readouterr().out) == {}
     assert elapsed < 1.8, f"two busy waits: {elapsed:.2f}s"
-    assert claims == []
+    assert claims == ["pretool_file:locked-1:-:src/a.py"]
+    assert touches_tried == []
     conn = sqlite3.connect(store_dir / "index.db")
     try:
         touches = conn.execute("SELECT COUNT(*) FROM retrieval_events WHERE kind='touch'")

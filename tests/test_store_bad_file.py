@@ -145,9 +145,9 @@ class _ReloadCounter:
         orig = Store._reload_index_from_canonical
         counter = self
 
-        def counting(self_, digest):
+        def counting(self_, digest, **kwargs):
             counter.n += 1
-            return orig(self_, digest)
+            return orig(self_, digest, **kwargs)
 
         monkeypatch.setattr(Store, "_reload_index_from_canonical", counting)
 

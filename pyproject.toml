@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.25.0"
+version = "0.25.1"
 description = "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code."
 readme = "README.md"
 requires-python = ">=3.13"

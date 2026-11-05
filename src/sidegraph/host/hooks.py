@@ -49,6 +49,7 @@ from ..config import (
     ancestor_store,
 )
 from ..store_layout import (
+    HOOK_BUSY_SECONDS,
     MEMORY_GUARD_LINE,
     MISTAKE_KINDS,
     StoreRequirementError,
@@ -1536,7 +1537,9 @@ def session_start() -> None:
         # anyone. Only a lock another process holds keeps that: it passes by itself.
         # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D3)
         try:
-            store = Store(location.path, busy_timeout_seconds=0.0)
+            store = Store(
+                location.path, busy_timeout_seconds=HOOK_BUSY_SECONDS, stop_waiting_after_busy=True
+            )
         except Exception as e:
             if not isinstance(e, StoreRequirementError):
                 diagnostics.report("store", e)
@@ -2234,8 +2237,9 @@ class _HotOpener:
     Touch recording and the nudge both need the index and both resolve the same store, so the
     second step reuses the first one's handle (or its refusal: ``None`` is remembered too, so a
     store that cannot be used is looked at once). A handle whose write hit the busy timeout
-    (``HotIndex.write_failed``) is not handed out again. Hook-owned handles use zero wait, so a
-    Read under a held lock refuses promptly. ``close`` releases the handle at the end of the run.
+    (``HotIndex.write_failed``) is not handed out again, so a run waits for a held lock at most
+    once. The handle waits ``HOOK_BUSY_SECONDS`` for a lock another process holds. ``close``
+    releases the handle at the end of the run.
     see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D3)
     """
 
@@ -2252,7 +2256,7 @@ class _HotOpener:
             self._index = HotIndex.open(
                 store_path,
                 on_error=lambda error: self.report("index", error),
-                busy_timeout_seconds=0.0,
+                busy_timeout_seconds=HOOK_BUSY_SECONDS,
             )
         if self._index is not None and self._index.write_failed:
             return None
@@ -2269,12 +2273,14 @@ class _HotOpener:
 
 
 def _record_touch_event(payload: dict, hot: _HotOpener) -> None:
-    """Record one touch. Runs FIRST in ``pre_tool_use``, before every delivery gate (D4).
+    """Record one touch. Runs in ``pre_tool_use`` after the delivery, and independently of its
+    gates (D4).
 
     Delivery's early exits belong to delivery: inheriting them would record nothing after an
     agent's first read of a file, nothing in a store without memory yet, and nothing when
-    delivery is switched off. The single gate shared with it is ``session_id``, because a touch
-    that cannot be attributed cannot be written at all.
+    delivery is switched off. When the delivery's claim lost its lock wait the handle is
+    withheld and no touch is recorded for that call. The single gate shared with it is
+    ``session_id``, because a touch that cannot be attributed cannot be written at all.
     Never raises (D9) — this runs inside a PreToolUse hook, where an exception would
     interfere with the user's own tool call.
 
@@ -2878,7 +2884,7 @@ def pre_tool_use() -> None:
         )
     diagnostics = HookDiagnostics("PreToolUse")
     # Payload first: stdin can only be read once, and recording (D4) must see it even when
-    # delivery is switched off. Then record, then deliver.
+    # delivery is switched off. Then deliver, then record.
     try:
         payload = _read_payload()
     except Exception as error:
@@ -2892,13 +2898,18 @@ def pre_tool_use() -> None:
             payload = _claude_shaped(payload)
         except Exception as error:
             diagnostics.report("payload", error)
-        _record_touch_event(payload, hot)
+        # Deliver first, record second: the records are the product and the touch row is
+        # telemetry. A touch that fails sets ``write_failed`` and the opener then hands out no
+        # handle, so touch-first let a refused telemetry write take the delivery with it.
+        # The delivery does not read the touch row. see design/superpowers/specs/
+        # 2026-11-05-hook-wait-and-digest-recheck.md (D2)
         try:
             output = _hook_output(payload, hot)
         except Exception as error:
             diagnostics.report("delivery", error)
             output = {}
-        print(json.dumps(output))
+        print(json.dumps(output), flush=True)
+        _record_touch_event(payload, hot)
     finally:
         try:
             hot.close()
