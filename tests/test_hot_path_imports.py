@@ -29,6 +29,7 @@ from tests.test_host_pretool import _seed_anchored_decision
 _PROBE = (
     "import json, sys\n"
     "from {module} import {entry}\n"
+    "{prelude}"
     "{entry}()\n"
     "heavy = sorted(\n"
     "    m for m in sys.modules\n"
@@ -58,9 +59,10 @@ def _run(
     store_dir: Path,
     extra_env: dict[str, str] | None = None,
     module: str = "sidegraph.host.hooks",
+    prelude: str = "",
 ) -> tuple[dict, list[str]]:
     """Run one hook entry point of ``module`` in a fresh interpreter: its parsed stdout and the
-    heavy modules it loaded."""
+    heavy modules it loaded. ``prelude`` is a line of Python run just before the entry."""
     env = {
         **os.environ,
         "CLAUDE_PROJECT_DIR": str(root),
@@ -68,7 +70,7 @@ def _run(
         **(extra_env or {}),
     }
     done = subprocess.run(
-        [sys.executable, "-c", _PROBE.format(module=module, entry=entry)],
+        [sys.executable, "-c", _PROBE.format(module=module, entry=entry, prelude=prelude)],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
@@ -102,6 +104,21 @@ def test_pretooluse_early_exit_loads_nothing_heavy(tmp_path):
     root, store_dir = _repo(tmp_path)
     out, heavy = _run("pre_tool_use", _payload("Glob", "g1", pattern="*"), root, store_dir)
     assert out == {}
+    assert heavy == []
+
+
+def test_pretooluse_with_repo_root_loads_nothing_heavy(tmp_path):
+    """The flag anchors through ``CLAUDE_PROJECT_DIR``; the settings helper (pydantic) is only
+    for the fallback, so it is not imported here."""
+    root, store_dir = _repo(tmp_path)
+    out, heavy = _run(
+        "pre_tool_use",
+        _payload("Read", "rr1", file_path=str(root / ANCHORED)),
+        root,
+        store_dir,
+        prelude="sys.argv = ['sidegraph-pre-tool-use', '--repo-root']\n",
+    )
+    assert "Never call foo twice" in out["hookSpecificOutput"]["additionalContext"]
     assert heavy == []
 
 

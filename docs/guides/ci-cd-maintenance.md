@@ -39,10 +39,11 @@ Runs `sidegraph-sync --json --check` on every PR (and on pushes to the default b
 fails the job when the report has an attention finding. It needs no explicit comparison
 ref: rebuild the graph, sync, then classify the report.
 
-Create a repository variable named `SIDEGRAPH_REF` containing a reviewed Sidegraph commit
-SHA. Every recipe reads it as `${{ vars.SIDEGRAPH_REF }}`. See
-[mutable development references](../getting-started/installation.md#mutable-development-references)
-for why CI should not follow a branch.
+Create a repository variable named `SIDEGRAPH_VERSION` containing a reviewed Sidegraph release
+(for example `0.25.0`). Every recipe reads it as `${{ vars.SIDEGRAPH_VERSION }}`. The published
+package pins its own dependencies, so the version fixes the whole install. See
+[pinned releases](../getting-started/installation.md#mutable-development-references)
+for why CI should not follow the latest release unreviewed.
 
 ```yaml
 name: sidegraph-anchor-health
@@ -75,7 +76,7 @@ jobs:
         id: sync
         continue-on-error: true   # let later steps run even when this exits non-zero
         run: |
-          uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@${{ vars.SIDEGRAPH_REF }} \
+          uvx --from sidegraph==${{ vars.SIDEGRAPH_VERSION }} --python 3.13 \
             sidegraph-sync --json --check > sync-report.json
           cat sync-report.json
 
@@ -189,7 +190,7 @@ jobs:
         id: verify
         continue-on-error: true   # let later steps run even when this exits non-zero
         run: |
-          uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@${{ vars.SIDEGRAPH_REF }} \
+          uvx --from sidegraph==${{ vars.SIDEGRAPH_VERSION }} --python 3.13 \
             sidegraph-verify --against "${{ steps.base.outputs.ref }}" --json \
             > verify-report.json
           cat verify-report.json
@@ -234,7 +235,7 @@ the branch. (That holds on that checkout; on your own machine the merge base is 
 target's tip only after you merged the target into your branch.) Run `sidegraph-verify` against that value: a local run against the fork point can
 differ, and CI's answer is the one that gates the merge. Findings and their remedies:
 [migrating to 0.17](migrating-to-0.17.md). A job that runs `sidegraph-doctor --check` exits `2`
-on the `store-not-migrated` notice until the store is migrated. The `maintenance-due` notice and the
+on the `store-not-migrated` notice until the store is migrated. The `maintenance-due` notice, the `domain-split` finding and the
 `superseded-no-live-successor` finding are reported but never fail `--check`.
 
 ## Recipe 3: scheduled triage
@@ -305,7 +306,7 @@ jobs:
             "mcpServers": {
               "sidegraph": {
                 "command": "uvx",
-                "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@${{ vars.SIDEGRAPH_REF }}", "sidegraph-mcp"],
+                "args": ["--from", "sidegraph==${{ vars.SIDEGRAPH_VERSION }}", "--python", "3.13", "sidegraph-mcp"],
                 "env": {
                   "SIDEGRAPH_DIR": ".sidegraph",
                   "SIDEGRAPH_GRAPH": "graphify-out/graph.json",

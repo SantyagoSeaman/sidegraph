@@ -500,7 +500,10 @@ no query. All three read the store's index directly, so each costs a few tens of
   the brief names, and the files named in a plan or notes document the brief names, and appends
   the decisions anchored to them to the brief: two per file, at most six lines. The subagent finds
   the block at the end of its first message. The parent does not see it, and its transcript keeps
-  the prompt it wrote. `SIDEGRAPH_AGENT_BRIEF=off` stops it.
+  the prompt it wrote. `SIDEGRAPH_AGENT_BRIEF=off` stops it. In Claude Code's auto mode
+  (`permission_mode: auto`) it leaves the call unchanged: that mode reviews a call before hooks run
+  and refuses an input a hook changed. The subagent still gets the `SubagentStart` brief and the
+  records of the files it reads.
 - **At the start of a subagent.** A subagent starts without the session's context. The
   `SubagentStart` hook gives it the standing instruction and one sentence saying how many
   decisions are anchored to code, in how many files, and how many are recorded mistakes. It

@@ -13,6 +13,7 @@ import json
 import os
 import shlex
 import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -257,8 +258,9 @@ def _validation_error() -> ValidationError:
             ValueError(
                 "store format marker 'x'; migration tooling is deferred — use a fresh store"
             ),
-            "This store was written by a different Sidegraph version: upgrade Sidegraph (or use "
-            "the version that wrote it).",
+            "This store was written by a different Sidegraph version: update the Sidegraph plugin "
+            "from its marketplace, or upgrade Sidegraph where you installed it (or use the "
+            "version that wrote it).",
         ),
         (
             LegacyStoreError("a legacy single-file store"),
@@ -274,7 +276,8 @@ def _validation_error() -> ValidationError:
                 kind="below",
                 required=above_running(),
             ),
-            f"Upgrade Sidegraph to >= {above_running()}, then start a new session.",
+            "Update the Sidegraph plugin from its marketplace, or upgrade Sidegraph where you "
+            f"installed it, to >= {above_running()}, then start a new session.",
         ),
         (
             StoreRequirementError("the store format marker x is missing", kind="missing"),
@@ -331,6 +334,77 @@ def test_store_unreadable_names_the_cause_and_its_own_fix(tmp_path, error, fix_s
     )
     assert problem.line == f"{problem.notice} Sidegraph memory tools will fail until it is fixed."
     assert (problem.summary, problem.fix) == ("store cannot be opened", "sidegraph-verify")
+
+
+def _requirement_notice(tmp_path) -> str:
+    store_dir = tmp_path / ".sidegraph"
+    store_dir.mkdir()
+    error = StoreRequirementError(
+        f"This store requires Sidegraph >= {above_running()}; this is {__version__}.",
+        kind="below",
+        required=above_running(),
+    )
+    result = run(
+        Inputs(store_dir=store_dir, now=NOW, open_error=error),
+        "session",
+        (integrity.STORE_UNREADABLE,),
+    )
+    (problem,) = result.problems
+    assert problem.notice is not None
+    return problem.notice
+
+
+# Where this interpreter lives says nothing about how Sidegraph was launched (a `uvx` archive
+# path is the same for a manual run and for the plugin), so one fix text serves every launch.
+_PREFIXES = [
+    pytest.param(("plugin", "sidegraph", "runtime", ".venv"), id="a-bundled-runtime-venv"),
+    pytest.param((".venv",), id="a-project-venv"),
+    pytest.param(("cache", "archive-v0", "abc123"), id="a-uvx-archive"),
+]
+
+
+@pytest.mark.parametrize("parts", _PREFIXES)
+def test_requirement_fix_names_the_plugin_update_and_the_upgrade_under_any_prefix(
+    tmp_path, monkeypatch, parts
+):
+    """Red against unfixed code under a fake ``runtime/.venv`` prefix (the plugin-only branch)
+    and under any other prefix (the upgrade-only branch)."""
+    monkeypatch.setattr(sys, "prefix", str(tmp_path.joinpath(*parts)))
+    assert _requirement_notice(tmp_path).endswith(
+        "Update the Sidegraph plugin from its marketplace, or upgrade Sidegraph where you "
+        f"installed it, to >= {above_running()}, then start a new session."
+    )
+
+
+def _different_version_notice(tmp_path) -> str:
+    store_dir = tmp_path / ".sidegraph"
+    store_dir.mkdir()
+    error = ValueError("store format marker 'x'; migration tooling is deferred — use a fresh store")
+    result = run(
+        Inputs(store_dir=store_dir, now=NOW, open_error=error),
+        "session",
+        (integrity.STORE_UNREADABLE,),
+    )
+    (problem,) = result.problems
+    assert problem.notice is not None
+    return problem.notice
+
+
+@pytest.mark.parametrize("parts", _PREFIXES)
+def test_different_version_fix_names_the_plugin_update_and_the_upgrade_under_any_prefix(
+    tmp_path, monkeypatch, parts
+):
+    monkeypatch.setattr(sys, "prefix", str(tmp_path.joinpath(*parts)))
+    assert _different_version_notice(tmp_path).endswith(
+        "This store was written by a different Sidegraph version: update the Sidegraph plugin "
+        "from its marketplace, or upgrade Sidegraph where you installed it (or use the "
+        "version that wrote it)."
+    )
+
+
+def test_integrity_has_no_launch_detection() -> None:
+    """The fix text does not depend on how Sidegraph was launched, so nothing detects it."""
+    assert not hasattr(integrity, "_runs_from_plugin_runtime")
 
 
 @pytest.mark.parametrize("cause", ["idle", "lock", "busy"])

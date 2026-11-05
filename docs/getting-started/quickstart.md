@@ -4,12 +4,12 @@
 
 This is one complete loop: build the graph, create the store, connect one host, record one
 anchored gotcha, and retrieve it in a new session. It assumes Graphify is installed as described in
-[Installation](installation.md). Commands are written with the `uvx` prefix the plugin uses, so
-no Sidegraph install is needed. With the optional CLI installed and kept updated
+[Installation](installation.md). Commands are written with a `uvx` prefix, so
+no Sidegraph install is needed (the plugins run `uvx` on their own pinned version; these are the
+same commands at the latest release). With the optional CLI installed and kept updated
 ([Option A](installation.md#option-a--the-cli-on-your-path)), the bare `sidegraph-*` names
-work too; the prose below uses those bare names, the code blocks the `uvx` form. (`@main` is a
-mutable ref; to pin it see
-[mutable development references](installation.md#mutable-development-references).)
+work too; the prose below uses those bare names, the code blocks the `uvx` form. To pin a
+version, see [pinned releases](installation.md#mutable-development-references).
 
 On Windows, run them in PowerShell and use the line marked for it: in Windows PowerShell 5.1,
 `>>` writes UTF-16 and git would ignore the `.gitignore` entry.
@@ -28,7 +28,7 @@ macOS or Linux:
 export GRAPHIFY_NO_AUTO_REFRESH=1
 graphify update .
 echo "graphify-out/" >> .gitignore
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
+uvx --from sidegraph --python 3.13 sidegraph-init
 ```
 
 Windows PowerShell:
@@ -37,7 +37,7 @@ Windows PowerShell:
 $env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
 Add-Content .gitignore "graphify-out/"
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
+uvx --from sidegraph --python 3.13 sidegraph-init
 ```
 
 `graphify update .` creates `graphify-out/graph.json`; Sidegraph reads it but never writes to
@@ -135,7 +135,7 @@ The agent should call `get_task_context` with that path or entity. The gotcha ap
 
 ```bash
 git status --short
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
+uvx --from sidegraph --python 3.13 sidegraph-verify
 ```
 
 Commit the whole `.sidegraph/` directory (`git add .sidegraph`), the root `.gitignore`, and

@@ -269,7 +269,10 @@ def _open_error_fix(error: BaseException, store_dir: Path) -> str:
     if isinstance(error, LegacyStoreError):
         return "Open the store once with Sidegraph 0.23.x to migrate it, then upgrade."
     if isinstance(error, StoreRequirementError) and error.required is not None:
-        return f"Upgrade Sidegraph to >= {error.required}, then start a new session."
+        return (
+            "Update the Sidegraph plugin from its marketplace, or upgrade Sidegraph where you "
+            f"installed it, to >= {error.required}, then start a new session."
+        )
     if isinstance(error, StoreRequirementError) and error.kind == "missing":
         # The error headline is clipped; keep the full recovery command in this sentence.
         # see design/superpowers/specs/2026-10-28-format-marker-checkout-race-design.md
@@ -301,7 +304,8 @@ def _open_error_fix(error: BaseException, store_dir: Path) -> str:
         )
     if isinstance(error, ValueError) and "migration tooling is deferred" in str(error):
         return (
-            "This store was written by a different Sidegraph version: upgrade Sidegraph (or use "
+            "This store was written by a different Sidegraph version: update the Sidegraph "
+            "plugin from its marketplace, or upgrade Sidegraph where you installed it (or use "
             "the version that wrote it)."
         )
     return "Run `sidegraph-verify` from the repository root for details."

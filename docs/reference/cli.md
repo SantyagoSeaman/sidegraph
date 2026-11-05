@@ -68,20 +68,28 @@ carries it too.
 
 ## Running the CLIs beside the plugin
 
-The plugin's MCP server and hooks run the Sidegraph at
-`git+https://github.com/SantyagoSeaman/sidegraph.git@main`. A plugin skill that runs a
-`sidegraph-*` command runs it the same way, `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, and never the copy on `PATH`: a
-persistent `uv tool install` is frozen at the version it was installed at and can lack
-commands or flags the plugin's skills use. In a Sidegraph checkout (the session's working
-directory holds a `pyproject.toml` named `sidegraph`) run `uv run --project <checkout> <command>`
-instead. Installing the CLI beside the plugin is optional
+A plugin skill that runs a `sidegraph-*` command runs it at the version of the session's
+plugin, and never the copy on `PATH`: a persistent `uv tool install` is frozen at the version it
+was installed at and can lack commands or flags the plugin's skills use. There are two cases.
+
+- **In a plugin session** the skills write every command with the same runner the plugin's MCP
+  server and hooks use: `uvx --from sidegraph==X.Y.Z --python 3.13 <command>`, with `X.Y.Z` the
+  plugin's version. A skill therefore cannot raise the store's minimum version above the one its
+  own session's hooks accept. The same line serves every host, and in a terminal of your own.
+- **In a Sidegraph checkout** (the plugin folder's `../..` holds a `pyproject.toml` named
+  `sidegraph`) the plugin is the development manifest, which runs the checkout. Run
+  `uv run --project <checkout> --package sidegraph --frozen --no-active <command>` instead.
+  Each skill carries one sentence that tells the agent to replace the runner this way.
+
+Installing the CLI beside the plugin is optional
 ([the CLI on your PATH](../getting-started/installation.md#option-a--the-cli-on-your-path)).
 Whoever installs it must update it after every release with `uv tool upgrade sidegraph`,
 and SessionStart says when a `sidegraph-*` on `PATH` differs from the session's version
 (`path-skew`, see [troubleshooting](../guides/troubleshooting.md#path-skew)).
 
-Commands on the documentation pages are shown by name. (`@main` is a mutable ref: see [mutable development references](../getting-started/installation.md#mutable-development-references).) Without a CLI install, run them as
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, for example `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor`.
+Commands on the documentation pages are shown by name. Without a CLI install, run them as
+`uvx --from sidegraph --python 3.13 <command>` (the latest release; to pin a version, see
+[pinned releases](../getting-started/installation.md#mutable-development-references)), for example `uvx --from sidegraph --python 3.13 sidegraph-doctor`.
 
 ## `sidegraph-bootstrap`
 
@@ -277,7 +285,7 @@ the Sidegraph checkout):
 5. Prints the setup instructions: the plugin install path first (`/plugin marketplace add
    SantyagoSeaman/sidegraph` + `/plugin install sidegraph@sidegraph` — installs the MCP server
    and all four hooks automatically), then the no-plugin alternative (a single
-   `claude mcp add sidegraph -s project … -- uvx --from git+…` command that writes a
+   `claude mcp add sidegraph -s project … -- uvx --from sidegraph==X.Y.Z --python 3.13 sidegraph-mcp` command that writes a
    repo-committed `.mcp.json`), and a pointer to
    [`claude-code-setup.md`](../getting-started/claude-code-setup.md) /
    [`codex-setup.md`](../getting-started/codex-setup.md) for hook-by-hook manual wiring.
@@ -352,6 +360,10 @@ append-only-safe operation (the file stays, only its status flips to `dropped`).
 both lists (or repeated) still just gets processed once per list, in `--accept` order then
 `--drop` order. Accepting a domain also mints its paired `domain:<slug>` abstract entity;
 dropping one mints nothing (an entity already minted by a prior accept is left as-is).
+When an accepted domain is one of several live replacements of the same domain (a split),
+the command also prints a `  split: <old> is now replaced by N live domains: ...` line under
+it, naming every part and the `--drop <id>` that keeps a single replacement; it is not an error
+and does not change the exit code.
 
 **TOC refresh:** whenever at least one *domain* id was actually accepted or dropped by this
 run, the `SessionStart` TOC cache is rebuilt immediately (no need to wait for the next
@@ -1660,7 +1672,7 @@ sidegraph-doctor [--db PATH] [--against GIT_REF] [--check] [--stale-days N] [--j
 |---|---|---|
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated) — same never-auto-create rule as `sidegraph-verify` (see above) |
 | `--against GIT_REF` | none | also run `sidegraph-verify`'s transition layer vs `GIT_REF` (identical semantics — same operational-error rules) |
-| `--check` | off | advisory findings also exit `2`, except those listed as exempt (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`) (default: report only; an entry in the JSON `skipped` list never fails, even with `--check`; store-level `code-drift` notes are findings and can fail) |
+| `--check` | off | advisory findings also exit `2`, except those listed as exempt (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`, `domain-split`) (default: report only; an entry in the JSON `skipped` list never fails, even with `--check`; store-level `code-drift` notes are findings and can fail) |
 | `--stale-days N` | `30` | flag a proposed decision/domain whose id timestamp is strictly older than `N` days; must be `>= 0`, and small enough that `N` days before today is still a date (about 739,000 today); otherwise exit `1` before the store is touched |
 | `--json` | off | print `{"clean", "violations", "findings", "skipped"}`, plus `drift_groups` when per-record `code-drift` is grouped, as one JSON object to stdout (nothing else); on an operational error (exit `1`) the object has `clean: false`, empty `findings`, `skipped: ["advisory-checks"]`, the violations found before a failed `--against`, and an `error` key holding the message also printed on stderr |
 | `--flat` | off | one `code-drift` line per record, as before: restores the flat listing and skips the grouping by file |
@@ -1680,7 +1692,8 @@ never constructs a `Store`.
 - **Advisory section** — `doctor.curate`: curation findings that never gate the exit code
   by default; `--check` escalates them to exit `2`, mirroring `sidegraph-sync --check`. The
   exempt findings are `maintenance-due` (routine upkeep on a healthy packed store),
-  `deprecated-auto-accept`, and `superseded-no-live-successor` (it cannot clear once the
+  `deprecated-auto-accept`, `domain-split` (a supported layout), and
+  `superseded-no-live-successor` (it cannot clear once the
   knowledge is restated): each is still printed and still in `--json`, but never changes the
   exit code.
 
@@ -1703,13 +1716,14 @@ plain-text line):
 | `duplicate-entity` | two or more committed entity files share one logical identity (legal — see below — but ambiguous); reported once per group, at the winner's (lowest-`entity_id`) file, naming every id in the group and its binding count; names are compared folded to their file's basename, and an entity named by a path (full or partial) of its file beside one named by the basename is not a duplicate — it is listed on the informational `spelling twins` lines |
 | `graph-root-mismatch` | `graphify update` was likely run from a subdirectory instead of the repository root, so every recorded `source_file` is relative to that subdirectory instead — every anchor in the graph will look orphaned until it's rebuilt from the root. Detected from `--graph`: a sample of anchorable `source_file` values that mostly don't exist relative to the repo root, but DO all exist under one specific subdirectory (named in the finding). Silent on a legitimately partial graph (a doc-only corpus, an `--exclude`d build) and on too small a sample to judge safely; needs `--graph` to resolve (missing/unreadable simply skips it) |
 | `snapshot-split` | Two or more accepted domains descend from one covered snapshot domain, so neither holds its frozen membership. Refresh each part: `sidegraph-domains snapshot --refresh --domain <each part>` |
+| `domain-split` | a domain is replaced by two or more domains that are live at once: a deliberate re-scope into parts, or two branches that each replaced it and merged. A part counts only while its chain still reaches an accepted domain, so a part that was dropped, or whose replacement was dropped, stops counting. A split of a domain the domain snapshot covers is `snapshot-split`'s instead. Advisory about a supported layout: **`--check` does not escalate it**, and `sidegraph-verify` has no finding for it. If it should be a single replacement, drop the extra parts with `sidegraph-ratify --drop <id>` |
 | `graph-stale` | the graph was built at a commit HEAD has moved past (graph.json's `built_at_commit`), and a file the graph should reflect changed since: one it holds was edited after the graph was last built (the later of `graph.json`'s and its sibling `manifest.json`'s modification times) or deleted, or a new file of a type it holds now exists (not under a dot-directory, which Graphify skips). Memory cannot see or anchor to code added after the build. The detail gives the build commit, how many commits behind HEAD (or "a commit outside HEAD's history" after a checkout of an older commit), how many files changed, and up to five example paths; the fix is to rebuild from the repository root by running `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then `sidegraph-sync`. Silent when the build commit is HEAD, when only file types the graph does not hold changed (a `.yml` against a `.py`-only graph), and when a graph built from a dirty tree was committed afterwards, or a `graphify update .` found nothing to change and rewrote only `manifest.json` (the file is no newer than the build); also silent when the comparison cannot be made (no `built_at_commit`, one that is not a full commit id, a graph outside a git repository, a build commit the repository lacks, git unavailable or slower than 3 seconds). **`--check` exits `2` on it**, so a CI job that runs doctor should rebuild the graph first; one that does is unaffected. Needs `--graph` to resolve |
 | `orphaned-record` | an open (`proposed`/`accepted`) decision or fact whose every Tier-2 (leaf) anchor is `orphaned`, so retrieval reaches it only through its file or domain; one finding per record, at its canonical file, naming how many leaf anchors it has. Statuses come from `index.db` and read "as of last sync", so the check is skipped while the statuses are not computed for the current graph (see *Skipped checks* below; run `sidegraph-sync`). It is the record-level view of `orphaned-binding` (any record it flags has orphaned bindings, which that code already reports), so it adds no new reason for `--check` to exit `2`. The fix is to rebuild a stale graph, then `sidegraph-sync`; otherwise re-anchor the record with `add_anchors` or the `heal-anchors` skill, or follow the [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings) if the claim changed or its subject is gone. Needs a usable `index.db` |
 | `store-uncommitted` | store files nobody committed for at least 24 hours: records, bindings, entities, an archive segment or the root files (`format`, `.gitignore`, `stamping_live_since`) that `git status` shows as new, modified or deleted. One finding, at the store path, naming how many files there are, how old the oldest is and what kinds they are (a new `archive/` segment beside deleted records reads as "a compaction"). A new record or entity file is aged by its ULID name, which a `git stash` cannot rewrite; a modified file, or anything under `bindings/`, by its modification time; a deleted file by its subdirectory's, a lower bound. Entries fully staged in the index are not counted, so a `--check` run in a pre-commit hook does not block the commit that fixes the problem. **`--check` exits `2` on it.** The fix is to commit the store in a pull request. Silent, and not run, outside a git repository, with no `git`, or when git is slower than 2 seconds |
 | `plugin-off-in-subdirectories` | Claude Code sessions started below the repository root run without the Sidegraph plugin. Claude Code reads the project settings (`.claude/settings.json`) of the launch directory only, and the repository root's `.claude/settings.local.json` for every launch inside the repository; `enabledPlugins` merges key by key (user settings, then project, then local). Two problems, reported as up to two findings: (a) the plugin is enabled only in the root's `.claude/settings.json`, so every directory below the root without its own enabling settings runs without it (reported at that file); (b) nested directories with a `.claude/settings.json` or `.claude/settings.local.json` of their own that sets `enabledPlugins` and whose merge leaves the plugin off (reported at the first such directory, naming how many there are; a nested settings file without `enabledPlugins` cannot change the merge, so it is not counted). The walk covers every directory that holds a tracked file (one `git ls-files` over the index, a few tens of milliseconds on a large repository) and looks for the two settings files in each directly, so a repository that ignores `.claude/` is covered. User settings are read from `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set and non-empty, else from `~/.claude/settings.json`. Silent when the plugin is not enabled for a launch at the root at all, and not run outside a git repository, with no `git`, or when `git ls-files` takes longer than 5 seconds. **`--check` exits `2` on it**; enabling the plugin at user scope or in the root's `.claude/settings.local.json` clears it |
-| `refresh-helper-outdated` | a git hook runs an older graph refresh helper that uses directory-based locking (unsafe with uutils `mkdir`), or whose Graphify line lacks `GRAPHIFY_NO_AUTO_REFRESH=1` (Graphify 0.9.87 and later can rewrite installed agent skills after an upgrade). Advisory, per clone (the helper lives in `.git/hooks`); **`--check` exits `2` on it**. The exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`) are the only ones it does not escalate. One hook that runs the helper is enough, and a recorded decline does not silence it. The fix is `sidegraph-init` (no flag), which refreshes the helper and keeps a recorded hook choice. Silent outside a git repository, with no helper, or when no hook runs it |
-| `engine-version` | the graph was built by a Graphify release this Sidegraph was not tested with (its `graph.graphify_version` stamp is neither absent nor in the tested set), so anchors and domains may read differently. Advisory; **`--check` exits `2` on it**. The exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`) are the only ones it does not escalate. Pin Graphify to a tested release listed under [Engine version pinning](../integrations/graphify.md#engine-version-pinning), then rebuild the graph. It also fires for a mention-edge graph (Graphify 0.9.62 or later) over a store without a minimum Sidegraph version; follow the [0.14 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.14.md). A malformed marker leaves this second case silent. Silent without a readable graph |
-| `store-not-migrated` | the store uses the pre-0.17 layout (a format marker below major 2) and holds at least one record of any kind (initiatives included). One finding, at the store path, naming `sidegraph-migrate` (run on the default branch, after the team checklist in the [0.17 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.17.md)) and the `sidegraph:compact` skill. Degraded; **`--check` exits `2` on it**. The exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`) are the only ones it does not escalate. Silent on an empty store and on a store that is already format 2 |
+| `refresh-helper-outdated` | a git hook runs an older graph refresh helper that uses directory-based locking (unsafe with uutils `mkdir`), or whose Graphify line lacks `GRAPHIFY_NO_AUTO_REFRESH=1` (Graphify 0.9.87 and later can rewrite installed agent skills after an upgrade). Advisory, per clone (the helper lives in `.git/hooks`); **`--check` exits `2` on it**. The exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`, `domain-split`) are the only ones it does not escalate. One hook that runs the helper is enough, and a recorded decline does not silence it. The fix is `sidegraph-init` (no flag), which refreshes the helper and keeps a recorded hook choice. Silent outside a git repository, with no helper, or when no hook runs it |
+| `engine-version` | the graph was built by a Graphify release this Sidegraph was not tested with (its `graph.graphify_version` stamp is neither absent nor in the tested set), so anchors and domains may read differently. Advisory; **`--check` exits `2` on it**. The exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`, `domain-split`) are the only ones it does not escalate. Pin Graphify to a tested release listed under [Engine version pinning](../integrations/graphify.md#engine-version-pinning), then rebuild the graph. It also fires for a mention-edge graph (Graphify 0.9.62 or later) over a store without a minimum Sidegraph version; follow the [0.14 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.14.md). A malformed marker leaves this second case silent. Silent without a readable graph |
+| `store-not-migrated` | the store uses the pre-0.17 layout (a format marker below major 2) and holds at least one record of any kind (initiatives included). One finding, at the store path, naming `sidegraph-migrate` (run on the default branch, after the team checklist in the [0.17 migration guide](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/guides/migrating-to-0.17.md)) and the `sidegraph:compact` skill. Degraded; **`--check` exits `2` on it**. The exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`, `domain-split`) are the only ones it does not escalate. Silent on an empty store and on a store that is already format 2 |
 | `deprecated-auto-accept` | `SIDEGRAPH_AUTO_ACCEPT=on` is set in the environment doctor runs in. The variable is deprecated: it lands agent captures `accepted` with no ratifier stamp and no live-anchor requirement. Set `SIDEGRAPH_RATIFY_POLICY=auto-all` instead (it stamps `ratified_by`, but a record with no live anchor stays `proposed`). One finding, at `SIDEGRAPH_AUTO_ACCEPT`; `--check` never fails on it |
 | `record-fields-requirement` | the store's `requires-sidegraph` is below the release that added a field to a stored record, so an older client could drop that field when it rewrites a record. The detail names `sidegraph-require --sidegraph X.Y.Z`; run it and commit `.sidegraph/format` (no command raises the requirement for you). Advisory, doctor only; **`--check` exits `2` on it**. Silent until a release raises the constant above the requirement every store already carries (`0.17.0`), while the running Sidegraph is older than the constant, on an empty store, and once the store requires the release |
 | `maintenance-due` | a format-2 store that `sidegraph-compact` would tidy: more than 200 per-record files (drift-check files `verifications/*.json` count, the packed file does not), or a legacy `archive/` segment it would delete, or a misplaced or duplicated shard line, or a stray shard file. `sidegraph-verify` does not report these; maintenance heals them. A segment kept because one of its lines is not safe to delete does not count. Advisory, and one of the exempt findings **`--check` does not escalate**: it is printed and listed in `--json`, but the exit code stays `0`. Run `sidegraph-compact` on the default branch. Silent on a store that is not format 2 |
@@ -1800,14 +1814,14 @@ of the lines above. A store whose format marker refuses this version also skips 
 checks: `remaining checks skipped (<the reason>)`, for example
 `remaining checks skipped (This store requires Sidegraph >= 0.15.0; this is 0.14.0.)`.
 A missing graph is deliberately not a finding: `--check` escalates
-every finding except the exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`), so a CI job that runs doctor without building a graph
+every finding except the exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`, `domain-split`), so a CI job that runs doctor without building a graph
 would start exiting `2`.
 
 **Exit code:** `0` healthy — advisory findings alone stay `0` without `--check`. `1`
 operational error — same paths as `sidegraph-verify` (unreadable store; or, when `--against`
 is used, a bad ref or store outside any git repo), plus a negative `--stale-days` or one too large to date, rejected before the
 store is touched (same hard-usage treatment as `sidegraph-import --limit`). `2` strict
-violations, or — with `--check` — advisory findings too, except the exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`),
+violations, or — with `--check` — advisory findings too, except the exempt findings (`maintenance-due`, `deprecated-auto-accept`, `superseded-no-live-successor`, `domain-split`),
 which never change the exit code.
 
 **Examples:**

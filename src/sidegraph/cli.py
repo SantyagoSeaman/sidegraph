@@ -55,7 +55,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import domain_snapshot, githooks, gitio, maintenance_clock
+from . import __version__, domain_snapshot, githooks, gitio, maintenance_clock
 from .capture import (
     RatifyPolicy,
     format_domain_proposal,
@@ -769,9 +769,7 @@ def init_main(argv: list[str] | None = None) -> int:
     print()
     print(
         "  claude mcp add sidegraph -s project "
-        "--env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json "
-        "-- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main "
-        "sidegraph-mcp"
+        f"-- uvx --from sidegraph=={__version__} --python 3.13 sidegraph-mcp"
     )
     print()
     print("Hook-by-hook manual setup and Codex CLI wiring: see")
@@ -2858,7 +2856,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
     touched — same hard-usage
     treatment as ``sidegraph-import --limit``), 2 strict violations or, with ``--check``,
     advisory findings other than :data:`doctor.CHECK_EXEMPT_CODES` (``maintenance-due``,
-    ``deprecated-auto-accept``, ``superseded-no-live-successor``).
+    ``deprecated-auto-accept``, ``superseded-no-live-successor``, ``domain-split``).
     """
     parser = argparse.ArgumentParser(
         prog="sidegraph-doctor",
@@ -2883,8 +2881,8 @@ def doctor_main(argv: list[str] | None = None) -> int:
         "--check",
         action="store_true",
         help="advisory findings also exit 2, except the exempt findings (maintenance-due, "
-        "deprecated-auto-accept, superseded-no-live-successor) (default: report only; "
-        "skipped checks never fail)",
+        "deprecated-auto-accept, superseded-no-live-successor, domain-split) (default: report "
+        "only; skipped checks never fail)",
     )
     parser.add_argument(
         "--stale-days",

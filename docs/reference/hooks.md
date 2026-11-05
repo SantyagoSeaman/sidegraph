@@ -21,12 +21,16 @@ Four hook entry points, registered as console scripts: `sidegraph-session-start`
 `sidegraph-subagent-start` in
 [`src/sidegraph/host/subagent.py`](../../src/sidegraph/host/subagent.py). All four read a JSON
 payload from stdin and write a JSON response to stdout, per the Claude Code hooks contract. They
-take no command-line arguments: `-h` or `--help` prints a short usage text and exits `0`, and any
-other argument is a usage error on stderr that exits `2` (the command guard below turns that exit
-into its fallback output, so a host never sees it, provided the wiring is guarded: every shipped
-manifest and recipe is). `-h` is honoured anywhere in the arguments. In both cases the entry point returns
-before it reads stdin or opens the store, so typing `--help` never runs a hook. A host calls them
-without arguments. For wiring them into `.claude/settings.json`, see
+take one command-line option, `--repo-root`: it moves the process to the project root first
+(`CLAUDE_PROJECT_DIR` when the host sets it, else the git top-level of the working directory, else
+the working directory stays), so a hook launched from a subdirectory finds the project's store.
+The Claude and Grok plugins pass it; Codex and Muse do not. `-h` or `--help` prints a short usage
+text and exits `0`, and any other argument is a usage error on stderr that exits `2` (the command
+guard below turns that exit into its fallback output, so a host never sees it, provided the
+wiring is guarded: every shipped manifest and recipe is). `-h` is honoured anywhere in the
+arguments. In both cases the entry point returns before it reads stdin or opens the store, so
+typing `--help` never runs a hook. A host calls them without arguments other than `--repo-root`.
+For wiring them into `.claude/settings.json`, see
 [`getting-started/claude-code-setup.md`](../getting-started/claude-code-setup.md).
 
 Hook-owned SQLite connections use a zero-second busy timeout, so a lock held by another
@@ -38,11 +42,14 @@ Other `Store`, hot-index and read-only-index callers retain their existing defau
 
 The shell wiring commands in the plugin manifests and the setup recipes end with a shell guard
 (Muse's hooks run a Python adapter instead, which answers `{}` itself on any failure):
-`|| printf '{}\n'` on `Stop`, `PreToolUse` and `SubagentStart`, and
-`|| printf '%s\n' '{"systemMessage":"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error"}'`
-on `SessionStart`. The entry points below already print `{}` on any failure of their own (except
+`|| echo '{}'` on `Stop`, `PreToolUse` and `SubagentStart`, and
+`|| echo '{"systemMessage":"Sidegraph: the SessionStart hook could not start (uv, the first download of Sidegraph, or no network); run the hook command in a terminal to see the error"}'`
+on `SessionStart` (the Claude and Grok plugins; the Codex wiring and the
+hand-wired recipes use an equivalent shell guard with the same `{}` answer and a message that
+says `uv/uvx, network or project path`). The entry points below already print `{}` on any failure of their own (except
 that `sidegraph-session-start` reports a store that cannot be opened, see
-[A store that cannot open](#a-store-that-cannot-open)), but they cannot catch one that happens before Python starts: `uv` exiting 2 on an internal error, or
+[A store that cannot open](#a-store-that-cannot-open)), but they cannot catch one that happens before Python starts: `uv` exiting 2 on an internal error, a
+first start that cannot download or install Sidegraph's pinned packages, or (in wiring that still has one)
 the `cd` in front of the command failing. On `Stop`, Claude Code and Codex treat exit 2 with text on stderr
 as a block and continue the session, and Claude Code does the same on `PreToolUse` by blocking
 the tool call, so without the guard such a command could loop a session. A command that does
@@ -53,20 +60,27 @@ start is not affected.
 "Sidegraph: the SessionStart hook could not start" means the guard caught a failure before
 Python ran, and hid its error. Run the hook command from your hook configuration in a terminal,
 in the project directory, with stdin closed so the entry point does not wait for a payload, and
-read what `uv` or `uvx` prints. For the plugin and the manual recipes:
+read what `uv` or `uvx` prints. Every plugin launches the published package at its own version, so
+run the same command with that version (`X.Y.Z` is the version in the plugin's manifest) and the
+host variable of your host (`SIDEGRAPH_HOST=claude`, `codex` or `grok`):
+
+```bash
+SIDEGRAPH_HOST=claude uvx --from sidegraph==X.Y.Z --python 3.13 sidegraph-session-start --repo-root </dev/null
+```
+
+The first run after a plugin update installs that version's pinned dependencies, so it needs the
+network once; see [the plugin's first start](../guides/troubleshooting.md#the-plugins-first-start).
+For the hand-wired non-plugin recipes, which run the latest release:
 
 ```bash
 SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json \
-  uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start </dev/null
+  uvx --from sidegraph --python 3.13 sidegraph-session-start </dev/null
 ```
 
-The `@main` ref tracks a mutable branch; see
-[Mutable development references](../getting-started/installation.md#mutable-development-references).
-That is the `SessionStart` command.
-
-The plugin's `Stop`, `PreToolUse` and `SubagentStart` commands run the same way but from the commit `SessionStart` recorded in a `launch-commit` file (see
-[Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file)); to reproduce one by hand, put that commit where `@main`
-stands. A plugin pinned to a tag or commit ignores the file and launches its own ref.
+That is the `SessionStart` command; the other hooks run the same way with their own entry point.
+A plugin installed before 0.25.0 launched `@main`, and its `Stop`, `PreToolUse` and
+`SubagentStart` commands launched from the commit `SessionStart` recorded in a `launch-commit`
+file (see [Troubleshooting](../guides/troubleshooting.md#the-launch-commit-file)).
 For a source checkout, the development form:
 
 ```bash
@@ -74,8 +88,11 @@ SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json \
   uv run --project /ABSOLUTE/PATH/TO/sidegraph sidegraph-session-start </dev/null
 ```
 
-The usual causes are no network or a failed git fetch (`uvx`), `uv` or `uvx` missing from the
-PATH the host gives its hooks, and a project path that no longer exists.
+The usual causes are no network, a first install of the pinned packages that could not finish, a
+uv older than 0.6.10, `uv` or `uvx` missing from the PATH the host gives its hooks, a uv set not
+to download Python when the machine has no 3.13 (see
+[the plugin's first start](../guides/troubleshooting.md#the-plugins-first-start)), and a project
+path that no longer exists.
 
 ## Which session a hook is in
 
@@ -356,8 +373,9 @@ raises costs only its own line.
      ignoring a local label (`+local`). Without a plugin root, a manifest, or a readable version
      the check does not run. A package newer than the plugin says the installed plugin copy is
      stale: update the plugin from its marketplace. A plugin newer than the package says the
-     session runs an old launcher cache or a pinned install: restart the session so
-     `SessionStart` resolves `@main` again, or remove the pinned install. The internal manifests
+     session started before the plugin update, or Sidegraph is launched from a manual
+     registration (`claude mcp add`, a hand-written config) that pins an older version: restart
+     the session, or update that registration. The internal manifests
      are bumped with the package, so the check stays quiet with them; an old binary cannot
      report itself, so it catches a skew only once the binary that runs it is new enough.
    - **`path-skew`.** A `sidegraph-*` command on `PATH` that is not the session's own package
@@ -366,7 +384,7 @@ raises costs only its own line.
      `sidegraph-mcp`, `sidegraph-doctor` found on `PATH` once the running environment's own `bin`
      (which `uvx` and `uv run` put first) is skipped, its real path, and the one
      `sidegraph-<version>.dist-info` in that environment. The line names the command, its
-     directory and both versions, and offers `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main` or
+     directory and both versions, and offers `uv tool install --reinstall --python 3.13 sidegraph==X.Y.Z` (the session's version) or
      `uv tool uninstall sidegraph` when the environment is a `uv tool` one, a generic "upgrade
      or remove" otherwise. It fires for an older and for a newer copy. No binary on `PATH`, no
      or two dist-infos, a non-numeric version or a Windows layout: the check does not run.
@@ -1147,6 +1165,11 @@ the input (`description`, `subagent_type`, `model`, `run_in_background`, …) co
 in, and the prompt is the original, a blank line and the block. This is on by default;
 `SIDEGRAPH_AGENT_BRIEF=off` turns it off, and no other value has any effect.
 
+In Claude Code's auto mode (`permission_mode: auto`) the hook leaves the call unchanged: that mode
+reviews a call before hooks run and refuses an input a hook changed. The subagent still gets the
+`SubagentStart` brief and the records of the files it reads. Grok Build runs hooks before its
+permission gate, so it keeps the brief in its own auto mode.
+
 The plugin and the manual recipe wire it as one more `PreToolUse` group, matcher `Agent|Task`,
 running the same command as the other groups. Claude Code reads a matcher made only of letters,
 digits, underscores and `|` as a list of whole tool names, so `TaskCreate`, `TaskList` and
@@ -1324,19 +1347,30 @@ it with `muse plugins approve sidegraph`.
 
 ## Wiring
 
+The Claude Code and Grok Build plugins wire all four hooks the same way: each command runs
+`uvx --from sidegraph==X.Y.Z --python 3.13 <entry point> --repo-root` and ends with the command
+guard. No `cd` prefix, no `UV_*` variable and no `@main` resolution is involved, so the Sidegraph
+version changes only when the plugin updates. The commands set no `SIDEGRAPH_DIR` or
+`SIDEGRAPH_GRAPH`: a value exported in your shell steers the plugin as it steers the CLIs, and
+otherwise the defaults apply. The development twins (`hooks/hooks.json`, `grok/hooks.json`) run the
+checkout the plugin was loaded from, with `--repo-root`. Codex wraps the same command in a `cd` to the git top level
+(plus a PowerShell form for Windows), and Muse starts it from a Python adapter, both on the same
+pin.
+
 See [`getting-started/claude-code-setup.md`](../getting-started/claude-code-setup.md) for the
 `.mcp.json` and `.claude/settings.json` snippets that register `sidegraph-mcp` and all four
-hooks against a project.
+hooks against a project without the plugin.
 
 ## The launch-commit file
 
-The plugin's `Stop`, `PreToolUse` and `SubagentStart` hooks (and Codex's `Stop` and
-`SubagentStart`, Grok Build's `Stop`, `PreToolUse` and `SubagentStart`, and Muse's
-`SubagentStart`) launch from a commit, not from
-`@main`, which tracks a mutable branch (see
-[Mutable development references](../getting-started/installation.md#mutable-development-references)):
-`uv` re-resolves a branch reference on every call and serves a commit from its cache.
-`SessionStart` writes the commit.
+The launch-commit file serves plugin installs older than 0.25.0, which launched `@main`. No
+current plugin reads it: every manifest names an exact version. For those older installs, the
+`Stop`, `PreToolUse` and `SubagentStart` hooks (Codex's `Stop` and `SubagentStart`, an older
+Claude plugin's `Stop`, `PreToolUse` and `SubagentStart`, and Muse's `SubagentStart`) launch from a
+commit, not from `@main`, which tracks a mutable branch: `uv` re-resolves a branch reference on
+every call and serves a commit from its cache. `SessionStart` writes the commit. The writer stays
+for a migration window so that an older install, whose `SessionStart` now runs the current code,
+keeps its hot hooks on that code.
 
 A historical local launch measurement on 2026-10-03 (uv 0.12.0, macOS, early-exit hook
 payload, two rounds of six warm calls) recorded about 0.8 s for `@main` and about 0.2 s
@@ -1346,8 +1380,8 @@ latency guarantee.
 - **What it is.** The 40 hex characters of a commit, in
   `${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/launch-commit`, one per machine. Only a Sidegraph
   installed from `@main` writes it, so an install pinned to a tag or SHA (a CI run, a pilot), an
-  editable install and a PyPI install never repoint the plugin. The reading side is the same: a
-  plugin pinned to a tag or commit ignores the file and launches its own ref. A later
+  editable install and a PyPI install, which is every current plugin launch, write nothing. The
+  reading side is the same: a plugin pinned to a tag or commit ignores the file. A later
   SessionStart in another project can update this shared file, changing the commit used by
   subsequent hooks in an already open session.
 - **Deleting it is safe.** With no valid file the hooks launch `@main`, as they did before, and

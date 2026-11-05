@@ -23,7 +23,8 @@ right write path, right `kind`, filled `rejected`, tight prose, on-target anchor
   accepted at write time when the project's `SIDEGRAPH_RATIFY_POLICY` admits it, the result's
   `ratified_by` then reading `auto:<policy>`, so don't tell the human it awaits review),
   tagged `[unratified]` in retrieval, for a human to accept later via
-  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from sidegraph==0.25.0 --python 3.13 sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 **Never call `add_decision` on your own initiative.** Self-initiated writes always go
 through the proposal gate — the same gate every other Sidegraph write path follows (a human
@@ -204,7 +205,9 @@ accepted records say the same thing, or the code or practice a decision governed
 exists and a successor would have nothing new to say, call `retire_decision(id, reason,
 duplicate_of=<the id that stays, for a duplicate>)`. It moves the record to `deprecated`,
 keeps the reason, and stops serving it; history still shows it. For a duplicate, the kept
-record takes over the duplicate's anchors (`anchors_added`). Retire only with the human's
+record takes over the duplicate's anchors (`anchors_added`, plus orphaned ones that can heal
+in `anchors_orphaned`), and facts that only the duplicate kept reachable gain them too
+(`facts_anchored`). Retire only with the human's
 agreement, and only an accepted decision (a proposal is dropped with `ratify(drop=...)`). The
 tool refuses until the store requires 0.24.0: relay its `sidegraph-require` instruction to the
 human rather than working around it.

@@ -101,11 +101,11 @@ whitepaper's §8.5 — read that before assuming a saving.
 ## CI wiring
 
 ```yaml
-- run: uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@<sha-or-tag> sidegraph-verify   # gate
-- run: uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@<sha-or-tag> sidegraph-doctor    # advisory
+- run: uvx --from sidegraph==X.Y.Z --python 3.13 sidegraph-verify   # gate
+- run: uvx --from sidegraph==X.Y.Z --python 3.13 sidegraph-doctor    # advisory
 ```
 
-Pin a SHA or a tag, not a branch, so CI runs the version you reviewed. The store format and
+Pin a release, not the latest, so CI runs the version you reviewed. The store format and
 documented CLI surface are committed contracts; pre-1.0 minor releases may introduce
 breaking changes (see [`stability.md`](stability.md)).
 

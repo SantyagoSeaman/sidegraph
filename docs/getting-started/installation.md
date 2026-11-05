@@ -11,7 +11,15 @@ the store, the session map and listings still work, but new concrete anchors rem
 
 - **Python 3.13+** for Sidegraph (`.python-version` pins it).
 - **Python 3.10+** for Graphify.
-- [`uv`](https://docs.astral.sh/uv/) — used to install and run both.
+- [`uv`](https://docs.astral.sh/uv/) — used to install and run both. The plugins launch
+  Sidegraph with `uvx`, and the launch needs **uv 0.6.10 or newer**; a refused start is hidden
+  by the hooks' guard. `uv --version` shows yours. Every launch names Python 3.13
+  (`--python 3.13`): uv uses a 3.13 it finds or downloads a managed one on the first start.
+- **Platforms.** The published package pins its dependencies to builds for macOS on Apple
+  silicon, Linux on x86-64 and arm64 with glibc, and Windows on x86-64. **Intel Macs and musl
+  Linux (Alpine) are not supported** by any install route: the pinned `cryptography` has no
+  Intel Mac wheel, `uvx` would try a source build that needs a Rust toolchain, and an exact
+  pin leaves no room for a constraint of your own.
 - For automatic session integration: [Claude Code](claude-code-setup.md),
   [Codex](codex-setup.md) or [Grok Build](../integrations/grok.md).
   [OpenCode V2](../../.opencode/INSTALL.md) provides MCP tools and shared skills without
@@ -31,8 +39,7 @@ in the historical 0.14.0 release-candidate campaign (see
 **Version requirement:** releases before 0.12.0 can stall a native Windows write: a Git
 child inherits the MCP stdin pipe and holds the write until the request times out (see
 the [changelog](../../CHANGELOG.md)). Use 0.12.0 or later; marketplace plugin users get
-the fix from the public repository's `main`, which their launchers fetch. WSL is the
-workaround for older versions.
+the fix by updating the plugin. WSL is the workaround for older versions.
 
 For the complete supplied plugin workflow, install and launch the agent host, uv/Python,
 Sidegraph and optional Graphify inside the same WSL distribution. Follow the Linux setup
@@ -63,7 +70,7 @@ The manual Codex hook recipes stay POSIX/WSL-only. If something still fails to s
 
 For MCP-only use with a client that can launch `uvx` directly, Claude Code's
 [manual MCP JSON recipe](claude-code-setup.md#1-register-the-mcp-server) starts `uvx`
-directly, as the plugin does. Set `SIDEGRAPH_DIR` and `SIDEGRAPH_GRAPH` to absolute paths for
+directly, as every plugin does. Set `SIDEGRAPH_DIR` and `SIDEGRAPH_GRAPH` to absolute paths for
 the intended repository, or set a working directory supported by your client. In JSON, use forward
 slashes (`C:/work/your repo/.sidegraph`) or escape each backslash
 (`C:\\work\\your repo\\.sidegraph`); keep paths with spaces as single argument values.
@@ -77,13 +84,24 @@ current CI coverage.
 
 ## Mutable development references
 
-The `git+…@main` examples below track a mutable branch: a later `uvx` cache refresh can
-install different code. That is useful while trying Sidegraph. For CI, shared setup, or a
-measured pilot, replace `@main` with a release tag or commit SHA, for example
-`git+https://github.com/SantyagoSeaman/sidegraph.git@<sha>`. The plugin marketplace is the
-exception: its public manifests intentionally track `main`, and the release process moves
-that `main` only when it cuts a release. See
-[`reference/stability.md`](../reference/stability.md) for the promises made by each surface.
+Every host plugin launches `uvx --from sidegraph==X.Y.Z --python 3.13 <command>`, with `X.Y.Z`
+the plugin's own version, and the published package pins every one of its dependencies to an
+exact version. A session therefore runs the release that was tested, on the dependencies it was
+tested with, and a newer Sidegraph reaches you only when the plugin updates. The commands in
+this documentation install the latest release from PyPI; in CI or a shared setup, name the
+version (`sidegraph==X.Y.Z`) and move it when you upgrade.
+
+The pin freezes the dependency set. A fix in one of Sidegraph's dependencies reaches you with
+the next Sidegraph release, not before. `pip install sidegraph` into a shared environment takes
+those exact versions and can conflict with other packages: install Sidegraph as a tool (`uvx`
+or `uv tool install`), never into an environment you import other libraries from.
+
+Two things still track a mutable branch: an install of unreleased code straight from git
+(`git+https://github.com/SantyagoSeaman/sidegraph.git@main`) and the OpenCode package spec
+(`git+…#main`, see below). Use them to try new code, not in CI. Plugin installs older than
+0.25.0 launched `@main` instead of a pin; they keep working and move to the pinned launch when
+their plugin updates. See [`reference/stability.md`](../reference/stability.md) for the promises
+made by each surface.
 
 For an existing store, follow the [0.14 migration guide](../guides/migrating-to-0.14.md)
 before upgrading Graphify, and update every Sidegraph client first.
@@ -94,17 +112,16 @@ before upgrading Graphify, and update every Sidegraph client first.
 
 This puts the `sidegraph-*` commands on your `PATH` under their bare names, for your own
 terminal, scripts and CI. Without a plugin it is the usual setup, though the `uvx` forms below
-and in [Option C](#option-c--uvx-directly-from-git) run Sidegraph with no install at all. Beside
+and in [Option C](#option-c--uvx-from-pypi) run Sidegraph with no install at all. Beside
 the Claude Code or Codex plugin
 ([Option B](#option-b--host-plugin-recommended-for-claude-code-and-codex)) it is optional: the
-plugin runs its own Sidegraph through `uvx` and its skills never use this copy, so install it only
+plugin runs its own pinned Sidegraph through `uvx` and its skills never use this copy, so install it only
 if you want to type the commands yourself.
 
-It installs from the same place as the plugin, the public repository's `main` branch, which
-changes only at releases:
+It installs the latest release from PyPI:
 
 ```bash
-uv tool install git+https://github.com/SantyagoSeaman/sidegraph.git@main
+uv tool install --python 3.13 sidegraph
 ```
 
 That puts `sidegraph-mcp` and every `sidegraph-*` CLI on your PATH, where the documentation's
@@ -119,10 +136,9 @@ release (listed in the [CHANGELOG](../../CHANGELOG.md) and on
 uv tool upgrade sidegraph
 ```
 
-For an install from `main`, `uv tool upgrade` asks GitHub for the current `main` commit, so it
-moves to the latest release. An older install from PyPI, pinned or not, moves to the same
-source with the install command above. The releases are also published on PyPI as `sidegraph`;
-use that only to pin an exact version (see below).
+`uv tool upgrade` moves the install to the latest release on PyPI, with the new release's own
+pinned dependencies. An older install from `git+…@main` moves to PyPI with the install command
+above (add `--reinstall`).
 
 Beside a plugin, an old copy keeps answering your own shell while the code the plugin runs moves
 to each release, and it can lack commands or flags the documentation shows. On macOS and Linux,
@@ -131,12 +147,13 @@ versions when the copy on `PATH` differs from the session's, and shows it to you
 day.
 
 To stop maintaining the copy, run `uv tool uninstall sidegraph`. The plugin keeps working, and
-any command still runs as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`.
+any command still runs as `uvx --from sidegraph --python 3.13 <command>`.
 
-For CI or a reproducible pilot, pin a version instead (`pip install 'sidegraph==X.Y.Z'`) and move
-the pin when you upgrade. For an ephemeral run without installing,
-`uvx --from sidegraph sidegraph-mcp` works — the entry-point name differs from the package
-name, so `--from sidegraph` is required (a bare `uvx sidegraph-mcp` will not resolve).
+For CI or a reproducible pilot, pin a version instead
+(`uv tool install --python 3.13 'sidegraph==X.Y.Z'`) and move the pin when you upgrade. For an
+ephemeral run without installing, `uvx --from sidegraph --python 3.13 sidegraph-mcp` works — the
+entry-point name differs from the package name, so `--from sidegraph` is required (a bare
+`uvx sidegraph-mcp` will not resolve).
 
 ### Option B — host plugin (recommended for Claude Code and Codex)
 
@@ -157,11 +174,13 @@ codex plugin add sidegraph@sidegraph
 The Claude Code host installs the MCP server and all four hooks (`SessionStart`, `Stop`,
 `PreToolUse`, `SubagentStart`). Codex installs the MCP server, `SessionStart`/`Stop`/
 `SubagentStart`, and the bundled skills;
-its tool surface has no equivalent target for the Claude-specific `PreToolUse` records block. The
-plugin's bundled config installs from the public repository, not PyPI: the MCP server and
-`SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`, and the
-`Stop`, `PreToolUse` and `SubagentStart` hooks start from the commit `SessionStart` resolved. Unlike the package
-install, the plugin deliberately follows the public repository's `main` branch. See
+its tool surface has no equivalent target for the Claude-specific `PreToolUse` records block.
+Every plugin launches the published package at its own version:
+`uvx --from sidegraph==X.Y.Z --python 3.13 <entry point>`, where `X.Y.Z` is the plugin's
+version. That needs uv 0.6.10 or newer; it downloads the pinned packages on the first session
+after an install or an update (and a uv-managed CPython 3.13 when the machine has none), and
+the Sidegraph version changes only when the plugin does. The Codex plugin asks you to trust its
+hooks again after each update, because the version is part of each hook command. See
 the integration details for [Claude Code](../integrations/claude-code.md#plugin-install-path)
 or [Codex](../integrations/codex.md#plugin-install-path).
 
@@ -176,31 +195,33 @@ the bare `sidegraph-*` commands in your own terminal, install the CLI as in
 For installation and updates for every host, see the
 [host plugin recipes](#host-plugins-install-and-update). Existing Claude Code and Codex installs
 keep `sidegraph@sidegraph`; update cached assets with the host's native update commands,
-then start a new session and review any changed approvals. The runtime's `@main` does not
-refresh cached skills or manifests. OpenCode V2 uses the
+then start a new session and review any changed approvals. The Sidegraph version a plugin
+runs is part of its manifests, so one plugin update replaces the version, the skills and the
+hooks together. OpenCode V2 uses the
 [canonical Git package guide](../../.opencode/INSTALL.md).
 [Muse](../integrations/muse.md) supplies MCP, skills, the session map and a subagent brief,
 and must be restarted from the intended project when switching workspaces; expanded native
 acceptance is deferred. Grok Build installs from its own plugin marketplace; see the
 [Grok Build guide](../integrations/grok.md).
 
-### Option C — uvx directly from git
+### Option C — uvx from PyPI
 
 Prefer manual wiring, or need an entry point outside Claude Code (e.g. `sidegraph-init` from
-a plain terminal)? Run it straight from the repository with
+a plain terminal)? Run it straight from PyPI with
 [`uvx`](https://docs.astral.sh/uv/guides/tools/), with no persistent install and no local
-checkout. `@main` moves only when a release is cut. For reproducibility, pin a tag or commit SHA instead
-(see "Mutable development references" above):
+checkout. This runs the latest release; for reproducibility name the version
+(`--from sidegraph==X.Y.Z`, see "Mutable development references" above):
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --help
+uvx --from sidegraph --python 3.13 sidegraph-init
+uvx --from sidegraph --python 3.13 sidegraph-bootstrap --help
 ```
 
-Every Sidegraph entry-point name differs from the source location, so any `uvx` invocation
-must use `--from git+<url>@<ref> <entrypoint>` — a bare `uvx sidegraph-init` will not work.
-`uv` caches the build after the first run, so repeat invocations are fast. Substitute
-`git+ssh://git@github.com/...` for the same URL if you authenticate over SSH.
+Every Sidegraph entry-point name differs from the package name, so any `uvx` invocation must
+use `--from sidegraph <entrypoint>` — a bare `uvx sidegraph-init` will not work. Keep
+`--python 3.13` after the package: without it uv uses the newest Python it finds, and a Python
+released after the version you run has no builds of some pinned dependencies. `uv` caches the
+install after the first run, so repeat invocations are fast.
 
 ### Option D — from source (contributors)
 
@@ -231,10 +252,11 @@ deactivating the other venv first.
 
 ## Host plugins: install and update
 
-Each recipe below installs the plugin and gives the command that updates it. Host plugin
-updates and the MCP runtime are separate: the default runtime follows the public repository's
-`main`, which advances at releases, and that does not refresh cached skills, manifests or hook
-definitions. Use your host's update recipe after a release, then start a new session.
+Each recipe below installs the plugin and gives the command that updates it. For Claude Code and
+Grok Build, Codex and Muse the launch names the plugin's own version, so one plugin update
+replaces the Sidegraph version together with the skills and manifests. OpenCode's package spec
+tracks `#main` and its MCP override names a version, so its package and its server update
+separately. Use your host's update recipe after a release, then start a new session.
 
 | Host | Automatic session memory | Host-session evidence |
 |---|---|---|
@@ -383,7 +405,7 @@ opencode plugin update 'git+https://github.com/SantyagoSeaman/sidegraph.git#main
 ```
 
 The [OpenCode installation guide](../../.opencode/INSTALL.md) is the canonical recipe, including
-configuration overrides. The package target `#main` and the MCP runtime's Git ref are
+configuration overrides. The package target `#main` and the MCP server's version pin are
 separate settings.
 
 ### Any MCP client
@@ -392,7 +414,7 @@ Without a plugin, register the stdio server with your client and run it from the
 root. For a client that reads an `mcpServers` file:
 
 ```json
-{ "mcpServers": { "sidegraph": { "command": "uvx", "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp", "--repo-root"], "env": { "SIDEGRAPH_DIR": ".sidegraph", "SIDEGRAPH_GRAPH": "graphify-out/graph.json" } } } }
+{ "mcpServers": { "sidegraph": { "command": "uvx", "args": ["--from", "sidegraph==X.Y.Z", "--python", "3.13", "sidegraph-mcp", "--repo-root"], "env": { "SIDEGRAPH_DIR": ".sidegraph", "SIDEGRAPH_GRAPH": "graphify-out/graph.json" } } } }
 ```
 
 There is no setup skill without a plugin: build the graph and create the store from a terminal
@@ -423,7 +445,7 @@ recalling it when that file is read needs the graph. See
 
 ## If something does not work
 
-- Run `sidegraph-doctor` (as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor`,
+- Run `sidegraph-doctor` (in a terminal, as the non-plugin form `uvx --from sidegraph --python 3.13 sidegraph-doctor`,
   or by its plain name if you installed the CLI, see [Option A](#option-a--the-cli-on-your-path)):
   it lists what is wrong with the store, the graph and the wiring.
   [Troubleshooting](../guides/troubleshooting.md) explains each message, and the
@@ -440,8 +462,8 @@ recalling it when that file is read needs the graph. See
 
 Remove the plugin with your host's plugin command (`/plugin uninstall sidegraph@sidegraph` in
 Claude Code, `grok plugin uninstall sidegraph` in Grok Build).
-`sidegraph-init --remove-hooks` removes the git hook (with the plugin alone, run it as
-`uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --remove-hooks`). The records in `.sidegraph/` are your
+`sidegraph-init --remove-hooks` removes the git hook (with no CLI installed, run it in the non-plugin
+form `uvx --from sidegraph --python 3.13 sidegraph-init --remove-hooks`). The records in `.sidegraph/` are your
 project's memory and are committed: delete them only if you mean to lose them.
 `graphify-out/` can always be deleted and rebuilt.
 
@@ -531,7 +553,7 @@ package or launcher check does not establish desktop GUI behavior.
 | OS | CLI and automated coverage | Hook coverage | CI evidence |
 |---|---|---|---|
 | Linux | Full pytest suite on Python 3.13 and 3.14 | Hook entry points and POSIX command contracts in the full suite | [`ci.yml` job `test`](../../.github/workflows/ci.yml), `ubuntu-latest` |
-| Windows | Selected portable core and MCP contracts, plus an installed-wheel stdio smoke, on Python 3.13 and 3.14 | Native `commandWindows`, payload-encoding and failure-diagnostic tests in that selection | [`ci.yml` job `windows-core`](../../.github/workflows/ci.yml), `windows-2022` |
+| Windows | Selected portable core and MCP contracts, plus an installed-wheel stdio smoke, on Python 3.13 | Native `commandWindows`, payload-encoding and failure-diagnostic tests in that selection | [`ci.yml` job `windows-core`](../../.github/workflows/ci.yml), `windows-2022` |
 | macOS | CLI host-session campaign below (0.14.0), plus host evidence above | Host-session checks in that campaign; no hook job in public CI | No macOS job in the public [`ci.yml`](../../.github/workflows/ci.yml) |
 
 The public workflow runs `test` and `windows-core` on ready pull requests, main pushes and
@@ -557,16 +579,17 @@ published version. Muse, OpenCode and Grok Build have the narrower
 coverage in their installation guides and are outside this native matrix.
 
 On native Windows, the Claude Code hooks run through Git Bash, which comes with Git for
-Windows; the MCP launchers and the Codex hooks need no POSIX shell. The native checks run
+Windows, and the pinned package has builds for Windows on x86-64 only; the MCP launchers and the Codex hooks need no POSIX shell. The native checks run
 with Git for Windows installed; they do not establish support for Windows hosts without it. Graphify integration
 remains outside these checks.
 
-Package dependencies support `fastmcp>=3.4.10,<4`, `mcp>=1.30,<2` and `markdown-it-py>=4,<5`
-(markdown section scope for drift checks). Runtime security
-floors also require `certifi>=2026.10.19`,
-`opentelemetry-api>=1.45.1`, `authlib>=1.9.1` and `dnspython>=2.9.0`, including standalone wheel installations. Major SDK upgrades
-require a separate compatibility review; an unlocked package install may resolve newer
-versions within those bounds than the development lockfile.
+The published package pins every dependency to an exact version: the set the release's tests
+ran against. The source supports `fastmcp>=3.4.10,<4`, `mcp>=1.30,<2` and `markdown-it-py>=4,<5`
+(markdown section scope for drift checks), with security floors of `certifi>=2026.10.19`,
+`opentelemetry-api>=1.45.1`, `authlib>=1.9.1` and `dnspython>=2.9.0`; CI proves those ranges on
+the source repository. Major SDK upgrades require a separate compatibility review. Installing
+from source, or any route that ignores the package's pins, may resolve newer versions within
+those bounds than the development lockfile.
 
 ## Next
 

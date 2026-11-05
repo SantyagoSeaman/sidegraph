@@ -1,7 +1,7 @@
 """Muse lifecycle hooks for Sidegraph: forward a hook payload to the public runtime.
 
 Muse starts a hook as ``python3 muse/<entry>.py`` with a cleared environment and no shell, so
-this module does what the Claude and Codex hook command strings do: pick the runtime source,
+this module does what the Claude and Codex hook command strings do: launch the pinned runtime,
 set the project variables, run the entry point in the project directory, and fail open. It is
 plain Python 3.9 standard library (the stock macOS ``python3``), imported by the entry files by
 plain name; it is never a declared hook source.
@@ -18,8 +18,9 @@ import signal
 import subprocess
 import sys
 
-# The one spelling of the runtime URL: ``release-public.sh --ref`` rewrites it by text.
-SOURCE = "git+https://github.com/SantyagoSeaman/sidegraph.git@main"
+# The exact PyPI pin the adapter launches: the version bump writes it, with the manifests. The
+# interpreter flag follows the package, as in every other host's launch.
+SOURCE = "sidegraph==0.25.0"
 
 # Muse's ``timeoutMs`` per event, pinned to the manifest by a test. The child gets the rest of
 # the budget minus the margin, so a slow runtime ends as ``{}`` and not as a Muse ``timed_out``.
@@ -28,44 +29,6 @@ CHILD_MARGIN_MS = 1000
 
 # Muse discards a hook's output over 16 KiB; stay a KiB under it.
 OUTPUT_LIMIT = 15 * 1024
-
-_HEX = b"0123456789abcdef"
-_LAUNCH_COMMIT_LENGTH = 40
-
-
-def _recorded_commit(env: dict) -> str | None:
-    """The launch-commit record, read like the shell prefix of the public hot hooks, in bytes: a
-    regular file only (a FIFO is never opened), at most 41 bytes, trailing LFs dropped as the
-    shell's command substitution does, then exactly 40 bytes of ``0-9a-f``. Nothing is decoded
-    first. Any failure is ``None``, which means launch from the fallback ref.
-
-    # see design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md
-    """
-    base = env.get("XDG_CACHE_HOME") or env.get("HOME", "") + "/.cache"
-    path = base + "/sidegraph/launch-commit"
-    try:
-        if not os.path.isfile(path):
-            return None
-        with open(path, "rb") as handle:
-            data = handle.read(_LAUNCH_COMMIT_LENGTH + 1)
-    except OSError:
-        return None
-    data = data.rstrip(b"\n")
-    if len(data) != _LAUNCH_COMMIT_LENGTH or data.strip(_HEX):
-        return None
-    return data.decode("ascii")
-
-
-def _source(event: str, env: dict) -> str:
-    """SessionStart always launches the branch (it carries a release to the machine and writes
-    the record); the other events launch from the recorded commit when the fallback is ``main``."""
-    if event == "SessionStart":
-        return SOURCE
-    base, _, ref = SOURCE.rpartition("@")
-    commit = _recorded_commit(env)
-    if commit is not None and ref == "main":
-        return base + "@" + commit
-    return SOURCE
 
 
 def _child_env(payload: dict) -> dict:
@@ -117,7 +80,7 @@ def _guarded(event: str, out: bytes) -> bytes:
 def _run(event: str, entry_point: str, raw: bytes, payload: dict) -> bytes:
     env = _child_env(payload)
     cwd = payload.get("cwd")
-    argv = ["uvx", "--from=" + _source(event, env), entry_point]
+    argv = ["uvx", "--from=" + SOURCE, "--python", "3.13", entry_point]
     timeout = (TIMEOUTS_MS[event] - CHILD_MARGIN_MS) / 1000.0
     child = subprocess.Popen(
         argv,

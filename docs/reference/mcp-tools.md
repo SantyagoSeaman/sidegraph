@@ -31,10 +31,13 @@ use; see [configuration](configuration.md#path-resolution-semantics).
 Git commands for provenance, initiative, ratification identity and graph checks receive
 EOF on standard input, keeping subprocesses separate from the MCP protocol stream.
 
-The development lockfile selects FastMCP 3.4.11 and MCP Python SDK 1.30.0. Supported package
-dependencies are `fastmcp>=3.4.10,<4`, `mcp>=1.30,<2` and `markdown-it-py>=4,<5` (it reads
-markdown structure for [declared-section drift checks](#record_drift_check)), with runtime security floors
-`certifi>=2026.10.19`, `opentelemetry-api>=1.45.1`, `authlib>=1.9.1` and `dnspython>=2.9.0`. The locked stack
+The development lockfile selects FastMCP 3.4.11 and MCP Python SDK 1.30.0, and the published
+package pins exactly those versions (and the rest of the lock's runtime closure), so a PyPI
+install runs the tested set. The source supports the ranges `fastmcp>=3.4.10,<4`, `mcp>=1.30,<2`
+and `markdown-it-py>=4,<5` (it reads markdown structure for
+[declared-section drift checks](#record_drift_check)), with runtime security floors
+`certifi>=2026.10.19`, `opentelemetry-api>=1.45.1`, `authlib>=1.9.1` and `dnspython>=2.9.0`; CI
+proves the ranges on the source repository, not on the pinned package. The locked stack
 uses the `initialize` / `notifications/initialized` lifecycle and negotiates protocol
 versions through **2025-11-25**. The server reports Sidegraph's package version in
 `serverInfo.version`; that is separate from the negotiated protocol version.
@@ -480,7 +483,23 @@ already set, and it gains `retired: {"reason", "duplicate_of"}`. `reason` is red
 every other text field. For a duplicate, the kept record first gains a binding to every entity
 the duplicate reaches through a `live` or `degraded` binding it does not already have (an
 orphaned or weaker binding of its own to that entity is replaced by the duplicate's), so the
-rule keeps surfacing for the duplicate's files; `anchors_added` lists them. The
+rule keeps surfacing for the duplicate's files; `anchors_added` lists them. An `orphaned`
+binding of the duplicate's is copied as orphaned to an entity the kept record does not bind at
+all, and heals on the next sync once its entity is in the graph. With no graph, every anchor is
+written as orphaned (as by [`add_anchors`](#add_anchors)) and every one is copied, reason
+`no-graph`. With a graph, only an orphaned anchor whose entity resolves there is copied, reason
+`awaiting-sync`, and so is one naming an existing file the graph does not index, reason
+`file-not-in-graph` (exact-file retrieval still serves it as `[file-bound]`); a dead one stays
+behind with the duplicate. `anchors_orphaned` lists the copies. An accepted, open fact that
+supports the duplicate and has no other way into retrieval gains the same anchors, so it still
+surfaces for those files, or the kept record's anchors when the duplicate has none to give (a
+global decision, or one bound only to a community, domain or tag); `facts_anchored` lists those
+fact ids. A fact has another way in when it has a `live` or `degraded` anchor of its own to a code
+entity, or an orphaned one naming an existing file the graph does not index (served as
+`[file-bound]`), or when another accepted, open decision among its `supports` is global or has
+such an anchor. A binding to a community, domain or tag alone does not count: those surface
+decisions, never a fact. A proposal does not count either, since it can leave the proposal
+window or be dropped. The fact record itself is unchanged. A retirement without `duplicate_of` anchors no fact. The
 record is never deleted. Default retrieval, `get_task_context`, `query_decisions`,
 `drill_down` and the hooks stop serving it, and sync stops reporting it as possibly stale.
 [`get_entity_history`](#get_entity_history) and `retrieve_decisions(status="deprecated")` (or
@@ -497,11 +516,18 @@ Refused, with nothing written, when:
 - the decision is not `accepted`, or `reason` is blank;
 - `duplicate_of` is the same id, or not another accepted, open decision;
 - a proposed successor of the decision is pending, or a proposed fact supports it: ratify or
-  drop it first.
+  drop it first;
+- for a duplicate, a fact that only the duplicate keeps reachable would be left with no way in,
+  because neither the duplicate nor the kept record has an anchor to give it: the message names
+  the fact; anchor it with [`add_anchors`](#add_anchors) (or anchor the kept record) first.
 
 **Returns:** `{"id": str, "status": "deprecated", "valid_to": str, "duplicate_of": str | null,
-"anchors_added": list[dict], "redactions": int}`; `anchors_added` holds `{"entity_id",
-"canonical_name", "tier"}` per binding added to the kept record, `[]` without `duplicate_of`.
+"anchors_added": list[dict], "anchors_orphaned": list[dict], "facts_anchored": list[str],
+"redactions": int}`; `anchors_added` holds `{"entity_id", "canonical_name", "tier"}` per live or
+degraded binding added to the kept record, `anchors_orphaned` the same plus `reason`
+(`no-graph`, `awaiting-sync` or `file-not-in-graph`) per orphaned one, and
+`facts_anchored` the ids of the facts that gained anchors; all three are `[]` without
+`duplicate_of`.
 Inside a git repository the result also carries a `commit_hint` ([Commit hint](#commit-hint)).
 
 ## `add_fact`
@@ -1635,9 +1661,14 @@ record in the same operation, at the ratification time; dropping the proposal ne
 it. Writes already guarantee a single pending successor of a live head (a dropped domain can
 still be superseded, but it too takes one pending successor at a time), so the refusals that
 remain are cross-branch merge cases: accepting a successor whose predecessor chain already has
-another live head (`<id> is already superseded by <id>; supersede that one instead`), or
-accepting a domain whose slug an unrelated accepted domain already holds, returns a clear
-`"error: ..."` entry and changes nothing. See
+another live head (`<id> is already superseded by <id>; supersede that one instead`),
+accepting a decision whose evidence facts include two successors of the same fact (`decision
+<id> cannot be ratified: its evidence facts <id> and <id> both supersede <id>; drop one of
+them (in a separate call), then ratify <id> again`), or accepting a domain whose slug an
+unrelated accepted domain already holds, returns a clear `"error: ..."` entry and changes
+nothing. For the competing evidence facts, drop the unwanted fact in one `ratify` call and
+accept the decision in the next: a single call processes `accept` before `drop`, so it would
+refuse the decision and then drop the fact, leaving the decision proposed. See
 [the supersession invariant](../concepts/data-model.md#the-supersession-invariant).
 
 An id present in both lists is accepted; the drop result for it reads `"<accept-result> (drop
@@ -1668,7 +1699,12 @@ for a domain) or `"error: already accepted; it cannot be dropped"` (for a decisi
 subject is gone`). Any other
 non-pending status keeps `"error: <kind> is not proposed (status: ...); ratify cannot change
 it"` (`"error: domain is not proposed or accepted (status: ...); ratify cannot change it"` for
-a domain drop). The generic ratification failure is kept for failures the status does not
+a domain drop). Accepting a domain that is one of several live replacements of the same
+domain (a split, which a merge of two branches can leave) succeeds, and its answer carries
+`(split: <old> is now replaced by N live domains: <slug> (<id>), ...; each keeps its own
+rules. If it should be a single replacement, drop the extra parts with `sidegraph-ratify
+--drop <id>`)`. In one call the part accepted last names every part. A domain the snapshot
+covers gets the snapshot's wording instead. The generic ratification failure is kept for failures the status does not
 explain; a mutation that fails because another writer settled the record in between is
 re-read and answered by its new status.
 

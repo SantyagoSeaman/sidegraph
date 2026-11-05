@@ -13,6 +13,10 @@ launch-commit``, and holds exactly the 40 hex bytes of a commit. The shell prefi
 it lives in the public hook manifests (``plugin/sidegraph/hooks/hooks.public.json``,
 ``plugin/sidegraph/codex/hooks.public.json``); this module is the writer.
 
+The Claude plugin's bundled runtime installs Sidegraph from a local wheel, so it has no
+``@main`` direct URL to record and writes nothing here. The record serves Codex, Muse and
+Claude installs older than the bundled runtime.
+
 # see design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md (D1-D4)
 """
 

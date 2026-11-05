@@ -12,7 +12,7 @@ caveats — see the deep dive at
 Run these in the repo you want memory over (not the Sidegraph checkout).
 
 **Windows:** read the [Windows setup notes](installation.md#windows) first. The plugin
-starts its MCP server through `uvx` directly and Claude Code runs the hooks through Git Bash,
+starts its MCP server through `uv run` directly and Claude Code runs the hooks through Git Bash,
 so natively you need only Claude Code, uv and Git for Windows with its default options: no
 PATH change. Claude Code finds Git Bash itself; if it cannot, set `CLAUDE_CODE_GIT_BASH_PATH`.
 Native core/stdio CI does not verify the complete Claude Code plugin; WSL with a single Linux
@@ -27,21 +27,24 @@ Inside a Claude Code session, in that repo:
 /plugin install sidegraph@sidegraph
 ```
 
-The plugin follows the public repository's `main`, which advances at releases. To pin a
-version for reproducible environments, see
-[how to pin mutable development references](installation.md#mutable-development-references).
+The plugin comes from the public repository's `main`, which advances at releases. The Sidegraph
+it runs is the release the plugin version names, and it changes only when you update the plugin.
 
 Installs the MCP server and all four hooks (`SessionStart`, `Stop`, `PreToolUse`,
-`SubagentStart`) in one step, pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by
-default. It installs from the public Git repository: the MCP
-server and `SessionStart` run `uvx --from git+https://github.com/SantyagoSeaman/
-sidegraph.git@main` under the hood, and `Stop`, `PreToolUse` and `SubagentStart` start from the
-commit `SessionStart` resolved. See
-[the plugin install path](../integrations/claude-code.md#plugin-install-path) for exactly
-what gets registered and the cwd-pinning details. Skip to [Verify](#verify) once installed.
+`SubagentStart`) in one step, using the store at `.sidegraph/` and the graph at
+`graphify-out/graph.json` by default. The MCP server and all four hooks run
+`uvx --from sidegraph==X.Y.Z --python 3.13 <entry point>`, with `X.Y.Z` the plugin's version, and
+that package pins every one of its dependencies. The first session after an install or an update
+downloads them once (and, on a machine without Python 3.13, a uv-managed CPython 3.13); later
+sessions need no network. The plugin needs [uv](installation.md#prerequisites) 0.6.10 or newer and a
+platform the pinned package supports (macOS on Apple silicon, Linux on x86-64 or arm64 with glibc,
+Windows on x86-64); Intel Macs and musl Linux are not supported. See [the plugin install path](../integrations/claude-code.md#plugin-install-path) for
+exactly what gets registered and the cwd-pinning details, and
+[the plugin's first start](../guides/troubleshooting.md#the-plugins-first-start) if the first
+session shows no memory. Skip to [Verify](#verify) once installed.
 
 The plugin needs no other install. The CLI on your `PATH`
-([`uv tool install` from `main`](installation.md#option-a--the-cli-on-your-path)) is
+([`uv tool install` from PyPI](installation.md#option-a--the-cli-on-your-path)) is
 optional, for typing `sidegraph-*` commands yourself. It never updates itself: after every
 release run `uv tool upgrade sidegraph`. SessionStart says when it differs from the session's version
 ([`path-skew`](../guides/troubleshooting.md#path-skew)), and the plugin's skills ignore it
@@ -77,14 +80,16 @@ reload summary and approval prompts before continuing. Check the Sidegraph skill
 slash menu and the server in `/mcp`.
 
 Third-party marketplaces have auto-update off by default in current Claude Code. You can
-enable it for `sidegraph` in `/plugin` → Marketplaces, or use the commands above. The
-runtime's `@main` source policy does not refresh skills or manifests already loaded by the
-host. See [Claude Code's update reference](https://code.claude.com/docs/en/discover-plugins#keep-plugins-updated).
+enable it for `sidegraph` in `/plugin` → Marketplaces, or use the commands above. Updating the
+plugin replaces the Sidegraph version together with its skills and manifests; a session that is
+already running keeps the ones it loaded. The first session after an update installs the new
+version's dependencies. See [Claude Code's update reference](https://code.claude.com/docs/en/discover-plugins#keep-plugins-updated).
 
 ## Option B — manual registration
 
-Prefer explicit `.mcp.json`/`.claude/settings.json` files (e.g. for review in a PR), or want
-to point at a source checkout? Register the two pieces yourself.
+This is the non-plugin install. It launches the latest release from PyPI with `uvx`, where the
+plugin above names its own version. Prefer explicit `.mcp.json`/`.claude/settings.json` files (e.g.
+for review in a PR), or want to point at a source checkout? Register the two pieces yourself.
 
 ### 1. Register the MCP server
 
@@ -95,7 +100,7 @@ Create (or merge into) `.mcp.json`:
   "mcpServers": {
     "sidegraph": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/SantyagoSeaman/sidegraph.git@main", "sidegraph-mcp"],
+      "args": ["--from", "sidegraph", "--python", "3.13", "sidegraph-mcp"],
       "env": {
         "SIDEGRAPH_DIR": ".sidegraph",
         "SIDEGRAPH_GRAPH": "graphify-out/graph.json"
@@ -108,7 +113,7 @@ Create (or merge into) `.mcp.json`:
 Or via the CLI — carry both env vars so this lands on the same store path as the JSON above:
 
 ```bash
-claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp
+claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRAPH_GRAPH=graphify-out/graph.json -- uvx --from sidegraph --python 3.13 sidegraph-mcp
 ```
 
 `-s project` writes a repo-committed `.mcp.json`, so the whole team gets the server
@@ -117,14 +122,14 @@ flag if you want a private, user-local registration instead.
 
 **From a source checkout instead** (contributors — see
 [installation: from source](installation.md#option-d--from-source-contributors)): replace the
-`uvx --from git+...` invocation above with
+`uvx --from sidegraph --python 3.13` invocation above with
 `uv run --project '/ABSOLUTE/PATH/TO/sidegraph' sidegraph-mcp` (CLI form: `-- uv run --project
 '/ABSOLUTE/PATH/TO/sidegraph' sidegraph-mcp`; in the JSON form the path is one `args` value and
 needs no quotes).
 
-The released package is also on PyPI: to pin an exact version, use `uvx --from
-'sidegraph==X.Y.Z' sidegraph-mcp` (in JSON, `"--from", "sidegraph==X.Y.Z"`) — see
-[installation: the CLI on your PATH](installation.md#option-a--the-cli-on-your-path)
+To pin an exact version, use `uvx --from 'sidegraph==X.Y.Z' --python 3.13 sidegraph-mcp` (in
+JSON, `"--from", "sidegraph==X.Y.Z"`) — see
+[installation: pinned releases](installation.md#mutable-development-references)
 for the pinning policy.
 
 The store (`SIDEGRAPH_DIR`) is meant to live **inside the repo it documents** — commit
@@ -143,7 +148,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "SIDEGRAPH_HOST=claude SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -153,7 +158,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stop || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -164,7 +169,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       },
@@ -174,22 +179,22 @@ Add to `.claude/settings.json` (merge into an existing file):
           {
             "type": "command",
             "if": "Bash(sed *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
           },
           {
             "type": "command",
             "if": "Bash(grep *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
           },
           {
             "type": "command",
             "if": "Bash(rg *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
           },
           {
             "type": "command",
             "if": "Bash(cat *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       },
@@ -198,7 +203,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
           }
         ]
       }
@@ -208,7 +213,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-subagent-start || printf '{}\\n'"
+            "command": "SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-subagent-start || printf '{}\\n'"
           }
         ]
       }
@@ -217,11 +222,14 @@ Add to `.claude/settings.json` (merge into an existing file):
 }
 ```
 
-These recipes keep plain `@main` on every command, which is simpler to copy. The plugin's own
-`Stop`, `PreToolUse` and `SubagentStart` commands start from the commit `SessionStart` resolved,
-which is faster on each call; see [the plugin install path](../integrations/claude-code.md#plugin-install-path).
+These non-plugin recipes name the package without a version, which is simpler to copy: each
+call runs the latest release. To pin a version for reproducible environments, write
+`sidegraph==X.Y.Z` in every command; see
+[pinned releases](installation.md#mutable-development-references). The Claude plugin names its
+own version in every command; see
+[the plugin install path](../integrations/claude-code.md#plugin-install-path).
 
-From a source checkout, replace each `uvx --from git+... <entrypoint>` above with `uv run
+In these non-plugin recipes, from a source checkout, replace each `uvx --from sidegraph --python 3.13 <entrypoint>` above with `uv run
 --project '/ABSOLUTE/PATH/TO/sidegraph' <entrypoint>` (see the note in step 1). Keep the trailing
 `|| printf …` on each command: Claude Code treats a hook that exits 2 with text on stderr as a
 block on `Stop` (it continues the conversation) and on `PreToolUse` (it blocks the tool call), and
@@ -259,7 +267,10 @@ The env vars are inlined into the command because Claude Code hook entries have 
   records for the files the subagent's brief names (and for the files named in a plan or notes
   document that the brief names) to the brief, so the subagent starts with them. The subagent sees the block in
   its first message; the parent's view of its own call is unchanged. Set
-  `SIDEGRAPH_AGENT_BRIEF=off` (alongside the other env vars in the command) to turn it off. See
+  `SIDEGRAPH_AGENT_BRIEF=off` (alongside the other env vars in the command) to turn it off. In
+  Claude Code's auto mode (`permission_mode: auto`) it leaves the call unchanged: that mode reviews
+  a call before hooks run and refuses an input a hook changed. The subagent still gets the
+  `SubagentStart` brief and the records of the files it reads. See
   [`reference/hooks.md`](../reference/hooks.md#subagent-briefs).
 - `SubagentStart` gives every subagent a short brief, because a subagent gets no `SessionStart`
   context and Explore and Plan agents load no `CLAUDE.md`: the same `get_task_context` call the
@@ -291,7 +302,9 @@ outside those two directories:
 - `sidegraph-init --no-hooks` records the git config key `sidegraph.graphRefresh`.
   `--remove-hooks` clears it.
 - `sidegraph-init` may have written `SIDEGRAPH_RATIFY_POLICY` into `.claude/settings.json`.
-- The SessionStart hook keeps `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`, one
-  file shared by every project on the machine.
+- An install older than 0.25.0 that launched `@main` keeps
+  `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`, one file shared by every project on the
+  machine. A launch from PyPI does not write it.
+- `uvx` keeps the packages it installed in uv's cache; `uv cache dir` prints where.
 
 [SECURITY.md](../../SECURITY.md) lists every write.

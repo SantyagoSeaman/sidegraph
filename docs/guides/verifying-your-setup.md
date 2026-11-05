@@ -7,9 +7,11 @@ Run them in the repository whose `.sidegraph/` you configured.
 
 Before starting, install `uv`, Git and Graphify, build `graphify-out/graph.json` and initialize `.sidegraph/`. Install the host integration and review its trust prompts. Keep the current repository selected for each check. A record is a stored decision or fact; an anchor identifies the file or symbol it is about.
 
-Commands are written with the `uvx` prefix the plugin uses, so no Sidegraph install is needed
-(`@main` is a mutable ref: see
-[mutable development references](../getting-started/installation.md#mutable-development-references)).
+Commands are written with a `uvx` prefix, so no Sidegraph install is needed. The plugins run
+`uvx` on their own pinned version, and these commands are the same CLI at the latest release (see
+[running the CLIs beside the plugin](../reference/cli.md#running-the-clis-beside-the-plugin); to
+pin a version, see
+[pinned releases](../getting-started/installation.md#mutable-development-references)).
 With the CLI installed ([Option A](../getting-started/installation.md#option-a--the-cli-on-your-path))
 you can drop the prefix and use the bare `sidegraph-*` names.
 
@@ -20,6 +22,11 @@ you can drop the prefix and use the bare `sidegraph-*` names.
 1. Start a fresh interactive agent session in the repository.
 2. On Claude Code, Codex and Muse, confirm that the opening context mentions Sidegraph or its domain map. On Grok Build, check its MCP instructions. OpenCode has no opening-map check.
 3. Ask the agent to call `get_task_context` for one existing file.
+
+On the Claude Code plugin, the first session after an install or an update downloads the pinned
+dependencies of that Sidegraph version (and a managed Python 3.13 on a machine without one), so that
+session can start without the opening map; open a new session, and if it still shows nothing, see
+[the plugin's first start](troubleshooting.md#the-plugins-first-start).
 
 **Success:** the tool is available and returns either task context or `No context found.` A
 missing record is fine; a trailing `## No code graph` block means the code graph is missing or not
@@ -43,7 +50,7 @@ Ask the agent to record an accepted gotcha against a real file or symbol, then r
 context for the same anchor. Run:
 
 ```bash
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
+uvx --from sidegraph --python 3.13 sidegraph-verify
 git status --short
 ```
 
@@ -98,8 +105,8 @@ macOS or Linux:
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync --check
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor
+uvx --from sidegraph --python 3.13 sidegraph-sync --check
+uvx --from sidegraph --python 3.13 sidegraph-doctor
 git status --short
 ```
 
@@ -108,8 +115,8 @@ Windows PowerShell:
 ```powershell
 $env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-sync --check
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-doctor
+uvx --from sidegraph --python 3.13 sidegraph-sync --check
+uvx --from sidegraph --python 3.13 sidegraph-doctor
 git status --short
 ```
 

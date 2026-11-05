@@ -11,7 +11,7 @@ plugin format:
 
 There is no context on reads and no capture reminder at the end of a session: call the tools
 for that, and capture decisions explicitly. The hooks run `python3` (3.9 or later; the stock
-macOS one works), which starts the runtime through `uvx`. If a hook cannot run, it prints
+macOS one works), which starts Sidegraph through `uvx`. If a hook cannot run, it prints
 nothing and the session continues; MCP and skills are unaffected.
 
 Install `uv` and Git. Add the public repository as a Muse marketplace and install the plugin
@@ -57,10 +57,8 @@ Review any changed capability before approving it, then restart Muse from the pr
 muse plugins approve sidegraph
 ```
 
-The MCP runtime and the SessionStart hook use the release's configured Git ref (normally
-`main`). SessionStart records the commit it ran, and the subagent hook starts from the commit the
-machine's latest SessionStart recorded. The record is one per machine, so a SessionStart in
-another project can move it during a session (see
-[the launch-commit contract](../reference/hooks.md#the-launch-commit-file)). Context on reads, the capture reminder,
+The MCP server and both hooks run the published package at the plugin's own version
+(`uvx --from sidegraph==X.Y.Z --python 3.13`), so a Sidegraph update arrives with a plugin update.
+Context on reads, the capture reminder,
 workspace switching and Windows are not supported yet; Muse support does not claim parity
 with Claude Code or Codex.

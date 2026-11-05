@@ -6,7 +6,7 @@
 then asks production retrieval to surface one accepted, live-anchored decision. It runs
 locally and does not require an account or model API.
 
-Commands use the `uvx` prefix the plugin uses; with the CLI installed ([Option A](installation.md#option-a--the-cli-on-your-path)) the bare names work too. (`@main` is a mutable ref: see [mutable development references](installation.md#mutable-development-references).)
+Commands use a `uvx` prefix and run the latest release from PyPI (the plugins run `uvx` on their own pinned version); with the CLI installed ([Option A](installation.md#option-a--the-cli-on-your-path)) the bare names work too. To pin a version, see [pinned releases](installation.md#mutable-development-references).
 
 The 10–15 minute path is a launch target that has not yet been measured across first-user
 sessions.
@@ -16,7 +16,7 @@ macOS or Linux:
 ```bash
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --host claude-code
+uvx --from sidegraph --python 3.13 sidegraph-bootstrap --host claude-code
 ```
 
 Windows PowerShell:
@@ -24,7 +24,7 @@ Windows PowerShell:
 ```powershell
 $env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap --host claude-code
+uvx --from sidegraph --python 3.13 sidegraph-bootstrap --host claude-code
 ```
 
 Bootstrap scans, previews, reviews, writes, verifies, checks the selected host, and proves
@@ -226,8 +226,8 @@ is available, run the supported-document path against it:
 > clone only if that prints a line. If it prints nothing, use a repository containing one of
 > the supported document profiles for the same bootstrap and retrieval loop.
 
-This command installs from the public `main`, which advances at releases. To pin a version, see
-[how to pin mutable development references](installation.md#mutable-development-references).
+This command runs the latest release from PyPI. To pin a version, see
+[pinned releases](installation.md#mutable-development-references).
 
 macOS or Linux:
 
@@ -236,7 +236,7 @@ git clone --branch demo https://github.com/SantyagoSeaman/sidegraph.git sidegrap
 cd sidegraph-demo
 export GRAPHIFY_NO_AUTO_REFRESH=1        # macOS, Linux: keeps Graphify off your agent skills
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap \
+uvx --from sidegraph --python 3.13 sidegraph-bootstrap \
   --profile superpowers --host claude-code --report bootstrap-report.md
 ```
 
@@ -247,7 +247,7 @@ git clone --branch demo https://github.com/SantyagoSeaman/sidegraph.git sidegrap
 cd sidegraph-demo
 $env:GRAPHIFY_NO_AUTO_REFRESH = "1"
 graphify update .
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-bootstrap `
+uvx --from sidegraph --python 3.13 sidegraph-bootstrap `
   --profile superpowers --host claude-code --report bootstrap-report.md
 ```
 

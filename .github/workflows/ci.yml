@@ -7,8 +7,8 @@
 #
 # Actions are pinned to commit SHAs (the tag comment records the version): a mutable tag
 # is a supply-chain hole, and this workflow ships to the public repo by snapshot.
-# Draft PRs run lint, store-lint and anchor-health. Ready PRs, main pushes and
-# workflow_call also run test, sdk-compatibility and windows-core. full-ci is the
+# Draft PRs run lint, store-lint and anchor-health. Ready PRs, main and release/** pushes
+# and workflow_call also run test, sdk-compatibility and windows-core. full-ci is the
 # single required check. Ready pushes validate this revision against the full matrix.
 # Draft runs use another name: a skipped job counts as success.
 # A superseded PR run cannot provide a result for a newer revision.
@@ -17,7 +17,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/**]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_call:   # reused as the pre-publish gate by publish.yml (tag builds)
@@ -25,7 +25,7 @@ on:
 permissions:
   contents: read
 
-# PR runs only: main, tag and workflow_call runs each get a unique group.
+# PR runs only: main, release/**, tag and workflow_call runs each get a unique group.
 # This does not apply to session-link-gate.yml. Re-run only the head run.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
@@ -45,14 +45,14 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1 # zizmor: ignore[cache-poisoning] release/** branches are the maintainer's; branch caches never reach main
         with:
           python-version: "3.13"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: Cache pre-commit hooks
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6 # zizmor: ignore[cache-poisoning] release/** branches are the maintainer's; branch caches never reach main
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-ubuntu-slim-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -104,7 +104,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1 # zizmor: ignore[cache-poisoning] release/** branches are the maintainer's; branch caches never reach main
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
@@ -138,14 +138,33 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Skip on a pinned package
+        id: pin
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+
+          with open("pyproject.toml", "rb") as fh:
+              dependencies = tomllib.load(fh)["project"]["dependencies"]
+          # Test the requirement, not its environment marker (`; sys_platform == 'win32'`).
+          pinned = bool(dependencies) and all("==" in entry.split(";")[0] for entry in dependencies)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"pinned={'true' if pinned else 'false'}\n")
+          if pinned:
+              print("pinned package: the SDK range is tested in the source repository")
+          PY
+
       - name: Install uv
-        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        if: steps.pin.outputs.pinned != 'true'
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1 # zizmor: ignore[cache-poisoning] release/** branches are the maintainer's; branch caches never reach main
         with:
           python-version: "3.13"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: Validate supported SDK bounds against installed wheel
+        if: steps.pin.outputs.pinned != 'true'
         env:
           SDK_PAIR: ${{ matrix.sdk }}
         run: |
@@ -179,14 +198,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.13", "3.14"]
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1 # zizmor: ignore[cache-poisoning] release/** branches are the maintainer's; branch caches never reach main
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
@@ -325,7 +344,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1 # zizmor: ignore[cache-poisoning] release/** branches are the maintainer's; branch caches never reach main
         with:
           python-version: "3.13"
           enable-cache: true
@@ -359,7 +378,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1 # zizmor: ignore[cache-poisoning] release/** branches are the maintainer's; branch caches never reach main
         with:
           python-version: "3.13"
           enable-cache: true

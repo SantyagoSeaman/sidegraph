@@ -62,6 +62,7 @@ from pydantic import BaseModel, Field
 
 from . import checkout_window, maintenance, maintenance_clock, store_format, store_layout
 from . import delivery as delivery_ledger
+from .domain_splits import split_added_by
 from .hot_index import CLAIM_META_SQL, GET_META_SQL, INSERT_EVENT_SQL, SHOW_UPSERT_SQL
 from .schema import (
     SCHEMA_VERSION,
@@ -133,12 +134,17 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     supersedes TEXT,
     data TEXT NOT NULL
 )""",
+    # The successor walk (`_live_head_after`) looks records up by `supersedes`, once per
+    # visited node: without these it was a full-table scan each (1.9 s on a 2000-link chain).
+    # Derived, like the tables: `CREATE ... IF NOT EXISTS` adds them to an existing index.db.
+    "CREATE INDEX IF NOT EXISTS idx_decisions_supersedes ON decisions (supersedes)",
     """CREATE TABLE IF NOT EXISTS facts (
     id TEXT PRIMARY KEY,
     status TEXT NOT NULL,
     supersedes TEXT,
     data TEXT NOT NULL
 )""",
+    "CREATE INDEX IF NOT EXISTS idx_facts_supersedes ON facts (supersedes)",
     """CREATE TABLE IF NOT EXISTS anchor_bindings (
     record_id TEXT NOT NULL,
     entity_id TEXT NOT NULL,
@@ -162,6 +168,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     supersedes TEXT,
     data TEXT NOT NULL
 )""",
+    "CREATE INDEX IF NOT EXISTS idx_domains_supersedes ON domains (supersedes)",
     """CREATE TABLE IF NOT EXISTS retrieval_shows (
     record_id     TEXT PRIMARY KEY,
     shows         INTEGER NOT NULL,
@@ -1281,6 +1288,12 @@ class SupersessionConflictError(ValueError):
     names only record ids and the next step, so a host may show it as is."""
 
 
+FILE_BOUND_ORPHAN = "file-not-in-graph"
+"""The reason a retirement's ``orphan_reason`` gives for an orphaned anchor whose existing file
+the graph does not index: retrieval serves it now as ``[file-bound]`` for that exact file
+(the same word ``anchoring.orphan_reason`` uses)."""
+
+
 class RetireRefusedError(ValueError):
     """``Store.retire`` refused: the message names only record ids, statuses and the next step,
     so a host may show it as is."""
@@ -1409,6 +1422,9 @@ class Store:
         self._allow_unmigrated_shards = _allow_unmigrated_shards
         self._creating = creating
         self._lock = threading.RLock()
+        # domain id -> predecessors whose split its latest accept created or grew (see
+        # ``domain_splits.split_added_by``); read once by ratify's activation note.
+        self._split_added: dict[str, list[str]] = {}
         # Depth counter for `_mutation` (design D1/D2): only the OUTERMOST `_mutation` scope
         # commits or rolls back -- see that method's docstring. Lives beside `_lock` since
         # the two are set up together and only ever mutate together.
@@ -3273,24 +3289,30 @@ class Store:
         return self._pending_successor("decisions", "id", decision_id, exclude_id=exclude_id)
 
     def _live_head_after(self, table: str, id_col: str, record_id: str) -> str | None:
-        """The live head of the chain that continues ``record_id``: follow its ``accepted``
-        or ``superseded`` successors (bounded; an ``accepted`` one is preferred at a fork) and
-        return the last ``accepted`` record met, or ``None`` when there is none."""
-        current, head, seen = record_id, None, {record_id}
-        for _ in range(64):
-            with self._lock:
-                row = self._conn.execute(
-                    f"SELECT {id_col}, status FROM {table} WHERE supersedes = ? "
-                    "AND status IN ('accepted', 'superseded') "
-                    f"ORDER BY status = 'accepted' DESC, {id_col} LIMIT 1",
-                    (current,),
-                ).fetchone()
-            if row is None or row[id_col] in seen:
-                break
-            current = row[id_col]
-            seen.add(current)
-            if row["status"] == "accepted":
-                head = current
+        """The live head of the chain that continues ``record_id``: walk ALL of its
+        ``accepted`` or ``superseded`` successors breadth-first (a merge can fork a chain;
+        a visited set ends any cycle, so the walk is bounded by the table) and return the
+        last ``accepted`` AND open record met (a closed one is passed through, never named),
+        or ``None`` when no branch holds one. A domain has no ``valid_to``: always open."""
+        head, seen, frontier = None, {record_id}, [record_id]
+        while frontier:
+            level: list[str] = []
+            for current in frontier:
+                with self._lock:
+                    rows = self._conn.execute(
+                        f"SELECT {id_col}, status, json_extract(data, '$.valid_to') IS NULL "
+                        f"AS is_open FROM {table} WHERE supersedes = ? "
+                        f"AND status IN ('accepted', 'superseded') ORDER BY {id_col}",
+                        (current,),
+                    ).fetchall()
+                for row in rows:
+                    if row[id_col] in seen:
+                        continue
+                    seen.add(row[id_col])
+                    level.append(row[id_col])
+                    if row["status"] == "accepted" and row["is_open"]:
+                        head = row[id_col]
+            frontier = level
         return head
 
     def _refuse_stale_predecessor(
@@ -4151,6 +4173,14 @@ class Store:
         for row in rows:
             yield Domain.model_validate_json(row["data"])
 
+    def take_split_added(self, domain_id: str) -> list[str] | None:
+        """The predecessors whose split this process's accept of ``domain_id`` created or grew
+        (``domain_splits.split_added_by``), read once; ``None`` when this process did not accept
+        it. Ratify's activation note uses it to say a split came to exist and to stay silent on
+        a plain revision of a part, which a later read of the store cannot tell apart."""
+        with self._lock:
+            return self._split_added.pop(domain_id, None)
+
     def ratify_domains(
         self,
         accept: list[str] | None = None,
@@ -4223,6 +4253,7 @@ class Store:
                                 f"slug {d.slug!r} is already held by accepted domain "
                                 f"{rival['domain_id']}; drop one of them first"
                             )
+                        models_before = {m.domain_id: m for m in self.iter_domains()}
                         d.status = DomainStatus.ACCEPTED
                         d.ratified_at = datetime.now(UTC)
                         d.ratified_by = _ratifier_identity(actor)
@@ -4237,6 +4268,11 @@ class Store:
                                 self._write_domain(old)
                         self.get_or_create_abstract_entity(f"domain:{d.slug}")
                         self._uncertify_membership()
+                        self._split_added[d.domain_id] = split_added_by(
+                            models_before,
+                            {m.domain_id: m for m in self.iter_domains()},
+                            d.domain_id,
+                        )
                     out[domain_id] = "accepted"
                 except ValueError as e:
                     out[domain_id] = f"error: {e}"
@@ -4317,7 +4353,8 @@ class Store:
         ("supersede that one instead" — two accepted successors would contradict each other).
         A dropped predecessor is no conflict: accepting closes nothing. Every proposed fact
         this decision's ratification would cascade gets the same check first, before anything
-        is written.
+        is written, and two cascaded facts superseding the same fact (a merge can attach both)
+        refuse the whole ratification, naming both and the drop remedy.
 
         ``actor`` (keyword-only, design D2/T17): an explicit stamp for this ratification,
         used by auto-ratification (the ``"auto:<policy>"`` stamp, never called by a human
@@ -4345,10 +4382,20 @@ class Store:
 
             if d.supersedes:
                 self._refuse_conflicting_successor(d)
-            # Preflight every cascaded fact before anything is written.
+            # Preflight every cascaded fact before anything is written. A merge can attach two
+            # successors of one fact; accepting both would leave two live heads, so the whole
+            # ratification is refused, as ``ratify_fact`` refuses the second after the first.
+            claimed: dict[str, str] = {}
             for fact in self.iter_proposed_facts():
                 if decision_id in fact.supports and fact.supersedes:
                     self._refuse_conflicting_fact_successor(fact)
+                    first = claimed.setdefault(fact.supersedes, fact.id)
+                    if first != fact.id:
+                        raise SupersessionConflictError(
+                            f"decision {decision_id!r} cannot be ratified: its evidence facts "
+                            f"{first} and {fact.id} both supersede {fact.supersedes}; drop one "
+                            f"of them (in a separate call), then ratify {decision_id} again"
+                        )
 
             if cascade_guard is not None:
                 cascade_candidates = [
@@ -4442,7 +4489,12 @@ class Store:
         )
 
     def retire(
-        self, decision_id: str, reason: str, duplicate_of: str | None = None
+        self,
+        decision_id: str,
+        reason: str,
+        duplicate_of: str | None = None,
+        *,
+        orphan_reason: Callable[[Entity], str | None] | None = None,
     ) -> tuple[Decision, list[AnchorBinding]]:
         """Retire an accepted decision: status ``deprecated``, ``valid_to`` set to now unless
         already set, and ``retired = {reason, duplicate_of}``. Append-only: the record stays,
@@ -4453,15 +4505,26 @@ class Store:
         whose subject is gone. For a duplicate, the kept record first gains a binding to every
         entity the duplicate reaches (a ``live`` or ``degraded`` binding the kept record does
         not already have, or has only as an orphaned or weaker one, which the duplicate's
-        binding replaces), so the rule keeps surfacing where the duplicate did; those bindings
-        are returned with the retired decision.
+        binding replaces), so the rule keeps surfacing where the duplicate did. An orphaned
+        binding of the duplicate's is copied as orphaned to an entity the kept record does not
+        bind at all, so it heals with the entity on the next sync once the graph holds it;
+        ``orphan_reason`` (None: copy every one, as with no graph) names why an orphaned
+        anchor is still worth having (it heals, or still serves its exact file) and returns
+        None for a dead one, which does not spread. An accepted, open fact that supports the
+        duplicate and could lose its only route into retrieval (see
+        :meth:`_facts_stranded_by`) gains the duplicate's bindings the same way, or the kept
+        record's when the duplicate has none to give (see :meth:`_has_own_route`: a global
+        decision, or one bound only to abstract entities): new binding files,
+        the fact record itself is not rewritten. Every binding written is returned with the
+        retired decision.
 
         Refused (:class:`RetireRefusedError`, nothing written) while the store requires less
         than ``RECORD_FIELDS_REQUIREMENT`` (an older client would not know ``retired``), and
         for an unknown id, a record that is not ``accepted``, a blank ``reason``, a bad
         ``duplicate_of``, a pending successor or a proposed fact that supports the decision
-        (ratify or drop it first). An id is named in a refusal only when it is a stored record.
-        The caller redacts ``reason``.
+        (ratify or drop it first), and for a duplicate whose fact neither it nor the kept record
+        can give an anchor (anchor the fact first). An id is named in a refusal only when it is
+        a stored record. The caller redacts ``reason``.
         see docs/reference/stability.md ("Mixed versions")
         """
         with self._mutation():
@@ -4512,39 +4575,141 @@ class Store:
                         f"decision {decision_id} has pending evidence: proposed fact {fact.id} "
                         "supports it; ratify or drop it first"
                     )
+            # Plan every fact's anchor source before anything is written, so a refusal leaves
+            # the store as it was: the duplicate's anchors, else the kept record's (a global
+            # duplicate has none to give), else no route is left and the retirement waits.
+            carries: list[tuple[str, str]] = []
+            if duplicate_of is not None:
+                for fact in self._facts_stranded_by(decision_id, orphan_reason):
+                    source = next(
+                        (
+                            rid
+                            for rid in (decision_id, duplicate_of)
+                            if self._has_own_route(rid, orphan_reason, served_now=False)
+                        ),
+                        None,
+                    )
+                    if source is None:
+                        raise RetireRefusedError(
+                            f"retiring decision {decision_id} would leave fact {fact.id} with no "
+                            f"way into retrieval: neither it nor {duplicate_of} has an anchor to "
+                            f"give it; anchor the fact first (add_anchors(record_id={fact.id!r}, "
+                            "...)) or anchor the kept record"
+                        )
+                    carries.append((source, fact.id))
             added: list[AnchorBinding] = []
             if duplicate_of is not None:
-                # A kept binding to the same entity counts only when it is at least as strong:
-                # an orphaned or degraded one would leave the entity with less than it had.
-                strength = {"live": 2, "degraded": 1}
-                kept_strength = {
-                    b.entity_id: strength.get(b.status, 0)
-                    for b in self.bindings_for_record(duplicate_of)
-                }
-                for b in self.bindings_for_record(decision_id):
-                    if (
-                        b.status not in strength
-                        or kept_strength.get(b.entity_id, -1) >= strength[b.status]
-                    ):
-                        continue
-                    added.append(
-                        self.add_binding(
-                            AnchorBinding(
-                                record_id=duplicate_of,
-                                entity_id=b.entity_id,
-                                tier=b.tier,
-                                weight=b.weight,
-                                status=b.status,
-                                relation=b.relation,
-                            )
-                        )
-                    )
-                    kept_strength[b.entity_id] = strength[b.status]
+                added += self._carry_bindings(decision_id, duplicate_of, orphan_reason)
+                for source, fact_id in carries:
+                    added += self._carry_bindings(source, fact_id, orphan_reason)
             d.status = DecisionStatus.DEPRECATED
             d.valid_to = d.valid_to or max(datetime.now(UTC), d.valid_from)
             d.retired = Retirement(reason=reason, duplicate_of=duplicate_of)
             self._write_decision(d)
         return d, added
+
+    def _carry_bindings(
+        self,
+        source_id: str,
+        target_id: str,
+        orphan_reason: Callable[[Entity], str | None] | None = None,
+    ) -> list[AnchorBinding]:
+        """Give ``target_id`` a binding to every entity ``source_id`` binds that the target
+        lacks or holds only weaker; returns the bindings written. A target binding to the same
+        entity counts only when it is at least as strong: an orphaned or degraded one would
+        leave the entity with less than it had. An orphaned source binding is copied as
+        orphaned, only where the target has no binding to that entity at all, and only when
+        ``orphan_reason`` (None: always) gives a reason for its entity (sync heals a leaf by
+        its entity once the graph holds it, or the file is served as ``[file-bound]``): a dead
+        anchor must not spread."""
+        strength = {"live": 2, "degraded": 1, "orphaned": 0}
+        target_strength = {
+            b.entity_id: strength.get(b.status, 0) for b in self.bindings_for_record(target_id)
+        }
+        added: list[AnchorBinding] = []
+        for b in self.bindings_for_record(source_id):
+            if (
+                b.status not in strength
+                or target_strength.get(b.entity_id, -1) >= strength[b.status]
+            ):
+                continue
+            if b.status == "orphaned" and orphan_reason is not None:
+                entity = self.get_entity(b.entity_id)
+                if entity is None or orphan_reason(entity) is None:
+                    continue
+            added.append(
+                self.add_binding(
+                    AnchorBinding(
+                        record_id=target_id,
+                        entity_id=b.entity_id,
+                        tier=b.tier,
+                        weight=b.weight,
+                        status=b.status,
+                        relation=b.relation,
+                    )
+                )
+            )
+            target_strength[b.entity_id] = strength[b.status]
+        return added
+
+    def _has_own_route(
+        self,
+        record_id: str,
+        orphan_reason: Callable[[Entity], str | None] | None,
+        *,
+        served_now: bool = True,
+    ) -> bool:
+        """Whether a record reaches retrieval through one of its own bindings, mirroring the
+        seeds ``retrieval`` collects records through: a binding to a concrete entity with a
+        descriptor that is ``live`` or ``degraded``, or ``orphaned`` with a file the graph does
+        not index (``orphan_reason`` says :data:`FILE_BOUND_ORPHAN`; served as ``[file-bound]``
+        for that exact file). An abstract entity (``community:*``, ``domain:*``, ``tag:*``)
+        seeds decisions only, never standalone facts or their evidence, so it never counts.
+
+        ``served_now=False`` asks instead whether :meth:`_carry_bindings` from this record
+        would give a target such a route, now or once the next sync heals it: any orphaned
+        binding ``orphan_reason`` lets through (None: every one, as with no graph)."""
+        for b in self.bindings_for_record(record_id):
+            entity = self.get_entity(b.entity_id)
+            if entity is None or entity.kind != EntityKind.CONCRETE or entity.descriptor is None:
+                continue
+            if b.status in ("live", "degraded"):
+                return True
+            if b.status != "orphaned":
+                continue
+            reason = orphan_reason(entity) if orphan_reason is not None else None
+            if served_now and reason == FILE_BOUND_ORPHAN:
+                return True
+            if not served_now and (orphan_reason is None or reason is not None):
+                return True
+        return False
+
+    def _facts_stranded_by(
+        self, decision_id: str, orphan_reason: Callable[[Entity], str | None] | None
+    ) -> list[Fact]:
+        """Accepted, open facts that retrieval may reach only as evidence of ``decision_id``:
+        no route of their own (:meth:`_has_own_route`), and no other accepted, open decision
+        among their ``supports`` that surfaces with its evidence: a global one (served
+        whatever the seeds) or one with a route of its own. A proposed supporter does not
+        count: it leaves the proposal window or is dropped later, and nothing would carry the
+        fact then."""
+        stranded: list[Fact] = []
+        for fact in self.facts_for_decision(decision_id):
+            if fact.status != DecisionStatus.ACCEPTED or fact.valid_to is not None:
+                continue
+            if self._has_own_route(fact.id, orphan_reason):
+                continue
+            if any(
+                (other := self.get_decision(sid)) is not None
+                and other.status == DecisionStatus.ACCEPTED
+                and other.valid_to is None
+                and (other.scope == Scope.GLOBAL or self._has_own_route(sid, orphan_reason))
+                for sid in fact.supports
+                if sid != decision_id
+            ):
+                continue
+            stranded.append(fact)
+        return stranded
 
     def ratify_fact(self, fact_id: str, *, actor: str | None = None) -> Fact:
         """Flip a proposed fact to accepted directly (no supporting decision involved).

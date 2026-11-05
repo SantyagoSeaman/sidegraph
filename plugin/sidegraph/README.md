@@ -15,8 +15,12 @@ it, and each learns at that code what was decided and why.
 
 ## Requirements
 
-- Git and [uv](https://docs.astral.sh/uv/). uv provides `uvx` and fetches the Python that
-  Sidegraph needs.
+- Git and [uv](https://docs.astral.sh/uv/) 0.6.10 or newer. uv runs the published Sidegraph
+  package at the plugin's own version (`uvx --from sidegraph==X.Y.Z --python 3.13`) and fetches
+  the Python 3.13 it needs when the machine has none. The package pins its dependencies for
+  macOS on Apple silicon, Linux (glibc) on x86-64 and arm64, and Windows on x86-64 (with Git for
+  Windows, which provides the Git Bash the hooks run in). Intel Macs and musl Linux are not
+  supported.
 - [Graphify](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/getting-started/installation.md#install-graphify),
   the code-graph engine that anchors records to files and symbols. The setup step installs it.
 
@@ -72,12 +76,12 @@ The MCP server and the hooks run locally. uv starts them from the plugin's confi
   before you push it to a shared or public repository. A derived index (`.sidegraph/index.db`)
   and the graph (`graphify-out/`) stay local and can be rebuilt.
 - **What leaves your machine.** The Sidegraph runtime opens no network connections and sends no
-  telemetry. The plugin starts the MCP server and the SessionStart hook with uv from Sidegraph's
-  public GitHub repository, so uv contacts GitHub at each session start to check for a newer
-  version, and downloads it and its Python dependencies (from PyPI) when needed. The other hooks
-  use the version that session start recorded, from uv's cache; without that record they check
-  GitHub too. The CLI commands the skills run always check GitHub's `main`. Setup installs
-  Graphify from PyPI, and `sidegraph-domains snapshot --build-with` downloads the Graphify release
+  telemetry. The plugin runs the published Sidegraph package at its own version, which pins every
+  dependency to an exact version. On the first start after an install or an update, uv downloads
+  that package and those dependencies from PyPI, and, on a machine without Python 3.13, a
+  uv-managed CPython 3.13 from python-build-standalone on GitHub, which the pins do not cover.
+  The plugin fetches nothing on later starts, and the skills' CLI commands run the same way.
+  Setup installs Graphify from PyPI, and `sidegraph-domains snapshot --build-with` downloads the Graphify release
   you name when you run it. Your agent sends what Sidegraph returns to its model provider, like any other context.
 - **Optional semantic extraction.** Graphify can extract design rationale from documents with
   an LLM (`graphify extract`). It sends those documents to the provider you configure for
@@ -100,10 +104,12 @@ Details: [Privacy](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/pr
 ## Removing it
 
 If you ran setup, first remove the graph-refresh git hook and its setting (it also clears the
-setting when you declined the hook):
+setting when you declined the hook). In a Claude Code session, ask the agent to run
+`sidegraph-init --remove-hooks`: it runs the plugin's own version, which is the version that
+installed the hook. In a terminal, or on another host, run it with `uvx`:
 
 ```text
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --remove-hooks
+uvx --from sidegraph --python 3.13 sidegraph-init --remove-hooks
 ```
 
 Then run `/plugin uninstall sidegraph@sidegraph`. The records in `.sidegraph/` belong to your
@@ -111,8 +117,9 @@ project: delete them only if you mean to lose them. `graphify-out/` can be delet
 Also left behind: Graphify, installed as a uv tool (`uv tool uninstall graphifyy`); the
 `graphify-out/` line setup added to `.gitignore`; `SIDEGRAPH_RATIFY_POLICY` in
 `.claude/settings.json` if setup wrote it; the hook's `sidegraph-graph-refresh.log` and
-`sidegraph-graph-refresh.repair` files in the `.git` directory; and one small file,
-`sidegraph/launch-commit`, in your user cache directory. See
+`sidegraph-graph-refresh.repair` files in the `.git` directory; and, if an older plugin version
+ran, one small file, `sidegraph/launch-commit`, in your user cache directory. uv's cache keeps the
+packages the plugin ran (`uv cache dir` prints where). See
 [Removing Sidegraph](https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/getting-started/installation.md#removing-sidegraph).
 
 ## Links

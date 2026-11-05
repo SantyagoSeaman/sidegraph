@@ -2,7 +2,7 @@
 
 > **Start here:** Match the message or check code to the table below, read its cause and run the suggested fix. A store is the committed record data. The index is a disposable local cache. Do not delete the store to clear a warning. [Glossary](../concepts/glossary.md).
 
-For commands following `@main`, see [pinning mutable development references](../getting-started/installation.md#mutable-development-references).
+For pinning a version in your own commands, see [pinned releases](../getting-started/installation.md#mutable-development-references).
 
 Sidegraph reports store, graph and host problems separately. First match the symptom,
 then inspect the diagnostic that can establish its cause. Keep the committed store.
@@ -26,9 +26,10 @@ owns the notice rules. `sidegraph-doctor` gives record-level diagnostics, while
 
 If the package CLI works but the plugin's MCP server cannot start or no memory appears
 at session start, check the [Windows setup boundary](../getting-started/installation.md#windows).
-The bundled MCP launchers start `uvx` (or `uv`) directly, so they need `uv` on the PATH the
-host gives its subprocesses; Claude Code runs its hooks through Git Bash, so they need Git for
-Windows at its default options. Codex hooks use a PowerShell command on Windows, which parses
+The bundled MCP launchers start `uvx` directly (`uv` in the development manifest),
+so they need `uv` on the PATH the host gives its subprocesses; Claude Code runs its hooks through
+Git Bash, so they need Git for Windows at its default options (the plugin does not start on
+native Windows without it). Codex hooks use a PowerShell command on Windows, which parses
 in both Windows PowerShell 5.1 and PowerShell 7. PowerShell 7 is optional. The MCP launchers and Codex hooks do not require an
 additional POSIX shell; executable discovery still depends on the host PATH.
 
@@ -41,12 +42,16 @@ Get-Command git, uv, uvx -ErrorAction SilentlyContinue |
 
 Missing entries identify PATH gaps. After changing PATH, restart the agent host so its
 subprocesses inherit the new environment. A GUI host may inherit a different PATH from a
-newly opened terminal. If `claude mcp list` shows `sidegraph` as failed to connect, or Codex
-lists no `sidegraph` tools, run the launcher by hand to see the error (Ctrl+C stops it):
+newly opened terminal. If Codex lists no `sidegraph` tools, run its launcher by hand to see the
+error (Ctrl+C stops it):
 
 ```powershell
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp --repo-root
+uvx --from sidegraph --python 3.13 sidegraph-mcp --repo-root
 ```
+
+If `claude mcp list` shows `sidegraph` as failed to connect, see
+[The plugin's first start](#the-plugins-first-start): the Claude plugin runs the same command with
+its own version, `sidegraph==X.Y.Z`.
 
 For Codex, `codex mcp list` should show the `sidegraph` server, and `/hooks` should list its
 hooks as trusted. If the hooks fail to start on Windows, update Codex: they need a release that
@@ -70,6 +75,52 @@ or [Codex hook trust](../getting-started/codex-setup.md#verify), and verify that
 server and hooks resolve the same repository's store. Native plugin integration is not
 established by core/installed-wheel CI; the native Windows route is verified with Claude Code
 2.1.296 and Codex CLI 0.162.1, and WSL with a single Linux toolchain is the other supported route.
+
+## The plugin's first start
+
+Every plugin (Claude Code, Grok Build, Codex, Muse and OpenCode's MCP server) launches the
+published package at the plugin's own version, `uvx --from sidegraph==X.Y.Z --python 3.13
+<entry point>`, and that package pins its dependencies. Nothing floats between sessions. What can
+go wrong is the first start after each plugin update, or the environment that start needs. When a
+hook cannot start, its guard hides the error: `SessionStart` shows "Sidegraph: the SessionStart
+hook could not start", the other hooks answer `{}`, and the MCP server shows as failed in
+`claude mcp list`. To see the error, run the hook command in a terminal, in the project, with
+stdin closed. `X.Y.Z` is the version in the plugin's manifest:
+
+```bash
+uvx --from sidegraph==X.Y.Z --python 3.13 sidegraph-session-start --repo-root </dev/null
+```
+
+- **The first start downloads.** The first session after each plugin update installs that
+  version's package and its pinned dependencies (about 70 packages) from PyPI into uv's cache,
+  unless uv already has them. On a machine with no Python 3.13, uv also downloads a managed
+  CPython 3.13 from python-build-standalone on GitHub. Expect that start to take seconds to a
+  minute on a slow connection. Grok waits only about two seconds for an MCP server, so its first
+  session after an update may start without Sidegraph tools; start a new session. Later starts
+  need no network. An offline machine, a proxy that blocks PyPI or GitHub, or an exported
+  `UV_OFFLINE` or index setting can make the first start fail.
+- **uv is set not to download Python.** The launch names Python 3.13 (`--python 3.13`). With
+  `python-downloads = "never"` or `"manual"` in uv's settings, or `UV_PYTHON_DOWNLOADS=never`,
+  and no Python 3.13 installed, the start fails with a message that no interpreter was found.
+  Install one (`uv python install 3.13`, or any 3.13 on the PATH) or allow downloads. A newer
+  Python on the machine does not stand in for it: the pinned dependencies have no builds for a
+  Python released after the version you run.
+- **uv older than 0.6.10.** The launch needs uv 0.6.10 or newer; the guard hides a refusal from
+  an older uv. `uv --version` shows yours, and `uv self update` (or the command of the way you
+  installed it) moves it.
+- **An exported `UV_*` setting.** The `--python 3.13` flag outranks an exported `UV_PYTHON`, so
+  that one has no effect. Any other `UV_*` setting still applies, because it is your own choice
+  of where uv looks or what it may do: `UV_OFFLINE`, `UV_CACHE_DIR`, `UV_INDEX_URL` and
+  `UV_DEFAULT_INDEX` can all change the result. Unset it for the session to test.
+- **A store that refuses the plugin's version.** A teammate raised the store's minimum Sidegraph
+  version (`sidegraph-require`), and the plugin is older. The hooks and the server refuse the
+  store until you update the plugin. The message reads "This store requires Sidegraph >= X; this is Y."
+- **Windows needs Git Bash.** The Claude Code hook commands are shell commands. Install Git for
+  Windows (see [Windows plugin launch](#windows-plugin-launch)).
+- **Platforms.** The pinned package has builds for macOS on Apple silicon, Linux (glibc) on x86-64
+  and arm64, and Windows on x86-64. Intel Macs and musl Linux (Alpine) are not supported by any
+  install route: the pinned `cryptography` has no wheel for an Intel Mac, `uvx` would try a source
+  build that needs a Rust toolchain, and an exact pin leaves no room for a constraint of your own.
 
 ## The checks
 
@@ -95,6 +146,7 @@ explains JSON output, exit codes and skipped evidence.
 | `unratified-accept` | An accepted agent-authored record has no ratifier stamp within the checkable period. | Inspect provenance and the capture policy before judging it. Replace deprecated auto-accept configuration if present. Do not backfill the store creation marker. |
 | `graph-root-mismatch` | Graph paths appear relative to a subdirectory instead of the repository root. | Rebuild from the repository root with `GRAPHIFY_NO_AUTO_REFRESH=1`, then run `sidegraph-sync`. |
 | `snapshot-split` | Several accepted domains inherit one frozen snapshot area. | Run the refresh command printed by doctor for every named part, review the snapshot change and commit it. See [snapshot reference](../reference/cli.md#sidegraph-domains-snapshot). |
+| `domain-split` | One domain is replaced by several live domains. | Nothing is wrong by itself, so `--check` does not fail on it. If it should be a single replacement, drop the extra parts with `sidegraph-ratify --drop <id>`. |
 | `graph-stale` | HEAD differs from the graph build commit and a covered file changed or appeared. | [Rebuild the graph](#graph-stale) from the root with the refresh guard, then sync. |
 | `engine-version` | The graph uses an untested engine version, or its store needs the matching migration. | Read the finding, pin a tested Graphify release and follow the [engine guidance](#engine-version). |
 | `store-uncommitted` | Canonical store files have remained outside commits. | Review the store diff and commit the canonical changes in the same pull request as the work. Keep the derived index ignored. See [commit guidance](#store-uncommitted). |
@@ -152,7 +204,8 @@ that depends on the exception:
   directory, a `.sidegraph` that is a plain file), the advice is the generic one below instead.
 - A store that requires a newer Sidegraph (`This store requires Sidegraph >= X.Y.Z; this is
   A.B.C.`): upgrade to at least that version and start a new session. A teammate raised it
-  with `sidegraph-require`.
+  with `sidegraph-require`. On the Claude plugin, a new session alone changes nothing: update
+  the Sidegraph plugin from its marketplace first, and the message says so.
 - A missing format marker (`the store format marker … is missing`, or
   `store format marker is missing and git did not answer in time`): if a git command is
   running (a pull or checkout), start a new session when it finishes. Otherwise restore a
@@ -161,7 +214,7 @@ that depends on the exception:
   repeated timeout with no git command running, check `git -C .sidegraph status`.
 - A store written by a different Sidegraph version, for example a packed (format 2) store opened
   by 0.14 to 0.16, whose message ends `migration tooling is deferred — use a fresh store`:
-  upgrade Sidegraph, or use the version that wrote it. The message predates `sidegraph-migrate`
+  upgrade Sidegraph (on the Claude plugin, update the plugin), or use the version that wrote it. The message predates `sidegraph-migrate`
   and does not mean you need a fresh store.
 - Anything else: `sidegraph-verify` gives the details.
 
@@ -446,12 +499,14 @@ too). It compares numeric parts, so `0.10.0` is above `0.9.0`, and ignores a loc
 
 - **The package is newer than the plugin.** The installed plugin copy is stale: its skills and
   hook wiring come from an older release. Update the plugin from its marketplace.
-- **The plugin is newer than the package.** The session runs an old launcher cache or a pinned
-  install. Restart the session, so that `SessionStart` resolves `@main` again, or remove the
-  pinned install (for example `uv tool uninstall sidegraph`).
+- **The plugin is newer than the package.** The session started before the plugin update, or
+  Sidegraph is launched from a manual registration (`claude mcp add`, a hand-written config) that
+  pins an older version. Restart the session, or update that registration.
 - **What it can catch.** With the internal manifests the package and `plugin.json` come from one
-  checkout and are bumped in one commit, so it never fires there. With the public `uvx` launch
-  the package is at or ahead of the installed plugin copy. An old binary cannot report itself,
+  checkout and are bumped in one commit, so it never fires there. A plugin launch names the
+  plugin's own version, so it does not fire there either. It fires when a manual registration pins
+  another version than the plugin, or when the installed plugin copy is older than the package that
+  runs. An old binary cannot report itself,
   so a skew is visible only once the binary that checks is new enough; the version line is what
   an older install lacks.
 - **Where it runs.** The session surface only, and not at all without a plugin root, a manifest,
@@ -463,17 +518,17 @@ too). It compares numeric parts, so `0.10.0` is above `0.9.0`, and ignores a loc
 A `sidegraph-*` command on `PATH` is a second Sidegraph beside the plugin, typically a
 `uv tool install`. That is fine while it stays current, but a `uv tool` install never
 updates itself: after a release it keeps answering your own shell commands at the version it was
-installed at, while the plugin's hooks, MCP server and skills run the session's version through
-`uvx`. Old copies can also lack commands or flags (`sidegraph-init --hooks`, `sidegraph-stats`).
+installed at, while the plugin's hooks, MCP server and skills run the session's version
+(`uvx --from sidegraph==X.Y.Z --python 3.13` on every host). Old copies can also lack commands or flags (`sidegraph-init --hooks`, `sidegraph-stats`).
 
 The SessionStart line names the command, the `PATH` directory and both versions. It reads the
 install's `sidegraph-<version>.dist-info` and never runs the command.
 
 - **You use only the plugin.** Remove it: `uv tool uninstall sidegraph`.
-- **You use the CLI on purpose.** Update it: `uv tool upgrade sidegraph` for an install from
-  `main`. An install from PyPI, pinned or not, moves to `main` with
-  `uv tool install --reinstall git+https://github.com/SantyagoSeaman/sidegraph.git@main`, the command the line offers because it works for
-  either. The line is shown whenever the versions differ, so a deliberately pinned or newer copy
+- **You use the CLI on purpose.** Update it: `uv tool upgrade sidegraph` for an unpinned install
+  from PyPI. An install pinned to a version, or from `git+…@main`, moves to the session's version
+  with `uv tool install --reinstall --python 3.13 sidegraph==X.Y.Z`, the command the line offers
+  because it works for either. The line is shown whenever the versions differ, so a deliberately pinned or newer copy
   shows it daily.
 - **Not a `uv tool` install** (pipx, pip). The line says "upgrade or remove" without a command.
 - **Where it runs.** The session surface only. It does not run when no foreign `sidegraph-*` is
@@ -540,4 +595,5 @@ line.
 
 ## The launch-commit file
 
-If a hook uses a stale or invalid cached commit, start a new session or remove the launch-commit file. See the [launch-commit contract](../reference/hooks.md#the-launch-commit-file) for its path, validation and recovery steps.
+Only plugin installs older than 0.25.0, which launched `@main`, use it; no current plugin
+does. If a hook uses a stale or invalid cached commit, start a new session or remove the launch-commit file. See the [launch-commit contract](../reference/hooks.md#the-launch-commit-file) for its path, validation and recovery steps.

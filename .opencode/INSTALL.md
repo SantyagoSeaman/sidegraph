@@ -38,14 +38,12 @@ server only when that name has no explicit configuration. An existing entry, inc
         "command": [
           "uvx",
           "--from",
-          "git+https://github.com/SantyagoSeaman/sidegraph.git@main",
+          "sidegraph==0.25.0",
+          "--python",
+          "3.13",
           "sidegraph-mcp",
           "--repo-root"
-        ],
-        "environment": {
-          "SIDEGRAPH_DIR": ".sidegraph",
-          "SIDEGRAPH_GRAPH": "graphify-out/graph.json"
-        }
+        ]
       }
     }
   }
@@ -62,6 +60,7 @@ opencode plugin check 'git+https://github.com/SantyagoSeaman/sidegraph.git#main'
 opencode plugin update 'git+https://github.com/SantyagoSeaman/sidegraph.git#main'
 ```
 
-The Git package target `#main` follows public releases. The MCP runtime uses its configured
-Git ref (normally `@main`); this host has no SessionStart version pin. Updating cached
-plugin files and resolving the MCP runtime are separate operations.
+The Git package target `#main` follows public releases. The package starts the MCP server with
+the Sidegraph version it names, so updating the package moves the server
+too; an explicit override like the one above keeps its own version until you change it. This host
+has no SessionStart version pin.

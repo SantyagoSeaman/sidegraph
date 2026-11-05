@@ -52,7 +52,7 @@ def test_native_muse_registers_the_proved_lifecycle_hooks() -> None:
     assert all(isinstance(h["timeoutMs"], int) and h["timeoutMs"] > 1000 for h in hooks)
 
 
-def test_native_muse_mcp_uses_the_public_runtime_without_a_shell() -> None:
+def test_native_muse_mcp_launches_the_pin_without_a_shell() -> None:
     """The native server must start without sh or a foreign project placeholder."""
     manifest = _manifest()
     assert manifest["schemaVersion"] == 1
@@ -61,14 +61,14 @@ def test_native_muse_mcp_uses_the_public_runtime_without_a_shell() -> None:
     assert len(servers) == 1
     server = servers[0]
     assert server["id"] == "sidegraph"
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     assert server["command"] == [
         "uvx",
-        "--from=git+https://github.com/SantyagoSeaman/sidegraph.git@main",
+        f"--from=sidegraph=={version}",
+        "--python",
+        "3.13",
         "sidegraph-mcp",
         "--repo-root",
     ]
-    assert server["env"] == {
-        "SIDEGRAPH_DIR": ".sidegraph",
-        "SIDEGRAPH_GRAPH": "graphify-out/graph.json",
-    }
+    assert "env" not in server
     assert "cwd" not in server

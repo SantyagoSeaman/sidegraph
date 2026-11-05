@@ -31,9 +31,12 @@ _ROOT = Path(__file__).resolve().parent.parent
 _PLUGIN = _ROOT / "plugin" / "sidegraph"
 
 # The guard each event ends with. Stop, PreToolUse and SubagentStart answer an empty object,
-# which both hosts read as "no decision". SessionStart answers a systemMessage the user sees,
+# which every host reads as "no decision". SessionStart answers a systemMessage the user sees,
 # so a broken install is not silent. A SubagentStart guard never says more than that: a start
 # failure must not put a message in front of every subagent.
+# Codex keeps the `printf` guards and its own message; the Claude and Grok manifests use `echo`.
+# The public ones launch the pinned package and say so ("the first download of Sidegraph"); the
+# development ones launch the checkout and keep the message that names the plugin runtime.
 _EMPTY_GUARD = " || printf '{}\\n'"
 _SESSION_MESSAGE = (
     "Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); "
@@ -44,20 +47,47 @@ _SESSION_GUARD = (
     + json.dumps({"systemMessage": _SESSION_MESSAGE}, separators=(",", ":"))
     + "'"
 )
+_RUNTIME_EMPTY_GUARD = " || echo '{}'"
+_DEV_SESSION_MESSAGE = (
+    "Sidegraph: the SessionStart hook could not start (uv, the first download of the plugin "
+    "runtime, or a read-only plugin folder); run the hook command in a terminal to see the error"
+)
+_PINNED_SESSION_MESSAGE = (
+    "Sidegraph: the SessionStart hook could not start (uv, the first download of Sidegraph, or "
+    "no network); run the hook command in a terminal to see the error"
+)
+_RUNTIME_HOSTS = ("hooks", "grok")  # the manifest folders of the Claude and Grok hooks
 _ENTRY_GUARDS = {
     "sidegraph-session-start": _SESSION_GUARD,
     "sidegraph-stop": _EMPTY_GUARD,
     "sidegraph-pre-tool-use": _EMPTY_GUARD,
     "sidegraph-subagent-start": _EMPTY_GUARD,
 }
-_EVENT_GUARDS = {
-    "SessionStart": _SESSION_GUARD,
-    "Stop": _EMPTY_GUARD,
-    "PreToolUse": _EMPTY_GUARD,
-    "SubagentStart": _EMPTY_GUARD,
-}
+
+
+def _runtime_session_message(command: str) -> str:
+    """The message of a Claude or Grok SessionStart command: the pinned launch (``uvx``) or the
+    development one (``uv run`` in the checkout)."""
+    return _PINNED_SESSION_MESSAGE if "uvx" in command else _DEV_SESSION_MESSAGE
+
+
+def _event_guard(event: str, host: str, command: str) -> str:
+    """The guard a ``host`` (the manifest's folder) ends ``event`` with."""
+    runtime = host in _RUNTIME_HOSTS
+    if event == "SessionStart":
+        if not runtime:
+            return _SESSION_GUARD
+        message = _runtime_session_message(command)
+        return " || echo '" + json.dumps({"systemMessage": message}, separators=(",", ":")) + "'"
+    return _RUNTIME_EMPTY_GUARD if runtime else _EMPTY_GUARD
+
+
+def _session_message(host: str, command: str) -> str:
+    return _runtime_session_message(command) if host in _RUNTIME_HOSTS else _SESSION_MESSAGE
+
 
 _ANSWER = '{"decision":"block","reason":"x"}'
+_PAYLOAD = '{"tool_name":"Bash","tool_input":{"command":"sed -n 1p f"}}\n'
 
 
 @pytest.fixture(autouse=True)
@@ -75,9 +105,11 @@ def host_user_config(
 
 
 def _manifest_paths() -> list[Path]:
-    """Every hook manifest that exists: the Claude Code ones and the Codex ones."""
-    return sorted((_PLUGIN / "hooks").glob("*.json")) + sorted(
-        (_PLUGIN / "codex").glob("hooks*.json")
+    """Every hook manifest that exists: the Claude Code, Grok and Codex ones."""
+    return (
+        sorted((_PLUGIN / "hooks").glob("*.json"))
+        + sorted((_PLUGIN / "grok").glob("*.json"))
+        + sorted((_PLUGIN / "codex").glob("hooks*.json"))
     )
 
 
@@ -92,7 +124,9 @@ def _hook_entries() -> list[Any]:
             for group in groups:
                 for hook in group["hooks"]:
                     entries.append(
-                        pytest.param(event, hook["command"], id=f"{_label(path)}:{event}")
+                        pytest.param(
+                            event, hook["command"], path.parent.name, id=f"{_label(path)}:{event}"
+                        )
                     )
     return entries
 
@@ -113,15 +147,15 @@ def _shells() -> list[Any]:
 
 
 def _distinct(entries: list[Any]) -> list[Any]:
-    """One entry per ``(event, command)``: a command repeated across manifests (or across
+    """One entry per ``(event, command, host)``: a command repeated across manifests (or across
     matcher groups) runs the same shell code, so the shell tests need it once. The id keeps
     every manifest that carries it."""
-    labels: dict[tuple[str, str], list[str]] = {}
+    labels: dict[tuple[str, str, str], list[str]] = {}
     for entry in entries:
         labels.setdefault(tuple(entry.values), []).append(entry.id)
     return [
-        pytest.param(event, command, id=",".join(dict.fromkeys(ids)))
-        for (event, command), ids in labels.items()
+        pytest.param(event, command, host, id=",".join(dict.fromkeys(ids)))
+        for (event, command, host), ids in labels.items()
     ]
 
 
@@ -153,7 +187,8 @@ def _run(
     PATH holds a directory of fakes first, then ``/bin:/usr/bin`` for what the shell itself
     needs, so a real ``uv``, ``uvx`` or ``git`` can never shadow a fake. ``uv`` selects what
     the fake ``uv`` and ``uvx`` do: ``fail`` prints an error to stderr and exits 2, the way
-    uv does on an internal error; ``answer`` prints a real hook answer and exits 0. The fake
+    uv does on an internal error; ``answer`` prints a real hook answer and exits 0; ``absent``
+    writes no ``uv`` or ``uvx`` at all, so none is on ``PATH``. The fake
     ``git`` reports ``project`` as the repository root, and ``CLAUDE_PROJECT_DIR`` is the
     same directory, so both manifest styles aim at it.
     """
@@ -163,14 +198,17 @@ def _run(
         body = "printf 'error: Failed to spawn: boom\\n' >&2\nexit 2"
     else:
         body = f"printf '%s\\n' '{_ANSWER}'"
-    _script(bin_dir / "uv", body)
-    _script(bin_dir / "uvx", body)
+    if uv != "absent":
+        _script(bin_dir / "uv", body)
+        _script(bin_dir / "uvx", body)
     _script(bin_dir / "git", f"printf '%s\\n' '{project}'")
     cwd = tmp_path / "cwd"
     cwd.mkdir(exist_ok=True)
     return subprocess.run(
         [shell, "-c", command],
         cwd=cwd,
+        # The Grok Bash pre-filter reads the payload and starts the hook only for a read command.
+        input=_PAYLOAD,
         env={"PATH": f"{bin_dir}:/bin:/usr/bin", "CLAUDE_PROJECT_DIR": str(project)},
         capture_output=True,
         text=True,
@@ -189,23 +227,45 @@ def test_the_scan_found_the_manifests() -> None:
     """The parametrised tests below are only as good as this scan: an empty one would pass
     every one of them."""
     labels = {_label(p) for p in _manifest_paths()}
-    assert {"hooks/hooks.json", "codex/hooks.json"} <= labels
+    assert {"hooks/hooks.json", "grok/hooks.json", "codex/hooks.json"} <= labels
     events = {e.values[0] for e in _ENTRIES}
     assert events == {"SessionStart", "Stop", "PreToolUse", "SubagentStart"}
     assert _EMPTY_ANSWER and _SESSION_START
 
 
-@pytest.mark.parametrize(("event", "command"), _ENTRIES)
-def test_t1_every_hook_command_ends_with_the_guard_for_its_event(event: str, command: str) -> None:
-    guard = _EVENT_GUARDS[event]
-    assert command.endswith(guard), f"{event} command lacks its guard: {command!r}"
+def test_the_public_claude_and_grok_session_message_is_about_the_pinned_package() -> None:
+    """The pinned launch downloads Sidegraph, not a plugin runtime, and writes nothing into the
+    plugin folder."""
+    public = [
+        command
+        for event, command, host in (e.values for e in _ENTRIES)
+        if event == "SessionStart" and host in _RUNTIME_HOSTS and "uvx" in command
+    ]
+    assert len(public) == 2
+    for command in public:
+        assert _PINNED_SESSION_MESSAGE in command
+        assert "plugin runtime" not in command
+        assert "read-only plugin folder" not in command
+
+
+@pytest.mark.parametrize(("event", "command", "host"), _ENTRIES)
+def test_t1_every_hook_command_ends_with_the_guard_for_its_event(
+    event: str, command: str, host: str
+) -> None:
+    guard = _event_guard(event, host, command)
     assert command.count(guard) == 1
+    if command.startswith("p=$(cat); case "):
+        # Grok's Bash pre-filter: the hook command inside it carries the guard, and the filter
+        # answers `{}` itself for a command that reads no file.
+        assert command.endswith(guard + " ; } ;; *) echo '{}' ;; esac"), command
+    else:
+        assert command.endswith(guard), f"{event} command lacks its guard: {command!r}"
 
 
 @pytest.mark.parametrize("shell", _shells())
-@pytest.mark.parametrize(("event", "command"), _EMPTY_ANSWER)
+@pytest.mark.parametrize(("event", "command", "host"), _EMPTY_ANSWER)
 def test_t2_a_failed_start_on_an_empty_answer_event_answers_empty_json(
-    shell: str, event: str, command: str, tmp_path: Path
+    shell: str, event: str, command: str, host: str, tmp_path: Path
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -215,36 +275,75 @@ def test_t2_a_failed_start_on_an_empty_answer_event_answers_empty_json(
 
 
 @pytest.mark.parametrize("shell", _shells())
-@pytest.mark.parametrize(("event", "command"), _SESSION_START)
+@pytest.mark.parametrize(("event", "command", "host"), _SESSION_START)
 def test_t2b_a_failed_start_on_session_start_tells_the_user(
-    shell: str, event: str, command: str, tmp_path: Path
+    shell: str, event: str, command: str, host: str, tmp_path: Path
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
     result = _run(shell, command, tmp_path, uv="fail", project=project)
     assert result.returncode == 0, (result.returncode, result.stderr)
-    assert _system_message(result.stdout) == _SESSION_MESSAGE
+    assert _system_message(result.stdout) == _session_message(host, command)
+
+
+_CD_COMMANDS = [e for e in _DISTINCT if "cd " in e.values[1]]
+_NO_CD_COMMANDS = [e for e in _DISTINCT if "cd " not in e.values[1]]
 
 
 @pytest.mark.parametrize("shell", _shells())
-@pytest.mark.parametrize(("event", "command"), _DISTINCT)
+@pytest.mark.parametrize(("event", "command", "host"), _CD_COMMANDS)
 def test_t3_a_missing_project_directory_is_caught(
-    shell: str, event: str, command: str, tmp_path: Path
+    shell: str, event: str, command: str, host: str, tmp_path: Path
 ) -> None:
     """The failing ``cd`` is part of the chain: ``dash`` exits 2 on it and the others 1, and
-    neither may reach the host. uv succeeds here, but is never reached."""
+    neither may reach the host. uv succeeds here, but is never reached. Only the Codex commands
+    still ``cd``; the Claude and Grok ones anchor with ``--repo-root`` instead."""
     result = _run(shell, command, tmp_path, uv="answer", project=tmp_path / "no-such-dir")
     assert result.returncode == 0, (result.returncode, result.stderr)
     if event == "SessionStart":
-        assert _system_message(result.stdout) == _SESSION_MESSAGE
+        assert _system_message(result.stdout) == _session_message(host, command)
+    else:
+        assert result.stdout == "{}\n"
+
+
+def test_t3_the_scan_found_the_commands_that_still_cd() -> None:
+    assert {e.values[2] for e in _CD_COMMANDS} == {"codex"}
+    assert {e.values[2] for e in _NO_CD_COMMANDS} == set(_RUNTIME_HOSTS)
+
+
+@pytest.mark.parametrize("shell", _shells())
+@pytest.mark.parametrize(("event", "command", "host"), _NO_CD_COMMANDS)
+def test_t3b_a_missing_project_directory_does_not_reach_a_command_without_cd(
+    shell: str, event: str, command: str, host: str, tmp_path: Path
+) -> None:
+    """The command never changes directory, so a missing project directory cannot fail it:
+    uv runs and its answer reaches the host."""
+    result = _run(shell, command, tmp_path, uv="answer", project=tmp_path / "no-such-dir")
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert result.stdout == _ANSWER + "\n"
+
+
+@pytest.mark.parametrize("shell", _shells())
+@pytest.mark.parametrize(("event", "command", "host"), _NO_CD_COMMANDS)
+def test_uv_missing_answers_the_fallback(
+    shell: str, event: str, command: str, host: str, tmp_path: Path
+) -> None:
+    """With no ``uv`` on ``PATH`` the shell reports 127, and the guard turns it into exit 0 and
+    the answer the host accepts: every Claude and Grok command, SessionStart with its message."""
+    project = tmp_path / "project"
+    project.mkdir()
+    result = _run(shell, command, tmp_path, uv="absent", project=project)
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    if event == "SessionStart":
+        assert _system_message(result.stdout) == _runtime_session_message(command)
     else:
         assert result.stdout == "{}\n"
 
 
 @pytest.mark.parametrize("shell", _shells())
-@pytest.mark.parametrize(("event", "command"), _DISTINCT)
+@pytest.mark.parametrize(("event", "command", "host"), _DISTINCT)
 def test_t4_the_guard_leaves_a_real_answer_alone(
-    shell: str, event: str, command: str, tmp_path: Path
+    shell: str, event: str, command: str, host: str, tmp_path: Path
 ) -> None:
     """Red against nothing: the guard must not swallow, wrap or repeat what the hook says."""
     project = tmp_path / "project"

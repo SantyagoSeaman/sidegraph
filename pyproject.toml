@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.24.0"
+version = "0.25.0"
 description = "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -33,21 +33,77 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "pydantic>=2.9",
-    "fastmcp>=3.4.10,<4",
-    # Security floors also apply to standalone wheel installs, which do not use uv.lock.
-    "certifi>=2026.10.19",
-    "opentelemetry-api>=1.45.1",
-    "authlib>=1.9.1",
-    "dnspython>=2.9.0",
-    "python-ulid>=3.0",
-    # Imported directly by server.py (the refresh middleware). Keep the security floor for
-    # GHSA-84m7-p3x7-pcfv / CVE-2026-59951: MCP 1.30.0 fixes stateful StreamableHTTP.
-    "anyio>=4",
-    "mcp>=1.30,<2",
-    # Imported directly by drift_groups.py (heading spans for the drift hint)
-    # and lazily by md_sections (declared-section drift scope).
-    "markdown-it-py>=4,<5",
+    "aiofile==3.12.3",
+    "annotated-types==0.8.0",
+    "anyio==4.16.0",
+    "attrs==26.1.0",
+    "authlib==1.9.4",
+    "beartype==0.23.1",
+    "cachetools==7.2.8",
+    "caio==0.12.10",
+    "certifi==2026.10.23",
+    "cffi==2.1.1 ; platform_python_implementation != 'PyPy'",
+    "click==8.5.0",
+    "cryptography==50.0.2",
+    "cyclopts==5.3.3",
+    "dnspython==2.9.2",
+    "docstring-parser==0.18.0",
+    "email-validator==2.3.0",
+    "exceptiongroup==1.3.1",
+    "fastmcp-slim==3.4.11",
+    "fastmcp==3.4.11",
+    "griffelib==2.4.1",
+    "h11==0.16.0",
+    "httpcore==1.0.9",
+    "httpx-sse==0.4.3",
+    "httpx==0.28.1",
+    "idna==3.20",
+    "jaraco-classes==3.4.0",
+    "jaraco-context==6.1.2",
+    "jaraco-functools==4.6.0",
+    "jeepney==0.9.0 ; sys_platform == 'linux'",
+    "joserfc==1.8.0",
+    "jsonref==1.1.0",
+    "jsonschema-path==0.5.0",
+    "jsonschema-specifications==2025.9.1",
+    "jsonschema==4.26.0",
+    "keyring==25.7.0",
+    "markdown-it-py==4.2.0",
+    "mcp==1.30.0",
+    "mdurl==0.1.2",
+    "more-itertools==11.2.1",
+    "openapi-pydantic==0.6.0",
+    "opentelemetry-api==1.45.2",
+    "packaging==26.3",
+    "pathable==0.6.0",
+    "platformdirs==4.14.5",
+    "py-key-value-aio==0.4.6",
+    "pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'",
+    "pydantic-core==2.50.2",
+    "pydantic-settings==2.16.2",
+    "pydantic==2.14.2",
+    "pygments==2.21.0",
+    "pyjwt==2.15.1",
+    "pyperclip==1.11.0",
+    "python-dotenv==1.2.4",
+    "python-multipart==0.0.33",
+    "python-ulid==4.1.0",
+    "pywin32-ctypes==0.2.3 ; sys_platform == 'win32'",
+    "pywin32==312 ; sys_platform == 'win32'",
+    "pyyaml==6.0.3",
+    "referencing==0.37.0",
+    "rich-rst==2.2.0",
+    "rich==15.0.0",
+    "rpds-py==2026.9.1",
+    "secretstorage==3.5.0 ; sys_platform == 'linux'",
+    "sse-starlette==3.6.0",
+    "starlette==1.10.0",
+    "typing-extensions==4.16.0",
+    "typing-inspection==0.4.5",
+    "uncalled-for==0.4.2",
+    "uvicorn==0.54.0",
+    "watchfiles==1.3.0",
+    "websockets==17.4",
 ]
 
 [project.urls]
@@ -124,6 +180,7 @@ norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules"
 markers = [
     "integration: spawns real git repositories and subprocesses (release-script contract)",
     "slow: creates thousands of files or spawns subprocesses",
+    "network: asks PyPI a question; skipped when pypi.org is unreachable",
 ]
 # A passing test leaves no temp dir behind; a failing one keeps its dir for inspection.
 tmp_path_retention_policy = "failed"

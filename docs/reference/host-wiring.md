@@ -147,7 +147,10 @@ file. It returns the call's own input with only `prompt` changed (`updatedInput`
 `permissionDecision`, and claims none of the per-agent keys above. **The block reaches the
 subagent, in its first message, but the parent's view of its own `Agent` call does not show it**:
 the parent's transcript keeps the prompt it wrote. It is on by default; set
-`SIDEGRAPH_AGENT_BRIEF=off` to turn it off. It was not tested on agent-team teammates or `fork`
+`SIDEGRAPH_AGENT_BRIEF=off` to turn it off. In Claude Code's auto mode (`permission_mode: auto`)
+it leaves the call unchanged: that mode reviews a call before hooks run and refuses an input a hook
+changed. The subagent still gets the `SubagentStart` brief and the records of the files it reads.
+Grok Build runs hooks before its permission gate, so it keeps the brief. It was not tested on agent-team teammates or `fork`
 spawns, and Codex does not carry it. See the
 [hooks reference](hooks.md#subagent-briefs).
 
@@ -190,17 +193,22 @@ memory. None of these breaks the session.
 
 **Public and development manifests differ.** The marketplace receives
 `plugin/sidegraph/.mcp.public.json` and `plugin/sidegraph/hooks/hooks.public.json`, renamed
-to the canonical filenames during the public release. Those variants run `uvx --from
-git+https://github.com/SantyagoSeaman/sidegraph.git@main …`, so the plugin deliberately
-follows the public repository rather than the PyPI package. The unsuffixed files in this
+to the canonical filenames during the public release. Every host's variant runs the published
+package at the plugin's own version: `uvx --from sidegraph==X.Y.Z --python 3.13 <entry point>
+--repo-root`. That package pins every one of its dependencies, so a newer Sidegraph arrives when
+the plugin updates and nothing floats between sessions. The command carries no `UV_*` variable,
+no `SIDEGRAPH_DIR` or `SIDEGRAPH_GRAPH` (their defaults apply unless your shell exports them) and
+no path into the plugin folder. The unsuffixed files in this
 development repository run the checkout the plugin was loaded from, with
 `UV_PROJECT_ENVIRONMENT=.venv uv run --project "${CLAUDE_PLUGIN_ROOT}/../.." --package
-sidegraph --frozen --no-active`, in whatever project the session is in. The MCP entry of
-both variants starts `uvx` or `uv` directly, with no `sh`; the Claude Code hooks run through
+sidegraph --frozen --no-active` and `--repo-root`, in whatever project the session is in. The MCP entry of
+every variant starts `uvx` or `uv` directly, with no `sh`; the Claude Code hooks run through
 Git Bash on Windows. Git for Windows provides it and Claude Code finds it; if it cannot,
 `CLAUDE_CODE_GIT_BASH_PATH` points it there. Without Git Bash, Claude Code runs hooks in
 PowerShell, which cannot parse Sidegraph's POSIX hook commands.
 
-The [launch-commit contract](hooks.md#the-launch-commit-file) explains package pinning between hook calls.
-
-Commands using `@main` follow a mutable branch. See [pinning development references](../getting-started/installation.md#mutable-development-references).
+The [launch-commit contract](hooks.md#the-launch-commit-file) explains how installs older than
+0.25.0, which launched `@main`, pinned the package between hook calls. A failed first start is
+covered in [troubleshooting](../guides/troubleshooting.md#the-plugins-first-start). For pinning a
+version in your own commands, see
+[pinned releases](../getting-started/installation.md#mutable-development-references).

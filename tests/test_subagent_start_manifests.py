@@ -1,7 +1,7 @@
 """The four plugin manifests carry the SubagentStart entry (T6).
 
-The public manifests run it from the hot form that launches from the commit SessionStart
-recorded, and the Codex public one is wrapped in ``sh -c``. The guard on every one answers
+The public manifests launch the exact PyPI pin, and the Codex public one is wrapped in
+``sh -c``. The guard on every one answers
 ``{}``, because a start failure on this event must never put a message in front of a subagent.
 The shape of each command is pinned word for word in tests/test_public_hook_launch.py, and the
 guard's behaviour in tests/test_hook_spawn_guard.py; this file pins that every manifest has the
@@ -16,6 +16,7 @@ see design/superpowers/specs/2026-10-03-subagent-start-brief-design.md (D4)
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,14 @@ _PLUGIN = Path(__file__).resolve().parent.parent / "plugin" / "sidegraph"
 _MANIFESTS = sorted((_PLUGIN / "hooks").glob("hooks*.json")) + sorted(
     (_PLUGIN / "codex").glob("hooks*.json")
 )
-_GUARD = " || printf '{}\\n'"  # the Python literal is the two characters backslash and n
+# The Claude manifests (hooks/) answer with `echo`; Codex keeps `printf`. The literal in the Python
+# string is the two characters backslash and n.
+_GUARDS = {"hooks": " || echo '{}'", "codex": " || printf '{}\\n'"}
+# The launch of every public hook: the exact PyPI pin of the tree's version.
+_VERSION = tomllib.loads((_PLUGIN.parent.parent / "pyproject.toml").read_text(encoding="utf-8"))[
+    "project"
+]["version"]
+_PINNED_LAUNCH = f"uvx --from sidegraph=={_VERSION} --python 3.13 sidegraph-subagent-start"
 
 
 def _label(path: Path) -> str:
@@ -42,7 +50,7 @@ def test_t6_the_scan_found_the_manifests() -> None:
 def test_t6_every_manifest_carries_the_subagent_start_entry(manifest: Path) -> None:
     """Red against a manifest without the entry, and (M4) against a Codex public command that
     is not wrapped in ``sh -c``: Codex runs a hook under ``$SHELL -lc``, and a fish login shell
-    cannot parse the POSIX prefix that reads the launch record."""
+    cannot parse the POSIX ``cd … &&`` chain."""
     groups = json.loads(manifest.read_text(encoding="utf-8"))["hooks"].get("SubagentStart")
     assert groups, f"{_label(manifest)} has no SubagentStart entry"
     (group,) = groups
@@ -50,19 +58,32 @@ def test_t6_every_manifest_carries_the_subagent_start_entry(manifest: Path) -> N
     (hook,) = group["hooks"]
     command = hook["command"]
     assert "sidegraph-subagent-start" in command
-    assert command.endswith(_GUARD) and command.count(_GUARD) >= 1
+    guard = _GUARDS[manifest.parent.name]
+    assert command.endswith(guard) and command.count(guard) >= 1
     codex = manifest.parent.name == "codex"
     if codex:  # native Windows runs `commandWindows` (PowerShell) instead of `command`
         windows = hook["commandWindows"]
         assert "sidegraph-subagent-start" in windows
         assert windows.endswith("; if (-not $?) { '{}' }"), windows
         assert "&&" not in windows and "||" not in windows, windows
-        assert ("launch-commit" in windows) == ("uvx" in command)
+        assert "launch-commit" not in windows and "XDG_CACHE_HOME" not in windows
+        assert ("uvx" in windows) == ("uvx" in command)
+        if "uvx" in command:
+            assert _PINNED_LAUNCH in windows, windows
+    if not codex:
+        assert "launch-commit" not in command and "cd " not in command, command
+        assert "sidegraph-subagent-start --repo-root" in command, command
+        # The development twin has the public one beside it; on a snapshot the public one has
+        # been renamed onto the base name and stands alone.
+        dev = manifest.name == "hooks.json" and manifest.with_name("hooks.public.json").is_file()
+        if dev:  # the checkout the plugin was loaded from
+            assert 'uv run --project "${CLAUDE_PLUGIN_ROOT}/../.."' in command, command
+        else:  # the pinned package
+            assert _PINNED_LAUNCH in command, command
+        return
     if "uvx" not in command:  # a development manifest: the checkout the plugin was loaded from
         assert "uv run" in command and "launch-commit" not in command
         return
-    assert "launch-commit" in command, "a public SubagentStart entry runs from the hot form"
-    if codex:
-        assert command.startswith("sh -c '"), command
-    else:
-        assert not command.startswith("sh -c"), command
+    assert _PINNED_LAUNCH in command, "a public SubagentStart entry launches the pin"
+    assert "launch-commit" not in command and "XDG_CACHE_HOME" not in command, command
+    assert command.startswith("sh -c '"), command

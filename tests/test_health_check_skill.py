@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -987,9 +988,8 @@ def test_healthy_fresh_graph_and_computed_index_need_no_graph_advice(
         ),
         encoding="utf-8",
     )
-    running_release = ".".join(
-        package for package in _collector()._imports()["__version__"].split(".")[:3]
-    )
+    # The X.Y.Z release of the running version: a pre-release such as 0.24.1rc1 gives 0.24.1.
+    running_release = re.match(r"\d+\.\d+\.\d+", _collector()._imports()["__version__"])[0]
     (store / "format").write_text(
         f"sidegraph-store 1.0.0\nrequires-sidegraph >= {running_release}\n",
         encoding="utf-8",

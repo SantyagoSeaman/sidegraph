@@ -146,7 +146,10 @@ store's index directly (see [hooks](../reference/hooks.md)):
 - **In a subagent's brief.** On an `Agent` call, the hook reads the files the brief names, and
   the files named in a plan or notes document it names, and appends the decisions anchored to them
   to the brief. The subagent sees the block in its first message; the parent's transcript keeps
-  the prompt it wrote. `SIDEGRAPH_AGENT_BRIEF=off` stops it.
+  the prompt it wrote. `SIDEGRAPH_AGENT_BRIEF=off` stops it. In Claude Code's auto mode
+  (`permission_mode: auto`) it leaves the call unchanged: that mode reviews a call before hooks run
+  and refuses an input a hook changed. The subagent still gets the `SubagentStart` brief and the
+  records of the files it reads.
 - **At the start of a subagent.** The `SubagentStart` hook tells the new subagent that decision
   memory exists, how to ask it, and how many decisions, files and mistakes it holds. It carries no
   records. `SIDEGRAPH_SUBAGENT_BRIEF=off` stops it.

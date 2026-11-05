@@ -177,6 +177,23 @@ def test_t4_a_grok_subagent_spawn_gets_the_brief_appended(project, monkeypatch, 
     assert "Never retry a charge" in hso["updatedInput"]["prompt"]
 
 
+def test_t4_a_grok_subagent_spawn_keeps_the_brief_in_auto_mode(project, monkeypatch, capsys):
+    """Grok sends ``permission_mode: auto`` too, but runs hooks before its permission gate, so
+    nothing refuses the rewritten input and the brief is still appended. Only Claude Code's auto
+    mode skips it. Red while the skip ignores the host."""
+    project.record("src/payments.py", "Never retry a charge")
+    prompt = "Fix the refund path in src/payments.py."
+    monkeypatch.setenv("SIDEGRAPH_HOST", "grok")
+    payload = _grok(
+        project, "spawn_subagent", str(uuid.uuid4()), project.root, prompt=prompt, description="r"
+    )
+    payload["permission_mode"] = "auto"
+    out = _call(monkeypatch, capsys, project, payload)
+    updated = out["hookSpecificOutput"]["updatedInput"]
+    assert updated["prompt"].startswith(prompt + "\n\n")
+    assert "Never retry a charge" in updated["prompt"]
+
+
 def test_t5_claude_tool_names_keep_their_input(project, monkeypatch, capsys):
     """Guard, red against nothing: a Claude name is never remapped, so an ``Edit`` and a ``Read``
     with an absolute path behave as before. A failure means the map touched a Claude name."""

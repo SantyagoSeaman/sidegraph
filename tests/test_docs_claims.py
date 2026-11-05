@@ -1008,7 +1008,8 @@ def test_readme_states_the_mechanism_and_promises_no_outcome():
 
 
 # ---------------------------------------------------------------------------
-# 8. the plugin's skills run the CLIs through uvx, never from PATH; the Quickstart does not
+# 8. the plugin's skills run the CLIs through the plugin's own runner (``uvx`` on the exact
+#    release pin), never from PATH; the Quickstart does not
 #    install a second Sidegraph beside the plugin
 #    see design/superpowers/specs/2026-10-11-stale-path-sidegraph-design.md (D1-D3)
 # ---------------------------------------------------------------------------
@@ -1066,8 +1067,9 @@ def test_cli_reference_has_the_rule_as_a_heading():
 
 
 def test_quickstart_does_not_install_the_cli_for_plugin_users():
-    """The plugin runs Sidegraph through uvx; ``uv tool install sidegraph`` beside it is
-    optional and updated by hand. The first-run pages show no bare ``sidegraph-`` command line
+    """The plugin runs its own Sidegraph (``uvx`` on the release pin); a persistent
+    ``uv tool install`` beside it is optional and updated by hand. The
+    first-run pages show no bare ``sidegraph-`` command line
     (a plugin-first reader has none on PATH) and no ``uv tool install sidegraph`` (Graphify's
     ``graphifyy`` pin is a different package)."""
     pages = [
@@ -1080,7 +1082,7 @@ def test_quickstart_does_not_install_the_cli_for_plugin_users():
     for page in pages:
         for line in _fenced_lines(page.read_text(encoding="utf-8")):
             if re.match(
-                r"uv tool install (sidegraph(?!y)|git\+https://github\.com/SantyagoSeaman/sidegraph)",
+                r"uv tool install (?:--python \S+ )?(sidegraph(?!y)|git\+https://github\.com/SantyagoSeaman/sidegraph)",
                 line,
             ):
                 problems.append(f"{page.name}: `{line}`")
@@ -1090,8 +1092,8 @@ def test_quickstart_does_not_install_the_cli_for_plugin_users():
     installation = (_ROOT / "docs" / "getting-started" / "installation.md").read_text(
         encoding="utf-8"
     )
-    source_ref = "git+https://github.com/SantyagoSeaman/sidegraph.git@main"
-    assert f"uv tool install {source_ref}" in installation
+    assert "uv tool install --python 3.13 sidegraph\n" in installation
+    assert "uv tool install git+" not in installation
     assert "uv tool upgrade sidegraph" in installation
     assert "### Option A — the CLI on your PATH\n" in installation
     assert "**Keep it updated. This step is part of the install.**" in installation
@@ -1423,3 +1425,181 @@ def test_readme_lists_every_cli_command():
     listed = _readme_details_names(f"All {len(commands)} CLI commands")
     assert sorted(listed) == commands
     assert f" · {len(commands)} CLI commands · " in _counted_line()
+
+
+# ---------------------------------------------------------------------------
+# 9. every host launches ``uvx --from sidegraph==X.Y.Z --python 3.13``; no page shows the
+#    retired bundled runtime, the ``@main`` source launch or a bare ``uvx`` install command
+#    see design/superpowers/specs/2026-11-04-pinned-pypi-launch-design.md §3, §9
+# ---------------------------------------------------------------------------
+
+# Launch forms that no longer exist. A sentence may still mention one when it says it is an
+# older install's.
+_RETIRED_LAUNCHES = (
+    "uvx --from git+",
+    "uv tool install git+",
+    "uv tool install --python 3.13 git+",
+    "sidegraph.git@main",
+    "${CLAUDE_PLUGIN_ROOT}/runtime",
+    "plugin/sidegraph/runtime",
+    "runtime/.venv",
+    "runtime/uv.lock",
+    "bundled runtime",
+    "plugin runtime",
+    "runtime bundled",
+)
+_RETIRED_EXCUSES = ("older", "earlier", "before 0.25.0", "unreleased")
+
+# Historical text keeps its commands: the migration guides describe the version they migrate to.
+_HISTORICAL_PAGES = ("migrating-to-",)
+
+
+def _doc_pages_with_readmes() -> list[Path]:
+    pages = [
+        p
+        for p in sorted((_ROOT / "docs").rglob("*.md"))
+        if not p.name.startswith(_HISTORICAL_PAGES)
+    ]
+    # The release snapshot renames CONTRIBUTING.public.md onto CONTRIBUTING.md before it runs
+    # these tests, so the twin is scanned only where it still exists.
+    twin = _ROOT / "CONTRIBUTING.public.md"
+    return [
+        *pages,
+        _ROOT / "README.md",
+        _ROOT / "SECURITY.md",
+        _ROOT / "CONTRIBUTING.md",
+        *([twin] if twin.exists() else []),
+        _ROOT / "plugin" / "sidegraph" / "README.md",
+        _ROOT / ".opencode" / "INSTALL.md",
+    ]
+
+
+def _sentences(paragraph: str) -> list[str]:
+    sentences: list[str] = []
+    for item in re.split(r"\n\s*[-*] ", paragraph):
+        flat = " ".join(item.split())
+        sentences.extend(re.split(r"(?<=[.!?:])\s+(?=[A-Z`*(\[])", flat))
+    return sentences
+
+
+def test_no_page_shows_a_retired_launch():
+    """The bundled runtime and the ``git+...@main`` launch are gone from every host. A sentence
+    that still names one must say it belongs to an older install; fenced commands never may."""
+    problems: list[str] = []
+    for page in _doc_pages_with_readmes():
+        text = page.read_text(encoding="utf-8")
+        rel = page.relative_to(_ROOT)
+        for line in _fenced_lines(text):
+            if any(marker in line for marker in _RETIRED_LAUNCHES):
+                problems.append(f"{rel}: fenced `{line[:80]}`")
+        for paragraph in re.split(r"\n\s*\n", text):
+            for sentence in _sentences(paragraph):
+                if not any(marker in sentence for marker in _RETIRED_LAUNCHES):
+                    continue
+                if any(excuse in sentence for excuse in _RETIRED_EXCUSES):
+                    continue
+                problems.append(f"{rel}: {sentence[:90]!r}")
+    assert problems == []
+
+
+_SIDEGRAPH_INSTALL = re.compile(
+    r"uvx\s+--from\s+(?:sidegraph\b|\./|\S*\.whl)|uv\s+tool\s+install\s+(?:--\S+\s+\S+\s+)*sidegraph(?!y)\b"
+)
+
+
+def test_no_page_shows_a_bare_uvx_without_python():
+    """A bare ``uvx --from sidegraph`` or ``uv tool install sidegraph`` lets uv pick the newest
+    interpreter, and the pinned closure has no wheels for a Python released after the cut. Every
+    Sidegraph install or ``uvx`` command in code names ``--python 3.13``."""
+    problems: list[str] = []
+    for page in _doc_pages_with_readmes():
+        text = page.read_text(encoding="utf-8")
+        rel = page.relative_to(_ROOT)
+        code = [*_fenced_lines(text), *re.findall(r"`([^`\n]+)`", text)]
+        for line in code:
+            if _SIDEGRAPH_INSTALL.search(line) and "--python 3.13" not in line:
+                problems.append(f"{rel}: `{line[:90]}`")
+    assert problems == []
+
+
+def test_the_python_flag_check_bites():
+    """The check above sees the forms it exists for."""
+    for line in (
+        "uvx --from sidegraph sidegraph-init",
+        "uvx --from sidegraph==0.24.1 sidegraph-doctor",
+        "uv tool install sidegraph",
+        "uvx --from ./dist/sidegraph-0.24.1-py3-none-any.whl sidegraph-doctor --help",
+    ):
+        assert _SIDEGRAPH_INSTALL.search(line) and "--python 3.13" not in line
+    assert not _SIDEGRAPH_INSTALL.search("uvx --from graphifyy==0.9.6 graphify update .")
+    assert not _SIDEGRAPH_INSTALL.search("uv tool install graphifyy")
+
+
+def test_hooks_guard_text_is_echo():
+    """The shipped command guard is ``|| echo '{}'``; the reference's guard section says so."""
+    text = (_ROOT / "docs" / "reference" / "hooks.md").read_text(encoding="utf-8")
+    section = text.split("## The command guard", 1)[1].split("\n## ", 1)[0]
+    assert "echo '{}'" in section
+    assert "printf" not in section
+
+
+def test_installation_names_the_uv_floor():
+    """The plugin launches need uv 0.6.10 or newer; the install page says so."""
+    text = (_ROOT / "docs" / "getting-started" / "installation.md").read_text(encoding="utf-8")
+    assert "0.6.10" in text
+
+
+@pytest.mark.parametrize("page", ["docs/privacy.md", "SECURITY.md"])
+def test_privacy_names_the_interpreter_download(page: str):
+    """On a machine without Python 3.13 the first start fetches a managed CPython from
+    python-build-standalone; the pages that list what the plugin fetches name it."""
+    assert "python-build-standalone" in (_ROOT / page).read_text(encoding="utf-8")
+
+
+def test_installation_names_the_pin_and_the_platforms():
+    """The pinned package supports the four platforms of the wheel-coverage gate; Intel Macs are
+    named as unsupported and the page says why a user constraint cannot help."""
+    text = " ".join(
+        (_ROOT / "docs" / "getting-started" / "installation.md").read_text(encoding="utf-8").split()
+    )
+    assert "sidegraph==X.Y.Z" in text
+    assert "Intel Mac" in text
+    assert "cryptography" in text
+
+
+_RELEASING = _ROOT / "docs" / "reference" / "releasing.md"
+
+
+def test_releasing_describes_the_branch_tag_publish_promote_order():
+    """Release order: cut to ``release/vX.Y.Z``, branch CI, tag, PyPI, promote. Nothing pushes the
+    public ``main`` before PyPI serves the version, and a failed publish no longer deletes a tag."""
+    text = " ".join(_RELEASING.read_text(encoding="utf-8").split())
+    for needle in (
+        "release/vX.Y.Z",
+        "tools/wait-branch-ci.sh",
+        "tools/promote-release.sh vX.Y.Z",
+        "SIDEGRAPH_PROMOTE_URL",
+        "tools/pin_public_dependencies.py",
+        "uv lock --upgrade",
+        "pip-audit",
+        "X.Y.Zrc1",
+        "sidegraph-rc",
+        "--compare",
+        "py3-none-any",
+    ):
+        assert needle in text, f"releasing.md no longer mentions {needle!r}"
+    for stale in (
+        "plugin/sidegraph/runtime",
+        "GROK_PUBLIC_FORM",
+        "its tag deleted",
+        'tools/release-public.sh "release: vX.Y.Z" --push`. This creates and pushes the public',
+    ):
+        assert stale not in text, f"releasing.md still says {stale!r}"
+
+
+def test_releasing_desktop_provenance_names_the_uv_archive():
+    """The desktop smoke's provenance for any host's install is ``sidegraph-X.Y.Z.dist-info`` in
+    the uv archive; a PyPI install has no ``direct_url.json`` to read."""
+    text = " ".join(_RELEASING.read_text(encoding="utf-8").split())
+    assert "sidegraph-X.Y.Z.dist-info" in text
+    assert "archive_info" not in text

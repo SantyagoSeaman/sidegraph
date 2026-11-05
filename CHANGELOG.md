@@ -7,6 +7,83 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-11-05
+
+### Changed (Contract change)
+
+- **Every host launches an exact PyPI pin.** The MCP servers, hooks and skills of the Claude
+  Code, Grok Build, Codex and Muse plugins, and the OpenCode MCP server, run
+  `uvx --from sidegraph==X.Y.Z --python 3.13 <entry point>` instead of
+  `uvx --from git+…@main`, with `X.Y.Z` the plugin's own version. The published package now pins
+  every one of its dependencies to an exact version, the set the release's tests ran against, so
+  nothing floats between sessions and a new Sidegraph reaches a plugin when the plugin updates,
+  not at each session start. The first session after an install or an update installs the pinned
+  packages into uv's cache (and a managed CPython 3.13 when the machine has none); later starts
+  need no network. The Claude Code and Grok Build hooks no longer `cd` in a shell: they pass
+  `--repo-root`, which moves to the project root inside the entry point. Their manifests also stop
+  setting `SIDEGRAPH_DIR` and `SIDEGRAPH_GRAPH`, so a value exported in your shell now steers
+  them as it steers the CLIs; the Codex hooks keep their `cd`, and the Muse hook still sets both
+  variables. The Codex plugin asks you to trust its hooks again after each update, because the version
+  is part of each hook command. Plugin installs from before this release keep launching `@main`
+  until they are updated; a dependency fix reaches users with the next Sidegraph release, not
+  before. The documentation's `uvx` and `uv tool install` commands now install from PyPI and name
+  `--python 3.13`.
+- **uv 0.6.10 or newer** is required for the plugin launches. The pinned package has builds for
+  macOS on Apple silicon, Linux (glibc) on x86-64 and arm64, and Windows on x86-64. **Intel Macs
+  and musl Linux are not supported by any install route**: the pinned `cryptography` has no Intel
+  Mac wheel, `uvx` would try a source build that needs a Rust toolchain, and an exact pin leaves
+  no room for a constraint of your own. See
+  [troubleshooting](docs/guides/troubleshooting.md#the-plugins-first-start).
+- **The release order changed.** The cut pushes a public `release/vX.Y.Z` branch, waits for its CI
+  and tags it; the tag publishes to PyPI; only then does `tools/promote-release.sh` write the
+  plugin's lock and fast-forward the public `main`. See
+  [releasing](docs/reference/releasing.md).
+- The hook entry points accept `--repo-root`, and their usage text no longer names only Claude
+  Code and Codex.
+
+### Fixed
+
+- **Subagents run in Claude Code's auto mode.** The `PreToolUse` hook no longer adds records to a
+  subagent's brief when the session is in Claude Code's auto mode (`permission_mode: auto`). That
+  mode reviews a call before hooks run and refuses an input a hook changed, so every `Agent` call
+  whose brief named a file with records needed a second round trip, and a call whose records
+  mentioned credentials could never run at all. The call now goes through unchanged. The subagent
+  still gets the `SubagentStart` brief and the records of the files it reads. Grok Build runs
+  hooks before its permission gate, so its brief is unchanged.
+- Accepting a decision no longer accepts two competing successors of one fact. When a merge
+  brings two branches' replacements of the same fact under one proposed decision as its
+  evidence, ratifying the decision now refuses with a supersession conflict and writes
+  nothing, the same answer accepting the second fact on its own already gave. Drop one of the
+  two facts, then ratify the decision again.
+- `retire_decision` with `duplicate_of` no longer strands an accepted fact that reached
+  retrieval only through the duplicate. Such a fact (no anchor of its own that retrieval serves
+  it through, no other accepted, open decision that is global or has one) gains the duplicate's
+  anchors (the kept record's when the duplicate has none, such as a global decision or one bound
+  only to a community, domain or tag), so `get_task_context` still
+  shows it and `sidegraph-doctor` no longer reports it as `dangling-record`. The result lists
+  those facts in a new `facts_anchored` field. When no anchor can keep such a fact reachable,
+  the retirement is refused, naming the fact to anchor first.
+- `retire_decision` with `duplicate_of` now copies the duplicate's orphaned anchors to the kept
+  record (where it has no anchor to that entity) instead of dropping them. Without a graph every
+  anchor is orphaned, so before this nothing was copied and `anchors_added` came back empty with
+  no reason given. The copies heal on the next sync once their entity is in the graph, and the
+  result lists them, each with a `reason`, in a new `anchors_orphaned` field. With a graph
+  loaded, a dead anchor is not copied; one naming an existing file the graph does not index
+  is, since exact-file retrieval still serves it.
+- Ratifying a stale proposal no longer creates a second open head after a merge. The check
+  for a live successor followed one branch at a time and gave up after 64 links, so a chain
+  that forked, or ran past 64 revisions, could hide its live head. It now looks at every
+  successor branch with no length limit (a cycle in the links ends the walk), and the same
+  walk names the live successor in the "no longer current" refusal.
+- **A domain split is now visible instead of silent.** One domain replaced by two or more
+  live domains is a supported layout, and a merge of two branches that each replaced the same
+  domain under different slugs can leave one. `ratify` still accepts both, and now says so,
+  naming every part, for any domain (before, only a domain covered by the domain snapshot
+  got a note). `sidegraph-doctor` reports it as the new `domain-split` finding, which
+  `--check` does not escalate, and `sidegraph-verify` still has nothing to say about it. A
+  part counts only while its chain reaches an accepted domain, so a dropped part stops
+  counting.
+
 ## [0.24.0] — 2026-11-03
 
 ### Changed (Contract change)
@@ -2892,7 +2969,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.21.1...v0.22.0

@@ -8,7 +8,7 @@ body:
       label: What happened
       description: What you ran, what you expected, what you got.
       placeholder: |
-        Command: uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-verify
+        Command: uvx --from sidegraph==0.25.0 --python 3.13 sidegraph-verify
         Expected: exit 0
         Got: ...
     validations:

@@ -134,7 +134,11 @@ re-derives both parts from their rules and freezes them. A split that arrives th
 merge (two branches each superseded the same covered domain) is the same: neither successor
 holds any of the frozen membership until that refresh names both, and `sidegraph-sync` and
 `sidegraph-doctor` report it as a split. `supersede_domain` itself refuses a second successor
-while the first is pending.
+while the first is pending. A merged split is accepted and reported by `ratify`, which names
+every part. For a domain the snapshot does not cover, `sidegraph-doctor` shows `domain-split`,
+which `--check` does not fail; for a covered one it shows `snapshot-split` (above), and `--check`
+still exits `2` on it until the refresh. Use `sidegraph-ratify --drop <id>` to keep a single
+replacement.
 
 ## Domains under a snapshot
 
@@ -155,5 +159,6 @@ include a note for frozen membership or a split.
 - [`docs/guides/naming-your-domains.md`](../../../../docs/guides/naming-your-domains.md) —
   background on bootstrap idempotency, mass-drop recovery, and the CLI equivalents
   (`sidegraph-domains add`, `sidegraph-ratify`).
-- CLI commands run as `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main <command>`, at the session's version, never the copy on `PATH`:
+- CLI commands run as `uvx --from sidegraph==0.25.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
   [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
+  Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.

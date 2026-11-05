@@ -37,10 +37,15 @@ What was checked on macOS:
 
 Windows was not checked, and Grok Build is not part of the release gate.
 
-The first session after installing, and the first after each Sidegraph release, takes a few
-seconds longer: the `SessionStart` hook downloads and builds Sidegraph (5–7 seconds measured on
-its own and about 10 inside Grok, where Grok's own limit for a hook is 5 seconds; the plugin
-gives it 30). Later hooks take well under a second.
+The plugin launches the published Sidegraph at its own version (`uvx --from sidegraph==X.Y.Z
+--python 3.13`), which changes only when the plugin updates. The first session after
+installing, and the first after each plugin update, takes longer: uv installs that version's
+pinned dependencies from PyPI into its cache (nothing is built from source, and a
+machine without Python 3.13 also downloads a managed one). Grok waits only about two seconds for
+an MCP server, so that first session can start without the Sidegraph tools; start a new session.
+The `SessionStart` hook has the plugin's 30 seconds. Later starts need no network and hooks take
+well under a second. If a start fails, see
+[the plugin's first start](../guides/troubleshooting.md#the-plugins-first-start).
 
 If the Hooks tab (`/hooks`) shows no Sidegraph hooks, open the Plugins tab (`/plugins`). A
 plugin marked `[disabled]` loads nothing; turn it on with `grok plugin enable sidegraph`, or

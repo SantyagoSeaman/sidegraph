@@ -1,6 +1,6 @@
 # Privacy
 
-Last updated: 2026-11-03. This page covers the Sidegraph plugin, its MCP server, its hooks and
+Last updated: 2026-11-04. This page covers the Sidegraph plugin, its MCP server, its hooks and
 its command-line tools. The [security policy](../SECURITY.md) has the technical detail behind it.
 
 ## What Sidegraph collects
@@ -27,8 +27,9 @@ no analytics, and it sends no telemetry anywhere.
 - **Code graph.** Graphify writes `graphify-out/` in your repository; it can be deleted and
   rebuilt.
 - **Session state.** One small file, `sidegraph/launch-commit` under your user cache directory
-  (`$XDG_CACHE_HOME`, or `~/.cache`): the runtime commit the last session started from. It is
-  written when Sidegraph runs from its public repository's `main` branch, as the plugin does.
+  (`$XDG_CACHE_HOME`, or `~/.cache`): the commit the last session started from. It is written
+  only when Sidegraph runs from its public repository's `main` branch, as plugin installs older
+  than 0.25.0 do. Current plugins launch a published release and do not write it.
 - **Graph refresh log.** If you install the graph-refresh git hook, it logs Graphify's output to
   `sidegraph-graph-refresh.log` in the repository's `.git` directory.
 - **Transcripts.** At the end of a turn, the Stop hook reads the session's local transcript to
@@ -42,13 +43,14 @@ effort, not a guarantee: do not ask the agent to record secrets.
 The Sidegraph runtime opens no network connections of its own. Network access happens only
 around it:
 
-- **Starting Sidegraph.** The plugin starts the MCP server and the SessionStart hook with uv
-  from Sidegraph's public GitHub repository, so at each session start uv contacts GitHub to check
-  for a newer version and downloads it, with its dependencies from their package registries, when
-  needed (the plugin tracks a
-  [mutable branch](getting-started/installation.md#mutable-development-references)). The other hooks use the version that session start recorded, from uv's cache; without
-  that record they check GitHub too. The CLI commands the skills run always check GitHub's
-  `main`.
+- **Starting Sidegraph in any plugin.** Every plugin starts Sidegraph with
+  `uvx --from sidegraph==X.Y.Z --python 3.13`, naming its own version. The published package pins
+  every dependency to an exact version. The first session after an install or an update has uv
+  download that package and those dependencies from PyPI into uv's cache, and, on a machine
+  without Python 3.13, a uv-managed CPython 3.13 from python-build-standalone on GitHub, which the
+  pins do not cover. Nothing is fetched on later starts, and the skills' CLI commands run the same
+  way. A CLI command run as `uvx --from sidegraph --python 3.13 <command>` checks PyPI for the
+  latest release on each run.
 - **Graphify.** The setup step installs Graphify from PyPI. `sidegraph-domains snapshot
   --build-with` downloads the Graphify release you name, through uv, when you run it.
 - **Your agent.** What Sidegraph returns to your agent becomes part of the conversation, which
@@ -65,7 +67,7 @@ graph-refresh git hook and its git setting, because the hook rebuilds `graphify-
 commits:
 
 ```text
-uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-init --remove-hooks
+uvx --from sidegraph --python 3.13 sidegraph-init --remove-hooks
 ```
 
 Then delete `.sidegraph/` and `graphify-out/` from the repository; records already committed stay

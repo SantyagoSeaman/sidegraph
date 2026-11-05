@@ -5,6 +5,7 @@ the full matrix only off Draft, one aggregate gate.
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,7 +41,7 @@ def test_pull_request_types_include_ready_for_review() -> None:
         "reopened",
         "ready_for_review",
     ]
-    assert events["push"] == {"branches": ["main"]}
+    assert events["push"] == {"branches": ["main", "release/**"]}
     assert "workflow_call" in events
 
 
@@ -166,3 +167,76 @@ def test_slim_jobs_fit_the_slim_time_cap() -> None:
         for job in wf["jobs"].values():
             if job["runs-on"] == "ubuntu-slim":
                 assert job["timeout-minutes"] <= 15
+
+
+def test_sdk_compatibility_skips_a_pinned_package() -> None:
+    steps = _load()["jobs"]["sdk-compatibility"]["steps"]
+    # The checkout comes first: the skip step reads pyproject.toml from the work tree.
+    assert steps[0]["uses"].startswith("actions/checkout@")
+    skip = steps[1]
+    assert skip["name"] == "Skip on a pinned package"
+    assert "tomllib" in skip["run"]
+    assert "pinned package: the SDK range is tested in the source repository" in skip["run"]
+    gate = f"steps.{skip['id']}.outputs.pinned != 'true'"
+    assert "if" not in skip
+    for step in steps[2:]:
+        assert step.get("if") == gate, step.get("name")
+
+
+def _skip_step_script() -> str:
+    """The Python the `Skip on a pinned package` step feeds to `python3 -` (its heredoc body)."""
+    run = _load()["jobs"]["sdk-compatibility"]["steps"][1]["run"]
+    start = run.index("<<'PY'\n") + len("<<'PY'\n")
+    return run[start : run.rindex("\nPY")] + "\n"
+
+
+def _run_skip_step(tmp_path: Path, dependencies: list[str]) -> tuple[str, str]:
+    """Execute the step's script in a tree holding a pyproject.toml with these dependencies.
+
+    Returns (what the step wrote to GITHUB_OUTPUT, what it printed).
+    """
+    quoted = ", ".join(f'"{entry}"' for entry in dependencies)
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\nname = "x"\nversion = "1"\ndependencies = [{quoted}]\n', encoding="utf-8"
+    )
+    output = tmp_path / "github_output"
+    output.write_text("", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-I", "-"],
+        input=_skip_step_script(),
+        cwd=tmp_path,
+        env={**os.environ, "GITHUB_OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return output.read_text(encoding="utf-8"), result.stdout
+
+
+SKIP_MESSAGE = "pinned package: the SDK range is tested in the source repository"
+
+
+def test_skip_step_runs_the_sdk_job_on_a_ranged_package(tmp_path: Path) -> None:
+    written, printed = _run_skip_step(tmp_path, ["pydantic>=2.9", "fastmcp>=3.4.10,<4"])
+    assert written == "pinned=false\n"
+    assert SKIP_MESSAGE not in printed
+
+
+def test_skip_step_runs_the_sdk_job_when_one_dependency_is_ranged(tmp_path: Path) -> None:
+    written, _ = _run_skip_step(tmp_path, ["pydantic==2.9.0", "fastmcp>=3.4.10,<4"])
+    assert written == "pinned=false\n"
+
+
+def test_skip_step_skips_a_fully_pinned_package_with_markers(tmp_path: Path) -> None:
+    written, printed = _run_skip_step(
+        tmp_path, ["pydantic==2.9.0", "colorama==0.4.6 ; sys_platform == 'win32'"]
+    )
+    assert written == "pinned=true\n"
+    assert printed.strip() == SKIP_MESSAGE
+
+
+def test_skip_step_does_not_count_an_equals_sign_inside_a_marker(tmp_path: Path) -> None:
+    written, _ = _run_skip_step(
+        tmp_path, ["pydantic==2.9.0", "colorama>=0.4 ; sys_platform == 'win32'"]
+    )
+    assert written == "pinned=false\n"

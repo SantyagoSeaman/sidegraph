@@ -2,7 +2,7 @@
 
 > **Start here:** Use this page to inspect the implementation contract. For installation, follow the [host setup paths](../README.md). [Glossary](../concepts/glossary.md).
 
-For commands following `@main`, see [pinning mutable development references](../getting-started/installation.md#mutable-development-references).
+For pinning a version, see [pinned releases](../getting-started/installation.md#mutable-development-references).
 
 ## Hooks (GA)
 

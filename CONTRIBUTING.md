@@ -27,6 +27,10 @@ replaces its tree wholesale from the upstream working repository. In practice:
   `status:awaiting-release` label until the release that contains it.
 - **Your change comes back with the next release.** The release replaces this tree, the
   PR is closed with a link to that release, and the CHANGELOG entry describes the change.
+- **Dependencies are pinned here.** This tree's `pyproject.toml` lists every dependency at one
+  exact version, the set the release tested and the published package pins; upstream declares
+  ranges. A change to dependencies is ported upstream like any other, and the next release
+  pins it again.
 
 ## Development setup
 
@@ -59,8 +63,8 @@ Use an area-prefixed imperative commit subject, for example `store: preserve his
 and sign off each commit as described below.
 
 CI runs lint on every PR push. On a pull request that is ready for review (not a draft),
-on `main` and before publishing, it also runs the full suite on Linux with Python 3.13 and
-3.14 and a selected native Windows core/MCP suite on both versions; see
+on `main`, on release branches and before publishing, it also runs the full suite on Linux with Python 3.13 and
+3.14 and a selected native Windows core/MCP suite on Python 3.13; see
 [platform coverage](docs/getting-started/installation.md#platform-coverage). If your change
 touches paths, permissions, subprocesses, or shell commands, describe any additional
 platform checks you performed.

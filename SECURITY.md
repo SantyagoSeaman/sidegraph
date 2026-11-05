@@ -53,10 +53,16 @@ scope too.
 - **Local execution.** The runtime runs with your user's permissions, makes no outbound
   network calls of its own, and is started by your agent host and, if you install them, by
   git hooks.
-- **Supply chain.** The plugin and the default runtime recipe install from
-  `git+https://github.com/SantyagoSeaman/sidegraph.git@main`, a moving reference. Teams that
-  need a fixed version pin a release; see
-  [mutable development references](docs/getting-started/installation.md#mutable-development-references).
+- **Supply chain.** Every plugin launches the published package at its own version,
+  `uvx --from sidegraph==X.Y.Z --python 3.13`. The release publishes to PyPI from a tagged public
+  commit through Trusted Publishing, and the package pins every dependency to an exact version,
+  the set the release's tests ran against; the release refuses a closure in which a compiled
+  dependency lacks a prebuilt wheel for a supported platform. The pins freeze the dependency set: a fix in a dependency reaches
+  you with the next Sidegraph release, so the release refreshes the lock and audits it for known
+  advisories before it is cut. The plugin directory also carries a `uv.lock` of the same set, for
+  tools that read a lock beside the manifest; Claude Code does not apply it. Teams that
+  need a fixed version in their own commands name a release; see
+  [pinned releases](docs/getting-started/installation.md#mutable-development-references).
 
 ## Data boundary — what this tool touches
 
@@ -89,14 +95,18 @@ provider according to your repository's data policy. The runtime data boundary i
   `sidegraph-init --remove-hooks` takes the blocks, the helper and that key out again. The
   SessionStart hook writes one 40-character commit id to
   `${XDG_CACHE_HOME:-~/.cache}/sidegraph/launch-commit`, and only when the running package was
-  installed from the canonical `git+https://github.com/SantyagoSeaman/sidegraph.git@main`. That
-  covers the plugin and the manual `uvx --from …@main` recipe. A PyPI, tag, SHA or editable
-  install never writes it. Beyond those, the only filesystem writes are the standard config
+  installed from the public repository's `main` branch. That covers plugin installs older than
+  0.24.1, which launched `@main`, and a manual `git+…@main` install. Current plugins, a PyPI, tag, SHA or editable
+  install never write it. Beyond those, the only filesystem writes are the standard config
   snippets you install yourself (`.mcp.json`, hook entries). See
   [`docs/reference/store-format.md`](docs/reference/store-format.md) for the full layout.
 - **Network:** the Sidegraph runtime makes no outbound network calls and sends no remote
   telemetry. Package installation, plugin installation, and updates download dependencies
-  from their configured registries or repositories. Your MCP client controls onward use of
+  from their configured registries or repositories. What a plugin fetches, and
+  when: on the first start after an install or an update, the Sidegraph package and its
+  exact-pinned dependencies from PyPI, into uv's cache; on a machine without Python 3.13, also a
+  uv-managed CPython 3.13 from python-build-standalone on GitHub, which the pins do not cover;
+  nothing on later starts. Your MCP client controls onward use of
   tool results. Local retrieval telemetry is recorded in the gitignored `index.db` by default (which records
   were shown and which files were touched, never uploaded); set `SIDEGRAPH_TELEMETRY=off` to
   stop new recording. The *optional* semantic documentation pass is executed by the
@@ -125,6 +135,6 @@ The exact runtime rules are in
 | Latest release | Yes |
 | Any earlier release | No: upgrade to the latest release |
 
-Sidegraph is pre-1.0, so fixes land only in a new release. Plugin and `@main` installs pick a
-fix up once you update them after the release that contains it; installs pinned to a PyPI version, tag or commit
-must move their pin.
+Sidegraph is pre-1.0, so fixes land only in a new release. Plugin installs pick a
+fix up once you update the plugin after the release that contains it; installs pinned to a PyPI
+version, tag or commit must move their pin.

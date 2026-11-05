@@ -24,6 +24,7 @@ import sys
 from ..hot_index import HotIndex
 from .diagnostics import HookDiagnostics
 from .hooks import STANDING_SEARCH_INSTRUCTION, _read_payload, refuse_arguments
+from .project_anchor import anchor_to_project, take_repo_root_flag
 
 _EVENT = "SubagentStart"
 
@@ -114,6 +115,8 @@ def subagent_start() -> None:
     index it cannot use, or a store with nothing anchored to code prints ``{}``.
     see design/superpowers/specs/2026-10-03-subagent-start-brief-design.md (D1, D5)
     """
+    if take_repo_root_flag(sys.argv):
+        anchor_to_project()
     if len(sys.argv) > 1:
         refuse_arguments(
             "sidegraph-subagent-start", "Prints the memory brief for a starting subagent."

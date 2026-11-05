@@ -3,7 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const RUNTIME_SOURCE = "git+https://github.com/SantyagoSeaman/sidegraph.git@main";
+const RUNTIME_SOURCE = "sidegraph==0.25.0";
 const SKILLS = fileURLToPath(new URL("./plugin/sidegraph/skills/", import.meta.url));
 
 async function loadSkills() {
@@ -46,8 +46,7 @@ export default Plugin.define({
         if (editor.get("sidegraph") === undefined) {
           editor.set("sidegraph", {
             type: "local",
-            command: ["uvx", "--from", RUNTIME_SOURCE, "sidegraph-mcp", "--repo-root"],
-            environment: { SIDEGRAPH_DIR: ".sidegraph", SIDEGRAPH_GRAPH: "graphify-out/graph.json" },
+            command: ["uvx", "--from", RUNTIME_SOURCE, "--python", "3.13", "sidegraph-mcp", "--repo-root"],
           });
         }
       });

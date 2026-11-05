@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import sqlite3
 
 import pytest
 
@@ -488,3 +489,53 @@ def test_hop_a_record_anchored_to_claude_md_itself_is_still_shown(project, monke
     block = _block(out, "Read CLAUDE.md first.")
     assert _headers(block) == ["CLAUDE.md:"]
     assert record.id in block
+
+
+# -- Claude Code auto mode: the call is left unchanged ------------------------------------------
+
+
+def _agent_in_mode(monkeypatch, capsys, project: Project, mode: str | None, env=None) -> dict:
+    """The hook's output for an ``Agent`` call naming an anchored file, with the payload's
+    ``permission_mode`` set to ``mode`` (the key is left out for ``None``)."""
+    payload = _payload("Agent", description="d", prompt="Fix src/a.py.")
+    if mode is not None:
+        payload["permission_mode"] = mode
+    return _run(monkeypatch, capsys, project, payload, env)
+
+
+def _rows_written(project: Project) -> int:
+    """How many journal and delivery rows the index holds (a table never created counts 0)."""
+    tables = ("retrieval_events", "retrieval_shows", "delivery_occurrences", "delivery_placements")
+    conn = sqlite3.connect(project.store_dir / "index.db")
+    try:
+        have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        return sum(
+            conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables if t in have
+        )
+    finally:
+        conn.close()
+
+
+def test_auto_mode_leaves_the_agent_call_unchanged(project, monkeypatch, capsys):
+    """Auto mode reviews a call before hooks run and refuses an input a hook changed, so the hook
+    prints nothing for it. Red while the hook ignores ``permission_mode``."""
+    project.record("src/a.py", "Gotcha of a")
+    assert _agent_in_mode(monkeypatch, capsys, project, "auto") == {}
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "bypassPermissions", "plan", None])
+def test_every_other_permission_mode_still_gets_the_block(project, monkeypatch, capsys, mode):
+    record = project.record("src/a.py", "Gotcha of a")
+    out = _agent_in_mode(monkeypatch, capsys, project, mode)
+    assert record.id in _block(out, "Fix src/a.py.")
+
+
+def test_auto_mode_writes_no_journal_or_delivery_rows(project, monkeypatch, capsys):
+    """A brief that was not delivered is not journaled. The control run in ``default`` mode
+    proves the same setup does write rows."""
+    project.record("src/a.py", "Gotcha of a")
+    env = {"SIDEGRAPH_TELEMETRY": "on"}
+    assert _agent_in_mode(monkeypatch, capsys, project, "auto", env) == {}
+    assert _rows_written(project) == 0
+    _agent_in_mode(monkeypatch, capsys, project, "default", env)
+    assert _rows_written(project) > 0

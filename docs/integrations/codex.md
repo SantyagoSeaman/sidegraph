@@ -25,22 +25,22 @@ that belongs to one repository. Pin the working directory rather than relying on
 command = "bash"
 args = [
   "-lc",
-  "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
+  "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-mcp"
 ]
 ```
 
 Register the same thing with the CLI:
 
 ```bash
-codex mcp add sidegraph -- bash -lc "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
+codex mcp add sidegraph -- bash -lc "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-mcp"
 ```
 
 From a source checkout (contributors; see
 [installation: from source](../getting-started/installation.md#option-d--from-source-contributors)),
-replace `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main` here and in the
-hooks below with `uv run --project '/ABSOLUTE/PATH/TO/sidegraph'`. `@main` is a mutable ref; to
-pin it, see
-[mutable development references](../getting-started/installation.md#mutable-development-references).
+replace `uvx --from sidegraph --python 3.13` here and in the
+hooks below with `uv run --project '/ABSOLUTE/PATH/TO/sidegraph'`. These recipes run the latest
+release; to pin one, write `sidegraph==X.Y.Z`, see
+[pinned releases](../getting-started/installation.md#mutable-development-references).
 
 `SIDEGRAPH_DIR` (default `.sidegraph`) and `SIDEGRAPH_GRAPH` (default
 `graphify-out/graph.json`) are the same two environment variables the Claude Code integration
@@ -60,7 +60,7 @@ Project-scoped, at `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -70,7 +70,7 @@ Project-scoped, at `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stop || printf '{}\\n'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -80,7 +80,7 @@ Project-scoped, at `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-subagent-start || printf '{}\\n'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-subagent-start || printf '{}\\n'"
           }
         ]
       }
@@ -165,17 +165,19 @@ without uninstalling; unchanged definitions keep their trust even when the cache
 moves. A never-approved definition (observed at first install) is `untrusted`; a previously
 approved definition whose command changed is `modified` and needs review again through
 `/hooks`. Those status names are the
-observed 0.162.1 metadata. Updating never grants approval to a changed command. The runtime
-launcher's `@main` does not update cached skills, manifests or hook definitions, so this
-marketplace update remains necessary. Update Codex itself if this command is unavailable.
+observed 0.162.1 metadata. Updating never grants approval to a changed command. Each hook command names the plugin's
+Sidegraph version, so every release changes the commands and asks for review once; the marketplace
+update is also what moves the Sidegraph version. Update Codex itself if this command is unavailable.
 
-**How the plugin launches.** The MCP server and SessionStart resolve the configured package source. Repeated hooks use the [shared launch-commit contract](../reference/hooks.md#the-launch-commit-file). See the [launcher reference](../reference/codex-wiring.md) when adapting the commands.
+**How the plugin launches.** The MCP server and every hook run `uvx --from sidegraph==X.Y.Z
+--python 3.13 <entry point>`, with `X.Y.Z` the plugin's version. See the
+[launcher reference](../reference/codex-wiring.md) when adapting the commands.
 
 **Native Windows.** The MCP server needs no shell: `codex/mcp.json` starts `uvx` (`uv` in the
 development manifest) directly with an argument list. Each hook carries a second key,
-`commandWindows`, a PowerShell command that does the same job as the POSIX one: `Stop` and
-`SubagentStart` read the launch-commit file; all of them move to the git top-level, set the
-environment variables, run `uvx`, and print the same fallback message when the launch fails.
+`commandWindows`, a PowerShell command that does the same job as the POSIX one: it moves to the
+git top-level, sets the host variable, runs `uvx`, and prints the same fallback message when the
+launch fails.
 Codex picks the key on
 Windows, where it runs a hook with `pwsh` when PowerShell 7 is installed and with Windows
 PowerShell 5.1 otherwise; the commands are written so 5.1 parses them. So on native Windows the

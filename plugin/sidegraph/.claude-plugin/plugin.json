@@ -1,7 +1,7 @@
 {
   "name": "sidegraph",
   "displayName": "Sidegraph",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code.",
   "author": { "name": "SantyagoSeaman", "url": "https://github.com/SantyagoSeaman" },
   "homepage": "https://github.com/SantyagoSeaman/sidegraph",
@@ -9,7 +9,14 @@
   "documentationUrl": "https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/README.md",
   "supportUrl": "https://github.com/SantyagoSeaman/sidegraph/issues",
   "privacyPolicyUrl": "https://github.com/SantyagoSeaman/sidegraph/blob/main/docs/privacy.md",
+  "termsOfServiceUrl": "https://github.com/SantyagoSeaman/sidegraph/blob/main/LICENSE",
   "icon": "./.claude-plugin/icon.png",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "decision-log", "adr", "knowledge-graph", "team-memory"]
+  "keywords": ["mcp", "decision-log", "adr", "knowledge-graph", "team-memory"],
+  "classification": {
+    "object_acted_on": ["code", "reference-docs"],
+    "work_department": "engineering",
+    "industry": "software-saas",
+    "subject": "computing"
+  }
 }

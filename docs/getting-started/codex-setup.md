@@ -27,23 +27,23 @@ codex plugin marketplace add SantyagoSeaman/sidegraph
 codex plugin add sidegraph@sidegraph
 ```
 
-The plugin follows the public repository's `main`, which advances at releases. To pin a
-version for reproducible environments, see
-[how to pin mutable development references](installation.md#mutable-development-references).
+The plugin comes from the public repository's `main`, which advances at releases. The Sidegraph it
+runs is the release the plugin version names: every command names that exact version, so it changes
+only when you update the plugin. See [pinned releases](installation.md#mutable-development-references).
 
 These are shell commands, not slash commands typed inside a Codex session. The marketplace
 source takes `owner/repo[@ref]`, a local path or a Git URL.
 
 Installs the MCP server, the `SessionStart`/`Stop`/`SubagentStart` hooks, and all 14 skills in one step,
-pointed at `SIDEGRAPH_DIR=.sidegraph`/`SIDEGRAPH_GRAPH=graphify-out/graph.json` by default.
-It installs from the public Git repository: the MCP server and `SessionStart`
-run `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main` under the hood, and
-`Stop` and `SubagentStart` start from the commit `SessionStart` resolved. See
+using the store at `.sidegraph/` and the graph at `graphify-out/graph.json` by default.
+The MCP server and the three hooks run `uvx --from sidegraph==X.Y.Z --python 3.13 <entry point>`
+under the hood, with `X.Y.Z` the plugin's version; that PyPI package pins every one of its
+dependencies. See
 [the plugin install path](../integrations/codex.md#plugin-install-path) for exactly what
 gets registered and the cwd-pinning details, and what has and hasn't been verified live.
 
 The plugin needs no other install. The CLI on your `PATH`
-([`uv tool install` from `main`](installation.md#option-a--the-cli-on-your-path)) is
+([`uv tool install` from PyPI](installation.md#option-a--the-cli-on-your-path)) is
 optional, for typing `sidegraph-*` commands yourself. It never updates itself: after every
 release run `uv tool upgrade sidegraph`. SessionStart says when it differs from the session's version
 ([`path-skew`](../guides/troubleshooting.md#path-skew)), and the plugin's skills ignore it
@@ -53,7 +53,8 @@ Trust the hooks: start an interactive `codex` session in the repo. Review the ne
 definitions (`SessionStart`, `Stop`, `SubagentStart`) through Codex's startup warning or
 `/hooks`, then approve them. Installation alone does not grant trust. Skip or decline and
 the MCP registration remains available, but automatic context, the capture reminder and
-the subagent brief stay silent. A new or changed hook definition needs a fresh review.
+the subagent brief stay silent. A new or changed hook definition needs a fresh review, and the version is part of each hook
+command, so every plugin update asks once.
 
 Skip to [Verify](#verify) once installed.
 
@@ -70,7 +71,6 @@ uninstall/reinstall. Unchanged hook definitions keep their approval even when th
 changes. Review new or changed definitions through the startup warning or `/hooks`; updating
 does not approve them for you. If your Codex version lacks this command, update Codex first.
 
-The runtime's `@main` reference does not refresh cached skills, hook definitions or manifests.
 Keep the optional CLI on your `PATH` updated separately as described above. See the
 [integration details](../integrations/codex.md#plugin-install-path) for tested behavior
 and its limits.
@@ -85,7 +85,7 @@ want to point at a source checkout? Register the pieces yourself.
 Via the CLI:
 
 ```bash
-codex mcp add sidegraph -- bash -lc "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
+codex mcp add sidegraph -- bash -lc "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-mcp"
 ```
 
 Or add it to the repo's `.codex/config.toml` (recommended for project-specific setup):
@@ -95,16 +95,16 @@ Or add it to the repo's `.codex/config.toml` (recommended for project-specific s
 command = "bash"
 args = [
   "-lc",
-  "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-mcp"
+  "cd '/ABSOLUTE/PATH/TO/your-repo' && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-mcp"
 ]
 ```
 
 **From a source checkout instead** (contributors; see
 [installation: from source](installation.md#option-d--from-source-contributors)): in this
-command and in the hooks below, replace `uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main`
+command and in the hooks below, replace `uvx --from sidegraph --python 3.13`
 with `uv run --project '/ABSOLUTE/PATH/TO/sidegraph'` (the single quotes keep a path with
-spaces whole and need no escaping in JSON). `@main` is a mutable ref; to pin it, see
-[mutable development references](installation.md#mutable-development-references).
+spaces whole and need no escaping in JSON). These recipes run the latest release; to pin one,
+write `sidegraph==X.Y.Z`, see [pinned releases](installation.md#mutable-development-references).
 
 Codex also reads `~/.codex/config.toml`. Use the project file when the registration belongs
 to this repository; use the global file only when you intentionally want the server in every
@@ -137,7 +137,7 @@ Create `.codex/hooks.json` in the repo:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-session-start || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -147,7 +147,7 @@ Create `.codex/hooks.json` in the repo:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-stop || printf '{}\\n'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-stop || printf '{}\\n'"
           }
         ]
       }
@@ -157,7 +157,7 @@ Create `.codex/hooks.json` in the repo:
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from git+https://github.com/SantyagoSeaman/sidegraph.git@main sidegraph-subagent-start || printf '{}\\n'"
+            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_DIR=.sidegraph SIDEGRAPH_GRAPH=graphify-out/graph.json uvx --from sidegraph --python 3.13 sidegraph-subagent-start || printf '{}\\n'"
           }
         ]
       }
