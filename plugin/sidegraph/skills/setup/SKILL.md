@@ -49,7 +49,7 @@ UTF-16 that git ignores.
 ## 3. Store
 
 ```bash
-uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-init
+uvx --from sidegraph==0.26.0rc1 --python 3.13 sidegraph-init
 ```
 
 Every Sidegraph CLI in this skill (`sidegraph-init --hooks`, `--no-hooks`, `--remove-hooks`,
@@ -121,7 +121,7 @@ For Codex, Grok Build, OpenCode and Muse, the MCP call is the wiring check; skip
 the following Claude-specific settings check. Shared `sidegraph:<skill>` names denote the corresponding
 installed skill; in OpenCode use `@sidegraph-<skill>`.
 
-On Claude Code, run `uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-doctor --json` (a pure read) and read the finding `plugin-off-in-subdirectories`. It says that Claude
+On Claude Code, run `uvx --from sidegraph==0.26.0rc1 --python 3.13 sidegraph-doctor --json` (a pure read) and read the finding `plugin-off-in-subdirectories`. It says that Claude
 sessions started below the repository root run without Sidegraph: the plugin is enabled only in
 the root's `.claude/settings.json`, which Claude Code reads for root launches alone, or a nested
 directory's own settings leave it off. The fix changes the human's settings, so put the options
@@ -138,8 +138,8 @@ human whether to install the refresh hook: a marked block in `post-commit`, `pos
 `post-checkout` that rebuilds the **code** graph in the background, in the main checkout only
 (linked worktrees read its graph). It never replaces an existing hook, and
 `sidegraph-init --remove-hooks` takes it out. On a yes run
-`uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-init --hooks`; on a no run
-`uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-init --no-hooks`, which records the answer so that Sidegraph stops asking. Do not run
+`uvx --from sidegraph==0.26.0rc1 --python 3.13 sidegraph-init --hooks`; on a no run
+`uvx --from sidegraph==0.26.0rc1 --python 3.13 sidegraph-init --no-hooks`, which records the answer so that Sidegraph stops asking. Do not run
 either unasked, and do not run `graphify hook install` instead: Graphify's own hook also rebuilds
 in every linked worktree. (Doc/prose extraction still needs a manual rebuild after doc changes: run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set.) Details:
 [keeping the graph fresh](../../../../docs/integrations/graphify.md#keeping-the-graph-fresh-git-hooks).
@@ -157,7 +157,7 @@ command asks whether to auto-ratify, and its default answer is yes. Put that que
 human: should the lessons, gotchas and facts the agent proposes be accepted without review
 once they are anchored to code? ADRs, constraints and domains always wait for a person either
 way. On a yes run
-`uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-init --ratify-policy auto-low-risk`;
+`uvx --from sidegraph==0.26.0rc1 --python 3.13 sidegraph-init --ratify-policy auto-low-risk`;
 on a no run the same command with `--ratify-policy manual`, which records the answer. It
 writes `SIDEGRAPH_RATIFY_POLICY` into `.claude/settings.json`, which the project commits, and
 never overwrites a value already there. The MCP server reads the policy when it starts, so
@@ -181,7 +181,7 @@ those two directories:
 
 - the graph refresh hook, if installed (`sidegraph-init --hooks`, or a yes to its question):
   a helper and three hook blocks under `.git/hooks/`. Run
-  `uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-init --remove-hooks` first, because deleting the directories leaves them behind.
+  `uvx --from sidegraph==0.26.0rc1 --python 3.13 sidegraph-init --remove-hooks` first, because deleting the directories leaves them behind.
 - the git config key `sidegraph.graphRefresh`, recorded by `sidegraph-init --no-hooks`.
   `--remove-hooks` clears it.
 - `SIDEGRAPH_RATIFY_POLICY` in `.claude/settings.json`, if `sidegraph-init` wrote it.

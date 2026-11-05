@@ -571,10 +571,11 @@ def _by_member(seed: Seed, given: str, reader: _Reader, out: _Build) -> tuple[bo
         if target:
             _rewritten(seed, target, "name", given, out)
             return True, target
-    elif found.status == "ambiguous":
-        # A member candidate always has a file (D2), so this always reports.
-        if not _report_ambiguous(seed, given, list(found.candidates), reader, out):
-            return True, None
+    # A member candidate always has a file (D2), so an ambiguous one always reports.
+    elif found.status == "ambiguous" and not _report_ambiguous(
+        seed, given, list(found.candidates), reader, out
+    ):
+        return True, None
     return False, None
 
 

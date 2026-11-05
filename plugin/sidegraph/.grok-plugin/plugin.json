@@ -1,7 +1,7 @@
 {
   "name": "sidegraph",
   "displayName": "Sidegraph",
-  "version": "0.25.1",
+  "version": "0.26.0rc1",
   "description": "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code.",
   "author": {
     "name": "SantyagoSeaman",

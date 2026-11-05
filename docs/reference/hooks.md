@@ -35,10 +35,12 @@ For wiring them into `.claude/settings.json`, see
 
 Hook-owned SQLite connections bound their lock waits. `PreToolUse`, `SessionStart` and
 `SubagentStart`, the hooks that hand the agent records, wait up to half a second for a lock
-another Sidegraph process holds, because a writer is usually gone within milliseconds. A hook
-that loses its first wait refuses every later lock at once, so a run waits for a held lock once
-(about twice the half second at most when a wait succeeds before the one that fails). `Stop` and
-the optional status and drift reads refuse at once. This bounds SQLite lock waits; graph
+another Sidegraph process holds, because a writer is usually gone within milliseconds. Each wait
+is bounded, but a run can wait more than once. `SubagentStart` makes one read. `PreToolUse` can
+lose a wait while reading the records and then wait again for its usage-journal write, about one
+second at most. `SessionStart` stops waiting after its first refused write, but waits that end
+in time add up: against a writer that keeps taking the lock back it can spend about three
+seconds. `Stop` and the optional status and drift reads refuse at once. This bounds SQLite lock waits; graph
 loading, filesystem work, transcript parsing and Git still contribute to whole-hook time. Other `Store`, hot-index and read-only-index callers retain their existing
 defaults.
 
@@ -928,8 +930,10 @@ tools it covers are `Read`, `Grep`, `Edit` and `Write`, and four Bash read comma
 `<store>/index.db` directly through a raw SQLite handle instead of constructing a `Store`: it
 loads nothing beyond the standard library, and it never walks the record files. It uses the index
 as the last full open left it (`SessionStart`, the MCP server or a CLI rebuilds the index from
-the record files when they changed); it never rebuilds, repairs or creates anything. When it
-cannot use the index it prints `{}` and writes nothing, whichever of these holds: the index is
+the record files when they changed); it never rebuilds, repairs or creates anything, and its
+only write besides the usage journal is one line of [the run log](#the-hook-run-log). When it
+cannot use the index it prints `{}` and writes nothing (apart from a `lock` line in the run log
+when the open lost to another process's lock), whichever of these holds: the index is
 missing; a store-owned entry (`index.db`, its `-journal`, `-wal` and
 `-shm` files, or a record directory) is a symlink, the same refusal `Store` makes; the store's format marker refuses this version; its
 `schema_version` stamp is not the one its store's marker calls for (`0.6.0`, or
@@ -1330,7 +1334,8 @@ outside the count.
 
 **It reads the index, not the store,** like [`sidegraph-pre-tool-use`](#sidegraph-pre-tool-use):
 it opens `<store>/index.db` through the same raw SQLite handle, loads nothing beyond the
-standard library, never rebuilds, repairs or creates anything, and writes nothing. It prints `{}`
+standard library, never rebuilds, repairs or creates anything, and writes nothing but one line of
+[the run log](#the-hook-run-log) when it used the index or lost it to a lock. It prints `{}`
 in every case that hook does nothing in (a missing, symlinked, wrong-version or unreadable
 index), and in these:
 
@@ -1348,6 +1353,48 @@ this event answers `{}`, so a start failure never puts a message in front of a s
 **Codex** users approve the new hook once: Codex records trust per hook definition (see
 [`integrations/codex.md`](../integrations/codex.md#plugin-install-path)). **Muse** users approve
 it with `muse plugins approve sidegraph`.
+
+## The hook run log
+
+`sidegraph-pre-tool-use`, `sidegraph-session-start` and `sidegraph-subagent-start` append one line
+per run to `.sidegraph/index.db-hooks.log`, after they have printed their answer:
+
+```
+<epoch ms> <hook> <outcome> <elapsed ms>
+```
+
+The outcome is `delivered` (the answer carries records or a brief), `empty` (there was nothing to
+deliver), `lock` (another process held the index's lock while the hook opened the index, chose
+records or claimed a file, so records may have been left out) or `error` (any other failure after
+the index was open, with nothing delivered). A refused touch row, which is only the usage journal, does not
+turn a delivered run into `lock`. `elapsed` runs from the first statement of the hook's entry
+function to the end of the run, so interpreter start-up and the module imports are not in it.
+`sidegraph-stop` writes nothing. Each write is a newline followed by the row, so the file starts
+with an empty line and its last row has no newline; a row cut short (a full disk) never swallows
+the next one.
+
+The line holds no path, session id or record text, and the file never leaves your machine. It is
+not part of `index.db`, so a held lock does not stop the write, and its name starts with `index.db`.
+The store's `.gitignore` carries the line `index.db*`, so git ignores it. The hooks never rewrite a
+committed file, so a store whose `.gitignore` git would not apply to the log gets no log: the file
+is missing, a symlink or not a regular file, it lacks that exact line (deleted, edited down to
+`index.db`, or indented), or it holds any negation line (`!…`).
+
+The log is written only next to a store. `sidegraph-pre-tool-use` and `sidegraph-subagent-start`
+write a line only for a run whose delivery opened the index (a run with delivery switched off, or
+one that stopped before opening it, is not counted, locked or not) and that used the index or lost
+it to a lock: an index they cannot use for any other reason (missing, a newer format, a symlink,
+corrupt) is left exactly as it was. `sidegraph-session-start` opens the whole store, so it also
+logs `error` when the store refuses to open, except for a store that needs a newer Sidegraph,
+which it leaves as it was.
+
+The write never waits (a named pipe planted at the log path or at the `.gitignore` cannot stop a
+hook), never writes through a symlink or a hard link, and never fails a hook. When the file passes
+4 MiB it becomes `index.db-hooks.log.1`, replacing the previous one, so the pair holds roughly
+110,000 to 220,000 runs. If that name cannot be used (a directory sits there), the log is emptied
+once it reaches 8 MiB instead. On Windows, runs that coincide can overwrite each other's lines, so
+counts there are a lower bound. `SIDEGRAPH_TELEMETRY=off` stops it. It is a plain text file: any
+text tool reads it.
 
 ## Wiring
 

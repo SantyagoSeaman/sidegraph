@@ -240,19 +240,36 @@ def test_t3_a_project_without_a_store_gets_no_store(tmp_path, monkeypatch, capsy
     assert not store_dir.exists()
 
 
+def _contents_except_the_run_log(root) -> dict[str, bytes]:
+    """Every file under ``root`` by relative path, the hook run log aside: the one write a run
+    that used the index is documented to make."""
+    from sidegraph.host import hook_log
+
+    skipped = {hook_log.LOG_NAME, hook_log.ROTATED_NAME}
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and p.name not in skipped
+    }
+
+
 @pytest.mark.parametrize("dead", [False, True], ids=["empty", "only-dead-records"])
 def test_t3_a_store_with_nothing_to_ask_about_prints_nothing(tmp_path, monkeypatch, capsys, dead):
     """N is 0 for an empty store and for one whose records are all superseded, expired,
-    orphaned, past the proposal window or bound to no file."""
+    orphaned, past the proposal window or bound to no file. Every file of the store stays byte
+    for byte as it was; the one addition is the hook run log's single ``empty`` line."""
+    from sidegraph.host import hook_log
+
     root, store_dir = _project(tmp_path, seeded=False)
     store = Store(store_dir)
     if dead:
         _seed_dead(store, _Seeder(store))
         store.set_meta(VOLATILE_STALE_KEY, "0")
     store.close()
-    before = _snapshot(root)
+    before = _contents_except_the_run_log(root)
     assert _run(monkeypatch, capsys, root, store_dir, CLAUDE_PAYLOAD) == {}
-    assert _snapshot(root) == before
+    assert _contents_except_the_run_log(root) == before
+    assert [r.outcome for r in hook_log.read_runs(store_dir)] == ["empty"]
 
 
 def test_t3_the_kill_switch_prints_nothing(tmp_path, monkeypatch, capsys):

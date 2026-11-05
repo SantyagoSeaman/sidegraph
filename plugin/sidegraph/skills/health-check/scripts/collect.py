@@ -397,6 +397,10 @@ def _inventory(store: Path, doctor: Any) -> dict[str, Any]:
     pending: list[datetime] = []
     unknown_reasons: list[str] = []
     pending_totals_known = True
+    # The ratification queue is decisions, standalone facts and domains: a proposed fact that
+    # supports a proposed decision rides that decision's verdict and is not counted again.
+    proposed_decisions: set[str] = set()
+    attached_facts = 0
     for directory, id_key in (("decisions", "id"), ("facts", "id"), ("domains", "domain_id")):
         try:
             records = doctor._iter_records(store, directory)
@@ -410,6 +414,15 @@ def _inventory(store: Path, doctor: Any) -> dict[str, Any]:
             if record.get("status") != "proposed":
                 continue
             rid = record.get(id_key)
+            if directory == "decisions" and isinstance(rid, str):
+                proposed_decisions.add(rid)
+            if directory == "facts":
+                supports = record.get("supports")
+                if isinstance(supports, list) and any(
+                    isinstance(s, str) and s in proposed_decisions for s in supports
+                ):
+                    attached_facts += 1
+                    continue
             created = doctor._ulid_datetime(rid) if isinstance(rid, str) else None
             if created is None:
                 unknown_age += 1
@@ -439,6 +452,7 @@ def _inventory(store: Path, doctor: Any) -> dict[str, Any]:
     return {
         "canonical_counts": counts,
         "proposed_count": observed_proposed_count if pending_totals_known else "UNKNOWN",
+        "attached_facts_pending": attached_facts if pending_totals_known else "UNKNOWN",
         "observed_proposed_count": observed_proposed_count,
         "oldest_pending_age_days": (
             age_days if pending_totals_known and not unknown_age else "UNKNOWN"
@@ -466,6 +480,55 @@ def _recommendation(
         "argv": argv or [],
         "cwd": str(cwd),
         "env": env or {},
+    }
+
+
+def _delivery_summary(evidence: Any) -> dict[str, Any]:
+    """Hook and MCP delivery counts from the stats report, which the legacy activation figures
+    leave out: a store whose hooks delivered records but whose agents never called the MCP
+    server has activation 0 and deliveries above 0."""
+    if evidence is None or not getattr(evidence, "available", False):
+        return {"available": False}
+
+    def group(stats: Any) -> dict[str, Any] | None:
+        if stats is None:
+            return None
+        return {
+            "occurrences": stats.occurrences,
+            "placements": stats.reported_placements,
+            "anchor_links": stats.reported_anchor_links,
+        }
+
+    return {
+        "available": True,
+        "recording_since": evidence.recording_since,
+        "hooks": group(evidence.hooks),
+        "mcp": group(evidence.mcp),
+    }
+
+
+def _hook_runs(store: Path) -> dict[str, Any]:
+    """The hook run log (`index.db-hooks.log`), summarised per hook: runs, one count per outcome
+    (`delivered`, `empty`, `lock`, `error`) and the p50/p95 elapsed time. A pure read of two small
+    text files beside the store; it needs no index. `lock` counts runs whose delivery another
+    process's lock withheld."""
+    try:
+        from sidegraph.host import hook_log
+    except ImportError:
+        return {"available": False, "reason": "this Sidegraph version writes no hook run log"}
+    try:
+        rows = hook_log.read_runs(store)
+    except Exception:
+        return {"available": False, "reason": "the hook run log could not be read"}
+    if not rows:
+        return {"available": True, "runs": 0, "hooks": {}}
+    stamps = [row.at_ms for row in rows]
+    return {
+        "available": True,
+        "runs": len(rows),
+        "first_ms": min(stamps),
+        "last_ms": max(stamps),
+        "hooks": hook_log.summarize(rows),
     }
 
 
@@ -498,6 +561,7 @@ def _stats_summary(report: Any) -> dict[str, Any]:
             "files_touched": reach.files_touched,
             "files_touched_with_memory": reach.files_touched_with_memory,
         },
+        "delivery": _delivery_summary(getattr(report, "delivery_evidence", None)),
         "index_stale": report.index_stale,
         "binding_statuses_computed": report.binding_statuses_computed,
         "coverage": "observed activity only; counts do not measure usefulness or saved effort",
@@ -971,11 +1035,13 @@ def collect(
         inventory = {
             "canonical_counts": "UNKNOWN",
             "proposed_count": "UNKNOWN",
+            "attached_facts_pending": "UNKNOWN",
             "oldest_pending_age_days": "UNKNOWN",
             "pending_age_unknown_count": "UNKNOWN",
             "unknown_reasons": ["inventory_read_failed"],
         }
     inventory["statistics"] = statistics
+    inventory["hook_runs"] = _hook_runs(store_path)
     usage_status = (
         "warning"
         if statistics.get("status") != "available"
@@ -1085,6 +1151,32 @@ def main(argv: list[str] | None = None) -> int:
             plugin_root=args.plugin_root,
             host=args.host,
         )
+    except ImportError as exc:
+        # Only a missing top-level `sidegraph` means "wrong Python". Any other import failure (a
+        # symbol an older release lacks, a dependency that is not installed) happens on a Python
+        # that does have Sidegraph, and sending the agent to "the Python of the running server"
+        # would send it back to the interpreter that just failed. Both hints are fixed text:
+        # none of the exception reaches the output.
+        no_sidegraph = isinstance(exc, ModuleNotFoundError) and exc.name == "sidegraph"
+        print(
+            json.dumps(
+                {
+                    "error": "ImportError",
+                    "message": "health report could not be collected",
+                    "hint": (
+                        "This Python has no Sidegraph. Use the Python of this project's running "
+                        "sidegraph-mcp process; references/installed-plugin.md beside SKILL.md "
+                        "says how to find it."
+                        if no_sidegraph
+                        else "This Python's Sidegraph, or a package it needs, could not be "
+                        "loaded by the collector (an older environment, or a missing "
+                        "dependency). Do not install anything: report the versions that "
+                        "references/installed-plugin.md beside SKILL.md says how to read."
+                    ),
+                }
+            )
+        )
+        return 1
     except Exception as exc:
         print(
             json.dumps(

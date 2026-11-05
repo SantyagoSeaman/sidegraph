@@ -300,8 +300,10 @@ INDEX_JOURNAL_PRAGMA = "PRAGMA journal_mode=TRUNCATE"
 # How long a hook that delivers records (PreToolUse, SessionStart, SubagentStart) waits for a lock
 # another process holds. Zero lost 39% of PreToolUse deliveries at 10 agents and 90% at 20:
 # a writer is usually gone in milliseconds. 0.5 s is the smallest value measured that
-# brings 10 agents under 2% lost; the worst case for one hook is about twice this (a wait that
-# succeeds, then one that fails). Stop and the optional peeks keep the zero wait.
+# brings 10 agents under 2% lost. It bounds each wait, not a run: PreToolUse can lose a read's
+# wait and then wait again for its touch write (about twice this), and SessionStart's waits that
+# end in time add up before its first refused one (about three seconds against a writer that keeps
+# retaking the lock). Stop and the optional peeks keep the zero wait.
 # see design/superpowers/specs/2026-11-05-hook-wait-and-digest-recheck.md (D1)
 HOOK_BUSY_SECONDS = 0.5
 

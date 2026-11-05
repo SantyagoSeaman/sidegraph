@@ -7,6 +7,33 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.26.0]
+
+### Added
+
+- `PreToolUse`, `SessionStart` and `SubagentStart` append one line per delivering run to
+  `.sidegraph/index.db-hooks.log`: a timestamp, the hook, whether it delivered, found nothing or
+  was refused by a lock, and how long it ran. A lock that withholds records now leaves a trace,
+  where it used to leave one stderr line the host does not keep. The file holds no path, session
+  id or record text, git ignores it, and `SIDEGRAPH_TELEMETRY=off` stops it. See
+  [the hook run log](docs/reference/hooks.md#the-hook-run-log).
+
+### Fixed
+
+- `/sidegraph:health-check` says how to find the Python of an installed plugin: the running
+  `sidegraph-mcp` process of the project, chosen by its working directory and, when sessions from
+  two plugin versions run, by version. A Python without Sidegraph now gets a hint beside the
+  "could not be collected" error, a Python whose Sidegraph cannot be fully loaded gets a different
+  one, and the skill lists the values `--host` accepts and limits its `.venv` rule to the
+  Sidegraph source checkout.
+- The health report's usage section includes the hook and MCP delivery counts, so a store whose
+  hooks delivered records no longer reads as "shows 0". Its pending-ratification count is the
+  queue SessionStart shows: facts attached to a proposed decision are not counted again.
+- The hooks reference and the 0.25.1 entry below said a hook that loses its first lock wait
+  refuses the rest at once. Each wait is bounded to half a second, but `PreToolUse` can wait
+  twice (about one second) and `SessionStart`'s waits that end in time add up (about three
+  seconds at worst); the reference now states those bounds.
+
 ## [0.25.1] — 2026-11-05
 
 ### Fixed
@@ -2986,7 +3013,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.1...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.23.0...v0.24.0

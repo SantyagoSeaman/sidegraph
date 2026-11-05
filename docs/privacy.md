@@ -24,6 +24,12 @@ no analytics, and it sends no telemetry anywhere.
   (session ids, timestamps, which files' records were already shown, when the last capture
   reminder fired) is still kept, without that 30-day cleanup, so records and reminders are not
   repeated.
+- **Hook run log.** `.sidegraph/index.db-hooks.log` gets one line per run of the hooks that
+  deliver records: a timestamp, the hook's name, whether it delivered, found nothing or was
+  refused by a lock, and how long it ran. No path, session id or record text. Git ignores it (a
+  store whose `.gitignore` lacks the `index.db*` line gets no log), it is never uploaded, and
+  `SIDEGRAPH_TELEMETRY=off` stops it. It exists so that a person can see how
+  often a lock withheld records. See [the hook run log](reference/hooks.md#the-hook-run-log).
 - **Code graph.** Graphify writes `graphify-out/` in your repository; it can be deleted and
   rebuilt.
 - **Session state.** One small file, `sidegraph/launch-commit` under your user cache directory

@@ -9,7 +9,8 @@ and that is what ``get_task_context`` answers.
 
 It runs once per subagent spawn, so it stays as light as the PreToolUse hook: it reads the
 index through ``HotIndex`` and never constructs a ``Store``. Where the index cannot be used, or
-holds nothing a ``get_task_context`` call could return, it prints ``{}`` and writes nothing.
+holds nothing a ``get_task_context`` call could return, it prints ``{}`` and writes nothing,
+apart from the one line of the run log (``hook_log``) a run that used the index appends.
 Claude Code and Codex use the same event name and the same ``hookSpecificOutput`` shape.
 
 see design/superpowers/specs/2026-10-03-subagent-start-brief-design.md (D1, D2, D5)
@@ -23,6 +24,7 @@ import sys
 
 from ..hot_index import HotIndex
 from ..store_layout import HOOK_BUSY_SECONDS
+from . import hook_log
 from .diagnostics import HookDiagnostics
 from .hooks import STANDING_SEARCH_INSTRUCTION, _read_payload, refuse_arguments
 from .project_anchor import anchor_to_project, take_repo_root_flag
@@ -49,8 +51,10 @@ def render_brief(records: int, files: int, mistakes: int) -> str:
     )
 
 
-def _answer(diagnostics: HookDiagnostics | None = None) -> dict:
-    """The hook's output: the brief, or ``{}`` where there is nothing to ask about."""
+def _answer(diagnostics: HookDiagnostics | None = None, run: hook_log.Run | None = None) -> dict:
+    """The hook's output: the brief, or ``{}`` where there is nothing to ask about. ``run``
+    is the outcome tally (see ``hook_log``): it learns the store and the failures of the steps
+    that deliver."""
     stage = "payload"
     try:
         if os.environ.get("SIDEGRAPH_SUBAGENT_BRIEF") == "off":
@@ -72,11 +76,26 @@ def _answer(diagnostics: HookDiagnostics | None = None) -> dict:
             root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
         )
         stage = "index"
+
+        errors: list[Exception] = []
+
+        def open_error(error: Exception) -> None:
+            errors.append(error)
+            if diagnostics is not None:
+                diagnostics.report("index", error)
+
         index = HotIndex.open(
-            location.path,
-            on_error=(lambda error: diagnostics.report("index", error)) if diagnostics else None,
-            busy_timeout_seconds=HOOK_BUSY_SECONDS,
+            location.path, on_error=open_error, busy_timeout_seconds=HOOK_BUSY_SECONDS
         )
+        # The run log (see ``_HotOpener.__call__``): errors count only when there is no handle,
+        # and a run is tallied when it used the index or lost it to a lock; an index that cannot
+        # be used for any other reason is left exactly as it was.
+        if run is not None:
+            if index is None:
+                for error in errors:
+                    run.note(error)
+            if index is not None or run.lock_seen:
+                run.store_dir = location.path
         if index is None:
             return {}
         stage = "brief"
@@ -99,6 +118,8 @@ def _answer(diagnostics: HookDiagnostics | None = None) -> dict:
             }
         }
     except Exception as error:
+        if run is not None:
+            run.note(error)
         if diagnostics is not None:
             diagnostics.report(stage, error)
         raise
@@ -116,6 +137,7 @@ def subagent_start() -> None:
     index it cannot use, or a store with nothing anchored to code prints ``{}``.
     see design/superpowers/specs/2026-10-03-subagent-start-brief-design.md (D1, D5)
     """
+    run = hook_log.Run("SubagentStart")  # first: the run log's elapsed time starts here
     if take_repo_root_flag(sys.argv):
         anchor_to_project()
     if len(sys.argv) > 1:
@@ -124,7 +146,8 @@ def subagent_start() -> None:
         )
     diagnostics = HookDiagnostics("SubagentStart")
     try:
-        answer = _answer(diagnostics)
+        answer = _answer(diagnostics, run)
     except Exception:
         answer = {}
-    print(json.dumps(answer))
+    print(json.dumps(answer), flush=True)
+    run.finish(bool(answer))
