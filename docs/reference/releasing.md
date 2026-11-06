@@ -79,7 +79,8 @@ A release moves through five stages, and the public `main` moves only in the las
 2. **Cut** (`tools/release-public.sh "release: vX.Y.Z" --push`): pin the snapshot's
    dependencies, push a public `release/vX.Y.Z` branch, wait for its CI, then push the tag
    `vX.Y.Z`.
-3. **Publish**: the tag starts `publish.yml`, which tests, builds and, after the `pypi`
+3. **Publish**: the tag starts `publish.yml`, which tests (the matrix is skipped when the
+   tag's tree already passed it on `release/vX.Y.Z`), builds and, after the `pypi`
    environment approval, uploads to PyPI.
 4. **Promote** (`tools/promote-release.sh vX.Y.Z`): once PyPI serves the version, check the
    PyPI wheel against a wheel built from the tag, write the plugin's lock, and fast-forward the
@@ -235,7 +236,9 @@ default) and then:
    simple index can lag the JSON API, the lock is retried for a bounded time;
 4. pushes that commit to `release/vX.Y.Z`, waits for `full-ci` on it, fast-forwards the public
    `main` to it (anything but a fast-forward is refused), and deletes the branch. The tag stays on
-   the commit below it; both are on `main`.
+   the commit below it; both are on `main`. The promotion commit changes only the plugin's
+   `pyproject.toml` and `uv.lock`, so its `full-ci` takes the lint-only path (no test matrix),
+   and so does the `main` push that fast-forwards to the same commit.
 
 The target is classified by repository identity (host, owner, repository), not by string:
 a final version goes only to the canonical repository, a pre-release only to the scratch
@@ -425,18 +428,20 @@ head of `release/vX.Y.Z` once branch CI is green, so do not tag by hand.
 **The tag goes to the public repository, not the internal one.** PyPI's trusted publisher is
 configured against `SantyagoSeaman/sidegraph`, so a tag pushed to the internal repository
 produces a valid OIDC token with the wrong `repository` claim and the publish job dies on
-`invalid-publisher` — after the whole test matrix has run. The cut pushes to the public
+`invalid-publisher` — after the `test` job has run. The cut pushes to the public
 repository and nowhere else. Pushing the release-prep branch and merging its Ready PR to
 internal `main` triggers CI, but no publish.
 
 The tag push triggers [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml)
 (`v*.*.*` matches a release candidate such as `v0.25.0rc1` too), three jobs in sequence.
 
-1. **`test`**: reuses `ci.yml` wholesale (pre-commit lint plus the pytest matrix; a tag push
-   is not a pull request, so the full matrix always runs). Build and publish never run if
-   this fails. On the public repository `pyproject.toml` pins every dependency with `==`, so
-   the `sdk-compatibility` job prints "pinned package: the SDK range is tested in the source
-   repository" and skips its remaining steps; the ranges are proved on the internal repository.
+1. **`test`**: reuses `ci.yml` wholesale (pre-commit lint plus the pytest matrix). `ci.yml`
+   first checks whether the tag's tree already passed the full matrix on `release/vX.Y.Z`. If
+   it did, the matrix is skipped and only lint runs; otherwise (a tag pushed by hand, for
+   example) the full matrix runs. Build and publish never run if this fails. On the public
+   repository `pyproject.toml` pins every dependency with `==`, so the `sdk-compatibility`
+   job prints "pinned package: the SDK range is tested in the source repository" and skips
+   its remaining steps; the ranges are proved on the internal repository.
 2. **`build`**: checks out the tag, then runs the tag-to-version guard. It reads
    `[project].version` out of `pyproject.toml` with `tomllib`, strips the leading `v` off
    `GITHUB_REF_NAME`, and fails the job if the two strings disagree. This check is

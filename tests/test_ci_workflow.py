@@ -3,6 +3,7 @@ the full matrix only off Draft, one aggregate gate.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,7 +14,13 @@ import yaml
 
 _ROOT = Path(__file__).resolve().parents[1]
 _CI = _ROOT / ".github/workflows/ci.yml"
+_PUBLISH = _ROOT / ".github/workflows/publish.yml"
+HEAVY_JOBS = ("test", "sdk-compatibility", "windows-core")
 FULL_IF = "${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}"
+HEAVY_IF = (
+    "${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) "
+    "&& needs.prior.outputs.mode != 'covered' && needs.prior.outputs.mode != 'light' }}"
+)
 FULL_CI_NAME = (
     "${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) "
     "&& 'full-ci' || 'full-ci (draft: full matrix not run)' }}"
@@ -47,11 +54,57 @@ def test_pull_request_types_include_ready_for_review() -> None:
 
 def test_full_tier_jobs_share_the_draft_condition() -> None:
     jobs = _load()["jobs"]
-    for name in ("test", "sdk-compatibility", "windows-core"):
-        assert jobs[name]["if"] == FULL_IF
+    for name in HEAVY_JOBS:
+        assert jobs[name]["if"] == HEAVY_IF
+        assert jobs[name]["needs"] == "prior"
     assert "if" not in jobs["lint"]
     for name in ("store-lint", "anchor-health"):
         assert jobs[name]["if"] == "github.event_name == 'pull_request'"
+
+
+def test_prior_job_shape() -> None:
+    prior = _load()["jobs"]["prior"]
+    assert prior["if"] == "github.event_name != 'pull_request'"
+    assert prior["continue-on-error"] is True
+    assert prior["timeout-minutes"] == 5
+    assert prior["permissions"] == {"contents": "read", "actions": "read"}
+    assert prior["runs-on"] == "ubuntu-slim"
+    assert prior["outputs"] == {
+        "mode": "${{ job.status == 'success' && steps.probe.outputs.mode || 'full' }}",
+        "covered_by": "${{ job.status == 'success' && steps.probe.outputs.covered_by || '' }}",
+    }
+    checkout, setup, probe = prior["steps"]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"] == {
+        "sparse-checkout": "tools/ci_covered.py",
+        "sparse-checkout-cone-mode": False,
+        "persist-credentials": False,
+    }
+    assert setup["uses"].startswith("astral-sh/setup-uv@")
+    assert setup["with"]["python-version"] == "3.13"
+    assert setup["with"]["enable-cache"] is False
+    assert probe["id"] == "probe"
+    assert "tools/ci_covered.py" in probe["run"]
+    assert "--python 3.13" in probe["run"]
+    assert probe["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
+
+
+def test_no_job_or_gate_step_is_made_non_fatal_at_job_level() -> None:
+    """A job-level `continue-on-error` would let a red job count as passed in the gate."""
+    jobs = _load()["jobs"]
+    for name in ("test", "sdk-compatibility", "windows-core", "full-ci"):
+        assert "continue-on-error" not in jobs[name], name
+    assert "continue-on-error" not in jobs["full-ci"]["steps"][0]
+
+
+def test_heavy_jobs_test_the_default_ref() -> None:
+    """The evidence records github.sha's tree; a heavy job must test that same tree."""
+    jobs = _load()["jobs"]
+    for name in HEAVY_JOBS:
+        for step in jobs[name]["steps"]:
+            assert "continue-on-error" not in step, (name, step.get("name"))
+            if step.get("uses", "").startswith("actions/checkout@"):
+                assert "ref" not in step.get("with", {}), name
 
 
 def test_full_ci_needs_every_other_job() -> None:
@@ -60,7 +113,8 @@ def test_full_ci_needs_every_other_job() -> None:
     assert set(gate["needs"]) == set(jobs) - {"full-ci"}
     assert gate["if"] == "${{ always() }}"
     assert gate["name"] == FULL_CI_NAME
-    assert len(gate["steps"]) == 1
+    assert gate["timeout-minutes"] == 8
+    assert len(gate["steps"]) == 4
     step = gate["steps"][0]
     assert "uses" not in step
     assert "${{" not in step["run"]
@@ -78,7 +132,25 @@ def test_full_ci_gate_env_matches_dependency_results() -> None:
         "WINDOWS": "${{ needs.windows-core.result }}",
         "STORE_LINT": "${{ needs.store-lint.result }}",
         "ANCHOR_HEALTH": "${{ needs.anchor-health.result }}",
+        "MODE": "${{ needs.prior.outputs.mode }}",
+        "PRIOR": "${{ needs.prior.result }}",
+        "COVERED_BY": "${{ needs.prior.outputs.covered_by }}",
     }
+
+
+SKIPPED_MATRIX = {
+    "TEST": "skipped",
+    "SDK": "skipped",
+    "WINDOWS": "skipped",
+    "STORE_LINT": "skipped",
+    "ANCHOR_HEALTH": "skipped",
+}
+COVERED = {
+    "MODE": "covered",
+    "PRIOR": "success",
+    "COVERED_BY": "https://github.com/o/r/actions/runs/7",
+    **SKIPPED_MATRIX,
+}
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
@@ -100,6 +172,16 @@ def test_full_ci_gate_env_matches_dependency_results() -> None:
             True,
         ),
         ("false", "pull_request", {"LINT": "failure"}, False),
+        ("true", "push", COVERED, True),
+        ("true", "push", {**COVERED, "MODE": "light"}, True),
+        ("true", "push", {**COVERED, "TEST": "success"}, False),
+        ("true", "push", {**COVERED, "PRIOR": "failure"}, False),
+        ("true", "push", {**COVERED, "LINT": "failure"}, False),
+        ("true", "push", {**COVERED, "STORE_LINT": "success"}, False),
+        ("true", "pull_request", {"MODE": "full"}, False),
+        ("true", "push", {"MODE": "bogus"}, False),
+        ("true", "push", {"MODE": "full"}, True),
+        ("true", "push", {"PRIOR": "failure", "MODE": "", "STORE_LINT": "skipped"}, True),
     ],
     ids=[
         "all-success",
@@ -112,6 +194,16 @@ def test_full_ci_gate_env_matches_dependency_results() -> None:
         "TEST=empty",
         "draft-success",
         "draft-lint-failure",
+        "covered",
+        "light",
+        "covered-but-test-ran",
+        "covered-prior-failed",
+        "covered-lint-failed",
+        "covered-store-lint-ran",
+        "pr-with-mode",
+        "unknown-mode",
+        "explicit-full",
+        "prior-failed-non-fatal",
     ],
 )
 def test_full_ci_gate_script(full: str, event: str, changes: dict, ok: bool) -> None:
@@ -125,6 +217,9 @@ def test_full_ci_gate_script(full: str, event: str, changes: dict, ok: bool) -> 
         "WINDOWS": "success",
         "STORE_LINT": "success",
         "ANCHOR_HEALTH": "success",
+        "MODE": "",
+        "PRIOR": "skipped",
+        "COVERED_BY": "",
         **changes,
     }
     assert set(step["env"]) == set(case_env)
@@ -137,7 +232,7 @@ def test_full_ci_gate_script(full: str, event: str, changes: dict, ok: bool) -> 
         check=False,
     )
     assert (result.returncode == 0) is ok, result.stdout + result.stderr
-    if full == "false" and ok:
+    if ok and (full == "false" or changes.get("MODE") in ("covered", "light")):
         assert "::notice::" in result.stdout
 
 
@@ -240,3 +335,141 @@ def test_skip_step_does_not_count_an_equals_sign_inside_a_marker(tmp_path: Path)
         tmp_path, ["pydantic==2.9.0", "colorama>=0.4 ; sys_platform == 'win32'"]
     )
     assert written == "pinned=false\n"
+
+
+def _eval_if(
+    expr: str, ctx: dict[str, object], *, success: bool = True, cancelled: bool = False
+) -> bool:
+    """Evaluate a `${{ }}` condition of these workflows against fixed context values.
+
+    `success()` and `cancelled()` are separate inputs: a step after a failed one sees
+    `success()` false while the run is not cancelled.
+    """
+    assert expr.startswith("${{") and expr.endswith("}}"), expr
+    body = expr[3:-2].strip()
+    for path in sorted(ctx, key=len, reverse=True):
+        body = body.replace(path, repr(ctx[path]))
+    body = re.sub(r"startsWith\(([^,]+),\s*([^)]+)\)", r"(\1).startswith(\2)", body)
+    body = body.replace("!cancelled()", repr(not cancelled)).replace("success()", repr(success))
+    body = body.replace("&&", " and ").replace("||", " or ")
+    body = re.sub(r"!(?!=)", "not ", body)
+    return bool(eval(body, {"__builtins__": {}}, {}))  # noqa: S307
+
+
+def _ctx(
+    event: str = "push",
+    *,
+    draft: bool = False,
+    ref: str = "refs/heads/main",
+    mode: str = "",
+    test: str = "success",
+    sdk: str = "success",
+    windows: str = "success",
+) -> dict[str, object]:
+    return {
+        "github.event_name": event,
+        "github.event.pull_request.draft": draft,
+        "github.ref": ref,
+        "needs.prior.outputs.mode": mode,
+        "needs.test.result": test,
+        "needs.sdk-compatibility.result": sdk,
+        "needs.windows-core.result": windows,
+    }
+
+
+def _evidence_steps() -> tuple[dict, dict, dict, dict]:
+    gate = _load()["jobs"]["full-ci"]
+    steps = gate["steps"]
+    assert [step.get("id") for step in steps[1:3]] == ["tree", "upload"]
+    return steps[0], steps[1], steps[2], steps[3]
+
+
+def test_evidence_steps() -> None:
+    _, tree, upload, warning = _evidence_steps()
+    assert tree["if"].startswith("${{ success() && ")
+    assert tree["continue-on-error"] is True
+    assert tree["timeout-minutes"] == 1
+    assert upload["continue-on-error"] is True
+    assert upload["timeout-minutes"] == 2
+    assert upload["if"] == "${{ steps.tree.outcome == 'success' }}"
+    assert upload["uses"].startswith("actions/upload-artifact@")
+    assert upload["with"] == {
+        "name": "full-ci-tree-${{ steps.tree.outputs.tree }}",
+        "path": "${{ runner.temp }}/full-ci-evidence/evidence.json",
+        "if-no-files-found": "error",
+        "retention-days": 30,
+    }
+    # The lookup and the recorded sha are the tested commit, never a pull request's head sha.
+    assert "git/commits/$GITHUB_SHA" in tree["run"]
+    assert '--arg sha "$GITHUB_SHA"' in tree["run"]
+    assert "${{" not in tree["run"]
+    assert "steps.tree.outcome == 'failure'" in warning["if"]
+    assert "steps.upload.outcome == 'failure'" in warning["if"]
+    gate = _load()["jobs"]["full-ci"]
+    assert sum(step.get("timeout-minutes", 0) for step in gate["steps"]) < gate["timeout-minutes"]
+
+
+@pytest.mark.parametrize(
+    ("ctx", "expected"),
+    [
+        (_ctx("pull_request", ref="refs/pull/1/merge"), True),
+        (_ctx("pull_request", draft=True, ref="refs/pull/1/merge"), False),
+        (_ctx(mode="full"), True),
+        (_ctx(mode=""), True),
+        (_ctx(mode="covered"), False),
+        (_ctx(mode="light"), False),
+        (_ctx(ref="refs/tags/v1.2.3"), False),
+        (_ctx(mode="", test="skipped"), False),
+        (_ctx(mode="full", sdk="skipped"), False),
+        (_ctx(mode="", windows="failure"), False),
+        (_ctx("pull_request", ref="refs/pull/1/merge", test="failure"), False),
+    ],
+    ids=[
+        "ready-pr",
+        "draft-pr",
+        "push-full",
+        "push-empty-mode",
+        "push-covered",
+        "push-light",
+        "tag-build",
+        "empty-mode-test-skipped",
+        "full-sdk-skipped",
+        "empty-mode-windows-failed",
+        "pr-test-failed",
+    ],
+)
+def test_evidence_if_predicate(ctx: dict[str, object], expected: bool) -> None:
+    _, tree, _, _ = _evidence_steps()
+    assert _eval_if(tree["if"], ctx) is expected
+
+
+@pytest.mark.parametrize(("success", "cancelled"), [(False, False), (False, True)])
+def test_evidence_if_needs_a_passing_gate(success: bool, cancelled: bool) -> None:
+    """After a failed gate step the heavy jobs are green but no evidence may be written."""
+    _, tree, _, _ = _evidence_steps()
+    assert _eval_if(tree["if"], _ctx(mode="full"), success=success, cancelled=cancelled) is False
+
+
+@pytest.mark.parametrize(
+    ("ctx", "expected"),
+    [
+        (_ctx(mode="covered"), False),
+        (_ctx(mode="light"), False),
+        (_ctx(mode=""), True),
+        (_ctx(mode="full"), True),
+        (_ctx("pull_request", draft=True, mode=""), False),
+        (_ctx("pull_request", mode=""), True),
+    ],
+    ids=["covered", "light", "empty", "full", "draft-pr", "ready-pr"],
+)
+def test_heavy_if_predicate(ctx: dict[str, object], expected: bool) -> None:
+    for name in HEAVY_JOBS:
+        assert _eval_if(_load()["jobs"][name]["if"], ctx) is expected
+
+
+def test_publish_test_job_permissions() -> None:
+    wf = yaml.safe_load(_PUBLISH.read_text(encoding="utf-8"))
+    assert wf["permissions"] == {"contents": "read"}
+    assert wf["jobs"]["test"]["permissions"] == {"contents": "read", "actions": "read"}
+    for name in ("build", "publish"):
+        assert "actions" not in wf["jobs"][name].get("permissions", {})

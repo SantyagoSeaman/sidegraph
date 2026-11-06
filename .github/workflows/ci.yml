@@ -12,6 +12,11 @@
 # single required check. Ready pushes validate this revision against the full matrix.
 # Draft runs use another name: a skipped job counts as success.
 # A superseded PR run cannot provide a result for a newer revision.
+# `prior` (tools/ci_covered.py) asks the GitHub API whether a full-ci run already passed this
+# very git tree (`covered`), or whether the commit only adds the plugin lock files on top of such
+# a tree on main or release/** (`light`); the heavy jobs then skip and full-ci accepts that. A
+# passing full matrix uploads the evidence artifact full-ci-tree-<tree>. Any doubt or error is
+# `full`: the matrix runs.
 # Rollback: disable the ruleset first, then revert this workflow through a PR.
 name: ci
 
@@ -89,8 +94,48 @@ jobs:
           assert sum(int(s.attrib["skipped"]) for s in suites) == 0, "scanner tests skipped"
           PY
 
+  # Decides whether this commit's tree already passed the full matrix (tools/ci_covered.py).
+  # Non-fatal: `continue-on-error` keeps a failure here from failing the run (a failed job in
+  # a called workflow would stop publish.yml), and the outputs fall back to `full` unless the
+  # job succeeded. enable-cache is off: the cache post-step fails on a sparse checkout with no
+  # uv.lock.
+  prior:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-slim
+    continue-on-error: true
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read   # list artifacts and read runs of this repository
+    outputs:
+      mode: ${{ job.status == 'success' && steps.probe.outputs.mode || 'full' }}
+      covered_by: ${{ job.status == 'success' && steps.probe.outputs.covered_by || '' }}
+    steps:
+      # zizmor artipacked: this job never pushes; do not persist git credentials past checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          sparse-checkout: tools/ci_covered.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          python-version: "3.13"
+          enable-cache: false
+
+      - name: Is this tree already covered
+        id: probe
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run --no-project --python 3.13 python tools/ci_covered.py
+
   test:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: prior
+    # Parenthesised: `&&` binds tighter than `||`. A skipped `prior` (pull request) leaves its mode
+    # empty and a failed one reports `full`; either way the matrix runs. `!cancelled()` keeps a
+    # skipped dependency from skipping these.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && needs.prior.outputs.mode != 'covered' && needs.prior.outputs.mode != 'light' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -126,7 +171,11 @@ jobs:
         run: uv run pytest -q --durations=30 --durations-min=1
 
   sdk-compatibility:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: prior
+    # Parenthesised: `&&` binds tighter than `||`. A skipped `prior` (pull request) leaves its mode
+    # empty and a failed one reports `full`; either way the matrix runs. `!cancelled()` keeps a
+    # skipped dependency from skipping these.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && needs.prior.outputs.mode != 'covered' && needs.prior.outputs.mode != 'light' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -192,7 +241,11 @@ jobs:
             -k "not t9 and not t14_every and not t14_the_manual and not console_script_is_the_host_entry"
 
   windows-core:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: prior
+    # Parenthesised: `&&` binds tighter than `||`. A skipped `prior` (pull request) leaves its mode
+    # empty and a failed one reports `full`; either way the matrix runs. `!cancelled()` keeps a
+    # skipped dependency from skipping these.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && needs.prior.outputs.mode != 'covered' && needs.prior.outputs.mode != 'light' }}
     runs-on: windows-2022
     timeout-minutes: 30
     strategy:
@@ -406,9 +459,9 @@ jobs:
   full-ci:
     name: "${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) && 'full-ci' || 'full-ci (draft: full matrix not run)' }}"
     if: ${{ always() }}
-    needs: [lint, test, sdk-compatibility, windows-core, store-lint, anchor-health]
+    needs: [prior, lint, test, sdk-compatibility, windows-core, store-lint, anchor-health]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Every required job passed on this revision
         env:
@@ -420,6 +473,9 @@ jobs:
           WINDOWS: ${{ needs.windows-core.result }}
           STORE_LINT: ${{ needs.store-lint.result }}
           ANCHOR_HEALTH: ${{ needs.anchor-health.result }}
+          MODE: ${{ needs.prior.outputs.mode }}
+          PRIOR: ${{ needs.prior.result }}
+          COVERED_BY: ${{ needs.prior.outputs.covered_by }}
         run: |
           status=0
           need() {  # need <job> <result> <allowed...>
@@ -427,6 +483,10 @@ jobs:
             for ok in "$@"; do [ "$result" = "$ok" ] && return 0; done
             echo "::error::$job: '${result:-none}' (needs: $*)"; status=1
           }
+          if [ "$EVENT" = pull_request ] && [ -n "$MODE" ]; then
+            echo "::error::prior reported '$MODE' on a pull request; it must not run there"
+            exit 1
+          fi
           if [ "$FULL" != true ]; then
             echo "::notice::Draft pull request: the full matrix did not run. Mark it Ready; the required check is full-ci."
             need lint "$LINT" success
@@ -434,6 +494,25 @@ jobs:
             need anchor-health "$ANCHOR_HEALTH" success
             exit "$status"
           fi
+          case "$MODE" in
+            ""|full) ;;   # the matrix ran (or prior failed, which is non-fatal): rules below
+            covered|light)
+              # The tree already passed the full matrix: every heavy job must have been skipped.
+              need prior "$PRIOR" success
+              need lint "$LINT" success
+              need test "$TEST" skipped
+              need sdk-compatibility "$SDK" skipped
+              need windows-core "$WINDOWS" skipped
+              need store-lint "$STORE_LINT" skipped
+              need anchor-health "$ANCHOR_HEALTH" skipped
+              echo "::notice::Matrix skipped ($MODE): this tree already passed in ${COVERED_BY:-an earlier run}"
+              exit "$status"
+              ;;
+            *)
+              echo "::error::prior reported an unknown mode '$MODE'"
+              exit 1
+              ;;
+          esac
           need lint "$LINT" success
           need test "$TEST" success
           need sdk-compatibility "$SDK" success
@@ -446,3 +525,40 @@ jobs:
             need anchor-health "$ANCHOR_HEALTH" success skipped
           fi
           exit "$status"
+
+      # Evidence for `prior` in later runs: only after a full matrix that really ran on this tree
+      # (the heavy jobs test the default ref, which is github.sha), never on a tag build. Best
+      # effort: a missing upload only means a later run tests this tree in full.
+      - name: Resolve the tested tree
+        id: tree
+        if: ${{ success() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (needs.prior.outputs.mode == '' || needs.prior.outputs.mode == 'full') && needs.test.result == 'success' && needs.sdk-compatibility.result == 'success' && needs.windows-core.result == 'success' && (github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/'))) }}
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tree="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq .tree.sha)"
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || { echo "unexpected tree id '$tree'" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/full-ci-evidence"
+          jq -n --arg tree "$tree" --arg sha "$GITHUB_SHA" --arg run_id "$GITHUB_RUN_ID" \
+            --arg event "$GITHUB_EVENT_NAME" --arg ref "$GITHUB_REF" \
+            '{tree: $tree, sha: $sha, run_id: $run_id, event: $event, ref: $ref}' \
+            > "$RUNNER_TEMP/full-ci-evidence/evidence.json"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the evidence
+        id: upload
+        if: ${{ steps.tree.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: full-ci-tree-${{ steps.tree.outputs.tree }}
+          path: ${{ runner.temp }}/full-ci-evidence/evidence.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Warn that the evidence is missing
+        if: ${{ steps.tree.outcome == 'failure' || steps.upload.outcome == 'failure' }}
+        run: echo "::warning::evidence for this tree was not uploaded; a later run will test it in full"

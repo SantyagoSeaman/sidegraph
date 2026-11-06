@@ -10,7 +10,7 @@ Seed the decision store from what the team already wrote — a folder of ADR/spe
 markdown (`--docs` mode, a deterministic parser: no LLM, no API key) or the rationale
 nodes Graphify extracted from docstrings/comments (default mode) — instead of starting
 memory empty. CLI commands below run through
-`uvx --from sidegraph==0.26.0 --python 3.13 <command>` at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+`uvx --from sidegraph==0.27.0 --python 3.13 <command>` at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
@@ -18,14 +18,14 @@ Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegrap
 
 1. **Run from the repo root.** Documents are keyed by their repository path from any
    directory inside a git work tree, but the default `--db` is resolved from the current
-   directory, so run from the root or pass it; the default `--graph` follows the store's
+   directory, so run from the root or give it explicitly; the default `--graph` follows the store's
    project.
    Outside a git work tree the current directory stands in for the root, and a wrong one
    makes every anchor miss.
 2. **Rebuild the graph right before importing:** run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set. A *missing* graph
    fails the whole run; a *stale* one (docs added since the last build) silently skips the
    new files as unanchorable.
-3. Initialize the store first if this repo was never set up (`uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-init`; see
+3. Initialize the store first if this repo was never set up (`uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-init`; see
    `sidegraph:setup`) — import would otherwise create a fresh store at the default
    `.sidegraph` path, which may not be the one you meant.
 
@@ -47,8 +47,8 @@ Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegrap
 ## Always dry-run first
 
 ```bash
-uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-import --docs docs/adr --dry-run     # docs mode
-uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-import --dry-run                      # rationale mode
+uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-import --docs docs/adr --dry-run     # docs mode
+uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-import --dry-run                      # rationale mode
 ```
 
 Costs nothing, writes no records, and shows exactly what a real run would do. It does open

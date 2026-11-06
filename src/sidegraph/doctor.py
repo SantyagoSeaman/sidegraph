@@ -42,6 +42,7 @@ from .store import (
     _STAMPING_MARKER_NAME,
     _TERMINAL_DECISION_STATUSES,
     SKIPPED_CANONICAL_KEY,
+    live_slug_conflicts,
     parse_skip_list,
 )
 from .store_layout import DRIFT_CACHE_KEY, index_stamp_problem, is_safe_record_id
@@ -94,6 +95,8 @@ MAINTENANCE_DUE = "maintenance-due"
 DEPRECATED_AUTO_ACCEPT = "deprecated-auto-accept"
 RECORD_FIELDS_REQUIREMENT_CODE = "record-fields-requirement"
 DOMAIN_SPLIT = "domain-split"
+DOMAIN_SLUG_CONFLICT = "domain-slug-conflict"
+DOMAIN_NOT_CLOSED = "domain-not-closed"
 # Findings ``--check`` never escalates to exit 2: still printed, still in ``--json``, still a
 # session notice. ``maintenance-due`` is routine upkeep on a healthy packed store, so a CI
 # gate must not go red on it (owner decision, 2026-10-27). ``store-not-migrated`` still counts.
@@ -1230,6 +1233,7 @@ def _apply_drift_checks(
     old_entries = {entry.record_id: entry for batch in batches for entry in batch.entries}
     updates: dict[str, DriftEntry | None] = {}
     pending = {}
+    set_aside: dict[str, set[str]] = {}
     union: set[str] = set()
     for rid in sorted(eligible.keys() & selected.keys()):
         capsule = selected[rid]
@@ -1258,8 +1262,19 @@ def _apply_drift_checks(
                 _stored_blobs(check, candidates | set(check.required_files)),
             )
             continue
+        # A path with no binding status at all (no usable index) may be an orphan the check
+        # rightly left out, so it is set aside unless the check required it. A set-aside path
+        # is put back below, once the trees are known, unless it is unchanged since the check's
+        # commit: absent then, or changed since, it was not left out as the same file.
+        aside = drift_checks.unknown_status_paths(
+            rid, bindings.get(rid, []), raw_entities, statuses
+        ) - set(check.required_files)
+        candidates -= aside
         pending[rid] = (check, candidates)
+        if aside:
+            set_aside[rid] = aside
         union.update(candidates)
+        union.update(aside)
         union.update(entry.path for entry in check.checked_files)
     skipped = False
     compared_head = head
@@ -1278,6 +1293,22 @@ def _apply_drift_checks(
                         checked_commit=check.checked_commit,
                     )
         else:
+            unavailable: set[str] = set()
+            for rid, aside in set_aside.items():
+                check, candidates = pending[rid]
+                present = aside & tree.keys()
+                if not present:
+                    continue
+                try:
+                    then = drift_checks.tree_entries(
+                        repo_root, check.checked_commit, present, remaining()
+                    )
+                except (ValueError, OSError):
+                    unavailable.add(rid)  # cannot tell what the check left out, or why
+                    continue
+                back = {path for path in present if then.get(path) != tree[path]}
+                candidates |= back
+                aside -= back
             scope = _SectionScope(repo_root, _blobs_needing_text(pending, tree), remaining)
             for rid, (check, candidates) in pending.items():
                 required = candidates & tree.keys()
@@ -1292,9 +1323,20 @@ def _apply_drift_checks(
                     reason = _first_reason(judged)
                     files = sorted(judged)
                     basis, blobs = "check", _stored_blobs(check, set(files))
+                elif rid in unavailable:
+                    # Nothing definite changed, but the paths set aside could not be judged.
+                    skipped = True
+                    if rid in old_entries:
+                        updates[rid] = old_entries[rid]._replace(
+                            check_reason="scoped comparison unavailable; capture advisory retained",
+                            check_id=check.id,
+                            checked_commit=check.checked_commit,
+                        )
+                    continue
                 elif rid in old_entries and (
                     outside := set(old_entries[rid].files)
                     - {entry.path for entry in check.checked_files}
+                    - set_aside.get(rid, set())
                 ):
                     reason = "changed anchored file outside checked scope"
                     files = sorted(outside)
@@ -1800,6 +1842,101 @@ def _check_domain_splits(
                 "`sidegraph-ratify --drop <id>`",
                 record_id=pred_id,
                 record_type="domain",
+            )
+        )
+    return out
+
+
+def _check_domain_slug_conflicts(
+    root: Path, domains: list[tuple[Path, dict]], archived_domains: dict[str, dict]
+) -> list[Finding]:
+    """Two live domains claiming what one should, both escalated by ``--check``:
+
+    * ``domain-not-closed``: an accepted domain that an accepted domain replaces
+      (``supersedes`` names it), whatever the two slugs. A replacement that was ratified and
+      has been replaced in turn since counts too, while its chain still reaches an accepted
+      domain (:func:`domain_splits.domain_parts`); one never ratified (a dropped proposal
+      recovered by a successor), or whose chain ended in a drop, does not. A Sidegraph older
+      than 0.24 leaves this when it accepts a proposed revision without closing the domain it
+      replaces. One
+      finding per open predecessor, at the place it is stored, naming the drop that closes it.
+    * ``domain-slug-conflict``: a slug held by more than one live domain
+      (:func:`store.live_slug_conflicts`, the definition behind sync's ``slug_conflicts``),
+      once the open predecessors above are set aside. Two branches that each added a domain
+      under one slug and merged leave it.
+
+    Records that fail the model check are skipped (verify reports them). Pure read over the
+    canonical files."""
+    models: dict[str, Domain] = {}
+    where: dict[str, str] = {}
+    for payload in archived_domains.values():
+        try:
+            dom = Domain.model_validate(payload)
+        except ValueError:
+            continue
+        models[dom.domain_id] = dom
+        where[dom.domain_id] = str(root / "archive")
+    for path, payload in domains:
+        try:
+            dom = Domain.model_validate(payload)
+        except ValueError:
+            continue
+        models[dom.domain_id] = dom
+        where[dom.domain_id] = str(path)
+    accepted = DomainStatus.ACCEPTED
+    parts = domain_splits.domain_parts(models)
+    out: list[Finding] = []
+    open_ids: set[str] = set()
+    for new in sorted(models.values(), key=lambda d: d.domain_id):
+        old = models.get(new.supersedes or "")
+        if old is None or old.status != accepted or old.domain_id in open_ids:
+            continue
+        ratified_since_replaced = (
+            new.status == DomainStatus.SUPERSEDED
+            and new.ratified_at is not None
+            and old.domain_id in parts
+        )
+        if new.status != accepted and not ratified_since_replaced:
+            continue
+        open_ids.add(old.domain_id)
+        heads = parts.get(old.domain_id, [])
+        live = (
+            ""
+            if heads == [new.domain_id]
+            else ", and the live replacement is now "
+            + ", ".join(f"{models[h].slug} ({h})" for h in heads)
+        )
+        out.append(
+            Finding(
+                DOMAIN_NOT_CLOSED,
+                where[old.domain_id],
+                f"{old.slug} ({old.domain_id}) is still accepted, but {new.slug} "
+                f"({new.domain_id}) replaced it{live}: a Sidegraph older than 0.24 accepted the "
+                f"replacement without closing it. Close it with "
+                f"`sidegraph-ratify --drop {old.domain_id}`",
+                record_id=old.domain_id,
+                record_type="domain",
+            )
+        )
+    rows = [
+        {
+            "domain_id": d.domain_id,
+            "slug": d.slug,
+            "status": d.status.value,
+            "supersedes": d.supersedes,
+        }
+        for d in models.values()
+        if d.domain_id not in open_ids
+    ]
+    for conflict in live_slug_conflicts(rows):
+        ids = conflict["domain_ids"]
+        out.append(
+            Finding(
+                DOMAIN_SLUG_CONFLICT,
+                str(root),
+                f"slug {conflict['slug']} is held by {len(ids)} live domains: {', '.join(ids)}. "
+                "Keep one: drop the others with `sidegraph-ratify --drop <id>`, or supersede "
+                "one under a different slug",
             )
         )
     return out
@@ -2587,4 +2724,5 @@ def _curate(
     findings += _registry_findings(root, now, reader, index, host_checks)
     findings += _check_snapshot_splits(root, domains, archived_domains)
     findings += _check_domain_splits(root, domains, archived_domains)
+    findings += _check_domain_slug_conflicts(root, domains, archived_domains)
     return CurationReport(findings=findings, skipped=skipped, drift_groups=drift_groups_report)

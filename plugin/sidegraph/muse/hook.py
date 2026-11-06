@@ -20,7 +20,7 @@ import sys
 
 # The exact PyPI pin the adapter launches: the version bump writes it, with the manifests. The
 # interpreter flag follows the package, as in every other host's launch.
-SOURCE = "sidegraph==0.26.0"
+SOURCE = "sidegraph==0.27.0"
 
 # Muse's ``timeoutMs`` per event, pinned to the manifest by a test. The child gets the rest of
 # the budget minus the margin, so a slow runtime ends as ``{}`` and not as a Muse ``timed_out``.
@@ -34,7 +34,17 @@ OUTPUT_LIMIT = 15 * 1024
 def _child_env(payload: dict) -> dict:
     """The adapter's own environment plus the five keys Muse cannot set through a command. A key
     whose source is absent, empty or invalid is deleted, so neither an inherited value nor an
-    empty string reaches the child."""
+    empty string reaches the child.
+
+    The whole environment is copied on purpose, and it carries no credential. Muse starts a hook
+    with a cleared environment: a closed allowlist (``HOME``, ``PATH``, ``USER``, ``TMPDIR``,
+    ``LANG`` and similar, plus the ``MUSE_*`` plugin and session keys). Provider keys and the
+    rest of the parent environment never reach this process, so it has none to forward. A
+    second, narrower list here would only repeat Muse's own, and dropping one of its keys
+    breaks the launch: without ``PATH`` there is no ``uvx``, and without ``HOME`` the uv cache
+    moves. The child is the pinned Sidegraph runtime, which sends
+    nothing anywhere.
+    """
     env = dict(os.environ)
     env["SIDEGRAPH_HOST"] = "muse"
     env["SIDEGRAPH_DIR"] = ".sidegraph"

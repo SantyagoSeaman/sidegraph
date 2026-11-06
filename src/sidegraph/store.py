@@ -52,7 +52,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1281,6 +1281,29 @@ def _single_pending_revisions(rows: Sequence[Any]) -> set[str]:
         if r["status"] == DomainStatus.PROPOSED.value and r["supersedes"] in accepted:
             by_holder.setdefault(r["supersedes"], []).append(r["domain_id"])
     return {ids[0] for ids in by_holder.values() if len(ids) == 1}
+
+
+def live_slug_conflicts(rows: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Slugs held by MORE than one live (``proposed``/``accepted``) domain, from rows carrying
+    ``domain_id``, ``slug``, ``status`` and ``supersedes``. The one pending revision of an
+    accepted holder is no rival (:func:`_single_pending_revisions`); superseded and dropped
+    domains free their slug. ``Store.domain_slug_conflicts`` (over the index, for sync) and
+    doctor's ``domain-slug-conflict`` (over the canonical files) both use this definition.
+
+    Returns ``{"slug", "domain_ids"}`` dicts, sorted by slug, ids sorted (ULID, so creation
+    order)."""
+    live = (DomainStatus.PROPOSED.value, DomainStatus.ACCEPTED.value)
+    by_slug: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        if row["status"] in live:
+            by_slug.setdefault(row["slug"], []).append(row)
+    out: list[dict] = []
+    for slug, group in sorted(by_slug.items()):
+        exempt = _single_pending_revisions(group)
+        ids = [r["domain_id"] for r in group if r["domain_id"] not in exempt]
+        if len(ids) > 1:
+            out.append({"slug": slug, "domain_ids": sorted(ids)})
+    return out
 
 
 class SupersessionConflictError(ValueError):
@@ -2863,16 +2886,7 @@ class Store:
                 "SELECT domain_id, slug, status, supersedes FROM domains WHERE status IN (?, ?)",
                 (DomainStatus.PROPOSED.value, DomainStatus.ACCEPTED.value),
             ).fetchall()
-        by_slug: dict[str, list[sqlite3.Row]] = {}
-        for row in rows:
-            by_slug.setdefault(row["slug"], []).append(row)
-        out: list[dict] = []
-        for slug, group in sorted(by_slug.items()):
-            exempt = _single_pending_revisions(group)
-            live = [r["domain_id"] for r in group if r["domain_id"] not in exempt]
-            if len(live) > 1:
-                out.append({"slug": slug, "domain_ids": sorted(live)})
-        return out
+        return live_slug_conflicts(rows)
 
     def domain_slug_conflicts(self) -> list[dict]:
         """Slugs currently held by more than one live domain — see

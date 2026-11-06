@@ -4483,6 +4483,8 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
             else:
                 store.drop_fact(id_)
             return ("accepted" if action == "accept" else "dropped"), []
+        except SupersessionConflictError as e:
+            return f"error: {e}", []
         except ValueError:
             raced = settled_after_failure(store, "fact", id_, action, fact.status.value)
             return raced or _RATIFY_FAILED, []

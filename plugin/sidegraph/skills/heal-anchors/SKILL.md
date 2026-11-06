@@ -10,7 +10,7 @@ Code and docs moved; the sync run re-resolved every tracked entity and reported 
 honestly, never guessing — what it could no longer follow. Sidegraph auto-heals everything
 it can prove (`rebound`, `moved`, community re-pointing); everything else is routed to a
 human, and this skill is how you walk them through it. CLI commands below run through
-`uvx --from sidegraph==0.26.0 --python 3.13 <command>` at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+`uvx --from sidegraph==0.27.0 --python 3.13 <command>` at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
@@ -46,7 +46,7 @@ entities; the `force=True` call above already re-runs everything, so it makes th
 **CLI fallback** (outside a session, scripted/CI use, or reviewing as plain text):
 
 ```bash
-uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
+uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
 ```
 
 (Reads also self-heal lazily — `get_task_context`/`SessionStart` run `maybe_sync()` — so
@@ -71,7 +71,7 @@ store write or a source change: confirm before acting.
    [record-authoring rules](../record-decision/SKILL.md#reversing-an-earlier-decision), then choose a heal:
    - **Restore the name** — the symbol/heading was renamed or dropped and the decision is
      still true of the code. Restoring it is a **source change**: propose the edit to the
-     human, never do it silently. Then run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, followed by `uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-sync` — the anchor
+     human, never do it silently. Then run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, followed by `uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-sync` — the anchor
      heals back to `rebound`/`unchanged` on an exact match.
    - **Supersede an accepted, open decision** — the code it described moved into new code
      and the rule changed with it. `supersede_decision(...)` with **explicit fresh `anchors` pointing at the successor

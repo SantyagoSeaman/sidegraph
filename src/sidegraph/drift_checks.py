@@ -316,6 +316,31 @@ def scope_leaves(
     return leaves, paths
 
 
+def unknown_status_paths(
+    record_id: str,
+    bindings: list[dict],
+    entities: dict[str, dict],
+    statuses: dict[tuple[str, str], str],
+) -> set[str]:
+    """Leaf paths whose every binding has NO status in ``statuses``: the index was missing,
+    unreadable or stamped by another Sidegraph. :func:`scope_leaves` counts such a path as
+    required, which is right when a check is written but cannot tell an orphan from a live
+    anchor when an earlier check is compared; the caller decides. A path that also has a leaf
+    with a known status is not unknown."""
+    unknown: set[str] = set()
+    known: set[str] = set()
+    for binding in bindings:
+        eid = binding.get("entity_id")
+        if binding.get("tier") != 2 or not isinstance(eid, str):
+            continue
+        descriptor = (entities.get(eid) or {}).get("descriptor")
+        path = descriptor.get("file_path") if isinstance(descriptor, dict) else None
+        if not isinstance(path, str) or not path:
+            continue
+        (known if (record_id, eid) in statuses else unknown).add(path)
+    return unknown - known
+
+
 def _env(no_lazy_fetch: bool) -> dict[str, str]:
     """``git_env()`` unchanged, plus ``GIT_NO_LAZY_FETCH=1`` when the caller must not fetch."""
     env = git_env()

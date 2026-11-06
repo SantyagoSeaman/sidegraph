@@ -37,7 +37,7 @@ the next omitted row in either storage layout; a count cut suggests filters and 
   specifically at ratify time, not as a general listing.
 - **`drill_down(domain_slug)`** — detail (summary, subdomains, members, and the decisions,
   mistakes first; the ones that do not fit come as ids) for one **known** slug — the natural
-  follow-up once `list_domains` has given you the slug you want to go deeper on. Passing an
+  follow-up once `list_domains` has given you the slug you want to go deeper on. Giving an
   unknown slug returns up to 10 currently-accepted slugs to retry with instead of guessing.
 - **`list_domain_candidates()`** — the *unclaimed* side only (communities with no domain yet);
   `already_claimed` gives you a count of already-named communities but not their slugs (use
@@ -87,7 +87,7 @@ leaves the old domain untouched. Only an accepted domain can be superseded, one 
 successor at a time; a *dropped* domain is the one exception and is flipped at once.
 
 **No rule is inherited.** The successor's `path_prefixes`/`seed_anchors` start at `[]` unless
-you pass them explicitly — to keep covering the same code, carry over whatever membership rule
+you set them explicitly — to keep covering the same code, carry over whatever membership rule
 the old domain had. (With a domain snapshot, the old domain's frozen membership does carry
 over, to the successor once it is accepted, and the new rule applies only after
 `sidegraph-domains snapshot --refresh --domain <new slug>`; see "Domains under a snapshot".)
@@ -159,6 +159,6 @@ include a note for frozen membership or a split.
 - [`docs/guides/naming-your-domains.md`](../../../../docs/guides/naming-your-domains.md) —
   background on bootstrap idempotency, mass-drop recovery, and the CLI equivalents
   (`sidegraph-domains add`, `sidegraph-ratify`).
-- CLI commands run as `uvx --from sidegraph==0.26.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
+- CLI commands run as `uvx --from sidegraph==0.27.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
   [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.

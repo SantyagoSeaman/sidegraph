@@ -10,7 +10,8 @@
 #          build/publish only run if it passes. `git-tag == pyproject version` is enforced
 #          unconditionally (not just `if: startsWith(github.ref, 'refs/tags/')`) so a mistyped
 #          tag never ships, and so a future trigger that isn't a tag push fails this check
-#          loudly instead of silently skipping it.
+#          loudly instead of silently skipping it. The reused ci.yml skips its matrix when the
+#          tag's tree already passed on its release branch, and runs it in full otherwise.
 # Auth:    PyPI Trusted Publishing (OIDC) — no API token stored. One-time PyPI setup:
 #          project `sidegraph` → Trusted Publishers → add owner `SantyagoSeaman`, repo
 #          `sidegraph`, workflow `publish.yml`, environment `pypi`. Also create a GitHub
@@ -29,6 +30,11 @@ permissions:
 
 jobs:
   test:
+    # A called workflow cannot hold more than its calling job: ci.yml's `prior` job reads this
+    # repository's artifacts and runs (actions: read). `build` and `publish` do not get it.
+    permissions:
+      contents: read
+      actions: read
     # zizmor self-repository: flags this as the older `./...` reusable-workflow reference and
     # suggests the newer `$/...` form. Not applied: GA support for `$/...` on the runners this
     # workflow actually executes on is unconfirmed, and this reference is exactly the job graph

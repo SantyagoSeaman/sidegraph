@@ -7,6 +7,18 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-11-06
+
+### Changed
+
+- The plugin skills no longer use the verb "pass" in prose, and the Muse hook says why it copies its environment to the runtime it starts. A directory scanner had read both as a credential being forwarded; neither forwards one.
+
+### Fixed
+
+- The MCP `ratify` tool names the conflict when it refuses a proposed fact whose predecessor another fact already superseded, as `sidegraph-ratify` does, instead of answering "ratification failed; reopen the store".
+- `sidegraph-doctor` reports `domain-not-closed` when an accepted domain is still open although another domain replaced it, and `domain-slug-conflict` when one slug is held by more than one live domain; `--check` fails on both. A Sidegraph older than 0.24 could accept a domain's replacement without closing the old domain, and two merged branches can each add a domain under one slug. Sync listed same-slug pairs, but doctor stayed green. The `domain-not-closed` finding names the domain to drop.
+- `sidegraph-doctor` no longer re-arms a fresh drift check as "required anchor file scope changed" when it cannot read binding statuses (no index, or an index another Sidegraph version wrote). A file with no status at all is set aside while it is unchanged since the check's commit, unless the check required it, so an orphaned anchor the check left out stays out; one that is new or changed since the check still re-arms it.
+
 ## [0.26.0] — 2026-11-06
 
 ### Added
@@ -3013,7 +3025,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.24.0...v0.25.0

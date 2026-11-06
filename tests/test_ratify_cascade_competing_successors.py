@@ -110,6 +110,20 @@ def test_direct_fact_ratification_already_refuses_the_second_successor(tmp_path)
             s.ratify_fact(right)
 
 
+def test_mcp_ratify_of_the_second_fact_successor_names_the_live_one(tmp_path):
+    # Red against the unfixed fact branch of _ratify_one: it caught the refusal as a plain
+    # ValueError and answered the generic "ratification failed; reopen the store" message.
+    store_path, _d_id, p_id, left, right = _merged_store(tmp_path)
+    with Store(store_path) as s:
+        assert _ratify_impl(s, accept=[left])[left] == "accepted"
+        out = _ratify_impl(s, accept=[right])[right]
+        assert out == (
+            f"error: fact {right!r} cannot be ratified: {p_id} is already superseded by "
+            f"{left}; supersede that one instead"
+        )
+        assert s.get_fact(right).status == DecisionStatus.PROPOSED
+
+
 def test_mcp_ratify_reports_the_conflict_and_writes_nothing(tmp_path):
     store_path, d_id, p_id, left, right = _merged_store(tmp_path)
     with Store(store_path) as s:

@@ -92,7 +92,7 @@ verdict — one human gate, not two:
   append-only, same as any direct fact drop). A fact that also supports a still-live
   decision is left alone — not orphaned, just no longer riding this one's cascade.
 - **The `ratify` result reports every record actually touched**, not just the ids you
-  passed: a cascaded fact gets its own entry, `"accepted (evidence of <decision_id>)"` /
+  sent: a cascaded fact gets its own entry, `"accepted (evidence of <decision_id>)"` /
   `"dropped (evidence of <decision_id>)"`. Relay these to the human alongside the
   decision's own result line.
 - **Standalone facts are their own queue rows** — presented and ratified by their own id,
@@ -156,7 +156,7 @@ decision proposed.
   Present the batch grouped, recommend a subset, let the human widen it.
 - **CLI parity:** `sidegraph-ratify` (no flags = the same pending listing;
   `--accept`/`--drop`/`--all`) is the terminal/PR-review equivalent. Run it as
-  `uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-ratify`, at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-ratify`, at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
   Point the human there when they'd rather review outside the session.
 - A proposed record is not hidden while it waits: by default it surfaces in retrieval tagged

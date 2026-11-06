@@ -23,7 +23,7 @@ right write path, right `kind`, filled `rejected`, tight prose, on-target anchor
   accepted at write time when the project's `SIDEGRAPH_RATIFY_POLICY` admits it, the result's
   `ratified_by` then reading `auto:<policy>`, so don't tell the human it awaits review),
   tagged `[unratified]` in retrieval, for a human to accept later via
-  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 **Never call `add_decision` on your own initiative.** Self-initiated writes always go
@@ -115,7 +115,7 @@ anchors resurface as noise in someone else's task context later.
   `reason` before fixing anything — the causes need opposite actions:** `file-not-in-graph` usually
   means your graph is stale (run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, then re-anchor — the name was probably
   fine); `name-not-in-file` means the name is wrong (`find_entity`/`query_structure` will say
-  what is really there); `no-file-path` means pass one. Repair with `add_anchors`
+  what is really there); `no-file-path` means add one. Repair with `add_anchors`
   (bindings-only, no duplicate record, no content-free supersession). Anchor to real symbols
   and real file paths — a feature name, a directory, a domain title or a heading you invented
   reads fine and resolves to nothing.
@@ -197,7 +197,7 @@ accepted, open head of its chain. Replace that head if needed. With no live head
 current knowledge as a fresh anchored proposal. The store refuses other targets. Follow
 the status routes above when a refusal has no live successor to name. Anchoring on supersede: omit `anchors` and the replacement
 inherits the predecessor's bindings verbatim (right when the reversal concerns the same
-entities); pass `anchors` to re-anchor from scratch (the two are exclusive — passing
+entities); give `anchors` to re-anchor from scratch (the two are exclusive — giving
 anchors replaces inheritance).
 
 **A duplicate, or a decision whose subject is gone, is retired, not superseded.** When two

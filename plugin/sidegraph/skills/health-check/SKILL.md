@@ -14,7 +14,7 @@ measured. `UNKNOWN` always remains a warning and names the missing evidence.
 
 Resolve the project root first with the host's existing Git context so you can identify its
 existing interpreter, and retain the original launch directory for Claude scope reporting.
-Pass that original directory as `--project`; the collector resolves Git root itself. Use a
+Give that original directory as `--project`; the collector resolves Git root itself. Use a
 directly identified, already-existing Python interpreter:
 
 - In the Sidegraph source checkout itself (the project's `pyproject.toml` names the package
@@ -39,7 +39,7 @@ In PowerShell, call a quoted interpreter path with the call operator:
 `& $python -B "$skillDir\scripts\collect.py" --project $launchDir --host $knownHost`.
 
 `$KNOWN_HOST` is `claude`, `codex` or `unknown`; the collector refuses any other value.
-Pass `--store`, `--graph`, or `--plugin-root` only when the user or host has identified those
+Add `--store`, `--graph`, or `--plugin-root` only when the user or host has identified those
 paths. The collector does not scan user profiles or guess a Python from `PATH`. Do not use
 `uv`, `uvx`, a package installer, or a cached distribution as the launcher: an offline
 launcher can still provision an environment. Never create or repair an environment to make

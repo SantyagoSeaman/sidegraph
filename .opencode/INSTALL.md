@@ -38,7 +38,7 @@ server only when that name has no explicit configuration. An existing entry, inc
         "command": [
           "uvx",
           "--from",
-          "sidegraph==0.26.0",
+          "sidegraph==0.27.0",
           "--python",
           "3.13",
           "sidegraph-mcp",

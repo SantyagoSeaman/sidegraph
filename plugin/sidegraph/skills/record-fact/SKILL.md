@@ -60,7 +60,7 @@ north star this razor guards.
   "file_path": "ADR-001-dq-execution-and-triggering.md"},
   {"name": "ADR-001-dq-execution-and-triggering.md",
   "file_path": "ADR-001-dq-execution-and-triggering.md"}]`. Easy to miss: confirming the
-  heading exists via `Grep` is not the same as passing it through as a second anchor — a
+  heading exists via `Grep` is not the same as giving it as a second anchor — a
   live run defaulted to file-only for exactly this reason.
 
 ## Attached vs. standalone
@@ -111,7 +111,7 @@ source, ...)`: the predecessor closes in the same transaction (`valid_to` set, `
 flipped to `superseded`), never deleted, and stays retrievable as "believed before,
 corrected because…". Omit `anchors` to inherit the predecessor's bindings verbatim —
 *including* any `orphaned` ones, carried as-is; `supports` likewise defaults to the
-predecessor's own `supports` when omitted. Passing `anchors` replaces inheritance outright,
+predecessor's own `supports` when omitted. Giving `anchors` replaces inheritance outright,
 it never adds to it.
 
 ## Notes
@@ -134,7 +134,7 @@ it never adds to it.
   record without touching its status). **Read the
   `reason` first:** `file-not-in-graph` usually means a stale graph (run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set,
   and re-anchor — the name was probably fine), `name-not-in-file` means the name is wrong
-  (`find_entity`/`query_structure` will say what is really there), `no-file-path` means pass
+  (`find_entity`/`query_structure` will say what is really there), `no-file-path` means add
   one. With no graph at all, every entry carries `reason: "no-graph"`. That is the expected graph-less case described above — not
   an authoring mistake, and it heals on the next sync.
 - **Check `redactions`** — every text field (`statement`/`source`) is redacted first, the

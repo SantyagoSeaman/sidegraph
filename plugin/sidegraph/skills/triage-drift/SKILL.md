@@ -27,7 +27,7 @@ The CLI runs at the plugin's pinned version, never the copy on `PATH` ([why](../
 Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 ```bash
-uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
+uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
 ```
 
 Read `drift_groups.groups` first: one group per drifted file, each listing the records whose
@@ -123,7 +123,7 @@ a rationale or a call, even when one file change re-armed both.
      declared sections, only a change to a declared or also-watched section or to the file's
      link definitions); unchanged file bytes after unrelated commits remain covered. A known wrong claim belongs in route (b).
      Never create a content-free successor just to refresh a stamp.
-     **Scoping a check on a document.** Pass `sections` to `record_drift_check` when:
+     **Scoping a check on a document.** Give `sections` to `record_drift_check` when:
 
      - the file is markdown, the claim rests on identifiable sections, and you read those
        sections in this session at the recorded HEAD. When unsure, make a plain whole-file check.

@@ -11,7 +11,7 @@ import pytest
 from sidegraph import server
 from sidegraph.doctor import scan_code_drift
 from sidegraph.retrieval import drifted_record_ids
-from sidegraph.schema import AnchorBinding, Descriptor, Entity, Provenance
+from sidegraph.schema import AnchorBinding, Decision, Descriptor, Entity, Provenance
 from sidegraph.store import Store
 from sidegraph.sync import refresh_code_drift_cache
 from tests.drift_checks_support import (  # noqa: F401
@@ -157,6 +157,212 @@ def test_same_file_restoration_keeps_explicit_whole_file_coverage(project):
     require_check(root, decision.id)
     restore(store, decision, entity)
     assert drift_ids(store) == set()
+
+
+def lose_binding_statuses(store: Store) -> None:
+    """The index doctor reads carries no statuses: missing, or stamped by another Sidegraph
+    (``index_stamp_problem``), as when a session's older MCP server wrote it. Every binding's
+    status is then unknown, not live."""
+    store.close()
+    for path in store.path.glob("index.db*"):
+        path.unlink()
+    assert scan_code_drift(store.path).binding_statuses_uncomputed
+
+
+def test_unknown_statuses_keep_a_check_that_left_an_orphan_out(project):
+    # Red against unfixed doctor: with no status the orphan counted as required, so the
+    # required set differed from the check's and the fresh check re-armed as
+    # "required anchor file scope changed".
+    root, store, decision = project
+    commit_file(root, "dependency.py", "dependency = 1\n")
+    orphan(store, decision, "dependency.py", "dependency.py")
+    require_check(root, decision.id, files=["code.py", "dependency.py"])
+    assert drift_ids(store) == set()
+    lose_binding_statuses(store)
+    assert drift_ids(store) == set()
+
+
+def test_unknown_statuses_keep_a_check_that_required_every_anchor(project):
+    # Guard, red against a fix that drops every unknown-status path: a required file still in
+    # the tree would leave the required set and re-arm the check the other way round.
+    root, store, decision = project
+    commit_file(root, "dependency.py", "dependency = 1\n")
+    entity = store.upsert_entity(
+        Entity(
+            canonical_name="dependency.py",
+            descriptor=Descriptor(name="dependency.py", file_path="dependency.py"),
+        )
+    )
+    store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2))
+    require_check(root, decision.id, files=["code.py", "dependency.py"])
+    lose_binding_statuses(store)
+    assert drift_ids(store) == set()
+
+
+def test_unknown_statuses_keep_a_check_that_neither_required_nor_read_the_orphan(project):
+    # Red against a fix that only touches the required-scope comparison (review, Opus and
+    # Sol): the orphan's file changed since capture, so the capture fallback listed it and the
+    # check re-armed as "changed anchored file outside checked scope".
+    root, store, decision = project
+    commit_file(root, "dependency.py", "dependency = 1\n")
+    orphan(store, decision, "dependency.py", "dependency.py")
+    require_check(root, decision.id, files=["code.py"])
+    assert drift_ids(store) == set()
+    lose_binding_statuses(store)
+    assert drift_ids(store) == set()
+
+
+def test_unknown_statuses_rearm_a_file_absent_at_the_check_and_restored(project):
+    # Red against a fix that treats every unknown-status path the check did not require as an
+    # orphan (review, Sol): this one was left out because it did not exist at the check.
+    root, store, decision = project
+    commit_file(root, "dependency.py", "dependency = 1\n")
+    other = store.add_decision(
+        Decision(
+            title="Dependency policy",
+            kind="constraint",
+            status="accepted",
+            context="c",
+            choice="c",
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual", commit=git(root, "rev-parse", "HEAD")),
+        )
+    )
+    for name in ["code.py", "dependency.py"]:
+        entity = store.upsert_entity(
+            Entity(canonical_name=name, descriptor=Descriptor(name=name, file_path=name))
+        )
+        store.add_binding(AnchorBinding(record_id=other.id, entity_id=entity.entity_id, tier=2))
+    git(root, "rm", "-q", "dependency.py")
+    git(root, "commit", "-q", "-m", "remove temporarily")
+    require_check(root, other.id, files=["code.py"])
+    commit_file(root, "dependency.py", "dependency = 1\n")
+    assert other.id in drift_ids(store)
+    lose_binding_statuses(store)
+    assert other.id in drift_ids(store)
+
+
+def test_unknown_statuses_rearm_a_left_out_file_changed_after_the_check(project):
+    # Red against a set-aside that only asks whether the file existed at the check (review
+    # round 2, Sol): an anchor orphaned at the check, revived, then changed, drifted with the
+    # index and went silent without it.
+    root, store, decision = project
+    commit_file(root, "dependency.py", "dependency = 1\n")
+    entity = orphan(store, decision, "dependency.py", "dependency.py")
+    require_check(root, decision.id, files=["code.py"])
+    assert drift_ids(store) == set()
+    restore(store, decision, entity)
+    commit_file(root, "dependency.py", "dependency = 2\n")
+    assert drift_ids(store) == {decision.id}
+    lose_binding_statuses(store)
+    assert drift_ids(store) == {decision.id}
+
+
+def test_unknown_statuses_with_no_tree_at_the_check_say_the_comparison_is_unavailable(
+    project, monkeypatch
+):
+    # Red against putting every set-aside path back when the check's tree cannot be read
+    # (review round 2, Opus): the check re-armed as "required anchor file scope changed".
+    from sidegraph import drift_checks
+
+    root, store, decision = project
+    commit_file(root, "dependency.py", "dependency = 1\n")
+    orphan(store, decision, "dependency.py", "dependency.py")
+    check = require_check(root, decision.id, files=["code.py"])
+    lose_binding_statuses(store)
+    real = drift_checks.tree_entries
+
+    def no_history(repo, revision, paths, timeout):
+        if revision == check["checked_commit"]:
+            raise ValueError("time budget spent")
+        return real(repo, revision, paths, timeout)
+
+    head = git(root, "rev-parse", "HEAD")
+    commit_file(root, "unrelated.py", "x = 1\n")
+    assert git(root, "rev-parse", "HEAD") != head
+    monkeypatch.setattr(drift_checks, "tree_entries", no_history)
+    scan = scan_code_drift(store.path)
+    reasons = {
+        e.check_reason for b in scan.batches for e in b.entries if e.record_id == decision.id
+    }
+    assert reasons <= {"scoped comparison unavailable; capture advisory retained"}
+    assert scan.check_skipped
+
+
+@pytest.mark.parametrize("change", ["delete", "edit"])
+def test_unknown_statuses_with_no_tree_at_the_check_still_report_a_definite_change(
+    project, monkeypatch, change
+):
+    # Red against skipping the whole record when the check's tree cannot be read (review
+    # round 3, Opus and Sol): a required file deleted or changed since the check is known from
+    # HEAD and the check's stored blobs alone, and went silent.
+    from sidegraph import drift_checks
+
+    root, store, decision = project
+    commit_file(root, "dependency.py", "dependency = 1\n")
+    orphan(store, decision, "dependency.py", "dependency.py")
+    check = require_check(root, decision.id, files=["code.py"])
+    lose_binding_statuses(store)
+    real = drift_checks.tree_entries
+
+    def no_history(repo, revision, paths, timeout):
+        if revision == check["checked_commit"]:
+            raise ValueError("time budget spent")
+        return real(repo, revision, paths, timeout)
+
+    if change == "delete":
+        git(root, "rm", "-q", "code.py")
+        git(root, "commit", "-q", "-m", "remove code")
+    else:
+        commit_file(root, "code.py", "changed = True\n")
+    monkeypatch.setattr(drift_checks, "tree_entries", no_history)
+    scan = scan_code_drift(store.path)
+    reasons = {
+        e.check_reason for b in scan.batches for e in b.entries if e.record_id == decision.id
+    }
+    assert reasons
+    assert "scoped comparison unavailable; capture advisory retained" not in reasons
+
+
+def test_unknown_status_paths_ignores_a_path_with_a_known_leaf() -> None:
+    from sidegraph.drift_checks import unknown_status_paths
+
+    entities = {
+        "E1": {"descriptor": {"file_path": "a.py"}},
+        "E2": {"descriptor": {"file_path": "a.py"}},
+        "E3": {"descriptor": {"file_path": "b.py"}},
+        "E4": {"descriptor": {"file_path": "c.py"}},
+    }
+    bindings = [
+        {"entity_id": "E1", "tier": 2},
+        {"entity_id": "E2", "tier": 2},
+        {"entity_id": "E3", "tier": 2},
+        {"entity_id": "E4", "tier": 1},
+    ]
+    statuses = {("R", "E1"): "orphaned"}
+    assert unknown_status_paths("R", bindings, entities, statuses) == {"b.py"}
+
+
+def test_unknown_statuses_still_rearm_when_a_required_file_is_deleted(project):
+    # Guard, red against a fix that skips the required-scope comparison when statuses are
+    # unknown: a deleted required file is known without any status.
+    root, store, decision = project
+    commit_file(root, "dependency.py", "dependency = 1\n")
+    entity = store.upsert_entity(
+        Entity(
+            canonical_name="dependency.py",
+            descriptor=Descriptor(name="dependency.py", file_path="dependency.py"),
+        )
+    )
+    store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2))
+    require_check(root, decision.id, files=["code.py", "dependency.py"])
+    git(root, "rm", "-q", "dependency.py")
+    git(root, "commit", "-q", "-m", "remove dependency")
+    lose_binding_statuses(store)
+    entries = [e for b in scan_code_drift(store.path).batches for e in b.entries]
+    assert [(e.record_id, e.check_reason) for e in entries] == [
+        (decision.id, "required anchor file scope changed")
+    ]
 
 
 def test_changed_descriptor_invalidates_the_checked_subject(project):
