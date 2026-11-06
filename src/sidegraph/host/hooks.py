@@ -56,6 +56,7 @@ from ..store_layout import (
     check_store_requirement,
     clip_line,
 )
+from . import hook_log
 from .diagnostics import HookDiagnostics
 from .project_anchor import anchor_to_project, take_repo_root_flag
 
@@ -830,10 +831,7 @@ def _is_transient_lock(error: BaseException) -> bool:
     printing ``{}`` for it; a read-only or unreadable index is not transient.
     see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D3)
     """
-    if not isinstance(error, sqlite3.OperationalError):
-        return False
-    code = getattr(error, "sqlite_errorcode", None)
-    return isinstance(code, int) and (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    return hook_log.is_lock_error(error)
 
 
 def _report_unreadable_store(location: StoreLocation, error: BaseException, now: datetime) -> None:
@@ -1487,6 +1485,7 @@ def session_start() -> None:
     there changes nothing below — see :mod:`sidegraph.host.launch` and
     design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md.
     """
+    run = hook_log.Run("SessionStart")  # first: the run log's elapsed time starts here
     if take_repo_root_flag(sys.argv):
         anchor_to_project()
     if len(sys.argv) > 1:
@@ -1494,6 +1493,7 @@ def session_start() -> None:
             "sidegraph-session-start", "Injects the project's decision map at session start."
         )
     diagnostics = HookDiagnostics("SessionStart")
+    delivered = False
     try:
         from . import launch
 
@@ -1533,6 +1533,7 @@ def session_start() -> None:
         if not _present_by_lstat(location.path) and not _interrupted(location.path):
             print(_bounded_output(missing_store_message(location.path), None))
             return
+        run.store_dir = location.path
         # A store that cannot open used to print `{}` and switch memory off with no word to
         # anyone. Only a lock another process holds keeps that: it passes by itself.
         # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D3)
@@ -1541,7 +1542,10 @@ def session_start() -> None:
                 location.path, busy_timeout_seconds=HOOK_BUSY_SECONDS, stop_waiting_after_busy=True
             )
         except Exception as e:
-            if not isinstance(e, StoreRequirementError):
+            if isinstance(e, StoreRequirementError):
+                run.store_dir = None  # a store of a newer release is left exactly as it was
+            else:
+                run.note(e)
                 diagnostics.report("store", e)
             if _is_transient_lock(e):
                 raise
@@ -1764,9 +1768,16 @@ def session_start() -> None:
         # The one composition point every host's SessionStart shares: the size budget is
         # applied here, after all sections are rendered.
         print(_fit_session_output(head, sections, status, notices))
+        delivered = True
     except Exception as error:
+        run.note(error)
         diagnostics.report(stage, error)
         print(json.dumps({}))
+    finally:
+        # After the answer is printed and flushed: the tally never delays the map.
+        with contextlib.suppress(Exception):
+            sys.stdout.flush()
+        run.finish(delivered)
 
 
 # A session that was already nudged is nudged again when at least this long has passed since its
@@ -2237,27 +2248,52 @@ class _HotOpener:
     Touch recording and the nudge both need the index and both resolve the same store, so the
     second step reuses the first one's handle (or its refusal: ``None`` is remembered too, so a
     store that cannot be used is looked at once). A handle whose write hit the busy timeout
-    (``HotIndex.write_failed``) is not handed out again, so a run waits for a held lock at most
-    once. The handle waits ``HOOK_BUSY_SECONDS`` for a lock another process holds. ``close``
-    releases the handle at the end of the run.
+    (``HotIndex.write_failed``) is not handed out again. A read that loses its wait does not
+    set that flag, so the touch write after it can wait once more: about twice
+    ``HOOK_BUSY_SECONDS`` per run at most. Each wait is ``HOOK_BUSY_SECONDS`` for a lock another
+    process holds. ``close`` releases the handle at the end of the run.
     see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D3)
     """
 
-    def __init__(self, diagnostics: HookDiagnostics | None = None) -> None:
+    def __init__(
+        self, diagnostics: HookDiagnostics | None = None, run: hook_log.Run | None = None
+    ) -> None:
         self.diagnostics = diagnostics
+        self._run = run
         self._asked = False
         self._index: HotIndex | None = None
 
-    def __call__(self, store_path: str | os.PathLike[str]) -> HotIndex | None:
+    def __call__(
+        self, store_path: str | os.PathLike[str], *, delivery: bool = True
+    ) -> HotIndex | None:
+        """The shared handle. ``delivery=False`` is the touch row's call: the open it makes when
+        delivery never asked is bookkeeping, so a failure of it is not a withheld delivery."""
         if not self._asked:
             from ..hot_index import HotIndex
 
             self._asked = True
+            errors: list[Exception] = []
+
+            def open_error(error: Exception) -> None:
+                errors.append(error)
+                self.report("index", error)
+
             self._index = HotIndex.open(
-                store_path,
-                on_error=lambda error: self.report("index", error),
-                busy_timeout_seconds=HOOK_BUSY_SECONDS,
+                store_path, on_error=open_error, busy_timeout_seconds=HOOK_BUSY_SECONDS
             )
+            # The run log. An error the open reported while still returning a handle (the journal
+            # pragma refused because another connection holds the file in WAL) withheld nothing,
+            # so the run learns of the errors only when there is no handle. A run is written only
+            # when its delivery used the index or lost it to a lock: an index the hook cannot use
+            # for any other reason (missing, a newer format, a symlink, corrupt) is left exactly
+            # as it was, and a run whose delivery never opened the index (switched off, or an
+            # early exit) is not counted, locked or not. Delivery always asks before the touch row.
+            if self._run is not None and delivery:
+                if self._index is None:
+                    for error in errors:
+                        self._run.note(error)
+                if self._index is not None or self._run.lock_seen:
+                    self._run.store_dir = store_path
         if self._index is not None and self._index.write_failed:
             return None
         return self._index
@@ -2266,10 +2302,22 @@ class _HotOpener:
         if self.diagnostics is not None:
             self.diagnostics.report(stage, error)
 
+    def note(self, error: Exception) -> None:
+        """Tell the run's outcome tally about a failure of a delivery step (opening the index,
+        selecting records, claiming a file), never about bookkeeping such as the touch row."""
+        if self._run is not None:
+            self._run.note(error)
+
     def close(self) -> None:
         if self._index is not None:
             self._index.close()
             self._index = None
+
+
+def _select_error(hot: _HotOpener, error: Exception) -> None:
+    """A failure while reading the records of a file the hook meant to deliver."""
+    hot.note(error)
+    hot.report("delivery", error)
 
 
 def _record_touch_event(payload: dict, hot: _HotOpener) -> None:
@@ -2312,7 +2360,7 @@ def _record_touch_event(payload: dict, hot: _HotOpener) -> None:
         path = _touch_path(payload.get("tool_input"), _touch_root(location))
         if path is None:
             return
-        index = hot(location.path)
+        index = hot(location.path, delivery=False)
         if index is None:
             return
         index.record_touch(session_id, path, str(tool), agent=agent_id)
@@ -2605,6 +2653,7 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
     def selection_error(error: Exception) -> None:
         nonlocal selection_failed
         selection_failed = True
+        hot.note(error)
         hot.report("delivery", error)
 
     chosen: list[tuple[str, list[Record]]] = []
@@ -2660,6 +2709,7 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
                 blocks.append(_records_block(rel, records, seen=seen))
                 winning.append((rel, _shown_slice(records)))
         except sqlite3.OperationalError as error:
+            hot.note(error)
             hot.report("claim", error)
             break  # contention refusal: deliver what is already claimed, claim no more
     if not blocks:
@@ -2805,7 +2855,7 @@ def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
         prompt, _touch_root(location), anchored, cwd if isinstance(cwd, str) else None
     ):
         records = _renderable_records(
-            index.records_for(anchored[rel], on_error=lambda error: hot.report("delivery", error))
+            index.records_for(anchored[rel], on_error=lambda error: _select_error(hot, error))
             if rel in anchored
             else []
         )
@@ -2875,6 +2925,7 @@ def pre_tool_use() -> None:
     design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1-D3) and
     design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1)
     """
+    run = hook_log.Run("PreToolUse")  # first: the run log's elapsed time starts here
     if take_repo_root_flag(sys.argv):
         anchor_to_project()
     if len(sys.argv) > 1:
@@ -2883,6 +2934,7 @@ def pre_tool_use() -> None:
             "Hands the agent the records anchored to the file it is about to read or edit.",
         )
     diagnostics = HookDiagnostics("PreToolUse")
+    delivered = False
     # Payload first: stdin can only be read once, and recording (D4) must see it even when
     # delivery is switched off. Then deliver, then record.
     try:
@@ -2892,7 +2944,7 @@ def pre_tool_use() -> None:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    hot = _HotOpener(diagnostics)
+    hot = _HotOpener(diagnostics, run)
     try:
         try:
             payload = _claude_shaped(payload)
@@ -2906,8 +2958,10 @@ def pre_tool_use() -> None:
         try:
             output = _hook_output(payload, hot)
         except Exception as error:
+            run.note(error)
             diagnostics.report("delivery", error)
             output = {}
+        delivered = bool(output)
         print(json.dumps(output), flush=True)
         _record_touch_event(payload, hot)
     finally:
@@ -2915,6 +2969,7 @@ def pre_tool_use() -> None:
             hot.close()
         except Exception as error:
             diagnostics.report("cleanup", error)
+        run.finish(delivered)
 
 
 def _hook_usage(prog: str, summary: str) -> str:

@@ -251,6 +251,11 @@ jobs:
             tests/test_git_output_utf8.py `
             tests/test_githooks_atomic_lock.py::test_windows_pid_probe_is_never_a_signal_from_python `
             tests/test_health_check_skill.py `
+            tests/test_hook_outcome_log.py::test_record_rotates_once_the_file_passes_the_limit `
+            tests/test_hook_outcome_log.py::test_the_rotation_without_flock_renames_a_closed_log `
+            tests/test_hook_outcome_log.py::test_a_paused_run_without_flock_leaves_a_fresh_log_alone `
+            tests/test_hook_outcome_log.py::test_the_log_stays_bounded_when_the_rotated_name_cannot_be_used `
+            tests/test_hook_outcome_log.py::test_a_log_just_past_the_limit_is_not_truncated `
             tests/test_checkout_window.py tests/test_store_marker_checkout_race.py `
             $privateTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -3,7 +3,7 @@
     "command": "uvx",
     "args": [
       "--from",
-      "sidegraph==0.25.1",
+      "sidegraph==0.26.0",
       "--python",
       "3.13",
       "sidegraph-mcp",

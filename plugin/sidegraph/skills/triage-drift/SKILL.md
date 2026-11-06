@@ -27,7 +27,7 @@ The CLI runs at the plugin's pinned version, never the copy on `PATH` ([why](../
 Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 ```bash
-uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
+uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
 ```
 
 Read `drift_groups.groups` first: one group per drifted file, each listing the records whose

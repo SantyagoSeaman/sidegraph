@@ -22,6 +22,8 @@ MCP server for any other client.
 [![release](https://img.shields.io/github/v/release/SantyagoSeaman/sidegraph)](https://github.com/SantyagoSeaman/sidegraph/releases)
 [![PyPI](https://img.shields.io/pypi/v/sidegraph)](https://pypi.org/project/sidegraph/)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
+[![MCP tools](https://img.shields.io/badge/MCP_tools-25-blue)](docs/reference/mcp-tools.md)
+[![skills](https://img.shields.io/badge/skills-14-blueviolet)](#what-you-can-do)
 
 ## Why
 

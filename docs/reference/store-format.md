@@ -40,7 +40,9 @@ record in both formats. A store may additionally be **packed** (format 2): see
 ├── archive/                 # optional — only exists once `sidegraph-compact` has run
 │   └── <date>-<seq>-<hash12>.jsonl  # immutable segments of terminal (closed) records
 └── index.db                 # DERIVED, gitignored: fast queries + every volatile field
-                             # (+ index.db-journal, a 0-byte rollback journal kept beside it)
+                             # (+ index.db-journal, a 0-byte rollback journal kept beside it,
+                             # and index.db-hooks.log, the hooks' run log: see "The hook run log"
+                             # in hooks.md; git ignores both, the name starts with `index.db`)
 ```
 
 The five record directories (`decisions/`, `facts/`, `domains/`, `entities/`, `bindings/`)

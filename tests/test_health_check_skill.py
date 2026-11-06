@@ -1120,3 +1120,227 @@ def test_skill_and_docs_name_direct_existing_interpreter_and_manual_only_actions
     assert '--project "$LAUNCH_DIR"' in skill
     assert "six sections" in skill
     assert "Do not execute them during this health check" in " ".join(skill.split())
+
+
+def test_inventory_counts_the_ratify_queue_and_leaves_attached_facts_out() -> None:
+    """SessionStart and ratify count decisions, standalone facts and domains; a fact that
+    supports a proposed decision rides that decision's verdict. Red against counting every
+    proposed record: it reported 3 where the queue holds 2."""
+    from ulid import ULID
+
+    decision, attached, standalone, accepted = (str(ULID()) for _ in range(4))
+
+    class FakeDoctor:
+        _ulid_datetime = staticmethod(_collector()._imports()["doctor"]._ulid_datetime)
+
+        @staticmethod
+        def _iter_records(_store: Path, directory: str) -> list[tuple[Path, dict[str, object]]]:
+            if directory == "decisions":
+                return [(Path("d.json"), {"id": decision, "status": "proposed"})]
+            if directory == "facts":
+                return [
+                    (
+                        Path("a.json"),
+                        {"id": attached, "status": "proposed", "supports": [decision]},
+                    ),
+                    (Path("s.json"), {"id": standalone, "status": "proposed", "supports": []}),
+                    (Path("x.json"), {"id": accepted, "status": "accepted", "supports": []}),
+                ]
+            return []
+
+        @staticmethod
+        def _check_archive_dir(_path: Path) -> SimpleNamespace:
+            return SimpleNamespace(decisions=[], domains=[])
+
+    inventory = _collector()._inventory(Path("/synthetic/store"), FakeDoctor)
+
+    assert inventory["proposed_count"] == 2
+    assert inventory["attached_facts_pending"] == 1
+
+
+def test_delivery_summary_reports_hook_and_mcp_placements() -> None:
+    """The usage section used to show only the legacy MCP-side activation, so a store whose
+    hooks delivered 135 records read as "shows 0". It now carries the delivery counts."""
+    collector = _collector()
+    group = SimpleNamespace(occurrences=34, reported_placements=135, reported_anchor_links=135)
+    quiet = SimpleNamespace(occurrences=0, reported_placements=0, reported_anchor_links=0)
+    evidence = SimpleNamespace(available=True, recording_since="2026-10-26", hooks=group, mcp=quiet)
+
+    summary = collector._delivery_summary(evidence)
+
+    assert summary == {
+        "available": True,
+        "recording_since": "2026-10-26",
+        "hooks": {"occurrences": 34, "placements": 135, "anchor_links": 135},
+        "mcp": {"occurrences": 0, "placements": 0, "anchor_links": 0},
+    }
+    assert collector._delivery_summary(None) == {"available": False}
+    assert collector._delivery_summary(SimpleNamespace(available=False)) == {"available": False}
+
+
+def test_stats_summary_carries_the_delivery_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _sandbox(tmp_path, monkeypatch)
+    initialized = Store(store)
+    initialized.set_meta("volatile_stale", "0")
+    initialized.close()
+
+    report = _collector().collect(
+        project=project, store=store, graph=project / "graphify-out/graph.json"
+    )
+
+    statistics = report["sections"][5]["evidence"]["statistics"]
+    assert statistics["status"] == "available"
+    # the real stats report, not a stand-in: its evidence group exists and the summary reads it
+    delivery = statistics["delivery"]
+    assert delivery["available"] is True
+    assert set(delivery) == {"available", "recording_since", "hooks", "mcp"}
+    assert delivery["hooks"] == {"occurrences": 0, "placements": 0, "anchor_links": 0}
+
+
+def test_usage_carries_the_hook_run_log_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run log is the field data the journal-mode decision waits for; the health report is
+    how it reaches us. Red against a collector that leaves it out."""
+    from sidegraph.host import hook_log
+
+    project, store = _sandbox(tmp_path, monkeypatch)
+    Store(store).close()
+    monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "on")
+    for outcome, elapsed in (("delivered", 40), ("lock", 520), ("empty", 30)):
+        hook_log.record(store, "PreToolUse", outcome, elapsed)
+    hook_log.record(store, "SessionStart", "delivered", 300)
+
+    report = _collector().collect(
+        project=project, store=store, graph=project / "graphify-out/graph.json"
+    )
+
+    runs = report["sections"][5]["evidence"]["hook_runs"]
+    assert runs["available"] is True and runs["runs"] == 4
+    assert runs["first_ms"] <= runs["last_ms"]
+    pretool = runs["hooks"]["PreToolUse"]
+    assert (pretool["runs"], pretool["delivered"], pretool["lock"], pretool["empty"]) == (
+        3,
+        1,
+        1,
+        1,
+    )
+    assert pretool["p95_ms"] == 520
+    assert runs["hooks"]["SessionStart"]["delivered"] == 1
+
+
+def test_a_store_with_no_hook_run_log_reports_zero_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _sandbox(tmp_path, monkeypatch)
+    Store(store).close()
+
+    report = _collector().collect(
+        project=project, store=store, graph=project / "graphify-out/graph.json"
+    )
+
+    assert report["sections"][5]["evidence"]["hook_runs"] == {
+        "available": True,
+        "runs": 0,
+        "hooks": {},
+    }
+
+
+def test_a_python_without_sidegraph_prints_a_fixed_hint_not_the_exception(
+    tmp_path: Path,
+) -> None:
+    """The first run of the field report failed on a Python without the package and printed
+    only "could not be collected". The error JSON now names the way out, with no exception
+    text."""
+    copied_skill = tmp_path / "copy/plugin/sidegraph/skills/health-check"
+    shutil.copytree(_ROOT / "plugin/sidegraph/skills/health-check", copied_skill)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-I",
+            "-S",
+            str(copied_skill / "scripts/collect.py"),
+            "--project",
+            str(tmp_path),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "ImportError"
+    assert payload["hint"].startswith("This Python has no Sidegraph")
+    assert "sidegraph-mcp" in payload["hint"] and "SKILL.md" in payload["hint"]
+    assert "ModuleNotFoundError" not in result.stdout and "No module" not in result.stdout
+
+
+@pytest.mark.parametrize("failure", ["plain-import-error", "missing-submodule"])
+def test_a_sidegraph_that_cannot_be_fully_loaded_is_not_called_absent(
+    tmp_path: Path, failure: str
+) -> None:
+    """A Python that has an older Sidegraph (a session kept running across a plugin update) or
+    lacks a dependency fails on a later import. It must not be told it has no Sidegraph: the hint
+    would send the agent to the interpreter that just failed. Two real shapes: an empty package
+    makes `from sidegraph import doctor` raise a plain ImportError, and an older release lacks a
+    submodule (`sidegraph.adr_cli`), which raises ModuleNotFoundError with a dotted name. Red
+    against the first version, which answered every ImportError with "has no Sidegraph", and the
+    submodule case is red against a handler that tests only the exception type."""
+    copied_skill = tmp_path / "copy/plugin/sidegraph/skills/health-check"
+    shutil.copytree(_ROOT / "plugin/sidegraph/skills/health-check", copied_skill)
+    stub = tmp_path / "stub"
+    (stub / "sidegraph").mkdir(parents=True)
+    (stub / "sidegraph/__init__.py").write_text('__version__ = "0.0.1"\n')
+    if failure == "missing-submodule":
+        (stub / "sidegraph/doctor.py").write_text("")
+        (stub / "sidegraph/verify.py").write_text("")
+    # a Windows interpreter needs SYSTEMROOT to start; nothing else of the environment is passed
+    env = {k: v for k, v in os.environ.items() if k in ("PATH", "SYSTEMROOT")}
+    env["PYTHONPATH"] = str(stub)
+
+    result = subprocess.run(
+        [sys.executable, "-B", "-S", str(copied_skill / "scripts/collect.py"), "--project", "."],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "ImportError"
+    assert "has no Sidegraph" not in payload["hint"]
+    assert "could not be loaded" in payload["hint"]
+    assert "installed-plugin.md" in payload["hint"]
+    assert "No module" not in result.stdout and "sidegraph.adr_cli" not in result.stdout
+
+
+def test_skill_gives_a_recipe_for_an_installed_plugin_and_the_host_values() -> None:
+    skill_dir = _ROOT / "plugin/sidegraph/skills/health-check"
+    skill = " ".join((skill_dir / "SKILL.md").read_text().split())
+    recipe = " ".join((skill_dir / "references/installed-plugin.md").read_text().split())
+    # SKILL.md names no CLI (the public-twin gate reads `sidegraph-` plus a letter as one), so
+    # the process recipe lives in the note it points at.
+    assert "references/installed-plugin.md" in skill
+    assert "sidegraph-mcp" in recipe and "working directory" in recipe
+    # field review: the first word of a command line is not the interpreter when a directory name
+    # holds a space; two sessions of different plugin versions are told apart by version; the
+    # PowerShell listing needs the CommandLine column
+    assert 'never "the first word"' in recipe
+    assert "importlib.metadata" in recipe and "plugin.json" in recipe
+    assert "Select-Object ProcessId,ParentProcessId,CommandLine" in recipe
+    assert "same interpreter" not in recipe.replace("give the same interpreter", "")
+    # a project's own `.venv` is not a Sidegraph environment; PowerShell needs the call operator
+    assert "source checkout itself" in skill
+    assert "call operator" in skill
+    # the one retry after the no-Sidegraph hint, and the stop rule that must not contradict it
+    assert "follow the installed-plugin note once" in skill
+    assert "after the one retry above where it applies" in skill
+    assert "`claude`, `codex` or `unknown`" in skill
+    # the spec's rules stay: no launcher that can provision, no guessing
+    assert "Do not use `uv`, `uvx`" in skill

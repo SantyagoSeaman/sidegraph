@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.25.1"
+version = "0.26.0"
 description = "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -37,9 +37,9 @@ dependencies = [
     "annotated-types==0.8.0",
     "anyio==4.16.0",
     "attrs==26.1.0",
-    "authlib==1.9.4",
+    "authlib==1.9.5",
     "beartype==0.23.1",
-    "cachetools==7.2.8",
+    "cachetools==7.3.0",
     "caio==0.12.10",
     "certifi==2026.10.23",
     "cffi==2.1.1 ; platform_python_implementation != 'PyPy'",
@@ -79,9 +79,9 @@ dependencies = [
     "platformdirs==4.14.5",
     "py-key-value-aio==0.4.6",
     "pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'",
-    "pydantic-core==2.50.2",
+    "pydantic-core==2.50.4",
     "pydantic-settings==2.16.2",
-    "pydantic==2.14.2",
+    "pydantic==2.14.3",
     "pygments==2.21.0",
     "pyjwt==2.15.1",
     "pyperclip==1.11.0",

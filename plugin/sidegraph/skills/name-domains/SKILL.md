@@ -140,7 +140,7 @@ does not authorize `propose_domains` or `ratify`.
 - `sidegraph-domains bootstrap` (CLI) does the same deterministic candidate selection but skips
   the curation step — it's the scripted/CI alternative, not the recommended path for a human in
   a session. See [naming your domains](../../../../docs/guides/naming-your-domains.md). Run it as
-  `uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
+  `uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 ## See also

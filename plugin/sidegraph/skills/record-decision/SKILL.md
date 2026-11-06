@@ -23,7 +23,7 @@ right write path, right `kind`, filled `rejected`, tight prose, on-target anchor
   accepted at write time when the project's `SIDEGRAPH_RATIFY_POLICY` admits it, the result's
   `ratified_by` then reading `auto:<policy>`, so don't tell the human it awaits review),
   tagged `[unratified]` in retrieval, for a human to accept later via
-  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 **Never call `add_decision` on your own initiative.** Self-initiated writes always go

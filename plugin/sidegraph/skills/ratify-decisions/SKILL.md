@@ -156,7 +156,7 @@ decision proposed.
   Present the batch grouped, recommend a subset, let the human widen it.
 - **CLI parity:** `sidegraph-ratify` (no flags = the same pending listing;
   `--accept`/`--drop`/`--all`) is the terminal/PR-review equivalent. Run it as
-  `uvx --from sidegraph==0.25.1 --python 3.13 sidegraph-ratify`, at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `uvx --from sidegraph==0.26.0 --python 3.13 sidegraph-ratify`, at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
   Point the human there when they'd rather review outside the session.
 - A proposed record is not hidden while it waits: by default it surfaces in retrieval tagged
