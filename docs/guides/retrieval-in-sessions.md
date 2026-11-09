@@ -8,7 +8,7 @@ code or docs. Ask for the relevant records before choosing an approach.
 
 ## What `SessionStart` injects
 
-The session map gives a short orientation before work. A **domain** is a named area of the project. Accepted domains appear as a table of contents with their purpose and mistake counts. Before domains are named, the hook can show graph communities instead. A community is a cluster of related code or document nodes.
+The session map gives a short orientation before work. A **domain** is a named area of the project. Accepted domains appear as a table of contents with their titles, mistake counts and subdomain counts. Before domains are named, the hook can show graph communities instead. A community is a cluster of related code or document nodes.
 
 The standing instruction is:
 
@@ -70,7 +70,7 @@ not-in-graph diagnostic, and proposal policy, history, mistakes-first and budget
 
 ## Reading the output blocks
 
-`get_task_context` renders up to six Markdown sections, in this order, each one skipped
+`get_task_context` renders up to five Markdown sections, in this order, each one skipped
 entirely if empty:
 
 | Block | What it means |
@@ -78,11 +78,13 @@ entirely if empty:
 | `## ⚠ Known mistakes & gotchas` | `gotcha`/`lesson`/`constraint` decisions bound directly to your seed entities, newest first. Read this first — these are the "someone already stepped on this" warnings. |
 | `## Decisions` | Accepted `adr` decisions bound directly to your seed entities — accepted supporting facts may nest under them. |
 | `## Known facts` | Accepted facts bound to seed/peripheral entities that were not already shown inline. |
-| `## Structural map` | The budgeted structural subgraph around your seeds (`- name (file_type) [path:line]`) — a map, not memory. |
 | `## Related` | Accepted decisions reached indirectly, plus one-line superseded history for seed entities. |
 | `## Unratified proposals` | Proposed decisions and facts, always after accepted memory and omitted by the proposal policy when required. |
 
-If nothing resolves at all, the tool returns the literal string `No context found.`, followed
+For the structural map, call `query_structure` with the same seeds. `structure_budget` still
+sizes the graph walk that finds related records.
+
+If the final answer has no memory, it starts with `No context found.`, followed
 by a block that says why. A seed that was read some other way than written gets a
 `## How your seeds were read` line (guessed, normalised, a directory, ambiguous, or a name that
 matches no symbol). If a file you passed is not in the code graph, a trailing
@@ -92,12 +94,17 @@ checkout (a sibling worktree), or the path names no file in any checkout (see [`
 that has no current record of its own, but has anchored files near it, gets a `## Nearest anchored`
 sentence naming them, and when the answer holds no decision memory at all the records of those
 files follow under `## Nearest anchored records (not anchored to your files)` (see
-[the nearest anchored records](../reference/mcp-tools.md#the-nearest-anchored-records)). A call
-with no seeds gets a `## Why this is empty` block. With no
+[the nearest anchored records](../reference/mcp-tools.md#the-nearest-anchored-records)). When those
+records follow an empty primary lookup, the answer starts: "No record is anchored to the files
+you named; the records of the nearest anchored files follow." If the hard cap removes all of
+them, it keeps "No context found." and the nearest-files sentence under `## Why this is empty`.
+A call with no seeds gets a `## Why this is empty` block. With no
 code graph at all, a trailing `## No code graph` block names the path that was looked at and says
 to build it: the graph is missing, so memory anchored to code could not be looked up. In a
 linked worktree the graph is the main checkout's, and a file that exists only on the branch is
-reported as not in it.
+reported as not in it, with advice to build a graph in this worktree; rebuilding the main
+checkout's graph cannot add that file. For a file only in another checkout, start the session
+in that checkout to read its graph and records.
 
 Each decision line looks like:
 
@@ -135,7 +142,7 @@ noise, not a violation of anything, and the mistakes block is never exposed to i
 
 A fact that ISN'T attached to (or doesn't yet support) any decision that made it into the
 output above still surfaces, standalone, in its own `## Known facts` block — rendered right
-after `## Decisions`, ahead of the structural map:
+after `## Decisions`, ahead of `## Related`:
 
 ```
 ## Known facts
@@ -144,6 +151,11 @@ after `## Decisions`, ahead of the structural map:
 
 Only accepted facts appear here. A proposed standalone fact appears in the final unratified
 block while the proposal policy allows it to surface.
+
+Standalone and inline evidence lines show up to 240 characters of the statement and 300
+characters of the source. A clipped part ends with `…`; if either part is clipped, exactly
+one ` (clipped; full: list_facts(ids=["<id>"]))` note gives the call to read the whole fact.
+The SessionStart map uses the same format when the store has no accepted domain.
 
 ## When `related`-via-community appears
 

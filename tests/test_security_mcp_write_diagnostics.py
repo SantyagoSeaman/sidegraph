@@ -175,6 +175,85 @@ def test_safe_fixed_reachability_help_survives_write_wrapper(store):
     assert "add an anchor" in rendered(result)
 
 
+UNKNOWN_ID = "01ZZZZZZZZZZZZZZZZZZZZZZZZ"
+
+
+def test_unknown_support_is_refused_with_a_position_not_the_uncertain_write_text(store):
+    before = canonical(store)
+    added = call(
+        "add_fact",
+        dict(
+            statement="ordinary",
+            source="probe",
+            supports=[UNKNOWN_ID],
+            anchors=[dict(name="sample.py")],
+        ),
+    )
+    assert canonical(store) == before
+    assert added.is_error
+    assert "Write refused: supports[0]: unknown_decision" in rendered(added)
+    assert "may be on disk" not in rendered(added)
+    assert UNKNOWN_ID not in rendered(added)
+
+    supporting = call("add_decision", decision_args()).data
+    original = call(
+        "add_fact",
+        dict(statement="old observation", source="probe", supports=[supporting["id"]]),
+    ).data
+    before = canonical(store)
+    superseded = call(
+        "supersede_fact",
+        dict(
+            old_fact_id=original["id"],
+            statement="new observation",
+            source="probe",
+            supports=[supporting["id"], UNKNOWN_ID],
+            anchors=[dict(name="sample.py")],
+        ),
+    )
+    assert canonical(store) == before
+    assert superseded.is_error
+    assert "Write refused: supports[1]: unknown_decision" in rendered(superseded)
+    assert "may be on disk" not in rendered(superseded)
+    assert UNKNOWN_ID not in rendered(superseded)
+
+
+def test_anchorless_unknown_support_is_refused_but_terminal_only_keeps_its_help(store):
+    before = canonical(store)
+    unknown = call("add_fact", dict(statement="ordinary", source="probe", supports=[UNKNOWN_ID]))
+    assert canonical(store) == before
+    assert unknown.is_error
+    assert "Write refused: supports[0]: unknown_decision" in rendered(unknown)
+    assert "no live supporting decision" not in rendered(unknown)
+
+    from datetime import UTC, datetime
+
+    from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
+
+    def accepted(**updates):
+        return store.add_decision(
+            Decision(
+                title="decision",
+                kind=DecisionKind.ADR,
+                status=DecisionStatus.ACCEPTED,
+                context="c",
+                choice="ch",
+                valid_from=datetime.now(UTC),
+                provenance=Provenance(source="manual"),
+                **updates,
+            )
+        )
+
+    old = accepted()
+    accepted(supersedes=old.id)
+    assert store.get_decision(old.id).status == DecisionStatus.SUPERSEDED
+    before = canonical(store)
+    terminal = call("add_fact", dict(statement="ordinary", source="probe", supports=[old.id]))
+    assert canonical(store) == before
+    assert terminal.is_error
+    assert "anchorless fact has no live supporting decision" in rendered(terminal)
+
+
 def test_mcp_supersede_fact_preserves_reopened_history(store):
     supporting = call("add_decision", decision_args()).data
     original = call(

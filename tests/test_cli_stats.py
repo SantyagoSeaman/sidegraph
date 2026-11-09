@@ -12,7 +12,8 @@ import pytest
 
 from sidegraph import __version__
 from sidegraph.cli import stats_main
-from sidegraph.schema import Decision, DecisionKind, Provenance
+from sidegraph.host.transcripts import cited_back as read_cited_back
+from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.stats.model import build_report
 from sidegraph.stats.render import render_text
 from sidegraph.store import Store
@@ -61,7 +62,9 @@ def test_text_and_json_come_from_one_report(tmp_path, capsys, monkeypatch):
     text = capsys.readouterr().out
 
     assert payload["activation"]["sessions_total"] == 1
-    assert text == render_text(build_report(tmp_path / ".sidegraph", None, window_days=30))
+    assert text == render_text(
+        build_report(tmp_path / ".sidegraph", None, window_days=30, cited_back=read_cited_back)
+    )
 
 
 def test_reading_stats_changes_nothing(tmp_path, monkeypatch):
@@ -680,3 +683,53 @@ def test_a_store_that_requires_a_newer_sidegraph_is_explained_not_read(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert f"This store requires Sidegraph >= {above}; this is {__version__}." in captured.err
+
+
+def test_json_reports_cited_back_from_a_recorded_transcript(tmp_path, capsys, monkeypatch):
+    store = Store(tmp_path / ".sidegraph")
+    decision = store.add_decision(
+        Decision(
+            title="t",
+            kind=DecisionKind.ADR,
+            status=DecisionStatus.ACCEPTED,
+            context="c",
+            choice="ch",
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual"),
+        )
+    )
+    transcript = tmp_path / "proj" / "sess-1.jsonl"
+    transcript.parent.mkdir()
+    rows = [
+        {
+            "type": "attachment",
+            "attachment": {
+                "type": "hook_additional_context",
+                "hookEvent": "PreToolUse",
+                "content": [
+                    f"Recorded for a.py (1 of 1, mistakes first):\n- [adr] t (id {decision.id})"
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": f"relying on {decision.id[:10]}"}]},
+        },
+    ]
+    transcript.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    store.record_touch("sess-1", "a.py", "Read")
+    store.record_session_transcript("sess-1", str(transcript), "claude")
+    store.close()
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(tmp_path / ".sidegraph"))
+
+    assert stats_main(["--json"]) == 0
+    cited = json.loads(capsys.readouterr().out)["cited_back"]
+    assert cited["sessions"]["read"] == 1
+    assert cited["channels"]["pre_tool_use"] == {
+        "sessions_visible": 1,
+        "placements": 1,
+        "cited": 1,
+        "asked_by_id": 0,
+        "by_tool": {},
+    }
+    assert cited["channels"]["mcp"]["placements"] == 0

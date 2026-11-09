@@ -1,5 +1,8 @@
 """Bounded write diagnostics using schema vocabulary, never caller values or causes."""
 
+from collections.abc import Sequence
+from typing import Literal
+
 from pydantic import ValidationError
 
 MAX_ERRORS = 10
@@ -213,6 +216,39 @@ def format_validation_error(exc: ValidationError) -> str:
         text += _TRUNCATED
     if len(text) > MAX_CHARACTERS:
         text = text[: MAX_CHARACTERS - len(_TRUNCATED)] + _TRUNCATED
+    return text
+
+
+def unknown_support_reason(
+    positions: Sequence[int],
+    *,
+    attached_to: str | None = None,
+    surface: Literal["capture", "mcp"] = "capture",
+) -> str:
+    """The fixed refusal for ``supports`` ids that name no decision: bounded 0-based
+    positions only, never the caller's id. ``attached_to`` is the ULID the store just minted
+    for the decision a nested fact hangs on; anything else is left out of the text.
+    # see design/superpowers/specs/2026-11-07-capture-unknown-supports-refusal-design.md D3
+    """
+    valid = [p for p in positions if type(p) is int and 0 <= p <= _MAX_INDEX]
+    shown = ", ".join(f"supports[{p}]" for p in valid[:MAX_ERRORS])
+    if len(valid) > MAX_ERRORS:
+        shown += _TRUNCATED
+    where = shown or "supports"
+    if surface == "mcp":
+        return (
+            f"Write refused: {where}: unknown_decision; no decision has this id. "
+            "Nothing was written for this fact: fix or remove the id and retry the write."
+        )
+    text = (
+        f"invalid draft: {where}: unknown_decision; no decision has this id. "
+        "Nothing was written for this fact: fix or remove the id and propose it again."
+    )
+    if type(attached_to) is str and len(attached_to) == 26:
+        text += (
+            f" Its decision {attached_to} was written; propose the corrected fact on its "
+            f"own with supports=[{attached_to}, ...]."
+        )
     return text
 
 

@@ -9,7 +9,7 @@ Choose the event you are diagnosing:
 | SessionStart | Gives the agent the project map and running version | Start a new session in the repository and inspect its opening context |
 | PreToolUse | Adds relevant file records on supported reads or edits | Read a file with an accepted anchored record |
 | SubagentStart | Introduces retrieval to a new subagent | Ask the subagent to retrieve context for its task files |
-| Stop | Reminds a substantial session to propose durable learning | Codex and Grok require interactive work; Claude also supports substantial one-shot runs |
+| Stop | Reminds a substantial session to propose durable learning | Codex and Grok require a person's interactive work; Claude requires two real prompts, so a headless one-prompt run is never nudged |
 
 A **record** is a stored decision or fact. A **domain** is a named project area. A **binding** connects a record to a target. A **proposed** record awaits a trust decision. A **drift** warning requests a content check. The event sections below give the exact JSON, gates and switches.
 
@@ -36,13 +36,14 @@ For wiring them into `.claude/settings.json`, see
 Hook-owned SQLite connections bound their lock waits. `PreToolUse`, `SessionStart` and
 `SubagentStart`, the hooks that hand the agent records, wait up to half a second for a lock
 another Sidegraph process holds, because a writer is usually gone within milliseconds. Each wait
-is bounded, but a run can wait more than once. `SubagentStart` makes one read. `PreToolUse` can
-lose a wait while reading the records and then wait again for its usage-journal write, about one
-second at most. `SessionStart` stops waiting after its first refused write, but waits that end
-in time add up: against a writer that keeps taking the lock back it can spend about three
-seconds. `Stop` and the optional status and drift reads refuse at once. This bounds SQLite lock waits; graph
-loading, filesystem work, transcript parsing and Git still contribute to whole-hook time. Other `Store`, hot-index and read-only-index callers retain their existing
-defaults.
+is bounded. `SubagentStart` makes one read. `PreToolUse` stops waiting after its first refused
+wait: a read or write that loses its wait ends the waiting for that run, so the usage-journal
+write after a refused read is not attempted. Waits that end in time add up there too.
+`SessionStart` stops waiting after its first refused write, but waits that end in time add up:
+against a writer that keeps taking the lock back it can spend about three seconds. `Stop` and
+the optional status and drift reads refuse at once. This bounds SQLite lock waits; graph
+loading, filesystem work, transcript parsing and Git still contribute to whole-hook time. Other
+`Store`, hot-index and read-only-index callers retain their existing defaults.
 
 ## The command guard
 
@@ -176,9 +177,15 @@ single proposal-surfacing policy — `$SIDEGRAPH_UNRATIFIED` and
 [`configuration.md`](configuration.md#environment-variables)): proposed records outside
 the surfacing window, or any proposed record in regulated mode, no longer render as
 content in the TOC's unratified block, while the pending-ratification counter below
-always keeps counting them. From the stdin payload it reads only the session — see
+always keeps counting them. From the stdin payload it reads the session — see
 [Which session a hook is in](#which-session-a-hook-is-in) — used for the duplicate-injection
-guard and published to the store as the telemetry session key.
+guard and published to the store as the telemetry session key, and the host's
+`transcript_path` and `source` (for the compact/clear reset below). With recording on, the hook writes that path, the session key, the host
+family and the time to the index's
+[`session_transcripts`](store-format.md#session_transcripts-derived-index-only) table, in its
+own best-effort step after the journal prune: a failing write costs neither the map nor the
+expiry. `SIDEGRAPH_TELEMETRY=off` stops the write. The hook never opens the file; `sidegraph-stats`
+reads it later (see [`sidegraph-stats`](cli.md#sidegraph-stats)).
 
 On Grok Build this hook runs but its output does not reach the model, so the MCP server sends
 the session map instead, as a workaround (see the
@@ -196,7 +203,11 @@ Behavior:
    under `$CLAUDE_PROJECT_DIR` is looked up in the parent directories, up to the repository
    root, so a session started in a subdirectory opens the repository's store and creates no
    second one. Every hook resolves the store this way. When the payload names a session, the
-   hook then checks the store's `session_start` ledger: a start for the same session within
+   hook first clears `mcp_sent:<session>:-:` when `source` is `compact` or `clear`: earlier
+   full bodies are no longer in the main agent's context. Codex resets both its canonical
+   `rollout-<ts>-<threadId>` key and the verified bare-thread alias. Other sessions and
+   subagents keep their state. This best-effort reset runs even within the duplicate window.
+   The hook then checks the store's `session_start` ledger: a start for the same session within
    60 seconds of the recorded one, before or after it, is a duplicate (the hook registered
    twice on one host, for example the plugin and a hand-written project hook), and it prints
    `{}` and returns before anything below runs. The check is a read that takes no write lock,
@@ -765,12 +776,10 @@ Behavior, in order:
      `origin.kind: "task-notification"` or `promptSource: "system"` doesn't count either, which
      catches task notifications written in plain prose. An absent field proves nothing. A turn a
      person typed keeps counting even when it is wrapped: a slash command that starts
-     `<command-message>`, and the `<bash-input>` of a `!` command. One exception arms the gate
-     without a second prompt: a one-shot session (`claude -p`, whose `entrypoint` is `sdk-cli`)
-     has exactly one prompt however much work follows, so there `_MIN_TOOL_USES` (currently 5)
-     assistant `tool_use` blocks are enough. The branch is scoped to that entrypoint: unscoped,
-     it armed at the end of turn one in 93% of the multi-prompt interactive sessions measured,
-     before the session's richer content existed.
+     `<command-message>`, and the `<bash-input>` of a `!` command. A headless `claude -p` run
+     with one prompt (`entrypoint` `sdk-cli`) never arms, so a Stop block never replaces its
+     answer; a resumed `claude -p` chain with two real prompts is counted like any other
+     session. Set `SIDEGRAPH_CAPTURE_NUDGE=off` for a scripted chain.
    - **A Codex rollout.** A real prompt is a `response_item` line whose payload is a
      user-role `message`, unless the start of its first `input_text` block (after leading
      whitespace) is a marker for text Codex or the host wrote itself: `# AGENTS.md`,
@@ -1092,7 +1101,7 @@ those measurements do not estimate output after facts were added. The bound of
 three per call is applied before claiming, from the same list in every process, so the several
 processes Claude Code starts for one Bash line cannot add up past it. `SessionStart` deletes
 `pretool_file:` keys whose claim is older than 30 days, the `Stop` hook's `capture_rearm:` keys
-on the same terms, and the two one-shot prefixes older versions wrote, `pretool_nudge:` and
+on the same terms, the MCP per-agent `mcp_sent:` rows (even with telemetry off), and the two one-shot prefixes older versions wrote, `pretool_nudge:` and
 `pretool_nudge_path:`, which nothing writes now (`Store.prune_meta_prefixes`).
 
 **A character cap.** The block is held to 9,500 characters, under Claude Code's 10,000-character

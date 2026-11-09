@@ -271,3 +271,28 @@ def test_opening_an_existing_store_flushes_its_root_once_and_writes_add_none(
         for i in range(20):
             s.add_decision(_decision(title=f"d{i}"))
     assert synced.count(tmp_path) == 1 and synced.count(root) == 1
+
+
+def test_claim_meta_many_keeps_existing_values_and_refuses_schema(store):
+    store.set_meta("k1", "old")
+    store.claim_meta_many(iter(["k1", "k2"]), "new")
+    assert store.get_meta("k1") == "old"
+    assert store.get_meta("k2") == "new"
+    with pytest.raises(ValueError, match="schema_version"):
+        store.claim_meta_many(["k3", "schema_version"], "bad")
+    assert store.get_meta("k3") is None
+    assert store.schema_version == SCHEMA_VERSION
+
+
+def test_delete_meta_prefix_is_literal_and_preserves_schema(store):
+    for key in ("p:a", "p:b", "p_other", "q:a"):
+        store.set_meta(key, "v")
+    assert store.delete_meta_prefix("p:") == 2
+    assert store.meta_with_prefix("p") == {"p_other": "v"}
+    assert store.get_meta("q:a") == "v"
+    for prefix in ("s", "schema_version"):
+        store.delete_meta_prefix(prefix)
+        assert store.schema_version == SCHEMA_VERSION
+    assert store.delete_meta_prefix("missing:") == 0
+    with pytest.raises(ValueError, match="empty prefix"):
+        store.delete_meta_prefix("")

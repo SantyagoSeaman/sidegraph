@@ -255,9 +255,9 @@ In Claude Code these are slash commands; in other agents, ask for the task in wo
 
 | Tool | Purpose |
 |---|---|
-| `get_task_context` | Records and structure for the files you are working on, mistakes first |
-| `query_decisions` | The decision half of `get_task_context` alone |
-| `query_structure` | The structural-map half of `get_task_context` alone |
+| `get_task_context` | Budgeted, task-scoped memory, mistakes first |
+| `query_decisions` | Task-scoped memory with exact seeds |
+| `query_structure` | The code map around the given seeds |
 | `get_entity_history` | Every decision and fact anchored to one function or file, newest first |
 | `find_entity` | Look up a function, class or file by name |
 | `drill_down` | One domain: its purpose, subdomains and records |

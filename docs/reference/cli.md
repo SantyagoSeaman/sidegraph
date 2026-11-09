@@ -162,7 +162,7 @@ sidegraph-bootstrap --resume --profile generic-adr --host claude-code
 
 ```
 sidegraph-init [--db PATH] [--graph PATH] [--no-settings | --ratify-policy VALUE]
-                [--hooks | --no-hooks | --remove-hooks]
+                [--hooks | --no-hooks | --remove-hooks] [--no-search-ignore]
 ```
 
 | Flag | Default | Meaning |
@@ -171,9 +171,10 @@ sidegraph-init [--db PATH] [--graph PATH] [--no-settings | --ratify-policy VALUE
 | `--graph` | `$SIDEGRAPH_GRAPH` or `graphify-out/graph.json`, in the store's project | `graph.json` path to check for (read-only; never created) |
 | `--no-settings` | off | skip the `.claude/settings.json` step described below entirely: no prompt, no write, just the line a person would need to set it up by hand |
 | `--ratify-policy` | unset | `manual`, `auto-low-risk`, or `auto-all`: write this value into `.claude/settings.json` with no prompt (still never overwrites an existing value there); for a scripted, non-interactive setup that wants an explicit answer instead of the interactive question below. Mutually exclusive with `--no-settings` |
-| `--hooks` | off | install or refresh the graph refresh git hook (step 3) with no question: for a scripted setup, or after the person agreed in chat. Clears an earlier decline. Mutually exclusive with `--no-hooks` and `--remove-hooks` |
+| `--hooks` | off | install or refresh the graph refresh git hook (step 4) with no question: for a scripted setup, or after the person agreed in chat. Clears an earlier decline. Mutually exclusive with `--no-hooks` and `--remove-hooks` |
 | `--no-hooks` | off | install no hook and record the choice (`git config --local sidegraph.graphRefresh false`), so the session-start reminder stops. Mutually exclusive with `--hooks` and `--remove-hooks` |
 | `--remove-hooks` | off | remove Sidegraph's block from `post-commit`, `post-merge` and `post-checkout` (each foreign hook ends byte-identical to its state before install, and a file Sidegraph created is deleted), delete the helper and its lock files, clear the recorded choice, print what changed, and **exit without running the rest of init** (`0`, or `1` when a file cannot be removed or a hook was left untouched: a hook with damaged markers, or a symlinked hook, which counts even if it never held a block, because Sidegraph does not follow it to look): it creates no `.sidegraph/` and asks no settings question. Mutually exclusive with `--hooks` and `--no-hooks` |
+| `--no-search-ignore` | off | do not add the store to the project-root `.ignore` (step 3): recursive `rg` and editor search would then return raw store files. See [the root `.ignore`](store-format.md#searching-the-repository-the-root-ignore) |
 
 Bootstraps a target repo for Sidegraph. Run it once, in the repo you want memory over (not
 the Sidegraph checkout):
@@ -197,7 +198,18 @@ the Sidegraph checkout):
    <path> — run \`graphify update .\` with the environment variable \`GRAPHIFY_NO_AUTO_REFRESH=1\` set, then \`sidegraph-sync\`, to anchor decisions to code
    (optional; Sidegraph works without it).` if not. The graph is optional at init time —
    `sidegraph-init` typically runs before the first `graphify update .`.
-3. Settles the **graph refresh git hook**, in the store's own repository (not necessarily the
+3. Adds the store to the project-root `.ignore`, so recursive search skips it (unless
+   `--no-search-ignore`). The root is the repository of the shell's directory, not the store's
+   own; a store outside it gets no file. Prints one line: `wrote .ignore: .sidegraph/
+   (recursive search skips the store)` for a new file, `added .sidegraph/ to .ignore` when it
+   appended to an existing one, `.ignore already names .sidegraph/. Left unchanged.`,
+   `left .ignore untouched (<reason>); to keep recursive search out of the store, add the line
+   .sidegraph/ yourself.` for a file it will not touch, `store is outside the project; no
+   .ignore written.`, or `skipped .ignore (--no-search-ignore).`. A problem here never fails
+   init. The existing bytes of a `.ignore` stay a prefix of the result. See
+   [the root `.ignore`](store-format.md#searching-the-repository-the-root-ignore) for what it
+   does and does not hide.
+4. Settles the **graph refresh git hook**, in the store's own repository (not necessarily the
    shell's directory), printing `graph refresh hook: skipped (not a git repository)` outside
    one. The hook keeps `graphify-out/graph.json` current: it rebuilds the graph in the
    background after each commit, merge and branch switch, **in the main checkout only**
@@ -239,7 +251,7 @@ the Sidegraph checkout):
    markers (a lone marker, reversed markers, two pairs) are reported and left alone. When
    Graphify's own hook is also installed, init says that it rebuilds in linked worktrees too
    and how to remove it (`graphify hook uninstall`); it never touches it.
-4. Settles `.claude/settings.json`'s `env.SIDEGRAPH_RATIFY_POLICY`
+5. Settles `.claude/settings.json`'s `env.SIDEGRAPH_RATIFY_POLICY`
    (see [`configuration.md`](configuration.md#environment-variables)), never by writing it
    silently. The library's own default is `manual` either way; this step only decides what a
    *fresh* project's committed settings say:
@@ -282,7 +294,7 @@ the Sidegraph checkout):
    (`sidegraph-mcp`) reads the committed value itself when its environment sets none, so the
    policy also applies under Codex, which does not read `.claude/settings.json`; an explicit
    environment value wins. A settings-file problem never fails the store creation in step 1.
-5. Prints the setup instructions: the plugin install path first (`/plugin marketplace add
+6. Prints the setup instructions: the plugin install path first (`/plugin marketplace add
    SantyagoSeaman/sidegraph` + `/plugin install sidegraph@sidegraph` — installs the MCP server
    and all four hooks automatically), then the no-plugin alternative (a single
    `claude mcp add sidegraph -s project … -- uvx --from sidegraph==X.Y.Z --python 3.13 sidegraph-mcp` command that writes a
@@ -324,7 +336,7 @@ sidegraph-ratify [--db PATH] [--accept ID ...] [--drop ID ...] [--all] [--graph 
 | `--db` | `$SIDEGRAPH_DIR` → existing `.sidegraph/` → `.sidegraph` | store directory; `$SIDEGRAPH_DB` honored for back-compat (deprecated); warns on stderr if the resolved path doesn't exist yet (see above) |
 | `--accept ID ...` | `[]` | ratify these ids — decisions, standalone facts, or domains, routed by lookup |
 | `--drop ID ...` | `[]` | reject these ids — same routing as `--accept` |
-| `--all` | off | accept every pending decision, standalone fact, and domain; a fact attached to a proposed decision rides that decision's cascade instead of being processed twice (see the [naming guide](../guides/naming-your-domains.md#why-selective-not---all) for why this is risky after a large domain bootstrap) |
+| `--all` | off | accept every pending decision, standalone fact, and domain, except the ids given to `--drop`; a fact attached to a proposed decision rides that decision's cascade instead of being processed twice (a nested fact named in `--drop` is accepted through the cascade, its drop is ignored, exit `0`) (see the [naming guide](../guides/naming-your-domains.md#why-selective-not---all) for why this is risky after a large domain bootstrap) |
 | `--graph` | `$SIDEGRAPH_GRAPH` → `graphify-out/graph.json`, in the store's project | read-only input used to resolve an accepted **domain's** membership immediately, the way the MCP `ratify` tool does. The default resolves against the STORE's project root; a path you type resolves against the shell's directory (see *Graph path resolution* at the top of this page). Missing or unreadable is fine — the accept still lands and the membership heal is scheduled for the next `sidegraph-sync` |
 
 One gate for decisions, facts, and [domains](../concepts/mind-model.md) — see
@@ -343,8 +355,10 @@ otherwise it ends with `N pending. Use --accept ID... / --drop ID... / --all.` (
 decisions, standalone facts, and domains; nested facts are represented by their decision).
 
 **With `--accept`/`--drop`/`--all`:** prints one line per id — `accepted <id>` / `dropped
-<id>` on success, `already accepted <id>` / `already rejected <id>` (`already dropped` for a
-domain) when the record already has that verdict (a no-op that does not fail the exit code),
+<id>` on success, `drop ignored <id>` for an id the same call's `--accept` already answered
+(accepted, already accepted, or error; see below), `already accepted <id>` / `already rejected
+<id>` (`already dropped` for a domain) when the record already has that verdict (a no-op that
+does not fail the exit code),
 `error <id>: <message>` if the id is in the opposite terminal state (`already rejected; it
 cannot be accepted` / `already accepted; it cannot be dropped`, which for a decision names
 `retire_decision` and supersession as the ways to close it), in another state that action
@@ -357,8 +371,10 @@ you retire by dropping; supersede it instead) but accepts `proposed` or accepted
 retiring an already-accepted domain (e.g. to resolve a [cross-branch slug
 conflict](store-format.md#merge-semantics-git-resolves-it-not-the-store)) is a legitimate,
 append-only-safe operation (the file stays, only its status flips to `dropped`). An id in
-both lists (or repeated) still just gets processed once per list, in `--accept` order then
-`--drop` order. Accepting a domain also mints its paired `domain:<slug>` abstract entity;
+both lists is accepted and its drop is ignored, printed as `drop ignored <id>` (the MCP `ratify`
+tool answers the same way); a failed accept stays that failure and is not turned into a drop. A
+repeated id is processed once per list, and `--accept` ids are processed before `--drop` ids.
+Accepting a domain also mints its paired `domain:<slug>` abstract entity;
 dropping one mints nothing (an entity already minted by a prior accept is left as-is).
 When an accepted domain is one of several live replacements of the same domain (a split),
 the command also prints a `  split: <old> is now replaced by N live domains: ...` line under
@@ -2004,7 +2020,7 @@ there anyway", so no line of the report claims an effect.
   `activation.degraded`, `dropped_for_budget`,
   `renders_with_abandoned` and `self_reported_intents` when the window holds no lookup at all;
   `activation.degraded` and `dropped_for_budget` also when the window holds only
-  `drill_down` lookups, which apply no relevance budget; `retained_days` for a window that holds nothing of an older journal; and
+  lookups that apply no relevance budget (`drill_down` and the listing tools); `retained_days` for a window that holds nothing of an older journal; and
   `graph.nodes`, `files` and `communities` when there is no readable graph. A zero that was
   measured stays a zero: an empty journal, a built graph with no nodes. The graph's state against
   `HEAD` is four more fields under `graph`: `freshness` (`"fresh"`, `"stale"` or `"unknown"`),
@@ -2015,6 +2031,13 @@ there anyway", so no line of the report claims an effect.
   `health` is a list of `{"check", "severity", "summary", "fix"}` objects, one per problem the
   integrity checks found that is `broken` or `degraded` (see **HEALTH** below), in the order the
   checks run; an empty list means none. It is never `null`.
+  `cited_back` is the object behind **CITED BACK** below: `sessions` (`population`, `read`,
+  `no_transcript`, `unreadable`, `no_reader`, `over_budget`), `channels` (`session_start`,
+  `pre_tool_use`, `subagent_brief` and `mcp`, each `{"sessions_visible", "placements", "cited"}`,
+  with `asked_by_id` and `by_tool` in every one that is not `null` (`0` and `{}` outside `mcp`),
+  or `null` when no read transcript can show the channel), `read_bytes` and `budget_bytes`. It
+  is `null` with recording off, when the index is behind the store files, and when no reader
+  was available.
 
 Example, from this repository's own store (the numbers are that store's, on the day it was
 run):
@@ -2042,6 +2065,18 @@ GRAPH       9,390 nodes · 541 files · 534 communities
 ANCHORS     2,418 live · 3 degraded · 61 orphaned → sidegraph-doctor
 ```
 
+The `CITED BACK` block sits after ACTIVATION and before DELIVERY (before REACH when there is no
+DELIVERY block). An example of its shape (illustrative
+figures, not this store's):
+
+```
+CITED BACK  ids quoted back later in the same session (a lower bound)
+            MCP: 81 of 246 record placements (33%)
+            PreToolUse: 12 of 900 (1%) · subagent brief: 3 of 400 (1%)
+            SessionStart: no record placed
+            transcripts read for 112 of 241 sessions; 129 have none recorded
+```
+
 What each block answers. HEALTH is first because it says whether the rest can be trusted;
 activation follows, as the question the other blocks build on:
 
@@ -2055,7 +2090,10 @@ activation follows, as the question the other blocks build on:
   that cannot run (no readable graph, an index behind the store files) adds nothing: `ok` here
   means "nothing found", and `sidegraph-doctor` says what it skipped.
 - **ACTIVATION** — did memory get asked for at all? A session counts as having *asked* when the
-  journal holds a memory lookup for it (`get_task_context`, `query_decisions` or `drill_down`);
+  journal holds a memory lookup for it: `get_task_context`, `query_decisions`, `drill_down`,
+  `find_entity`, `get_entity_history`, and `retrieve_decisions` or `list_facts` when the call
+  names a filter (`status`, `kind`, `files`, `query` or `ids`, and `supports` for facts; the
+  no-filter overview is a glance at the store, not a question, and is not counted);
   sessions that touched files and never asked are counted separately, and so is a session that
   asked and got nothing back (no record shown against a file, and no lookup that placed a
   record: a global-scope decision, or a fact bound to no file, has no file to be shown
@@ -2082,6 +2120,37 @@ activation follows, as the question the other blocks build on:
   gives the count, `(12 retrieval calls could not be attributed to a session)`. In `--json`
   it is `activation.unattributed_calls`, `0` when every call was attributed (the lines then
   read as in the sample above).
+- **CITED BACK** — of the records Sidegraph delivered, how many had their id quoted back later in
+  the same session? It reads the host's own transcript files, on your machine, read-only.
+  Each delivery channel gets a line: `MCP` (a memory tool's answer; `by_tool` in `--json` has
+  it per tool), `PreToolUse` (the block before a file read or edit), `subagent brief` and
+  `SessionStart`. A **placement** is one record in one delivery, the unit of a showing; a
+  record is **cited** when its id (the first ten characters are enough, the short form agents
+  write in tables) appears in text the agent wrote later in the same transcript file: its
+  replies, its thinking when the host kept it, and the inputs of its tool calls other than
+  shell commands and Sidegraph's own tools. It is a **lower bound**. An agent that follows a
+  record without quoting its id is not counted, and a quotation shows the record was seen, not
+  that it changed anything. A record a call named by id (`retrieve_decisions` with `ids`) is not
+  a placement, since the caller already held its id (`asked_by_id` in `--json`), and neither is
+  a record re-sent as a pointer (`[sent earlier]`). A line reads `MCP: 81 of 246 record
+  placements (33%)`; the percentage appears only once the report is past the floor ACTIVATION
+  uses, below it the counts stand alone. A visible channel that placed nothing reads `no record
+  placed`, never `0%`; a channel no read transcript can show reads `not visible in these hosts'
+  transcripts` (`null` in `--json`). Claude Code transcripts show all four channels; Codex and
+  Grok show `MCP` only (Codex calls made inside its `exec` JavaScript wrapper are not seen, so
+  its figure is lower still); Muse has no reader. The last line, `transcripts read for R of P
+  sessions`, names the largest class that could not be read: `have none recorded` (no path was
+  recorded: an older Sidegraph, a host that sends none, or recording off at that start),
+  `left out by the reading bound`, `could not be opened`, or `are in a format not read`. A
+  session of a host this version does not read that does not fit the bound is counted as left
+  out by it, not as a format not read. A session without a readable transcript adds nothing to
+  any figure: unknown is never a zero.
+  Reading is bounded to 2 GiB of transcript per run, newest sessions first, a session whole
+  or not at all, and only the `.jsonl` files whose paths `SessionStart` recorded (and a Claude
+  session's subagent transcripts beside them) are opened. The report holds counts only. With
+  recording off the block reads `recording is off; not computed`; when the index is behind the
+  store files it is left out, since a count from an incomplete set of record ids could cite the
+  wrong record.
 - **REACH** — of the files touched in the window, how many have memory (a decision or a fact) anchored to them,
   which areas were asked about most, and which accepted domains have no record bound to
   them.
@@ -2132,18 +2201,23 @@ Lines the report will not invent:
   the window holds no render-journal record, the budget lines are replaced by the single line
   `budget and tried-and-abandoned counts: not recorded yet`. A zero there would read as a
   measurement, and nothing was measured. A window whose only lookups are `drill_down` calls
-  is a narrower case: a drill-down delivers records and applies no relevance budget, so the screen
-  reads `budget counts: not recorded yet` and still prints how many lookups included something
+  is a narrower case: a drill-down delivers records and applies no relevance budget, and
+  neither do the listing tools, so the screen reads `budget counts: not recorded yet` and still prints how many lookups included something
   already tried and abandoned, which a drill-down does have.
 - **A narrowed window over an older journal.** `--window 7` over a journal whose only rows are
   20 days old holds nothing in the window and something outside it. The screen then says
   `no sessions recorded in this window` (and `not recorded in this window` for the budget
   line) instead of `recorded yet`, and the header drops `(N retained)`, which would read as an
   empty journal. `--json` carries `activation.outside_window`.
-- **A lookup is not counted if it never rendered.** Only `get_task_context` and
-  `query_decisions` are budgeted renders. The reversal hunt that `check-plan` runs as a fixed step,
-  `retrieve_decisions` over superseded and rejected records, leaves no journal row and is not
-  reflected anywhere in this report.
+- **Which lookups leave a row.** `get_task_context` and `query_decisions` are budgeted renders.
+  `drill_down`, `retrieve_decisions` and `list_facts` with a filter, `find_entity` and
+  `get_entity_history` each leave one row without a budget, so the reversal hunt that
+  `check-plan` runs (`retrieve_decisions` over superseded and rejected records) is reflected
+  in the asked and showing figures. `find_entity` returns no record bodies, so it asks and
+  shows nothing. `query_structure`, the no-filter overviews and a call that fails leave no row.
+  Listing lookups count in `showings` but do not feed `no recorded showing` or
+  `sidegraph-doctor`'s `never-surfaced`, which still see only lookups that render and hook
+  deliveries.
 - **Windowed and all-time.** The header window cuts the session and file counts. `asked about
   most` and `no recorded showing` are running totals kept outside the window, and the report labels
   them `all time`.
@@ -2164,8 +2238,9 @@ The `/sidegraph:stats` skill runs this command and shows its output verbatim. Th
 `intent` argument on `get_task_context` and `query_decisions` (see
 [`mcp-tools.md`](mcp-tools.md#get_task_context)) is recorded for these statistics only. It
 appears in `--json` as `activation.self_reported_intents` (lookups in the window per label,
-most used first; a lookup that passed none is not counted; `drill_down` is a label the server
-writes for its own lookups and is not counted here, and a caller cannot pass it; `null` when the
+most used first; a lookup that passed none is not counted; `drill_down`, `retrieve_decisions`,
+`list_facts`, `find_entity` and `get_entity_history` are labels the server writes for its own
+lookups and are not counted here, and a caller cannot pass them; `null` when the
 window holds no lookup) and never on the screen: a prompt
 can always forget to pass one, so the counts are self-reported, not a census.
 

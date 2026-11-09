@@ -23,7 +23,7 @@ def _domains(count: int) -> list[dict]:
     return [
         {
             "slug": f"domain-{i}",
-            "title": f"Платёжный домен №{i} — 決済",
+            "title": f"Платёжный домен №{i} — 決済" + "決済" * 8,
             "summary": f"Обрабатывает расчёты и возвраты, область {i}; 🚀 émoji and café.",
             "parent_slug": None,
             "mistakes": 1 + i % 4,
@@ -122,7 +122,7 @@ def test_ascii_domain_map_is_trimmed_under_the_character_cap(tmp_path, monkeypat
     the byte budget can still be over it, and must be trimmed to the character cap."""
     from sidegraph.retrieval import render_toc
 
-    cache = {"domains": _ascii_domains(240), "global_mistakes": []}
+    cache = {"domains": _ascii_domains(400), "global_mistakes": []}
     full = render_toc(cache)
     assert len(full) > 10_000  # over Claude Code's cap...
     assert len(json.dumps(full).encode("utf-8")) < hooks.SESSION_START_OUTPUT_BUDGET - 1024
@@ -135,13 +135,12 @@ def test_ascii_domain_map_is_trimmed_under_the_character_cap(tmp_path, monkeypat
     kept = [line for line in ctx.split("\n") if line.startswith("- area ")]
     assert kept and all(line in set(full.split("\n")) for line in kept)
     last = ctx.split("\n")[-1]
-    assert last.startswith(f"Sidegraph: {240 - len(kept)} map entries omitted")
+    assert last.startswith(f"Sidegraph: {400 - len(kept)} map entries omitted")
     assert "list_domains" in last
 
 
 def test_a_heading_in_an_early_domain_summary_opens_no_section(tmp_path, monkeypatch, capsys):
-    """A summary with ``\\n## Implementation notes`` stays on its domain's line: it neither
-    shows as a heading nor shields the domains after it from the trim."""
+    """A summary heading is omitted and cannot shield later domains from trimming."""
     early = {
         "slug": "0-payments",
         "title": "Payments",
@@ -155,7 +154,9 @@ def test_a_heading_in_an_early_domain_summary_opens_no_section(tmp_path, monkeyp
     _assert_within_limits(raw)
     ctx = _context(raw)
     assert "\n## Implementation notes" not in ctx
-    assert "- Payments — Handles payments. ## Implementation notes Payment boundaries." in ctx
+    assert early["summary"] not in ctx
+    assert "Handles payments." not in ctx
+    assert "- Payments (1 mistake(s))" in ctx
     kept = sum(1 for line in ctx.split("\n") if line.startswith("- area "))
     assert kept < 400
 
@@ -169,18 +170,23 @@ def test_a_newline_in_a_domain_title_stays_on_its_line(tmp_path, monkeypatch, ca
     _assert_within_limits(raw)
     ctx = _context(raw)
     assert "\n## Notes" not in ctx
-    assert "- Payments ## Notes — Money. (2 mistake(s))" in ctx
+    assert "- Payments ## Notes (2 mistake(s))" in ctx
 
 
 def test_domains_drop_subdomains_then_quiet_domains_then_the_tail(tmp_path, monkeypatch, capsys):
     """Inside the domain list: subdomains go first, then domains with no mistakes, then the
     rest from the tail."""
-    plain = _ascii_domains(300)
+    from sidegraph.retrieval import render_toc
+
+    plain = [d | {"title": f"area {i:03d} " + "x" * 30} for i, d in enumerate(_ascii_domains(300))]
+    assert len(render_toc({"domains": plain})) > hooks.HOOK_CONTEXT_MAX_CHARS
     quiet = [
-        d | {"slug": f"q{i}", "title": f"quiet {i}", "mistakes": 0} for i, d in enumerate(plain)
+        d | {"slug": f"q{i}", "title": f"quiet {i:03d}" + "x" * 30, "mistakes": 0}
+        for i, d in enumerate(plain)
     ]
     subs = [
-        d | {"slug": f"s{i}", "title": f"sub {i}", "parent_slug": "a0"} for i, d in enumerate(plain)
+        d | {"slug": f"s{i}", "title": f"sub {i:03d}  " + "x" * 30, "parent_slug": "a0"}
+        for i, d in enumerate(plain)
     ]
     domains = [x for trio in zip(plain, quiet, subs, strict=True) for x in trio]
     cache = {"domains": domains, "global_mistakes": []}
@@ -193,7 +199,7 @@ def test_domains_drop_subdomains_then_quiet_domains_then_the_tail(tmp_path, monk
     assert "- quiet " not in ctx
     kept = [line for line in ctx.split("\n") if line.startswith("- area ")]
     assert 0 < len(kept) < 300
-    assert [line.split(" ")[2] for line in kept] == [str(i) for i in range(len(kept))]
+    assert [line.split(" ")[2] for line in kept] == [f"{i:03d}" for i in range(len(kept))]
 
 
 def test_one_oversized_entry_does_not_empty_its_section(tmp_path, monkeypatch, capsys):

@@ -151,7 +151,7 @@ def test_session_start_renders_domain_toc_when_cache_present(tmp_path, monkeypat
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert "## Domains" in ctx
     assert "Payments" in ctx
-    assert "Handles settlement and refunds." in ctx
+    assert "Handles settlement and refunds." not in ctx
     assert "(3 mistake(s))" in ctx
 
 
@@ -219,7 +219,7 @@ def test_session_start_augments_stale_domain_cache_with_live_unratified_memory(
     hooks.session_start()
 
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "Cached accepted summary." in ctx
+    assert "Cached accepted summary." not in ctx
     assert "(7 mistake(s))" in ctx
     assert "Live domain summary." not in ctx
     assert "## Unratified proposals" in ctx
@@ -765,3 +765,68 @@ def test_later_zero_domain_sessions_do_not_repeat_the_setup_offer(
         assert list(store.iter_domains()) == []
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("source", ["startup", "compact", "clear"])
+@pytest.mark.parametrize("codex", [False, True])
+def test_sent_state_reset_precedes_duplicate_gate(tmp_path, monkeypatch, capsys, source, codex):
+    from sidegraph.store import Store
+
+    thread = "12345678-1234-1234-1234-123456789abc"
+    canonical = f"rollout-2026-11-08T10-00-00-{thread}" if codex else "session-main"
+    db = _existing_store(tmp_path / ".sidegraph")
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(db))
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
+    if codex:
+        monkeypatch.setenv("SIDEGRAPH_HOST", "codex")
+    payload = {"session_id": thread if codex else canonical, "source": "startup"}
+    if codex:
+        payload["transcript_path"] = str(tmp_path / f"{canonical}.jsonl")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    hooks.session_start()
+    capsys.readouterr()
+    main_keys = (
+        {f"mcp_sent:{canonical}:-:r1", f"mcp_sent:{thread}:-:r2"}
+        if codex
+        else {f"mcp_sent:{canonical}:-:r1"}
+    )
+    keep_keys = {f"mcp_sent:{canonical}:a1:r1", f"mcp_sent:{thread}:a1:r2", "mcp_sent:other:-:r1"}
+    with Store(db) as store:
+        now = datetime.now(UTC).isoformat()
+        for key in main_keys | keep_keys:
+            store.set_meta(key, now)
+    instant = datetime.now(UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant + timedelta(seconds=1)
+
+    monkeypatch.setattr(hooks, "datetime", Clock)
+    payload["source"] = source
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    hooks.session_start()
+    assert json.loads(capsys.readouterr().out) == {}
+    with Store(db) as store:
+        for key in main_keys:
+            assert (store.get_meta(key) is not None) == (source == "startup")
+        for key in keep_keys:
+            assert store.get_meta(key) is not None
+
+
+def test_session_start_expires_sent_state_with_telemetry_off(tmp_path, monkeypatch, capsys):
+    from sidegraph.store import Store
+
+    db = _existing_store(tmp_path / ".sidegraph")
+    with Store(db) as store:
+        store.set_meta("mcp_sent:old:-:r", (datetime.now(UTC) - timedelta(days=31)).isoformat())
+        store.set_meta("mcp_sent:current:-:r", datetime.now(UTC).isoformat())
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(db))
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
+    monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "off")
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"session_id":"prune"}'))
+    hooks.session_start()
+    capsys.readouterr()
+    with Store(db) as store:
+        assert store.get_meta("mcp_sent:old:-:r") is None
+        assert store.get_meta("mcp_sent:current:-:r") is not None

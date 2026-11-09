@@ -68,3 +68,32 @@ def test_prune_sweeps_render_events_too(tmp_path):
     assert store.render_events() == []
     assert store.retrieval_events() == []
     store.close()
+
+
+def test_session_transcript_upserts_per_session_and_path(tmp_path):
+    store = Store(tmp_path / "s")
+    store.record_session_transcript(
+        "sess-1", "/x/a.jsonl", "claude", at="2026-11-01T00:00:00+00:00"
+    )
+    store.record_session_transcript("sess-1", "/x/a.jsonl", "codex", at="2026-11-02T00:00:00+00:00")
+    rows = store.session_transcripts()
+    assert [(r["session_id"], r["path"], r["host"], r["at"]) for r in rows] == [
+        ("sess-1", "/x/a.jsonl", "codex", "2026-11-02T00:00:00+00:00")
+    ]
+    store.record_session_transcript("sess-1", "/x/b.jsonl", "codex", at="2026-11-03T00:00:00+00:00")
+    assert [r["path"] for r in store.session_transcripts()] == ["/x/a.jsonl", "/x/b.jsonl"]
+    store.close()
+
+
+def test_prune_sweeps_session_transcripts_too(tmp_path):
+    store = Store(tmp_path / "s")
+    store.record_session_transcript("old", "/x/o.jsonl", "claude")
+    store.record_session_transcript("new", "/x/n.jsonl", "claude")
+    old = (datetime.now(UTC) - timedelta(days=90)).isoformat()
+    with store._mutation():
+        store._conn.execute(
+            "UPDATE session_transcripts SET at = ? WHERE session_id = 'old'", (old,)
+        )
+    assert store.prune_telemetry_events(older_than_days=30) == 1
+    assert [r["session_id"] for r in store.session_transcripts()] == ["new"]
+    store.close()

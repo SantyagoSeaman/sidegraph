@@ -34,6 +34,7 @@ CASES = [
     (capture.propose, decision(facts=[fact(source={MARKER: MARKER})]), decision(), "decisions"),
     (capture.propose_facts, fact(statement={MARKER: MARKER}), fact(), "facts"),
     (capture.propose_facts, fact(anchors=[dict(name={MARKER: MARKER})]), fact(), "facts"),
+    (capture.propose_facts, fact(supports=[MARKER]), fact(), "facts"),
     (capture.propose_domains, domain(title={MARKER: MARKER}), domain(), "domains"),
     (capture.propose_domains, domain(slug=MARKER.upper()), domain(), "domains"),
 ]

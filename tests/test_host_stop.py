@@ -333,14 +333,12 @@ def _with_entrypoint(entries, entrypoint):
     return [{**e, "entrypoint": entrypoint} for e in entries]
 
 
-def test_one_shot_session_with_tool_work_arms_the_gate(tmp_path, monkeypatch, capsys):
-    """Spec D1 (E10 H-F0): an sdk-cli one-shot session — 1 real prompt, >= _MIN_TOOL_USES
-    assistant tool_use blocks — must nudge and mark the ledger. Red against unfixed code:
-    the prompt-only gate suppresses it."""
+def test_a_one_prompt_sdk_cli_session_is_never_nudged(tmp_path, monkeypatch, capsys):
+    """Red against the 2026-07-30 one-shot branch: six tool uses armed it, and the extra turn
+    the nudge forced replaced the headless run's answer with a reply to the nudge."""
     db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
-        [_user_prompt()] + [_assistant_tool_use() for _ in range(hooks._MIN_TOOL_USES)],
-        "sdk-cli",
+        [_user_prompt()] + [_assistant_tool_use() for _ in range(6)], "sdk-cli"
     )
     transcript = _write_transcript(tmp_path / "os1.jsonl", entries)
     out = _run(
@@ -349,18 +347,38 @@ def test_one_shot_session_with_tool_work_arms_the_gate(tmp_path, monkeypatch, ca
         {"session_id": "os1", "stop_hook_active": False, "transcript_path": transcript},
         db,
     )
+    assert out == {}
+    from sidegraph.store import Store
+
+    assert Store(db).was_captured("os1") is False
+
+
+def test_a_two_prompt_sdk_cli_session_still_arms(tmp_path, monkeypatch, capsys):
+    """Over-reach guard, red against nothing: guards against never arming any sdk-cli
+    transcript (a resumed `claude -p` chain with two real prompts counts like any session)."""
+    db = _existing_store(tmp_path / "s.db")
+    entries = _with_entrypoint(
+        [_user_prompt(), _assistant(), _user_prompt("second prompt"), _assistant()], "sdk-cli"
+    )
+    transcript = _write_transcript(tmp_path / "os1b.jsonl", entries)
+    out = _run(
+        monkeypatch,
+        capsys,
+        {"session_id": "os1b", "stop_hook_active": False, "transcript_path": transcript},
+        db,
+    )
     assert out["decision"] == "block"
     from sidegraph.store import Store
 
-    assert Store(db).was_captured("os1") is True
+    assert Store(db).was_captured("os1b") is True
 
 
-def test_one_shot_below_tool_threshold_stays_suppressed(tmp_path, monkeypatch, capsys):
-    # Threshold-exactness guard (declared exception in the spec ledger: red against
-    # nothing — it passes before and after; it exists so the fix cannot over-reach).
+def test_one_shot_below_the_old_tool_count_stays_suppressed(tmp_path, monkeypatch, capsys):
+    # Over-reach guard: red against nothing — it passes before and after the removal of the
+    # one-shot tool branch.
     db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
-        [_user_prompt()] + [_assistant_tool_use() for _ in range(hooks._MIN_TOOL_USES - 1)],
+        [_user_prompt()] + [_assistant_tool_use() for _ in range(4)],
         "sdk-cli",
     )
     transcript = _write_transcript(tmp_path / "transcript.jsonl", entries)
@@ -377,11 +395,9 @@ def test_one_shot_below_tool_threshold_stays_suppressed(tmp_path, monkeypatch, c
 
 
 def test_interactive_session_tool_use_does_not_arm_turn_one(tmp_path, monkeypatch, capsys):
-    """Spec review F2 (BLOCKING): an UNSCOPED tool branch armed at the end of turn 1 in
-    93% of multi-prompt interactive sessions, burning the once-per-session ledger before
-    the session's richer content existed. The branch is scoped to sdk-cli; a cli
-    (interactive) session with heavy tool use at turn 1 must stay on the prompt gate.
-    Red against the rev-1 unscoped design (discarded-design red, per the spec ledger)."""
+    """Over-reach guard, red against nothing: tool work alone never arms. A cli (interactive)
+    session with heavy tool use at turn 1 stays on the prompt gate, so the once-per-session
+    ledger is not spent before the session's richer content exists."""
     db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
         [_user_prompt()] + [_assistant_tool_use() for _ in range(20)],
@@ -401,11 +417,13 @@ def test_interactive_session_tool_use_does_not_arm_turn_one(tmp_path, monkeypatc
 
 
 def test_missing_entrypoint_degrades_to_the_prompt_gate(tmp_path, monkeypatch, capsys):
-    # A host that stamps no `entrypoint` anywhere degrades to the old gate — never to
-    # arming (spec D1). 1 prompt + many tools, no entrypoint field → suppressed.
+    # A host that stamps no `entrypoint` anywhere stays on the prompt gate: 1 prompt + many
+    # tools, no entrypoint field → suppressed and reported as None. Over-reach guard, red
+    # against nothing.
     db = _existing_store(tmp_path / "s.db")
     entries = [_user_prompt()] + [_assistant_tool_use() for _ in range(20)]
     transcript = _write_transcript(tmp_path / "transcript.jsonl", entries)
+    assert hooks._transcript_stats(transcript).entrypoint is None
     out = _run(
         monkeypatch,
         capsys,
@@ -415,17 +433,16 @@ def test_missing_entrypoint_degrades_to_the_prompt_gate(tmp_path, monkeypatch, c
     assert out == {}
 
 
-def test_entrypoint_reads_the_first_entry_not_the_last(tmp_path, monkeypatch, capsys):
-    """Code review F6: `claude -p --resume` of an interactive session appends sdk-cli
-    entries to a transcript whose FIRST entries are cli — first-seen keeps that session on
-    the prompt gate (the conservative choice D1 argues for); last-seen would arm the tool
-    branch inside an interactive session, the exact F2 blast-radius shape. Red against a
-    last-seen reading."""
+def test_resumed_interactive_one_prompt_session_stays_suppressed(tmp_path, monkeypatch, capsys):
+    """Over-reach guard, red against nothing: `claude -p --resume` of an interactive session
+    with one real prompt appends sdk-cli tool work to a transcript whose FIRST entries are
+    cli; the entrypoint is still read from the first entry and the session stays suppressed."""
     db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint([_user_prompt(), _assistant()], "cli") + _with_entrypoint(
         [_assistant_tool_use() for _ in range(20)], "sdk-cli"
     )
     transcript = _write_transcript(tmp_path / "transcript.jsonl", entries)
+    assert hooks._transcript_stats(transcript).entrypoint == "cli"
     out = _run(
         monkeypatch,
         capsys,
@@ -439,11 +456,8 @@ def test_entrypoint_reads_the_first_entry_not_the_last(tmp_path, monkeypatch, ca
 
 
 def test_tool_results_do_not_count_in_an_sdk_cli_session(tmp_path, monkeypatch, capsys):
-    """Code review F7: the pre-existing tool-result test carries no entrypoint, so it only
-    exercises the prompt branch — a counter that also counted `tool_result` blocks (or
-    scanned user entries) would arm sdk-cli sessions with no test noticing. 1 prompt +
-    10 tool results, sdk-cli → still suppressed. Red against a counter that reads
-    tool_result blocks or non-assistant entries."""
+    """Over-reach guard, red against nothing: 1 prompt + 10 tool results in an sdk-cli
+    session stays suppressed; tool results are not prompts."""
     db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
         [_user_prompt()] + [_tool_result(f"r{i}") for i in range(10)], "sdk-cli"
@@ -462,12 +476,11 @@ def test_tool_results_do_not_count_in_an_sdk_cli_session(tmp_path, monkeypatch, 
 
 
 def test_malformed_lines_do_not_crash_the_combined_counter(tmp_path, monkeypatch, capsys):
-    """Spec T5 (declared: no red exists against the generalized single-pass counter —
-    the malformed-line skip is inherited by construction; this red applies only to the
-    discarded sibling-counter variant). Kept as the cheap crash guard."""
+    """Crash guard, red against nothing: malformed lines around a two-prompt sdk-cli
+    transcript are skipped and the gate still arms."""
     db = _existing_store(tmp_path / "s.db")
     entries = _with_entrypoint(
-        [_user_prompt()] + [_assistant_tool_use() for _ in range(hooks._MIN_TOOL_USES)],
+        [_user_prompt(), _assistant_tool_use(), _user_prompt("second prompt"), _assistant()],
         "sdk-cli",
     )
     transcript = tmp_path / "transcript.jsonl"

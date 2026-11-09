@@ -23,7 +23,9 @@ _HARD = 40000
 _WORKTREE_SENTENCE = (
     "1 of 1 seed path exists only in another checkout of this repository, not in the one this "
     "server reads (/repo): pkg/new.py (worktree .worktrees/feat, branch feat). The code graph "
-    "this server reads (built from /repo) does not hold it."
+    "this server reads (built from /repo) does not hold it. "
+    "Rebuilding that graph cannot add the missing files: start the session in that "
+    "checkout to read its graph and records."
 )
 _NOT_IN_GRAPH = "## Not in the code graph\n" + _WORKTREE_SENTENCE
 

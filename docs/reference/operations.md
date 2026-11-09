@@ -83,8 +83,8 @@ the one-file-per-record layout and were not re-measured for shards.
 The code-graph engine is **optional for the store, but required for task-seeded structure and
 name/file resolution**. Without it, the SessionStart TOC, proposal queue, raw store listings,
 and global memory still work; `get_task_context` cannot resolve file/name seeds against the graph and
-returns no structural map (a seed that names a descriptor already stored with a decision still
-finds that decision). With it, Sidegraph adds symbol-level anchors, task-scoped retrieval,
+can still find a decision whose stored descriptor matches the seed. `query_structure` has no
+map to return. With it, Sidegraph adds symbol-level anchors, task-scoped retrieval,
 community-derived domain candidates, and rebind support. Its rebuild cost (≈8 s here) is on
 your commit or CI path, not on ordinary tool calls. A rebuild may update Graphify's own output,
 but ordinary Sidegraph sync does not dirty canonical store files except for a durable leaf-file

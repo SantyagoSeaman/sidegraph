@@ -327,6 +327,31 @@ def test_a_record_printed_under_two_files_of_one_brief_is_two_showings(
     assert _shows(project) == {rec.id: 2}
 
 
+def test_a_brief_whose_later_read_lost_its_wait_skips_the_journal(project, monkeypatch, capsys):
+    """File 1's records are read, then file 2's read loses its lock wait and marks the handle:
+    the brief is still delivered with file 1's records, and the journal write after it is not
+    attempted (it would wait the timeout out again). Red against a journal that ignores the
+    mark: the inject_brief rows are written."""
+    _crowded(project, "src/a.py")
+    _crowded(project, "src/b.py")
+    real = HotIndex.records_for
+    calls: list[int] = []
+
+    def second_read_loses_its_wait(self, entity_ids, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            self.lock_lost = True
+            return []
+        return real(self, entity_ids, **kwargs)
+
+    monkeypatch.setattr(HotIndex, "records_for", second_read_loses_its_wait)
+    prompt = "Touch src/a.py and src/b.py."
+    out, _ = _agent(monkeypatch, capsys, project, prompt)
+    assert len(calls) == 2
+    assert "src/a.py:" in _block(out, prompt)
+    assert _journaled_brief(project) == []
+
+
 # -- doctor and the stats memory line ----------------------------------------------------------
 
 

@@ -34,7 +34,12 @@ import json
 from typing import Any
 
 from sidegraph.githooks import GRAPH_REBUILD_COMMAND
-from sidegraph.stats.model import ActivationStats, GraphStats, StatsReport
+from sidegraph.stats.model import (
+    ActivationStats,
+    ChannelCitedBack,
+    GraphStats,
+    StatsReport,
+)
 
 _LABEL_WIDTH = 12
 _SCREEN_WIDTH = 80
@@ -346,6 +351,62 @@ def _anchors(report: StatsReport) -> list[str]:
     return [line]
 
 
+# How each delivery channel is named on the screen, in the order the block lists them.
+_CHANNEL_NAMES = {
+    "mcp": "MCP",
+    "pre_tool_use": "PreToolUse",
+    "subagent_brief": "subagent brief",
+    "session_start": "SessionStart",
+}
+# What a session that was not read is called, in the order that breaks a tie.
+_UNREAD = (
+    ("no_transcript", "have none recorded"),
+    ("over_budget", "left out by the reading bound"),
+    ("unreadable", "could not be opened"),
+    ("no_reader", "are in a format not read"),
+)
+
+
+def _channel(name: str, stats: ChannelCitedBack | None, mature: bool, *, noun: bool) -> str:
+    """One channel's figure: ``cited of placements`` (a percentage only past the maturity
+    floor), ``no record placed`` for a visible channel with none, and a statement for a channel
+    no read transcript can show. Never a zero percent for a channel that placed nothing."""
+    if stats is None:
+        return f"{name}: not visible in these hosts' transcripts"
+    if stats.placements == 0:
+        return f"{name}: no record placed"
+    figure = f"{name}: {_n(stats.cited)} of {_n(stats.placements)}"
+    if noun:
+        figure += " record placements"
+    if mature:
+        figure += f" ({_pct(stats.cited, stats.placements)}%)"
+    return figure
+
+
+def _cited_back(report: StatsReport) -> list[str]:
+    if not report.telemetry_enabled:
+        return ["recording is off; not computed"]
+    cited = report.cited_back
+    assert cited is not None
+    mature = report.activation.mature
+    lines = ["ids quoted back later in the same session (a lower bound)"]
+    lines.append(_channel("MCP", cited.channels.get("mcp"), mature, noun=True))
+    hooks = [
+        _channel(_CHANNEL_NAMES[key], cited.channels.get(key), mature, noun=False)
+        for key in ("pre_tool_use", "subagent_brief")
+    ]
+    lines += _pack("", hooks, " · ")
+    lines.append(_channel("SessionStart", cited.channels.get("session_start"), mature, noun=False))
+    read = cited.sessions.get("read", 0)
+    population = cited.sessions.get("population", 0)
+    unread = max(
+        ((cited.sessions.get(key, 0), label) for key, label in _UNREAD), key=lambda x: x[0]
+    )
+    coverage = f"transcripts read for {_n(read)} of {_count(population, 'session')}"
+    lines += _pack("", [coverage, *([f"{_n(unread[0])} {unread[1]}"] if unread[0] else [])], "; ")
+    return lines
+
+
 def _delivery_evidence(report: StatsReport) -> list[str]:
     evidence = report.delivery_evidence
     if not report.telemetry_enabled:
@@ -386,6 +447,10 @@ def render_text(report: StatsReport) -> str:
     lines = [_header(report), ""]
     lines += _block("HEALTH", _health(report))
     lines += _block("ACTIVATION", _activation(report))
+    # Omitted when recording is on and the model computed nothing (no reader, or an index behind
+    # the files); with recording off the block says it was not computed.
+    if report.cited_back is not None or not report.telemetry_enabled:
+        lines += _block("CITED BACK", _cited_back(report))
     if report.delivery_evidence is not None:
         lines += _block("DELIVERY", _delivery_evidence(report))
     lines += _block("REACH", _reach(report))
@@ -412,6 +477,7 @@ def render_json(report: StatsReport) -> str:
     """
     data: dict[str, Any] = report.model_dump(mode="json")
     if not report.telemetry_enabled:
+        data["cited_back"] = None
         # Everything the journal supplied. Store-derived figures stand.
         data["activation"] = None
         data["delivery_evidence"] = None

@@ -21,9 +21,18 @@ no analytics, and it sends no telemetry anywhere.
   were touched, with session ids and timestamps. It is never uploaded, and its event entries older than 30
   days are deleted at session start. `SIDEGRAPH_TELEMETRY=off`, set in the environment Claude
   Code starts with (or under `env` in `.claude/settings.json`), stops the log; working state
-  (session ids, timestamps, which files' records were already shown, when the last capture
-  reminder fired) is still kept, without that 30-day cleanup, so records and reminders are not
-  repeated.
+  (session ids, timestamps, which files' records were already shown, which records the MCP
+  tools already sent to each agent, when the last capture reminder fired) is still kept so
+  records and reminders are not repeated. Per-agent MCP sent-record rows expire at session
+  start after 30 days even when telemetry is off; compact/clear resets the main agent's rows.
+- **Transcript paths.** The same index keeps, for each session, the path of the transcript file
+  the host wrote (`~/.claude/projects/…`, for example), with the session id, host and time. It
+  holds the path and nothing from the file; entries older than 30 days are deleted at session
+  start, and `SIDEGRAPH_TELEMETRY=off` stops them. `sidegraph-stats` opens those files on your
+  machine, read-only, to count how many delivered record ids the agent quoted later in the same
+  session, and keeps nothing of them: its report holds counts only, no transcript text, path or
+  session id, and it writes no file or index row. See
+  [`sidegraph-stats`](reference/cli.md#sidegraph-stats).
 - **Hook run log.** `.sidegraph/index.db-hooks.log` gets one line per run of the hooks that
   deliver records: a timestamp, the hook's name, whether it delivered, found nothing or was
   refused by a lock, and how long it ran. No path, session id or record text. Git ignores it (a

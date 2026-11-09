@@ -172,11 +172,13 @@ def test_b1_with_no_memory_in_the_main_answer_the_records_follow_under_their_own
 
     out = repo.call(files=["core/a.py"], structure_budget=ONE_NODE)
 
+    assert out.startswith(server._NEAREST_ONLY_LEAD + "\n\n")
+    assert "## Structural map" not in out
     assert out.index(NEAREST + "\n") < out.index(RECORDS + "\n")
     records = out.split(RECORDS + "\n", 1)[1]
     for title in ("Neighbour gotcha 1", "Neighbour gotcha 2", "Sibling gotcha 3"):
         assert title in records
-    # One guard line for the reply (the map's own), and the headings sit one level lower.
+    # One guard line for the reply, and the headings sit one level lower.
     assert out.count(MEMORY_GUARD_LINE) == 1
     assert "### ⚠ Known mistakes & gotchas" in records
     assert re.search(r"(?m)^## ", records) is None
@@ -331,21 +333,24 @@ def test_b1_a_file_both_linked_and_in_the_same_directory_is_named_once(tmp_path)
     ]
 
 
-def test_b1_the_empty_answer_carries_the_sentence_in_the_why_block(tmp_path):
-    """``core/new.py`` is in no graph: the answer is empty, so the sentence goes where the
-    reason for an empty answer goes. The records have no guard line from the main answer to
-    lean on, so the block brings the one the reply needs."""
+def test_b1_the_empty_answer_carries_the_sentence_in_the_nearest_block(tmp_path):
+    """``core/new.py`` is in no graph, but the nearest files supply memory. The records have
+    no guard line from the main answer, so the block brings the one the reply needs."""
     repo = _area(tmp_path)
 
     out = repo.call(files=["core/new.py"])
 
-    assert out.startswith("No context found.\n\n")
-    assert _section(out, EMPTY) == [
+    assert server._NEAREST_ONLY_LEAD == (
+        "No record is anchored to the files you named; "
+        "the records of the nearest anchored files follow."
+    )
+    assert out.startswith(server._NEAREST_ONLY_LEAD + "\n\n")
+    assert _section(out, NEAREST) == [
         "No current record is anchored to `core/new.py`. Nearest anchored: "
         "`core/b.py` (same directory, 3 records)."
     ]
-    assert NEAREST + "\n" not in out
-    assert out.index(NOT_IN_GRAPH) < out.index(EMPTY) < out.index(RECORDS)
+    assert EMPTY + "\n" not in out
+    assert out.index(NOT_IN_GRAPH) < out.index(NEAREST) < out.index(RECORDS)
     records = out.split(RECORDS + "\n", 1)[1]
     assert records.startswith(MEMORY_GUARD_LINE + "\n\n### ⚠ Known mistakes & gotchas")
     assert out.count(MEMORY_GUARD_LINE) == 1
@@ -676,7 +681,7 @@ def test_a_failure_in_the_plan_leaves_the_text_untouched(tmp_path, monkeypatch):
 
     bare = server._retrieve(
         [Seed(file_path="core/a.py")], repo.store, repo.reader, RetrievalBudget(ONE_NODE, 2000)
-    ).render()
+    ).render(include_structure=False)
     assert out == bare
 
 
@@ -695,7 +700,7 @@ def test_a_failing_second_retrieval_keeps_the_sentence(tmp_path, monkeypatch):
 
     out = repo.call(files=["core/a.py"], structure_budget=ONE_NODE)
 
-    assert _section(out, NEAREST)[0].startswith("No current record is anchored to `core/a.py`.")
+    assert _section(out, EMPTY)[0].startswith("No current record is anchored to `core/a.py`.")
     assert RECORDS not in out
 
 
@@ -711,7 +716,7 @@ def test_a_failure_in_the_records_block_leaves_the_rest_of_the_reply(tmp_path, m
 
     out = repo.call(files=["core/a.py"], structure_budget=ONE_NODE)
 
-    assert _section(out, NEAREST)[0].startswith("No current record is anchored to `core/a.py`.")
+    assert _section(out, EMPTY)[0].startswith("No current record is anchored to `core/a.py`.")
     assert RECORDS not in out and _STANDING_SUPERSEDE_HINT not in out
 
 
@@ -727,5 +732,5 @@ def test_a_failure_in_combining_the_two_contexts_keeps_the_sentence(tmp_path, mo
 
     out = repo.call(files=["core/a.py"], structure_budget=ONE_NODE)
 
-    assert _section(out, NEAREST)[0].startswith("No current record is anchored to `core/a.py`.")
+    assert _section(out, EMPTY)[0].startswith("No current record is anchored to `core/a.py`.")
     assert RECORDS not in out

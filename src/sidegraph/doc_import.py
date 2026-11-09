@@ -654,6 +654,25 @@ def _strip_bold_lead_lines(lines: list[str]) -> list[str]:
     return [ln for i, ln in enumerate(lines) if i not in strip_indices]
 
 
+def _section_ends(rest: Sequence[tuple[int, int, str]], n_lines: int) -> list[int]:
+    """One end line per heading in ``rest``: the line of the next heading at or above the
+    heading's own level, else ``n_lines``. A reverse pass keeps a stack of later headings and
+    pops those deeper than the current one, so each heading is pushed and popped once: O(H)
+    however the levels nest.
+    # see design/superpowers/specs/2026-11-07-doc-import-linear-time-design.md D1
+    """
+    ends = [n_lines] * len(rest)
+    stack: list[tuple[int, int]] = []  # (level, line) of later headings, nearest on top
+    for idx in range(len(rest) - 1, -1, -1):
+        pos, lvl, _text = rest[idx]
+        while stack and stack[-1][0] > lvl:
+            stack.pop()
+        if stack:
+            ends[idx] = stack[-1][1]
+        stack.append((lvl, pos))
+    return ends
+
+
 def _parse_structure(
     text: str,
 ) -> tuple[str | None, list[tuple[str, str]], str, dict[str, str]]:
@@ -696,15 +715,11 @@ def _parse_structure(
     prose_lead_lines = _strip_bold_lead_lines(lead_lines)
     first_paragraph = _first_paragraph(prose_lead_lines)
 
-    sections: list[tuple[str, str]] = []
-    for idx, (pos, lvl, heading_text) in enumerate(rest):
-        body_start = pos + 1
-        body_end = len(lines)
-        for later_pos, later_lvl, _ in rest[idx + 1 :]:
-            if later_lvl <= lvl:
-                body_end = later_pos
-                break
-        sections.append((heading_text, "\n".join(lines[body_start:body_end]).strip()))
+    ends = _section_ends(rest, len(lines))
+    sections = [
+        (heading_text, "\n".join(lines[pos + 1 : body_end]).strip())
+        for (pos, _lvl, heading_text), body_end in zip(rest, ends, strict=True)
+    ]
 
     return h1_text, sections, first_paragraph, bold_metadata
 
@@ -830,6 +845,28 @@ def _choice_is_context_echo(context: str, choice: str, rel_path: str) -> bool:
     return bool(stripped_context) and choice.strip() == stripped_context
 
 
+def _child_spans(
+    after: Sequence[tuple[int, int, str]], section_end: int, n_lines: int
+) -> list[tuple[str, int, int]]:
+    """``(heading_text, first_body_line, body_end)`` per level-3 child of a split section.
+
+    A child's body runs to the next heading by position in ``after`` (strictly increasing line
+    order, so that next heading is always later), clamped to ``section_end``. Containment is
+    guarded TWICE, and each guard is independently sufficient (code review F10): the
+    ``i >= section_end`` skip, and the ``min(..., section_end)`` clamp (which empties an
+    out-of-section body so the empty-choice rule drops the child). Do not delete one believing
+    T16 covers it — T16 bites only against the fully naive reading with neither guard.
+    # see design/superpowers/specs/2026-11-07-doc-import-linear-time-design.md D2
+    """
+    spans: list[tuple[str, int, int]] = []
+    for pos, (i, lvl, text) in enumerate(after):
+        if i >= section_end or lvl != 3:
+            continue
+        body_end = after[pos + 1][0] if pos + 1 < len(after) else n_lines
+        spans.append((text, i + 1, min(body_end, section_end)))
+    return spans
+
+
 def _split_section_children(
     lines: list[str], dialect: ReaderDialect
 ) -> tuple[str, str, list[tuple[str, str]]] | None:
@@ -873,21 +910,32 @@ def _split_section_children(
     split_idx, _split_lvl, split_text = split
     after = [(i, lvl, t) for i, lvl, t in headings if i > split_idx]
     section_end = next((i for i, lvl, _ in after if lvl <= 2), len(lines))
-    children: list[tuple[str, str]] = []
-    for pos, (i, lvl, text) in enumerate(after):
-        # Containment is guarded TWICE, and each guard is independently sufficient (code
-        # review F10): the `i >= section_end` skip here, and the `min(..., section_end)`
-        # clamp below (which empties an out-of-section body so the empty-choice rule
-        # drops the child). Do not delete one believing T16 covers it — T16 bites only
-        # against the fully naive reading with neither guard.
-        if i >= section_end or lvl != 3:
-            continue
-        body_end = next((j for j, _, _ in after[pos + 1 :] if j > i), len(lines))
-        body_end = min(body_end, section_end)
-        children.append((text, "\n".join(lines[i + 1 : body_end]).strip()))
+    children = [
+        (text, "\n".join(lines[first:body_end]).strip())
+        for text, first, body_end in _child_spans(after, section_end, len(lines))
+    ]
     intro_end = min((i for i, _, _ in after), default=len(lines))
     intro = "\n".join(lines[split_idx + 1 : intro_end]).strip()
     return split_text, intro, children
+
+
+def _next_fragment(base: str, used: set[str], next_ordinal: dict[str, int]) -> str:
+    """The smallest free fragment for ``base`` (``base``, ``base-2``, ``base-3``, …), recorded in
+    ``used``. Searching starts at the ordinal this base last took instead of at 1: fragments
+    are never removed from ``used``, so every ordinal 1..k of a base is taken once k is
+    assigned and nothing free is skipped. A name another heading already holds (a title whose
+    slug is naturally ``base-2``) is still skipped, which keeps the shared set the source of
+    truth. Total membership checks are O(N) per document.
+    # see design/superpowers/specs/2026-11-07-doc-import-linear-time-design.md D3
+    """
+    k = next_ordinal.get(base, 1)
+    fragment = base if k == 1 else f"{base}-{k}"
+    while fragment in used:
+        k += 1
+        fragment = f"{base}-{k}"
+    used.add(fragment)
+    next_ordinal[base] = k
+    return fragment
 
 
 def _parse_decision_doc_with_reason(
@@ -1102,8 +1150,11 @@ def _parse_decision_docs_with_reason(
         # "supersedes" one AD with its sibling on a fresh store, flip-flopping every run
         # (measured: total 4→6→8 across three imports of an unchanged file). The loop
         # below advances the ordinal until the fragment is genuinely free, which also
-        # closes the same hole for the `section-<n>` fallback.
+        # closes the same hole for the `section-<n>` fallback. The per-base pointer in
+        # `_next_fragment` only skips ordinals that are already taken, so the shared set
+        # stays the single source of truth and the names are the ones that loop always chose.
         used_fragments: set[str] = set()
+        next_ordinal: dict[str, int] = {}
         for n, (child_heading, child_body) in enumerate(split_children, start=1):
             child_choice_clean, _ = redact(child_body)
             child_choice = _truncate_section(child_choice_clean.strip(), section_limit)
@@ -1111,11 +1162,7 @@ def _parse_decision_docs_with_reason(
                 continue
             child_title_clean, _ = redact(child_heading)
             base = slugify(child_title_clean) or f"section-{n}"
-            fragment, k = base, 1
-            while fragment in used_fragments:
-                k += 1
-                fragment = f"{base}-{k}"
-            used_fragments.add(fragment)
+            fragment = _next_fragment(base, used_fragments, next_ordinal)
             effective_ref = f"{rel_path}#{fragment}"
             child_context = (
                 f"{raw_context_clean}\n\nimported from {effective_ref}"

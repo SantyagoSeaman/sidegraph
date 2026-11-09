@@ -1,0 +1,4 @@
+# Sidegraph: keeps recursive search (rg, editor search) out of the decision store.
+# Read memory through the Sidegraph MCP; without it: sidegraph-export-adr --json, sidegraph-export-okf --out <dir>, sidegraph-doctor.
+# Explicit paths still search it: rg PATTERN .sidegraph/
+.sidegraph/

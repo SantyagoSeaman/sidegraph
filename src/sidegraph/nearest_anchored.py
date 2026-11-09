@@ -344,23 +344,26 @@ def has_memory(ctx: TaskContext) -> bool:
     return bool(ctx.mistakes or ctx.decisions or ctx.facts or ctx.related or ctx.unratified)
 
 
-def records_block(ctx: TaskContext, *, guarded: bool) -> tuple[str, bool]:
+def records_block(ctx: TaskContext, *, guarded: bool) -> tuple[str, bool, str | None]:
     """The records of the nearest files, as a block under :data:`RECORDS_HEADING`, and whether
-    they carried ids (so the reply must end with the supersede hint). ``("", False)`` when the
-    second retrieval found nothing to show.
+    they carried ids (so the reply must end with the supersede hint), plus the extracted
+    sent-earlier legend. ``("", False, None)`` when the second retrieval found nothing to show.
 
     The block holds ``ctx.render(include_structure=False)`` without its guard line and its
     supersede hint, which the reply carries once, with its ``##`` headings one level lower.
     ``guarded`` says whether the main answer already carries the guard line; when it does not
     (an empty answer), the block brings it, so no record reaches the reader unlabelled."""
     if not has_memory(ctx):
-        return "", False
+        return "", False, None
     body, legend, hint = ctx.render_parts(include_structure=False, heading="###")
+    paragraphs = (legend or "").split("\n\n")
+    backref_legend = next((p for p in paragraphs if p.startswith("[sent earlier]")), None)
+    legend = "\n\n".join(p for p in paragraphs if not p.startswith("[sent earlier]")) or None
     text = "\n\n".join(part for part in (body, legend) if part)
     text = text.removeprefix(MEMORY_GUARD_LINE + "\n\n")
     ids_shown = hint is not None
     lead = "" if guarded else MEMORY_GUARD_LINE + "\n\n"
-    return f"{RECORDS_HEADING}\n{lead}{text}", ids_shown
+    return f"{RECORDS_HEADING}\n{lead}{text}", ids_shown, backref_legend
 
 
 def combine(first: TaskContext, second: TaskContext) -> TaskContext:
@@ -373,6 +376,9 @@ def combine(first: TaskContext, second: TaskContext) -> TaskContext:
     return dataclasses.replace(
         first,
         shown_ids=[*first.shown_ids, *second.shown_ids],
+        full_body_ids=[*first.full_body_ids, *second.full_body_ids],
+        backref_ids=[*first.backref_ids, *second.backref_ids],
+        backref_shown=first.backref_shown or second.backref_shown,
         line_ids={
             key: [*first.line_ids.get(key, []), *second.line_ids.get(key, [])]
             for key in (*first.line_ids, *(k for k in second.line_ids if k not in first.line_ids))

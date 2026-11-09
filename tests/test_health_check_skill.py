@@ -1344,3 +1344,15 @@ def test_skill_gives_a_recipe_for_an_installed_plugin_and_the_host_values() -> N
     assert "`claude`, `codex` or `unknown`" in skill
     # the spec's rules stay: no launcher that can provision, no guessing
     assert "Do not use `uv`, `uvx`" in skill
+
+
+def test_skill_points_at_an_existing_without_the_mcp_note() -> None:
+    skill_dir = _ROOT / "plugin/sidegraph/skills/health-check"
+    skill = " ".join((skill_dir / "SKILL.md").read_text().split())
+    note = skill_dir / "references/without-the-mcp.md"
+    # SKILL.md names no CLI (the public-twin gate reads `sidegraph-` plus a letter as one), so the
+    # command line recipe lives in the note it points at.
+    assert "references/without-the-mcp.md" in skill
+    assert note.is_file()
+    text = " ".join(note.read_text().split())
+    assert "sidegraph-export-adr --json" in text and "sidegraph-doctor" in text

@@ -24,7 +24,14 @@
 # with only the internal path excluded, the first snapshot build reformatted nine bundle
 # scripts and broke 41 of the manifest's hashes. (The corpus leak gate still scans the
 # bundle either way: it walks the filesystem itself and ignores this exclude.)
-exclude: '^(\.sidegraph/|src/sidegraph/viz/assets/|sidegraph-graph\.html|(design|docs)/whitepaper/evidence/artifact-bundle/)'
+# The 2026-11-06 and 2026-11-07 research packages (design/reviews/2026-11-0[67]-<name>/) are
+# excluded for the same reason as the whitepaper bundle: their reports pin evidence files,
+# scripts and manifests by SHA-256, so a whitespace or ruff fixer rewriting them falsifies the
+# recorded hashes (measured: the fixers changed 68 of 1,340 files on the first commit attempt),
+# and three receipts exceed the 1 MiB large-file cap. Prose files outside those directories
+# (the session recap, the index, the plan) are still linted. The corpus leak gate and gitleaks
+# still scan the packages.
+exclude: '^(\.sidegraph/|src/sidegraph/viz/assets/|sidegraph-graph\.html|(design|docs)/whitepaper/evidence/artifact-bundle/|design/reviews/2026-11-0[67]-[^/]+/)'
 
 # A plain `pre-commit install` (no --hook-types flag) wires up BOTH the pre-commit stage and
 # the commit-msg stage below, so the `no-session-links` hook actually runs for a contributor

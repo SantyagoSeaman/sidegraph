@@ -103,6 +103,7 @@ from .host.claude_settings import (
     ensure_ratify_policy_setting,
     repo_root_for_settings,
 )
+from .host.transcripts import cited_back as read_cited_back
 from .importer import import_rationales
 from .input_limits import InputLimitError
 from .integrity import binding_statuses_computed
@@ -111,6 +112,7 @@ from .okf import build_bundle, write_bundle
 from .profiles import PROFILES, get_profile
 from .retrieval import TOC_CACHE_KEY, build_toc, proposal_surfaces
 from .schema import Decision, DecisionKind, DecisionStatus, Domain, DomainStatus, Fact, Provenance
+from .search_ignore import SearchIgnoreResult, ensure_search_ignore, store_pattern
 from .stats.model import UnreadableRecordError, build_report
 from .stats.render import render_json, render_text
 from .store import (
@@ -592,7 +594,8 @@ def _remove_graph_refresh_hook(project: Path) -> int:
 
 
 def init_main(argv: list[str] | None = None) -> int:
-    """Bootstrap a target repo: create the store, check for the graph, print wiring.
+    """Bootstrap a target repo: create the store, add it to the project-root ``.ignore``
+    (unless ``--no-search-ignore``), check for the graph, print wiring.
 
     Idempotent: safe to re-run on an already-initialized repo (says so, exits 0). The graph
     is optional at init time — a missing ``graph.json`` is reported, not an error, since
@@ -659,6 +662,14 @@ def init_main(argv: list[str] | None = None) -> int:
             "choice, print what changed and exit without running the rest of init"
         ),
     )
+    parser.add_argument(
+        "--no-search-ignore",
+        action="store_true",
+        help=(
+            "do not add the store to the project-root .ignore (recursive rg and editor search "
+            "would then return raw store files)"
+        ),
+    )
     args = parser.parse_args(argv)
     # Resolved AFTER parse_args, and only when --db was actually omitted (review Minor 4):
     # resolve_store_path() can print SIDEGRAPH_DB's one-line deprecation notice as a side
@@ -700,6 +711,8 @@ def init_main(argv: list[str] | None = None) -> int:
             "to anchor decisions to code (optional; Sidegraph works without it)."
         )
     _graph_hint(args.graph, graph_path)
+
+    _search_ignore_step(args.db, skip=args.no_search_ignore)
 
     hooks_ok = _graph_refresh_hook(
         project_dir,
@@ -775,6 +788,37 @@ def init_main(argv: list[str] | None = None) -> int:
     print("Hook-by-hook manual setup and Codex CLI wiring: see")
     print("docs/getting-started/claude-code-setup.md and docs/getting-started/codex-setup.md.")
     return 0 if hooks_ok or not args.hooks else 1
+
+
+def _search_ignore_step(store_path: str, *, skip: bool) -> None:
+    """Add the store to the invocation repository's root ``.ignore`` and say what happened.
+
+    The repository root is the shell's (``repo_root_for_settings``, cwd fallback), not the
+    store's own project: a store outside it gets no file. A failure here never fails init.
+    # see design/superpowers/specs/2026-11-07-root-ignore-for-store-design.md (D1, D2)
+    """
+    if skip:
+        print("skipped .ignore (--no-search-ignore).")
+        return
+    root = repo_root_for_settings()
+    try:
+        result = ensure_search_ignore(root, Path(store_path))
+    except Exception as e:  # the helper itself never raises; belt and braces for init
+        result = SearchIgnoreResult("left_untouched", None, type(e).__name__)
+    line = result.line or store_pattern(root, Path(store_path)) or f"{DEFAULT_STORE_DIR}/"
+    if result.outcome == "created":
+        print(f"wrote .ignore: {line} (recursive search skips the store)")
+    elif result.outcome == "appended":
+        print(f"added {line} to .ignore")
+    elif result.outcome == "already_present":
+        print(f".ignore already names {line}. Left unchanged.")
+    elif result.outcome == "outside_project":
+        print("store is outside the project; no .ignore written.")
+    else:
+        print(
+            f"left .ignore untouched ({result.reason}); to keep recursive search out of the "
+            f"store, add the line {line} yourself."
+        )
 
 
 def _route_ratify(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
@@ -987,7 +1031,10 @@ def ratify_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--all",
         action="store_true",
-        help="accept every pending proposal (decisions, standalone facts, and domains)",
+        help=(
+            "accept every pending proposal (decisions, standalone facts, and domains) "
+            "except the ids given to --drop"
+        ),
     )
     parser.add_argument(
         "--graph",
@@ -1009,7 +1056,15 @@ def ratify_main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"store not readable ({args.db}): {e}", file=sys.stderr)
         return 1
+    try:
+        return _ratify_with_store(store, args)
+    finally:
+        store.close()
 
+
+def _ratify_with_store(store: Store, args: argparse.Namespace) -> int:
+    """The batch body of ``sidegraph-ratify``; the caller opened ``store`` and closes it, so
+    everything here only borrows the handle."""
     if args.all:
         proposals = list(store.iter_proposed())
         args.accept = [d.id for d in proposals]
@@ -1018,6 +1073,9 @@ def ratify_main(argv: list[str] | None = None) -> int:
         # decision's cascade already; adding it here too would double-report it.
         nested = _nested_fact_ids(store, proposals)
         args.accept += [f.id for f in store.iter_proposed_facts() if f.id not in nested]
+        # `--all` means "everything pending except what this call drops".
+        excluded = set(args.drop)
+        args.accept = [i for i in args.accept if i not in excluded]
 
     if not args.accept and not args.drop:
         proposals = list(store.iter_proposed())
@@ -1099,8 +1157,15 @@ def ratify_main(argv: list[str] | None = None) -> int:
     # spurious "error" line and forcing exit 1 despite full success. No two-pass reordering
     # here (unlike the accept loop) -- drop ids are dropped in the caller's own list order;
     # this guard only skips an id ALREADY reported earlier in that same order, via cascade.
+    # Second guard (same parity, MCP `_ratify_impl` and `Store.ratify_domains`): an id the accept
+    # part already answered -- success, error or cascade alike -- keeps that answer as its only
+    # outcome; its drop is reported and ignored. A failed accept is not turned into a drop.
     for did in args.drop:
         if did in dropped:
+            continue
+        if did in accepted:
+            dropped[did] = "drop ignored"
+            print(f"drop ignored {did}")
             continue
         result, cascaded = _route_ratify(store, did, "drop")
         dropped[did] = result
@@ -3322,7 +3387,10 @@ def stats_main(argv: list[str] | None = None) -> int:
     _graph_hint(args.graph, graph_path)
     try:
         report = build_report(
-            store_dir, graph_path if path_exists(graph_path) else None, window_days=args.window
+            store_dir,
+            graph_path if path_exists(graph_path) else None,
+            window_days=args.window,
+            cited_back=read_cited_back,
         )
     except (sqlite3.Error, PermissionError) as e:
         return _operational_error(

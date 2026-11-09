@@ -144,12 +144,16 @@ class SessionHint:
     ``session_id`` is the host's own id for the calling session (``None`` when the host did
     not announce one); ``family`` is an opaque label of the host family the client named
     (``None`` for a client Sidegraph does not know). Host-neutral on purpose: core reads this
-    and never imports ``sidegraph.host``.
+    and never imports ``sidegraph.host``. ``agent`` identifies the caller within that session
+    (None for its own agent); ``agent_exact`` permits per-agent delivery state only when
+    the host knows the caller exactly.
     see design/superpowers/specs/2026-10-11-session-attribution-design.md (D2)
     """
 
     session_id: str | None
     family: str | None
+    agent: str | None = None
+    agent_exact: bool = False
 
 
 # Set by the host entry's middleware around each tool call; unset (``None``) for the CLI, the

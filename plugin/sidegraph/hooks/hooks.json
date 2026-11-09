@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_HOST=claude uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-session-start --repo-root || echo '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv, the first download of Sidegraph, or no network); run the hook command in a terminal to see the error\"}'"
+            "command": "SIDEGRAPH_HOST=claude uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-session-start --repo-root || echo '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv, the first download of Sidegraph, or no network); run the hook command in a terminal to see the error\"}'"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-stop --repo-root || echo '{}'"
+            "command": "uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-stop --repo-root || echo '{}'"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
+            "command": "uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
           }
         ]
       },
@@ -36,22 +36,22 @@
           {
             "type": "command",
             "if": "Bash(sed *)",
-            "command": "uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
+            "command": "uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
           },
           {
             "type": "command",
             "if": "Bash(grep *)",
-            "command": "uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
+            "command": "uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
           },
           {
             "type": "command",
             "if": "Bash(rg *)",
-            "command": "uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
+            "command": "uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
           },
           {
             "type": "command",
             "if": "Bash(cat *)",
-            "command": "uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
+            "command": "uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
           }
         ]
       },
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
+            "command": "uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'"
           }
         ]
       }
@@ -70,7 +70,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-subagent-start --repo-root || echo '{}'"
+            "command": "uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-subagent-start --repo-root || echo '{}'"
           }
         ]
       }

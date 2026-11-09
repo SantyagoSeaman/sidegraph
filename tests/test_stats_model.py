@@ -18,7 +18,7 @@ from sidegraph.schema import (
     Fact,
     Provenance,
 )
-from sidegraph.stats.model import build_report
+from sidegraph.stats.model import CitedBackStats, build_report
 from sidegraph.store import Store
 from tests.store_format2_support import format1_store
 
@@ -1422,12 +1422,65 @@ def test_the_reserved_intent_is_not_a_self_reported_label(tmp_path):
     assert a.self_reported_intents == {"check-plan": 1}
 
 
-def test_the_reserved_intent_matches_the_one_the_server_writes():
-    """`stats/` imports nothing from the server, so the label is mirrored and pinned."""
+def test_the_reserved_intents_match_the_ones_the_server_writes():
+    """`stats/` imports nothing from the server, so the labels are mirrored and pinned."""
     from sidegraph import server
     from sidegraph.stats import model
 
-    assert model._DRILL_DOWN_INTENT == server.DRILL_DOWN_INTENT
+    assert model._UNBUDGETED_INTENTS == server.UNBUDGETED_INTENTS
+
+
+def _listing_row(store, sid, intent, *, emitted, superseded=False):
+    store.record_render_event(
+        sid,
+        intent=intent,
+        selected=emitted,
+        emitted=emitted,
+        degraded=0,
+        dropped_for_budget=0,
+        chars_used=0,
+        had_rejected=False,
+        had_superseded=superseded,
+    )
+
+
+def test_a_listing_only_session_is_asked_and_fed(tmp_path):
+    """Guard for the writer (server tests pin the rows): the model reads listing rows like any
+    other lookup, so a session that only listed records and touched a file is asked, and fed
+    by the records the listings returned in full."""
+    store = Store(tmp_path / "s")
+    store.record_touch("sess-a", "a.py", "Read")
+    _listing_row(store, "sess-a", "retrieve_decisions", emitted=3)
+    _listing_row(store, "sess-a", "find_entity", emitted=0)
+    store.close()
+    a = build_report(tmp_path / "s", None, window_days=30, now=NOW).activation
+    assert (a.sessions_total, a.sessions_with_retrieval, a.sessions_touch_only) == (1, 1, 0)
+    assert a.sessions_asked_but_empty == 0
+    assert a.showings == 3
+
+
+def test_a_listing_row_with_nothing_back_is_asked_but_empty(tmp_path):
+    store = Store(tmp_path / "s")
+    store.record_touch("sess-a", "a.py", "Read")
+    _listing_row(store, "sess-a", "list_facts", emitted=0)
+    store.close()
+    a = build_report(tmp_path / "s", None, window_days=30, now=NOW).activation
+    assert (a.sessions_with_retrieval, a.sessions_asked_but_empty, a.showings) == (1, 1, 0)
+
+
+def test_listing_rows_stay_out_of_the_budget_figures(tmp_path):
+    store = Store(tmp_path / "s")
+    _listing_row(store, "a", "retrieve_decisions", emitted=2, superseded=True)
+    _listing_row(store, "b", "get_entity_history", emitted=1)
+    _listing_row(store, "c", "list_facts", emitted=1)
+    _listing_row(store, "d", "find_entity", emitted=0)
+    store.close()
+    a = build_report(tmp_path / "s", None, window_days=30, now=NOW).activation
+    assert a.budget_journal is False
+    assert (a.degraded, a.dropped_for_budget) == (0, 0)
+    assert a.self_reported_intents == {}
+    assert a.renders_with_abandoned == 1
+    assert a.render_journal is True
 
 
 # --- a narrowed window over an older journal (fix wave, finding 11) --------------------------
@@ -1666,3 +1719,147 @@ def test_t11_calls_written_by_the_server_share_one_timestamp_per_call(tmp_path, 
     a = build_report(tmp_path / "s", None, window_days=30, now=datetime.now(UTC)).activation
 
     assert a.unattributed_calls == 2
+
+
+def test_cited_back_shared_types():
+    from sidegraph.stats.model import ChannelCitedBack, CitedBackStats, SessionTranscript
+
+    row = SessionTranscript(session_id="s", path="/x/s.jsonl", host="claude", at="2026-11-01")
+    assert row.model_dump() == {
+        "session_id": "s",
+        "path": "/x/s.jsonl",
+        "host": "claude",
+        "at": "2026-11-01",
+    }
+    channel = ChannelCitedBack(sessions_visible=2, placements=5, cited=1)
+    assert channel.model_dump() == {
+        "sessions_visible": 2,
+        "placements": 5,
+        "cited": 1,
+        "asked_by_id": 0,
+        "by_tool": {},
+    }
+    stats = CitedBackStats(
+        sessions={"population": 3, "read": 2},
+        channels={"mcp": channel, "session_start": None},
+        read_bytes=10,
+        budget_bytes=100,
+    )
+    assert stats.model_dump()["channels"]["session_start"] is None
+    assert stats.model_dump()["read_bytes"] == 10
+
+
+# --- the cited-back reader is called after the snapshot (spec D5) ----------------------------
+
+
+def _empty_cited_back() -> CitedBackStats:
+    return CitedBackStats(sessions={"population": 0}, channels={}, read_bytes=0, budget_bytes=0)
+
+
+def test_cited_back_runs_after_the_snapshot_closes(tmp_path, monkeypatch):
+    """The reader may take seconds; a read transaction held across it would keep a writer's
+    commit waiting. Proved by the reader committing a write of its own: under the rollback
+    journal the open snapshot's SHARED lock refuses it."""
+    import sqlite3
+
+    store = Store(tmp_path / "s")
+    _seed_sessions(store, asking=1, touch_only=0)
+    store.close()
+    committed: list[bool] = []
+
+    def reader(rows, known_ids, *, population=(), budget=0):
+        conn = sqlite3.connect(tmp_path / "s" / "index.db", timeout=0, isolation_level=None)
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal"
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('probe', '1')")
+            conn.execute("COMMIT")
+            committed.append(True)
+        finally:
+            conn.close()
+        return _empty_cited_back()
+
+    report = build_report(tmp_path / "s", None, window_days=30, now=NOW, cited_back=reader)
+    assert committed == [True]
+    assert report.cited_back is not None
+
+
+def test_build_report_passes_window_rows_known_ids_and_population(tmp_path):
+    store = Store(tmp_path / "s")
+    old = _decision(store, title="old")
+    new = _decision(store, title="new", supersedes=old.id)
+    fact = store.add_fact(
+        Fact(
+            statement="s",
+            source="src",
+            status=DecisionStatus.ACCEPTED,
+            valid_from=NOW,
+            provenance=Provenance(source="manual"),
+        )
+    )
+    store.record_touch("sess-a", "a.py", "Read")
+    inside = (NOW - timedelta(days=2)).isoformat()
+    outside = (NOW - timedelta(days=60)).isoformat()
+    store.record_session_transcript("sess-a", "/x/a.jsonl", "claude", at=inside)
+    store.record_session_transcript("sess-old", "/x/o.jsonl", "claude", at=outside)
+    store.close()
+    seen: dict = {}
+
+    def reader(rows, known_ids, *, population=(), budget=0):
+        seen.update(rows=rows, known=known_ids, population=population)
+        return _empty_cited_back()
+
+    build_report(tmp_path / "s", None, window_days=30, now=NOW, cited_back=reader)
+    assert [(r.session_id, r.path, r.host) for r in seen["rows"]] == [
+        ("sess-a", "/x/a.jsonl", "claude")
+    ]
+    assert seen["known"] == frozenset({old.id, new.id, fact.id})
+    assert "sess-a" in set(seen["population"])
+
+
+def test_cited_back_is_none_without_a_reader_and_with_telemetry_off(tmp_path, monkeypatch):
+    store = Store(tmp_path / "s")
+    _seed_sessions(store, asking=1, touch_only=0)
+    store.close()
+    assert build_report(tmp_path / "s", None, window_days=30, now=NOW).cited_back is None
+    calls = []
+
+    def reader(*_a, **_k):
+        calls.append(1)
+        return _empty_cited_back()
+
+    monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "off")
+    off = build_report(tmp_path / "s", None, window_days=30, now=NOW, cited_back=reader)
+    assert off.cited_back is None and calls == []
+
+
+def test_cited_back_is_omitted_when_the_index_is_behind(tmp_path):
+    """A stale id set could miss a ten-character prefix twin and turn a quotation of the
+    unseen twin into a false citation, so the reader is not called at all."""
+    store = Store(tmp_path / "s")
+    d = _decision(store)
+    store.record_session_transcript("sess-a", "/x/a.jsonl", "claude")
+    store.close()
+    _pull_a_change(tmp_path, d.id)
+    calls = []
+
+    def reader(*_a, **_k):
+        calls.append(1)
+        return _empty_cited_back()
+
+    report = build_report(tmp_path / "s", None, window_days=30, now=NOW, cited_back=reader)
+    assert report.index_stale is True
+    assert calls == [] and report.cited_back is None
+
+
+def test_a_failing_reader_costs_only_the_cited_back_block(tmp_path):
+    store = Store(tmp_path / "s")
+    _seed_sessions(store, asking=1, touch_only=0)
+    store.close()
+
+    def reader(*_a, **_k):
+        raise RuntimeError("transcript root unreadable")
+
+    report = build_report(tmp_path / "s", None, window_days=30, now=NOW, cited_back=reader)
+    assert report.cited_back is None
+    assert report.activation.sessions_with_retrieval == 1

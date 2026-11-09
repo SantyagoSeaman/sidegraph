@@ -174,3 +174,13 @@ def test_existing_empty_store_success_is_allowed_before_wiring(
     wiring = skill.split("## 4. Verify the wiring", 1)[1].split("Call `list_domains()`", 1)[0]
     allowed = re.findall(r"`([^`]+ store:|already initialized:)`", wiring)
     assert store_message in allowed
+
+
+def test_reset_list_says_remove_hooks_leaves_the_ignore_block() -> None:
+    """Red target: the `.ignore` bullet sat between the git-config bullet and its
+    `--remove-hooks clears it` line, so the cleanup list claimed init's removal flag clears it."""
+    text = SKILL.read_text().split("## Reset / cleanup", 1)[1].split("## See also")[0]
+    reset = " ".join(text.split())
+    config = "recorded by `sidegraph-init --no-hooks`. `--remove-hooks` clears it."
+    assert config in reset
+    assert "`--remove-hooks` leaves it; delete the block by hand." in reset

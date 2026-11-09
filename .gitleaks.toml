@@ -11,7 +11,7 @@ useDefault = true
 # vendored third-party content we do not edit. A real secret anywhere else in the repo still
 # fails the scan. This file ships to the public repo (tests/ ships wholesale with the same
 # fixtures), so it has to hold there too.
-[allowlist]
+[[allowlists]]
 description = "Known-fake secrets in redaction-feature fixtures and vendored/planning content"
 paths = [
   '''^tests/test_capture_redact\.py$''',
@@ -30,4 +30,19 @@ paths = [
   '''^design/superpowers/plans/2026-07-10-facts-layer\.md$''',
   '''^design/superpowers/reviews/2026-09-28-grok-whole-repo-review\.md$''',
   '''^src/sidegraph/viz/assets/vis-network\.min\.js$''',
+]
+
+# The 2026-11-06 and 2026-11-07 research packages record SHA-256 digests under keys such as
+# task_key_sha256 and file paths such as src/sidegraph/redaction_tokens.py. The generic-api-key
+# rule reads those as credentials (86 findings on the first commit attempt, all this rule, all
+# digests or paths). Allowlisted for that one rule only; every other rule still scans them.
+[[allowlists]]
+description = "Digests and file names in the research packages read as generic API keys"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^design/reviews/2026-11-0[67]-[^/]+/''',
+  # L2 bench results pin grading_key_sha256 and keys_sha256 (4 findings, all digests).
+  '''^design/testing/benches/l2/results/[^/]+/result\.json$''',
+  # Saved L0 reports pin canonical_sha256, task_key_sha256 and other digests.
+  '''^design/testing/benches/l0/results/[^/]+\.json$''',
 ]

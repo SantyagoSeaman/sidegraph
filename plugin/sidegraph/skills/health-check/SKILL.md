@@ -85,6 +85,8 @@ source-and-time-cited MCP response already visible in the session; never change 
 collector's section or overall status from it. Do not start an MCP server or call memory
 retrieval for this check.
 
+If the Sidegraph MCP is not connected, `references/without-the-mcp.md` (next to this file) says how to read memory and check the store from the command line.
+
 The collector brackets its own process with input fingerprints. If inputs changed or could
 not be read, report preservation as unstable or unverified without blaming the collector.
 Host hooks around tool invocation can write independently. The collector never opens a

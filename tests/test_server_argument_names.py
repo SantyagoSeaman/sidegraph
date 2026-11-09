@@ -262,10 +262,10 @@ def test_t6_a_write_tool_gets_the_same_error_and_writes_nothing(repo):
     assert len(list(store.iter_decisions())) == before
 
 
-def test_t6_a_tool_without_parameters_says_so(repo):
+def test_t6_verify_store_names_its_budget_parameter(repo):
     message = error("verify_store", {"x": 1})
 
-    assert message == "Unknown argument `x` for `verify_store`. It takes no parameters."
+    assert message == "Unknown argument `x` for `verify_store`. Its parameters are: budget_chars."
 
 
 def test_known_arguments_pass_through_untouched(repo):

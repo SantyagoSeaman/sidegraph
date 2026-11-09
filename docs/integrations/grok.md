@@ -102,18 +102,23 @@ This is a stopgap for a gap in Grok, not how Sidegraph is meant to deliver the m
 narrower than the hook:
 
 - It carries the standing instruction, the version line and the domain table of contents from
-  the store's cache, with the global mistakes and proposals read from the store as they are
-  now, so a retired or superseded one is not shown. It has none of the status lines SessionStart adds: no integrity notices,
-  no pending-ratification line, no drift line, no stale-graph warning.
+  the store's cache, with the global mistakes and proposals read from the store as they are now,
+  so a retired or superseded one is not shown. When a `git pull` has changed the record files
+  since this clone's index was last built, the server cannot trust the index's rows before its
+  first tool call opens the store and refreshes it, so this session's map carries no global
+  mistakes or proposals; a later session gets them once a tool call has refreshed the index. It
+  has none of the status lines SessionStart adds: no integrity notices, no pending-ratification
+  line, no drift line, no stale-graph warning.
 - On a store with no named domains yet, it carries only the standing instruction and the version
   line, not the community listing SessionStart shows there: building that listing needs the code
   graph, which is too slow to load before Grok's session starts.
 - No store yet means no map: the server does not create `.sidegraph/` to send one. The
   `SessionStart` hook still runs and tells Grok's interface to run `sidegraph-init`.
 - Grok keeps only the first 2,033 characters of a server's instructions (checked on 1.0.70). A
-  longer map is shortened to fit: the domain summaries are clipped, then dropped, and as a last
-  resort the end of the table is cut with a note that `list_domains` and `list_proposed` have
-  the rest.
+  longer map is shortened to fit by cutting whole lines from the end of the table, with a note
+  that `list_domains` and `list_proposed` have the rest. Domain lines contain the title,
+  mistake count and any subdomain count; summaries remain available through `list_domains`
+  and `drill_down`.
 - Grok waits about two seconds for MCP servers before its first request to the model. A server
   that starts later still delivers the map, but after the agent's first tool call instead of
   before its first answer. This happens in the first session after installing, while Sidegraph

@@ -736,11 +736,11 @@ def test_a_refused_touch_after_a_delivery_leaves_the_run_delivered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The touch row is bookkeeping. Red against an outcome taken from the handle's
-    ``write_failed``, which the refused touch sets."""
+    ``lock_lost``, which the refused touch sets."""
     store_dir, source, transcript = _case(tmp_path, monkeypatch)
 
     def refused(self: HotIndex, *args: object, **kwargs: object) -> None:
-        self.write_failed = True
+        self.lock_lost = True
         raise _busy_error()
 
     monkeypatch.setattr(HotIndex, "record_touch", refused)

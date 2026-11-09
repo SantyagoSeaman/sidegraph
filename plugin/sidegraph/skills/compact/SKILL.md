@@ -8,7 +8,7 @@ description: >-
 
 Run the CLI, never an MCP tool: the MCP server, sync and `SessionStart` never run maintenance or
 migration. CLI commands below run through
-`uvx --from sidegraph==0.27.0 --python 3.13 <command>` at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+`uvx --from sidegraph==0.28.0 --python 3.13 <command>` at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
@@ -24,8 +24,8 @@ and **before** running even its dry run, show the human the **team checklist** i
 Otherwise the command is `sidegraph-compact`.
 
 ```bash
-uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-compact --dry-run   # packed store
-uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-migrate --dry-run   # older layout
+uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-compact --dry-run   # packed store
+uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-migrate --dry-run   # older layout
 ```
 
 Show the report **verbatim** in a fenced block. A dry run writes nothing tracked.
@@ -45,7 +45,7 @@ newer once the pull request merges. Say that plainly before asking.
 Run the same command without `--dry-run`, then `sidegraph-verify`:
 
 ```bash
-uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-verify
+uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-verify
 ```
 
 Show both outputs verbatim. A non-zero exit from either is reported as it is: do not retry,

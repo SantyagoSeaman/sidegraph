@@ -123,6 +123,10 @@ def test_1_worktree_only_file_names_the_worktree_and_branch(tmp_path, monkeypatc
 
     (line,) = lines(out)
     assert "exists only in another checkout of this repository" in line
+    assert (
+        "Rebuilding that graph cannot add the missing files: start the session in that "
+        "checkout to read its graph and records."
+    ) in line
     assert "pkg/new.py (worktree .worktrees/feat, branch wt-feat)" in line
     assert "retrieve_decisions" not in line  # the pointer comes with records, not before
     assert "repo-relative" not in line

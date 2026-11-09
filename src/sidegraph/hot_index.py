@@ -23,7 +23,7 @@ import contextlib
 import json
 import os
 import sqlite3
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, NamedTuple
@@ -86,6 +86,15 @@ _PROPOSED = "proposed"
 _CONCRETE = "concrete"
 
 
+def _lock_refused(error: BaseException) -> bool:
+    """True for an ``OperationalError`` that a held lock caused (busy or locked), not a damaged
+    or older index (a missing table)."""
+    code = getattr(error, "sqlite_errorcode", 0)
+    return isinstance(error, sqlite3.OperationalError) and (
+        isinstance(code, int) and code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    )
+
+
 def _is_live(record: dict, now: datetime) -> bool:
     """A decision that is not superseded, rejected or retired and has not expired."""
     if record["status"] in (_SUPERSEDED, _REJECTED, _DEPRECATED):
@@ -116,9 +125,10 @@ class HotIndex:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
         # Set when a write on this handle raised ``sqlite3.OperationalError`` (almost always the
-        # busy timeout: a rebuild or another writer holds the lock). The hook reads it to stop
-        # asking for more writes, since each one would wait out the timeout again.
-        self.write_failed = False
+        # busy timeout: a rebuild or another writer holds the lock), or a read was refused by a
+        # busy or locked database. The hook reads it to stop asking for more work, since each
+        # step would wait out the timeout again.
+        self.lock_lost = False
         self._delivery_available: bool | None = None
 
     @classmethod
@@ -185,8 +195,21 @@ class HotIndex:
 
     # -- one-shot ledger and touch journal (writes) ------------------------------------------
 
+    @contextlib.contextmanager
+    def _reading(self) -> Iterator[None]:
+        """A read that loses its lock wait (busy or locked; a missing table does not count)
+        marks the handle ``lock_lost``, as a refused write does, so the run does not wait for
+        the same lock again at its next step."""
+        try:
+            yield
+        except sqlite3.OperationalError as error:
+            if _lock_refused(error):
+                self.lock_lost = True
+            raise
+
     def get_meta(self, key: str) -> str | None:
-        row = self._conn.execute(GET_META_SQL, (key,)).fetchone()
+        with self._reading():
+            row = self._conn.execute(GET_META_SQL, (key,)).fetchone()
         return row[0] if row else None
 
     def record_delivery(
@@ -196,7 +219,7 @@ class HotIndex:
         on_error: Callable[[Exception], None] | None = None,
     ) -> bool:
         """One optional append after legacy claims; never changes their failure state."""
-        if self.write_failed or self._conn.in_transaction or self._delivery_available is False:
+        if self.lock_lost or self._conn.in_transaction or self._delivery_available is False:
             return False
         try:
             with delivery_ledger.no_wait(self._conn):
@@ -218,12 +241,12 @@ class HotIndex:
 
     def _in_transaction[T](self, work: Callable[[sqlite3.Connection], T]) -> T:
         """Run ``work`` in one transaction. An ``OperationalError`` (the busy timeout) marks the
-        handle as ``write_failed`` and propagates; the transaction is rolled back."""
+        handle as ``lock_lost`` and propagates; the transaction is rolled back."""
         try:
             with self._conn:
                 return work(self._conn)
         except sqlite3.OperationalError:
-            self.write_failed = True
+            self.lock_lost = True
             raise
 
     def _write(self, sql: str, params: tuple) -> sqlite3.Cursor:
@@ -285,8 +308,9 @@ class HotIndex:
         """Journal the records a subagent's brief printed: one ``inject_brief`` row (``agent``
         NULL, the recipient being unknown at spawn) and one shows bump per ``(file, record id)``
         row, in one transaction of their own (the brief claims nothing to join).
+        A marked handle (``lock_lost``) skips the optional journal rather than wait again.
         # see design/superpowers/specs/2026-10-11-hook-showings-journal-design.md (D4)"""
-        if rows:
+        if rows and not self.lock_lost:
             self._in_transaction(
                 lambda conn: self._journal_shows(conn, session_id, INJECT_BRIEF_KIND, None, rows)
             )
@@ -315,6 +339,10 @@ class HotIndex:
         sync certifies them. The flag and binding rows share one statement snapshot.
         see design/superpowers/specs/2026-10-03-subagent-start-brief-design.md (D2)
         """
+        with self._reading():
+            return self._memory_counts()
+
+    def _memory_counts(self) -> tuple[int, int, int]:
         now = datetime.now(UTC)
         file_of: dict[str, str] = {}
         for entity_id, data in self._conn.execute("SELECT entity_id, data FROM entities"):
@@ -368,8 +396,10 @@ class HotIndex:
         fallback of ``text_paths``). A row that fails to parse is skipped on its own, never the
         whole scan.
         # see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D2)"""
+        with self._reading():
+            rows = self._conn.execute("SELECT data FROM entities").fetchall()
         found: dict[str, list[str]] = {}
-        for (data,) in self._conn.execute("SELECT data FROM entities").fetchall():
+        for (data,) in rows:
             try:
                 entity = json.loads(data)
                 descriptor = entity.get("descriptor")
@@ -413,11 +443,15 @@ class HotIndex:
         seen: set[str] = set()
 
         def report(error: Exception) -> None:
+            if _lock_refused(error):
+                self.lock_lost = True
             if on_error is not None:
                 with contextlib.suppress(Exception):
                     on_error(error)
 
         for entity_id in entity_ids:
+            if self.lock_lost:  # a lost wait ends the call: no further read waits again
+                break
             try:
                 rows = self._conn.execute(
                     "SELECT data FROM anchor_bindings WHERE entity_id = ? "
@@ -438,6 +472,8 @@ class HotIndex:
                 except (ValueError, TypeError, KeyError, AttributeError):
                     continue
             for is_fact in (False, True):
+                if self.lock_lost:
+                    break
                 try:
                     bound = (
                         self._facts_for_bindings(record_ids)

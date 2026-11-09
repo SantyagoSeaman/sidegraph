@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -106,8 +106,9 @@ class ActivationStats(BaseModel):
     # then zero because nothing was recorded, not because nothing happened — the renderer must
     # not print them. With rows present a zero is a finding and stays a number.
     render_journal: bool = True
-    # False when no row in the window came from a lookup that applied a budget: `drill_down`
-    # writes a render row (its records are showings) and applies none, so a window of only those
+    # False when no row in the window came from a lookup that applied a budget: `drill_down` and
+    # the listing tools write a render row (their records are showings) and apply none, so a
+    # window of only those
     # has `render_journal` true and nothing recorded about a budget. `degraded` and
     # `dropped_for_budget` are then zero for want of a budget, and the renderers withhold them
     # exactly as they do for a missing journal; `renders_with_abandoned` still stands.
@@ -230,6 +231,35 @@ class DeliveryEvidenceStats(BaseModel):
     capacity_evicted_anchor_links: int = 0
 
 
+class SessionTranscript(BaseModel):
+    """One ``session_transcripts`` row: where a host kept a session's transcript."""
+
+    session_id: str
+    path: str
+    host: str
+    at: str
+
+
+class ChannelCitedBack(BaseModel):
+    """Delivered records of one channel and how many were quoted back later (a lower bound)."""
+
+    sessions_visible: int
+    placements: int
+    cited: int
+    asked_by_id: int = 0  # mcp only
+    by_tool: dict[str, tuple[int, int]] = {}  # mcp only: tool -> (placements, cited)
+
+
+class CitedBackStats(BaseModel):
+    """The cited-back figure per delivery channel and how many sessions it could read."""
+
+    # keys: population, read, no_transcript, unreadable, no_reader, over_budget
+    sessions: dict[str, int]
+    channels: dict[str, ChannelCitedBack | None]  # keys: the echo CHANNELS; None = not visible
+    read_bytes: int
+    budget_bytes: int
+
+
 class StatsReport(BaseModel):
     repo: str
     window_days: int
@@ -251,6 +281,9 @@ class StatsReport(BaseModel):
     # The registry's broken and degraded problems, in registry order; empty is "ok". Additive:
     # the stats JSON is Provisional and may gain fields.
     health: list[HealthItem] = []
+    # Delivered records the agent quoted back later, read from host transcripts. None when no
+    # reader was supplied, telemetry is off, the index is behind the files, or the read failed.
+    cited_back: CitedBackStats | None = None
 
 
 class UnreadableRecordError(ValueError):
@@ -340,10 +373,13 @@ def _index_is_stale(conn: sqlite3.Connection, store_dir: Path) -> bool:
     return recorded != _canonical_files(store_dir)
 
 
-# The `intent` a `drill_down` render row is written under (server.DRILL_DOWN_INTENT; this module
-# imports nothing from the server, and a test pins the two together). Such a row says how many
-# records a drill-down delivered and nothing about a budget: it applies no relevance budget.
-_DRILL_DOWN_INTENT = "drill_down"
+# The `intent` labels the server writes on render rows of lookups that apply no relevance
+# budget: `drill_down` and the listing tools that name what they want (server.UNBUDGETED_INTENTS;
+# this module imports nothing from the server, and a test pins the two together). Such a row says
+# how many records the lookup delivered and nothing about a budget.
+_UNBUDGETED_INTENTS = frozenset(
+    {"drill_down", "retrieve_decisions", "list_facts", "find_entity", "get_entity_history"}
+)
 
 
 # The journal kinds the PreToolUse hook writes for what it handed over. Spelled here: stats
@@ -353,8 +389,8 @@ _HOOK_KINDS = ("inject", "inject_brief")
 _HOOK_KINDS_SQL = "('inject', 'inject_brief')"
 
 
-def _is_drill_down(row: sqlite3.Row) -> bool:
-    return (row["intent"] or "").strip() == _DRILL_DOWN_INTENT
+def _is_unbudgeted(row: sqlite3.Row) -> bool:
+    return (row["intent"] or "").strip() in _UNBUDGETED_INTENTS
 
 
 def _intent_counts(renders: Sequence[sqlite3.Row]) -> dict[str, int]:
@@ -453,8 +489,16 @@ def build_report(
     *,
     window_days: int = 30,
     now: datetime | None = None,
+    cited_back: Callable[..., CitedBackStats] | None = None,
 ) -> StatsReport:
     """One typed report over the index, its journals and the graph.
+
+    ``cited_back`` is the host-seam transcript reader (``host.transcripts.cited_back``); this
+    module imports nothing from ``host/``. It is called with the window's ``session_transcripts``
+    rows, the store's record ids and the activation sessions, only after the read snapshot
+    below has closed: reading transcripts takes seconds, and a read transaction held across
+    that would keep a writer's commit waiting. It is not called while the index is behind the
+    files, since an incomplete id set could turn a quotation into a false citation.
 
     Raises ``StoreRequirementError`` when the marker refuses this version.
     ``now`` is injectable so tests can freeze the clock; production passes None.
@@ -600,6 +644,26 @@ def build_report(
             bindings = _rows(
                 conn, "anchor_bindings", AnchorBinding, "record_id || ' -> ' || entity_id"
             )
+        has_transcript_table = (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_transcripts'"
+            ).fetchone()
+            is not None
+        )
+        transcript_rows = (
+            [
+                SessionTranscript(**dict(r))
+                for r in conn.execute(
+                    "SELECT session_id, path, host, at FROM session_transcripts WHERE at >= ? "
+                    "ORDER BY at, session_id, path",
+                    (cutoff,),
+                )
+            ]
+            if has_transcript_table and not index_stale
+            else []
+        )
+        known_ids = frozenset([d.id for d in decisions] + [f.id for f in facts])
+        activation_sessions = sorted(sessions)
         # Called while the connection is still open, on rows already fetched: a reopen here
         # would be a second read path, and a `Store` a write path (D8).
         binding_statuses_computed = not index_stale and integrity.binding_statuses_computed(conn)
@@ -624,6 +688,16 @@ def build_report(
             if p.severity in ("broken", "degraded")
         ]
 
+    cited_back_stats: CitedBackStats | None = None
+    if cited_back is not None and telemetry_enabled() and not index_stale:
+        try:
+            cited_back_stats = cited_back(
+                transcript_rows, known_ids, population=activation_sessions
+            )
+        except Exception:
+            # A transcript the reader could not handle costs this block, never the report.
+            cited_back_stats = None
+
     retained_days = max((now - datetime.fromisoformat(first_at)).days, 0) if first_at else 0
     # A session "asked" when the journals hold a seed, a show OR a render row for it: a seed
     # row is a query; a show row with no seed row is a drill_down of an older server, whose
@@ -647,15 +721,16 @@ def build_report(
         session whose render placed one anchored and one global decision has one show row and
         two showings, and the show rows undercount it. Only a session with no render row (it
         predates the journal) is counted from its show rows, one per distinct record. A
-        `drill_down` writes a render row of its own, so it counts here like any lookup."""
+        `drill_down` and the listing tools write a render row of their own, so they count here
+        like any lookup."""
         if session_id in rendered:
             return emitted[session_id]
         return len(sessions[session_id]["show"])
 
-    # Rows a budget ran for. A drill-down row is a delivery with no relevance budget behind it,
-    # so its zeros are not "the budget clipped nothing": they stay out of every budget figure, and a
-    # window holding only drill-downs has no budget recorded at all.
-    budgeted = [r for r in renders if not _is_drill_down(r)]
+    # Rows a budget ran for. A drill-down or listing row is a delivery with no relevance budget
+    # behind it, so its zeros are not "the budget clipped nothing": they stay out of every budget
+    # figure, and a window holding only those has no budget recorded at all.
+    budgeted = [r for r in renders if not _is_unbudgeted(r)]
     activation = ActivationStats(
         sessions_total=len(sessions),
         sessions_with_retrieval=len(asking),
@@ -668,8 +743,8 @@ def build_report(
         dropped_for_budget=sum(r["dropped_for_budget"] for r in budgeted),
         # A superseded record surfacing is "something already tried and abandoned" exactly as
         # a record with a non-empty `rejected` is, so either flag makes the render count once.
-        # Counted over EVERY render row: a drill-down delivered records too, and these two flags
-        # describe what was delivered, not what a budget did.
+        # Counted over EVERY render row: a drill-down or listing delivered records too, and these
+        # two flags describe what was delivered, not what a budget did.
         renders_with_abandoned=sum(1 for r in renders if r["had_rejected"] or r["had_superseded"]),
         mature=len(sessions) >= MIN_SESSIONS and retained_days >= MIN_DAYS,
         render_journal=bool(renders),
@@ -720,6 +795,7 @@ def build_report(
         graph=graph,
         anchors=anchors,
         health=health,
+        cited_back=cited_back_stats,
     )
 
 

@@ -109,7 +109,9 @@ def test_telemetry_survives_a_canonical_reload(tmp_path):
     store.record_retrieval(["r1"], ["a.py"])
     store.record_touch("sess-1", "a.py", "Read")
     _record_render(store)
+    store.record_session_transcript("sess-1", "/x/sess-1.jsonl", "claude")
     store._reload_index_from_canonical("forced-digest")
+    assert len(store.session_transcripts()) == 1
     assert store.retrieval_shows() == {"r1": 1}
     assert store.retrieval_seed_queries() == {"a.py": 1}
     assert [e["key"] for e in store.retrieval_events()] == ["a.py"]

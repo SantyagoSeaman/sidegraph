@@ -6,7 +6,12 @@ Host seam. The MCP server process learns its session from its host, with no stor
   own environment (Claude Code >= 2.1.154; stable across ``--resume`` from 2.1.163).
 - Codex (``"codex-mcp-client"``): ``threadId`` in the request ``_meta``. The hook side keys a
   Codex session by its rollout file stem, ``rollout-<ts>-<threadId>``, so the id is bridged to
-  the SessionStart stamp whose key ends in ``-<threadId>``.
+  the SessionStart stamp whose key ends in ``-<threadId>``. Probe P1 (2026-11-08,
+  codex-cli 0.167.0) verified that a spawned subagent announces its own ``_meta.threadId``
+  and its parent's ``_meta.sessionId``: a thread identifies the calling agent exactly.
+  An explicit ``thread/compact/start`` via ``codex app-server`` fires SessionStart with
+  ``source: "compact"``, the bare thread as ``session_id`` and ``rollout-<ts>-<threadId>`` as
+  transcript stem; the MCP thread id stays unchanged. Automatic compaction was not observed.
 - Grok Build (``"grok-shell-<server name>"``): ``GROK_SESSION_ID`` in the server's own
   environment, the session that started the server. Grok starts one server per session, and
   the hook side keys that session by the same id (measured on Grok Build 1.0.70). A subagent
@@ -67,9 +72,14 @@ def hint_for(
         if thread_id is None:
             return SessionHint(None, CODEX_FAMILY)
         try:
-            return SessionHint(bridge_codex_thread(thread_id, stamp_keys()), CODEX_FAMILY)
+            return SessionHint(
+                bridge_codex_thread(thread_id, stamp_keys()),
+                CODEX_FAMILY,
+                agent=None,
+                agent_exact=True,
+            )
         except Exception:
-            return SessionHint(thread_id, CODEX_FAMILY)
+            return SessionHint(thread_id, CODEX_FAMILY, agent=None, agent_exact=True)
     if isinstance(client_name, str) and client_name.startswith(GROK_CLIENT_PREFIX):
         return SessionHint(_text(env.get(_GROK_ENV)), GROK_FAMILY)
     return SessionHint(None, None)

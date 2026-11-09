@@ -11,7 +11,7 @@ exposed as MCP tools in [`src/sidegraph/server.py`](../../src/sidegraph/server.p
 
 ## SessionStart TOC
 
-The session map orients the agent before a task. With accepted domains, it lists their names and purposes. Without named domains, it uses graph communities and recorded decisions. Global mistakes and visible proposals can also appear.
+The session map orients the agent before a task. With accepted domains, it lists their titles, mistake counts and subdomain counts. Without named domains, it uses graph communities and recorded decisions. Global mistakes and visible proposals can also appear.
 
 The host adds the standing instruction:
 
@@ -36,17 +36,13 @@ See [implementation details](../reference/retrieval-internals.md#drill_downdomai
 
 ## `get_task_context`: seeded, budgeted, mistakes-first
 
-Supply the files or entities for the task. The result prioritizes known mistakes, then decisions, structure and related records. If output is clipped, narrow the task or follow its hints.
+Supply the files or entities for the task. The result prioritizes known mistakes, then decisions, facts and related records. Call `query_structure` with the same seeds for the map; `structure_budget` still sizes the walk that finds related records. If output is clipped, narrow the task or follow its hints.
 
-For the scratch repository's `cache.py`, that call returned this real excerpt:
+For the scratch repository's `cache.py`, the memory excerpt is:
 
 ```text
 ## ⚠ Known mistakes & gotchas
 - [gotcha] Include the project in cache keys: Build cache keys from both project and resource name. (context: Two projects can use the same resource name.) (rejected: Using the resource name alone allows cross-project collisions.) (id: 01M6EPVG29W7ZP4FG6H9G24X40)
-
-## Structural map
-- cache_key() (code) [cache.py:L1]
-- cache.py (code) [cache.py:L1]
 ```
 
 Read the rejected alternative before editing. `[unratified]` means a proposal awaits a trust decision. `[drifted]` means its content needs checking against the current code. A record's visibility does not remove either qualification.
@@ -99,15 +95,15 @@ See [the detailed contract](../reference/retrieval-internals.md#the-drifted-mark
 
 ### Budget fallback: summaries instead of leaves
 
-When detailed structure does not fit, retrieval can show a higher-level summary. Follow a named domain or ask for fewer files to narrow the result.
+When the detailed map does not fit, `query_structure` can show a higher-level summary. Follow a named domain or ask for fewer files to narrow the result.
 
 See [the detailed contract](../reference/retrieval-internals.md#budget-fallback-summaries-instead-of-leaves).
 
-### Thin tools: the two halves, separately
+### Thin tools: explicit map and memory
 
-Use `query_structure` when you need the graph and `query_decisions` when you need records. `get_task_context` combines both for a task.
+Use `query_structure` when you need the graph and `query_decisions` when you need records. `get_task_context` adds tolerant seed reading and diagnostics to task memory, and keeps the graph walk for related records without rendering its map.
 
-See [the detailed contract](../reference/retrieval-internals.md#thin-tools-the-two-halves-separately).
+See [the detailed contract](../reference/retrieval-internals.md#thin-tools-explicit-map-and-memory).
 
 ### Community fallback
 

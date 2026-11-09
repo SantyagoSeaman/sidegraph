@@ -153,7 +153,7 @@ def test_t8_get_task_context_in_a_worktree_returns_the_main_graphs_content(workt
     """Red against unfixed code: no reader, so nothing resolves."""
     out = server._get_task_context_with_sync(files=["pkg/m.py"])
 
-    assert "fn_0" in out  # the structural map, from R's graph
+    assert "n.py settles in batches" in out  # Related, reached through the borrowed graph
     assert "m.py keeps a retry budget" in out  # the worktree's own tracked store
     assert "## Not in the code graph" not in out and NO_GRAPH not in out
     assert porcelain(worktree) == ""
@@ -373,7 +373,11 @@ def test_t9_a_file_that_exists_only_on_the_branch_gets_the_borrowed_sentence(
 
     (line,) = _block(out, "## Not in the code graph")
     assert line.startswith("1 of 1 seed path exists but is not in the code graph: pkg/new.py. ")
-    assert line.endswith(BORROWED)
+    assert BORROWED in line
+    assert line.endswith(
+        "Rebuilding the main checkout's graph cannot add them: build a graph in this worktree "
+        f"by running {GRAPH_REBUILD} from its root, and later calls read it."
+    )
     assert calls == []
 
 
@@ -436,7 +440,7 @@ def test_each_seed_gets_the_sentence_for_its_own_cause(main, worktree):
     in_main, only_here, other = _block(out, "## Not in the code graph")
     assert "pkg/extra.py" in in_main and "pkg/new.py" not in in_main
     assert "The graph is stale" in in_main
-    assert "pkg/new.py" in only_here and only_here.endswith(BORROWED)
+    assert "pkg/new.py" in only_here and BORROWED in only_here
     assert "pkg/nope.py" in other
 
 

@@ -7,6 +7,79 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-11-09
+
+### Added
+
+- `sidegraph-init` adds `.sidegraph/` to the `.ignore` at the project root, so recursive `rg` (with hidden files), the Claude Code Grep tool and editor search stop returning raw store files next to what the MCP returns. An existing `.ignore` is only appended to, never reordered, and is left alone when it already names the store. `--no-search-ignore` skips it. It is search hygiene, not access control. Existing projects: re-run `sidegraph-init` or add the line by hand.
+- `sidegraph-stats` prints a `CITED BACK` block, and `--json` a `cited_back` object: of the records Sidegraph delivered, how many had their id quoted back later in the same session, per delivery channel (`MCP`, `PreToolUse`, `subagent brief`, `SessionStart`). It reads the host's own transcript files on your machine, read-only, and keeps nothing of them. The figure is a lower bound: an id quoted in the agent's replies, thinking or tool-call inputs counts, a record followed without quoting its id does not, and a quotation does not show the record changed anything. Claude Code transcripts show all four channels; Codex and Grok show `MCP` only; Muse has no reader. A session without a readable transcript adds nothing to any rate (unknown is never a zero), and the block states how many sessions it read. A channel no read transcript can show says so, and a channel that placed nothing says `no record placed`, never `0%`. Percentages follow the report's maturity floor. Reading is bounded to 2 GiB of transcript per run, newest sessions first. With `SIDEGRAPH_TELEMETRY=off` the block reads `recording is off; not computed` and `cited_back` is `null`; the block is left out when the index is behind the store files.
+- `SessionStart` records the session's transcript path in the gitignored `index.db` (the `session_transcripts` table, pruned with the other journals after 30 days). It holds the path and nothing from the file. `SIDEGRAPH_TELEMETRY=off` stops it.
+
+### Changed (Contract change)
+
+- **`retrieve_decisions` full records leave out `provenance` by default.** The provenance block
+  was about 11–18% of stored decision text (more than twice the title), and in recorded
+  sessions agents never quoted a session id back; the capture commit was quoted back after
+  under 1% of answers, by drift triage. Pass `include_provenance=True` for the full block; the
+  `triage-drift` skill does. For a compact `sent_earlier` row, use `ids=[...]` together with
+  the flag to get the full record. The removal happens inside `budget_chars`, so a call the budget cuts
+  now returns more records for the same size. The overview answer and every other tool are
+  unchanged. A client that read `decisions[*].provenance` must pass the flag.
+
+### Changed
+
+- `get_task_context` no longer includes the `## Structural map` block. It listed the functions of
+  the files you named and their line numbers, about a quarter of every answer (2,000–3,000
+  characters at the default budgets), and in recorded sessions no agent followed it to a file it
+  had not already named. `query_structure` returns the same map for the same seeds.
+  `structure_budget` keeps its name and now only sets how far the graph walk that finds related
+  records reaches; the records returned are unchanged. An answer with no recorded memory now reads
+  "No context found." followed by the usual hints when no memory survives; when nearest
+  records follow, it starts with "No record is anchored to the files you named; the records of
+  the nearest anchored files follow."
+
+- `get_task_context` no longer starts with "No context found." when the nearest anchored files' records follow; it says that those records follow. The advice for a file that exists only on a worktree's branch, or only in another checkout, now says what to do instead of rebuilding.
+- **Contract change:** On hosts where Sidegraph can tell which agent is calling (Codex), `get_task_context` and
+  `query_decisions` no longer resend a record's full text to an agent that already received
+  it from an MCP read in the same session: the record keeps its place as one `[sent earlier]`
+  line with its id, and the freed budget goes to further records. A filtered
+  `retrieve_decisions` answer shows such records as rows with `sent_earlier: true`; asking
+  by `ids=[...]` always returns the full record. When the host delivers a compact/clear
+  SessionStart event, it resets this for the main agent. Verified with codex-cli 0.167.0:
+  explicit compaction through `codex app-server` (`thread/compact/start`) delivers that
+  event; automatic compaction was not observed.
+
+- `find_entity` and `verify_store` are bounded by `budget_chars` (default 24000, maximum 40000) and answer as one text block, with no structured copy: a long-lived entity's bindings or a damaged store's violations no longer exceed the host's output limit. When a filtered `retrieve_decisions`, `list_facts` or `list_domains` answer is cut, `omitted_ids` lists what was left out, to read with `ids=[...]`. **Return shapes change** for `find_entity` and `verify_store` (`.data` is `None` for MCP clients that read structured content).
+- The `SessionStart` map lists each domain by its title, mistake count and subdomain count,
+  without its summary. The summaries were about 40% of the map that every session starts with,
+  and no sampled agent quoted one; a domain tool was called in fewer than 1 in 300 sampled sessions.
+  `list_domains` and `drill_down` still return the summaries. Grok's MCP instructions map follows
+  the same format.
+- A fact line in `get_task_context`, `query_decisions`, and the SessionStart map of a store
+  with no accepted domain now shows its source up to 300 characters instead of 80.
+  Most sources were cut before (63% in one real store, 87% in
+  another), often in the middle of a version, a sample size or the place a measurement was taken.
+  A source that is still longer ends with `…`. If the source exceeds 300 characters or the
+  statement exceeds 240 characters, the line carries one
+  `(clipped; full: list_facts(ids=["<id>"]))` note, making either cut explicit and naming the
+  call that returns the whole fact. Per-file hook record lines are unchanged: they print the
+  whole source.
+- A headless `claude -p` run with one prompt no longer gets the Stop capture nudge. The extra turn it forced replaced the run's answer with a reply to the nudge. A `claude -p` chain that sends two or more prompts is still counted like an interactive session; set `SIDEGRAPH_CAPTURE_NUDGE=off` for scripted chains.
+- `sidegraph-ratify` treats an id given to both `--accept` and `--drop` the way the MCP `ratify` tool does: it is accepted and the drop is ignored (`drop ignored <id>`). Both a proposed and an already-accepted domain used to end dropped, and a decision or fact used to report an error and exit 1 after it had been accepted. `--all --drop <id>` now accepts everything pending except that id. Teammates on older versions get the old result for the same command line until they upgrade.
+- `sidegraph-stats` counts a session as having asked memory when it used `retrieve_decisions` or `list_facts` with a filter, `find_entity` or `get_entity_history`. Before, a session that only listed records was reported as touching files without asking. These lookups count in `showings` and stay out of the budget figures; the no-filter overview and `query_structure` still leave no row, and `sidegraph-doctor`'s `never-surfaced` check is unchanged. The `activation` figures in `--json` change meaning accordingly.
+
+### Security
+
+- Importing or bootstrapping from a Markdown file with many headings no longer takes time that grows with the square of the heading count; a 448 KB file with 64,000 headings took about 6 s. Imported records, their section references and fragment names are unchanged.
+
+### Fixed
+
+- On Grok, the session map sent when a session starts no longer lists a global rule that a `git pull` retired. Before the server's first tool call it read the global mistakes from the clone's old `index.db`; it now checks that the index still matches the record files and, when it does not, sends that session's map without global mistakes and proposals; a later session gets them once a tool call has refreshed the index.
+- `PreToolUse` stops waiting for the index lock after its first refused wait. A read that lost its half-second wait did not stop the usage-journal write after it, which then waited again (about 1.1 s in all), and the read of the records could wait once per anchored entity; a read that loses its wait now ends the waiting for that call, and the hook still prints its answer or `{}`. Waits that end in time still add up. `SessionStart` is unchanged: its first refused write ends its waiting, and waits that end in time still add up.
+- A file named exactly `decisions/.json` (or `archive/.jsonl`) no longer makes every index recheck that races a writer rebuild the index: the digest now lists the same files the rebuild and the inventory do.
+- `sidegraph-ratify` closes its store when it finishes or fails.
+- A fact draft, `add_fact` or `supersede_fact` call whose `supports` names a decision that does not exist is now refused with the position to fix and a note that nothing was written, instead of the warning that the record may be on disk and must not be proposed again in this session (or, for a fact draft without an anchor, the claim that its supports resolve only to a superseded decision). A fact attached to a new decision says that the decision itself was written.
+
 ## [0.27.0] — 2026-11-06
 
 ### Changed
@@ -3025,7 +3098,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.0...v0.25.1

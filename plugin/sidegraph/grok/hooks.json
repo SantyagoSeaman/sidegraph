@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-session-start --repo-root || echo '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv, the first download of Sidegraph, or no network); run the hook command in a terminal to see the error\"}'",
+            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-session-start --repo-root || echo '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv, the first download of Sidegraph, or no network); run the hook command in a terminal to see the error\"}'",
             "timeout": 30
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-stop --repo-root || echo '{}'"
+            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-stop --repo-root || echo '{}'"
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'",
+            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'",
             "timeout": 10
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*\\\\[ntr]'sed '*|*[!A-Za-z0-9_]'grep '*|*\\\\[ntr]'grep '*|*[!A-Za-z0-9_]'rg '*|*\\\\[ntr]'rg '*|*[!A-Za-z0-9_]'cat '*|*\\\\[ntr]'cat '*) printf '%s\\n' \"$p\" | { SIDEGRAPH_HOST=grok uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}' ; } ;; *) echo '{}' ;; esac",
+            "command": "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*\\\\[ntr]'sed '*|*[!A-Za-z0-9_]'grep '*|*\\\\[ntr]'grep '*|*[!A-Za-z0-9_]'rg '*|*\\\\[ntr]'rg '*|*[!A-Za-z0-9_]'cat '*|*\\\\[ntr]'cat '*) printf '%s\\n' \"$p\" | { SIDEGRAPH_HOST=grok uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}' ; } ;; *) echo '{}' ;; esac",
             "timeout": 10
           }
         ]
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'",
+            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-pre-tool-use --repo-root || echo '{}'",
             "timeout": 10
           }
         ]
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-subagent-start --repo-root || echo '{}'",
+            "command": "SIDEGRAPH_HOST=grok uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-subagent-start --repo-root || echo '{}'",
             "timeout": 10
           }
         ]

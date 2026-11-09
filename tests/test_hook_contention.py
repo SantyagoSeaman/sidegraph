@@ -253,7 +253,7 @@ def test_hot_index_write_refuses_immediate_writer_without_waiting(
     try:
         with pytest.raises(sqlite3.OperationalError):
             index.record_touch("session", "src/example.py", "Read")
-        assert index.write_failed
+        assert index.lock_lost
     finally:
         index.close()
 
@@ -454,7 +454,7 @@ def test_shared_reader_commit_refusal_rolls_back_claim_and_showing(tmp_path: Pat
             )
 
         assert not index._conn.in_transaction
-        assert index.write_failed
+        assert index.lock_lost
         assert (
             index._conn.execute(
                 "SELECT 1 FROM meta WHERE key = ?", ("claimed:src/example.py",)
@@ -701,7 +701,7 @@ def test_zero_timeout_hot_handle_keeps_optional_delivery_independent(
         assert not index.record_delivery(delivery)
         assert time.monotonic() - started < 0.5
         assert index._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 0
-        assert not index.write_failed
+        assert not index.lock_lost
     finally:
         index.close()
 
@@ -727,7 +727,7 @@ def test_late_exclusive_lock_refuses_operations_on_already_open_handles(
         read_only.execute("SELECT key FROM meta").fetchall()
 
     assert time.monotonic() - started < 0.5
-    assert hot.write_failed
+    assert hot.lock_lost
     read_only.close()
     hot.close()
     store.close()
@@ -1114,7 +1114,7 @@ def test_a_failed_touch_write_does_not_withhold_the_delivery(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The touch row is telemetry; the records are the product (spec D2). Red against the
-    touch-first order: the failed write sets `write_failed`, the opener hands out no handle and
+    touch-first order: the failed write sets `lock_lost`, the opener hands out no handle and
     the same run delivers nothing."""
     root = tmp_path / "project"
     store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
@@ -1123,7 +1123,7 @@ def test_a_failed_touch_write_does_not_withhold_the_delivery(
     )
 
     def refused(self, *args, **kwargs):
-        self.write_failed = True
+        self.lock_lost = True
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(HotIndex, "record_touch", refused)
@@ -1361,3 +1361,136 @@ def test_optional_evidence_refusal_leaves_the_waiting_policy_alone(
         assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 400
     finally:
         store.close()
+
+
+def test_pretool_waits_for_a_held_lock_once_not_once_per_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    held_lock,
+) -> None:
+    """A read that loses its lock wait marks the handle like a refused write does, so the touch
+    write after it is not attempted and the run waits once. Red against a flag that only a failed
+    write sets: the touch write then waits a second time (measured: 0.55 s + 0.54 s)."""
+    root = tmp_path / "project"
+    store_dir, source, transcript, _ = _hook_case(root, monkeypatch, cold=False, telemetry="on")
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_hook_payload("pretool", source, transcript)))
+    )
+    touches: list[str] = []
+    real_touch = HotIndex.record_touch
+
+    def counting(self, *args, **kwargs):
+        touches.append("touch")
+        return real_touch(self, *args, **kwargs)
+
+    monkeypatch.setattr(HotIndex, "record_touch", counting)
+    real_open = HotIndex.open.__func__
+
+    def open_then_lock(cls, store_path, **kwargs):
+        index = real_open(cls, store_path, **kwargs)
+        held_lock(store_dir, "BEGIN EXCLUSIVE")  # the writer arrives after the handle opened
+        return index
+
+    monkeypatch.setattr(HotIndex, "open", classmethod(open_then_lock))
+
+    hooks.pre_tool_use()
+
+    assert isinstance(json.loads(capsys.readouterr().out), dict)
+    assert touches == []
+
+
+def test_records_for_waits_for_a_held_lock_once_however_many_entities(
+    tmp_path: Path, held_lock
+) -> None:
+    """A read that loses its wait marks the handle; the entities and tables after it are not
+    read, so one call waits once. Red against a loop that carries on: three entities cost three
+    refused waits (measured 1.7 s at a 0.5 s wait). The wait is 1.0 s so that three of them (3 s)
+    stay apart from one plus a slow Windows runner (a 0.3 s wait took 0.8 s there)."""
+    store_dir = tmp_path / ".sidegraph"
+    _make_store(store_dir)
+    index = HotIndex.open(store_dir, busy_timeout_seconds=1.0)
+    assert index is not None
+    errors: list[Exception] = []
+    try:
+        held_lock(store_dir)  # the writer arrives after the handle opened
+
+        started = time.monotonic()
+        records = index.records_for(["e1", "e2", "e3"], on_error=errors.append)
+        elapsed = time.monotonic() - started
+
+        assert records == []
+        assert index.lock_lost
+        assert len(errors) == 1
+        assert elapsed < 2.0
+        started = time.monotonic()
+        assert index.records_for(["e4"], on_error=errors.append) == []
+        assert time.monotonic() - started < 0.5  # a marked handle refuses at once, not after 1 s
+    finally:
+        index.close()
+
+
+def test_records_for_skips_the_fact_read_after_the_decision_read_lost_its_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The writer can arrive after the binding query: the decision read loses its wait and the
+    fact read after it must not wait again."""
+    store_dir = tmp_path / ".sidegraph"
+    _seed_published_store(store_dir, cold=False)
+    index = HotIndex.open(store_dir)
+    assert index is not None
+    facts_read: list[str] = []
+
+    def refused(self, record_ids, now):
+        error = sqlite3.OperationalError("database is locked")
+        error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        raise error
+
+    monkeypatch.setattr(HotIndex, "_decisions_for_bindings", refused)
+    monkeypatch.setattr(
+        HotIndex, "_facts_for_bindings", lambda self, ids: facts_read.append("facts") or []
+    )
+    try:
+        entity_id = next(iter(index.anchored_files().values()))[0]
+        errors: list[Exception] = []
+        index.records_for([entity_id], on_error=errors.append)
+        assert index.lock_lost
+        assert len(errors) == 1
+        assert facts_read == []
+    finally:
+        index.close()
+
+
+def test_a_read_failing_for_another_reason_leaves_the_handle_usable(tmp_path: Path) -> None:
+    """Only a lock refusal marks the handle: a missing table is a damaged or older index, and
+    the reads after it still run."""
+    store_dir = tmp_path / ".sidegraph"
+    _make_store(store_dir)
+    index = HotIndex.open(store_dir)
+    assert index is not None
+    try:
+        index._conn.execute("DROP TABLE meta")
+        with pytest.raises(sqlite3.OperationalError):
+            index.get_meta("x")
+        assert not index.lock_lost
+    finally:
+        index.close()
+
+
+def test_record_shows_on_a_marked_handle_does_not_wait(tmp_path: Path, held_lock) -> None:
+    """The brief's journal write after a read that lost its wait is skipped, not retried: a
+    marked handle refuses it at once. Red against a write that ignores the mark (it waited out
+    the timeout again: measured 0.55 s inside a 1.13 s hook)."""
+    store_dir = tmp_path / ".sidegraph"
+    _make_store(store_dir)
+    index = HotIndex.open(store_dir, busy_timeout_seconds=0.3)
+    assert index is not None
+    try:
+        held_lock(store_dir)  # the writer arrives after the handle opened
+        index.lock_lost = True  # an earlier read of this run lost its wait
+
+        started = time.monotonic()
+        index.record_shows("s1", [("a.py", "r1")])
+        assert time.monotonic() - started < 0.15
+    finally:
+        index.close()

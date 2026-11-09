@@ -19,7 +19,7 @@ def _run_session_start(monkeypatch, capsys, payload, db):
     monkeypatch.setenv("SIDEGRAPH_DIR", str(db))
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     hooks.session_start()
-    capsys.readouterr()
+    return capsys.readouterr().out
 
 
 def test_session_start_publishes_the_key_with_a_timestamp(tmp_path, monkeypatch, capsys):
@@ -243,3 +243,60 @@ def test_a_null_transcript_path_falls_back_to_the_session_id(tmp_path, monkeypat
     store.close()
 
     assert raw is not None and raw.partition("|")[0] == "abc-123"
+
+
+# --- the transcript path (stats-cited-back-and-asked design, D4) -----------------------------
+
+
+def _transcripts(db):
+    store = Store(db)
+    rows = [(r["session_id"], r["path"], r["host"]) for r in store.session_transcripts()]
+    store.close()
+    return rows
+
+
+def test_session_start_records_the_transcript_path(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "db"
+    Store(db).close()
+    monkeypatch.setenv("SIDEGRAPH_HOST", "claude")
+    payload = {"session_id": "abc", "transcript_path": "/x/abc.jsonl"}
+    _run_session_start(monkeypatch, capsys, payload, db)
+    assert _transcripts(db) == [("abc", "/x/abc.jsonl", "claude")]
+    _run_session_start(monkeypatch, capsys, payload, db)
+    assert _transcripts(db) == [("abc", "/x/abc.jsonl", "claude")]
+
+
+def test_no_transcript_row_without_a_path_a_session_or_telemetry(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "db"
+    Store(db).close()
+    _run_session_start(monkeypatch, capsys, {"session_id": "abc"}, db)
+    _run_session_start(monkeypatch, capsys, {"session_id": "abc", "transcript_path": ""}, db)
+    assert _transcripts(db) == []
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(hooks, "_session_identity", lambda _payload: (None, None))
+        _run_session_start(ctx, capsys, {"transcript_path": "/x/abc.jsonl"}, db)
+    assert _transcripts(db) == []
+
+    monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "off")
+    _run_session_start(
+        monkeypatch, capsys, {"session_id": "abc", "transcript_path": "/x/abc.jsonl"}, db
+    )
+    assert _transcripts(db) == []
+
+
+def test_a_failing_transcript_write_still_prints_the_map_and_prunes(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "db"
+    _seed_one_old_event(db)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("transcript table is gone")
+
+    monkeypatch.setattr(Store, "record_session_transcript", boom)
+    out = _run_session_start(
+        monkeypatch, capsys, {"session_id": "abc", "transcript_path": "/x/abc.jsonl"}, db
+    )
+    assert "additionalContext" in json.loads(out)["hookSpecificOutput"]
+    store = Store(db)
+    assert [e["key"] for e in store.retrieval_events()] == []
+    store.close()

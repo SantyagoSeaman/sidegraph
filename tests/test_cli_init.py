@@ -633,3 +633,128 @@ def test_init_readonly_dot_claude_prints_the_manual_line(tmp_path, capsys, monke
     assert "could not be written" in out
     assert "wrote .claude/settings.json" not in out
     assert f'"env": {{"{RATIFY_POLICY_ENV_VAR}": "manual"}}' in out
+
+
+# -- the project-root .ignore (design/superpowers/specs/2026-11-07-root-ignore-for-store-design.md)
+
+
+@pytest.fixture
+def project(tmp_path, monkeypatch):
+    """A real git repository in ``tmp_path`` as the shell's cwd, so the invocation repository
+    root is the temporary project and not the checkout the tests run from."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    monkeypatch.delenv("SIDEGRAPH_DIR", raising=False)
+    monkeypatch.delenv("SIDEGRAPH_DB", raising=False)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def _init(project, capsys, *extra, db=None):
+    argv = ["--graph", str(project / "no.json"), "--no-settings", "--no-hooks", *extra]
+    if db is not None:
+        argv = ["--db", str(db), *argv]
+    code = init_main(argv)
+    return code, capsys.readouterr().out
+
+
+def test_init_writes_the_root_ignore(project, capsys):
+    """Red target: unfixed init (no file)."""
+    code, out = _init(project, capsys, db=project / ".sidegraph")
+    assert code == 0
+    ignore = (project / ".ignore").read_text()
+    assert ignore.splitlines()[-1] == ".sidegraph/"
+    assert "wrote .ignore: .sidegraph/ (recursive search skips the store)" in out
+
+
+def test_init_no_search_ignore_writes_nothing(project, capsys):
+    """Red target: unfixed init (flag unknown, argparse exit 2)."""
+    code, out = _init(project, capsys, "--no-search-ignore", db=project / ".sidegraph")
+    assert code == 0
+    assert not (project / ".ignore").exists()
+    assert "skipped .ignore (--no-search-ignore)." in out
+
+
+def test_init_is_idempotent_for_the_ignore(project, capsys):
+    """Red target: a non-idempotent append."""
+    _init(project, capsys, db=project / ".sidegraph")
+    first = (project / ".ignore").read_bytes()
+    code, out = _init(project, capsys, db=project / ".sidegraph")
+    assert code == 0
+    assert (project / ".ignore").read_bytes() == first
+    assert ".ignore already names .sidegraph/. Left unchanged." in out
+
+
+def test_init_appends_to_an_existing_ignore(project, capsys):
+    """Red target: a rewrite of the existing file."""
+    (project / ".ignore").write_bytes(b"node_modules/\n")
+    code, out = _init(project, capsys, db=project / ".sidegraph")
+    assert code == 0
+    assert (project / ".ignore").read_bytes().startswith(b"node_modules/\n")
+    assert "added .sidegraph/ to .ignore" in out
+
+
+def test_remove_hooks_writes_no_ignore(project, capsys):
+    """Red target: a helper call placed before the early exit."""
+    code = init_main(["--db", str(project / ".sidegraph"), "--remove-hooks"])
+    assert code == 0
+    assert not (project / ".ignore").exists()
+
+
+def test_init_survives_an_unsafe_ignore(project, capsys):
+    """Red target: an init that fails on an unsafe file."""
+    (project / ".ignore").mkdir()
+    code, out = _init(project, capsys, db=project / ".sidegraph")
+    assert code == 0
+    assert "left .ignore untouched (" in out
+    assert "add the line .sidegraph/ yourself." in out
+
+
+def test_init_from_a_subdirectory_anchors_the_store_relative_to_the_repository(
+    project, capsys, monkeypatch
+):
+    """Red target: missing cwd normalization."""
+    package = project / "pkg"
+    package.mkdir()
+    monkeypatch.chdir(package)
+    code, _ = _init(project, capsys)
+    assert code == 0
+    assert (project / ".ignore").read_text().splitlines()[-1] == "/pkg/.sidegraph/"
+    assert not (package / ".ignore").exists()
+
+
+def test_init_through_a_symlinked_ancestor_stays_inside_the_project(project, capsys):
+    """Red target: a lexical ancestor comparison."""
+    (project / "real").mkdir()
+    try:
+        (project / "link").symlink_to(project / "real")
+    except OSError:
+        pytest.skip("symlinks are not available")
+    code, _ = _init(project, capsys, db=project / "link" / ".sidegraph")
+    assert code == 0
+    assert (project / ".ignore").read_text().splitlines()[-1] == "/real/.sidegraph/"
+
+
+def test_init_with_a_nested_db_anchors_it_at_the_root(project, capsys):
+    """Red target: a version that always writes `.sidegraph/`."""
+    code, _ = _init(project, capsys, db=project / "a" / "b")
+    assert code == 0
+    assert (project / ".ignore").read_text().splitlines()[-1] == "/a/b/"
+
+
+def test_init_with_an_external_store_writes_no_ignore(project, tmp_path_factory, capsys):
+    """Red target: a version that always writes `.sidegraph/`."""
+    external = tmp_path_factory.mktemp("external") / "store"
+    code, out = _init(project, capsys, db=external)
+    assert code == 0
+    assert "store is outside the project; no .ignore written." in out
+    assert not (project / ".ignore").exists()
+    assert not (external.parent / ".ignore").exists()
+
+
+def test_store_creation_writes_no_ignore(tmp_path):
+    """Guards the explicit-command rule: creating a Store is not a reason to touch the tree
+    (red against nothing)."""
+    Store(tmp_path / ".sidegraph").close()
+    assert not (tmp_path / ".ignore").exists()

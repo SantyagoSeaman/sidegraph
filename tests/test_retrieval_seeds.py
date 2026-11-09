@@ -418,7 +418,16 @@ def test_server_main_and_nearest_retrieval_share_one_lookup(tmp_path, monkeypatc
     reads = _track_lookup_materializations(monkeypatch)
     lookups = []
 
-    def retrieve(_seeds, _store, _reader, _budget, *, guessed=(), descriptor_lookup=None):
+    def retrieve(
+        _seeds,
+        _store,
+        _reader,
+        _budget,
+        *,
+        guessed=(),
+        descriptor_lookup=None,
+        already_sent=frozenset(),
+    ):
         lookups.append(descriptor_lookup)
         assert descriptor_lookup.resolve_descriptor("absent", None) is None
         return TaskContext()

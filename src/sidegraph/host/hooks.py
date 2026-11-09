@@ -1303,19 +1303,6 @@ def _grok_stop_skipped(payload: dict) -> bool:
     )
 
 
-# Substance signal for agentic one-shot sessions (design D1, E10 H-F0): a `claude -p`
-# session has exactly one real prompt however much work follows, so the >=2-prompts gate
-# never arms there — every stage-session capture in E8/E9/E9b had been armed by the
-# isMeta-counting defect 05c9010 fixed. The tool branch is scoped to the host's one-shot
-# entrypoint ONLY: unscoped, it armed at the end of turn 1 in 93% of multi-prompt
-# interactive sessions (measured over 806 transcripts, spec review F2), burning the
-# once-per-session ledger before the session's richer content existed. In an sdk-cli
-# one-shot, turn 1 IS the whole session, so those two moments coincide. Threshold 5 is
-# the measured must-arm floor (E10 backfill = 5; stage sessions 14–46; trivial 0–2).
-_MIN_TOOL_USES = 5
-_ONE_SHOT_ENTRYPOINT = "sdk-cli"
-
-
 class _TranscriptStats(NamedTuple):
     real_prompts: int
     tool_uses: int
@@ -1343,7 +1330,7 @@ def _transcript_stats(transcript_path: str) -> _TranscriptStats:
     parse, one policy). A missing/unreadable file (bad path, permissions) propagates to
     the caller -- ``stop``'s outer ``try/except`` turns that into the same "print {} and
     allow" as any other never-crash failure. A transcript with no ``entrypoint`` anywhere
-    returns ``None`` — the caller degrades to the prompt-only gate, never to arming. A Grok
+    reports ``None``; the field is informational (the gate counts prompts only). A Grok
     transcript also reports the ``session_kind`` of the ``summary.json`` beside it.
     see design/superpowers/specs/2026-10-01-codex-capture-gate-design.md (D1)
     see design/superpowers/specs/2026-10-30-grok-stop-capture-nudge-design.md (D1)
@@ -1431,16 +1418,18 @@ def _transcript_stats(transcript_path: str) -> _TranscriptStats:
 def _is_substantial(stats: _TranscriptStats) -> bool:
     """True when a transcript's stats say the session is worth a capture nudge.
 
-    Claude Code: >= ``_MIN_USER_PROMPTS`` real prompts, or an ``sdk-cli`` one-shot with >=
-    ``_MIN_TOOL_USES`` tool uses. Codex: the same prompt count, never the tool branch, and
-    never a thread no person works in (a subagent or the automatic reviewer, by
-    ``thread_source`` or by a subagent ``source``) or a headless ``codex exec`` run (its
-    ``originator`` is ``codex_exec``, or its ``source`` is ``exec``, which also catches the
-    TypeScript SDK's own originator), whose Stop block would replace its output. A rollout
-    with no ``thread_source`` (an older Codex) is a person's thread. Grok: the same prompt
-    count, never a headless ``grok -p`` session, whose output a Stop block would extend. A
-    Claude transcript has none of these fields, so the thread rules are inert there.
-    see design/superpowers/specs/2026-10-01-codex-capture-gate-design.md (D2)
+    Claude Code: >= ``_MIN_USER_PROMPTS`` real prompts, so a headless one-prompt ``claude -p``
+    run is never nudged (its answer is the run's ``result``, which the extra turn a Stop block
+    forces would replace). Codex: the same prompt count, and never a thread no person works
+    in (a subagent or the automatic reviewer, by ``thread_source`` or by a subagent
+    ``source``) or a headless ``codex exec`` run (its ``originator`` is ``codex_exec``, or its
+    ``source`` is ``exec``, which also catches the TypeScript SDK's own originator), whose
+    Stop block would replace its output. A rollout with no ``thread_source`` (an older Codex)
+    is a person's thread. Grok: the same prompt count, never a headless ``grok -p`` session,
+    whose output a Stop block would extend. A Claude transcript has none of these fields, so
+    the thread rules are inert there.
+    see design/superpowers/specs/2026-10-01-codex-capture-gate-design.md (D2) and
+    design/superpowers/specs/2026-11-07-stop-nudge-yield-and-headless-gate-design.md (D1)
     """
     if (
         stats.codex_subagent
@@ -1450,9 +1439,7 @@ def _is_substantial(stats: _TranscriptStats) -> bool:
         or stats.session_kind == _GROK_HEADLESS_KIND
     ):
         return False
-    return stats.real_prompts >= _MIN_USER_PROMPTS or (
-        stats.entrypoint == _ONE_SHOT_ENTRYPOINT and stats.tool_uses >= _MIN_TOOL_USES
-    )
+    return stats.real_prompts >= _MIN_USER_PROMPTS
 
 
 def session_start() -> None:
@@ -1555,6 +1542,21 @@ def session_start() -> None:
         # on Codex, not this session — see _session_identity.
         stage = "session"
         session_id, session_group = _session_identity(payload)
+        # Compaction can follow startup inside the duplicate window: reset before that gate.
+        if session_id and payload.get("source") in ("compact", "clear"):
+            try:
+                store.delete_meta_prefix(f"{_MCP_SENT_KEY_PREFIX}{session_id}:-:")
+                if _host_family() == "codex":
+                    rollout = re.fullmatch(
+                        r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"
+                        r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+                        session_id,
+                    )
+                    if rollout is not None:
+                        store.delete_meta_prefix(f"{_MCP_SENT_KEY_PREFIX}{rollout[1]}:-:")
+            except Exception as error:
+                diagnostics.report("mcp-sent-reset", error)
 
         # D7.2: double-injection dedupe, checked BEFORE any other work (sync/TOC/nudges) —
         # a duplicate SessionStart call for the same session within the window exits
@@ -1596,6 +1598,15 @@ def session_start() -> None:
             store.prune_telemetry_events()
         except Exception as error:
             diagnostics.report("telemetry", error)
+        # Where this session's host transcript lives, for `sidegraph-stats` to read locally.
+        # Its own try, after the prune: a failing write costs neither the map nor the expiry.
+        # see design/superpowers/specs/2026-11-07-stats-cited-back-and-asked-design.md (D4)
+        try:
+            transcript = payload.get("transcript_path")
+            if session_id and isinstance(transcript, str) and transcript and _journals_showings():
+                store.record_session_transcript(session_id, transcript, _host_family())
+        except Exception as error:
+            diagnostics.report("telemetry", error)
         # Per-session stamps outlive the longest reader TTL (24 h) by an hour and no more:
         # with telemetry off they are retained session ids, so they expire like the journals.
         try:
@@ -1613,7 +1624,7 @@ def session_start() -> None:
         # see design/superpowers/specs/2026-10-03-capture-rearm-design.md (D2)
         try:
             store.prune_meta_prefixes(
-                (*_PRETOOL_PRUNE_PREFIXES, _CAPTURE_REARM_KEY_PREFIX),
+                (*_PRETOOL_PRUNE_PREFIXES, _CAPTURE_REARM_KEY_PREFIX, _MCP_SENT_KEY_PREFIX),
                 older_than=timedelta(days=_PRETOOL_KEY_RETENTION_DAYS),
             )
         except Exception as error:
@@ -1893,12 +1904,12 @@ def stop() -> None:
     """Stop hook (Stage 5): guarded block-to-distill.
 
     Fires the distillation nudge once the session looks substantial: >=
-    ``_MIN_USER_PROMPTS`` real prompts, OR — one-shot (``sdk-cli``) sessions only —
-    >= ``_MIN_TOOL_USES`` assistant tool calls (see ``_transcript_stats``, ``_is_substantial``
-    and the scoping rationale above ``_MIN_TOOL_USES``). A session that was already nudged
-    (capture ledger + ``stop_hook_active``) is nudged again only after at least
-    ``_REARM_GAP`` and ``_REARM_MIN_COMMITS`` new commits (``_rearm_commits``), and exactly
-    one of several parallel Stops wins that nudge (a compare-and-swap on ``capture_rearm``).
+    ``_MIN_USER_PROMPTS`` real prompts (see ``_transcript_stats`` and ``_is_substantial``;
+    a one-prompt headless run never arms, however much tool work it did). A session that was
+    already nudged (capture ledger + ``stop_hook_active``) is nudged again only after at
+    least ``_REARM_GAP`` and ``_REARM_MIN_COMMITS`` new commits (``_rearm_commits``), and
+    exactly one of several parallel Stops wins that nudge (a compare-and-swap on
+    ``capture_rearm``).
     It reads a Claude Code transcript, a Codex rollout and a Grok ``updates.jsonl`` alike; on
     Codex only a person's interactive thread can arm, and on Grok only a turn a person ended
     in a session that is not headless (``_grok_stop_skipped``). Disable entirely with
@@ -2090,6 +2101,7 @@ _PRETOOL_FILE_KEY_PREFIX = "pretool_file:"
 # The two one-shot prefixes older versions wrote. Nothing writes them now; SessionStart still
 # clears what is left of them.
 _PRETOOL_LEGACY_KEY_PREFIXES = ("pretool_nudge:", "pretool_nudge_path:")
+_MCP_SENT_KEY_PREFIX = "mcp_sent:"
 _PRETOOL_PRUNE_PREFIXES = (*_PRETOOL_LEGACY_KEY_PREFIXES, _PRETOOL_FILE_KEY_PREFIX)
 
 # SessionStart expires a per-file key this many days after its claim. The value is the claim's
@@ -2247,11 +2259,12 @@ class _HotOpener:
 
     Touch recording and the nudge both need the index and both resolve the same store, so the
     second step reuses the first one's handle (or its refusal: ``None`` is remembered too, so a
-    store that cannot be used is looked at once). A handle whose write hit the busy timeout
-    (``HotIndex.write_failed``) is not handed out again. A read that loses its wait does not
-    set that flag, so the touch write after it can wait once more: about twice
-    ``HOOK_BUSY_SECONDS`` per run at most. Each wait is ``HOOK_BUSY_SECONDS`` for a lock another
-    process holds. ``close`` releases the handle at the end of the run.
+    store that cannot be used is looked at once). A handle whose read or write lost its lock
+    wait (``HotIndex.lock_lost``) is not handed out again, and a marked handle's record reads and
+    optional journal writes return at once, so a run ends its waiting after one refused wait.
+    Each wait is at most ``HOOK_BUSY_SECONDS`` for a lock another process holds; waits that end
+    in time are not counted, so they can add up. ``close`` releases the handle at the end of
+    the run.
     see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D3)
     """
 
@@ -2294,7 +2307,7 @@ class _HotOpener:
                         self._run.note(error)
                 if self._index is not None or self._run.lock_seen:
                     self._run.store_dir = store_path
-        if self._index is not None and self._index.write_failed:
+        if self._index is not None and self._index.lock_lost:
             return None
         return self._index
 
@@ -2951,7 +2964,7 @@ def pre_tool_use() -> None:
         except Exception as error:
             diagnostics.report("payload", error)
         # Deliver first, record second: the records are the product and the touch row is
-        # telemetry. A touch that fails sets ``write_failed`` and the opener then hands out no
+        # telemetry. A touch that fails sets ``lock_lost`` and the opener then hands out no
         # handle, so touch-first let a refused telemetry write take the delivery with it.
         # The delivery does not read the touch row. see design/superpowers/specs/
         # 2026-11-05-hook-wait-and-digest-recheck.md (D2)

@@ -14,7 +14,7 @@ Runs a best-effort lazy sync (`maybe_sync`) against the current graph, then inje
 [retrieval: SessionStart TOC](../concepts/retrieval.md#sessionstart-toc)):
 
 - **Once at least one domain is ratified**, `render_toc()` renders the real, domain-named
-  table of contents: one line per accepted domain (title, one-line summary, mistake count,
+  table of contents: one line per accepted domain (title, mistake count,
   subdomain count) — the normal steady-state view once a project's mind model has any names
   in it.
 - **Before any domain is ratified**, `top_tier_map()` is the fallback — a **phase-1 top-tier
@@ -69,8 +69,9 @@ repo, not an error.
 A **guarded block-to-distill**, gated on the session actually looking substantial: the first
 nudge comes once per session (a per-session capture ledger in the store, plus Claude Code's own
 `stop_hook_active` re-entrancy flag), and only once the transcript has produced **>= 2 real
-user prompts** (or, in a one-shot Claude `sdk-cli` session, one prompt and at least 5 tool calls; counting actual typed prompts, not tool-result noise — a session's very first
-`Stop` no longer triggers it; see [`reference/hooks.md`](hooks.md#sidegraph-stop)
+user prompts** (counting actual typed prompts, not tool-result noise; a session's very first
+`Stop` no longer triggers it, and a headless one-prompt `claude -p` run is never nudged; see
+[`reference/hooks.md`](hooks.md#sidegraph-stop)
 for the exact counting rule). Once both gates clear, it returns:
 
 ```json

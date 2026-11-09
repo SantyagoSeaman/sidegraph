@@ -47,14 +47,14 @@ from .worktree_seeds import has_drive
 # ``sync.sync`` at the end of every completed pass, read by ``host.hooks.session_start``.
 TOC_CACHE_KEY = "toc_cache"
 
-# One-line domain summaries in the rendered TOC are truncated to this many characters (§5:
-# "title, one-line summary, mistake count").
+# One-line domain summaries in the structure-budget fallback and drill_down are truncated
+# to this many characters.
 _TOC_SUMMARY_MAX_CHARS = 100
 
 
 def _truncate_summary(text: str, max_chars: int = _TOC_SUMMARY_MAX_CHARS) -> str:
     """Clip a domain summary to a one-line budget, appending an ellipsis when clipped.
-    Shared by ``render_toc``, the structure-budget fallback, and ``drill_down``."""
+    Shared by the structure-budget fallback and ``drill_down``."""
     text = text or ""
     if len(text) > max_chars:
         return text[:max_chars].rstrip() + "…"
@@ -215,6 +215,9 @@ class TaskContext:
     line_ids: dict[str, list[str]] = field(default_factory=dict)
     # The ids of the records that rendered only after falling back to the tight tier.
     degraded_ids: list[str] = field(default_factory=list)
+    full_body_ids: list[str] = field(default_factory=list)
+    backref_ids: list[str] = field(default_factory=list)
+    backref_shown: bool = False
     # True when at least one placed line carries the ` [drifted]` marker (drift→supersede
     # D3) — `render()` keys the one legend line on it. Not rendered itself.
     drift_shown: bool = False
@@ -310,6 +313,11 @@ class TaskContext:
         legends = []
         if self.drift_shown:
             legends.append(_DRIFT_LEGEND)
+        if self.backref_shown:
+            legends.append(
+                "[sent earlier] = this record's full text was sent to you earlier in "
+                "this session; retrieve_decisions(ids=[...]) returns it in full."
+            )
         if self.file_bound_shown:
             legends.append(
                 "[file-bound] = declared applicability to the exact requested file; "
@@ -520,6 +528,7 @@ _LINE_CLIP_CHARS = 240  # tight tier: choice snippet only
 # Each line keeps its id so the agent can expand it; the rest is counted, not shown.
 _RELATED_CLIP_CHARS = 80
 _RELATED_LINE_CAP = 5
+_FACT_SOURCE_CLIP_CHARS = 300
 _DIRECT_FIELD_CLIP_CHARS = 1200  # direct tier: choice AND context, each
 _DIRECT_SIDE_CLIP_CHARS = 400  # direct tier: rejected AND consequences, each
 # Fix-wave D: a live A/B re-eval found every rendered `(consequences: ...)` suffix showed
@@ -716,16 +725,26 @@ def _fmt_decision(
     return line + _id_suffix(d)
 
 
+def _fact_tail(f: Fact, statement_limit: int) -> tuple[str, str]:
+    """The clipped statement and source tail, with one note for either clipped part."""
+    statement = _clip_line(f.statement, statement_limit)
+    source = _clip_line(f.source, _FACT_SOURCE_CLIP_CHARS)
+    clipped = statement != f.statement or source != f.source
+    note = f' (clipped; full: list_facts(ids=["{f.id}"]))' if clipped else ""
+    return statement, f" [{source}]{note}"
+
+
 def _fmt_fact(f: Fact, prefix: str = "- ", *, file_bound: bool = False) -> str:
     """Render one fact line for the ``## Known facts`` bucket (standalone facts — those not
     already rendered inline under a supported decision, see ``rank_decisions``). Same tight
     ``_LINE_CLIP_CHARS`` clip and ``[unratified]`` PROPOSED tag as an inline evidence line
     (:func:`_fmt_decision`'s related tier) — a fact never gets the generous direct-tier
-    allowance, since it has no analogous "seed-anchored" render tier of its own."""
+    allowance, since it has no analogous "seed-anchored" render tier of its own. The source
+    has its own 300-character bound; either clipped part adds exactly one omission note."""
     tag = " [unratified]" if f.status == DecisionStatus.PROPOSED else ""
-    statement = _clip_line(f.statement, _LINE_CLIP_CHARS)
+    statement, tail = _fact_tail(f, _LINE_CLIP_CHARS)
     ftag = " [file-bound]" if file_bound else ""
-    return f"{prefix}fact{tag}{ftag}: {statement} [{_clip_line(f.source, 80)}]"
+    return f"{prefix}fact{tag}{ftag}: {statement}{tail}"
 
 
 def _live_facts(facts: list[Fact]) -> list[Fact]:
@@ -800,6 +819,7 @@ def rank_decisions(
     seed_node_ids: Sequence[str] = (),
     file_bound_entity_ids: frozenset[str] = frozenset(),
     ordinary_seed_entity_ids: frozenset[str] = frozenset(),
+    already_sent: frozenset[str] = frozenset(),
 ) -> TaskContext:
     """Gather valid decisions and rank them mistakes-first under budget.memory_chars.
 
@@ -877,6 +897,16 @@ def rank_decisions(
     # detailed-selected records only — the tier that carries the id supersede_decision
     # needs. Related/superseded one-liners never consult this set.
     drifted_ids = drifted_record_ids(store)
+    support_map: dict[str, list[Fact]] | None = None
+
+    def _supporting(decision_id: str) -> list[Fact]:
+        # One read of the facts table per call, built on first use. It never outlives this
+        # call: an older Sidegraph writing the same store would leave a longer-lived copy stale.
+        nonlocal support_map
+        if support_map is None:
+            support_map = store.facts_by_supported_decision()
+        return list(support_map.get(decision_id, ()))
+
     file_bound_record_ids: set[str] = set()
 
     def add_line(bucket: list[str], line: str, *, at: int | None = None) -> bool:
@@ -925,22 +955,21 @@ def rank_decisions(
         """Live supporting facts for ``d``, each paired with its rendered evidence line —
         already filtered against ``rendered_fact_ids`` (a fact already placed under another
         decision is excluded here, not left for the caller to notice) and sorted by fact id
-        for deterministic order (store's ``facts_for_decision`` is an unsorted SQLite scan,
-        see its docstring; sorting here, not in store.py, is this task's explicit call-site
-        fix). Callers place each line via ``add_line`` (budget-checked) and must call
-        ``rendered_fact_ids.add(fact.id)`` themselves once a line is actually placed — this
-        helper only computes candidates, never mutates ``rendered_fact_ids``, so it can be
-        safely called once per decision without double-counting."""
+        for deterministic order (the support map keeps the store's unsorted SQLite row order,
+        see ``facts_for_decision``'s docstring; sorting here, not in the store, keeps the
+        store's row order intact for the order-sensitive sites). Callers place each line via
+        ``add_line`` (budget-checked) and must call ``rendered_fact_ids.add(fact.id)`` themselves
+        once a line is actually placed — this helper only computes candidates, never mutates
+        ``rendered_fact_ids``, so it can be safely called once per decision without
+        double-counting."""
         out: list[tuple[Fact, str]] = []
-        for fact in sorted(_live_facts(store.facts_for_decision(d.id)), key=lambda f: f.id):
+        for fact in sorted(_live_facts(_supporting(d.id)), key=lambda f: f.id):
             if fact.status != DecisionStatus.ACCEPTED:
                 continue
             if fact.id in rendered_fact_ids:
                 continue
-            line = (
-                f"  evidence: {_clip_line(fact.statement, _LINE_CLIP_CHARS)}"
-                f" [{_clip_line(fact.source, 80)}]"
-            )
+            statement, tail = _fact_tail(fact, _LINE_CLIP_CHARS)
+            line = f"  evidence: {statement}{tail}"
             out.append((fact, line))
         return out
 
@@ -971,7 +1000,7 @@ def rank_decisions(
                     ctx.related_overflow += 1
                 # The cap hides the line, not the review queue: its proposed facts are
                 # queued exactly as a placed related line's are.
-                for fact in _live_facts(store.facts_for_decision(d.id)):
+                for fact in _live_facts(_supporting(d.id)):
                     if fact.status == DecisionStatus.PROPOSED:
                         related_proposed_facts.setdefault(fact.id, fact)
             return False
@@ -989,11 +1018,22 @@ def rank_decisions(
             file_bound=d.id in file_bound_record_ids,
             choice_limit=_RELATED_CLIP_CHARS if capped else None,
         )
+        backref = (
+            d.id in already_sent
+            and d.status != DecisionStatus.PROPOSED
+            and detailed
+            and (bucket is ctx.mistakes or bucket is ctx.decisions)
+        )
+        if backref:
+            dtag = " [drifted]" if drifted else ""
+            ftag = " [file-bound]" if d.id in file_bound_record_ids else ""
+            line = f"{prefix}[{d.kind.value}]{dtag}{ftag} [sent earlier] {d.title}{_id_suffix(d)}"
+            evidence = False
         if capped:
             line += _id_suffix(d)
             evidence = False
         if not add_line(bucket, line):
-            if not detailed:
+            if not detailed or backref:
                 refused.add(d.id)
                 return False
             # Degrade before drop: re-render at the tight tier, but a record *selected for*
@@ -1015,6 +1055,16 @@ def rank_decisions(
             ctx.degraded += 1
             ctx.degraded_ids.append(d.id)
             ctx.delivery_degraded.add(("decision", d.id))
+        if backref:
+            ctx.backref_ids.append(d.id)
+            ctx.backref_shown = True
+        elif (
+            detailed
+            and (bucket is ctx.mistakes or bucket is ctx.decisions)
+            and d.status != DecisionStatus.PROPOSED
+            and d.id not in ctx.degraded_ids
+        ):
+            ctx.full_body_ids.append(d.id)
         if drifted:
             ctx.drift_shown = True
         if capped:
@@ -1030,7 +1080,7 @@ def rank_decisions(
         ctx.delivery_placed.add(snapshot.key)
         ctx.emitted += 1
         proposal_fact_bucket = direct_proposed_facts if detailed else related_proposed_facts
-        for fact in _live_facts(store.facts_for_decision(d.id)):
+        for fact in _live_facts(_supporting(d.id)):
             if fact.status == DecisionStatus.PROPOSED:
                 proposal_fact_bucket.setdefault(fact.id, fact)
         if evidence:
@@ -1058,7 +1108,7 @@ def rank_decisions(
             route_ids.update(d.id for d in [*accepted, *proposed])
             route_ids.update(f.id for f in seed_facts[entity.entity_id])
             for decision in [*accepted, *proposed]:
-                route_ids.update(f.id for f in _live_facts(store.facts_for_decision(decision.id)))
+                route_ids.update(f.id for f in _live_facts(_supporting(decision.id)))
             route_ids.update(d.id for d in store.superseded_for_entity(entity.entity_id))
             if (
                 entity.entity_id in file_bound_entity_ids
@@ -1073,9 +1123,7 @@ def rank_decisions(
                 verified_ids.update(d.id for d in [*normal_accepted, *normal_proposed])
                 verified_ids.update(f.id for f in normal_facts)
                 for decision in [*normal_accepted, *normal_proposed]:
-                    verified_ids.update(
-                        f.id for f in _live_facts(store.facts_for_decision(decision.id))
-                    )
+                    verified_ids.update(f.id for f in _live_facts(_supporting(decision.id)))
                 verified_ids.update(d.id for d in store.superseded_for_entity(entity.entity_id))
     # Ordinary direct routes win, even when the unverified file seed was listed first.
     file_bound_record_ids.difference_update(verified_ids)
@@ -1093,6 +1141,8 @@ def rank_decisions(
     # CURRENT (post-insertion) position, never its original pre-phase-2 index.
     offset = 0
     for i, d in enumerate(mistake_decisions):
+        if d.id in ctx.backref_ids:
+            continue
         insert_at = i + 1 + offset
         for fact, fact_line in _evidence_candidates(d):
             if place_fact(ctx.mistakes, fact, fact_line, at=insert_at):
@@ -1215,9 +1265,7 @@ def rank_decisions(
         (related_proposed, related_proposed_facts),
     ):
         for decision in decisions:
-            for fact in sorted(
-                _live_facts(store.facts_for_decision(decision.id)), key=lambda f: f.id
-            ):
+            for fact in sorted(_live_facts(_supporting(decision.id)), key=lambda f: f.id):
                 if fact.status == DecisionStatus.PROPOSED:
                     proposal_fact_bucket.setdefault(fact.id, fact)
                 elif fact.id not in rendered_fact_ids:
@@ -1260,7 +1308,7 @@ def rank_decisions(
                 # `add` queued its proposed facts for the related proposals (a line the cap
                 # left out included), which were rendered above: queue them again for the
                 # trailing ones.
-                for fact in _live_facts(store.facts_for_decision(d.id)):
+                for fact in _live_facts(_supporting(d.id)):
                     if fact.status == DecisionStatus.PROPOSED:
                         trailing_proposed_facts.setdefault(fact.id, fact)
         trailing_proposed.extend(proposed)
@@ -1279,7 +1327,7 @@ def rank_decisions(
             trailing_proposed_facts.setdefault(fact.id, fact)
     trailing_proposed = _by_recency(trailing_proposed)
     for decision in trailing_proposed:
-        for fact in sorted(_live_facts(store.facts_for_decision(decision.id)), key=lambda f: f.id):
+        for fact in sorted(_live_facts(_supporting(decision.id)), key=lambda f: f.id):
             if fact.status == DecisionStatus.PROPOSED:
                 trailing_proposed_facts.setdefault(fact.id, fact)
             elif fact.id not in rendered_fact_ids:
@@ -1540,6 +1588,7 @@ def get_task_context(
     *,
     guessed: Sequence[Seed] = (),
     descriptor_lookup: DescriptorLookup | None = None,
+    already_sent: frozenset[str] = frozenset(),
 ) -> TaskContext:
     """Phase-2 merge: budgeted structural subgraph + mistakes-first decision memory.
 
@@ -1584,6 +1633,7 @@ def get_task_context(
         seed_node_ids=res.seed_node_ids,
         file_bound_entity_ids=res.file_bound_entity_ids,
         ordinary_seed_entity_ids=res.ordinary_seed_entity_ids,
+        already_sent=already_sent,
     )
     ctx.structure = structure
     ctx.delivery_unresolved = res.unresolved
@@ -1898,17 +1948,8 @@ def toc_sections(cache: dict) -> list[MapSection]:
     rows = []
     for d in cache.get("domains") or []:
         title = d.get("title") or ""
-        raw_summary = d.get("summary") or ""
         mistakes = d.get("mistakes", 0)
-        # Exact-equality guard (see `_structure_fallback_lines`'s docstring for why it's
-        # exact-only, not a startswith/prefix rule): a label-bootstrapped domain's
-        # summary is sometimes IDENTICAL to its title before any real digest exists —
-        # drop the redundant "— summary" tail rather than repeat the title verbatim.
-        if raw_summary.strip() == title.strip():
-            line = f"- {title} ({mistakes} mistake(s))"
-        else:
-            summary = _truncate_summary(raw_summary)
-            line = f"- {title} — {summary} ({mistakes} mistake(s))"
+        line = f"- {title} ({mistakes} mistake(s))"
         subdomains = d.get("subdomains", 0)
         if subdomains:
             line += f" · {subdomains} subdomains"

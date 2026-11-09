@@ -93,7 +93,7 @@ def test_optional_append_rollback_keeps_committed_claim_and_legacy_show(tmp_path
         == 1
     )
     assert rows(store, "delivery_occurrences") == []
-    assert not hot.write_failed
+    assert not hot.lock_lost
     assert errors == ["DatabaseError"]
     hot.close()
     store.close()
@@ -117,7 +117,7 @@ def test_optional_append_busy_never_uses_legacy_timeout(tmp_path, kind):
         locker.close()
     assert handle._conn.execute("PRAGMA busy_timeout").fetchone()[0] == before
     assert rows(store, "delivery_occurrences") == []
-    assert not hot.write_failed
+    assert not hot.lock_lost
     hot.close()
     store.close()
 
@@ -142,7 +142,7 @@ def test_old_index_optional_absence_does_not_refuse_hot_delivery(tmp_path):
     assert hot is not None
     assert hot.claim_file("claim:", "a.py", "now", 3, shown=Shown("s", None, ["record"]))
     assert not hot.record_delivery(sample())
-    assert not hot.write_failed
+    assert not hot.lock_lost
     assert hot.get_meta("claim:a.py") == "now"
     hot.close()
     store.close()

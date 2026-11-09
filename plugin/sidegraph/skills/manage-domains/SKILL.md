@@ -28,9 +28,10 @@ path_prefixes, seed_anchor_count, parent_slug, child_slugs}`. `member_count` is
 `len(communities)` (0 for a domain not yet ratified/synced), and lineage reflects the full store.
 Read `hint` before assuming the listing is complete. Narrow with `status`, `query` (AND terms
 across slug/title/summary), or `ids` (exact domain ids). `limit` is clamped to 1..100 and
-`budget_chars` to 4,000..40,000. A budget cut includes a local `Store.get_domain(id)` fallback for
-the next omitted row in either storage layout; a count cut suggests filters and raising `limit` only while it is below
-100. This is the tool for "show me all domains" — prefer it over the narrower views below:
+`budget_chars` to 4,000..40,000. A cut lists omitted ids in `omitted_ids`, to read with
+`list_domains(ids=[...])`; `omitted_ids_unlisted` counts ids that could not fit. Only a budget
+cut returning zero rows includes a local `Store.get_domain(id)` fallback in either storage
+layout; a count cut suggests filters and raising `limit` only while it is below 100. This is the tool for "show me all domains" — prefer it over the narrower views below:
 
 - **`list_proposed()`** — domains awaiting ratification only (`status=proposed`), rendered
   human-readably with their `paths:`/`communities:` membership rule — reach for this
@@ -159,6 +160,6 @@ include a note for frozen membership or a split.
 - [`docs/guides/naming-your-domains.md`](../../../../docs/guides/naming-your-domains.md) —
   background on bootstrap idempotency, mass-drop recovery, and the CLI equivalents
   (`sidegraph-domains add`, `sidegraph-ratify`).
-- CLI commands run as `uvx --from sidegraph==0.27.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
+- CLI commands run as `uvx --from sidegraph==0.28.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
   [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.

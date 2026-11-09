@@ -337,7 +337,7 @@ def test_build_toc_global_mistakes(tmp_path):
 # -- render_toc ---------------------------------------------------------------------
 
 
-def test_render_toc_renders_domain_title_summary_and_mistake_count():
+def test_render_toc_renders_domain_title_and_mistake_count():
     cache = {
         "domains": [
             {
@@ -354,7 +354,7 @@ def test_render_toc_renders_domain_title_summary_and_mistake_count():
     text = render_toc(cache)
     assert "## Domains" in text
     assert "Payments" in text
-    assert "Handles settlement." in text
+    assert "Handles settlement." not in text
     assert "(2 mistake(s))" in text
     # the standing get_task_context instruction now lives at host.hooks.session_start,
     # prepended once regardless of which renderer produced the rest of the text -- this
@@ -409,7 +409,7 @@ def test_render_toc_subdomain_count_from_build_toc_parent_child(tmp_path):
     assert "· 1 subdomains" in root_line
 
 
-def test_render_toc_truncates_long_summary():
+def test_render_toc_never_renders_a_summary():
     long_summary = "x" * 200
     cache = {
         "domains": [
@@ -425,8 +425,10 @@ def test_render_toc_truncates_long_summary():
         "global_mistakes": [],
     }
     text = render_toc(cache)
-    assert long_summary not in text  # the full 200-char summary never renders
-    assert "…" in text
+    line = next(line for line in text.splitlines() if line.startswith("- S"))
+    assert line == "- S (0 mistake(s))"
+    assert "x" * 10 not in text
+    assert "…" not in text
 
 
 def test_render_toc_renders_global_mistakes_and_ignores_a_cached_initiatives_key():
@@ -449,33 +451,8 @@ def test_render_toc_empty_cache_still_has_header():
     assert "## Domains" not in text
 
 
-def test_render_toc_dedupes_when_summary_exactly_equals_title():
-    """Label-bootstrapped domains sometimes have summary == title exactly (both derive
-    from the same engine label before any real digest exists) -- render_toc drops the
-    redundant "— summary" tail rather than repeat the title verbatim."""
-    cache = {
-        "domains": [
-            {
-                "slug": "widgets",
-                "title": "Widgets",
-                "summary": "Widgets",
-                "parent_slug": None,
-                "mistakes": 1,
-                "subdomains": 0,
-            },
-        ],
-        "global_mistakes": [],
-    }
-    text = render_toc(cache)
-    line = next(line for line in text.splitlines() if line.startswith("- Widgets"))
-    assert line == "- Widgets (1 mistake(s))"
-    assert "—" not in line
-
-
-def test_render_toc_keeps_both_parts_when_summary_only_starts_with_title():
-    """A digest summary that merely STARTS WITH the title but continues with more
-    information is NOT deduped -- only EXACT equality collapses to the title alone
-    (unlike `_fmt_decision`'s startswith/prefix rule for decisions)."""
+def test_render_toc_omits_a_nonidentical_summary():
+    """A domain summary is omitted even when it differs from the title."""
     cache = {
         "domains": [
             {
@@ -491,4 +468,12 @@ def test_render_toc_keeps_both_parts_when_summary_only_starts_with_title():
     }
     text = render_toc(cache)
     line = next(line for line in text.splitlines() if line.startswith("- Widgets"))
-    assert line == "- Widgets — Widgets handles settlement (0 mistake(s))"
+    assert line == "- Widgets (0 mistake(s))"
+
+
+def test_a_domain_line_keeps_its_subdomain_count():
+    cache = {
+        "domains": [{"title": "Payments", "summary": "Money.", "mistakes": 2, "subdomains": 3}]
+    }
+    line = next(line for line in render_toc(cache).splitlines() if line.startswith("- Payments"))
+    assert line == "- Payments (2 mistake(s)) · 3 subdomains"

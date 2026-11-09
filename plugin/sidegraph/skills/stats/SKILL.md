@@ -6,7 +6,7 @@ description: >-
 
 # Stats
 
-Run `uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-stats` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin): skills run the CLIs at the plugin's pinned version, never the copy on `PATH`) and show its output **verbatim** in a fenced block. Usage figures
+Run `uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-stats` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin): skills run the CLIs at the plugin's pinned version, never the copy on `PATH`) and show its output **verbatim** in a fenced block. Usage figures
 come from the local, gitignored index and graph figures from the optional read-only
 `graph.json`; the command also checks the canonical store files for index staleness.
 Nothing is sent anywhere.
@@ -19,6 +19,11 @@ not add a summary line. The report is written to be read as printed.
 **Never** describe the numbers causally. The report says what was shown, asked and touched.
 It does not say what was improved, prevented, saved or caused, and neither do you — no
 timeline here can separate "memory sent the agent there" from "the agent was going anyway".
+
+The CITED BACK block counts delivered record ids that the agent quoted back later in the same
+session. It is a lower bound on whether a record was seen: never describe it as use, and never
+read a low figure as memory being ignored, since an agent can act on a record without quoting
+its id.
 
 If the report says `too little to summarize yet`, say that and stop; do not compute a
 ratio it deliberately withheld.

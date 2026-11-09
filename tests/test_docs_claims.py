@@ -876,7 +876,6 @@ def test_removed_stale_claims_do_not_return() -> None:
     banned = (
         ".codex/hooks/hooks.json",
         "once sidegraph publishes to pypi",
-        "up to five markdown sections",
         "rm -rf graphify-out",
         # The SessionStart instruction once taught this call; the tool has no `seeds`
         # parameter (it takes `files` and `entities`), so an agent following it failed
@@ -923,7 +922,7 @@ def _task_context_render_headings() -> list[str]:
     start = source.index("    def render_parts(")
     end = source.index("        text = MEMORY_GUARD_LINE", start)
     names = re.findall(r'blocks\.append\(f"\{heading\} ([^"\n]+)\\n"', source[start:end])
-    return [f"## {name}" for name in names]
+    return [f"## {name}" for name in names if name != "Structural map"]
 
 
 def test_retrieval_guide_block_table_matches_task_context_render() -> None:

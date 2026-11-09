@@ -33,6 +33,7 @@ from sidegraph.schema import (
     Descriptor,
     Domain,
     DomainStatus,
+    Entity,
     Fact,
     Provenance,
 )
@@ -206,7 +207,7 @@ def test_domain_listing_blank_filters_match_the_unfiltered_call(store):
     )
 
 
-def test_domain_listing_mid_list_oversize_keeps_prefix_and_local_fallback(store):
+def test_domain_listing_mid_list_oversize_keeps_prefix_and_omitted_ids(store):
     first = _add_listing_domain(store, "a-small")
     blocked = _add_listing_domain(store, "b-large", summary="z" * 50_000)
     third = _add_listing_domain(store, "c-small")
@@ -216,7 +217,9 @@ def test_domain_listing_mid_list_oversize_keeps_prefix_and_local_fallback(store)
     assert len(text) <= 4000
     assert answer["matched"] == 3 and answer["returned"] == 1 and answer["omitted"] == 2
     assert [row["id"] for row in answer["domains"]] == [first.domain_id]
-    assert f'Store.get_domain("{blocked.domain_id}")' in answer["hint"]
+    assert answer["omitted_ids"] == [blocked.domain_id, third.domain_id]
+    assert "Store.get_domain" not in answer["hint"]
+    assert "list_domains(ids=[...])" in answer["hint"]
     assert "raise budget" not in answer["hint"]
     follow_up = json.loads(server._domain_listing(store, ids=[third.domain_id]))
     assert [row["id"] for row in follow_up["domains"]] == [third.domain_id]
@@ -487,6 +490,85 @@ def wire(name: str, arguments: dict | None = None) -> tuple[str, dict | None]:
         return text, json.loads(text)
     except json.JSONDecodeError:
         return text, None
+
+
+# -- the listing answers stay byte-identical when the lookup is journaled ----------------
+
+# Captured from the tools before they wrote a render row (stats-cited-back-and-asked design,
+# T-542-4): fixed ids and timestamps, so an unconditional change to an answer breaks them.
+JOURNALED_LISTING_WIRE = {
+    "retrieve_decisions": (
+        '{"overview":false,"matched":1,"returned":1,"omitted":0,"decisions":[{"id":"01DECISIONAAAAAAAAAAAAAAAA","title":"alpha lock order","kind":"gotcha","status":"accepted","context":"c","choice":"ch","rejected":"global lock","consequences":null,"valid_from":"2026-10-01T12:00:00Z","valid_to":null,"supersedes":null,"scope":"repo","layer":null,"provenance":{"source":"manual","ref":null,"author":null,"session_id":null,"graph_version":null,"commit":null},"ratified_by":null,"ratified_at":null,"retired":null}],"hint":null}'  # noqa: E501
+    ),
+    "list_facts": (
+        '{"matched":1,"returned":1,"omitted":0,"counts":{"status":{"accepted":1}},"facts":[{"id":"01FACTAAAAAAAAAAAAAAAAAAAA","statement":"alpha fact","source":"bench","supports":[],"ratified_by":null,"ratified_at":null,"status":"accepted","valid_from":"2026-10-01T12:00:00Z","valid_to":null,"supersedes":null,"provenance":{"source":"manual","ref":null,"author":null,"session_id":null,"graph_version":null,"commit":null}}],"hint":null}'  # noqa: E501
+    ),
+    "get_entity_history": (
+        '{"entity_id":"01ENTITYAAAAAAAAAAAAAAAAAA","matched":2,"returned":2,"omitted":0,"records":[{"id":"01DECISIONAAAAAAAAAAAAAAAA","title":"alpha lock order","kind":"gotcha","status":"accepted","context":"c","choice":"ch","rejected":"global lock","consequences":null,"valid_from":"2026-10-01T12:00:00Z","valid_to":null,"supersedes":null,"scope":"repo","layer":null,"provenance":{"source":"manual","ref":null,"author":null,"session_id":null,"graph_version":null,"commit":null},"ratified_by":null,"ratified_at":null,"retired":null,"record_type":"decision"},{"id":"01FACTAAAAAAAAAAAAAAAAAAAA","statement":"alpha fact","source":"bench","supports":[],"ratified_by":null,"ratified_at":null,"status":"accepted","valid_from":"2026-10-01T12:00:00Z","valid_to":null,"supersedes":null,"provenance":{"source":"manual","ref":null,"author":null,"session_id":null,"graph_version":null,"commit":null},"record_type":"fact"}],"hint":null}'  # noqa: E501
+    ),
+    "find_entity": (
+        '{"found":true,"entity_id":"01ENTITYAAAAAAAAAAAAAAAAAA","canonical_name":"Worker","descriptor":{"name":"Worker","file_path":"worker.py"},"last_seen_node_id":null,"bindings":[{"record_id":"01DECISIONAAAAAAAAAAAAAAAA","record_type":"decision","tier":2,"status":"live"},{"record_id":"01FACTAAAAAAAAAAAAAAAAAAAA","record_type":"fact","tier":2,"status":"live"}]}'  # noqa: E501
+    ),
+}
+
+
+def _journaled_listing_store(tmp_path, monkeypatch) -> Store:
+    store = Store(tmp_path / "journaled.db")
+    monkeypatch.setattr(server, "_store", store)
+    monkeypatch.setattr(server, "_session_key", lambda _s: "sess-1")
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-such-graph.json"))
+    when = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    decision = Decision(
+        id="01DECISIONAAAAAAAAAAAAAAAA",
+        title="alpha lock order",
+        kind=DecisionKind.GOTCHA,
+        status=DecisionStatus.ACCEPTED,
+        context="c",
+        choice="ch",
+        rejected="global lock",
+        valid_from=when,
+        provenance=Provenance(source="manual"),
+    )
+    fact = Fact(
+        id="01FACTAAAAAAAAAAAAAAAAAAAA",
+        statement="alpha fact",
+        source="bench",
+        status=DecisionStatus.ACCEPTED,
+        valid_from=when,
+        provenance=Provenance(source="manual"),
+    )
+    store.add_decision(decision)
+    store.add_fact(fact)
+    entity = store.upsert_entity(
+        Entity(
+            entity_id="01ENTITYAAAAAAAAAAAAAAAAAA",
+            canonical_name="Worker",
+            descriptor=Descriptor(name="Worker", file_path="worker.py"),
+        )
+    )
+    for record in (decision, fact):
+        _bind(store, record.id, entity.entity_id, tier=2)
+    return store
+
+
+@pytest.mark.parametrize("telemetry", ["on", "off"])
+def test_listing_answers_are_identical_with_telemetry_on_and_off(tmp_path, monkeypatch, telemetry):
+    monkeypatch.setenv("SIDEGRAPH_TELEMETRY", telemetry)
+    store = _journaled_listing_store(tmp_path, monkeypatch)
+    calls = {
+        "retrieve_decisions": {"query": "alpha", "include_provenance": True},
+        "list_facts": {"query": "alpha"},
+        "get_entity_history": {"entity_id": "01ENTITYAAAAAAAAAAAAAAAAAA"},
+        "find_entity": {"name": "Worker", "file_path": "worker.py"},
+    }
+    for name in ("retrieve_decisions", "list_facts", "get_entity_history"):
+        text, _ = wire(name, calls[name])
+        assert text == JOURNALED_LISTING_WIRE[name], name
+    result = call("find_entity", calls["find_entity"])
+    assert result.content[0].text == JOURNALED_LISTING_WIRE["find_entity"]
+    assert result.structured_content is None
+    assert result.data is None
+    store.close()
 
 
 # -- L1-L4, L14, L16: list_facts ----------------------------------------------------------
@@ -997,10 +1079,10 @@ def test_l12_get_task_context_is_capped_and_keeps_its_advice(ctx_env, uncapped_r
     assert "Not in the code graph" in text
     assert server._STANDING_SUPERSEDE_HINT in text
     assert "[output cut at 40000 characters" in text
-    # the cut order: the structural map goes first, the records stay (partly)
-    assert _note_sections(text)[0] == "structure"
+    # A narrow call cuts Related; with eight seed files it cuts primary records.
+    assert _note_sections(text) == (["related decisions"] if count == 1 else ["records"])
     assert "## ⚠ Known mistakes" in text
-    assert "structure" in _note_sections(text) and "## Structural map" not in text
+    assert "structure" not in _note_sections(text) and "## Structural map" not in text
     # the legend follows the tag on a kept line, never the legend's own text
     assert (_DRIFT_LEGEND in text) == bool(_tagged(text[: text.index("[output cut")]))
     # cut at a line boundary: the note starts its own paragraph
@@ -1011,8 +1093,7 @@ def test_l12_the_cut_order_removes_related_before_the_records(ctx_env, uncapped_
     store, reader, paths, _ = ctx_env
     text = server._get_task_context_impl(store, reader, paths[:1], None, 10**9, 10**9)
     sections = _note_sections(text)
-    assert sections[:2] == ["structure", "related decisions"]
-    assert "records" not in sections or sections.index("records") > 1
+    assert sections == ["related decisions"]
 
 
 def test_l12_the_legend_survives_when_a_kept_line_is_drifted(ctx_env):
@@ -1092,7 +1173,7 @@ def test_r4_1_every_bucket_heading_renders_at_the_nearest_blocks_level():
     ctx = TaskContext(
         mistakes=["- m"], decisions=["- d"], facts=["- f"], related=["- r"], unratified=["- u"]
     )
-    text, _ = nearest_anchored.records_block(ctx, guarded=True)
+    text, _, _ = nearest_anchored.records_block(ctx, guarded=True)
     heads = [ln for ln in text.splitlines() if ln.startswith("#")]
     assert heads[0].startswith("## Nearest anchored records")
     assert heads[1:] == [

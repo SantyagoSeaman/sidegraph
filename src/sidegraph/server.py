@@ -53,6 +53,7 @@ from .capture import (
     _clean_initiative,
     _resolves_to_live_decision,
     _session_id_fallback,
+    _unknown_support_positions,
     format_communities_sample,
     format_fact_proposal,
     format_path_prefixes,
@@ -67,6 +68,7 @@ from .capture import (
 )
 from .capture import propose_domains as _propose_domain_drafts
 from .config import (
+    CURRENT_SESSION,
     DEFAULT_GRAPH,
     UNATTRIBUTED_SESSION,
     _interrupted,
@@ -126,6 +128,7 @@ from .store import (
     VOLATILE_STALE_KEY,
     Store,
     SupersessionConflictError,
+    UnknownSupportError,
     settled_after_failure,
     settled_ratify_result,
 )
@@ -663,6 +666,8 @@ def _require_fact_reachability(store, anchors: list[dict] | None, supports: list
     if anchors:
         return
     if not _resolves_to_live_decision(store, supports):
+        if unknown := _unknown_support_positions(store, supports):
+            raise UnknownSupportError(unknown)
         raise SafeWriteError("supports", "no_live_support")
 
 
@@ -2197,7 +2202,8 @@ def _hard_cap(
     follows the body. Only a heading in ``_CUT_ORDER`` starts a section: any other ``## `` line
     (an H2 inside a record's text) belongs to the section it sits in. The trailer blocks (advice:
     how the seeds were read, what is not in the graph, the supersede hint) are never cut, and the
-    legend stays whenever a kept line carries ``[drifted]``. A trailer that alone exceeds ``cap``
+    legend paragraphs stay whenever a kept line carries their ``[drifted]``,
+    ``[file-bound]`` or ``[sent earlier]`` marker. A trailer that alone exceeds ``cap``
     is cut from its front, the last lines kept, and the note says so.
 
     ``atoms`` are rendered records that span several physical lines (a context with a newline
@@ -2251,7 +2257,11 @@ def _hard_cap(
                 if (
                     " [file-bound]" in retained
                     if part.startswith("[file-bound]")
-                    else _DRIFT_MARK in retained
+                    else (
+                        " [sent earlier] " in retained
+                        if part.startswith("[sent earlier]")
+                        else _DRIFT_MARK in retained
+                    )
                 )
             )
             or None
@@ -2357,6 +2367,7 @@ def _delivered(ctx: TaskContext, report: _CapReport) -> TaskContext:
     return dataclasses.replace(
         ctx,
         shown_ids=shown,
+        full_body_ids=[i for i in ctx.full_body_ids if i not in removed],
         delivery_placements=placements,
         emitted=max(0, ctx.emitted - len(removed)),
         degraded=max(0, ctx.degraded - len(removed & set(ctx.degraded_ids))),
@@ -2406,6 +2417,7 @@ def _listing_overview(
 
 def _listing_hint(
     *,
+    key: str,
     matched: int,
     returned: int,
     cut: str | None,
@@ -2416,6 +2428,7 @@ def _listing_hint(
     echo: str | None,
     has_query: bool,
     history_hint: bool,
+    sent_earlier: int = 0,
 ) -> str | None:
     """Why a filtered answer is empty, cut, or short of a file: ``None`` only when something
     matched, nothing was left out and every file was read. ``cut`` is the bound that ended
@@ -2424,6 +2437,8 @@ def _listing_hint(
     the one place that says which and why. ``echo`` is the caller's filters, ``None`` when the
     answer had no room for them."""
     parts: list[str] = []
+    tool = "retrieve_decisions" if key == "decisions" else "list_facts"
+    read = f"Read them with {tool}(ids=[...]) (ids in omitted_ids)."
     if matched == 0:
         text = f"Nothing matched {echo or 'the filters'}."
         if has_query:
@@ -2444,7 +2459,7 @@ def _listing_hint(
             f", or raise limit (max {_LISTING_LIMIT_MAX})" if limit < _LISTING_LIMIT_MAX else ""
         )
         parts.append(
-            f"{matched - returned} more matched; limit={limit} cut the list. "
+            f"{matched - returned} more matched; limit={limit} cut the list. {read} "
             f"Narrow with files=[...] or query=...{raise_it}."
         )
     elif cut == "budget":
@@ -2454,7 +2469,7 @@ def _listing_hint(
             else ""
         )
         parts.append(
-            f"{matched - returned} more matched; the character budget cut the list. "
+            f"{matched - returned} more matched; the character budget cut the list. {read} "
             f"Narrow with files=[...] or query=...{raise_it}."
         )
     if unresolved:
@@ -2462,6 +2477,11 @@ def _listing_hint(
         if unlisted:
             text += f" {unlisted} more are not listed."
         parts.append(text)
+    if sent_earlier:
+        parts.append(
+            f"{sent_earlier} records were sent to you earlier in this session and are shown "
+            "as rows with sent_earlier; read one again with retrieve_decisions(ids=[...])."
+        )
     return " ".join(parts) or None
 
 
@@ -2478,7 +2498,43 @@ def _decision_listing(
     limit: int = 25,
     budget_chars: int = 24000,
     borrowed_from: Path | None = None,
+    sent: frozenset[str] = frozenset(),
+    include_provenance: bool = False,
 ) -> str:
+    """The listing text without the internal full-body delivery evidence."""
+    return _decision_listing_result(
+        store,
+        reader,
+        include_superseded=include_superseded,
+        status=status,
+        kind=kind,
+        files=files,
+        query=query,
+        ids=ids,
+        limit=limit,
+        budget_chars=budget_chars,
+        borrowed_from=borrowed_from,
+        sent=sent,
+        include_provenance=include_provenance,
+    )[0]
+
+
+def _decision_listing_result(
+    store,
+    reader,
+    *,
+    include_superseded: bool = False,
+    status: str | list[str] | None = None,
+    kind: str | list[str] | None = None,
+    files: list[str] | None = None,
+    query: str | None = None,
+    ids: list[str] | None = None,
+    limit: int = 25,
+    budget_chars: int = 24000,
+    borrowed_from: Path | None = None,
+    sent: frozenset[str] = frozenset(),
+    include_provenance: bool = False,
+) -> tuple[str, list[str]]:
     """The text ``retrieve_decisions`` sends: an overview, or, with a narrowing filter, full
     records. The length of the text never exceeds the clamped ``budget_chars``.
 
@@ -2498,7 +2554,7 @@ def _decision_listing(
     terms = (query or "").lower().split()
     everything = _retrieve_decisions_impl(store, include_superseded=True)
     if not (statuses or kinds or wanted_files or wanted_ids or terms):
-        return _listing_overview(everything, include_superseded, limit, budget)
+        return _listing_overview(everything, include_superseded, limit, budget), []
 
     pool = everything
     if wanted_ids:
@@ -2532,6 +2588,15 @@ def _decision_listing(
     # Mistakes first, then newest first; the sort is stable, so the rank keeps the recency order.
     pool.sort(key=_newest_first, reverse=True)
     pool.sort(key=lambda d: _MISTAKE_RANK.get(d["kind"], 2))
+    if not wanted_ids:
+        pool = [
+            {key: d[key] for key in _ROW_KEYS} | {"sent_earlier": True}
+            if d["id"] in sent and d["status"] != "proposed"
+            else d
+            for d in pool
+        ]
+    if not include_provenance:
+        pool = [{k: v for k, v in d.items() if k != "provenance"} for d in pool]
     echo = ", ".join(
         f"{name}={_clip(value)}"
         for name, value in (
@@ -2545,7 +2610,8 @@ def _decision_listing(
     )
     # Unreadable files are the whole story of an empty answer only when no file could be read.
     history_hint = history_hidden and not (wanted_files and len(unresolved) == len(wanted_files))
-    return _bounded_records(
+    returned: list[dict] = []
+    text = _bounded_records(
         pool,
         key="decisions",
         lead={"overview": False},
@@ -2557,7 +2623,11 @@ def _decision_listing(
         files_given=bool(wanted_files),
         has_query=bool(terms),
         history_hint=history_hint,
+        returned=returned,
     )
+    return text, [
+        d["id"] for d in returned if d["status"] != "proposed" and not d.get("sent_earlier")
+    ]
 
 
 def _bounded_records(
@@ -2573,6 +2643,7 @@ def _bounded_records(
     files_given: bool,
     has_query: bool,
     history_hint: bool,
+    returned: list[dict] | None = None,
 ) -> str:
     """The filtered answer both record listings share: ``pool`` (already sorted) cut at ``limit``
     or ``budget``, never mid-record, with the counts, the hint and the unresolved files. The
@@ -2609,10 +2680,14 @@ def _bounded_records(
                 **middle,
                 key: decisions,
             }
+            if k < matched:
+                out["omitted_ids"] = []
+                out["omitted_ids_unlisted"] = matched - k
             if files_given:
                 out["unresolved_files"] = shown
                 out["unresolved_omitted"] = len(unresolved) - len(shown)
             out["hint"] = _listing_hint(
+                key=key,
                 matched=matched,
                 returned=k,
                 cut=ended_by(k),
@@ -2623,11 +2698,38 @@ def _bounded_records(
                 echo=echo if echoed else None,
                 has_query=has_query,
                 history_hint=history_hint,
+                sent_earlier=sum(bool(d.get("sent_earlier")) for d in pool[:k]),
             )
             return out
 
+        if matched <= limit:
+            complete = _dump(answer(matched, pool))
+            if len(complete) <= budget:
+                if returned is not None:
+                    returned[:] = pool
+                return complete
+
         taken = _take(min(matched, limit), budget, size_of, lambda k: len(_dump(answer(k, []))))
-        return _dump(answer(taken, pool[:taken]))
+        if returned is not None:
+            returned[:] = pool[:taken]
+        out = answer(taken, pool[:taken])
+        if taken < matched:
+            room = budget - len(_dump(out))
+            for record in pool[taken:]:
+                cost = len(_dump(record["id"])) + 1
+                if cost > room:
+                    break
+                out["omitted_ids"].append(record["id"])
+                room -= cost
+            unlisted = matched - taken - len(out["omitted_ids"])
+            if unlisted:
+                out["omitted_ids_unlisted"] = unlisted
+            else:
+                del out["omitted_ids_unlisted"]
+            while len(_dump(out)) > budget and out["omitted_ids"]:
+                out["omitted_ids"].pop()
+                out["omitted_ids_unlisted"] = matched - taken - len(out["omitted_ids"])
+        return _dump(out)
 
     # The ceiling is the contract: when the caller's own text leaves no room, drop the echo of
     # the filters first, then the unresolved entries, last one first.
@@ -2651,14 +2753,21 @@ def retrieve_decisions(
     ids: list[str] | None = None,
     limit: int = 25,
     budget_chars: int = 24000,
+    include_provenance: bool = False,
 ) -> ToolResult:
     """List decisions from the store, bounded. The answer is one JSON object in one text block.
 
     With no narrowing filter you get an overview: the total, counts by status and kind, and the
     newest records as compact rows. Pass a filter to get full records, gotchas and lessons
-    first, then newest first, cut at ``limit`` (default 25, max 100) or ``budget_chars``
+    first, then newest first. On Codex, a record already sent in full to the calling agent
+    in this session becomes a compact row with ``sent_earlier: true``; ``ids=[...]`` always
+    requests full records. Proposed records never become sent-earlier rows. Answers are
+    cut at ``limit`` (default 25, max 100) or ``budget_chars``
     (default 24000, max 40000), whichever comes first; ``hint`` says what cut the list or why
     it is empty.
+    Full records leave out ``provenance`` (capture source, session, commit); pass
+    ``include_provenance=True`` for it on full records. Already-sent rows stay compact;
+    use ``ids=[...]`` with that flag for the full record.
 
     Filters combine with AND, and an empty one is ignored. ``status`` and ``kind`` take one
     value or a list (status: proposed, accepted, superseded, rejected, deprecated; kind: adr,
@@ -2674,19 +2783,30 @@ def retrieve_decisions(
     # JSON a second time as `structuredContent` (design D1; the smoke test reads the wire).
     # The code graph is read only when a path has to be matched against it.
     reader, borrowed_from = _synced_reader() if _listing_texts(files) else (None, None)
-    text = _decision_listing(
-        _get_store(),
-        reader,
-        include_superseded=include_superseded,
-        status=status,
-        kind=kind,
-        files=files,
-        query=query,
-        ids=ids,
-        limit=limit,
-        budget_chars=budget_chars,
-        borrowed_from=borrowed_from,
-    )
+    store = _get_store()
+    prefix = _sent_prefix(store)
+    sent, claims = _sent_ids(store, prefix) if prefix is not None else (frozenset(), False)
+    for _attempt in range(2):
+        text, full_ids = _decision_listing_result(
+            store,
+            reader,
+            include_superseded=include_superseded,
+            status=status,
+            kind=kind,
+            files=files,
+            query=query,
+            ids=ids,
+            limit=limit,
+            budget_chars=budget_chars,
+            borrowed_from=borrowed_from,
+            sent=sent,
+            include_provenance=include_provenance,
+        )
+        if not claims or _claim_sent(store, prefix, [i for i in full_ids if i not in sent]):
+            break
+        sent, claims = frozenset(), False
+    # An overview (no narrowing filter) is a glance at the store, not a question: no row.
+    _journal_listing(store, "retrieve_decisions", text, "decisions")
     return ToolResult(content=text)
 
 
@@ -2821,8 +2941,9 @@ def list_facts(
     """
     # Read-only: the graph is read without the lazy sync that `retrieve_decisions` runs.
     reader = _load_reader() if _listing_texts(files) else None
+    store = _get_store()
     text = _fact_listing(
-        _get_store(),
+        store,
         reader,
         include_superseded=include_superseded,
         status=status,
@@ -2834,6 +2955,17 @@ def list_facts(
         budget_chars=budget_chars,
         borrowed_from=None,
     )
+    # No overview mode here: a call counts as asking only when it names a filter.
+    named = False
+    with contextlib.suppress(Exception):
+        named = bool(
+            _listing_values(status, DecisionStatus, "status")
+            or _listing_texts(files)
+            or _listing_texts(ids)
+            or _listing_texts(supports)
+            or (query or "").split()
+        )
+    _journal_listing(store, "list_facts", text, "facts", counted=named)
     return ToolResult(content=text)
 
 
@@ -2885,8 +3017,80 @@ def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
     }
 
 
-@mcp.tool(annotations=_READ_ONLY)
-def find_entity(name: str, file_path: str | None = None) -> dict:
+def _find_entity_listing(store: Store, name: str, file_path: str | None, budget_chars: int) -> str:
+    """Bound the wire lookup, preserving identities and whole binding/candidate rows."""
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
+    full = _find_entity_impl(store, name, file_path)
+    clipped: list[str] = []
+    fields = [(full, "canonical_name"), (full, "last_seen_node_id")]
+    if full.get("descriptor"):
+        fields += [(full["descriptor"], "name"), (full["descriptor"], "file_path")]
+    for candidate in full.get("candidates", []):
+        fields += [(candidate, "canonical_name"), (candidate, "file_path")]
+    for target, field in fields:
+        value = target.get(field)
+        if isinstance(value, str) and _width(value) > _IDENTITY_WIDTH:
+            target[field] = _clipped(value, _IDENTITY_WIDTH)
+            if field not in clipped:
+                clipped.append(field)
+    key = "bindings" if full.get("found") else "candidates"
+    if key not in full:
+        return _dump(full)
+    rows = full[key]
+    total = len(rows)
+    omitted_key = "omitted" if key == "bindings" else "candidates_omitted"
+
+    def answer(k: int, shown: list[dict]) -> dict:
+        out = {**full, key: shown}
+        hints = []
+        if k < total:
+            out[omitted_key] = total - k
+            out["omitted_ids"] = []
+            out["omitted_ids_unlisted"] = total - k
+            if key == "bindings":
+                hints.append(
+                    f"{total - k} more bindings not shown. get_entity_history(entity_id=...) "
+                    "lists every record anchored here; read one with retrieve_decisions(ids=[...]) "
+                    "or list_facts(ids=[...]) (ids in omitted_ids)."
+                )
+            else:
+                hints.append(
+                    f"{total - k} more candidates not shown; pass file_path to choose one."
+                )
+            if budget < _LISTING_BUDGET_MAX:
+                hints.append(f"Raise budget_chars (max {_LISTING_BUDGET_MAX}).")
+        hints += [f"Bounded: the entity {field} was clipped." for field in clipped]
+        if hints:
+            out["hint"] = " ".join(hints)
+        return out
+
+    # A partial answer's hint can be larger than the complete envelope.
+    complete = _dump(answer(total, rows))
+    if len(complete) <= budget:
+        return complete
+
+    taken = _take(total, budget, lambda i: len(_dump(rows[i])), lambda k: len(_dump(answer(k, []))))
+    out = answer(taken, rows[:taken])
+    if taken < total:
+        remaining = [row["record_id" if key == "bindings" else "entity_id"] for row in rows[taken:]]
+        room = budget - len(_dump(out))
+        for record_id in remaining:
+            cost = len(_dump(record_id)) + 1
+            if cost > room:
+                break
+            out["omitted_ids"].append(record_id)
+            room -= cost
+        out["omitted_ids_unlisted"] = len(remaining) - len(out["omitted_ids"])
+        if not out["omitted_ids_unlisted"]:
+            del out["omitted_ids_unlisted"]
+        while len(_dump(out)) > budget and out["omitted_ids"]:
+            out["omitted_ids"].pop()
+            out["omitted_ids_unlisted"] = len(remaining) - len(out["omitted_ids"])
+    return _dump(out)
+
+
+@mcp.tool(annotations=_READ_ONLY, output_schema=None)
+def find_entity(name: str, file_path: str | None = None, budget_chars: int = 24000) -> ToolResult:
     """Look up an entity_id by name (+ optional file_path) — the missing link that lets an
     agent chain ``add_decision``/``propose_decisions`` output into ``get_entity_history``
     without reading the store directly.
@@ -2902,9 +3106,16 @@ def find_entity(name: str, file_path: str | None = None) -> dict:
     exists in neither table) when resolved to exactly one entity;
     ``{"found": False}`` when nothing matches; or
     ``{"found": False, "candidates": [{"entity_id", "canonical_name", "file_path"}, ...]}``
-    when the name alone is ambiguous.
+    when the name alone is ambiguous. One text block, bounded by ``budget_chars``
+    (default 24000, maximum 40000); ``omitted_ids`` names the remainder, and
+    ``omitted_ids_unlisted`` counts ids that did not fit. Oversized entity text is clipped
+    with an explicit hint; identity and record ids are preserved.
     """
-    return _find_entity_impl(_get_store(), name, file_path)
+    store = _get_store()
+    answer = _find_entity_listing(store, name, file_path, budget_chars)
+    # It names a thing, so it is asking; it returns no record bodies, so nothing was delivered.
+    _record_listing(store, "find_entity", [])
+    return ToolResult(content=answer)
 
 
 def _get_entity_history_impl(store: Store, entity_id: str) -> list[dict]:
@@ -3098,9 +3309,11 @@ def get_entity_history(
     locally with ``Store.get_decision(id)`` and an omitted fact with ``Store.get_fact(id)``.
     Explicit-id MCP reads obey the proposal-surfacing policy; ``status`` narrows history.
     """
+    store = _get_store()
     text = _entity_history_listing(
-        _get_store(), entity_id, status=status, limit=limit, budget_chars=budget_chars
+        store, entity_id, status=status, limit=limit, budget_chars=budget_chars
     )
+    _journal_listing(store, "get_entity_history", text, "records")
     return ToolResult(content=text)
 
 
@@ -3275,6 +3488,8 @@ def _not_in_graph_block(
         lines.append(
             f"{n} of {len(seeds)} {noun} {verb} not in the code graph: {_listed(only_here)}. "
             f"{_BORROWED_SENTENCE}"
+            " Rebuilding the main checkout's graph cannot add them: build a graph in this "
+            f"worktree by running {GRAPH_REBUILD} from its root, and later calls read it."
         )
     if elsewhere and root is not None:
         n = len(elsewhere)
@@ -3290,7 +3505,9 @@ def _not_in_graph_block(
         lines.append(
             f"{n} of {len(seeds)} {noun} {verb} only in another checkout of this repository, "
             f"not in the one this server reads ({root}): {named}. The code graph this server "
-            f"reads (built from {graph_root}) does not hold {pron}."
+            f"reads (built from {graph_root}) does not hold {pron}. "
+            "Rebuilding that graph cannot add the missing files: start the session in that "
+            "checkout to read its graph and records."
         )
     if not_here and root is not None:
         n = len(not_here)
@@ -3375,6 +3592,10 @@ def _no_graph_block(store) -> str:
 # `TaskContext.render()` when nothing was found. The "Why this is empty" block is for exactly
 # this text; `test_retrieval_seeds.py` pins the literal on the render side.
 _NO_CONTEXT = "No context found."
+_NEAREST_ONLY_LEAD = (
+    "No record is anchored to the files you named; "
+    "the records of the nearest anchored files follow."
+)
 
 # "Why this is empty": at most this many accepted domains are named.
 _EMPTY_DOMAINS_LISTED = 12
@@ -3554,95 +3775,142 @@ def _get_task_context_impl(
             ),
         ]
     descriptor_lookup = store.descriptor_lookup()
-    ctx = _retrieve(
-        exact, store, reader, budget, guessed=guessed, descriptor_lookup=descriptor_lookup
-    )
-    body, legend, hint = ctx.render_parts()
-    text = "\n\n".join(part for part in (body, legend, hint) if part)
-    # The nearest anchored files (spec D10-D12): a sentence per file seed that has no record of
-    # its own, and, when the main answer has no memory at all, the records of those files. Each
-    # step has its own try/except: advice must never cost the answer, nor each other.
-    near = nearest_anchored.Plan()
-    with contextlib.suppress(Exception):
-        if reader is not None and seeds:
-            near = nearest_anchored.plan(seeds, ladder, store, reader, shown_ids=ctx.shown_ids)
-    near_ctx: TaskContext | None = None
-    recorded = ctx
-    with contextlib.suppress(Exception):
-        if near.files and not nearest_anchored.has_memory(ctx):
-            second = _retrieve(
-                [Seed(file_path=f) for f in near.files],
-                store,
-                reader,
-                budget,
-                descriptor_lookup=descriptor_lookup,
-            )
-            merged = nearest_anchored.combine(ctx, second)
-            near_ctx, recorded = second, merged
-    # Each block has its own try/except: advice about the seeds must never cost the answer it
-    # follows, nor each other.
-    blocks: list[str] = []
-    with contextlib.suppress(Exception):
-        if ladder is not None:
-            blocks.append(seed_ladder.read_block(ladder.notes))
-    with contextlib.suppress(Exception):
-        if reader is not None:
-            worktree = worktree_of()
-            blocks.append(
-                _not_in_graph_block(
+    prefix = _sent_prefix(store)
+    sent, claims = _sent_ids(store, prefix) if prefix is not None else (frozenset(), False)
+    for _attempt in range(2):
+        ctx = _retrieve(
+            exact,
+            store,
+            reader,
+            budget,
+            guessed=guessed,
+            descriptor_lookup=descriptor_lookup,
+            already_sent=sent,
+        )
+        body, legend, hint = ctx.render_parts(include_structure=False)
+        text = "\n\n".join(part for part in (body, legend, hint) if part)
+        # The nearest anchored files (spec D10-D12): a sentence per file seed that has no record of
+        # its own, and, when the main answer has no memory at all, the records of those files. Each
+        # step has its own try/except: advice must never cost the answer, nor each other.
+        near = nearest_anchored.Plan()
+        with contextlib.suppress(Exception):
+            if reader is not None and seeds:
+                near = nearest_anchored.plan(seeds, ladder, store, reader, shown_ids=ctx.shown_ids)
+        near_ctx: TaskContext | None = None
+        recorded = ctx
+        with contextlib.suppress(Exception):
+            if near.files and not nearest_anchored.has_memory(ctx):
+                second = _retrieve(
+                    [Seed(file_path=f) for f in near.files],
+                    store,
                     reader,
-                    files,
-                    entities,
-                    borrowed_from,
-                    worktree,
-                    ladder=ladder,
-                    root_of=root_once,
-                    worktrees_of=worktrees_once,
+                    budget,
+                    descriptor_lookup=descriptor_lookup,
+                    already_sent=sent,
                 )
+                merged = nearest_anchored.combine(ctx, second)
+                near_ctx, recorded = second, merged
+        ids_shown = False
+        near_records = ""
+        near_legend = None
+        with contextlib.suppress(Exception):
+            if near_ctx is not None:
+                near_records, ids_shown, near_legend = nearest_anchored.records_block(
+                    near_ctx, guarded=MEMORY_GUARD_LINE in text
+                )
+        nearest_only = text == _NO_CONTEXT and near_ctx is not None and bool(near_records)
+        if nearest_only:
+            body = _NEAREST_ONLY_LEAD + body[len(_NO_CONTEXT) :]
+        # Each block has its own try/except: advice about the seeds must never cost the answer it
+        # follows, nor each other.
+        blocks: list[str] = []
+        with contextlib.suppress(Exception):
+            if ladder is not None:
+                blocks.append(seed_ladder.read_block(ladder.notes))
+        with contextlib.suppress(Exception):
+            if reader is not None:
+                worktree = worktree_of()
+                blocks.append(
+                    _not_in_graph_block(
+                        reader,
+                        files,
+                        entities,
+                        borrowed_from,
+                        worktree,
+                        ladder=ladder,
+                        root_of=root_once,
+                        worktrees_of=worktrees_once,
+                    )
+                )
+            elif seeds:
+                blocks.append(_no_graph_block(store))
+        with contextlib.suppress(Exception):
+            if not seeds and text == _NO_CONTEXT:
+                blocks.append(_empty_block(store, graph_missing=reader is None))
+        near_block = empty_near_block = ""
+        with contextlib.suppress(Exception):
+            # The records of the second retrieval are known only now: a bound record it shows is
+            # not "more".
+            shown_below = near_ctx.shown_ids if near_ctx is not None else ()
+            # With the second retrieval's records taken off the count, the hard cap may still cut
+            # some of them from the text, so the count is then a floor ("at least").
+            floor = near_ctx is not None
+            if near.lines_for(shown_below, at_least=floor):
+                heading = (
+                    _EMPTY_HEADING
+                    if text == _NO_CONTEXT and not nearest_only
+                    else nearest_anchored.NEAREST_HEADING
+                )
+                lines = near.lines(shown_below, at_least=floor)
+                near_block = "\n".join([heading, *lines])
+                empty_near_block = "\n".join([_EMPTY_HEADING, *lines])
+                blocks.append(near_block)
+        # The records carried ids, so the reply ends with the line that says what to do about one
+        # that is wrong: once, at the very end, as the render puts it. The hard cap on the whole
+        # text cuts the body and keeps all of this advice.
+        # The nearest records are records, not advice: they are cut first, in place.
+        trailer = [*([hint] if hint else []), *(b for b in blocks if b)]
+        near_at = len(trailer)
+        if ids_shown:
+            trailer.append(_STANDING_SUPERSEDE_HINT)
+        empty_trailer = [
+            empty_near_block if nearest_only and b == near_block else b
+            for b in (trailer[:-1] if ids_shown else trailer)
+        ]
+        report = _CapReport()
+        answer = _hard_cap(
+            body,
+            trailer,
+            _CONTEXT_CUT_ADVICE,
+            legend="\n\n".join(dict.fromkeys(p for p in (legend or "", near_legend or "") if p))
+            or None,
+            near=near_records,
+            near_at=near_at,
+            atoms=recorded.line_ids,
+            report=report,
+        )
+        if (
+            near_records
+            and near_ctx is not None
+            and not any(unit in near_ctx.line_ids for unit in report.kept)
+        ):
+            # Do not retry the near block: the shorter empty lead could make a record fit.
+            recorded = ctx
+            answer = _hard_cap(
+                _NO_CONTEXT if nearest_only else body,
+                empty_trailer,
+                _CONTEXT_CUT_ADVICE,
+                legend=legend,
+                atoms=ctx.line_ids,
+                report=report,
             )
-        elif seeds:
-            blocks.append(_no_graph_block(store))
-    with contextlib.suppress(Exception):
-        if not seeds and text == _NO_CONTEXT:
-            blocks.append(_empty_block(store, graph_missing=reader is None))
-    with contextlib.suppress(Exception):
-        # The records of the second retrieval are known only now: a bound record it shows is
-        # not "more".
-        shown_below = near_ctx.shown_ids if near_ctx is not None else ()
-        # With the second retrieval's records taken off the count, the hard cap may still cut
-        # some of them from the text, so the count is then a floor ("at least").
-        floor = near_ctx is not None
-        if near.lines_for(shown_below, at_least=floor):
-            heading = _EMPTY_HEADING if text == _NO_CONTEXT else nearest_anchored.NEAREST_HEADING
-            blocks.append("\n".join([heading, *near.lines(shown_below, at_least=floor)]))
-    ids_shown = False
-    near_records = ""
-    with contextlib.suppress(Exception):
-        if near_ctx is not None:
-            near_records, ids_shown = nearest_anchored.records_block(
-                near_ctx, guarded=MEMORY_GUARD_LINE in text
-            )
-    # The records carried ids, so the reply ends with the line that says what to do about one
-    # that is wrong: once, at the very end, as the render puts it. The hard cap on the whole
-    # text cuts the body and keeps all of this advice.
-    # The nearest records are records, not advice: they are cut first, in place.
-    trailer = [*([hint] if hint else []), *(b for b in blocks if b)]
-    near_at = len(trailer)
-    if ids_shown:
-        trailer.append(_STANDING_SUPERSEDE_HINT)
-    report = _CapReport()
-    answer = _hard_cap(
-        body,
-        trailer,
-        _CONTEXT_CUT_ADVICE,
-        legend=legend,
-        near=near_records,
-        near_at=near_at,
-        atoms=recorded.line_ids,
-        report=report,
-    )
-    # Telemetry follows the text: a record the hard cap removed was never shown.
-    delivered = _delivered(recorded, report)
+        # Telemetry follows the text: a record the hard cap removed was never shown.
+        delivered = _delivered(recorded, report)
+        if not claims or _claim_sent(
+            store, prefix, [i for i in delivered.full_body_ids if i not in sent]
+        ):
+            break
+        sent, claims = frozenset(), False
     _record(
         store,
         delivered.shown_ids,
@@ -3660,10 +3928,8 @@ def _get_task_context_impl(
                     for note in ladder.notes
                 )
             ),
-            structure=None if report.cut and recorded.structure else bool(recorded.structure),
-            reason="structure_cut"
-            if report.cut and recorded.structure
-            else ("graph_unavailable" if reader is None else None),
+            structure=False,
+            reason="graph_unavailable" if reader is None else None,
         ),
     )
     return answer
@@ -3761,20 +4027,32 @@ def _query_decisions_impl(
     ``ctx.shown_ids`` for telemetry before rendering with ``include_structure=False``.
     """
     seeds = _seeds_from_args(files, entities)
-    ctx = _retrieve(
-        seeds, store, reader, RetrievalBudget(memory_chars=min(budget_chars, _LISTING_BUDGET_MAX))
-    )
-    body, legend, hint = ctx.render_parts(include_structure=False)
-    report = _CapReport()
-    answer = _hard_cap(
-        body,
-        [hint] if hint else [],
-        _BUDGET_CUT_ADVICE,
-        legend=legend,
-        atoms=ctx.line_ids,
-        report=report,
-    )
-    delivered = _delivered(ctx, report)  # telemetry follows the text, not the render
+    prefix = _sent_prefix(store)
+    sent, claims = _sent_ids(store, prefix) if prefix is not None else (frozenset(), False)
+    for _attempt in range(2):
+        ctx = _retrieve(
+            seeds,
+            store,
+            reader,
+            RetrievalBudget(memory_chars=min(budget_chars, _LISTING_BUDGET_MAX)),
+            already_sent=sent,
+        )
+        body, legend, hint = ctx.render_parts(include_structure=False)
+        report = _CapReport()
+        answer = _hard_cap(
+            body,
+            [hint] if hint else [],
+            _BUDGET_CUT_ADVICE,
+            legend=legend,
+            atoms=ctx.line_ids,
+            report=report,
+        )
+        delivered = _delivered(ctx, report)  # telemetry follows the text, not the render
+        if not claims or _claim_sent(
+            store, prefix, [i for i in delivered.full_body_ids if i not in sent]
+        ):
+            break
+        sent, claims = frozenset(), False
     _record(
         store,
         delivered.shown_ids,
@@ -3801,8 +4079,11 @@ def get_task_context(
     """Task-aware context for the files/entities you're working on, mistakes ranked first.
 
     ``files`` are repo-relative paths; ``entities`` are ``{"name": ..., "file_path": ...}``
-    refs. Returns a compact slice: known mistakes/gotchas, then decisions, then a structural
-    map, then related decisions. Best-effort — degrades if the graph or store is absent.
+    refs. Returns a compact slice: known mistakes/gotchas, then decisions, facts, related
+    decisions and unratified proposals. The structural map is not included: call
+    ``query_structure`` with the same seeds for it. ``structure_budget`` sets how far the
+    graph walk that finds related records reaches. Best-effort — degrades if the graph or
+    store is absent.
 
     Also accepted: ``paths`` (the same as ``files``) and ``seeds``, a list or one string. A seed
     with a ``/``, or ending in a known file extension (``.py``, ``.toml``), is read as a file;
@@ -3813,7 +4094,7 @@ def get_task_context(
     statistics only; never affects what is returned.
 
     Each budget is capped at 40000 (no floor) and the whole text never exceeds 40000 characters:
-    over it, the nearest-anchored records, the structural map, related and then the records are
+    over it, the nearest-anchored records, related and then the records are
     cut, a closing note names what was cut, and the advice blocks are kept.
     """
     return _get_task_context_with_sync(files, entities, structure_budget, memory_budget, intent)
@@ -3825,8 +4106,8 @@ def query_structure(
     entities: list[dict] | None = None,
     budget_chars: int = 4000,
 ) -> str:
-    """The structural-map half of ``get_task_context`` alone (§5 FR8.2 thin tool) — a cheap
-    follow-up once you already have decision memory and just need the code map.
+    """The code map around the given seeds — a cheap follow-up once you already have
+    decision memory and just need the code map.
 
     Same ``files``/``entities`` shape as ``get_task_context``, and the same ``paths`` and
     ``seeds`` aliases. Never crashes: with no Graphify graph present, returns an explanatory
@@ -3844,8 +4125,7 @@ def query_decisions(
     budget_chars: int = 6000,
     intent: str | None = None,
 ) -> str:
-    """The decision-memory half of ``get_task_context`` alone (§5 FR8.2 thin tool):
-    mistakes, decisions, related — no structural map.
+    """Task-scoped memory with exact seeds: mistakes, decisions, facts and related records.
 
     Same ``files``/``entities`` shape as ``get_task_context``, and the same ``paths`` and
     ``seeds`` aliases. Best-effort like every other tool here: degrades gracefully with no
@@ -3929,6 +4209,41 @@ def _telemetry_enabled() -> bool:
 _SESSION_KEY_TTL = timedelta(hours=12)
 
 
+def _sent_prefix(store: Store) -> str | None:
+    """Per-agent delivery key only for an announced, exactly known caller (design D2)."""
+    hint = CURRENT_SESSION.get()
+    if (
+        hint is None
+        or not isinstance(hint.session_id, str)
+        or not hint.session_id
+        or not hint.agent_exact
+    ):
+        return None
+    return f"mcp_sent:{hint.session_id}:{hint.agent or '-'}:"
+
+
+def _sent_ids(store: Store, prefix: str) -> tuple[frozenset[str], bool]:
+    """Read delivery working state; a failed read disables claims for this answer."""
+    try:
+        return frozenset(key[len(prefix) :] for key in store.meta_with_prefix(prefix)), True
+    except Exception:
+        return frozenset(), False
+
+
+def _claim_sent(store: Store, prefix: str | None, ids: Iterable[str]) -> bool:
+    """Claim full bodies after the cap, independently of telemetry (design D3)."""
+    ids = tuple(ids)
+    if not ids:
+        return True
+    try:
+        store.claim_meta_many(
+            (f"{prefix}{record_id}" for record_id in ids), datetime.now(UTC).isoformat()
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _session_key(store: Store) -> str | None:
     """The current host session id, or None when there is no trustworthy one.
 
@@ -3998,16 +4313,23 @@ def _normalized_seeds(store: Store, seeds: list[str]) -> list[str]:
 # literal (it imports nothing from here) and a test pins the two together.
 DRILL_DOWN_INTENT = "drill_down"
 
+# Every label a server-written render row carries when its lookup applied no relevance budget:
+# `drill_down` and the listing tools that name what they want (stats-cited-back-and-asked
+# design, D2). `stats/model.py` mirrors the set and a test pins the two together.
+UNBUDGETED_INTENTS: frozenset[str] = frozenset(
+    {DRILL_DOWN_INTENT, "retrieve_decisions", "list_facts", "find_entity", "get_entity_history"}
+)
+
 
 def _caller_intent(intent: str | None) -> str | None:
-    """The label a budgeted lookup's caller passed, with the reserved one removed.
+    """The label a budgeted lookup's caller passed, with the reserved ones removed.
 
-    ``DRILL_DOWN_INTENT`` tells the report a row applied no relevance budget. A caller that
-    passed it to ``get_task_context`` would have that lookup's real budget counts read as no
-    budget at all, so the label is not recorded for a caller; every other label passes through
-    unchanged.
+    Each label in ``UNBUDGETED_INTENTS`` tells the report a row applied no relevance budget. A
+    caller that passed one to ``get_task_context`` would have that lookup's real budget counts
+    read as no budget at all, so the label is not recorded for a caller; every other label
+    passes through unchanged.
     """
-    if intent is not None and intent.strip() == DRILL_DOWN_INTENT:
+    if intent is not None and intent.strip() in UNBUDGETED_INTENTS:
         return None
     return intent
 
@@ -4020,9 +4342,13 @@ def _record(
     ctx: TaskContext | None = None,
     intent: str | None = None,
     delivery: delivery_ledger.Delivery | None = None,
+    counters: bool = True,
 ) -> None:
     """Best-effort telemetry. Swallows everything: a retrieval that failed because a
     counter could not be written would be strictly worse than no counters (D9).
+
+    ``counters=False`` skips the cumulative counters and the show/seed journal and writes only
+    the render row, for the listing lookups that must not mark records as surfaced.
 
     Seeds are normalized ONCE, up front, so the aggregate `retrieval_seeds` counter and the
     `retrieval_events` journal agree on the same key shape for the SAME call (fix-wave
@@ -4049,8 +4375,9 @@ def _record(
     normalized_seeds = seeds
     with contextlib.suppress(Exception):
         normalized_seeds = _normalized_seeds(store, seeds)
-    with contextlib.suppress(Exception):
-        store.record_retrieval(record_ids, normalized_seeds)
+    if counters:
+        with contextlib.suppress(Exception):
+            store.record_retrieval(record_ids, normalized_seeds)
     # Sampled ONCE for this call and passed to both journal writes. The key is a shared `meta`
     # row that a `SessionStart` overwrites, so reading it once per write let a start landing
     # between them stamp one call's show rows and render row with two different sessions, which
@@ -4067,14 +4394,15 @@ def _record(
     # One timestamp for the whole call, shared by its show rows and its render row, so stats
     # counts an unattributed call once however many rows it wrote.
     at = datetime.now(UTC).isoformat()
-    with contextlib.suppress(Exception):
-        shows = [
-            (record_id, path)
-            for record_id in dict.fromkeys(record_ids)
-            for path in _anchor_paths(store, record_id)
-        ]
-        journal_seeds = [s for s in normalized_seeds if not s.startswith("domain:")]
-        store.record_retrieval_events(session_id, journal_seeds, shows, at=at)
+    if counters:
+        with contextlib.suppress(Exception):
+            shows = [
+                (record_id, path)
+                for record_id in dict.fromkeys(record_ids)
+                for path in _anchor_paths(store, record_id)
+            ]
+            journal_seeds = [s for s in normalized_seeds if not s.startswith("domain:")]
+            store.record_retrieval_events(session_id, journal_seeds, shows, at=at)
     # Render accounting (2026-09-18-usage-stats-design.md, D5). Its own suppress, after the
     # two writes above, so a failure here costs only this journal — and only when a
     # TaskContext was in hand, so a caller with no render to account for writes no row.
@@ -4109,6 +4437,38 @@ def _record(
                     session_id=None if session_id == UNATTRIBUTED_SESSION else session_id
                 )
             )
+
+
+def _record_listing(store: Store, tool: str, ids: list[str]) -> None:
+    """Journal one counted listing call as a render row under the tool's reserved intent.
+
+    ``ids`` are the records the call returned in full; the row feeds neither cumulative counter
+    nor the show/seed journal (stats-cited-back-and-asked design, D2/D3). Never raises, and does
+    nothing at all when telemetry is off.
+    """
+    if not _telemetry_enabled():
+        return
+    with contextlib.suppress(Exception):
+        ctx = TaskContext(shown_ids=ids, selected=len(ids), emitted=len(ids))
+        _record(store, ids, [], ctx=ctx, intent=tool, counters=False)
+
+
+def _journal_listing(
+    store: Store, tool: str, text: str, field: str, *, counted: bool = True
+) -> None:
+    """``_record_listing`` for a listing tool's answer text: the full records under ``field``.
+
+    An overview answer and a pointer row (``sent_earlier``) are not records delivered in full.
+    The parse happens inside the suppress, so a surprise in the answer can never fail the tool.
+    """
+    if not counted or not _telemetry_enabled():
+        return
+    with contextlib.suppress(Exception):
+        parsed = json.loads(text)
+        if parsed.get("overview"):
+            return
+        ids = [row["id"] for row in parsed.get(field, []) if not row.get("sent_earlier")]
+        _record_listing(store, tool, ids)
 
 
 def _propose_decisions_impl(
@@ -5324,36 +5684,44 @@ def _domain_listing(
             return f"No domains matched filters: {', '.join(filters)}."
         if not omitted:
             return None
+        read = "Read them with list_domains(ids=[...]) (ids in omitted_ids)."
         if returned < min(matched, limit):
-            next_id = rows[returned]["id"]
-            fallback = (
-                f"Use local Python Store.get_domain({_dump(next_id)}) on the configured store "
-                "for the full domain, including seed_anchors, in either store layout."
-                if len(_dump(next_id)) <= 128
-                else "Use local Python Store.iter_domains() on the configured store "
-                "for full domains."
-            )
+            fallback = ""
+            if returned == 0:
+                next_id = rows[returned]["id"]
+                fallback = (
+                    f"Use local Python Store.get_domain({_dump(next_id)}) on the configured store "
+                    "for the full domain, including seed_anchors, in either store layout."
+                    if len(_dump(next_id)) <= 128
+                    else "Use local Python Store.iter_domains() on the configured store "
+                    "for full domains."
+                )
             first = (
                 "The first matching domain does not fit"
                 if returned == 0
                 else "The character budget cut the list"
             )
             return (
-                f"{first} at budget_chars={budget}; use status, query or ids to narrow. {fallback}"
+                f"{first} at budget_chars={budget}. {read} Use status, query or ids to narrow."
+                + (f" {fallback}" if returned == 0 else "")
             )
         advice = "Use status, query or ids to narrow"
         if limit < _LISTING_LIMIT_MAX:
             advice += f" or raise limit (max {_LISTING_LIMIT_MAX})"
-        return f"limit={limit} cut the list; {advice}."
+        return f"limit={limit} cut the list. {read} {advice}."
 
     def envelope(returned: int, domains: list[dict]) -> dict:
-        return {
+        out = {
             "matched": matched,
             "returned": returned,
             "omitted": matched - returned,
             "domains": domains,
-            "hint": hint_for(returned),
         }
+        if returned < matched:
+            out["omitted_ids"] = []
+            out["omitted_ids_unlisted"] = matched - returned
+        out["hint"] = hint_for(returned)
+        return out
 
     # Serialize each eligible row once. Evaluate every eligible prefix against its own
     # envelope and hint while adding known row payload widths to the exact empty-envelope size.
@@ -5366,7 +5734,24 @@ def _domain_listing(
             rows_size += len(serialized_rows[count - 1]) + (1 if count > 1 else 0)
         if len(_dump(envelope(count, []))) + rows_size <= budget:
             selected = count
-    return _dump(envelope(selected, rows[:selected]))
+    out = envelope(selected, rows[:selected])
+    if selected < matched:
+        room = budget - len(_dump(out))
+        for row in rows[selected:]:
+            cost = len(_dump(row["id"])) + 1
+            if cost > room:
+                break
+            out["omitted_ids"].append(row["id"])
+            room -= cost
+        unlisted = matched - selected - len(out["omitted_ids"])
+        if unlisted:
+            out["omitted_ids_unlisted"] = unlisted
+        else:
+            del out["omitted_ids_unlisted"]
+        while len(_dump(out)) > budget and out["omitted_ids"]:
+            out["omitted_ids"].pop()
+            out["omitted_ids_unlisted"] = matched - selected - len(out["omitted_ids"])
+    return _dump(out)
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -5395,9 +5780,11 @@ def list_domains(
     "domains", "hint"}``. ``domains`` is an ascending-slug prefix of complete rows with
     the same ten fields as the raw projection. Counts are after filtering and before bounds;
     lineage still reflects the full store. ``member_count`` remains ``len(domain.communities)``.
-    When the character budget omits rows, the hint names the active bound, suggests filters,
-    and gives a bounded local Store.get_domain(id) fallback for the next omitted domain. A limit cut
-    suggests filters and raising ``limit`` only below 100. No output schema or structured
+    A cut lists the remainder in ``omitted_ids`` (and counts ids that do not fit in
+    ``omitted_ids_unlisted``), to read with ``list_domains(ids=[...])``. The hint names
+    the bound and suggests filters; only a zero-row budget cut gives a local
+    Store.get_domain(id) fallback. A limit cut suggests raising ``limit`` only below 100.
+    No output schema or structured
     duplicate is sent.
     """
     return ToolResult(
@@ -5910,8 +6297,45 @@ def _verify_store_impl(store: Store) -> dict:
     }
 
 
-@mcp.tool(annotations=_READ_ONLY)
-def verify_store() -> dict:
+def _verify_listing(store: Store, budget_chars: int) -> str:
+    """Count every violation, and fit whole findings in the wire response."""
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
+    full = _verify_store_impl(store)
+    rows = full["violations"]
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row["code"]] = counts.get(row["code"], 0) + 1
+    counts = dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+    total = len(rows)
+
+    def answer(k: int, violations: list[dict]) -> dict:
+        out = {"clean": full["clean"], "total": total, "counts": counts, "violations": violations}
+        if k < total:
+            out["omitted"] = total - k
+            out["hint"] = (
+                f"{total - k} more violations not shown; counts lists all of them by code. "
+                "Run sidegraph-verify --json for the full list."
+            )
+        return out
+
+    # A partial answer's hint can be larger than the complete envelope.
+    complete = _dump(answer(total, rows))
+    if len(complete) <= budget:
+        return complete
+
+    for i, row in enumerate(rows):
+        if len(_dump(answer(1, [row]))) > budget:
+            rows[i] = {**row, "detail": _clip(row["detail"]), "path": _clip(row["path"])}
+    complete = _dump(answer(total, rows))
+    if len(complete) <= budget:
+        return complete
+
+    taken = _take(total, budget, lambda i: len(_dump(rows[i])), lambda k: len(_dump(answer(k, []))))
+    return _dump(answer(taken, rows[:taken]))
+
+
+@mcp.tool(annotations=_READ_ONLY, output_schema=None)
+def verify_store(budget_chars: int = 24000) -> ToolResult:
     """Lint the decision store's canonical files against its write-path invariants — the
     MCP counterpart to ``sidegraph-verify`` (design/superpowers/specs/
     2026-07-11-ci-integrity-design.md ruling 2).
@@ -5936,10 +6360,12 @@ def verify_store() -> dict:
     ``sidegraph-verify --against <git-ref>`` on the command line instead; that layer
     needs git plumbing this MCP surface deliberately doesn't carry.
 
-    Returns ``{"clean": bool, "violations": [{"code", "path", "detail"}, ...]}`` —
-    ``violations`` is empty iff ``clean`` is ``True``.
+    Returns one JSON text block: ``clean``, ``total``, ``counts`` by violation code and
+    whole ``violations`` (``code``, ``path``, ``detail``), bounded by ``budget_chars``
+    (default 24000, maximum 40000). A cut adds ``omitted`` and a full-list CLI hint;
+    oversized detail and path fields are clipped. ``clean`` describes the entire store.
     """
-    return _verify_store_impl(_get_store())
+    return ToolResult(content=_verify_listing(_get_store(), budget_chars))
 
 
 def _anchor_leaf_summary(store: Store, name: str, file_path: str | None) -> dict | None:

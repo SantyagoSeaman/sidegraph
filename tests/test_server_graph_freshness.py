@@ -36,13 +36,13 @@ def _call(tmp_path, reader, files=None, entities=None) -> str:
 
 
 def _bare_render(tmp_path, reader, files=None, entities=None) -> str:
-    """What the tool printed before the block existed: ``ctx.render()`` and nothing else."""
+    """The map-free primary render, without the seed diagnostics."""
     store = Store(tmp_path / "bare.db")
     try:
         ctx = _retrieve(
             _seeds_from_args(files, entities), store, reader, RetrievalBudget(4000, 2000)
         )
-        return ctx.render()
+        return ctx.render(include_structure=False)
     finally:
         store.close()
 
@@ -68,7 +68,7 @@ def test_t11_a_seed_the_stale_graph_lacks_gets_the_stale_sentence(tmp_path):
     assert "1 commit behind HEAD" in lines[0]
     assert "`graphify update .`" in lines[0]
     assert out.startswith(_bare_render(tmp_path, reader, files=["pkg/n.py", "pkg/m.py"]))
-    assert out.index(HEADING) > out.index("pkg/m.py")
+    assert out.index(HEADING) > out.index("No context found.")
 
 
 def test_t12_seeds_the_graph_holds_leave_the_output_and_the_cost_unchanged(tmp_path, monkeypatch):

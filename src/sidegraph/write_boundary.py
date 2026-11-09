@@ -19,8 +19,18 @@ from pydantic import ValidationError
 from pydantic_core import SchemaValidator
 
 from .input_limits import MAX_DRAFTS, InputLimitError, preflight_direct, preflight_drafts
-from .store import RetireRefusedError, StoreBusyError, SupersessionConflictError
-from .validation_errors import SafeWriteError, format_validation_error, safe_write_error
+from .store import (
+    RetireRefusedError,
+    StoreBusyError,
+    SupersessionConflictError,
+    UnknownSupportError,
+)
+from .validation_errors import (
+    SafeWriteError,
+    format_validation_error,
+    safe_write_error,
+    unknown_support_reason,
+)
 
 CONFIGURATION_ERROR = "Write tool configuration is unsupported; update its safe registration."
 WRITE_FAILURE = (
@@ -37,6 +47,8 @@ def _safe_tool_error(exc: Exception) -> ToolError:
             "Store is busy. Earlier steps may have written records; "
             "inspect the store before retrying."
         )
+    if isinstance(exc, UnknownSupportError):
+        return ToolError(unknown_support_reason(exc.positions, surface="mcp"))
     if isinstance(exc, (SupersessionConflictError, RetireRefusedError)):
         return ToolError(str(exc))  # record ids, statuses and the next step only
     if isinstance(exc, ValidationError):

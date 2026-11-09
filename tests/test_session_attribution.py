@@ -260,7 +260,7 @@ def test_t10_a_failing_stamp_lookup_gives_the_bare_thread_id():
         raise RuntimeError("store would not open")
 
     assert hint_for("codex-mcp-client", {"threadId": THREAD}, {}, boom) == SessionHint(
-        THREAD, "codex"
+        THREAD, "codex", agent_exact=True
     )
 
 
@@ -374,7 +374,7 @@ def test_t10_a_store_that_fails_to_open_yields_the_bare_thread_id(store, monkeyp
         await mcp_entry._BindSession().on_call_tool(fake, call_next)
 
     asyncio.run(run())
-    assert seen == [SessionHint(THREAD, "codex")]
+    assert seen == [SessionHint(THREAD, "codex", agent_exact=True)]
 
 
 # -- T6, T14: SessionStart stamps -------------------------------------------------------------
@@ -656,3 +656,24 @@ def test_t15_the_console_script_initializes_and_lists_the_tools(tmp_path):
             return len(await client.list_tools())
 
     assert asyncio.run(run()) == 25
+
+
+@pytest.mark.parametrize("stamps", [[], [ROLLOUT]])
+def test_codex_thread_identity_is_exact_for_each_agent(stamps):
+    main = hint_for(
+        "codex-mcp-client", {"threadId": THREAD, "sessionId": "parent"}, {}, lambda: stamps
+    )
+    child = hint_for(
+        "codex-mcp-client", {"threadId": "child-thread", "sessionId": THREAD}, {}, lambda: stamps
+    )
+    assert main.agent_exact and main.agent is None
+    assert main.session_id == (ROLLOUT if stamps else THREAD)
+    assert child.agent_exact and child.agent is None
+    assert child.session_id == "child-thread"
+    for name, meta, env in [
+        ("codex-mcp-client", {}, {}),
+        ("claude-code", None, {"CLAUDE_CODE_SESSION_ID": "parent"}),
+        ("grok-shell-sidegraph", None, {"GROK_SESSION_ID": "parent"}),
+        ("unknown", {"threadId": THREAD}, {}),
+    ]:
+        assert not hint_for(name, meta, env, lambda: stamps).agent_exact

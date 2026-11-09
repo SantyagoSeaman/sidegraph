@@ -66,7 +66,9 @@ def _bare_render(tmp_path, reader, files=None, entities=None) -> str:
     store = Store(tmp_path / "bare.db")
     try:
         seeds = _seeds_from_args(files, entities)
-        return _retrieve(seeds, store, reader, RetrievalBudget(4000, 2000)).render()
+        return _retrieve(seeds, store, reader, RetrievalBudget(4000, 2000)).render(
+            include_structure=False
+        )
     finally:
         store.close()
 
@@ -86,8 +88,8 @@ def test_a_guessed_seed_is_read_and_the_reply_says_how(tmp_path):
 
     out = _call(tmp_path, reader, files=["app/m.py"])
 
-    assert "No context found." not in out
-    assert "fn_0()" in out  # the map of pkg/m.py
+    assert out.startswith("No context found.")
+    assert "## Structural map" not in out
     assert _section(out, READ) == [
         "- `app/m.py` → read as `pkg/m.py` (guessed: the only file with that name)"
     ]
@@ -101,7 +103,7 @@ def test_the_blocks_follow_the_render_in_order_a_blank_line_apart(tmp_path):
 
     out = _call(tmp_path, reader, files=["app/m.py", "pkg/n.py"])
 
-    assert out.index("fn_0()") < out.index(READ) < out.index(NOT_IN_GRAPH)
+    assert out.index("No context found.") < out.index(READ) < out.index(NOT_IN_GRAPH)
     assert "\n\n" + READ + "\n" in out and "\n\n" + NOT_IN_GRAPH + "\n" in out
     read_end = out.index("\n\n" + NOT_IN_GRAPH)
     assert out[:read_end].endswith("(guessed: the only file with that name)")
@@ -202,7 +204,7 @@ def test_a_failure_in_the_block_leaves_the_text_untouched(tmp_path, monkeypatch)
 
     out = _call(tmp_path, reader, files=["app/m.py"])
 
-    assert "fn_0()" in out and READ not in out
+    assert out == "No context found."
 
 
 # -- A6, A7: what the not-in-graph block still says -----------------------------------------

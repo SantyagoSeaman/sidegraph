@@ -22,10 +22,11 @@ lesson, finding it costs one tool call; not finding it costs re-living it.
 Three shapes of why-question, three entry points:
 
 - **A file or a few files** ("why is this module structured like this") →
-  `get_task_context(files=["src/..."])` — decisions, mistakes and facts, plus a structural
-  map to orient in the area. It reads a loosely spelled path (`./src/x.py`, a basename, a
-  directory) and, when a file has no record of its own, says where the nearest memory is.
-  `query_decisions(files=[...])` returns the same memory without the map, but it matches the
+  `get_task_context(files=["src/..."])` — decisions, mistakes and facts. Call
+  `query_structure` with the same seeds for the code map. `get_task_context` reads a
+  loosely spelled path (`./src/x.py`, a basename, a directory) and, when a file has no record
+  of its own, says where the nearest memory is.
+  `query_decisions(files=[...])` returns the same memory, but it matches the
   path exactly as written and answers `No context found.` for one it cannot place.
 - **A named symbol, class, or doc heading** ("why does `X` do Y") →
   `find_entity(name, file_path=...)` first. A single match returns `entity_id`; then

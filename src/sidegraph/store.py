@@ -215,6 +215,17 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
 )""",
     """CREATE INDEX IF NOT EXISTS idx_render_events_session
     ON render_events (session_id)""",
+    # Where a session's host transcript lives, written at SessionStart for `sidegraph-stats`
+    # to read the cited-back figure locally. A journal like render_events: not dropped by the
+    # reload, pruned with the others. One row per (session, path), refreshed on a resume.
+    # see design/superpowers/specs/2026-11-07-stats-cited-back-and-asked-design.md (D4)
+    """CREATE TABLE IF NOT EXISTS session_transcripts (
+    session_id TEXT NOT NULL,
+    at         TEXT NOT NULL,
+    host       TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    PRIMARY KEY (session_id, path)
+)""",
     # Each accepted domain's effective membership over the graph sync last read: derived like
     # Domain.communities, dropped by every reload and recomputed (sync, or
     # sync.ensure_domain_membership). Keyed by domain; capture and retrieval look up by node.
@@ -1311,6 +1322,20 @@ class SupersessionConflictError(ValueError):
     names only record ids and the next step, so a host may show it as is."""
 
 
+class UnknownSupportError(ValueError):
+    """``Store.add_fact`` refused: these ``supports`` positions name no decision. Raised before
+    the fact is written; the message names positions only, never a caller-supplied id.
+    # see design/superpowers/specs/2026-11-07-capture-unknown-supports-refusal-design.md D1
+    """
+
+    def __init__(self, positions: Sequence[int]) -> None:
+        self.positions = tuple(positions)
+        super().__init__(
+            "supports references an unknown decision at position(s) "
+            + ", ".join(str(p) for p in self.positions)
+        )
+
+
 FILE_BOUND_ORPHAN = "file-not-in-graph"
 """The reason a retirement's ``orphan_reason`` gives for an orphaned anchor whose existing file
 the graph does not index: retrieval serves it now as ``[file-bound]`` for that exact file
@@ -1361,7 +1386,9 @@ def canonical_digest(
         if not d.is_dir():
             continue
         for f in d.iterdir():
-            if f.suffix != ".json":
+            # By name, as the rebuild's ``*.json`` glob matches: a file named exactly ``.json``
+            # has no suffix, and skipping it left a row the digest never saw.
+            if not f.name.endswith(".json"):
                 continue
             st = stat_entry(f)
             entries.append(f"{sub}/{f.name}\0{st.st_size}\0{st.st_mtime_ns}")
@@ -1369,7 +1396,7 @@ def canonical_digest(
     archive_dir = store_dir / _ARCHIVE_SUBDIR
     if archive_dir.is_dir():
         for f in archive_dir.iterdir():
-            if f.suffix != ".jsonl":
+            if not f.name.endswith(".jsonl"):
                 continue
             st = stat_entry(f)
             entries.append(f"{_ARCHIVE_SUBDIR}/{f.name}\0{st.st_size}\0{st.st_mtime_ns}")
@@ -1417,6 +1444,10 @@ def unknown_stamp_message(stamped: str | None, expected: str) -> str:
         f"store schema_version {stamped!r} != code {expected!r}; "
         "migration tooling is deferred — use a fresh store"
     )
+
+
+_SUPPORT_CANDIDATE_SQL = "SELECT data FROM facts WHERE status IN (?, ?)"
+"""The one query behind both support reads, so they can never filter differently."""
 
 
 class Store:
@@ -3632,9 +3663,9 @@ class Store:
                     f"fact {fact.id} already exists — add_fact is append-only; "
                     "use its supersedes field instead"
                 )
-            for sid in fact.supports:
-                if self.get_decision(sid) is None:
-                    raise ValueError(f"supports references unknown decision: {sid}")
+            missing = [i for i, sid in enumerate(fact.supports) if self.get_decision(sid) is None]
+            if missing:
+                raise UnknownSupportError(missing)
 
             predecessor = None
             if fact.supersedes:
@@ -3717,7 +3748,7 @@ class Store:
         rationale as ``decisions_by_source``'s full-table scan)."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT data FROM facts WHERE status IN (?, ?)",
+                _SUPPORT_CANDIDATE_SQL,
                 (DecisionStatus.ACCEPTED.value, DecisionStatus.PROPOSED.value),
             ).fetchall()
         out: list[Fact] = []
@@ -3725,6 +3756,26 @@ class Store:
             f = Fact.model_validate_json(row["data"])
             if decision_id in f.supports:
                 out.append(f)
+        return out
+
+    def facts_by_supported_decision(self) -> dict[str, list[Fact]]:
+        """Every live or proposed fact, grouped by each decision id it supports, in the order
+        :meth:`facts_for_decision` returns them — one query, one validation per fact.
+
+        Meant for ONE operation (``rank_decisions`` builds it lazily and drops it): a copy kept
+        longer would go stale under an older Sidegraph writing the same store.
+        # see design/superpowers/specs/2026-11-07-retrieval-support-map-design.md D1
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                _SUPPORT_CANDIDATE_SQL,
+                (DecisionStatus.ACCEPTED.value, DecisionStatus.PROPOSED.value),
+            ).fetchall()
+        out: dict[str, list[Fact]] = {}
+        for row in rows:
+            f = Fact.model_validate_json(row["data"])
+            for sid in dict.fromkeys(f.supports):
+                out.setdefault(sid, []).append(f)
         return out
 
     def valid_facts_for_entity(self, entity_id: str, as_of: datetime | None = None) -> list[Fact]:
@@ -5055,9 +5106,35 @@ class Store:
         with self._lock:
             return [dict(row) for row in self._conn.execute(sql, params)]
 
+    def record_session_transcript(
+        self, session_id: str, path: str, host: str, *, at: str | None = None
+    ) -> None:
+        """Remember where a session's host transcript is; a repeat refreshes its row.
+
+        see design/superpowers/specs/2026-11-07-stats-cited-back-and-asked-design.md (D4)
+        """
+        with self._mutation():
+            self._conn.execute(
+                "INSERT INTO session_transcripts (session_id, at, host, path) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(session_id, path) DO UPDATE SET "
+                "at = excluded.at, host = excluded.host",
+                (session_id, at or datetime.now(UTC).isoformat(), host, path),
+            )
+
+    def session_transcripts(self) -> list[dict[str, str]]:
+        """Recorded transcript paths in ``at`` order (for tests; stats reads the index itself)."""
+        with self._lock:
+            return [
+                dict(row)
+                for row in self._conn.execute(
+                    "SELECT session_id, at, host, path FROM session_transcripts "
+                    "ORDER BY at, session_id, path"
+                )
+            ]
+
     # Every append-only journal table. The prune sweeps this list, so a journal added
     # without being listed here would grow without bound -- the reason it is one constant.
-    _JOURNAL_TABLES: tuple[str, ...] = ("retrieval_events", "render_events")
+    _JOURNAL_TABLES: tuple[str, ...] = ("retrieval_events", "render_events", "session_transcripts")
 
     def prune_telemetry_events(self, older_than_days: int = 30) -> int:
         """Delete events older than the retention window across EVERY journal table.
@@ -5779,6 +5856,19 @@ class Store:
             cursor = self._conn.execute(CLAIM_META_SQL, (key, value))
             return cursor.rowcount == 1
 
+    def claim_meta_many(self, keys: Iterable[str], value: str) -> None:
+        """Claim absent derived keys atomically, preserving existing values.
+
+        See design/superpowers/specs/2026-11-07-mcp-redelivery-backreference-design.md (D3).
+        """
+        wanted = tuple(keys)
+        if "schema_version" in wanted:
+            raise ValueError(
+                "schema_version is stamped at store creation and must not be overwritten"
+            )
+        with self._mutation():
+            self._conn.executemany(CLAIM_META_SQL, ((key, value) for key in wanted))
+
     def update_meta_if(self, key: str, decide: Callable[[str | None], str | None]) -> bool:
         """Read ``key``, let ``decide`` choose the new value, and write it, all under one
         ``BEGIN IMMEDIATE``; True iff a value was written.
@@ -5840,6 +5930,20 @@ class Store:
             raise ValueError("schema_version is stamped at store creation and must not be removed")
         with self._mutation():
             self._conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+
+    def delete_meta_prefix(self, prefix: str) -> int:
+        """Delete derived keys under a literal prefix, always preserving schema_version.
+
+        See design/superpowers/specs/2026-11-07-mcp-redelivery-backreference-design.md (D6).
+        """
+        if not prefix:
+            raise ValueError("an empty prefix matches every meta key; name what to delete")
+        upper = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+        with self._mutation():
+            return self._conn.execute(
+                "DELETE FROM meta WHERE key >= ? AND key < ? AND key != 'schema_version'",
+                (prefix, upper),
+            ).rowcount
 
     def close(self) -> None:
         with self._lock:

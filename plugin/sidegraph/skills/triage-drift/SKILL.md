@@ -27,7 +27,7 @@ The CLI runs at the plugin's pinned version, never the copy on `PATH` ([why](../
 Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 ```bash
-uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
+uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
 ```
 
 Read `drift_groups.groups` first: one group per drifted file, each listing the records whose
@@ -82,9 +82,11 @@ a rationale or a call, even when one file change re-armed both.
 ## Per record: read both sides, then route
 
 1. **Read the record** — `get_entity_history(entity_id)` via `find_entity`, or read the
-   doctor finding's record by id with `retrieve_decisions(ids=["<record id>"])`. Note what
-   it *claims*: the `choice`, the `consequences`, any evidence facts.
+   doctor finding's record by id with
+   `retrieve_decisions(ids=["<record id>"], include_provenance=True)`. Note what it
+   *claims*: the `choice`, the `consequences`, any evidence facts.
 2. **Read the anchored code at HEAD** — the actual current implementation, not the diff.
+   `retrieve_decisions` returns `provenance` only with `include_provenance=True`.
    `git diff <provenance.commit> HEAD -- <file>` helps locate *what* changed, but the
    verdict comes from whether the record's claims still hold, not from how big the diff is.
 3. **Check status before writing.** Supersession requires an accepted predecessor with

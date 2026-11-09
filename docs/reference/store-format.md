@@ -445,6 +445,56 @@ covers `index.db` and its SQLite sidecars (the `*` glob): the 0-byte
 it in WAL mode. The `*.tmp` line covers any crash-debris temp file left mid-write. The store **never overwrites an existing `.gitignore`** — if you've hand-edited
 it, your edits stand.
 
+## Searching the repository: the root `.ignore`
+
+`sidegraph-init` adds the store to the `.ignore` at the project root, so a recursive search
+(`rg --hidden`, the Claude Code Grep tool, an editor's project search that runs ripgrep) does
+not return raw store lines next to what the MCP returns. A fresh file holds this block; an
+existing file only gets it appended:
+
+```
+# Sidegraph: keeps recursive search (rg, editor search) out of the decision store.
+# Read memory through the Sidegraph MCP; without it: sidegraph-export-adr --json, sidegraph-export-okf --out <dir>, sidegraph-doctor.
+# Explicit paths still search it: rg PATTERN .sidegraph/
+.sidegraph/
+```
+
+A store at another path inside the project gets the anchored line (`/memory/`); a store outside
+the project root gets no file. What to know about it:
+
+1. **It is search hygiene, not access control.** An explicit path (`rg PATTERN .sidegraph/`),
+   `--no-ignore`, `-uu`, plain `grep`, `find`, `cat` and `git show` still read the store. A glob
+   argument is not an explicit path: `rg --hidden -g ".sidegraph/**" PATTERN .` returns no store
+   hit. How the Claude Glob tool treats it is not measured.
+2. **Without the MCP, an agent has to know where the store lives.** The command line reads it:
+   `sidegraph-export-adr --json` (ADRs and constraints), `sidegraph-export-okf --out <dir>`
+   (every ratified record, with history) and `sidegraph-doctor` (store health).
+3. **The raw files are not a substitute for the MCP.** A packed shard line can hold an older
+   image of a record that a per-record file has since superseded, and drift is not in the files
+   at all. The MCP and the export commands return the resolved record, so a superseded image
+   in a shard never reaches you. Drift shows in the MCP, in `sidegraph-doctor` and in the
+   advisories of `sidegraph-export-adr --json`; the OKF export leaves volatile status out.
+4. **Host coverage.** The native Claude Code Grep tool was measured. A shell `rg` in Codex
+   follows ripgrep. The native search of Grok and of Muse is not measured. `grep` is never
+   affected.
+5. **An existing `.ignore` or `.rgignore`.** Init appends to `.ignore` only: it never reorders
+   or rewrites it, and it leaves a file alone that already names the store (a `!.sidegraph/`
+   line counts as naming it). A `.rgignore` is never read or written; ripgrep gives it a higher
+   precedence, so a rule there wins. A symlink, a file with a second hard link, a file larger
+   than 64 KiB, one that is not UTF-8 or one that changes while init reads it is left
+   untouched, and init says so; so is a custom store path that contains a line break. Glob
+   characters in a custom store path are escaped in the line init writes. The line also
+   changes what `fd` and `ag` return.
+6. **People are affected too.** Someone who runs `rg` for a record id gets nothing; search the
+   store explicitly (`rg <id> .sidegraph/`), or use `sidegraph-doctor` or the MCP.
+7. **Tools that honor `.ignore` skip the store**: editor project search that runs ripgrep, `fd`,
+   `ag` and other ripgrep-based indexers. Sidegraph itself and Graphify do not read `.ignore`,
+   so sync, the engine reader and the graph are unaffected.
+8. **How to opt out.** Run `sidegraph-init --no-search-ignore`, or delete the block. Projects
+   that already ran init: run `sidegraph-init` again (it is idempotent), or add `.sidegraph/` to
+   the `.ignore` at the project root by hand. The Sidegraph repository's own `.ignore` hides only
+   its store.
+
 ## Freshness: absorbing a `git pull`
 
 `index.db` stores a canonical digest — a sha256 over the sorted `(relpath, size, mtime_ns)` of
@@ -583,7 +633,10 @@ retrieval path (`get_task_context`, `query_decisions`, `drill_down`) after a suc
 render (+1 per record per call), and by the PreToolUse hook for each record it prints (+1 each
 time it is printed: a record printed under two files, of one Bash line or of one brief, counts twice), read by `sidegraph-doctor`'s `never-surfaced` check (see
 [`docs/reference/cli.md`](cli.md)) to tell a decision nobody has needed yet from one that's
-anchored where people keep working and still never surfaces. `query_structure` records
+anchored where people keep working and still never surfaces. The listing tools
+(`retrieve_decisions`, `list_facts`, `find_entity`, `get_entity_history`) write neither
+counter, so a maintenance session that lists records by id or status does not mark them as
+surfaced. `query_structure` records
 nothing at all — it returns no decision memory, so it never offers an opportunity for one to
 surface, and counting its seeds would inflate the never-surfaced denominator with areas no
 decision could possibly have fired in.
@@ -628,7 +681,8 @@ practitioner review caught that inversion. Opting out now strictly reduces reten
 ### `render_events` (derived, index-only)
 
 One row per lookup that delivered records — a `get_task_context`, `query_decisions` or
-`drill_down` call — recording what that render selected and what survived the budget: `selected`, `emitted`, `degraded` (shrunk to
+`drill_down` call, or a `retrieve_decisions` or `list_facts` call that names a filter, a
+`find_entity` or a `get_entity_history` call — recording what that render selected and what survived the budget: `selected`, `emitted`, `degraded` (shrunk to
 a shorter line), `dropped_for_budget` (did not fit at all), `chars_used`, whether the delivered
 set held a record with a non-empty `rejected` field (`had_rejected`) or a superseded one
 (`had_superseded`), and the optional `intent` label the caller passed. It holds no record
@@ -639,10 +693,28 @@ decisions it showed as `emitted` and `selected`, zeros for `degraded`, `dropped_
 `chars_used`, and
 the reserved `intent` `drill_down`, which the statistics use to keep those zeros out of the
 budget figures. A caller of `get_task_context` or `query_decisions` cannot pass that label.
+The listing tools write the same kind of row under their own name as the reserved `intent`
+(`retrieve_decisions`, `list_facts`, `find_entity`, `get_entity_history`): `emitted` and
+`selected` are the records the call returned in full (always 0 for `find_entity`, which returns
+no record bodies), the budget fields are zero, and the flags describe what was returned. They
+write only this row: neither retrieval counter and no `seed` or `show_anchor` event.
 
 Same contract as `retrieval_events`: gitignored `index.db` only, not dropped by the reload,
 silenced by `SIDEGRAPH_TELEMETRY=off`, and pruned to 30 days at each `SessionStart`
 unconditionally — one sweep covers every journal table. `sidegraph-stats` is its reader.
+
+### `session_transcripts` (derived, index-only)
+
+Where each session's host transcript lives, so `sidegraph-stats` can read it locally for the
+`CITED BACK` figure. One row per `(session_id, path)`: `session_id`, `at` (when the hook last
+saw the path), `host` (the host family) and `path` (the `transcript_path` of the hook's JSON
+payload). `SessionStart` writes it, with an upsert, so a resume, `/clear` or compaction
+refreshes the row instead of adding one. It holds a path and nothing from the file.
+
+Same contract as `retrieval_events`: gitignored `index.db` only, not dropped by the reload,
+silenced by `SIDEGRAPH_TELEMETRY=off`, and pruned to 30 days at each `SessionStart`
+unconditionally. An index written before the table existed has no rows; those sessions are
+counted as having no transcript recorded, never as sessions that cited nothing.
 
 ### Delivery evidence (derived, index-only)
 
@@ -666,7 +738,8 @@ Known core errors take precedence, then records, then unknown structure visibili
 structure, unknown seed-resolution evidence, unresolved seeds/domain, and valid empty. A separate unresolved flag retains
 mixed answers for requested seeds; internal nearest-file seeds do not replace that flag.
 Candidate slugs and omitted-id references are neither bodies nor structure.
-Task-context structure after a hard cut can be unknown. Error coverage starts inside the
+`get_task_context` renders no structure, so its rows never take the `structure` outcome.
+Error coverage starts inside the
 three instrumented cores after a usable Store exists. The neutral `core_error` reason names
 that boundary; it does not classify input-validation failures as internal bugs. Error text
 is never recorded.

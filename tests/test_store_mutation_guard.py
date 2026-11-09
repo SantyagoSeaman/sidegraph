@@ -332,6 +332,12 @@ class _FailAfterMarker:
                 raise RuntimeError(f"injected failure: {self._marker!r}")
         return result
 
+    def executemany(self, sql: str, rows: object) -> object:
+        if self._marker in sql:
+            for row in rows:
+                self.execute(sql, row)
+        return self._real.executemany(sql, rows)
+
     def __getattr__(self, name: str) -> object:
         return getattr(self._real, name)
 
@@ -443,6 +449,12 @@ def _case_record_render_event(store: Store) -> tuple[str, object]:
     )
 
 
+def _case_record_session_transcript(store: Store) -> tuple[str, object]:
+    return "INSERT INTO session_transcripts", lambda: store.record_session_transcript(
+        "case-session", "/x/case.jsonl", "claude"
+    )
+
+
 def _case_delivery_write(store: Store) -> tuple[str, object]:
     return "INSERT INTO delivery_occurrences", lambda: store.record_delivery(
         Delivery("query_decisions")
@@ -494,6 +506,15 @@ def _case_raise_requirement(store: Store) -> tuple[str, object]:
 
 def _case_claim_meta(store: Store) -> tuple[str, object]:
     return "INSERT INTO meta", lambda: store.claim_meta("case-claim-key", "v1")
+
+
+def _case_claim_meta_many(store: Store) -> tuple[str, object]:
+    return "INSERT INTO meta", lambda: store.claim_meta_many(["batch:a", "batch:b"], "v")
+
+
+def _case_delete_meta_prefix(store: Store) -> tuple[str, object]:
+    store.set_meta("batch:a", "v")
+    return "DELETE FROM meta", lambda: store.delete_meta_prefix("batch:")
 
 
 def _case_update_meta_if(store: Store) -> tuple[str, object]:
@@ -598,12 +619,15 @@ _ROLLBACK_CASES = {
     "_append_event": _case_append_event,
     "record_retrieval_events": _case_record_retrieval_events,
     "record_render_event": _case_record_render_event,
+    "record_session_transcript": _case_record_session_transcript,
     "_delivery_write": _case_delivery_write,
     "prune_telemetry_events": _case_prune_telemetry_events,
     "compact": _case_compact,
     "maintain": _case_maintain,
     "set_meta": _case_set_meta,
     "claim_meta": _case_claim_meta,
+    "claim_meta_many": _case_claim_meta_many,
+    "delete_meta_prefix": _case_delete_meta_prefix,
     "raise_requirement": _case_raise_requirement,
     "update_meta_if": _case_update_meta_if,
     "prune_meta_prefixes": _case_prune_meta_prefixes,
@@ -685,3 +709,31 @@ def test_ratify_domains_commits_per_item_so_one_bad_id_leaves_earlier_items_dura
     # already-tested concern (see `_reload_index_from_canonical`'s own tests), not what this
     # test pins.
     assert store.get_domain(bad.domain_id).status.value == "proposed"
+
+
+@pytest.mark.parametrize("operation", ["claim", "delete"])
+def test_batch_meta_failure_restores_rows_and_releases_writer(tmp_path, monkeypatch, operation):
+    store = Store(tmp_path / "s")
+    store.set_meta("batch:old", "old")
+    if operation == "claim":
+        _raise_when_sql_contains(store, "INSERT INTO meta", skip=1)
+
+        def action():
+            return store.claim_meta_many(["batch:a", "batch:b"], "new")
+    else:
+
+        def fail_commit():
+            raise RuntimeError("commit failed")
+
+        monkeypatch.setattr(store, "_commit", fail_commit)
+
+        def action():
+            return store.delete_meta_prefix("batch:")
+
+    with pytest.raises(RuntimeError):
+        action()
+    assert store.meta_with_prefix("batch:") == {"batch:old": "old"}
+    assert not store._conn.in_transaction
+    with Store(store.path) as writer:
+        writer.set_meta("independent", "ok")
+    assert store.get_meta("independent") == "ok"

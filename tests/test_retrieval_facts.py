@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from sidegraph.retrieval import RetrievalBudget, rank_decisions
+from sidegraph.retrieval import RetrievalBudget, _fmt_fact, rank_decisions
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -72,6 +72,113 @@ def populated_many_mistakes(tmp_path):
     for i in range(15):
         _bound_decision(store, entity.entity_id, f"gotcha{i}", DecisionKind.GOTCHA)
     return store, entity
+
+
+def test_a_source_of_300_characters_is_shown_whole():
+    source = ("word " * 60)[:299] + "z"
+    assert len(source) == 300
+    line = _fmt_fact(_fact("observed", source=source))
+    assert line.endswith(f"[{source}]")
+    assert "clipped; full:" not in line
+
+
+def test_a_longer_source_is_clipped_with_a_note():
+    source = "word " * 60 + "z"
+    assert len(source) == 301
+    fact = _fact("observed", source=source)
+    line = _fmt_fact(fact)
+    note = f' (clipped; full: list_facts(ids=["{fact.id}"]))'
+    assert line.endswith(note)
+    bracket = line.removesuffix(note).rsplit("[", 1)[1]
+    assert bracket.endswith("…]")
+    shown = bracket.removesuffix("…]")
+    assert len(shown) <= 300 and source.startswith(shown)
+
+
+@pytest.mark.parametrize("source", ["benchmark run", "x" * 80])
+def test_a_short_source_line_is_unchanged(source):
+    fact = _fact("observed", source=source, status=DecisionStatus.ACCEPTED)
+    assert _fmt_fact(fact) == f"- fact: observed [{source}]"
+
+
+@pytest.mark.parametrize(
+    ("statement", "source", "clipped"),
+    [
+        ("observed", "word " * 60 + "z", True),
+        ("observed", ("word " * 60)[:299] + "z", False),
+        ("s" * 241, "benchmark run", True),
+    ],
+)
+def test_the_evidence_line_follows_the_same_rule(populated, statement, source, clipped):
+    store, entity = populated
+    d = store.valid_decisions_for_entity(entity.entity_id)[0]
+    fact = store.add_fact(
+        _fact(statement, source=source, supports=[d.id], status=DecisionStatus.ACCEPTED)
+    )
+    lines = rank_decisions([entity], [], [], store, RetrievalBudget()).render().splitlines()
+    decision_idx = next(i for i, line in enumerate(lines) if "gotcha1" in line)
+    line = lines[decision_idx + 1]
+    assert line.startswith("  evidence:")
+    note = f' (clipped; full: list_facts(ids=["{fact.id}"]))'
+    if clipped:
+        assert line.endswith(note) and line.count("clipped; full:") == 1
+        if len(source) > 300:
+            assert line.removesuffix(note).endswith("…]")
+    else:
+        assert line.endswith(f"[{source}]") and "clipped; full:" not in line
+
+
+def test_a_clip_inside_a_long_word_cuts_at_the_last_space():
+    fact = _fact("observed", source="a" * 249 + " " + "b" * 60)
+    assert f"[{'a' * 249}…]" in _fmt_fact(fact)
+
+
+def test_a_source_without_spaces_is_hard_cut_and_noted():
+    fact = _fact("observed", source="x" * 400)
+    assert _fmt_fact(fact).endswith(
+        f'[{"x" * 300}…] (clipped; full: list_facts(ids=["{fact.id}"]))'
+    )
+
+
+# False pins the old-length budget; True catches a bound-80 mutation that adds the note.
+@pytest.mark.parametrize("allow_clip_note", [False, True])
+def test_a_longer_fact_line_is_charged_to_the_budget(populated, allow_clip_note):
+    store, entity = populated
+    mistake = rank_decisions([entity], [], [], store, RetrievalBudget()).mistakes[0]
+    fact = store.add_fact(_fact("observed", source="x" * 300, status=DecisionStatus.ACCEPTED))
+    store.add_binding(AnchorBinding(record_id=fact.id, entity_id=entity.entity_id, tier=2))
+    old_line = f"- fact: observed [{'x' * 80}…]"
+    if allow_clip_note:
+        old_line += f' (clipped; full: list_facts(ids=["{fact.id}"]))'
+    ctx = rank_decisions(
+        [entity], [], [], store, RetrievalBudget(memory_chars=len(mistake) + len(old_line) + 2)
+    )
+    assert ctx.mistakes == [mistake]
+    assert ctx.facts == []
+    assert ctx.dropped_for_budget == 1
+
+
+def test_a_source_ending_in_an_ellipsis_is_not_noted():
+    line = _fmt_fact(_fact("observed", source="benchmark…"))
+    assert line.endswith("[benchmark…]") and "clipped; full:" not in line
+
+
+@pytest.mark.parametrize(
+    ("statement", "source", "clipped"),
+    [
+        ("s" * 241, "benchmark run", True),
+        ("s" * 241, "x" * 301, True),
+        ("observed", "benchmark run", False),
+    ],
+)
+def test_a_clipped_statement_gets_the_note(statement, source, clipped):
+    fact = _fact(statement, source=source)
+    line = _fmt_fact(fact)
+    if clipped:
+        assert line.endswith(f' (clipped; full: list_facts(ids=["{fact.id}"]))')
+        assert line.count("clipped; full:") == 1
+    else:
+        assert "clipped; full:" not in line
 
 
 def test_inline_evidence_renders_under_decision(populated):

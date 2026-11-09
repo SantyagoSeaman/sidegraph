@@ -24,7 +24,7 @@ plan would *delete or bypass* — that's where reversal records live.
 ## 2. Pull the memory, mistakes first
 
 - **Primary:** `get_task_context(files=[...], entities=[{"name": ..., "file_path": ...}])`
-  — mistakes first, decisions with evidence, then structure. This is the budget-bounded
+  — mistakes first, decisions with evidence, facts and related records. This is the budget-bounded
   view an agent would get mid-work; you're pulling it early.
 - **Area-level plans** ("rework how retrieval budgets work") → `list_domains()` +
   `drill_down(domain_slug)` — the domain's decisions, mistakes first.

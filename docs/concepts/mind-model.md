@@ -37,8 +37,8 @@ answers a top-level question *from*, before it ever reads a leaf file.
 The read path now has three altitudes, and the point is to answer from the highest altitude
 that suffices:
 
-1. **`SessionStart` TOC** — the accepted domains, each with a title, a one-line WHY-IT-EXISTS
-   summary, a mistake count, and a subdomain count (see
+1. **`SessionStart` TOC** — the accepted domains, each with a title, a mistake count,
+   and a subdomain count (see
    [retrieval](retrieval.md#sessionstart-toc)). This is what an agent reads before touching
    anything — "what areas does this project have, and what should I already know about each."
    The mistake count is what `drill_down` would serve for the domain: the accepted `gotcha`,
@@ -62,7 +62,7 @@ that suffices:
    scoped to whole-document anchors only, so a code corpus (where one file spans many
    communities) can't have a decision on an unrelated function in that file falsely surface just
    because the file is touched. This is the Axis-1 operation: go one level deeper into a named
-   area without falling all the way to `get_task_context`'s leaf-level structural map.
+   area before naming files for `get_task_context` or requesting their map with `query_structure`.
 3. **`get_task_context` / `query_structure` / `query_decisions`** — the seeded, budgeted leaf
    read path (unchanged from the shipped v1 loop), for when the agent already knows the
    files/entities it is about to touch.

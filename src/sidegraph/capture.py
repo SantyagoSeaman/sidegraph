@@ -58,10 +58,15 @@ from .schema import (
     matches_path_prefix,
     slugify,
 )
-from .store import _TERMINAL_DECISION_STATUSES, Store, SupersessionConflictError
+from .store import (
+    _TERMINAL_DECISION_STATUSES,
+    Store,
+    SupersessionConflictError,
+    UnknownSupportError,
+)
 from .store_layout import REBIND_PENDING_KEY
 from .sync import activate_accepted_domain
-from .validation_errors import format_validation_error
+from .validation_errors import format_validation_error, unknown_support_reason
 from .verify import _run_git, find_store_project_repo
 
 # v1 secret patterns. Redaction runs FIRST: its output is the only text that proceeds to
@@ -1168,6 +1173,22 @@ def _resolves_to_live_decision(store: Store, supports: Sequence[str]) -> bool:
     )
 
 
+def _unknown_support_positions(store: Store, supports: Sequence[str]) -> tuple[int, ...]:
+    """The 0-based positions in ``supports`` whose id names no decision at all.
+
+    Lets the anchorless gates (here and in ``server.py``) tell "an id does not exist" from
+    "every id exists but none is live" before choosing a message.
+    # see design/superpowers/specs/2026-11-07-capture-unknown-supports-refusal-design.md D4
+    """
+    return tuple(i for i, sid in enumerate(supports) if store.get_decision(sid) is None)
+
+
+def _draft_positions(positions: Sequence[int], offset: int) -> tuple[int, ...]:
+    """Store ``supports`` positions as the draft's own: an attached fact's list starts with
+    the decision it hangs on, which the draft never wrote, so drop it and shift."""
+    return tuple(p - offset for p in positions if p >= offset)
+
+
 def _supports_a_still_proposed_decision(store: Store, supports: Sequence[str]) -> bool:
     """True iff at least one id in ``supports`` names a decision that is still
     ``proposed`` — the store's own nested-evidence definition
@@ -1280,7 +1301,17 @@ def _propose_fact_one(
     # REQUEST here (this function's own `anchors`, not a resolved outcome) — D8's residual.
     anchors = draft.anchors or (inherited_anchors or [])
     supports = ([attached_to] if attached_to else []) + list(draft.supports)
+    offset = 1 if attached_to else 0
     if not anchors and not _resolves_to_live_decision(store, supports):
+        unknown = _unknown_support_positions(store, supports) if supports else ()
+        if unknown:
+            return ProposeFactResult(
+                status="rejected",
+                reason=unknown_support_reason(
+                    _draft_positions(unknown, offset), attached_to=attached_to
+                ),
+                redactions=redactions,
+            )
         reason = (
             "standalone fact needs at least one anchor or a supports id"
             if not supports
@@ -1289,7 +1320,7 @@ def _propose_fact_one(
                 "deprecated decision — add an anchor, or re-point supports at the successor"
             )
         )
-        return ProposeFactResult(status="rejected", reason=reason)
+        return ProposeFactResult(status="rejected", reason=reason, redactions=redactions)
 
     # 4. Dedup (conservative: when unsure, write; the human drops at ratify).
     dup_id = _is_duplicate_fact(statement, anchors, supports, store)
@@ -1324,6 +1355,16 @@ def _propose_fact_one(
         )
     try:
         store.add_fact(fact)
+    except UnknownSupportError as e:
+        # Raised before the write, so nothing is on disk for THIS fact. Positions only,
+        # never `str(e)`.
+        return ProposeFactResult(
+            status="rejected",
+            reason=unknown_support_reason(
+                _draft_positions(e.positions, offset), attached_to=attached_to
+            ),
+            redactions=redactions,
+        )
     except Exception as e:
         return ProposeFactResult(
             status="rejected", reason=_internal_error_reason(e), redactions=redactions

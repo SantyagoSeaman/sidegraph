@@ -191,7 +191,7 @@ def test_final_atom_queue_counts_actual_placements_even_for_identical_lines(same
     assert delivered.emitted == (2 if same_id else 1)
 
 
-def test_hard_cut_structure_without_surviving_records_is_unknown(tmp_path, monkeypatch):
+def test_get_task_context_delivers_no_structure(tmp_path, monkeypatch):
     from sidegraph.retrieval import TaskContext
 
     monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "on")
@@ -203,11 +203,12 @@ def test_hard_cut_structure_without_surviving_records_is_unknown(tmp_path, monke
             structure=["Synthetic structure " + "x" * 45000], delivery_unresolved=False
         ),
     )
-    server._get_task_context_impl(store, object(), None, None, 4000, 6000)
+    answer = server._get_task_context_impl(store, object(), None, None, 4000, 6000)
+    assert "[output cut" not in answer
     header = rows(store, "delivery_occurrences")[0]
-    assert header["outcome"] == "unknown"
-    assert header["structure_present"] is None
-    assert header["reason"] == "structure_cut"
+    assert header["outcome"] == "valid_empty"
+    assert header["structure_present"] == 0
+    assert header["reason"] is None
     store.close()
 
 
@@ -316,7 +317,7 @@ def test_brief_document_path_and_prompt_do_not_enter_new_ledger(tmp_path, monkey
 
 
 @pytest.mark.parametrize(
-    "files,want", [(["missing.py"], "unresolved"), (["pkg/m.py", "missing.py"], "structure")]
+    "files,want", [(["missing.py"], "unresolved"), (["pkg/m.py", "missing.py"], "unresolved")]
 )
 def test_ladder_rejected_original_seeds_retain_unresolved_evidence(
     tmp_path, monkeypatch, files, want

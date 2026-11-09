@@ -6,18 +6,22 @@ the promise is about the surface, not about the happy path.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from sidegraph.stats.model import (
     ActivationStats,
     AnchorStats,
+    ChannelCitedBack,
+    CitedBackStats,
     GraphStats,
     HealthItem,
     MemoryStats,
     ReachStats,
     StatsReport,
 )
-from sidegraph.stats.render import render_text
+from sidegraph.stats.render import render_json, render_text
 
 # The brief's six, plus the wider family a well-meaning edit reaches for. The renderer states
 # what was shown, asked and touched; none of these belongs on any surface (D2).
@@ -148,6 +152,29 @@ def _narrowed_window():
         ),
         reach=_reach(files_touched=0, files_touched_with_memory=0, busiest_seeds=[]),
     )
+
+
+def _cited(**over) -> CitedBackStats:
+    """The example screen of the spec: 81 of 246 over MCP, hooks small, SessionStart empty."""
+    fields = dict(
+        sessions={
+            "population": 241,
+            "read": 112,
+            "no_transcript": 129,
+            "unreadable": 0,
+            "no_reader": 0,
+            "over_budget": 0,
+        },
+        channels={
+            "session_start": ChannelCitedBack(sessions_visible=100, placements=0, cited=0),
+            "pre_tool_use": ChannelCitedBack(sessions_visible=100, placements=900, cited=12),
+            "subagent_brief": ChannelCitedBack(sessions_visible=100, placements=400, cited=3),
+            "mcp": ChannelCitedBack(sessions_visible=112, placements=246, cited=81),
+        },
+        read_bytes=1000,
+        budget_bytes=2000,
+    )
+    return CitedBackStats(**{**fields, **over})
 
 
 def _lines(text: str) -> list[str]:
@@ -296,6 +323,31 @@ def _states() -> dict[str, StatsReport]:
         "wrapped-and-rounded": wrapped,
         "quiet-and-off": quiet_and_off,
         "nothing-asked": nothing_asked,
+        "cited-back": _report(cited_back=_cited()),
+        "cited-back-immature": _report(activation=_act(mature=False), cited_back=_cited()),
+        "cited-back-recording-off": _report(telemetry_enabled=False, cited_back=_cited()),
+        "cited-back-wide": _report(
+            cited_back=_cited(
+                sessions={
+                    "population": 99999,
+                    "read": 12345,
+                    "no_transcript": 87654,
+                    "unreadable": 0,
+                    "no_reader": 0,
+                    "over_budget": 0,
+                },
+                channels={
+                    "session_start": None,
+                    "pre_tool_use": ChannelCitedBack(
+                        sessions_visible=9000, placements=1234567, cited=123456
+                    ),
+                    "subagent_brief": ChannelCitedBack(
+                        sessions_visible=9000, placements=765432, cited=7654
+                    ),
+                    "mcp": ChannelCitedBack(sessions_visible=9000, placements=88888, cited=8888),
+                },
+            )
+        ),
         # The HEALTH block in its three shapes. The 80-column and causal-word sweeps read them.
         "health-one": _report(
             health=[_problem("graph-stale", "code graph stale", "graphify update .")]
@@ -917,6 +969,7 @@ Sidegraph · demo                                                 window: 30 day
 
 HEALTH      ok
 ACTIVATION  recording is off (SIDEGRAPH_TELEMETRY=off)
+CITED BACK  recording is off; not computed
 REACH       silent domains: CLI — no record is bound to it
 
 MEMORY      accepted: 242 decisions · 119 facts · 19 domains
@@ -1079,6 +1132,7 @@ Sidegraph · demo                                                 window: 30 day
 
 HEALTH      ok
 ACTIVATION  recording is off (SIDEGRAPH_TELEMETRY=off)
+CITED BACK  recording is off; not computed
 REACH       nothing to report yet
 
 MEMORY      accepted: 0 decisions · 0 facts · 0 domains
@@ -1400,3 +1454,82 @@ def test_json_carries_hook_showings_and_nulls_it_with_recording_off():
     assert _data(_report(activation=_act(hook_showings=36)))["activation"]["hook_showings"] == 36
     assert _data(_report())["activation"]["hook_showings"] == 0
     assert _data(_report(telemetry_enabled=False))["activation"] is None
+
+
+# --- the CITED BACK block (stats-cited-back-and-asked design, D8) -------------------------------
+
+
+def test_a_mature_cited_back_block_prints_per_channel_percentages():
+    text = render_text(_report(cited_back=_cited()))
+    block = _block(text, "CITED BACK")
+    assert block[0] == "CITED BACK  ids quoted back later in the same session (a lower bound)"
+    assert "MCP: 81 of 246 record placements (33%)" in block[1]
+    joined = "\n".join(block)
+    assert "PreToolUse: 12 of 900 (1%)" in joined
+    assert "subagent brief: 3 of 400 (1%)" in joined
+    assert "SessionStart: no record placed" in joined
+    assert "transcripts read for 112 of 241 sessions; 129 have none recorded" in joined
+
+
+def test_the_block_sits_between_activation_and_the_rest():
+    text = render_text(_report(cited_back=_cited()))
+    assert text.index("ACTIVATION") < text.index("CITED BACK") < text.index("REACH")
+
+
+def test_an_immature_window_prints_the_counts_and_no_percentage():
+    text = render_text(_report(activation=_act(mature=False), cited_back=_cited()))
+    block = "\n".join(_block(text, "CITED BACK"))
+    assert "MCP: 81 of 246 record placements" in block
+    assert "%" not in block
+
+
+def test_a_channel_nobody_can_see_is_stated_not_zeroed():
+    channels = _cited().channels | {"session_start": None}
+    text = render_text(_report(cited_back=_cited(channels=channels)))
+    block = "\n".join(_block(text, "CITED BACK"))
+    assert "SessionStart: not visible in these hosts' transcripts" in block
+
+
+def test_a_visible_channel_with_no_placement_is_never_a_zero_percent():
+    channels = _cited().channels | {
+        "mcp": ChannelCitedBack(sessions_visible=3, placements=0, cited=0)
+    }
+    block = "\n".join(
+        _block(render_text(_report(cited_back=_cited(channels=channels))), "CITED BACK")
+    )
+    assert "MCP: no record placed" in block
+    assert "0%" not in block
+
+
+def test_recording_off_says_the_block_is_not_computed():
+    text = render_text(_report(telemetry_enabled=False, cited_back=_cited()))
+    assert _block(text, "CITED BACK")[0].endswith("recording is off; not computed")
+    assert (
+        json.loads(render_json(_report(telemetry_enabled=False, cited_back=_cited())))["cited_back"]
+        is None
+    )
+
+
+def test_no_block_when_the_model_omitted_it_with_recording_on():
+    assert "CITED BACK" not in render_text(_report())
+    assert json.loads(render_json(_report()))["cited_back"] is None
+
+
+def test_the_json_carries_the_cited_back_object():
+    data = json.loads(render_json(_report(cited_back=_cited())))["cited_back"]
+    assert data["channels"]["mcp"]["cited"] == 81
+    assert data["sessions"]["read"] == 112
+
+
+def test_the_largest_unread_state_is_named_in_the_coverage_line():
+    sessions = {
+        "population": 241,
+        "read": 100,
+        "no_transcript": 40,
+        "unreadable": 5,
+        "no_reader": 0,
+        "over_budget": 96,
+    }
+    text = render_text(_report(cited_back=_cited(sessions=sessions)))
+    assert "transcripts read for 100 of 241 sessions;" in text
+    assert "96 left out by the reading bound" in text

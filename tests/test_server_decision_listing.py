@@ -23,6 +23,8 @@ import fastmcp
 import pytest
 
 import sidegraph.server as server_module
+from sidegraph import config
+from sidegraph.config import SessionHint
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.schema import (
     AnchorBinding,
@@ -180,6 +182,100 @@ def test_t4_kind_returns_that_kind_only(store):
     assert _ids(answer) == [gotcha.id]
     with pytest.raises(ValueError, match="constraint"):
         _decision_listing(store, None, kind="nonsense")
+
+
+def test_full_records_leave_out_provenance_by_default(store):
+    for i in range(3):
+        _add(store, f"record {i}")
+
+    answer = _ask(store, status="accepted")
+
+    assert answer["returned"] == 3
+    for row in answer["decisions"]:
+        stored = store.get_decision(row["id"]).model_dump(mode="json")
+        assert "provenance" not in row
+        assert row == {k: v for k, v in stored.items() if k != "provenance"}
+
+
+def test_include_provenance_restores_the_full_record(store):
+    for i in range(3):
+        _add(store, f"record {i}")
+
+    answer = _ask(store, status="accepted", include_provenance=True)
+
+    assert answer["returned"] == 3
+    assert answer["decisions"] == [
+        store.get_decision(i).model_dump(mode="json") for i in _ids(answer)
+    ]
+
+
+def test_provenance_is_removed_before_the_budget_cut(store):
+    for i in range(40):
+        store.add_decision(
+            Decision(
+                title=f"record {i}",
+                kind=DecisionKind.GOTCHA,
+                status=DecisionStatus.ACCEPTED,
+                context="c",
+                choice="ch",
+                valid_from=datetime.now(UTC) - timedelta(hours=i + 1),
+                provenance=Provenance(
+                    source="agent",
+                    author="a" * 20,
+                    session_id="s" * 40,
+                    graph_version="g" * 60,
+                    commit="c" * 40,
+                ),
+            )
+        )
+
+    full = _ask(store, status="accepted", budget_chars=4000, include_provenance=True)
+    slim = _ask(store, status="accepted", budget_chars=4000)
+
+    assert full["omitted"] > 0
+    assert slim["returned"] > full["returned"]
+    assert _ids(slim)[: full["returned"]] == _ids(full)
+
+
+def test_the_overview_does_not_change_with_the_flag(store):
+    _add(store, "record")
+
+    assert _decision_listing(store, None) == _decision_listing(store, None, include_provenance=True)
+
+
+def test_include_provenance_keeps_sent_earlier_rows(store, monkeypatch):
+    sent = _add(store, "already sent")
+    fresh = _add(store, "fresh")
+    monkeypatch.setattr(server_module, "_get_store", lambda: store)
+    compact_rows = []
+    for flag in (False, True):
+        token = config.CURRENT_SESSION.set(
+            SessionHint("listing-test", "codex", agent=str(flag), agent_exact=True)
+        )
+        try:
+            prefix = server_module._sent_prefix(store)
+            assert prefix is not None
+            assert server_module._claim_sent(store, prefix, [sent.id])
+            answer = json.loads(
+                server_module.retrieve_decisions(status="accepted", include_provenance=flag)
+                .content[0]
+                .text
+            )
+            by_id = {d["id"]: d for d in answer["decisions"]}
+            compact_rows.append(by_id[sent.id])
+            assert set(by_id[sent.id]) == ROW_KEYS | {"sent_earlier"}
+            assert by_id[sent.id]["sent_earlier"] is True
+            assert by_id[fresh.id]["choice"] == fresh.choice
+            assert ("provenance" in by_id[fresh.id]) is flag
+            full = json.loads(
+                server_module.retrieve_decisions(ids=[sent.id], include_provenance=True)
+                .content[0]
+                .text
+            )
+            assert full["decisions"] == [store.get_decision(sent.id).model_dump(mode="json")]
+        finally:
+            config.CURRENT_SESSION.reset(token)
+    assert compact_rows[0] == compact_rows[1]
 
 
 # -- T5: files ---------------------------------------------------------------------------
@@ -466,12 +562,21 @@ def _clamped(budget: int) -> int:
     return max(4000, min(40000, budget))
 
 
+@pytest.mark.parametrize("include_provenance", [False, True])
 @pytest.mark.parametrize("limit", [25, 100])
 @pytest.mark.parametrize("budget", [4000, 24000, 40000, 10**9])
 @pytest.mark.parametrize("shape", sorted(SHAPES))
-def test_t8_the_serialized_answer_stays_within_the_clamped_budget(big_store, shape, budget, limit):
+def test_t8_the_serialized_answer_stays_within_the_clamped_budget(
+    big_store, shape, budget, limit, include_provenance
+):
     text = _decision_listing(
-        big_store, None, limit=limit, budget_chars=budget, include_superseded=True, **SHAPES[shape]
+        big_store,
+        None,
+        limit=limit,
+        budget_chars=budget,
+        include_superseded=True,
+        include_provenance=include_provenance,
+        **SHAPES[shape],
     )
     answer = json.loads(text)
 
@@ -681,7 +786,7 @@ def test_t13_the_tool_passes_every_argument_through(store, monkeypatch, tmp_path
     for i in range(3):
         _add(store, f"filler {i}", kind="gotcha", hours_ago=20 + i)
 
-    by_files, by_kind, by_ids, by_limit, by_history, by_budget = _through_the_server(
+    by_files, by_kind, by_ids, by_limit, by_history, by_budget, by_provenance = _through_the_server(
         store,
         monkeypatch,
         tmp_path,
@@ -692,9 +797,12 @@ def test_t13_the_tool_passes_every_argument_through(store, monkeypatch, tmp_path
             {"status": "accepted", "limit": 2},
             {"query": "cache", "include_superseded": True},
             {"status": "accepted", "budget_chars": 1},
+            {"status": "accepted", "include_provenance": True},
         ],
     )
 
+    assert all("provenance" in d for d in by_provenance["decisions"])
+    assert all("provenance" not in d for d in by_limit["decisions"])
     assert _ids(by_files) == [anchored.id]
     assert {d["kind"] for d in by_kind["decisions"]} == {"lesson"}
     assert _ids(by_ids) == [old.id]
@@ -797,3 +905,11 @@ def test_t12_no_skill_calls_retrieve_decisions_without_a_narrowing_filter():
 
     assert unbounded == []
     assert seen >= 4, "the scan found fewer calls than the skills make: the matcher is broken"
+
+
+def test_triage_drift_asks_for_provenance():
+    skill = next(s for s in SKILLS if s.parent.name == "triage-drift")
+    calls = [args for _, args in _calls(skill.read_text(encoding="utf-8")) if "ids=" in args]
+
+    assert calls
+    assert all("include_provenance=True" in args for args in calls)

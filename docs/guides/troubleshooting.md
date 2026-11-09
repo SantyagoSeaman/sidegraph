@@ -14,6 +14,7 @@ The SQLite index is derived and can be rebuilt when it is the damaged component.
 | Tools answer but no record appears for a file | No matching record, an unresolved anchor or the wrong store | Inspect the capture result and [verify anchored retrieval](verifying-your-setup.md#case-2--durable-capture-and-retrieval). |
 | A host says Sidegraph could not start | A launcher failed before the hook entry point | Run the [hook diagnostic](../reference/hooks.md#if-you-see-this-message) in the host environment. |
 | A graph or anchor warning appears | Missing, stale or differently rooted graph, or a changed target | Find the exact code in [the checks](#the-checks), rebuild from the root when needed, then sync. |
+| `rg` or Grep finds nothing in `.sidegraph/` | The project-root `.ignore` hides the store from recursive search | Search it by path (`rg PATTERN .sidegraph/`), use the MCP or `sidegraph-doctor`, or read [the root `.ignore`](../reference/store-format.md#searching-the-repository-the-root-ignore) to opt out. |
 | Doctor reports strict violations | Canonical data or transition verification failed | Read `sidegraph-verify` before attempting curation. Restore the named data from Git when appropriate. |
 | Doctor lists skipped checks | Required index or graph evidence was unavailable, or the advisory pass stopped early | Restore that evidence and repeat the check. Skipped evidence does not prove health. |
 

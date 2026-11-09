@@ -107,15 +107,17 @@ def _grok_session_map() -> str | None:
     without an index, or a legacy store, gets the standing lines only), and the global
     mistakes (accepted and unratified) from the current decision rows through the same kind of
     handle (rows it cannot read: no global sections, never the cache's, which may still list
-    a retired one); once a tool call has opened the store, they are read from it. Either way
-    they are live, as SessionStart reads them. SessionStart still runs on Grok and syncs,
-    stamps and records the launch commit; only its text is lost there. The text is fitted to
-    :data:`GROK_MAP_MAX_CHARS`.
+    a retired one). The rows are trusted only while the index is current, that is, while its
+    certified digest equals the record files' (:func:`_index_is_current`); after a ``git pull``
+    that changed a record they are not, and the map carries no global sections until a tool
+    call opens the store and refreshes the index. Once a tool call has opened the store, they
+    are read from it. Either way they are live, as SessionStart reads them. SessionStart still
+    runs on Grok and syncs, stamps and records the launch commit; only its text is lost there.
+    The text is fitted to :data:`GROK_MAP_MAX_CHARS` by cutting whole lines.
     see design/superpowers/specs/2026-10-29-grok-session-map-mcp-instructions-design.md (D2)
     """
     from ..retrieval import (
         TOC_CACHE_KEY,
-        _truncate_summary,
         global_mistakes_from,
         live_global_mistakes,
         render_toc,
@@ -138,28 +140,38 @@ def _grok_session_map() -> str | None:
             return head
         if store is not None:
             cache = {**cache, **live_global_mistakes(store)}
-        else:
+        elif _index_is_current(Path(location.path)):
             rows = _read_global_decisions_ro(Path(location.path)) or []
             cache = {**cache, **global_mistakes_from(rows)}
+        else:
+            # The record files changed since this index was built (a `git pull`), so its rows
+            # and the cache's own lists may still hold a retired rule. Serve no global
+            # sections; the first tool call opens the store and refreshes the index.
+            cache = {k: v for k, v in cache.items() if k not in _GLOBAL_SECTIONS}
         text = f"{head}\n\n{render_toc(cache)}"
-        # Too long for Grok: shorter summaries, then none (``render_toc`` omits a summary
-        # equal to its title), then whole lines cut.
-        for width in _GROK_SUMMARY_WIDTHS:
-            if len(text) <= GROK_MAP_MAX_CHARS:
-                break
-            domains = [
-                {
-                    **d,
-                    "summary": _truncate_summary(d.get("summary") or "", width)
-                    if width
-                    else d.get("title"),
-                }
-                for d in cache["domains"]
-            ]
-            text = f"{head}\n\n{render_toc({**cache, 'domains': domains})}"
     except Exception:  # noqa: BLE001 - a bad cache costs the table, not the map
         return head
     return _fit(text, GROK_MAP_MAX_CHARS)
+
+
+# The cache keys that carry global rules; the cold map drops them when the index is behind.
+_GLOBAL_SECTIONS = ("global_mistakes", "unratified")
+
+
+def _index_is_current(store_dir: Path) -> bool:
+    """True iff the digest the index was last certified against equals the record files' now.
+    A read-only walk (a stat per file, a few milliseconds for a few hundred records) and one
+    meta read; a missing or cleared digest, or any error, reads as not current."""
+    from ..store import _CANONICAL_DIGEST_KEY, canonical_digest
+
+    stored = _read_meta_ro(store_dir, _CANONICAL_DIGEST_KEY)
+    if not stored:
+        return False
+    try:
+        current, _stats = canonical_digest(store_dir)
+    except Exception:  # noqa: BLE001 - an unreadable tree is not a current index
+        return False
+    return stored == current
 
 
 def _read_meta_ro(store_dir: Path, key: str) -> str | None:
@@ -223,8 +235,6 @@ def _query_index_ro[T](store_dir: Path, read: Callable[[sqlite3.Connection], T])
         conn.close()
 
 
-# Summary widths tried in turn when the map is over the limit; 0 drops the summary.
-_GROK_SUMMARY_WIDTHS = (40, 0)
 _GROK_MAP_CUT = "… (cut to fit Grok; list_domains and list_proposed have the rest)"
 
 

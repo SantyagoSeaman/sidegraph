@@ -45,9 +45,9 @@ what it's working on.
 
 `RetrievalBudget` is a hard split, in characters (`len(text)`, ≈4 chars/token — no tokenizer
 dependency): `structure_chars` (default 4000) and `memory_chars` (default 6000). The split
-exists so decision memory can never crowd out structural context, or vice versa — each half
-fills independently and stops at its own cap. (`memory_chars` was raised from an original
-2000 — see "Tiered rendering" below for why a bigger memory budget is what makes the tiered
+sizes the graph walk independently of the memory render. `get_task_context` keeps that walk
+for related records but omits the map; `query_structure` renders it under `structure_chars`.
+(`memory_chars` was raised from an original 2000 — see "Tiered rendering" below for why a bigger memory budget is what makes the tiered
 render actually deliver on real ADR-scale content instead of dropping it.)
 
 ### Ranking buckets, and why mistakes come first
@@ -116,12 +116,18 @@ forms:
   Either way, evidence lines degrade/drop with their decision under budget pressure — a fact
   only ever renders next to a decision that itself made the cut.
 - **The Known-facts bucket** (`## Known facts`, rendered right after `## Decisions`, ahead of
-  the structural map). Accepted standalone facts — ones not already rendered inline under a
+  `## Related`). Accepted standalone facts — ones not already rendered inline under a
   decision above — bound to a seed or peripheral entity, walked in the same
   seed-then-peripheral order every other bucket uses, sorted by fact id for determinism.
   Proposed facts go to **Unratified proposals**. This bucket is populated only AFTER every
   decision bucket (A-D) and the superseded one-liners have already had first claim on the
   budget.
+
+Both fact-line forms clip the statement to 240 characters and the source to 300 characters,
+at word boundaries where possible, appending `…` to a clipped part. If either part is clipped,
+the line carries exactly one ` (clipped; full: list_facts(ids=["<id>"]))` note, naming the
+call that returns the whole fact. The longer line spends the same shared character budget.
+The same format appears in the SessionStart fallback map of a store with no accepted domain.
 
 **The mistakes-budget guarantee: facts can never displace a mistake.** Bucket A is two-phase
 specifically to protect this: phase 1 places every mistake decision's line, with NO evidence
@@ -212,9 +218,9 @@ counts them as "not checkable".
 
 ### Budget fallback: summaries instead of leaves
 
-The structural-map half of `get_task_context` has its own budget (`structure_chars`) and its
-own overflow behavior. Before this layer, the map simply stopped emitting leaf lines the
-instant one didn't fit — the rest of the subgraph was silently dropped, a hard truncation. Now,
+The structural map rendered by `query_structure` has its own budget (`structure_chars`) and
+its own overflow behavior. `get_task_context` does not render this block or its domain summaries.
+Before this layer, the map simply stopped emitting leaf lines the instant one didn't fit — the rest of the subgraph was silently dropped, a hard truncation. Now,
 whatever leaves got dropped that way (`overflow_nodes`) get one more chance: their communities
 are mapped to accepted domains (`store.find_domain_by_community`), and up to 5 one-line domain
 summaries (`- [domain] <title>: <summary>`) are rendered into whatever budget is left over,
@@ -228,12 +234,11 @@ truncated. No accepted domain covers any candidate community (every store withou
 domains, or a cut that happens to land outside a named area) → the fallback contributes nothing,
 and the old truncation behavior is unchanged, byte-for-byte.
 
-### Thin tools: the two halves, separately
+### Thin tools: explicit map and memory
 
 `query_structure(seeds, budget_chars)` and `query_decisions(seeds, budget_chars)` are
-`get_task_context` split down the middle — the structural-map half and the decision-memory half
-(mistakes, decisions, facts, related), exposed as their own MCP tools for a cheap follow-up once the
-caller already has one half and just needs the other. Both reuse the same seed-resolution
+explicit map and memory reads (mistakes, decisions, facts, related), exposed as MCP tools for
+a cheap follow-up. Both reuse the same seed-resolution
 and ranking code as `get_task_context`, but not its [tolerant seed reading](#seeds): they match
 seeds exactly as written. They're thinner call surfaces, not a different algorithm. `query_structure` needs a reader (no graph, no structural map — it says so rather
 than crashing); `query_decisions` degrades like `get_task_context` always has: resolving a seed
@@ -292,24 +297,33 @@ accepted inline `evidence:` lines nested under the decision they support), **Kno
 (accepted standalone facts — see above), **Structural map** (the budgeted subgraph around the
 seeds, rendered as pointers — `- name (file_type) [file_path:line]`, never inlined code),
 **Related**, then **Unratified proposals**.
-Missing sections are omitted; an empty result renders `"No context found."`. After the
-rendered text, `get_task_context` appends a `## Not in the code graph` block when a seed path is
-not a file the graph holds, saying why: a file that exists but is missing from a stale graph
+Missing sections are omitted; an empty result renders `"No context found."`.
+`get_task_context` calls `render_parts(include_structure=False)`: it omits the map, including
+its domain-summary fallback, while leaving the graph walk and related records unchanged.
+After the rendered text, `get_task_context` appends a `## Not in the code graph` block when a
+seed path is not a file the graph holds, saying why: a file that exists but is missing from a stale graph
 (rebuild it), from a graph with no committed change since its build (the file may be newer than
 the build and uncommitted, or sit on a path or have a type the engine skips), a file that exists
 only in another checkout of the repository (a sibling linked worktree: the sentence names the
-worktree and branch), a well-formed path that is
+worktree and branch, and says to start the session there to read its graph and records),
+a well-formed path that is
 not a file in any checkout (check the branch and the spelling), or a path that is not a
 normalized repo-relative path (check it). In a linked worktree that borrows the
-main checkout's graph, a file that exists only on the branch gets one sentence saying the graph
-does not hold it, and the rebuild advice for any other file names the main checkout. With no graph
+main checkout's graph, a file that exists only on the branch gets advice to build a graph in
+this worktree: rebuilding the main checkout's graph cannot add it.
+The rebuild advice for any other file names the main checkout. With no graph
 at all and at least one seed, a `## No code graph` block names the path looked at and says to build
 it (or, when the graph is there and cannot be read, that it is not readable). A file seed with
 no current record of its own, and anchored files near it, gets a `## Nearest anchored` sentence
-that names those files (under `## Why this is empty` when the answer is empty). When the answer
+that names those files. When the answer
 holds no decision memory at all, the records of the named files follow under
 `## Nearest anchored records (not anchored to your files)`; see
 [the nearest anchored records](mcp-tools.md#the-nearest-anchored-records).
+When those records follow an empty primary lookup, the leading "No context found." becomes
+"No record is anchored to the files you named; the records of the nearest anchored files follow."
+If the hard cap removes every nearest record, the old lead and `## Why this is empty` heading
+return, without the nearest-records block or its supersede hint. Telemetry and delivery claims
+exclude the removed records.
 `render()` itself produces none of these blocks.
 
 ## SessionStart TOC
@@ -319,7 +333,7 @@ whether the store has any accepted domains yet:
 
 - **`render_toc(cache)`** — the real, domain-named table of contents (activated the moment the
   first domain is ratified — no sync required, see [below](#when-the-toc-goes-live)): one line
-  per accepted domain (title, one-line summary truncated to 100 characters, mistake count,
+  per accepted domain (title, mistake count,
   subdomain count when non-zero), then global mistakes, then any proposed
   global mistakes under `## Unratified proposals`. This is what "the
   mind model comes alive" means in practice. The per-domain mistake count is what
@@ -419,7 +433,7 @@ instead (the cached domain table of contents, or only the standing lines, never 
 - **Once at least one domain has been ratified** (`sidegraph-domains bootstrap`/`add` →
   `sidegraph-ratify` — see [naming your domains](../guides/naming-your-domains.md)), `render_toc()`
   renders the real, domain-named table of contents: one line per accepted domain (title,
-  one-line summary truncated to 100 characters, mistake count, subdomain count when
+  mistake count, subdomain count when
   non-zero). This is the normal steady-state view for any project whose mind model has names
   in it — most projects, after the first bootstrap/ratify pass.
 - **Before any domain is ratified** — a fresh repo, or one that hasn't bootstrapped/ratified
@@ -520,3 +534,19 @@ use `get_task_context` for fuller decision context and `list_facts` for whole fa
 These two channels run on Claude Code and Grok Build (Sidegraph ships no `PreToolUse` hook for Codex or Muse).
 `SubagentStart` delivers its brief on Claude Code, Codex and Muse; Grok Build runs it but does
 not pass the output to the model. The wiring is in the [hooks reference](hooks.md#sidegraph-pre-tool-use).
+
+## Per-agent MCP sent state
+
+For Codex requests with an announced thread id, `get_task_context` (including nearest
+records), `query_decisions` and filtered `retrieve_decisions` share a sent set in derived
+`index.db` meta rows, `mcp_sent:<session>:<agent or ->:<record id>`. Only non-proposed full
+record bodies that survive the final output cap qualify: detailed, non-degraded decisions
+in the mistakes/decisions buckets, or full listing records. Previously sent bodies become
+in-place `[sent earlier]` lines, without accepted inline evidence, or compact
+`sent_earlier: true` listing rows; `ids=[...]` always requests full records. The freed budget
+can admit further records. Related lines, facts and proposals are never claimed. State is
+independent of telemetry; a read or batch-claim failure renders the usual full-body answer
+and claims nothing new. Claude, Grok and unknown callers remain inexact and use no sent
+state. SessionStart expires rows after 30 days and clears the main agent's rows on
+compact/clear, including Codex's canonical rollout and bare-thread aliases, before the
+60-second duplicate-event gate. Other sessions and subagents retain their rows.

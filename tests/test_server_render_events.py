@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+
+import fastmcp
+import pytest
 
 from sidegraph import server
 from sidegraph.engine.reader import GraphifyReader
@@ -15,11 +20,13 @@ from sidegraph.schema import (
     DecisionStatus,
     Descriptor,
     Entity,
+    Fact,
     Provenance,
 )
 from sidegraph.store import Store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_graph.json"
+ACCEPTED = DecisionStatus.ACCEPTED
 
 
 def _ctx():
@@ -284,6 +291,177 @@ def test_a_caller_cannot_pass_the_reserved_intent_to_a_budgeted_lookup(tmp_path,
     )
     assert [e["intent"] for e in store.render_events()] == [None, "check-plan", None]
     store.close()
+
+
+RESERVED_INTENTS = (
+    "drill_down",
+    "retrieve_decisions",
+    "list_facts",
+    "find_entity",
+    "get_entity_history",
+)
+
+
+def test_a_caller_cannot_pass_any_reserved_intent():
+    """Every label a server-written row carries is dropped from a caller's `intent`, with or
+    without surrounding spaces; the set is pinned against an independent literal."""
+    assert frozenset(RESERVED_INTENTS) == server.UNBUDGETED_INTENTS
+    for label in RESERVED_INTENTS:
+        assert server._caller_intent(label) is None
+        assert server._caller_intent(f"  {label} ") is None
+    assert server._caller_intent("check-plan") == "check-plan"
+    assert server._caller_intent(None) is None
+
+
+def test_record_without_counters_writes_only_the_render_row(tmp_path, monkeypatch):
+    store, _reader = _store_with_seed_mistake(tmp_path)
+    monkeypatch.setattr(server, "_session_key", lambda _s: "sess-1")
+    decision = next(store.iter_decisions())
+    ctx = TaskContext(shown_ids=[decision.id], selected=1, emitted=1)
+    server._record(
+        store,
+        [decision.id],
+        ["trader/exec.py"],
+        ctx=ctx,
+        intent="retrieve_decisions",
+        counters=False,
+    )
+    rows = store.render_events()
+    assert [(r["intent"], r["emitted"]) for r in rows] == [("retrieve_decisions", 1)]
+    assert store.retrieval_events() == []
+    assert store.retrieval_shows() == {}
+    assert store.retrieval_seed_queries() == {}
+    store.close()
+
+
+# --- the listing tools write one render row (stats-cited-back-and-asked design, D1-D3) -------
+
+
+def _call(name, arguments=None):
+    async def run():
+        async with fastmcp.Client(server.mcp) as client:
+            return await client.call_tool(name, arguments or {}, raise_on_error=False)
+
+    return asyncio.run(run())
+
+
+@pytest.fixture
+def listed(tmp_path, monkeypatch):
+    """A store behind the in-process server: three decisions (one with a rejected alternative),
+    two facts, and one entity both a decision and a fact are bound to."""
+    store = Store(tmp_path / "s")
+    monkeypatch.setattr(server, "_store", store)
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-such-graph.json"))
+    monkeypatch.setattr(server, "_session_key", lambda _s: "sess-1")
+    decisions = [
+        _decision("alpha lock order", rejected="a global lock, abandoned", status=ACCEPTED),
+        _decision("alpha retry budget", status=ACCEPTED),
+        _decision("beta unrelated", status=ACCEPTED),
+    ]
+    for d in decisions:
+        store.add_decision(d)
+    facts = [
+        Fact(
+            statement=f"fact {i} about alpha",
+            source=f"bench {i}",
+            status=ACCEPTED,
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual"),
+        )
+        for i in range(2)
+    ]
+    for f in facts:
+        store.add_fact(f)
+    entity = store.get_or_create_entity(Descriptor(name="Worker", file_path="worker.py"))
+    for record in (decisions[0], decisions[1], facts[0]):
+        store.add_binding(
+            AnchorBinding(record_id=record.id, entity_id=entity.entity_id, tier=2, status="live")
+        )
+    store.entity = entity
+    yield store
+    store.close()
+
+
+def _rows(store):
+    return [(r["intent"], r["selected"], r["emitted"]) for r in store.render_events()]
+
+
+def _no_counters(store):
+    assert store.retrieval_events() == []
+    assert store.retrieval_shows() == {}
+    assert store.retrieval_seed_queries() == {}
+
+
+def test_a_narrowed_retrieve_decisions_writes_one_render_row(listed):
+    result = _call("retrieve_decisions", {"query": "alpha"})
+    assert not result.is_error
+    row = listed.render_events()[0]
+    assert (row["intent"], row["selected"], row["emitted"]) == ("retrieve_decisions", 2, 2)
+    assert (row["degraded"], row["dropped_for_budget"], row["chars_used"]) == (0, 0, 0)
+    assert row["had_rejected"] == 1
+    assert len(listed.render_events()) == 1
+    _no_counters(listed)
+
+
+def test_list_facts_find_entity_and_history_write_their_rows(listed):
+    _call("list_facts", {"query": "alpha"})
+    _call("find_entity", {"name": "Worker", "file_path": "worker.py"})
+    _call("find_entity", {"name": "NoSuchThing"})
+    _call("get_entity_history", {"entity_id": listed.entity.entity_id})
+    assert _rows(listed) == [
+        ("list_facts", 2, 2),
+        ("find_entity", 0, 0),
+        ("find_entity", 0, 0),
+        ("get_entity_history", 3, 3),
+    ]
+    _no_counters(listed)
+
+
+def test_find_entity_with_ambiguous_candidates_emits_nothing(listed):
+    listed.get_or_create_entity(Descriptor(name="Twin", file_path="a/twin.py"))
+    listed.get_or_create_entity(Descriptor(name="Twin", file_path="b/twin.py"))
+    result = _call("find_entity", {"name": "Twin"})
+    answer = json.loads(result.content[0].text)
+    assert answer["found"] is False and answer["candidates"]
+    assert _rows(listed) == [("find_entity", 0, 0)]
+
+
+def test_entity_history_emits_only_the_records_it_returned_in_full(listed):
+    result = _call("get_entity_history", {"entity_id": listed.entity.entity_id, "limit": 1})
+    answer = json.loads(result.content[0].text)
+    assert answer["returned"] == 1 and answer["omitted"] == 2
+    assert _rows(listed) == [("get_entity_history", 1, 1)]
+
+
+def test_unasked_calls_write_nothing(listed):
+    """The overview, a no-filter fact list, a raising call and a graph-only call are not asking."""
+    assert not _call("retrieve_decisions").is_error
+    assert not _call("list_facts").is_error
+    assert _call("retrieve_decisions", {"status": "bogus"}).is_error
+    assert _call("list_facts", {"status": "bogus"}).is_error
+    _call("query_structure", {"files": ["worker.py"]})
+    assert listed.render_events() == []
+    _no_counters(listed)
+
+
+def test_telemetry_off_listing_writes_nothing(listed, monkeypatch):
+    monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "off")
+    _call("retrieve_decisions", {"query": "alpha"})
+    _call("find_entity", {"name": "Worker"})
+    assert listed.render_events() == []
+
+
+def test_sent_earlier_rows_are_not_emitted(listed, monkeypatch):
+    """A back-reference row sits in the same `decisions` list but is not a full record."""
+    answer = {
+        "overview": False,
+        "decisions": [{"id": "full-1", "title": "kept"}, {"id": "gone-2", "sent_earlier": True}],
+    }
+    monkeypatch.setattr(
+        server, "_decision_listing_result", lambda *a, **k: (json.dumps(answer), [])
+    )
+    _call("retrieve_decisions", {"query": "alpha"})
+    assert _rows(listed) == [("retrieve_decisions", 1, 1)]
 
 
 # --- one `_record` call is one session (usage-stats fix wave 3) ------------------------------

@@ -48,13 +48,21 @@ def test_complete_operation_failure_keeps_payload_and_sets_mcp_error(isolated_se
 
 
 @pytest.mark.parametrize(
-    "name", ["get_task_context", "query_structure", "query_decisions", "list_proposed"]
+    "name,args",
+    [
+        ("get_task_context", {}),
+        ("query_structure", {}),
+        ("query_decisions", {}),
+        ("list_proposed", {}),
+        ("find_entity", {"name": "missing"}),
+        ("verify_store", {}),
+    ],
 )
-def test_text_tool_advertises_and_emits_content_only(isolated_server, name):
+def test_text_tool_advertises_and_emits_content_only(isolated_server, name, args):
     async def run():
         async with fastmcp.Client(server.mcp) as client:
             tools = {t.name: t for t in await client.list_tools()}
-            result = await client.call_tool(name, {}, raise_on_error=False)
+            result = await client.call_tool(name, args, raise_on_error=False)
             return tools[name], result
 
     tool, result = asyncio.run(run())

@@ -5,8 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-session-start || printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\\\"}\"' || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'",
-            "commandWindows": "$r=git rev-parse --show-cdup 2>$null; if ($r) { Set-Location -LiteralPath $r }; $env:SIDEGRAPH_HOST='codex'; uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-session-start; if (-not $?) { '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}' }"
+            "command": "sh -c 'cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && SIDEGRAPH_HOST=codex uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-session-start || printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\\\"}\"' || printf '%s\\n' '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}'",
+            "commandWindows": "$r=git rev-parse --show-cdup 2>$null; if ($r) { Set-Location -LiteralPath $r }; $env:SIDEGRAPH_HOST='codex'; uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-session-start; if (-not $?) { '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv/uvx, network or project path); run the hook command in a terminal to see the error\"}' }"
           }
         ]
       }
@@ -16,8 +16,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-stop || printf \"{}\\n\"' || printf '{}\\n'",
-            "commandWindows": "$r=git rev-parse --show-cdup 2>$null; if ($r) { Set-Location -LiteralPath $r }; uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-stop; if (-not $?) { '{}' }"
+            "command": "sh -c 'cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-stop || printf \"{}\\n\"' || printf '{}\\n'",
+            "commandWindows": "$r=git rev-parse --show-cdup 2>$null; if ($r) { Set-Location -LiteralPath $r }; uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-stop; if (-not $?) { '{}' }"
           }
         ]
       }
@@ -27,8 +27,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-subagent-start || printf \"{}\\n\"' || printf '{}\\n'",
-            "commandWindows": "$r=git rev-parse --show-cdup 2>$null; if ($r) { Set-Location -LiteralPath $r }; uvx --from sidegraph==0.27.0 --python 3.13 sidegraph-subagent-start; if (-not $?) { '{}' }"
+            "command": "sh -c 'cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-subagent-start || printf \"{}\\n\"' || printf '{}\\n'",
+            "commandWindows": "$r=git rev-parse --show-cdup 2>$null; if ($r) { Set-Location -LiteralPath $r }; uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-subagent-start; if (-not $?) { '{}' }"
           }
         ]
       }

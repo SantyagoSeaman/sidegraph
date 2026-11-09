@@ -271,8 +271,8 @@ frozen membership, and with it the communities that membership holds.
 `ratify` recomputes the SessionStart TOC cache immediately whenever at least one domain was
 accepted or dropped in that call — no `sidegraph-sync` needed first. Start a new Claude Code
 session in the repo (`claude`) and the `SessionStart` context should now show a `## Domains`
-section with the titles and summaries you just ratified, instead of the nameless
-"top communities by member count" fallback.
+section listing the domains you just ratified (title, mistake count, and subdomain count
+when non-zero), instead of the nameless "top communities by member count" fallback.
 
 ## 5. After that: agent proposals, and re-running bootstrap
 

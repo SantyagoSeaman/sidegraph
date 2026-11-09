@@ -154,6 +154,9 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
    `uvx --from ./dist/sidegraph-X.Y.Z-py3-none-any.whl --python 3.13 sidegraph-doctor --help`. This confirms
    the package actually installs standalone and its console scripts resolve, which `pytest`
    alone (running against the editable checkout) does not exercise.
+   In the development repository, also run the four-host smoke against the same wheel:
+   `uv run python -m tools.bench_hosts l1 --wheel ./dist/sidegraph-X.Y.Z-py3-none-any.whl`. It
+   runs locally with the maintainer's host logins and must exit 0.
 8. Commit the release preparation on the release-prep branch, open a Draft pull request,
    and mark it Ready when final. Wait for `full-ci` to pass on its exact head SHA and settle
    the Copilot review, then merge the PR and update internal `main`. A direct push to
@@ -168,8 +171,10 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
    `tools/release-public.sh "release: vX.Y.Z" --push` (see [The cut](#the-cut)). `--push` itself
    refuses unless `vX.Y.Z` is untagged in the **public** repository and `CHANGELOG.md` dates it.
    Refresh `demo` separately when required.
-11. Approve the `pypi` environment when `publish.yml` asks, then promote with
-    `tools/promote-release.sh vX.Y.Z` (see [Publish and promote](#publish-and-promote)).
+11. Approve the `pypi` environment when `publish.yml` asks. Before promoting, run
+    `uv run python -m tools.bench_hosts l1 --release X.Y.Z`; a tag-mode FAIL blocks the promote;
+    the fix ships as X.Y.(Z+1). Then promote with `tools/promote-release.sh vX.Y.Z` (see
+    [Publish and promote](#publish-and-promote)).
 
 Only after all eleven steps, the candidate validation and any requested
 [desktop smoke](#desktop-smoke-when-requested) pass is the release done.
@@ -216,7 +221,16 @@ with the commands to inspect it.
 ### Publish and promote
 
 The tag push starts [`publish.yml`](../../.github/workflows/publish.yml) (see [Tag-driven
-publish flow](#tag-driven-publish-flow)). Once PyPI lists the version, promote it:
+publish flow](#tag-driven-publish-flow)). Once PyPI lists the version, run the four-host smoke
+against it:
+
+```bash
+uv run python -m tools.bench_hosts l1 --release X.Y.Z
+```
+
+A tag-mode FAIL blocks the promote; the fix ships as X.Y.(Z+1).
+
+Then promote:
 
 ```bash
 tools/promote-release.sh vX.Y.Z
@@ -239,6 +253,8 @@ default) and then:
    the commit below it; both are on `main`. The promotion commit changes only the plugin's
    `pyproject.toml` and `uv.lock`, so its `full-ci` takes the lint-only path (no test matrix),
    and so does the `main` push that fast-forwards to the same commit.
+5. for a final version, creates the [GitHub Release](#github-release) from the tag's
+   `CHANGELOG.md` section. The promote ends with an error, after `main` has moved, if that fails.
 
 The target is classified by repository identity (host, owner, repository), not by string:
 a final version goes only to the canonical repository, a pre-release only to the scratch
@@ -266,6 +282,9 @@ Nothing before the tag is spent, and the public `main` does not move before the 
 - **The public `main` moved after the cut.** It moves only at a promote, so this means two
   releases overlapped. Promote refuses a final version whose tag is not a fast-forward of `main`;
   release the next version from the new `main`.
+- **The four-host smoke (L1) does not pass.** Exit 1 blocks the release or the promote; exit 2
+  means one rerun after fixing the environment. A tag-mode FAIL blocks the promote; the fix ships
+  as X.Y.(Z+1).
 
 ### Release candidate validation
 
@@ -458,15 +477,19 @@ When the workflow is green, run [the promote](#publish-and-promote).
 
 ## GitHub Release
 
-`publish.yml` does not create a GitHub Release. That step is manual, after the workflow goes
-green:
+`publish.yml` does not create a GitHub Release; `tools/promote-release.sh` does, as its last
+step for a final version, so a release cannot be promoted without one. The notes are the dated
+`## [X.Y.Z]` section of the `CHANGELOG.md` at the tag, heading through the entries, up to the
+next `## [`. The step refuses a section that is missing, undated or empty, or that names an
+internal issue id. A release that already exists is left as it is, and a candidate
+(`X.Y.ZrcN`) gets none.
+
+If the promote stopped after `main` moved (the message says so), do not run it again; create
+the release alone:
 
 ```bash
-gh release create vX.Y.Z --title vX.Y.Z --notes-file <(sed -n '/## \[X.Y.Z\]/,/## \[/p' CHANGELOG.md | sed '$d')
+tools/create-github-release.sh vX.Y.Z
 ```
-
-Or, from the UI, paste the same dated `CHANGELOG.md` section (heading through the entries
-under it, stopping before the next `##`) as the release notes body.
 
 ## Post-release checks
 

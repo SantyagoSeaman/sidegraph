@@ -438,8 +438,8 @@ Skip the Graphify install and `graphify update`, run `sidegraph-init` as usual, 
 to its *Keep the code graph fresh?* question. The store, the SessionStart map, the proposal
 queue, store listings and global memory still work. Anchoring does not: `add_decision` and a
 proposed draft keep only an orphaned anchor that waits for a graph, and retrieval for a file or a symbol finds nothing (a seed that names a descriptor
-already stored with a record still finds it). There is no structural map, no automatic domain
-candidates and no following of moved code. The loop of capturing a record for a file and
+already stored with a record still finds it). `query_structure` has no map to return; there are
+no automatic domain candidates and no following of moved code. The loop of capturing a record for a file and
 recalling it when that file is read needs the graph. See
 [the graph dependency](../reference/operations.md#the-graph-dependency-stated-plainly).
 
