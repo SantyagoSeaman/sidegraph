@@ -407,6 +407,66 @@ def _cited_back(report: StatsReport) -> list[str]:
     return lines
 
 
+# The causes that mean a record was bound to a file the call named, and the words for each
+# cause. ``cold`` is an index rebuilt since the last sync with no status kept for the binding.
+_BOUND_CAUSES = (("repeat", "already delivered"), ("cap", "ten-file cap"), ("cold", "not synced"))
+_OTHER_CAUSES = (
+    ("no-entity", "no anchor"),
+    ("no-record", "no current record"),
+    ("duplicate", "duplicate start"),
+    ("unrecorded", "cause not recorded"),
+    ("unknown", "cause unknown"),
+    ("other", "other cause"),
+)
+
+
+def _dotted(first: str, items: list[str]) -> list[str]:
+    """Lay `items` out after `first` with " · " between them, wrapping between items. Unlike
+    `_pack`, a line that ends in the separator is counted with it, so it still fits the screen."""
+    lines: list[str] = []
+    current, fresh = first, True
+    for i, item in enumerate(items):
+        piece = item + (" ·" if i < len(items) - 1 else "")
+        if not fresh and len(current) + 1 + len(piece) > _BODY_WIDTH:
+            lines.append(current)
+            current, fresh = _HANG, True
+        current += ("" if fresh else " ") + piece
+        fresh = False
+    lines.append(current)
+    return lines
+
+
+def _hook_runs(report: StatsReport) -> list[str]:
+    runs = report.hook_runs
+    assert runs is not None
+    lines = [f"runs that opened the index, last {_count(report.window_days, 'day')} (run log)"]
+    for hook, counts in runs.hooks.items():
+        name = "other hooks" if hook == "other" else hook
+        first = f"{name}: {_count(counts.runs, 'run')}; delivered on {_n(counts.delivered)}"
+        if counts.partial:
+            first += f" ({_n(counts.partial)} cut short by a lock)"
+        lines.append(first)
+        bound = [(label, counts.empty.get(cause, 0)) for cause, label in _BOUND_CAUSES]
+        # The share: of the runs a record was bound on, how many delivered. Only over runs the
+        # log explains: from the hook's first line with a cause, and not at all while lines
+        # without a cause are still being written.
+        if counts.delivered_with_causes is not None and any(n for _, n in bound):
+            total = counts.delivered_with_causes + sum(n for _, n in bound)
+            since = (
+                f" since {counts.causes_since.date().isoformat()}" if counts.causes_since else ""
+            )
+            items = [f"delivered {_n(counts.delivered_with_causes)}"]
+            items += [f"{label} {_n(n)}" for label, n in bound if n]
+            lines += _dotted(f"{_HANG}a record was bound on {_n(total)}{since}: ", items)
+            bound = []
+        rest = bound + [(label, counts.empty.get(cause, 0)) for cause, label in _OTHER_CAUSES]
+        rest += [("lock", counts.lock), ("error", counts.error)]
+        items = [f"{label} {_n(n)}" for label, n in rest if n]
+        if items:
+            lines += _dotted(f"{_HANG}other runs: ", items)
+    return lines
+
+
 def _delivery_evidence(report: StatsReport) -> list[str]:
     evidence = report.delivery_evidence
     if not report.telemetry_enabled:
@@ -453,6 +513,8 @@ def render_text(report: StatsReport) -> str:
         lines += _block("CITED BACK", _cited_back(report))
     if report.delivery_evidence is not None:
         lines += _block("DELIVERY", _delivery_evidence(report))
+    if report.hook_runs is not None:
+        lines += _block("HOOK RUNS", _hook_runs(report))
     lines += _block("REACH", _reach(report))
     lines.append("")
     lines += _block("MEMORY", _memory(report))
@@ -481,6 +543,7 @@ def render_json(report: StatsReport) -> str:
         # Everything the journal supplied. Store-derived figures stand.
         data["activation"] = None
         data["delivery_evidence"] = None
+        data["hook_runs"] = None
         for key in ("files_touched", "files_touched_with_memory", "busiest_seeds"):
             data["reach"][key] = None
         if data["memory"] is not None:

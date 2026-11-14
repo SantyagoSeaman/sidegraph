@@ -37,7 +37,7 @@ from .anchoring import (
 )
 from .config import CURRENT_SESSION, TELEMETRY_SESSION_KEY, TELEMETRY_SESSION_STAMP_PREFIX
 from .engine.reader import GraphifyReader
-from .gitenv import git_env
+from .gitenv import run_git
 from .input_limits import MAX_DRAFTS, preflight_drafts
 from .redaction_scan import PhaseScanner
 from .redaction_tokens import iter_jwt_spans, iter_private_key_spans
@@ -847,13 +847,11 @@ def _derive_initiative(store: Store) -> str | None:
     friends, not the config-injection ones) from the environment.
     # see design/superpowers/specs/2026-09-30-initiative-from-store-repo-design.md §6 (D4, D5)
     """
-    env = git_env()
     try:
         for cwd in (Path(os.path.abspath(store.path)).parent, store.path):
-            out = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=cwd,
-                env=env,
+            out = run_git(
+                ["branch", "--show-current"],
+                cwd,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,

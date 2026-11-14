@@ -27,8 +27,10 @@ renderer's text follows — added once at the hook-assembly level, not inside ei
 
 > When you need to find or understand code in this project, call get_task_context(files=[…])
 > with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
-> available. If the tool is listed only by name, load it first.
+> are indexed here. If you know a symbol's name and not its file, call
+> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
+> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
+> listed only by name, load it first.
 
 Unlike the `PreToolUse` records block below (which fires only when a `Read`, `Edit`, `Write`,
 `Grep` or `sed`/`grep`/`rg`/`cat` line names a file with records, each file at most once per
@@ -116,9 +118,10 @@ first two are mistakes, each as `- [kind] title — first sentence of the choice
 denied, escalated, or auto-approved; it only gets annotated with the block, and then runs
 through Claude Code's normal permission flow exactly as it would have otherwise.
 
-Each file is delivered **once per agent**, up to **ten files per agent** (one statement in the
-store's `meta` table counts and inserts, separate from the `Stop` hook's own capture ledger so the
-guards don't consume each other). The session's own agent and every subagent it starts count
+Each file is delivered **once per agent**, up to **ten files per agent** (an agent starts its
+ten again after its context is compacted or cleared) (one statement in the store's `meta` table
+counts and inserts, separate from the `Stop` hook's own capture ledger so the guards don't
+consume each other). The session's own agent and every subagent it starts count
 separately, because Claude Code gives a subagent's hook payload its parent's session id and its
 own `agent_id`: without that, the main agent's delivery would have used up the one a subagent
 needed. A call that names no file with records prints `{}`, and no counting form is printed
@@ -134,10 +137,16 @@ so a call costs a few tens of milliseconds, and in a project with no store it do
 creates nothing. Like the other hooks, it never crashes or blocks the tool call: any failure (or
 nothing to deliver) prints `{}`.
 
-After a new store or canonical index reload, record delivery and the `SubagentStart` brief
-wait until a successful sync computes binding statuses. `SessionStart` and memory retrieval
-attempt lazy sync; without a graph reader, these hot-hook outputs remain withheld until a
-reader and successful sync are available. Touch recording and file claims remain available.
+After an index rebuild (a pull or a branch switch that changes record files, a touched
+record file, a compaction) record delivery and the `SubagentStart` brief continue for
+every anchor whose entity is unchanged, by the status the last sync computed for it. That
+status describes the code as the last sync saw it: when the code changed since, a record
+can still arrive through an anchor the next sync will find gone, as it can between any
+two syncs. A record that reaches a file only through a new or changed anchor waits for
+the next successful sync. A store that no sync has ever checked delivers nothing from
+these two hooks until one completes: `SessionStart` and memory retrieval attempt a lazy
+sync, and without a graph reader that state lasts until a reader and a successful sync
+are available. Touch recording and file claims remain available.
 
 **Subagent briefs.** The third group, matcher `Agent|Task`, runs the same command when the agent
 spawns a subagent. The brief the parent writes is where the task is, so the hook reads the files
@@ -162,9 +171,10 @@ No matcher. A subagent (Explore, Plan, general-purpose, or one you define) start
 standing tells one that decision memory exists. When Claude Code creates a subagent, this hook
 answers with an `additionalContext` that arrives in front of its first turn: the same standing
 call `SessionStart` gives the main agent (`get_task_context(files=[…])` with repo-relative
-paths, the check-plan skill before a non-trivial change, and a reminder to load the tool first if
-it is listed only by name), then one sentence of what memory holds: how many records are anchored
-to code, in how many files, and how many of them are recorded mistakes. It carries no records:
+paths, or with a symbol's name alone when its file is not known, the check-plan skill before a
+non-trivial change, and a reminder to load the tool first if it is listed only by name), then
+one sentence of what memory holds: how many records are anchored to code, in how many files,
+and how many of them are recorded mistakes. It carries no records:
 which ones matter depends on the files the subagent works on, and `get_task_context` answers
 that. In a store with nothing anchored to code, or where the index cannot be used, it prints
 `{}`. Set `SIDEGRAPH_SUBAGENT_BRIEF=off` to disable it entirely. It reads the store's index
@@ -182,9 +192,9 @@ any exception inside `stop` prints `{}` (Claude Code proceeds to stop normally);
 inside `pre_tool_use` — or the nudge conditions simply not holding — also prints `{}` (the
 tool call proceeds through the normal permission flow); any exception inside `subagent_start`, or
 nothing anchored to code to describe, prints `{}` (the subagent starts with no brief). A missing
-graph leaves new records without code anchors and gives a shorter map; after a new store or canonical index
-reload, hot-hook record delivery and briefs remain withheld until sync can run with a reader.
-A missing store is not an error either:
+graph leaves new records without code anchors and gives a shorter map; on a store that no sync
+has ever checked, hot-hook record delivery and briefs remain withheld until sync can run with a
+reader. A missing store is not an error either:
 `SessionStart` creates nothing: it sends a `systemMessage` that names the expected path and asks for
 an explicit `sidegraph-init` there, and no hook creates the store, so memory stays off until you run it. An
 env var that points at the wrong path gives an empty store there, so that session has no

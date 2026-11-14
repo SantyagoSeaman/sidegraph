@@ -61,6 +61,19 @@ SCHEMA_VERSION = "0.6.0"
 # Set to "1" on canonical reload and cleared by a completed sync: binding statuses are
 # placeholders until then. Shared by Store and the dependency-light hook index.
 VOLATILE_STALE_KEY = "volatile_stale"
+# The index-only column of ``anchor_bindings`` that carries a leaf status across a rebuild. A
+# rebuild fills it for the entities whose status a sync had computed and whose descriptor the
+# rebuild did not change; nothing else writes it, and NULL means "not computed". While the
+# index is cold the hook index delivers through a row only when both this column and the row's
+# own status are deliverable. ``LEAF_STATUSES`` is ordered worst first.
+KEPT_STATUS_COLUMN = "kept_status"
+DELIVERABLE_STATUSES = ("live", "degraded")
+LEAF_STATUSES = ("orphaned", "degraded", "live")
+# ``descriptor_changed:<entity id>`` is set when a stored entity's descriptor is changed in
+# place: the statuses the index holds for it were computed for the old descriptor. The next
+# rebuild keeps no status for a marked entity and deletes the marks; until then the hook index
+# treats a marked entity's kept status as absent while the index is cold.
+DESCRIPTOR_CHANGED_PREFIX = "descriptor_changed:"
 # A generation counter bumped when a binding is born orphaned for want of a graph, and the
 # generation the last completed sync started from. They differ while an orphan still awaits a
 # rebind: sync's version gate must not skip then, yet (unlike VOLATILE_STALE_KEY) retrieval
@@ -270,7 +283,7 @@ INDEX_STAMPS = frozenset({SCHEMA_VERSION, REQUIRED_INDEX_STAMP})
 _RELEASE_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _REQUIREMENT_LINE_RE = re.compile(r"requires-sidegraph >= (\d+\.\d+\.\d+)")
 
-RefusalKind = Literal["unrecognized", "major", "malformed", "below", "layout", "missing"]
+RefusalKind = Literal["unrecognized", "major", "malformed", "below", "layout", "missing", "link"]
 
 # The committed ``.gitignore`` beside the records (see ``Store._ensure_gitignore``).
 GITIGNORE_NAME = ".gitignore"
@@ -514,6 +527,57 @@ class StoreRequirementError(ValueError):
         self.busy = busy
 
 
+def outside_store_link(store_path: str | os.PathLike[str]) -> str | None:
+    """The directory ``store_path`` really is, when it lies outside a repository that
+    encloses the path as written; ``None`` otherwise.
+
+    EVERY directory above the path, as written, that holds a ``.git`` entry must contain the
+    resolved path: not only the nearest one. A link to another repository brings that
+    repository's ``.git`` with it, and the nearest rule then takes the link's own target for
+    the boundary. With no ``.git`` above there is no checkout to leave. Links above the
+    outermost repository cancel out. Two Windows drives count as outside. Stdlib only.
+    # see design/superpowers/specs/2026-11-12-trust-boundary-clone-content-design.md (D8.1)
+    """
+    try:
+        lexical = os.path.abspath(os.fspath(store_path))
+        # The path as written, not the collapsed one: the system resolves a `..` after a link
+        # through the link, `abspath` does not.
+        target = os.path.realpath(os.fspath(store_path))
+        current = os.path.dirname(lexical)
+        while True:
+            if os.path.lexists(os.path.join(current, ".git")):
+                boundary = os.path.realpath(current)
+                try:
+                    common = os.path.commonpath([boundary, target])
+                except ValueError:  # two drives
+                    return target
+                if os.path.normcase(common) != os.path.normcase(boundary):
+                    return target
+            parent = os.path.dirname(current)
+            if parent == current:
+                return None
+            current = parent
+    except OSError:
+        return None
+
+
+class StoreLinkRefused(StoreRequirementError):
+    """The store path leaves its repository through a link, so nothing behind it is read.
+    A ``StoreRequirementError``: every reader that refuses a store it may not read refuses
+    this one the same way."""
+
+
+def refuse_outside_store_link(store_path: str | os.PathLike[str]) -> None:
+    """Raise :class:`StoreLinkRefused` for a path :func:`outside_store_link` reports."""
+    target = outside_store_link(store_path)
+    if target is not None:
+        raise StoreLinkRefused(
+            f"leaves its repository through a link to {target}: {os.fspath(store_path)}. "
+            "Sidegraph does not follow it.",
+            kind="link",
+        )
+
+
 def release_tuple(version: str) -> tuple[int, int, int] | None:
     """``(X, Y, Z)`` of a version that starts with ``X.Y.Z``, ignoring what follows, so
     ``0.14.0.dev3+g1`` is ``(0, 14, 0)``: how a dev or local build compares against a
@@ -696,7 +760,11 @@ def check_store_requirement(
     the one caller that accepts exactly this shape. An unlistable ``shards/`` propagates its
     ``PermissionError``.
     # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D6)
-    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.5)"""
+    A path that leaves its repository through a link is refused first
+    (:func:`refuse_outside_store_link`), before any file behind it is read.
+    # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.5)
+    # see design/superpowers/specs/2026-11-12-trust-boundary-clone-content-design.md (D8.2)"""
+    refuse_outside_store_link(store_dir)
     found = store_marker(store_dir)
     if not allow_unmigrated_shards and (found is None or found.major < 2):
         from .store_format import has_shard_files

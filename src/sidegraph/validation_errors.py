@@ -61,6 +61,7 @@ _FIELDS = frozenset(
         "drafts",
         "accept",
         "drop",
+        "verdict",
         "record_id",
         "decision_id",
         "checked_commit",
@@ -179,6 +180,13 @@ _MESSAGES = {
         "per file and 64 per check"
     ),
     "no_named_anchor": "anchors: none of the given anchors has a name",
+    "owner_verdict_required": (
+        "ratify needs the owner's verdict to accept a record, and to drop one that is not "
+        "proposed: pass verdict with the owner's own words that named these records in this "
+        "conversation, after the owner could see what would be accepted. If the owner has not "
+        "said so, change nothing: show list_proposed and ask. Do not run sidegraph-ratify "
+        "yourself. A proposed record can be dropped without a verdict."
+    ),
     "no_live_support": (
         "anchorless fact has no live supporting decision — add an anchor, or "
         "re-point supports at the successor of a superseded/rejected/deprecated one"

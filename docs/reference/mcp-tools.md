@@ -24,7 +24,8 @@ server without host identity: the session id stays null and retrievals are journ
 `sidegraph-mcp` defaults to a local **stdio** server started by an MCP client. Standard input
 and standard output carry protocol messages; diagnostics go to standard error. FastMCP
 transport settings can select HTTP, but Sidegraph supplies no separate HTTP authorization
-configuration.
+configuration. These settings are read from the environment. A `.env` file in the working
+directory is not loaded unless `FASTMCP_ENV_FILE` names it.
 Configure the working directory and `SIDEGRAPH_DIR` for the repository the server should
 use; see [configuration](configuration.md#path-resolution-semantics).
 
@@ -110,7 +111,7 @@ for recovery from an incomplete operation.
 |---|---|---|
 | [`add_decision`](#add_decision) | Write one decision directly, `status=accepted` | Mid-session, when a human/agent asks to record something now |
 | [`record_drift_check`](#record_drift_check) | Record an attributed inspection of an unchanged decision | After reading current code and confirming the claim still holds |
-| [`supersede_decision`](#supersede_decision) | Close an old decision, write its replacement | When a past decision is explicitly reversed |
+| [`supersede_decision`](#supersede_decision) | Write a decision's replacement; an agent's own waits for ratification | When a past decision is reversed |
 | [`retire_decision`](#retire_decision) | Close an accepted decision with a reason, no replacement | A duplicate, or a decision whose subject is gone |
 | [`add_fact`](#add_fact) | Write one non-derivable fact directly, `status=accepted` | Mid-session, when a human asks to record a benchmark/limit/trial-learned fact now |
 | [`supersede_fact`](#supersede_fact) | Close an old fact, write its falsifying replacement | When a past fact is disproven or corrected |
@@ -232,9 +233,7 @@ to a successful result:
 
 The value is one sentence, naming the store's path relative to the repository root:
 `Commit .sidegraph/ in the same change as the work that produced this record, so it reaches
-other checkouts and teammates.` Outside a git repository the key is absent, and so it is for a
-store that is a symlink to a directory outside the repository, because git commits the link and
-not the records behind it. `ratify` carries none, because its results are keyed by record id,
+other checkouts and teammates.` Outside a git repository the key is absent. `ratify` carries none, because its results are keyed by record id,
 and `sync_anchors` writes a committed file only when a rung moves. The key is additive, like every field the tools'
 results may still gain ([stability](stability.md)).
 
@@ -422,18 +421,41 @@ supersede_decision(
     anchors: list[dict] | None = None,  # [{"name": str, "file_path": str | None}, ...]
     session_id: str | None = None,
     author: str | None = None,
-    source: str = "human",
+    source: str = "agent",
 ) -> dict
 ```
 
-Writes a replacement `Decision` (`status="accepted"`, provenance source defaults to
-`"human"`) with
-`supersedes=old_decision_id`. Under one serialized store mutation, the successor is written
-first and the predecessor is then closed (`valid_to` set, `status` flipped to `superseded`).
-The predecessor must be accepted with `valid_to` unset. For proposals or closed history,
-follow [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
-The predecessor is never deleted. `session_id`, `author`, and `source` are stamped into the
-successor's provenance; use `source="agent"` when an agent initiates the reversal.
+Writes a replacement `Decision` with `supersedes=old_decision_id`. `source` decides how it
+lands:
+
+- **Omitted, or any value except `"human"`** (the default is `"agent"`): the replacement
+  lands `status="proposed"`. The predecessor stays `accepted` and current. The replacement
+  waits in [`list_proposed`](#list_proposed) for [`ratify`](#ratify): accepting it closes
+  the predecessor (`valid_to` set, `status` flipped to `superseded`) at that moment, and
+  dropping it leaves the predecessor untouched.
+- **`source="human"`**: the owner asked for this reversal in the conversation and dictated
+  or approved the replacement's text. The replacement lands `status="accepted"` and, under
+  one serialized store mutation, the predecessor is closed in the same call.
+
+The tool cannot check who asked: `source` is the caller's statement, stamped into
+`provenance.source`. The predecessor must be accepted with `valid_to` unset and have no
+pending successor. A second replacement of the same record is refused with `<id> already
+has a pending successor <id>; it waits for the owner's verdict. …`: tell the owner, and do
+not drop a pending successor you did not write in this session. For proposals or closed
+history, follow
+[status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
+The predecessor is never deleted. `session_id` and `author` are stamped into the
+successor's provenance.
+
+**The ratification policy applies to a replacement that landed `proposed`.** Under
+`SIDEGRAPH_RATIFY_POLICY=auto-all`, a replacement with at least one live Tier-1 or Tier-2
+anchor is accepted at write time and stamped `ratified_by="auto:auto-all"`, as a
+superseding `propose_decisions` draft is, and the predecessor closes in that call. Without
+a live anchor (no graph, or only orphaned bindings inherited) it stays `proposed`, and so it
+does while the index is waiting for a sync, live anchor or not (see the
+`SIDEGRAPH_RATIFY_POLICY` row of [configuration](configuration.md)). Under
+`manual` and `auto-low-risk` it always stays `proposed`. The deprecated
+`SIDEGRAPH_AUTO_ACCEPT` is not read by this tool.
 
 Anchoring: pass `anchors` (same shape as `add_decision`'s) to `resolve_and_bind` the
 replacement to ONLY those refs, exactly like `add_decision`. Omit `anchors` (the default) and
@@ -450,8 +472,11 @@ is refused before anything is written: there would be nothing to copy, and the s
 would silently start with no anchors. MCP omits the raw cause/file name; use `sidegraph-doctor` to identify the binding file to repair. Passing
 `anchors` still works.
 
-**Returns:** `{"id": str, "supersedes": str, "bindings": int, "entities": list[dict],
-"anchors_skipped": list[dict], "anchors_orphaned": list[dict], "redactions": int}` — same `bindings`/`entities`/
+**Returns:** `{"id": str, "status": str, "ratified_by": str | None,
+"auto_ratify_error": str | None, "supersedes": str, "bindings": int, "entities": list[dict],
+"anchors_skipped": list[dict], "anchors_orphaned": list[dict], "redactions": int}` — `status` is
+`"proposed"` or `"accepted"`. `ratified_by` and `auto_ratify_error` have the same meaning
+as in a `propose_decisions` result. Same `bindings`/`entities`/
 `anchors_skipped`/`anchors_orphaned`/`redactions` shapes as `add_decision`'s, reflecting whichever path
 (explicit or inherited) produced the replacement's bindings (`anchors_skipped` is always
 `[]` on the inherited path — inheritance never resolves against the graph). Text fields are
@@ -515,8 +540,8 @@ Refused, with nothing written, when:
   (`duplicate_of names no decision`); an id that names no record is never echoed;
 - the decision is not `accepted`, or `reason` is blank;
 - `duplicate_of` is the same id, or not another accepted, open decision;
-- a proposed successor of the decision is pending, or a proposed fact supports it: ratify or
-  drop it first;
+- a proposed successor of the decision is pending, or a proposed fact supports it: it waits
+  for the owner's verdict, so tell the owner; do not drop it yourself;
 - for a duplicate, a fact that only the duplicate keeps reachable would be left with no way in,
   because neither the duplicate nor the kept record has an anchor to give it: the message names
   the fact; anchor it with [`add_anchors`](#add_anchors) (or anchor the kept record) first.
@@ -929,7 +954,15 @@ degrades to un-synced retrieval, never an error), resolves `files`/`entities` in
 and returns a rendered Markdown string with up to five sections — accepted mistakes (with
 accepted inline evidence facts), accepted decisions (with accepted inline evidence), accepted
 known facts (standalone), related accepted memory, and unratified proposals —
-under the given character budgets. Related memory reached by expansion shows at most 5 short
+under the given character budgets.
+
+Inside the mistakes and decisions sections the records of a symbol named in `entities` come
+first and take the budget first: the named symbol's mistakes, then its decisions, then the
+mistakes and the decisions of the other symbols of the named files. A call that names no
+symbol places every direct mistake before every direct decision. See
+[retrieval: named symbols](retrieval-internals.md#named-symbols-what-you-named-comes-first).
+
+Related memory reached by expansion shows at most 5 short
 lines with ids, plus a count of the rest; see
 [retrieval: two-tier rendering](../concepts/retrieval.md). See
 [retrieval: facts](../concepts/retrieval.md#facts-inline-evidence-and-the-known-facts-bucket)
@@ -1621,8 +1654,8 @@ exception is a *dropped* domain, kept for the mass-drop recovery below. See
 [the supersession invariant](../concepts/data-model.md#the-supersession-invariant).
 
 The successor always lands `status="proposed"` — same rule `add_domain` always follows (and
-`propose_domains` under the default policy) — and the predecessor stays live until a human
-calls `ratify(accept=[...])` on it, which flips an *accepted* predecessor to `superseded`
+`propose_domains` under the default policy) — and the predecessor stays live until the owner's verdict
+reaches `ratify(accept=[...], verdict=...)` for it, which flips an *accepted* predecessor to `superseded`
 (append-only: the record stays, fully retrievable, never deleted) in the same operation.
 Dropping the successor leaves it exactly as it was. A *dropped* predecessor holds no live
 domain, so it is flipped to `superseded` at once (this is what frees its community in the
@@ -1692,7 +1725,11 @@ store, or use `sidegraph-ratify` without flags for the full pending queue. Domai
 ## `ratify`
 
 ```python
-ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> dict[str, str]
+ratify(
+    accept: list[str] | None = None,
+    drop: list[str] | None = None,
+    verdict: str | None = None,  # required to accept, and to drop a record that is not proposed
+) -> dict[str, str]
 ```
 
 Ratifies pending proposals of **any kind** — decisions, facts, and domains share one gate.
@@ -1700,6 +1737,18 @@ Each id in `accept`/`drop` is routed by lookup, decision first, then fact, then 
 guessed). `accept` always requires `proposed`, for any kind: a pending decision or fact flips
 `proposed → accepted`; a pending domain flips `proposed → accepted` **and mints its paired
 `domain:<slug>` abstract entity**.
+
+**The owner's verdict.** `verdict` is the owner's own words that named these records in
+the conversation. It is required to **accept** a record, and to **drop a record that is
+not `proposed`** (an accepted domain). A call that needs it and lacks it (or carries a
+blank one) is refused whole, before anything is written, with an error that says what to
+do. A drop of `proposed` records needs no verdict: anyone may withdraw a draft. An
+instruction given before the owner could see what would be accepted is not a verdict. The server cannot
+verify who is speaking: `verdict` is the calling agent's statement, and its text is not
+stored. What is stored is the path: every record accepted through this tool is stamped
+`ratified_by="agent-relayed:<git user name>"` (`"agent-relayed"` when git gives no name).
+`sidegraph-ratify` run by a person stamps the bare name, and a ratification policy stamps
+`auto:<policy>`. A drop stamps nothing.
 
 `drop` requires `proposed` for a **decision or fact** (`→ rejected`, append-only, `valid_to`
 set) but accepts `proposed` **or accepted** for a **domain** (`→ dropped`, no entity minted —

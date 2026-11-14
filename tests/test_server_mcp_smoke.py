@@ -189,7 +189,9 @@ def test_mcp_add_domain_propose_domains_and_ratify_roundtrip(tmp_path, monkeypat
             )
             manual_id = add_result.data["domain_id"]
             proposed_id = propose_result.data[0]["domain_id"]
-            ratify_result = await client.call_tool("ratify", {"accept": [manual_id, proposed_id]})
+            ratify_result = await client.call_tool(
+                "ratify", {"accept": [manual_id, proposed_id], "verdict": "owner said accept"}
+            )
             return add_result, propose_result, ratify_result, manual_id, proposed_id
 
     add_result, propose_result, ratify_result, manual_id, proposed_id = asyncio.run(_run())
@@ -213,7 +215,9 @@ def test_mcp_drill_down_and_thin_tools_roundtrip(tmp_path, monkeypatch):
                 {"slug": "payments", "title": "Payments", "summary": "Order settlement."},
             )
             domain_id = add_result.data["domain_id"]
-            await client.call_tool("ratify", {"accept": [domain_id]})
+            await client.call_tool(
+                "ratify", {"accept": [domain_id], "verdict": "owner said accept"}
+            )
 
             found_result = await client.call_tool("drill_down", {"domain_slug": "payments"})
             missing_result = await client.call_tool("drill_down", {"domain_slug": "no-such"})
@@ -398,7 +402,9 @@ def test_mcp_list_domains_and_supersede_domain_roundtrip(tmp_path, monkeypatch):
                 {"slug": "payments", "title": "Payments", "summary": "Order settlement."},
             )
             domain_id = add_result.data["domain_id"]
-            await client.call_tool("ratify", {"accept": [domain_id]})
+            await client.call_tool(
+                "ratify", {"accept": [domain_id], "verdict": "owner said accept"}
+            )
 
             listed = await client.call_tool("list_domains", {})
             filtered = await client.call_tool("list_domains", {"status": "accepted"})

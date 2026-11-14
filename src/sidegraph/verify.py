@@ -61,7 +61,7 @@ from pydantic import BaseModel, ValidationError
 from . import domain_snapshot, drift_checks
 from .check_fold import _TERMINAL as _CHECK_TERMINAL
 from .config import _store_project_root
-from .gitenv import git_env
+from .gitenv import run_git
 from .schema import (
     SCHEMA_VERSION,
     AnchorBinding,
@@ -110,6 +110,7 @@ from .store_layout import (
     hot_matches_archive,
     is_regular_file,
     parse_format_marker,
+    refuse_outside_store_link,
     release_tuple,
     require_listable_record_dirs,
     requirement_met,
@@ -1514,6 +1515,7 @@ def verify_snapshot(store_dir: str | Path) -> list[Violation]:
     about the store's contents.
     """
     store_dir = Path(store_dir)
+    refuse_outside_store_link(store_dir)
     _require_store_dir(store_dir)
 
     violations: list[Violation] = []
@@ -1761,16 +1763,15 @@ def _run_git(
     answers about the repository containing ``cwd``, never an ambient one. These
     noninteractive commands receive EOF on stdin, keeping subprocesses off the MCP pipe."""
     try:
-        return subprocess.run(
-            ["git", *args],
-            cwd=cwd,
+        return run_git(
+            args,
+            cwd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=text,
             encoding="utf-8" if text else None,
             errors="surrogateescape" if text else None,  # lossless for paths (os.fsencode)
             timeout=timeout,
-            env=git_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ValueError(f"could not run git ({' '.join(args)}): {e}") from e
@@ -2524,9 +2525,9 @@ def _check_occurrences_at_ref(
     prefix = f"{store_rel}/" if store_rel else ""
     folder = f"{prefix}{VERIFICATIONS_SUBDIR}"
     env = drift_checks._env(True)
-    listing = subprocess.run(
-        ["git", "ls-tree", "-z", oid, f"{folder}/"],
-        cwd=repo_root,
+    listing = run_git(
+        ["ls-tree", "-z", oid, f"{folder}/"],
+        repo_root,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         env=env,
@@ -2547,9 +2548,9 @@ def _check_occurrences_at_ref(
             wanted.append((name, blob))
     if not wanted:
         return []
-    batch = subprocess.run(
-        ["git", "cat-file", "--batch"],
-        cwd=repo_root,
+    batch = run_git(
+        ["cat-file", "--batch"],
+        repo_root,
         input=b"".join(blob.encode("ascii") + b"\n" for _, blob in wanted),
         capture_output=True,
         env=env,
@@ -2788,6 +2789,7 @@ def verify_against(store_dir: str | Path, ref: str) -> list[Violation]:
     :func:`verify_snapshot` uses; this function always corrects it to the real changed path.
     """
     store_dir = Path(store_dir)
+    refuse_outside_store_link(store_dir)
     _require_store_dir(store_dir)
 
     repo_root = _find_repo_root(store_dir)

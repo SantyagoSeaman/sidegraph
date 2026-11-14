@@ -42,6 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from .gitenv import run_git
 from .store_layout import StoreRequirementError, check_store_requirement, index_stamp_problem
 
 # Per-subprocess ceiling (several git calls run per hook/blame invocation) -- never the
@@ -75,9 +76,10 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | N
     unusable, timeout) -- every caller treats that the same as a clean "nothing to
     report" degrade (G9)."""
     try:
-        return subprocess.run(
-            ["git", *args],
-            cwd=cwd,
+        return run_git(
+            args,
+            cwd,
+            keep_repository_env=True,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -91,8 +93,8 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | N
 def _run_git_bytes(args: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes] | None:
     """:func:`_run_git` for NUL-framed output: raw bytes, so no decoding touches a path."""
     try:
-        return subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, timeout=_GIT_TIMEOUT_SECONDS
+        return run_git(
+            args, cwd, keep_repository_env=True, capture_output=True, timeout=_GIT_TIMEOUT_SECONDS
         )
     except (OSError, subprocess.SubprocessError):
         return None

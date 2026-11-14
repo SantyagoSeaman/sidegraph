@@ -16,7 +16,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from sidegraph.gitenv import git_env
+from sidegraph.gitenv import run_git
 
 # A clock pass walks the whole first-parent history of the store path; give it room.
 _GIT_TIMEOUT_SECONDS = 300.0
@@ -57,15 +57,14 @@ def _run(
     messages in English for the two outcomes callers tell apart. A missing git or a timeout
     raises :class:`ClockError`.
     """
-    cmd = ["git", *pre]
-    if root is not None:
-        cmd += ["-C", str(root), "--literal-pathspecs"]
     try:
-        return subprocess.run(
-            [*cmd, *args],
+        return run_git(
+            [*pre, *args] if root is None else [*pre, "--literal-pathspecs", *args],
+            root,
+            dash_c=True,
             capture_output=True,
             stdin=subprocess.DEVNULL,
-            env={**git_env(), "LC_ALL": "C"},
+            env={"LC_ALL": "C"},
             timeout=_GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError) as exc:

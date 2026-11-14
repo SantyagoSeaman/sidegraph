@@ -6,7 +6,10 @@ User settings are read through ``HOME``, which every test points at ``tmp_path``
 real config directory. The repositories are real (``git init``), because the
 directory walk starts from ``git ls-files``. A clean case asserts the check RAN (its id is in the
 result's ``clean`` set), not merely that it produced no problem.
+The installed-version probe of ``version-skew`` reads a plugin cache built under ``tmp_path``,
+never the real one.
 see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (T1-T5)
+see design/superpowers/specs/2026-11-12-stale-install-advisory-design.md
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -42,6 +46,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.delenv("PLUGIN_ROOT", raising=False)
+    monkeypatch.delenv("SIDEGRAPH_HOST", raising=False)
     return path
 
 
@@ -130,6 +135,39 @@ def _skew(
     return _run(tmp_path / "repo", "session")
 
 
+def _version_cache(tmp_path: Path, *versions: str, orphaned: tuple[str, ...] = ()) -> Path:
+    """A host plugin cache: ``<tmp>/plugins/cache/sidegraph/sidegraph/<version>/`` per version,
+    each with its Claude manifest; ``orphaned`` ones also hold the ``.orphaned_at`` marker.
+    Returns the directory that holds the version directories."""
+    cache = tmp_path / "plugins" / "cache" / "sidegraph" / "sidegraph"
+    for version in versions:
+        _write(
+            cache / version / ".claude-plugin" / "plugin.json",
+            json.dumps({"name": "sidegraph", "version": version}),
+        )
+        if version in orphaned:
+            _write(cache / version / ".orphaned_at", "1794510500803")
+    return cache
+
+
+def _behind(
+    tmp_path: Path,
+    monkeypatch,
+    cache: Path,
+    *,
+    package: str,
+    root: str,
+    host: str | None = "claude",
+) -> integrity.RunResult:
+    """The registry's session run with the running package at ``package`` and the plugin root
+    at ``<cache>/<root>``."""
+    monkeypatch.setattr(sidegraph, "__version__", package)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(cache / root))
+    if host is not None:
+        monkeypatch.setenv("SIDEGRAPH_HOST", host)
+    return _run(tmp_path / "repo", "session")
+
+
 def test_t2_equal_versions_are_clean_and_the_check_ran(tmp_path, monkeypatch):
     _repo(tmp_path)
 
@@ -139,26 +177,41 @@ def test_t2_equal_versions_are_clean_and_the_check_ran(tmp_path, monkeypatch):
     assert [p.check for p in result.problems if p.check == VERSION_SKEW] == []
 
 
-def test_t2_a_plugin_newer_than_the_package_names_the_old_session_and_the_manual_registration(
-    tmp_path, monkeypatch
-):
-    """0.10.0 is newer than 0.9.0: a string comparison says the opposite (mutation M1)."""
+def test_behind_a_newer_installed_version_is_reported(tmp_path, monkeypatch):
+    """Red against the check before the change: an install beside a newer installed version was
+    clean. 0.10.0 is above 0.9.0; a string comparison says the opposite."""
+    _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.9.0", "0.10.0")
+
+    result = _behind(tmp_path, monkeypatch, cache, package="0.9.0", root="0.9.0")
+
+    problem = _problem(result, VERSION_SKEW)
+    assert problem.severity == "advisory"
+    assert problem.line is not None and problem.notice is not None
+    assert "this session runs Sidegraph 0.9.0" in problem.line
+    assert "0.10.0 is installed on this machine" in problem.line
+    assert "`claude plugin marketplace update sidegraph`" in problem.line
+    assert "`claude plugin update sidegraph@sidegraph`" in problem.line
+    assert "add `--scope local` or `--scope project`" in problem.line
+    assert problem.line.endswith("Tell the user, and do not update the plugin unasked.")
+    assert "Tell the user" not in problem.notice
+    assert problem.line.startswith(problem.notice)
+
+
+def test_a_plugin_manifest_newer_than_the_package_is_reported_as_behind(tmp_path, monkeypatch):
+    """Red against the check before the change, whose line named a session started before the
+    plugin update and a manual registration: no install can produce that case."""
     _repo(tmp_path)
 
     result = _skew(tmp_path, monkeypatch, package="0.9.0", plugin="0.10.0")
 
     problem = _problem(result, VERSION_SKEW)
-    assert problem.severity == "advisory"
-    assert problem.line is not None and problem.notice is not None
-    assert "plugin is 0.10.0" in problem.line and "package is 0.9.0" in problem.line
-    assert "session was started before the plugin update" in problem.line
-    assert "manual registration" in problem.line
-    assert "restart the session" in problem.line.lower()
-    for stale in ("@main", "stale cache", "launcher cache", "pinned install"):
-        assert stale not in problem.line
-    assert "marketplace" not in problem.line
-    # The structured fix names both actions, the restart and the registration update.
-    assert "restart" in problem.fix and "registration" in problem.fix
+    assert "this session runs Sidegraph 0.9.0" in problem.line
+    assert "0.10.0 is installed on this machine" in problem.line
+    assert "Update the plugin from its marketplace, then start a new session." in problem.line
+    for gone in ("manual registration", "session was started", "claude plugin"):
+        assert gone not in problem.line
+    assert problem.fix == "update the plugin and start a new session"
 
 
 def test_t2_a_package_newer_than_the_plugin_says_to_update_the_plugin(tmp_path, monkeypatch):
@@ -171,6 +224,24 @@ def test_t2_a_package_newer_than_the_plugin_says_to_update_the_plugin(tmp_path, 
     assert "stale" in problem.line
     assert "marketplace" in problem.line
     assert "restart the session" not in problem.line.lower()
+    assert "Update the plugin from its marketplace, then start a new session." in problem.line
+    assert problem.line.endswith("Tell the user, and do not update the plugin unasked.")
+
+
+def test_t2_a_stale_plugin_copy_in_claude_code_names_the_update_commands(tmp_path, monkeypatch):
+    """Red against the check before the change: the stale-copy line named no command and did not
+    ask the agent to tell the user."""
+    _repo(tmp_path)
+    monkeypatch.setenv("SIDEGRAPH_HOST", "claude")
+
+    result = _skew(tmp_path, monkeypatch, package="0.10.0", plugin="0.9.0")
+
+    line = _problem(result, VERSION_SKEW).line
+    assert "the installed plugin copy is stale" in line
+    assert "`claude plugin marketplace update sidegraph`" in line
+    assert "`claude plugin update sidegraph@sidegraph`" in line
+    assert "add `--scope local` or `--scope project`" in line
+    assert line.endswith("Tell the user, and do not update the plugin unasked.")
 
 
 def test_t2_a_local_label_is_ignored(tmp_path, monkeypatch):
@@ -233,23 +304,224 @@ def test_t2_without_evidence_the_check_is_not_run(tmp_path, monkeypatch, case):
     assert all(p.check != VERSION_SKEW for p in result.problems)
 
 
-def test_t2_the_session_hook_puts_the_skew_line_in_the_context_and_a_notice_for_the_human(
+def test_the_session_hook_carries_the_behind_line_and_the_notice_once(
     tmp_path, monkeypatch, capsys
 ):
+    """Red against the check before the change: the hook printed no such line."""
     repo = _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.9.0", "0.10.0")
     monkeypatch.setattr(sidegraph, "__version__", "0.9.0")
-    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(_plugin_root(tmp_path, "0.10.0")))
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(cache / "0.9.0"))
+    monkeypatch.setenv("SIDEGRAPH_HOST", "claude")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
     Store(format1_store(repo / ".sidegraph")).close()
     monkeypatch.setenv("SIDEGRAPH_DIR", str(repo / ".sidegraph"))
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))
+
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
-
     hooks.session_start()
+    first = json.loads(capsys.readouterr().out)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    hooks.session_start()
+    second = json.loads(capsys.readouterr().out)
 
-    out = json.loads(capsys.readouterr().out)
-    assert "plugin is 0.10.0" in out["hookSpecificOutput"]["additionalContext"]
-    assert "plugin is 0.10.0" in out["systemMessage"]
+    tell = "Tell the user, and do not update the plugin unasked."
+    behind = "0.10.0 is installed on this machine"
+    assert behind in first["hookSpecificOutput"]["additionalContext"]
+    assert behind in second["hookSpecificOutput"]["additionalContext"]
+    assert behind in first["systemMessage"]
+    assert tell in first["hookSpecificOutput"]["additionalContext"]
+    assert tell not in first["systemMessage"]
+    assert "systemMessage" not in second or "0.10.0" not in second["systemMessage"]
+
+
+def test_a_session_on_the_newest_installed_version_is_clean(tmp_path, monkeypatch, home):
+    """Red against a check that looks the project up in the host's install registry: the record
+    says 0.6.0 for a project that runs 0.10.0. It passes on the code before the change, so it is
+    a guard, not evidence of the bug. It also guards against a check that reports any other
+    version beside the root."""
+    repo = _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.6.0", "0.8.0", "0.9.0", "0.10.0")
+    record = {
+        "scope": "local",
+        "projectPath": str(repo),
+        "installPath": str(cache / "0.6.0"),
+        "version": "0.6.0",
+    }
+    _write(
+        home / ".claude" / "plugins" / "installed_plugins.json",
+        json.dumps({"version": 2, "plugins": {"sidegraph@sidegraph": [record]}}),
+    )
+
+    result = _behind(tmp_path, monkeypatch, cache, package="0.10.0", root="0.10.0")
+
+    assert VERSION_SKEW in result.clean
+    assert [p.check for p in result.problems if p.check == VERSION_SKEW] == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
+def test_a_manifest_directory_that_cannot_be_read_is_no_manifest(tmp_path):
+    """Red against the search for the manifest outside the handler (mutation M7):
+    ``Path.is_file()`` raises PermissionError for a directory that cannot be searched. A direct
+    call: at the registry both versions end as not run."""
+    cache = _version_cache(tmp_path, "0.9.0")
+    folder = cache / "0.9.0" / ".claude-plugin"
+    folder.chmod(0o000)
+    try:
+        assert hooks._manifest_version(cache / "0.9.0") is None
+    finally:
+        folder.chmod(0o755)
+
+
+def test_an_orphaned_newer_version_is_not_installed(tmp_path, monkeypatch):
+    """Red against a probe that counts every directory (mutation M2)."""
+    _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.9.0", "0.10.0", orphaned=("0.10.0",))
+
+    result = _behind(tmp_path, monkeypatch, cache, package="0.9.0", root="0.9.0")
+
+    assert VERSION_SKEW in result.clean
+    assert [p.check for p in result.problems if p.check == VERSION_SKEW] == []
+
+
+@pytest.mark.parametrize(
+    "case", ["no-manifest", "other-name", "other-version", "malformed", "plain-file"]
+)
+def test_a_newer_directory_counts_only_with_its_own_sidegraph_manifest(tmp_path, monkeypatch, case):
+    """Red against a probe that trusts directory names (mutation M4)."""
+    _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.9.0")
+    newer = cache / "0.10.0"
+    manifest = newer / ".claude-plugin" / "plugin.json"
+    if case == "no-manifest":
+        newer.mkdir()
+    elif case == "other-name":
+        _write(manifest, json.dumps({"name": "other", "version": "0.10.0"}))
+    elif case == "other-version":
+        _write(manifest, json.dumps({"name": "sidegraph", "version": "0.9.5"}))
+    elif case == "malformed":
+        _write(manifest, "{not json")
+    else:
+        _write(newer, "x\n")
+
+    result = _behind(tmp_path, monkeypatch, cache, package="0.9.0", root="0.9.0")
+
+    assert VERSION_SKEW in result.clean
+    assert [p.check for p in result.problems if p.check == VERSION_SKEW] == []
+
+
+def test_a_root_that_is_not_a_version_directory_reads_no_sibling(tmp_path, monkeypatch):
+    """Red against a probe that always reads the parent (mutation M3): a host that keeps one copy
+    under another name."""
+    _repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    _write(
+        plugins / "sidegraph-1a2b3c" / ".claude-plugin" / "plugin.json",
+        json.dumps({"name": "sidegraph", "version": "0.9.0"}),
+    )
+    _write(
+        plugins / "0.10.0" / ".claude-plugin" / "plugin.json",
+        json.dumps({"name": "sidegraph", "version": "0.10.0"}),
+    )
+    monkeypatch.setattr(sidegraph, "__version__", "0.9.0")
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugins / "sidegraph-1a2b3c"))
+
+    result = _run(tmp_path / "repo", "session")
+
+    assert VERSION_SKEW in result.clean
+    assert [p.check for p in result.problems if p.check == VERSION_SKEW] == []
+
+
+def test_behind_wins_over_a_stale_plugin_copy(tmp_path, monkeypatch):
+    """Red against the two branches in the other order: the package is above the root's manifest
+    and a live directory is above the package, and the check reports one problem."""
+    _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.8.0", "0.10.0")
+
+    result = _behind(tmp_path, monkeypatch, cache, package="0.9.0", root="0.8.0")
+
+    (problem,) = [p for p in result.problems if p.check == VERSION_SKEW]
+    assert "0.10.0 is installed on this machine" in problem.line
+    assert "plugin copy is stale" not in problem.line
+
+
+def test_the_probe_starts_no_process_and_opens_no_socket(tmp_path, monkeypatch):
+    """The reported-problem assertion is red before the change. The guard (no process, no
+    socket) has no red target on the shipped code; it was checked by injecting each call."""
+    _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.9.0", "0.10.0")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the probe must read files only")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(os, "execv", forbidden)
+    monkeypatch.setattr(os, "execve", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+
+    result = _behind(tmp_path, monkeypatch, cache, package="0.9.0", root="0.9.0")
+
+    assert "0.10.0 is installed on this machine" in _problem(result, VERSION_SKEW).line
+
+
+@pytest.mark.parametrize("ascending", [True, False])
+def test_the_newest_of_several_newer_versions_is_named(tmp_path, monkeypatch, ascending):
+    """Red against a probe that compares each sibling with the running package only, or never
+    raises its best so far: the last-listed newer sibling would be named. The listing order is
+    fixed, because the natural order of a directory listing is not sorted."""
+    _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.9.0", "0.10.0", "0.11.0")
+    names = ["0.9.0", "0.10.0", "0.11.0"]
+    ordered = names if ascending else names[::-1]
+    real_listdir = os.listdir
+
+    def listdir(path="."):
+        return list(ordered) if os.fspath(path) == str(cache) else real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+
+    result = _behind(tmp_path, monkeypatch, cache, package="0.9.0", root="0.9.0")
+
+    line = _problem(result, VERSION_SKEW).line
+    assert "0.11.0 is installed on this machine" in line
+    assert "0.10.0 is installed" not in line
+
+
+def test_a_deeply_nested_sibling_manifest_is_skipped_not_raised(tmp_path, monkeypatch):
+    """Red against a handler without ``RecursionError``: ``json.loads`` raises it for deeply
+    nested JSON, it leaves the probe, and the whole check is lost even though another sibling is
+    a fine newer install."""
+    _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.9.0", "0.10.0")
+    deep = "[" * 200_000
+    with pytest.raises(RecursionError):
+        json.loads(deep)
+    _write(cache / "0.11.0" / ".claude-plugin" / "plugin.json", deep)
+
+    result = _behind(tmp_path, monkeypatch, cache, package="0.9.0", root="0.9.0")
+
+    assert "0.10.0 is installed on this machine" in _problem(result, VERSION_SKEW).line
+
+
+def test_a_cache_directory_that_cannot_be_listed_is_silent(tmp_path, monkeypatch):
+    """Red against a probe without the ``except``: the detector raises and the id leaves
+    ``clean``."""
+    _repo(tmp_path)
+    cache = _version_cache(tmp_path, "0.9.0", "0.10.0")
+    real_listdir = os.listdir
+
+    def listdir(path="."):
+        if os.fspath(path) == str(cache):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+
+    result = _behind(tmp_path, monkeypatch, cache, package="0.9.0", root="0.9.0")
+
+    assert VERSION_SKEW in result.clean
+    assert [p.check for p in result.problems if p.check == VERSION_SKEW] == []
 
 
 # -- path-skew: a foreign `sidegraph-*` on PATH beside the plugin

@@ -68,7 +68,10 @@ Parse the helper's JSON and render a single chat report in this order:
    Under Inventory and usage, render `hook_runs` as a table: one row per hook with its runs,
    `delivered`, `empty`, `lock`, `error`, and the p50/p95 milliseconds, plus the window from
    `first_ms` to `last_ms` as dates. `lock` is a delivery another process's lock withheld; say
-   so in one line when it is above zero. `available: false` prints its reason.
+   so in one line when it is above zero. When `empty_causes` is present, print one line per
+   hook under the table with its causes and counts, as given; `cold` is an anchor no sync
+   has checked (a store never synced, or an index rebuilt since the last sync), `cap` the
+   ten-file limit, `repeat` a file already delivered. State counts only. `available: false` prints its reason.
 3. Findings with measured values, followed by each `UNKNOWN` and its reason.
 4. Prioritized, deduplicated manual recommendations with the stated scope and reason. Render a
    structured recommendation as a manual command for later use, using only its `argv`, `cwd`,

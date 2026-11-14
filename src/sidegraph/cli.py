@@ -103,6 +103,7 @@ from .host.claude_settings import (
     ensure_ratify_policy_setting,
     repo_root_for_settings,
 )
+from .host.hook_log import read_runs as read_hook_runs
 from .host.transcripts import cited_back as read_cited_back
 from .importer import import_rationales
 from .input_limits import InputLimitError
@@ -131,11 +132,13 @@ from .store_layout import (
     LEGACY_SUBDIRS,
     SHARDS_SUBDIR,
     STAMPING_MARKER_NAME,
+    StoreLinkRefused,
     StoreRequirementError,
     check_store_requirement,
     index_stamp_note,
     is_release_version,
     open_would_write,
+    refuse_outside_store_link,
     require_listable_record_dirs,
     requirement_met,
     snapshot_signature,
@@ -685,6 +688,11 @@ def init_main(argv: list[str] | None = None) -> int:
         return _remove_graph_refresh_hook(project_dir)
 
     db_path = Path(args.db)
+    try:
+        refuse_outside_store_link(db_path)
+    except StoreLinkRefused as e:
+        print(f"store not writable ({db_path}): {e}", file=sys.stderr)
+        return 1
     already_initialized = _looks_already_initialized(db_path)
     empty_store = _is_empty_store_for_init(db_path)
     graph_path = _resolve_cli_graph(args.graph, args.db)
@@ -1282,6 +1290,10 @@ def sync_main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     args.db = resolve_store_path(args.db)
+    try:
+        refuse_outside_store_link(args.db)
+    except StoreLinkRefused as e:
+        return _operational_error(f"store not readable ({args.db}): {e}", _json_error(args.json))
 
     graph = _resolve_cli_graph(args.graph, args.db)
     _graph_hint(args.graph, graph)
@@ -1429,6 +1441,11 @@ def _import_docs_mode(args: argparse.Namespace) -> int:
         docs_paths = [os.path.relpath(p) for p in inside]
 
     args.db = resolve_store_path(args.db)
+    try:
+        refuse_outside_store_link(args.db)
+    except StoreLinkRefused as e:
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
+        return 1
 
     graph = _resolve_cli_graph(args.graph, args.db)
     _graph_hint(args.graph, graph)
@@ -1769,6 +1786,11 @@ def import_main(argv: list[str] | None = None) -> int:
         return _import_docs_mode(args)
 
     args.db = resolve_store_path(args.db)
+    try:
+        refuse_outside_store_link(args.db)
+    except StoreLinkRefused as e:
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
+        return 1
 
     graph = _resolve_cli_graph(args.graph, args.db)
     _graph_hint(args.graph, graph)
@@ -1873,6 +1895,11 @@ def _domains_bootstrap(args: argparse.Namespace) -> int:
         return 1
 
     args.db = resolve_store_path(args.db)
+    try:
+        refuse_outside_store_link(args.db)
+    except StoreLinkRefused as e:
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
+        return 1
 
     graph = _resolve_cli_graph(args.graph, args.db)
     _graph_hint(args.graph, graph)
@@ -2403,6 +2430,7 @@ def compact_main(argv: list[str] | None = None) -> int:
     # (a missing marker, .gitignore, stamping marker), which a refusal and a dry run must not.
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.2)
     try:
+        refuse_outside_store_link(args.db)
         marker = store_marker(args.db)
     except Exception as e:
         print(f"store not readable ({args.db}): {e}", file=sys.stderr)
@@ -2481,6 +2509,11 @@ def migrate_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.db = resolve_store_path(args.db)
     root = Path(args.db)
+    try:
+        refuse_outside_store_link(root)
+    except StoreLinkRefused as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 1
     if not (root / "format").exists() and _not_a_store(root) and not has_shard_files(root):
         print(f"no store at {args.db}: sidegraph-migrate never creates one", file=sys.stderr)
         return 1
@@ -2741,6 +2774,11 @@ def require_main(argv: list[str] | None = None) -> int:
         )
         return 1
     db_path = Path(resolve_store_path(args.db, warn_on_create=False))
+    try:
+        refuse_outside_store_link(db_path)
+    except StoreLinkRefused as e:
+        print(f"sidegraph-require: {e}", file=sys.stderr)
+        return 1
     if not path_is_file(db_path / "format"):
         print(
             f"sidegraph-require: no store at {db_path} — run `sidegraph-init` first",
@@ -3239,6 +3277,10 @@ def viz_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.db = resolve_store_path(args.db, warn_on_create=False)
 
+    try:
+        refuse_outside_store_link(args.db)
+    except StoreLinkRefused as e:
+        return _operational_error(f"store not readable ({args.db}): {e}", _json_error(args.json))
     if not _looks_already_initialized(Path(args.db)):
         return _operational_error(
             f"no store at {args.db} — run `sidegraph-init` first", _json_error(args.json)
@@ -3357,6 +3399,12 @@ def stats_main(argv: list[str] | None = None) -> int:
         )
 
     store_dir = Path(resolve_store_path(args.db, warn_on_create=False))
+    try:
+        refuse_outside_store_link(store_dir)
+    except StoreLinkRefused as e:
+        return _operational_error(
+            f"cannot read the store ({store_dir}): {e}", _json_error(args.json)
+        )
     index = store_dir / "index.db"
     # os.stat, not path_is_file alone: 3.14 reads an unsearchable directory as "missing".
     try:
@@ -3391,6 +3439,7 @@ def stats_main(argv: list[str] | None = None) -> int:
             graph_path if path_exists(graph_path) else None,
             window_days=args.window,
             cited_back=read_cited_back,
+            hook_runs=read_hook_runs,
         )
     except (sqlite3.Error, PermissionError) as e:
         return _operational_error(
@@ -3447,6 +3496,11 @@ def export_okf_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.db = resolve_store_path(args.db, warn_on_create=False)
 
+    try:
+        refuse_outside_store_link(args.db)
+    except StoreLinkRefused as e:
+        print(f"store not readable ({args.db}): {e}", file=sys.stderr)
+        return 1
     if not _looks_already_initialized(Path(args.db)):
         print(f"no store at {args.db} — run `sidegraph-init` first", file=sys.stderr)
         return 1

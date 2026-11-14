@@ -64,6 +64,23 @@ all sources in the same bucket.
 | C | **Related** | decisions on the seed's community *and*, when an accepted domain covers that community, the domain's own decisions too — plus peripheral (subgraph-neighbor) entities |
 | D | **Related** | `scope: global` decisions |
 
+### Named symbols: what you named comes first
+
+Buckets A and B put the records of a named symbol first. A seed entity is a named symbol
+when an item of `entities` reached it and that item carries a `file_path`, or its name is
+held by exactly one node of the graph. A name with no file that several nodes share names
+nothing; its candidates are still read, as before. A direct record (an accepted decision
+bound to a seed entity) that is bound to a named symbol is a named record, whatever else it
+is bound to.
+
+The placement order is: the mistake lines of the named records, their ADR lines, every other
+direct mistake line, the evidence of the mistake lines, the evidence of the named ADRs, then
+the other ADRs, each followed by its evidence. The sections do not change: all mistakes are
+printed under **Known mistakes & gotchas** and all ADRs under **Decisions**, the named
+records first in each. So a named symbol's ADR takes the budget before another symbol's
+gotcha, and is printed below it. A call with no named symbol has no named record: every
+direct mistake is placed before every direct ADR.
+
 ### Bucket C: domains and communities
 
 It also takes every accepted domain that holds one of the seed nodes, so a domain holding
@@ -97,10 +114,10 @@ broke before, here's why" *before* it sees the architectural rationale or the ge
 structure. Superseded decisions on a seed entity are appended to Related as one-liners
 (`~ tried, reverted 2026-01: ...`) rather than omitted — see [decision memory](../concepts/decision-memory.md#append-only-as-a-feature).
 Everything is deduplicated by decision id and filled greedily into `memory_chars`, buckets in
-order (A, B, then C/D) — a decision that would overflow the *remaining* budget is simply not
-added; since every bucket shares one running total, buckets A/B are always spent first, so
-depth on the task's own seeds wins over breadth of merely-related decisions under pressure,
-not the other way around.
+order (the named records, then A, B, then C/D) — a decision that would overflow the *remaining*
+budget is simply not added; since every bucket shares one running total, buckets A/B are always
+spent first, so depth on the task's own seeds wins over breadth of merely-related decisions
+under pressure, not the other way around.
 
 ### Facts: inline evidence, and the Known-facts bucket
 
@@ -113,6 +130,8 @@ forms:
   quarantined in the final **Unratified proposals** section instead; a superseded fact does
   not render. Bucket A (mistakes) defers accepted evidence to a second pass
   instead of rendering it immediately — see the mistakes-budget guarantee below for why.
+  A named symbol's ADR is placed early, without its evidence; the evidence is inserted after
+  its line once every mistake line and the mistakes' evidence are placed.
   Either way, evidence lines degrade/drop with their decision under budget pressure — a fact
   only ever renders next to a decision that itself made the cut.
 - **The Known-facts bucket** (`## Known facts`, rendered right after `## Decisions`, ahead of
@@ -140,8 +159,9 @@ lower-ranked ADR/related/global decision within its own bucket is accepted ranki
 as any other same-bucket ordering effect). And because both the Known-facts bucket and every
 inline evidence line are spent from the SAME cumulative counter, strictly after decisions in
 program order, a fact can never displace a decision line it wasn't already entitled to run
-ahead of by construction — this is what makes "mistakes ranked first" a guarantee, not a
-best-effort ordering.
+ahead of by construction — this is what makes the mistakes-budget guarantee hold by
+construction, not as a best-effort ordering. It holds for a named symbol's records too: their
+lines are placed first, their evidence only after every mistake line.
 
 ### Tiered rendering: direct entries get depth, related entries stay a pointer
 
@@ -360,10 +380,12 @@ prepends it once, at the hook-assembly level, ahead of whichever renderer's text
 [`reference/hooks.md`](hooks.md#sidegraph-session-start)). The instruction now
 covers every search surface, not just `Read`/`Grep`: *"When you need to find or understand
 code in this project, call `get_task_context(files=[…])` with repo-relative paths before any
-grep or file search — decisions, gotchas and a domain map are indexed here. Before a
-non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
-listed only by name, load it first."* A `Sidegraph X.Y.Z` line follows it, so a session
-that launched an old install says so in its own context. Both degrade gracefully — an empty
+grep or file search — decisions, gotchas and a domain map are indexed here. If you know a
+symbol's name and not its file, call `get_task_context(entities=[{"name": "…"}])` instead of
+searching for the path. Before a non-trivial change, run the sidegraph check-plan skill if it
+is available. If the tool is listed only by name, load it first."* A `Sidegraph X.Y.Z` line
+follows it, so a session that launched an old install says so in its own context. Both
+degrade gracefully — an empty
 store still gets the instruction, the version line and the header. After the map the hook
 appends the integrity checks' status lines (records awaiting ratification, code drift, a stale
 or missing graph, uncommitted store files and the rest), and sends a notice to the person for
@@ -448,8 +470,10 @@ search instruction**, once, ahead of the rest of the text (not inside either ren
 
 > When you need to find or understand code in this project, call get_task_context(files=[…])
 > with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
-> available. If the tool is listed only by name, load it first.
+> are indexed here. If you know a symbol's name and not its file, call
+> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
+> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
+> listed only by name, load it first.
 
 Unlike the records the `PreToolUse` hook delivers at the point of reading (see
 [Memory without asking](#memory-without-asking) below), this line is unconditional and covers
@@ -508,8 +532,9 @@ no query. All three read the store's index directly, so each costs a few tens of
   `Grep` call, and before a Bash line that runs `sed`, `grep`, `rg` or `cat`. When the call names
   a file that decisions are anchored to, the agent gets that file's top decisions, mistakes first,
   in the same call: two decisions, or three when the first two are mistakes, for at most three
-  files per call. Each file is delivered once per agent, and an agent gets ten files in all. A call that
-  names no file with records gets nothing. `SIDEGRAPH_GREP_NUDGE=off` stops it.
+  files per call. Each file is delivered once per agent, and an agent gets ten files in all; the
+  count starts again for an agent after its context is compacted or cleared. A call that names no
+  file with records gets nothing. `SIDEGRAPH_GREP_NUDGE=off` stops it.
 - **In a subagent's brief.** On an `Agent` call (`Task` on older hosts), the hook reads the files
   the brief names, and the files named in a plan or notes document the brief names, and appends
   the decisions anchored to them to the brief: two per file, at most six lines. The subagent finds

@@ -103,7 +103,7 @@ does not authorize `propose_domains` or `ratify`.
    draft per domain: `{"slug", "title", "summary", "seed_anchors": [...], "path_prefixes"?}`
    (no `parent_slug`: offered sets are flat — hierarchy is a `manage-domains` follow-up, not
    part of this flow). Then, only after that write, call
-   `ratify(accept=[...])` with the returned `domain_id`s whose `ratified_by` is null (under
+   `ratify(accept=[...], verdict="<the human's words>")` with the returned `domain_id`s whose `ratified_by` is null (under
    `auto-all` the rest are already accepted, and `ratify` would only answer `already
    accepted` for them) —
    turning the pick into an accepted, TOC-visible set in the same turn (ratify also resolves
@@ -140,7 +140,7 @@ does not authorize `propose_domains` or `ratify`.
 - `sidegraph-domains bootstrap` (CLI) does the same deterministic candidate selection but skips
   the curation step — it's the scripted/CI alternative, not the recommended path for a human in
   a session. See [naming your domains](../../../../docs/guides/naming-your-domains.md). Run it as
-  `uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
+  `uvx --from sidegraph==0.29.0 --python 3.13 sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 ## See also

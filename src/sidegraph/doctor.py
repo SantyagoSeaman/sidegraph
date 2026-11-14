@@ -2165,6 +2165,11 @@ def _check_unratified_accepts(
     check's whole signature — accepted, agent-sourced, no ratifier stamp — on every
     superseding record, with no relation to the env var this check exists to catch.
 
+    From 0.29.0 ``supersede_decision`` writes an agent's own successor ``proposed`` (see
+    design/superpowers/specs/2026-11-12-ratification-needs-a-human-verdict-design.md).
+    The exclusion stays for the successors written before that: a record carries no
+    version to tell them apart.
+
     Narrowed in fix round 2, 2026-09-15 (review Major 1): fix round 1 excluded EVERY
     ``supersedes``-bearing record on the claim that a ``supersede_decision`` successor and
     an auto-accepted superseding ``propose_decisions`` draft are "genuinely

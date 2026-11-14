@@ -517,6 +517,14 @@ def _case_delete_meta_prefix(store: Store) -> tuple[str, object]:
     return "DELETE FROM meta", lambda: store.delete_meta_prefix("batch:")
 
 
+def _case_delete_meta_prefix_stamped(store: Store) -> tuple[str, object]:
+    # The failure lands on the stamp, after the deletion ran: both must roll back.
+    store.set_meta("batch:a", "v")
+    return "INSERT INTO meta", lambda: store.delete_meta_prefix_stamped(
+        "batch:", "stamp:batch", "now", lambda raw: False
+    )
+
+
 def _case_update_meta_if(store: Store) -> tuple[str, object]:
     return "INSERT INTO meta", lambda: store.update_meta_if("case-cond-key", lambda cur: "v1")
 
@@ -628,6 +636,7 @@ _ROLLBACK_CASES = {
     "claim_meta": _case_claim_meta,
     "claim_meta_many": _case_claim_meta_many,
     "delete_meta_prefix": _case_delete_meta_prefix,
+    "delete_meta_prefix_stamped": _case_delete_meta_prefix_stamped,
     "raise_requirement": _case_raise_requirement,
     "update_meta_if": _case_update_meta_if,
     "prune_meta_prefixes": _case_prune_meta_prefixes,

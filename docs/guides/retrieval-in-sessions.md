@@ -14,8 +14,10 @@ The standing instruction is:
 
 > When you need to find or understand code in this project, call get_task_context(files=[…])
 > with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
-> available. If the tool is listed only by name, load it first.
+> are indexed here. If you know a symbol's name and not its file, call
+> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
+> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
+> listed only by name, load it first.
 
 `Sidegraph X.Y.Z` identifies the running package. A pending-ratification line means someone must review proposed records. A drift line asks for a content check. Read other diagnostic lines using [troubleshooting](troubleshooting.md). None of these lines means the whole store is loaded into the agent's context.
 
@@ -25,7 +27,7 @@ The [delivery contract](../reference/retrieval-internals.md#what-sessionstart-in
 
 ## Memory without asking
 
-On Claude Code and Grok Build, a supported file read or edit can deliver the file's most relevant records automatically. A subagent task brief can receive records for the files it names. Each file is delivered once per agent, so use `get_task_context` when you need the full context again.
+On Claude Code and Grok Build, a supported file read or edit can deliver the file's most relevant records automatically. A subagent task brief can receive records for the files it names. Each file is delivered once per agent, and the count starts again after the agent's context is compacted or cleared, so use `get_task_context` when you need the full context again.
 
 Claude Code, Codex and Muse also introduce retrieval to a starting subagent through a short hook brief. That introduction contains no records. Grok's subagents share the parent's MCP instructions. OpenCode uses explicit tool calls.
 
@@ -75,8 +77,8 @@ entirely if empty:
 
 | Block | What it means |
 |---|---|
-| `## ⚠ Known mistakes & gotchas` | `gotcha`/`lesson`/`constraint` decisions bound directly to your seed entities, newest first. Read this first — these are the "someone already stepped on this" warnings. |
-| `## Decisions` | Accepted `adr` decisions bound directly to your seed entities — accepted supporting facts may nest under them. |
+| `## ⚠ Known mistakes & gotchas` | `gotcha`/`lesson`/`constraint` decisions bound directly to your seed entities, those of a symbol you named in `entities` first. Read this first — these are the "someone already stepped on this" warnings. |
+| `## Decisions` | Accepted `adr` decisions bound directly to your seed entities, those of a named symbol first — accepted supporting facts may nest under them. |
 | `## Known facts` | Accepted facts bound to seed/peripheral entities that were not already shown inline. |
 | `## Related` | Accepted decisions reached indirectly, plus one-line superseded history for seed entities. |
 | `## Unratified proposals` | Proposed decisions and facts, always after accepted memory and omitted by the proposal policy when required. |

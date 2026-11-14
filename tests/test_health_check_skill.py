@@ -19,6 +19,7 @@ import pytest
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.store import Store
 from sidegraph.store_layout import SCHEMA_VERSION
+from tests.git_trap_support import plant_git_dir, plant_marker, trap_is_armed
 
 _ROOT = Path(__file__).resolve().parents[1]
 _COLLECTOR = _ROOT / "plugin/sidegraph/skills/health-check/scripts/collect.py"
@@ -641,10 +642,10 @@ def test_verify_and_git_unknown_are_warnings_not_false_ok_or_broken(
     monkeypatch.setattr(modules["verify"], "verify_snapshot", failed_verify)
     original_git = collector._git
 
-    def missing_status(args: list[str], cwd: Path, git_env: object) -> str | None:
+    def missing_status(args: list[str], cwd: Path, run_git: object) -> str | None:
         if args == ["status", "--porcelain"]:
             return None
-        return original_git(args, cwd, git_env)
+        return original_git(args, cwd, run_git)
 
     monkeypatch.setattr(collector, "_git", missing_status)
     report = collector.collect(
@@ -780,7 +781,7 @@ def test_candidate_settings_directories_do_not_escape_selected_root(tmp_path: Pa
         project,
         project,
         None,
-        modules["git_env"],
+        modules["run_git"],
         modules["claude_settings"],
     )
 
@@ -799,7 +800,7 @@ def test_git_root_and_default_store_preserve_trailing_space(
     (tmp_path / "project").mkdir()
     collector = _collector()
     modules = collector._imports()
-    assert collector._git_root(spaced_project, modules["git_env"]) == spaced_project
+    assert collector._git_root(spaced_project, modules["run_git"]) == spaced_project
 
     resolved_roots: list[str] = []
     resolve_store_path = modules["resolve_store_path"]
@@ -815,28 +816,28 @@ def test_git_root_and_default_store_preserve_trailing_space(
     assert resolved_roots == [str(spaced_project)]
     assert any(item["cwd"] == str(spaced_project) for item in report["recommendations"])
     assert (
-        collector._git_index(spaced_project, spaced_project, modules["git_env"])
+        collector._git_index(spaced_project, spaced_project, modules["run_git"])
         == spaced_project / ".git/index"
     )
 
     external_git_index = tmp_path / "external git dir " / "index"
 
-    def git_path(args: list[str], _cwd: Path, _git_env: object) -> str | None:
+    def git_path(args: list[str], _cwd: Path, _run_git: object) -> str | None:
         if args == ["rev-parse", "--git-path", "index"]:
             return f"{external_git_index}\n"
         return None
 
     monkeypatch.setattr(collector, "_git", git_path)
-    assert collector._git_index(spaced_project, None, modules["git_env"]) == external_git_index
+    assert collector._git_index(spaced_project, None, modules["run_git"]) == external_git_index
 
-    def empty_git_path(_args: list[str], _cwd: Path, _git_env: object) -> str:
+    def empty_git_path(_args: list[str], _cwd: Path, _run_git: object) -> str:
         return "\n"
 
     monkeypatch.setattr(collector, "_git", empty_git_path)
-    assert collector._git_index(spaced_project, None, modules["git_env"]) is None
+    assert collector._git_index(spaced_project, None, modules["run_git"]) is None
 
     monkeypatch.setattr(collector, "_git", lambda *_args: None)
-    assert collector._git_index(spaced_project, None, modules["git_env"]) is None
+    assert collector._git_index(spaced_project, None, modules["run_git"]) is None
 
 
 def test_cached_git_listing_preserves_leading_and_trailing_path_spaces(
@@ -847,14 +848,14 @@ def test_cached_git_listing_preserves_leading_and_trailing_path_spaces(
     collector = _collector()
     modules = collector._imports()
 
-    def listing(args: list[str], _cwd: Path, _git_env: object) -> str | None:
+    def listing(args: list[str], _cwd: Path, _run_git: object) -> str | None:
         return (
             " leading and trailing /file.txt\0" if args == ["ls-files", "--cached", "-z"] else None
         )
 
     monkeypatch.setattr(collector, "_git", listing)
     candidates, complete = collector._candidate_settings_dirs(
-        root, root, root, modules["git_env"], modules["claude_settings"]
+        root, root, root, modules["run_git"], modules["claude_settings"]
     )
 
     assert complete is True
@@ -868,10 +869,10 @@ def test_failed_settings_directory_discovery_withholds_verified_preservation(
     collector = _collector()
     original_git = collector._git
 
-    def fail_settings_listing(args: list[str], cwd: Path, git_env: object) -> str | None:
+    def fail_settings_listing(args: list[str], cwd: Path, run_git: object) -> str | None:
         if args == ["ls-files", "--cached", "-z"]:
             return None
-        return original_git(args, cwd, git_env)
+        return original_git(args, cwd, run_git)
 
     monkeypatch.setattr(collector, "_git", fail_settings_listing)
 
@@ -1209,8 +1210,12 @@ def test_usage_carries_the_hook_run_log_summary(
     project, store = _sandbox(tmp_path, monkeypatch)
     Store(store).close()
     monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "on")
-    for outcome, elapsed in (("delivered", 40), ("lock", 520), ("empty", 30)):
-        hook_log.record(store, "PreToolUse", outcome, elapsed)
+    for outcome, elapsed, cause in (
+        ("delivered", 40, None),
+        ("lock", 520, None),
+        ("empty", 30, "cap"),
+    ):
+        hook_log.record(store, "PreToolUse", outcome, elapsed, cause)
     hook_log.record(store, "SessionStart", "delivered", 300)
 
     report = _collector().collect(
@@ -1229,6 +1234,7 @@ def test_usage_carries_the_hook_run_log_summary(
     )
     assert pretool["p95_ms"] == 520
     assert runs["hooks"]["SessionStart"]["delivered"] == 1
+    assert runs["empty_causes"] == {"PreToolUse": {"cap": 1}}
 
 
 def test_a_store_with_no_hook_run_log_reports_zero_runs(
@@ -1356,3 +1362,154 @@ def test_skill_points_at_an_existing_without_the_mcp_note() -> None:
     assert note.is_file()
     text = " ".join(note.read_text().split())
     assert "sidegraph-export-adr --json" in text and "sidegraph-doctor" in text
+
+
+def test_collect_does_not_run_a_command_planted_in_git_directory_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The collector starts git through the guarded launcher: a directory that holds the files
+    of a git directory but no ``.git`` entry is never handed to git."""
+    project, _store = _sandbox(tmp_path, monkeypatch)
+    command, marker = plant_marker(tmp_path)
+    planted = project / "planted"
+    (planted / ".sidegraph").mkdir(parents=True)
+    plant_git_dir(planted, command)
+    config = planted / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("worktree = ..", "worktree = ."),
+        encoding="utf-8",
+    )
+    assert trap_is_armed(planted, marker), "control: plain git runs the planted command here"
+
+    report = _collector().collect(project=planted)
+
+    assert not marker.exists()
+    assert report["overall"] in {"OK", "warning", "broken"}
+    assert [section["name"] for section in report["sections"]][0] == "plugin_and_wiring"
+
+
+_WATCHED: list[Path] = []
+_TOUCHED: list[str] = []
+
+
+def _record_touch(event: str, args: tuple[object, ...]) -> None:
+    """Audit hook (it cannot be removed, so it is inert while ``_WATCHED`` is empty): note every
+    open, listing and database connection below a watched directory."""
+    if not _WATCHED or event not in {"open", "os.listdir", "os.scandir", "sqlite3.connect"}:
+        return
+    target = args[0]
+    if not isinstance(target, (str, bytes, os.PathLike)) or isinstance(target, int):
+        return
+    try:
+        resolved = Path(os.fsdecode(target)).resolve()
+    except (OSError, ValueError):
+        return
+    for watched in _WATCHED:
+        if resolved.is_relative_to(watched):
+            _TOUCHED.append(f"{event}:{resolved.relative_to(watched).as_posix()}")
+
+
+sys.addaudithook(_record_touch)
+
+
+def _add_record(store: Path) -> str:
+    with Store(store) as handle:
+        record = handle.add_decision(
+            Decision(
+                title="Linked store record",
+                kind=DecisionKind.GOTCHA,
+                status=DecisionStatus.ACCEPTED,
+                context="linked context",
+                choice="linked choice",
+                valid_from=datetime.now(UTC),
+                provenance=Provenance(source="manual"),
+            )
+        )
+    return record.id
+
+
+def _link_store(project: Path, store: Path, target: Path) -> None:
+    shutil.rmtree(store)
+    store.symlink_to(os.path.relpath(target, project), target_is_directory=True)
+
+
+def test_collect_does_not_read_a_store_that_leaves_the_repository_through_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _sandbox(tmp_path, monkeypatch)
+    external = tmp_path / "external" / ".sidegraph"
+    record_id = _add_record(external)
+    _link_store(project, store, external)
+    _WATCHED[:] = [external.resolve()]
+    _TOUCHED.clear()
+    try:
+        report = _collector().collect(project=project)
+    finally:
+        _WATCHED.clear()
+
+    assert _TOUCHED == []
+    assert record_id not in json.dumps(report)
+    integrity = next(s for s in report["sections"] if s["name"] == "store_integrity")
+    assert integrity["status"] == "warning"
+    assert integrity["evidence"]["verification"]["status"] == "UNKNOWN"
+    reason = integrity["evidence"]["index"]["reason"]
+    assert "leaves its repository through a link" in reason and str(external.resolve()) in reason
+    inventory = next(s for s in report["sections"] if s["name"] == "inventory_and_usage")
+    assert inventory["evidence"]["canonical_counts"] == "UNKNOWN"
+    assert inventory["evidence"]["hook_runs"]["available"] is False
+    assert report["overall"] == "warning"
+
+
+def test_collect_does_not_read_a_graph_that_lies_inside_a_refused_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph named through the refused link is the store's own file: it is neither
+    fingerprinted nor opened, and the graph section states the refusal."""
+    project, store = _sandbox(tmp_path, monkeypatch)
+    external = tmp_path / "external" / ".sidegraph"
+    _add_record(external)
+    shutil.copy(project / "graphify-out/graph.json", external / "graph.json")
+    _link_store(project, store, external)
+    _WATCHED[:] = [external.resolve()]
+    _TOUCHED.clear()
+    try:
+        report = _collector().collect(project=project, graph=project / ".sidegraph" / "graph.json")
+    finally:
+        _WATCHED.clear()
+
+    assert _TOUCHED == []
+    graphify = next(s for s in report["sections"] if s["name"] == "graphify")
+    assert graphify["status"] == "warning"
+    assert graphify["evidence"]["status"] == "UNKNOWN"
+    assert "leaves its repository through a link" in graphify["evidence"]["reason"]
+
+
+def test_collect_reads_a_graph_outside_a_refused_store_as_usual(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _sandbox(tmp_path, monkeypatch)
+    external = tmp_path / "external" / ".sidegraph"
+    _add_record(external)
+    _link_store(project, store, external)
+
+    report = _collector().collect(project=project, graph=project / "graphify-out/graph.json")
+
+    graphify = next(s for s in report["sections"] if s["name"] == "graphify")
+    assert graphify["evidence"]["status"] == "available"
+    assert "link" not in str(graphify["evidence"])
+
+
+def test_collect_still_reads_a_store_link_that_stays_inside_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store = _sandbox(tmp_path, monkeypatch)
+    inside = project / "stores" / "real"
+    _add_record(inside)
+    _link_store(project, store, inside)
+
+    report = _collector().collect(project=project)
+
+    inventory = next(s for s in report["sections"] if s["name"] == "inventory_and_usage")
+    assert inventory["evidence"]["canonical_counts"]["decisions"] == 1
+    integrity = next(s for s in report["sections"] if s["name"] == "store_integrity")
+    assert "link" not in str(integrity["evidence"]["index"]["reason"])

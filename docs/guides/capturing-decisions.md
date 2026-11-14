@@ -183,8 +183,10 @@ Ratify without leaving the session. `SessionStart` tells you when something is w
 ("Sidegraph: N record(s) awaiting ratification …"), and saying "ratify" — or invoking the
 `sidegraph:ratify-decisions` skill — walks the queue conversationally. Under the hood that
 is two MCP tools: `list_proposed()` (human-readable render of the pending queue; a long queue is shown in part, with the rest listed by id) and
-`ratify(accept=[...], drop=[...])` — the unified tool that ratifies decisions *and* domains
-through one gate (see [mind model](../concepts/mind-model.md#domain-lifecycle)).
+`ratify(accept=[...], drop=[...], verdict=...)` — the unified tool that ratifies decisions *and* domains
+through one gate (see [mind model](../concepts/mind-model.md#domain-lifecycle)). `verdict` is your own words that named the records; the agent
+passes them on. An accept is refused without them, and each accepted record is stamped
+`agent-relayed:<your git name>`. A proposal can be dropped without them.
 
 - **Accept** flips `proposed → accepted`. The record now reads untagged everywhere.
 - **Drop** is append-only, like everything else in the store: it sets `valid_to` and flips
@@ -304,7 +306,7 @@ once any record anywhere carries an `auto:` stamp, `sidegraph-doctor`'s human ou
   longer `[unratified]` — untagged, indistinguishable from a human-reviewed one except by
   its `ratified_by` stamp.
 - **The supersede rate only moves when something is actually superseded — by a human, by
-  an agent calling `supersede_decision` directly, or under `auto-all` by an agent's own
+  a `supersede_decision` successor once it is accepted, or under `auto-all` by an agent's own
   superseding proposal.** A bad auto-ratified record that nobody ever revisits looks
   identical, in that metric, to a good one.
 - **A record's own anchor check is check-then-act, not atomic.** Bindings that go stale in
@@ -382,7 +384,8 @@ human was the gate.
 
 For an accepted fact with `valid_to` unset, `supersede_fact(old_fact_id, statement, source, ...)`
 closes the predecessor (`status=superseded`, `valid_to` set) and writes a replacement in the
-same transaction, exactly like `supersede_decision`. Omit `anchors` to inherit the
+same transaction, like `supersede_decision` with `source="human"` (a fact's replacement never
+waits for ratification). Omit `anchors` to inherit the
 predecessor's bindings verbatim (including any `orphaned` ones, carried as-is); `supports`
 defaults to the predecessor's own `supports` when omitted. For an invalidated proposal or
 closed history, follow the [status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings):

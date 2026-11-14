@@ -255,7 +255,7 @@ In Claude Code these are slash commands; in other agents, ask for the task in wo
 
 | Tool | Purpose |
 |---|---|
-| `get_task_context` | Budgeted, task-scoped memory, mistakes first |
+| `get_task_context` | Budgeted, task-scoped memory: what you named first, mistakes before decisions |
 | `query_decisions` | Task-scoped memory with exact seeds |
 | `query_structure` | The code map around the given seeds |
 | `get_entity_history` | Every decision and fact anchored to one function or file, newest first |
@@ -272,9 +272,9 @@ In Claude Code these are slash commands; in other agents, ask for the task in wo
 | `propose_decisions` | Draft decisions and facts from the session for review |
 | `propose_domains` | Draft domains for review |
 | `ratify` | Accept or drop pending proposals |
-| `supersede_decision` | Reverse a decision: close it and add its replacement |
+| `supersede_decision` | Reverse a decision: add its replacement (an agent's own waits for ratification) |
 | `retire_decision` | Close a duplicate decision, or one whose subject is gone, with a reason |
-| `supersede_fact` | Correct a fact the same way |
+| `supersede_fact` | Correct a fact: its replacement is accepted at once |
 | `supersede_domain` | Rename or re-scope a domain |
 | `add_anchors` | Anchor an existing record to more code |
 | `record_drift_check` | Confirm a record still holds after its code changed |

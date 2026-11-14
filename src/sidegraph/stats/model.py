@@ -26,11 +26,11 @@ from __future__ import annotations
 import os
 import sqlite3
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote
 
 from pydantic import BaseModel, ValidationError
@@ -48,7 +48,12 @@ from sidegraph.schema import (
     Fact,
 )
 from sidegraph.store_format import SHARDS_SUBDIR, list_shard_files
-from sidegraph.store_layout import check_store_requirement, index_stamp_problem, stat_entry
+from sidegraph.store_layout import (
+    check_store_requirement,
+    index_stamp_problem,
+    refuse_outside_store_link,
+    stat_entry,
+)
 from sidegraph.store_view import is_packed_store
 
 if TYPE_CHECKING:
@@ -260,6 +265,97 @@ class CitedBackStats(BaseModel):
     budget_bytes: int
 
 
+class HookRunCounts(BaseModel):
+    """One hook's runs in the window, as the hook run log has them."""
+
+    runs: int
+    # runs that handed something over, the ones a lock then cut short included
+    delivered: int
+    partial: int  # of ``delivered``: a later step of the run was refused by a lock
+    lock: int  # runs a lock refused that handed nothing over
+    error: int
+    # cause -> runs that delivered nothing for it; ``unrecorded`` is a line with no cause
+    empty: dict[str, int]
+    # The delivered runs that may be set beside the runs a cause explains: those at or after
+    # this hook's first line that carries a cause. ``None`` when no line carries one, or when
+    # a line without a cause was written after that first one (an older writer still at work):
+    # the two kinds of line cannot be compared then.
+    delivered_with_causes: int | None = None
+    # The time of that first line, when the window also holds older runs of this hook.
+    causes_since: datetime | None = None
+
+
+class HookRunStats(BaseModel):
+    """Runs of the delivering hooks that opened the index, per hook. Counts, nothing else."""
+
+    hooks: dict[str, HookRunCounts]
+
+
+# The words the report may print from the log: the hooks that write a line and the causes they
+# write. Any other text in a log (a damaged or hand-edited line, a word a later version adds) is
+# counted under ``other`` and never printed.
+_LOG_HOOKS = ("PreToolUse", "SessionStart", "SubagentStart")
+_LOG_CAUSES = (
+    "no-entity",
+    "no-record",
+    "cold",
+    "repeat",
+    "cap",
+    "duplicate",
+    "unknown",
+    "unrecorded",
+)
+OTHER = "other"
+
+
+def hook_run_stats(rows: Iterable[Any], cutoff_ms: int) -> HookRunStats | None:
+    """Count the run-log rows at or after ``cutoff_ms``; ``None`` when there is none.
+
+    ``rows`` are the host seam's rows (``host.hook_log.read_runs``): objects with ``at_ms``,
+    ``hook``, ``outcome`` and ``detail``. This module imports nothing from ``host/``.
+    """
+    by_hook: dict[str, list[Any]] = {}
+    for row in rows:
+        if row.at_ms >= cutoff_ms:
+            by_hook.setdefault(row.hook if row.hook in _LOG_HOOKS else OTHER, []).append(row)
+    hooks: dict[str, HookRunCounts] = {}
+    for hook, hook_rows in sorted(by_hook.items()):
+        counts = HookRunCounts(
+            runs=len(hook_rows), delivered=0, partial=0, lock=0, error=0, empty={}
+        )
+        caused = [row.at_ms for row in hook_rows if row.outcome == "empty" and row.detail]
+        since = min(caused) if caused else None
+        with_causes = 0
+        comparable = since is not None
+        for row in hook_rows:
+            handed_over = row.outcome == "delivered" or (
+                row.outcome == "lock" and row.detail == "partial"
+            )
+            if handed_over:
+                counts.delivered += 1
+                counts.partial += row.outcome == "lock"
+                with_causes += since is not None and row.at_ms >= since
+            elif row.outcome == "lock":
+                counts.lock += 1
+            elif row.outcome == "error":
+                counts.error += 1
+            elif row.outcome == "empty":
+                cause = row.detail or "unrecorded"
+                if cause not in _LOG_CAUSES:
+                    cause = OTHER
+                counts.empty[cause] = counts.empty.get(cause, 0) + 1
+                if since is not None and not row.detail and row.at_ms >= since:
+                    comparable = False
+        if comparable and since is not None:
+            counts.delivered_with_causes = with_causes
+            if any(row.at_ms < since for row in hook_rows):
+                counts.causes_since = datetime.fromtimestamp(since / 1000, UTC)
+        hooks[hook] = counts
+    if not hooks:
+        return None
+    return HookRunStats(hooks=hooks)
+
+
 class StatsReport(BaseModel):
     repo: str
     window_days: int
@@ -284,6 +380,7 @@ class StatsReport(BaseModel):
     # Delivered records the agent quoted back later, read from host transcripts. None when no
     # reader was supplied, telemetry is off, the index is behind the files, or the read failed.
     cited_back: CitedBackStats | None = None
+    hook_runs: HookRunStats | None = None
 
 
 class UnreadableRecordError(ValueError):
@@ -490,6 +587,7 @@ def build_report(
     window_days: int = 30,
     now: datetime | None = None,
     cited_back: Callable[..., CitedBackStats] | None = None,
+    hook_runs: Callable[[Path], Iterable[Any]] | None = None,
 ) -> StatsReport:
     """One typed report over the index, its journals and the graph.
 
@@ -511,6 +609,7 @@ def build_report(
     cutoff = cutoff_dt.isoformat()
     # Resolved so a relative `.sidegraph` still yields its repo's name: the default store path
     # is relative, and `Path('.sidegraph').parent.name` is "".
+    refuse_outside_store_link(store_dir)
     store_dir = Path(store_dir).resolve()
     # A store this version may not read (spec D6) is not read at all: StoreRequirementError
     # propagates, and `sidegraph-stats` reports it.
@@ -688,6 +787,16 @@ def build_report(
             if p.severity in ("broken", "degraded")
         ]
 
+    # The run log is a text file beside the index, so it is read whatever the index's state.
+    hook_runs_stats: HookRunStats | None = None
+    if hook_runs is not None and telemetry_enabled():
+        try:
+            hook_runs_stats = hook_run_stats(
+                hook_runs(store_dir), int(cutoff_dt.timestamp() * 1000)
+            )
+        except Exception:
+            hook_runs_stats = None  # an unreadable log costs this block, never the report
+
     cited_back_stats: CitedBackStats | None = None
     if cited_back is not None and telemetry_enabled() and not index_stale:
         try:
@@ -796,6 +905,7 @@ def build_report(
         anchors=anchors,
         health=health,
         cited_back=cited_back_stats,
+        hook_runs=hook_runs_stats,
     )
 
 

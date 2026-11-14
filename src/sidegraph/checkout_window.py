@@ -17,7 +17,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Literal, NamedTuple
 
-from .gitenv import git_env
+from .gitenv import run_git
 from .store_layout import FORMAT_MARKER_NAME, StoreRequirementError
 
 GIT_TIMEOUT_SECONDS = 1.0
@@ -43,11 +43,8 @@ _View = GitView | None | Literal[_Busy.GIT_BUSY]
 def git_view(store_dir: Path, *, timeout: float | None = None) -> _View:
     """Read the lock path and committed marker together; a timeout means Git is busy."""
     try:
-        proc = subprocess.run(
+        proc = run_git(
             [
-                "git",
-                "-C",
-                str(store_dir),
                 "rev-parse",
                 "--git-path",
                 "index.lock",
@@ -55,7 +52,9 @@ def git_view(store_dir: Path, *, timeout: float | None = None) -> _View:
                 "-q",
                 "HEAD:./" + FORMAT_MARKER_NAME,
             ],
-            env={**git_env(), "GIT_NO_LAZY_FETCH": "1"},
+            store_dir,
+            dash_c=True,
+            env={"GIT_NO_LAZY_FETCH": "1"},
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=GIT_TIMEOUT_SECONDS if timeout is None else timeout,

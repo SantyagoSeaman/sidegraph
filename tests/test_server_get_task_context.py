@@ -80,3 +80,10 @@ def test_the_tool_description_points_to_query_structure():
     doc = " ".join(server.get_task_context.__doc__.split())
     assert "then a structural map" not in doc
     assert "query_structure" in doc
+
+
+def test_the_tool_description_says_what_comes_first():
+    doc = " ".join(server.get_task_context.__doc__.split())
+    assert "mistakes ranked first" not in doc
+    assert "Records of a symbol named in ``entities`` take the budget before" in doc
+    assert "among each, mistakes come before decisions" in doc

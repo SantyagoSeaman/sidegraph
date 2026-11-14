@@ -60,13 +60,15 @@ repos:
       # the capture-redaction feature (src/sidegraph/capture.py) already regexes decision
       # CONTENT for this pattern; this guards the source tree itself. Excludes the redaction
       # feature's own fake-key test fixtures and the design note that quotes them, none of
-      # which is a real key.
+      # which is a real key. The spec-replay kit's regression lists hold test node ids only, and
+      # some of those ids carry the fake PEM headers the redaction tests pass as parameters.
       - id: detect-private-key
         exclude: |
           (?x)^(
             tests/test_capture_redact\.py|
             tests/test_redaction_seeded\.py|
-            design/superpowers/plans/2026-07-06-capture-ratification\.md
+            design/superpowers/plans/2026-07-06-capture-ratification\.md|
+            design/research/2026-11-09-spec-replay/[a-z]+/regression-[ABC]\.txt
           )$
 
   # Broad secret-detection net (AWS/GCP/GitHub/Slack tokens, private keys, etc.) beyond the

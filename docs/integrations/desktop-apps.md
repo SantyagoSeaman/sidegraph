@@ -66,8 +66,9 @@ it does not ratify by itself. Whether the separate proposal call lands accepted 
 on the project's [ratification policy](../reference/configuration.md#environment-variables).
 The reminder also names updates to existing decisions. Follow
 [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings):
-a successful direct `supersede_decision` call writes an accepted replacement for an accepted, open
-predecessor, independently of proposal policy.
+a `supersede_decision` call the agent makes on its own writes
+a `proposed` replacement that waits for ratification; the predecessor stays current until
+then. Under the `auto-all` policy it is accepted at write time when it has a live anchor.
 
 ## Verify the current project
 

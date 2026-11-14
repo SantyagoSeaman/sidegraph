@@ -90,13 +90,18 @@ CAPTURE_NUDGE = (
 # that failed validation. The check-plan clause is conditional because the manual installs
 # (the Codex hooks recipe, the uvx route) emit this line with no skill installed; the last
 # sentence is for a host that lists a tool by name only until it is loaded.
+# The second sentence is there because a task often names a symbol and no file: asked for
+# repo-relative paths only, an agent ran one file-locating search to get the path and asked
+# memory second, although a name alone already reaches the symbol's records. The first
+# sentence is kept word for word: host checks outside this package match on it.
 # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D1)
 STANDING_SEARCH_INSTRUCTION = (
     "When you need to find or understand code in this project, call "
     "get_task_context(files=[…]) with repo-relative paths before any grep or file search — "
-    "decisions, gotchas and a domain map are indexed here. Before a non-trivial change, run "
-    "the sidegraph check-plan skill if it is available. If the tool is listed only by name, "
-    "load it first."
+    "decisions, gotchas and a domain map are indexed here. If you know a symbol's name and "
+    'not its file, call get_task_context(entities=[{"name": "…"}]) instead of searching for '
+    "the path. Before a non-trivial change, run the sidegraph check-plan skill if it is "
+    "available. If the tool is listed only by name, load it first."
 )
 
 
@@ -527,8 +532,11 @@ def _stray_store_line(location: StoreLocation) -> str | None:
 # `version-skew`: the plugin manifest sits under the plugin root Claude Code sets for its hooks
 # (`CLAUDE_PLUGIN_ROOT`) or Codex does (both, in fact; `PLUGIN_ROOT` is a generic name another
 # tool could set, which is why the manifest's own name is checked). Claude's cache holds the
-# `.claude-plugin` manifest, Codex's both.
+# `.claude-plugin` manifest, Codex's both. The hosts that keep one directory per installed
+# version (Claude Code, Codex) name that directory as the plugin root, and Claude Code writes
+# `.orphaned_at` into a version that no install uses any more.
 # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D2)
+# see design/superpowers/specs/2026-11-12-stale-install-advisory-design.md (D1, D2)
 _PLUGIN_ROOT_VARS = ("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")
 _MANIFEST_PATHS = (
     Path(".claude-plugin") / "plugin.json",
@@ -536,26 +544,33 @@ _MANIFEST_PATHS = (
 )
 
 
-def _plugin_manifest_version() -> str | None:
-    """The ``version`` of the Sidegraph plugin manifest under the plugin root, or ``None`` when
-    there is no root, no manifest, a manifest that is not JSON or not named ``sidegraph``, or one
-    without a string version. The first manifest that exists is the one read.
+_ORPHANED_MARKER = ".orphaned_at"
+
+
+def _manifest_version(root: Path) -> str | None:
+    """The ``version`` of the Sidegraph plugin manifest under ``root``, or ``None`` when there
+    is no manifest, one that cannot be reached or read, a manifest that is not JSON or not
+    named ``sidegraph``, or one without a string version. The first manifest that exists is
+    the one read.
     see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D2)
     """
-    root = next((os.environ[name] for name in _PLUGIN_ROOT_VARS if os.environ.get(name)), None)
-    if root is None:
-        return None
-    manifest = next((m for m in (Path(root) / rel for rel in _MANIFEST_PATHS) if m.is_file()), None)
-    if manifest is None:
-        return None
     try:
+        manifest = next((m for m in (root / rel for rel in _MANIFEST_PATHS) if m.is_file()), None)
+        if manifest is None:
+            return None
         data = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict) or data.get("name") != "sidegraph":
         return None
     version = data.get("version")
     return version if isinstance(version, str) else None
+
+
+def _plugin_root() -> Path | None:
+    """The plugin root the host named (the first non-empty of ``_PLUGIN_ROOT_VARS``)."""
+    root = next((os.environ[name] for name in _PLUGIN_ROOT_VARS if os.environ.get(name)), None)
+    return Path(root) if root is not None else None
 
 
 def _numeric_version(text: str) -> tuple[int, ...] | None:
@@ -573,16 +588,60 @@ def _numeric_version(text: str) -> tuple[int, ...] | None:
     return tuple(parts)
 
 
+def _newer_installed_version(root: Path, plugin: str, running: tuple[int, ...]) -> str | None:
+    """The newest Sidegraph version above ``running`` (the running package's release) that is
+    installed at or beside the plugin root, or ``None``.
+
+    ``plugin`` is the root's own manifest version and always counts. A directory beside the
+    root counts only when the root is itself a version directory (its name is its manifest
+    version: the host keeps one directory per installed version), the directory's name is the
+    version in its own Sidegraph manifest, and it holds no ``.orphaned_at`` marker (a version
+    no install uses any more). Only directories named above the best found so far are opened.
+    Nothing here raises: what cannot be read does not count.
+    see design/superpowers/specs/2026-11-12-stale-install-advisory-design.md (D2, D3)
+    """
+    best: str | None = None
+    best_release = running
+    plugin_release = _numeric_version(plugin)
+    if plugin_release is not None and plugin_release > best_release:
+        best, best_release = plugin, plugin_release
+    if root.name != plugin:
+        return best
+    try:
+        names = os.listdir(root.parent)
+    except OSError:
+        return best
+    for name in names:
+        release = _numeric_version(name)
+        if name == root.name or release is None or release <= best_release:
+            continue
+        sibling = root.parent / name
+        try:
+            if _manifest_version(sibling) != name or (sibling / _ORPHANED_MARKER).exists():
+                continue
+        except OSError:
+            continue
+        best, best_release = name, release
+    return best
+
+
+_UPDATE_PLUGIN = "Update the plugin from its marketplace, then start a new session."
+_UPDATE_PLUGIN_CLAUDE = (
+    "Update this project's install: in a terminal, from this project's directory, run "
+    "`claude plugin marketplace update sidegraph` and then `claude plugin update "
+    "sidegraph@sidegraph` (on Claude Code older than 2.1.281, add `--scope local` or "
+    "`--scope project`), then start a new session. If the new session still shows this "
+    "line, update Sidegraph on the Installed tab of `/plugin` inside that session."
+)
 _PACKAGE_NEWER = (
     "Sidegraph: the package is {package} but the plugin is {plugin}: the installed plugin copy "
-    "is stale. Update the plugin from its marketplace."
+    "is stale. {update}"
 )
-_PLUGIN_NEWER = (
-    "Sidegraph: the plugin is {plugin} but the package is {package}: the session was started "
-    "before the plugin update, or Sidegraph is launched from a manual registration "
-    "(`claude mcp add`, a hand-written config) that pins an older version. Restart the "
-    "session, or update that registration."
+_INSTALL_BEHIND = (
+    "Sidegraph: this session runs Sidegraph {package}, and {newer} is installed on this "
+    "machine. {update}"
 )
+_VERSION_SKEW_TELL_THE_USER = "Tell the user, and do not update the plugin unasked."
 
 # `path-skew`: a `sidegraph-*` command on PATH that is not the running package's own. A persistent
 # `uv tool install` never updates itself, and a released entry point cannot be asked its
@@ -683,6 +742,7 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
     see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D1, D4 check 5)
     see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D2, D3)
     see design/superpowers/specs/2026-10-11-stale-path-sidegraph-design.md (D4)
+    see design/superpowers/specs/2026-11-12-stale-install-advisory-design.md (D3, D4)
     """
     from .. import __version__
     from ..integrity import Check, Inputs, Problem, _NotRun
@@ -702,27 +762,32 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
         )
 
     def detect_version_skew(inputs: Inputs) -> Problem | None:
-        plugin = _plugin_manifest_version()
+        root = _plugin_root()
+        if root is None:
+            raise _NotRun
+        plugin = _manifest_version(root)
         if plugin is None:
             raise _NotRun
         package_release, plugin_release = _numeric_version(__version__), _numeric_version(plugin)
         if package_release is None or plugin_release is None:
             raise _NotRun
-        if package_release == plugin_release:
+        update = _UPDATE_PLUGIN_CLAUDE if _host_family() == "claude" else _UPDATE_PLUGIN
+        newer = _newer_installed_version(root, plugin, package_release)
+        if newer is not None:
+            notice = _INSTALL_BEHIND.format(package=__version__, newer=newer, update=update)
+            summary = "a newer Sidegraph is installed than the session runs"
+        elif package_release > plugin_release:
+            notice = _PACKAGE_NEWER.format(package=__version__, plugin=plugin, update=update)
+            summary = "package and plugin versions differ"
+        else:
             return None
-        template = _PACKAGE_NEWER if package_release > plugin_release else _PLUGIN_NEWER
-        line = template.format(package=__version__, plugin=plugin)
         return Problem(
             check="version-skew",
             severity="advisory",
-            summary="package and plugin versions differ",
-            fix=(
-                "update the plugin"
-                if template is _PACKAGE_NEWER
-                else "restart the session, or update the manual registration"
-            ),
-            line=line,
-            notice=line,
+            summary=summary,
+            fix="update the plugin and start a new session",
+            line=f"{notice} {_VERSION_SKEW_TELL_THE_USER}",
+            notice=notice,
         )
 
     def detect_path_skew(inputs: Inputs) -> Problem | None:
@@ -1034,6 +1099,37 @@ def _session_start_duplicate(
         if diagnostics is not None:
             diagnostics.report("session", error)
         return False
+
+
+def _reset_file_claims(store, payload: dict, session_id: str, now: datetime) -> None:
+    """After a compaction or a clear, delete the PreToolUse file claims of the agent whose
+    context it was, so that agent starts its ten files again and a file it reads again is
+    delivered again. The agent is the one the payload names (``_agent_identity``, the function
+    PreToolUse builds its keys with), ``-`` for the session's own agent.
+
+    Once per notice: hosts repeat a SessionStart (a second registration, a retry), and a
+    repeat must not delete the claims made since the first. The first reset leaves a stamp
+    ``pretool_reset:<session>:<agent>:<source>``; a notice with the same source for the same
+    agent within ``_SESSION_START_DEDUPE_SECONDS`` of that stamp changes nothing. A compact
+    that follows a startup has no stamp and resets. Called before the duplicate gate.
+
+    The stamp check, the deletion and the stamp write are one store transaction
+    (``Store.delete_meta_prefix_stamped``): the repeats of a notice arrive together, and
+    with three transactions two of them would both find no stamp.
+    """
+    agent = _agent_identity(payload) or "-"
+    stamp_key = f"{_PRETOOL_RESET_KEY_PREFIX}{session_id}:{agent}:{payload.get('source')}"
+    window = timedelta(seconds=_SESSION_START_DEDUPE_SECONDS)
+
+    def repeated(raw: str | None) -> bool:
+        stamped = _parse_stamp(raw)
+        # A stamp newer than ``now`` is a repeat too: this notice read its clock, then waited
+        # for the reservation while a notice that read its clock later reset and stamped.
+        return stamped is not None and abs(now - stamped) < window
+
+    store.delete_meta_prefix_stamped(
+        f"{_PRETOOL_FILE_KEY_PREFIX}{session_id}:{agent}:", stamp_key, now.isoformat(), repeated
+    )
 
 
 def _is_recent_stamp(raw: str, session_id: str, now: datetime) -> bool:
@@ -1557,6 +1653,10 @@ def session_start() -> None:
                         store.delete_meta_prefix(f"{_MCP_SENT_KEY_PREFIX}{rollout[1]}:-:")
             except Exception as error:
                 diagnostics.report("mcp-sent-reset", error)
+            try:
+                _reset_file_claims(store, payload, session_id, datetime.now(UTC))
+            except Exception as error:
+                diagnostics.report("file-claims-reset", error)
 
         # D7.2: double-injection dedupe, checked BEFORE any other work (sync/TOC/nudges) —
         # a duplicate SessionStart call for the same session within the window exits
@@ -1565,6 +1665,7 @@ def session_start() -> None:
         if session_id and _session_start_duplicate(
             store, session_id, datetime.now(UTC), diagnostics
         ):
+            run.cause = hook_log.DUPLICATE
             print(json.dumps({}))
             return
 
@@ -1864,10 +1965,9 @@ def _commits_since(
     since_epoch = int(since.timestamp())
     walk_epoch = int((since - _REARM_SKEW_MARGIN).timestamp())
     try:
-        done = subprocess.run(
-            ["git", "log", "--branches", "HEAD", f"--since={walk_epoch}", "--format=%at", "--"],
-            cwd=_store_project_root(store_path),
-            env=gitenv.git_env(),
+        done = gitenv.run_git(
+            ["log", "--branches", "HEAD", f"--since={walk_epoch}", "--format=%at", "--"],
+            _store_project_root(store_path),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -2091,10 +2191,12 @@ _POINT_OF_READ_TOOLS = frozenset({"Read", "Grep", "Edit", "Write", "Bash"})
 
 # One claim per file per agent in the meta table, keyed
 # ``pretool_file:<session>:<agent or ->:<repo-relative path>`` with the claim's ISO timestamp as
-# the value (SessionStart expires it). ``-`` stands for the session's own agent: without it that
-# agent's key prefix would be the session alone, which every subagent's keys also start with, and
-# the subagents' claims would spend the main agent's cap. Deliberately NOT the Stop hook's
-# `capture_sessions` table: that table means "already nudged to *distill*", a different guard.
+# the value (SessionStart expires it after 30 days, and deletes an agent's claims when that
+# agent's context was compacted or cleared). ``-`` stands for the session's own agent: without
+# it that agent's key prefix would be the session alone, which every subagent's keys also start
+# with, and the subagents' claims would spend the main agent's cap. Deliberately NOT the Stop
+# hook's `capture_sessions` table: that table means "already nudged to *distill*", a different
+# guard.
 # see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2)
 _PRETOOL_FILE_KEY_PREFIX = "pretool_file:"
 
@@ -2102,7 +2204,15 @@ _PRETOOL_FILE_KEY_PREFIX = "pretool_file:"
 # clears what is left of them.
 _PRETOOL_LEGACY_KEY_PREFIXES = ("pretool_nudge:", "pretool_nudge_path:")
 _MCP_SENT_KEY_PREFIX = "mcp_sent:"
-_PRETOOL_PRUNE_PREFIXES = (*_PRETOOL_LEGACY_KEY_PREFIXES, _PRETOOL_FILE_KEY_PREFIX)
+# When SessionStart last reset an agent's file claims, per source: an ISO timestamp under
+# ``pretool_reset:<session>:<agent or ->:<source>`` (see ``_reset_file_claims``). Expires with
+# the claims.
+_PRETOOL_RESET_KEY_PREFIX = "pretool_reset:"
+_PRETOOL_PRUNE_PREFIXES = (
+    *_PRETOOL_LEGACY_KEY_PREFIXES,
+    _PRETOOL_FILE_KEY_PREFIX,
+    _PRETOOL_RESET_KEY_PREFIX,
+)
 
 # SessionStart expires a per-file key this many days after its claim. The value is the claim's
 # ISO timestamp (the older one-shot keys held "1", which SessionStart also expires).
@@ -2321,6 +2431,11 @@ class _HotOpener:
         if self._run is not None:
             self._run.note(error)
 
+    def empty_because(self, cause: str) -> None:
+        """Name why this run delivers nothing (one of ``hook_log.CAUSES``), for the run log."""
+        if self._run is not None:
+            self._run.cause = cause
+
     def close(self) -> None:
         if self._index is not None:
             self._index.close()
@@ -2389,8 +2504,8 @@ def _records_for_path(store, rel_path: str) -> list[tuple]:
     must equal this byte for byte (``tests/test_hot_index.py``); its fact path has a separate
     typed eligibility oracle. The hook itself never builds a ``Store``.
 
-    Mistakes-first is the product's one hard ranking guarantee (``MISTAKE_KINDS``, imported,
-    never re-spelled). WITHIN each bucket the order is newest-first: the scan order is ULID mint
+    Mistakes-first is this block's ranking rule (``MISTAKE_KINDS``, imported, never
+    re-spelled). WITHIN each bucket the order is newest-first: the scan order is ULID mint
     order, so without this a cap would spend itself on the OLDEST records of a busy path.
 
     Pure read. A row that fails to parse is skipped individually.
@@ -2661,6 +2776,9 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
         return None
 
     anchored = index.anchored_entities(files)
+    if not anchored:
+        hot.empty_because(hook_log.NO_ENTITY)
+        return None
     selection_failed = False
 
     def selection_error(error: Exception) -> None:
@@ -2703,9 +2821,23 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
     journal = _journals_showings()
     from ..hot_index import Shown  # already loaded: the index above is a HotIndex
 
+    if not chosen and not left_out:
+        entity_ids = [entity for rel in dict.fromkeys(files) for entity in anchored.get(rel, ())]
+        hot.empty_because(
+            _cold_or_no_record(
+                index,
+                entity_ids,
+                hot,
+                prefix,
+                [rel for rel in dict.fromkeys(files) if rel in anchored],
+            )
+        )
+        return None
+
     blocks: list[str] = []
     seen: list[Record] = []
     winning: list[tuple[str, Sequence[Record]]] = []
+    refused: list[str] = []
     for rel, records in chosen:
         # Claim BEFORE emitting, in one statement that also counts: a crash cannot deliver a
         # file twice, two parallel reads of one agent cannot both deliver it, and the agent's
@@ -2721,6 +2853,8 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
             if index.claim_file(prefix, rel, now, _FILES_PER_AGENT, shown=shown):
                 blocks.append(_records_block(rel, records, seen=seen))
                 winning.append((rel, _shown_slice(records)))
+            else:
+                refused.append(rel)
         except sqlite3.OperationalError as error:
             hot.note(error)
             hot.report("claim", error)
@@ -2728,7 +2862,11 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
     if not blocks:
         # Nothing delivered, so nothing to journal; the files left out still deserve the
         # pointer to get_task_context.
-        return _PRETOOL_OMITTED.format(count=left_out) if left_out else None
+        if left_out:
+            return _PRETOOL_OMITTED.format(count=left_out)
+        if refused:
+            hot.empty_because(_refusal_cause(index, prefix, refused, hot))
+        return None
     text = "\n".join([MEMORY_GUARD_LINE, *blocks])
     if left_out:
         text += "\n" + _PRETOOL_OMITTED.format(count=left_out)
@@ -2736,6 +2874,56 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
         payload, index, "hook_read", winning, lambda error: hot.report("delivery", error)
     )
     return text
+
+
+def _cold_or_no_record(
+    index: HotIndex,
+    entity_ids: Sequence[str],
+    hot: _HotOpener,
+    prefix: str | None = None,
+    files: Sequence[str] = (),
+) -> str:
+    """Why a call whose files have entities found nothing to hand over: ``cold`` when a record
+    the hook would have printed sits behind a binding whose status was not computed, else
+    ``no-record``. Asked only for a run that delivers nothing; the index stops at the first
+    such record and does not wait for a lock. A read that fails, or that another process's
+    lock refuses, leaves ``unknown``: the run is not kept waiting to learn why it was empty.
+
+    With ``prefix`` (the Read path, which claims files) the claim rules still win over
+    ``cold``, as they do on an index that is not cold: ``cap`` when a named file is not held
+    and the agent holds its ten, else ``repeat`` when it holds a named file. These are point
+    reads of the first three named files and never wait for a lock either."""
+    try:
+        if not index.cold_withholds(entity_ids, lambda record: bool(_renderable_records([record]))):
+            return hook_log.NO_RECORD
+        if prefix is not None:
+            named = files[:_FILES_PER_CALL]
+            held = [index.has_meta_now(prefix + rel) for rel in named]
+            if not all(held) and index.claims_held_now(prefix) >= _FILES_PER_AGENT:
+                return hook_log.CAP
+            if any(held):
+                return hook_log.REPEAT
+    except Exception as error:
+        if not hook_log.is_lock_error(error):
+            hot.report("cause", error)
+        return hook_log.UNKNOWN
+    return hook_log.COLD
+
+
+def _refusal_cause(index: HotIndex, prefix: str, refused: Sequence[str], hot: _HotOpener) -> str:
+    """Why the claims of a run that delivered nothing were refused: ``repeat`` when this agent
+    already holds every refused file, ``cap`` when one of them is a file it does not hold (the
+    claim statement refuses both the same way). One point read per refused file, at most three,
+    without waiting for a lock; a read that fails or is refused leaves ``unknown``."""
+    try:
+        for rel in refused:
+            if not index.has_meta_now(prefix + rel):
+                return hook_log.CAP
+    except Exception as error:
+        if not hook_log.is_lock_error(error):
+            hot.report("cause", error)
+        return hook_log.UNKNOWN
+    return hook_log.REPEAT
 
 
 def _brief_plan(
@@ -2863,10 +3051,12 @@ def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
         return None
     anchored = index.anchored_files()
     chosen: list[tuple[str | None, str, list[Record]]] = []
+    named: list[str] = []  # the entities of the anchored files the brief names
     cwd = payload.get("cwd")
     for doc, rel in brief_files(
         prompt, _touch_root(location), anchored, cwd if isinstance(cwd, str) else None
     ):
+        named.extend(anchored.get(rel, ()))
         records = _renderable_records(
             index.records_for(anchored[rel], on_error=lambda error: _select_error(hot, error))
             if rel in anchored
@@ -2879,6 +3069,12 @@ def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
     plan = _brief_plan(chosen)
     block = _brief_block(plan)
     if block is None:
+        if chosen:
+            hot.empty_because(hook_log.NO_RECORD)  # the first file's records do not fit
+        elif named:
+            hot.empty_because(_cold_or_no_record(index, named, hot))
+        else:
+            hot.empty_because(hook_log.NO_ENTITY)
         return None
     _journal_brief(payload, index, plan, lambda error: hot.report("brief_journal", error))
     _journal_delivery(
@@ -2916,10 +3112,12 @@ def pre_tool_use() -> None:
     asks) — for a Read, Grep, Edit, Write, or a Bash line whose ``sed``, ``grep``, ``rg`` or
     ``cat`` names a file with records. Each file is delivered once per agent (the session's own
     agent and each subagent separately; see :func:`_agent_identity`), up to ten files per agent
-    and three per call. Switch it off with ``SIDEGRAPH_GREP_NUDGE=off`` (the name is older than
-    the behaviour; touch recording is not affected). Must never crash or block the tool call:
-    any failure — or nothing to deliver — prints ``{}``; either way the normal permission flow
-    applies untouched.
+    and three per call; an agent starts its ten again after its context was compacted or
+    cleared (see :func:`_reset_file_claims`). Switch it off with ``SIDEGRAPH_GREP_NUDGE=off``
+    (the name is older than the behaviour; touch recording is not affected). Must never crash
+    or block the tool call:
+    any failure — or nothing to deliver — prints ``{}`` (the run log names why a run that used
+    the index delivered nothing); either way the normal permission flow applies untouched.
 
     On an ``Agent`` (or ``Task``) call, the one that spawns a subagent, it prints the call's own
     input with the records for the files the brief names appended to ``prompt`` (``updatedInput``,

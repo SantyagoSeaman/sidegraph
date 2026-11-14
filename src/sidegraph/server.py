@@ -46,7 +46,10 @@ from . import (
 from .anchoring import anchor_descriptor, anchor_roots, orphan_reason, resolve_and_bind
 from .anchoring import entity_summaries as _entity_summaries
 from .capture import (
+    AutoEligibility,
     RatifyPolicy,
+    _anchor_signal,
+    _auto_ratify,
     _bind_initiative,
     _bind_orphaned,
     _capture_commit,
@@ -54,6 +57,7 @@ from .capture import (
     _resolves_to_live_decision,
     _session_id_fallback,
     _unknown_support_positions,
+    auto_ratify_eligible,
     format_communities_sample,
     format_fact_proposal,
     format_path_prefixes,
@@ -132,6 +136,7 @@ from .store import (
     settled_after_failure,
     settled_ratify_result,
 )
+from .store_layout import StoreLinkRefused, refuse_outside_store_link
 from .sync import (
     activate_accepted_domain,
     ensure_domain_membership,
@@ -203,7 +208,12 @@ _store_lock = threading.Lock()
 
 
 def _missing_store_setup(path: str) -> str | None:
-    """Refuse implicit creation below or outside the selected logical Git root."""
+    """Refuse implicit creation below or outside the selected logical Git root, and a store
+    path that leaves its repository through a link."""
+    try:
+        refuse_outside_store_link(path)
+    except StoreLinkRefused as error:
+        return f"Sidegraph: the store path {error}"
     if not _present_by_lstat(path) and not _interrupted(path):
         parent = os.path.dirname(os.path.abspath(path))
         if _repository_boundary(parent) != parent:
@@ -520,8 +530,10 @@ mcp.add_middleware(_ArgumentNames())
 def _commit_hint(store: Store) -> str | None:
     """The sentence a write tool adds to its result: the store sits inside a git repository, so
     a record in it is stranded on this checkout until the change that produced it is committed.
-    ``None`` outside a repository, and ``None`` for a symlinked store whose target lies outside
-    it: git commits the link, not the records behind it, so the advice would be false. The prefix
+    ``None`` outside a repository, and ``None`` for a store whose real location lies outside it
+    (git commits a link, not the records behind it, so the advice would be false). The second
+    case is a safeguard: a store path that leaves its repository through a link is refused when
+    the store opens, so no store reaches this function that way. The prefix
     is the store's path relative to the repository root, lexical like ``repository_root``: no
     subprocess, and a symlinked store keeps the name its project knows it by.
     # see design/superpowers/specs/2026-10-02-stranded-store-writes-design.md (D3)"""
@@ -530,7 +542,7 @@ def _commit_hint(store: Store) -> str | None:
         if root is None:
             return None
         if not Path(store.path).resolve().is_relative_to(root.resolve()):
-            return None
+            return None  # safeguard: see the docstring
         prefix = Path(os.path.abspath(store.path)).relative_to(root).as_posix()
     except (OSError, ValueError):
         return None
@@ -1296,7 +1308,8 @@ def _supersede_decision_impl(
     anchors: list[dict] | None = None,
     session_id: str | None = None,
     author: str | None = None,
-    source: str = "human",
+    source: str = "agent",
+    ratify_policy: RatifyPolicy = RatifyPolicy.MANUAL,
 ) -> dict:
     """Testable core: write the successor, then anchor it (explicit anchors, or inherit).
 
@@ -1316,14 +1329,24 @@ def _supersede_decision_impl(
       this path (inheritance never resolves against the graph), so ``anchors_skipped`` is
       always ``[]`` here.
 
-    ``session_id``/``author``/``source`` (design D6, all optional/additive): stamped onto
-    the successor's ``Provenance`` the same way ``propose`` stamps a captured decision's.
-    ``source`` defaults to ``"human"`` — this tool's own historical hardcoded value, so an
-    existing caller that never passes it keeps stamping exactly what it always has; an
-    agent-initiated caller (e.g. a future supersede-from-neighbors flow) passes
-    ``source="agent"`` instead. ``graph_version``/``commit`` are stamped the way ``propose``
-    stamps them too — ``graph_version`` from the reader when present, ``commit`` via the
-    same best-effort ``git rev-parse HEAD`` (:func:`sidegraph.capture._capture_commit`).
+    ``source`` decides the landing status as well as the provenance stamp. Only the exact
+    value ``"human"`` (the owner asked for this reversal and dictated or approved the
+    successor's text) writes the successor ``accepted``, which closes the predecessor in
+    the same mutation. Any other value, the default ``"agent"`` included, writes it
+    ``proposed``: the predecessor stays accepted and open until the successor is
+    accepted, and a drop leaves it untouched (``Store.add_decision`` and
+    ``Store.ratify`` own that rule).
+    ``session_id``/``author`` are stamped onto the successor's ``Provenance`` the way
+    ``propose`` stamps a captured decision's; ``graph_version`` comes from the reader
+    when present, ``commit`` from the best-effort ``git rev-parse HEAD``
+    (:func:`sidegraph.capture._capture_commit`).
+    ``ratify_policy`` (default ``RatifyPolicy.MANUAL``; the tool passes the resolved
+    ``SIDEGRAPH_RATIFY_POLICY``): a successor that landed ``proposed`` goes through the
+    policy's own eligibility check after the anchor step and, when eligible, through the
+    same ``Store.ratify`` a draft goes through, stamped ``auto:<policy>``. Only
+    ``auto-all`` admits a successor, and only with a live Tier-1 or Tier-2 binding;
+    otherwise it stays ``proposed``. The deprecated auto-accept switch is not read here.
+    see design/superpowers/specs/2026-11-12-ratification-needs-a-human-verdict-design.md (D1-D3)
     """
     preflight_direct(
         old_decision_id,
@@ -1360,7 +1383,7 @@ def _supersede_decision_impl(
     replacement = Decision(
         title=title,
         kind=DecisionKind(kind),
-        status=DecisionStatus.ACCEPTED,
+        status=DecisionStatus.ACCEPTED if source == "human" else DecisionStatus.PROPOSED,
         context=context,
         choice=choice,
         rejected=rejected,
@@ -1399,11 +1422,44 @@ def _supersede_decision_impl(
                 )
             )
 
+    # A gated successor follows the configured ratification policy, as a superseding
+    # draft does: after the anchor step, through the same gates and the same transition.
+    # see design/superpowers/specs/2026-11-12-ratification-needs-a-human-verdict-design.md (D4)
+    ratified_by: str | None = None
+    auto_ratify_error: str | None = None
+    # The flag says the index waits for a sync. After a build every binding row holds the
+    # placeholder `live`, and an inherited row is a copy of that: the gate would read an anchor
+    # the sync found orphaned as live. After a domain accept the statuses are computed, but the
+    # next sync still has work to settle. Either way the successor stays proposed; the policy
+    # does not look at it again, a person ratifies it.
+    index_is_cold = store.get_meta(VOLATILE_STALE_KEY) == "1"
+    if (
+        replacement.status == DecisionStatus.PROPOSED
+        and ratify_policy.auto_ratifies
+        and not index_is_cold
+    ):
+        live_tier12, ambiguous_or_orphan_only = _anchor_signal(store, replacement.id)
+        signal = AutoEligibility(
+            kind=replacement.kind.value,
+            live_tier12=live_tier12,
+            ambiguous_or_orphan_only=ambiguous_or_orphan_only,
+            pipeline_clean=True,
+            has_provenance=True,
+            domain_anchored=False,
+            has_supersedes=True,
+        )
+        if auto_ratify_eligible(signal, ratify_policy):
+            outcome = _auto_ratify(store, replacement.id, signal.kind, ratify_policy)
+            ratified_by, auto_ratify_error = outcome.ratified_by, outcome.error
+
     bindings = store.bindings_for_record(replacement.id)
     return _with_commit_hint(
         store,
         {
             "id": replacement.id,
+            "status": "accepted" if ratified_by else replacement.status.value,
+            "ratified_by": ratified_by,
+            "auto_ratify_error": auto_ratify_error,
             "supersedes": old_decision_id,
             "bindings": len(bindings),
             "entities": _entity_summaries(store, bindings),
@@ -1427,9 +1483,10 @@ def supersede_decision(
     anchors: list[dict] | None = None,
     session_id: str | None = None,
     author: str | None = None,
-    source: str = "human",
+    source: str = "agent",
 ) -> dict:
-    """Reverse a decision: close the old one and append a replacement that supersedes it.
+    """Reverse a decision: append a replacement that supersedes it. The old one closes when
+    the replacement is accepted.
 
     Call this when work has made a recorded decision false, too broad, or reversed — the
     situations retrieval renders as ``(id: ...)`` lines and ``propose_decisions`` reports as
@@ -1446,14 +1503,31 @@ def supersede_decision(
     Passing ``anchors`` replaces inheritance; it never adds to it.
     Explicit ``anchors`` are validated like ``add_decision``'s before anything is written.
 
-    ``session_id``/``author`` (optional) and ``source`` (default ``"human"``, this tool's
-    historical hardcoded value — pass ``"agent"`` when an agent calls this itself, e.g. off
-    a ``neighbors`` or ``(id: ...)`` hint) are stamped onto the successor's provenance,
-    alongside ``graph_version`` and a best-effort capture-time ``commit`` (same fields
-    ``propose_decisions`` stamps).
+    ``source`` (default ``"agent"``) decides whether the replacement waits for a verdict.
+    Leave it out when superseding was your own decision: the replacement lands
+    ``proposed``, the old decision stays accepted and current, and the replacement waits
+    in ``list_proposed`` for the owner. Pass ``source="human"`` only when the owner
+    asked for this reversal in this conversation and dictated or approved the
+    replacement's text: it then lands ``accepted`` and the old decision closes at once.
+    ``session_id``/``author`` (optional) and ``source`` are stamped onto the
+    replacement's provenance, alongside ``graph_version`` and a best-effort capture-time
+    ``commit``.
 
-    Returns ``{"id", "supersedes", "bindings", "entities", "anchors_skipped",
-    "anchors_orphaned", "redactions"}`` — ``anchors_skipped`` is ``[{"name", "reason": "ambiguous",
+    Under ``SIDEGRAPH_RATIFY_POLICY=auto-all`` a replacement you wrote on your own is
+    accepted at write time when it has a live anchor, stamped ``auto:auto-all``, as a
+    superseding ``propose_decisions`` draft is; the result's ``status`` and ``ratified_by``
+    say so. While the index is waiting for a sync the replacement stays ``proposed`` even
+    with a live anchor. Under ``manual`` and ``auto-low-risk`` it always waits.
+
+    A decision takes one pending replacement at a time. If this call is refused with
+    "already has a pending successor", a replacement is already waiting for the owner:
+    stop, tell the owner its id, and do not drop it to make room for yours.
+
+    Returns ``{"id", "status", "ratified_by", "auto_ratify_error", "supersedes", "bindings",
+    "entities", "anchors_skipped", "anchors_orphaned", "redactions"}`` — ``status`` is
+    ``"proposed"`` or ``"accepted"``; ``ratified_by`` is the ``auto:<policy>`` stamp when the
+    policy accepted the replacement at write time, else null; ``auto_ratify_error`` is null
+    unless that attempt failed; ``anchors_skipped`` is ``[{"name", "reason": "ambiguous",
     "candidates"}, ...]``, the same per-anchor feedback ``add_decision`` returns
     (candidates capped at 5): populated
     only on the explicit-``anchors`` path (an anchor whose name matched more than one graph
@@ -1486,6 +1560,7 @@ def supersede_decision(
         session_id=session_id,
         author=author,
         source=source,
+        ratify_policy=_ratify_policy(),
     )
 
 
@@ -1760,7 +1835,7 @@ def _supersede_fact_impl(
 ) -> dict:
     """Testable core: write the successor, then anchor it (explicit anchors, or inherit).
 
-    Mirrors ``_supersede_decision_impl`` exactly (falsification, not deletion): the
+    Mirrors ``_supersede_decision_impl``'s owner-asked path (falsification, not deletion): the
     predecessor must already exist; ``supports`` defaults to the PREDECESSOR's ``supports``
     when omitted (a superseding fact informs the same decisions unless told otherwise).
     ``anchors`` given -> resolve fresh via ``_bind_fact_anchors`` (same no-graph-orphans
@@ -4076,14 +4151,17 @@ def get_task_context(
     memory_budget: int = 6000,
     intent: str | None = None,
 ) -> str:
-    """Task-aware context for the files/entities you're working on, mistakes ranked first.
+    """Task-aware context for the files/entities you're working on, what you named ranked first.
 
     ``files`` are repo-relative paths; ``entities`` are ``{"name": ..., "file_path": ...}``
-    refs. Returns a compact slice: known mistakes/gotchas, then decisions, facts, related
-    decisions and unratified proposals. The structural map is not included: call
-    ``query_structure`` with the same seeds for it. ``structure_budget`` sets how far the
-    graph walk that finds related records reaches. Best-effort — degrades if the graph or
-    store is absent.
+    refs. ``file_path`` is optional: when you know a symbol's name and not its file, pass the
+    name alone instead of searching for the path first.
+    Returns a compact slice: known mistakes/gotchas, then decisions, facts, related
+    decisions and unratified proposals. Records of a symbol named in ``entities`` take the
+    budget before the records of the other symbols in the named files; among each, mistakes
+    come before decisions. The structural map is not included: call ``query_structure`` with
+    the same seeds for it. ``structure_budget`` sets how far the graph walk that finds
+    related records reaches. Best-effort — degrades if the graph or store is absent.
 
     Also accepted: ``paths`` (the same as ``files``) and ``seeds``, a list or one string. A seed
     with a ``/``, or ending in a known file extension (``.py``, ``.toml``), is read as a file;
@@ -4170,11 +4248,12 @@ def _ratify_policy() -> RatifyPolicy:
     to ``RatifyPolicy.MANUAL`` via the pure ``capture.parse_ratify_policy`` this function
     wraps with the actual env read.
 
-    Called exactly ONCE per MCP request — inside ``propose_decisions`` and
-    ``propose_domains`` — and the returned object is threaded through unchanged to every
-    core call the request makes (``propose_decisions`` passes the SAME object to both
-    ``capture.propose`` and ``capture.propose_facts`` via ``_propose_decisions_impl``), so
-    a single batch samples the policy once, never once per core call.
+    Called exactly ONCE per MCP request — inside ``propose_decisions``,
+    ``propose_domains`` and ``supersede_decision`` — and the returned object is threaded
+    through unchanged to every core call the request makes (``propose_decisions`` passes the
+    SAME object to both ``capture.propose`` and ``capture.propose_facts`` via
+    ``_propose_decisions_impl``), so a single batch samples the policy once, never once per
+    core call.
     # see design/superpowers/specs/2026-09-11-auto-ratification-policy-design.md D1
     """
     return parse_ratify_policy(os.environ.get("SIDEGRAPH_RATIFY_POLICY"))
@@ -4803,7 +4882,14 @@ def list_proposed(budget_chars: int = 24000) -> str:
 _RATIFY_FAILED = "error: ratification failed; reopen the store and inspect status before retrying"
 
 
-def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
+def _ratify_one(
+    store: Store,
+    id_: str,
+    action: str,
+    *,
+    relayed: bool = False,
+    drop_needs_verdict: bool = False,
+) -> tuple[str, list[Fact]]:
     """Route one id to a decision, a fact, or a domain by lookup (decision first, then
     fact, then domain) and apply ``action`` ("accept" | "drop"). Unknown ids get a generic
     error entry — never guess which kind an id belongs to. A known record that is not
@@ -4816,7 +4902,10 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
     rode a DECISION's verdict in this call (``Store.ratify``/``Store.drop``'s own cascade;
     facts layer 2026-07-10), always empty for a fact or domain id since neither has
     anything of its own to cascade. The caller (``_ratify_impl``) turns this into per-fact
-    result-dict entries.
+    result-dict entries. ``relayed`` is forwarded to the three accept transitions, which
+    then stamp the record as relayed by an agent. ``drop_needs_verdict`` (the call carried no
+    verdict) is forwarded to a domain drop, which then refuses an accepted domain at the
+    moment of the write.
     """
     decision = store.get_decision(id_)
     if decision is not None:
@@ -4824,7 +4913,7 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
             return settled_ratify_result("decision", decision.status.value, action), []
         try:
             if action == "accept":
-                _decision, cascaded = store.ratify(id_)
+                _decision, cascaded = store.ratify(id_, relayed=relayed)
                 return "accepted", cascaded
             _decision, cascaded = store.drop(id_)
             return "dropped", cascaded
@@ -4839,7 +4928,7 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
             return settled_ratify_result("fact", fact.status.value, action), []
         try:
             if action == "accept":
-                store.ratify_fact(id_)
+                store.ratify_fact(id_, relayed=relayed)
             else:
                 store.drop_fact(id_)
             return ("accepted" if action == "accept" else "dropped"), []
@@ -4851,16 +4940,29 @@ def _ratify_one(store: Store, id_: str, action: str) -> tuple[str, list[Fact]]:
     domain = store.get_domain(id_)
     if domain is not None:
         # A domain drop also works on an accepted one; every other non-proposed state is settled.
+        # Keep `_drop_changes_a_settled_record` in step with this branch.
         if domain.status != DomainStatus.PROPOSED and not (
             action == "drop" and domain.status == DomainStatus.ACCEPTED
         ):
             return settled_ratify_result("domain", domain.status.value, action), []
         result = (
-            store.ratify_domains(accept=[id_])
+            store.ratify_domains(accept=[id_], relayed=relayed)
             if action == "accept"
-            else store.ratify_domains(drop=[id_])
+            else store.ratify_domains(drop=[id_], drop_needs_verdict=drop_needs_verdict)
         )
         if result[id_].startswith("error"):
+            now = store.get_domain(id_)
+            if (
+                drop_needs_verdict
+                and action == "drop"
+                and now is not None
+                and now.status == DomainStatus.ACCEPTED
+            ):
+                return (
+                    "error: domain was accepted in the meantime; dropping it needs the "
+                    "owner's verdict",
+                    [],
+                )
             raced = settled_after_failure(store, "domain", id_, action, domain.status.value)
             return raced or _RATIFY_FAILED, []
         return result[id_], []
@@ -4880,6 +4982,9 @@ def _ratify_impl(
     accept: list[str] | None = None,
     drop: list[str] | None = None,
     reader: GraphifyReader | None = None,
+    *,
+    relayed: bool = False,
+    drop_needs_verdict: bool = False,
 ) -> dict[str, str]:
     """Testable core for the unified ``ratify`` tool: one gate covering decisions, facts,
     AND domains (§4, "one gate, no exceptions"; facts layer 2026-07-10). Accept-before-drop,
@@ -4918,6 +5023,11 @@ def _ratify_impl(
     waiting for the next graph-rebuild-gated ``sync`` pass. Best-effort: a resolution
     failure here must never fail the ratify call itself (mirrors every other best-effort
     engine touch in this module).
+
+    ``relayed`` (default ``False``) is set by ``_ratify_with_verdict``; the accepts of this
+    call are then stamped ``agent-relayed:<name>`` (``Store.ratify``). ``drop_needs_verdict`` is
+    set by ``_ratify_with_verdict`` when the call carried no verdict: the drops of this call
+    then refuse a domain that was accepted after the gate read it.
     """
     out: dict[str, str] = {}
     domain_changed = False
@@ -4929,7 +5039,7 @@ def _ratify_impl(
     for id_ in accept_ids:
         if id_ in out or store.get_decision(id_) is None:
             continue
-        result, cascaded = _ratify_one(store, id_, "accept")
+        result, cascaded = _ratify_one(store, id_, "accept", relayed=relayed)
         out[id_] = result
         for f in cascaded:
             out[f.id] = f"accepted (evidence of {id_})"
@@ -4938,7 +5048,7 @@ def _ratify_impl(
     for id_ in accept_ids:
         if id_ in out:
             continue
-        result, cascaded = _ratify_one(store, id_, "accept")
+        result, cascaded = _ratify_one(store, id_, "accept", relayed=relayed)
         out[id_] = result
         for f in cascaded:
             out[f.id] = f"accepted (evidence of {id_})"
@@ -4969,7 +5079,7 @@ def _ratify_impl(
         if id_ in out:
             out[id_] = f"{out[id_]} (drop ignored)"
             continue
-        result, cascaded = _ratify_one(store, id_, "drop")
+        result, cascaded = _ratify_one(store, id_, "drop", drop_needs_verdict=drop_needs_verdict)
         out[id_] = result
         for f in cascaded:
             out[f.id] = f"dropped (evidence of {id_})"
@@ -4985,9 +5095,61 @@ def _ratify_impl(
     return out
 
 
+def _drop_changes_a_settled_record(store: Store, id_: str) -> bool:
+    """True when dropping ``id_`` would change a record that is not ``proposed``.
+
+    Routed as ``_ratify_one`` routes (decision, then fact, then domain). A decision or fact
+    drop only ever rejects a proposal; a domain drop also works on an accepted domain, and
+    that one retires what the owner accepted.
+    """
+    if store.get_decision(id_) is not None or store.get_fact(id_) is not None:
+        return False
+    domain = store.get_domain(id_)
+    return domain is not None and domain.status == DomainStatus.ACCEPTED
+
+
+def _ratify_with_verdict(
+    store: Store,
+    accept: list[str] | None,
+    drop: list[str] | None,
+    verdict: str | None,
+    reader: GraphifyReader | None = None,
+) -> dict[str, str]:
+    """The ``ratify`` tool's gate: an accept, and a drop of a record that is not
+    ``proposed``, need the owner's verdict.
+
+    Without one such a call is refused whole, before anything is written. A drop of
+    proposed records needs none: anyone may withdraw a draft. The server cannot verify
+    who is speaking, so ``verdict`` is the caller's statement; its text is not stored.
+    What the call accepts is stamped as relayed by an agent.
+    see design/superpowers/specs/2026-11-12-ratification-needs-a-human-verdict-design.md (D6, D7)
+    """
+    preflight_direct(verdict)
+    needs_verdict = bool(accept) or any(
+        _drop_changes_a_settled_record(store, id_) for id_ in drop or []
+    )
+    has_verdict = isinstance(verdict, str) and bool(verdict.strip())
+    if needs_verdict and not has_verdict:
+        raise SafeWriteError("verdict", "owner_verdict_required")
+    # The gate above read the domain; a second writer may accept it before the drop runs, so the
+    # drop checks again where it writes.
+    return _ratify_impl(
+        store,
+        accept=accept,
+        drop=drop,
+        reader=reader,
+        relayed=True,
+        drop_needs_verdict=not has_verdict,
+    )
+
+
 @mcp.tool(annotations=_LOCAL_WRITE)
 @safe_write
-def ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> dict[str, str]:
+def ratify(
+    accept: list[str] | None = None,
+    drop: list[str] | None = None,
+    verdict: str | None = None,
+) -> dict[str, str]:
     """Ratify pending proposals of ANY kind — decisions, facts, and domains share one gate.
 
     Each id in ``accept``/``drop`` is routed by lookup: a pending decision flips
@@ -5001,13 +5163,25 @@ def ratify(accept: list[str] | None = None, drop: list[str] | None = None) -> di
     failure; the opposite verdict is ``"error: already rejected; it cannot be accepted"`` /
     ``"error: already accepted; it cannot be dropped"``.
 
+    ``verdict`` is required to accept a record, and to drop one that is not ``proposed``
+    (an accepted domain): the owner's own words that named these records in this
+    conversation (for example ``"accept the first two"``). Without it such a call is
+    refused whole and writes nothing. If the owner has not given a verdict, change
+    nothing: show ``list_proposed`` and ask. An instruction given before the owner could
+    see what would be accepted is not a verdict. A proposed record can be dropped without a verdict;
+    do not drop a pending successor you did not write in this session. The text of
+    ``verdict`` is not stored; every record this call accepts is stamped
+    ``ratified_by="agent-relayed:<git user name>"`` (``"agent-relayed"`` when git gives
+    no name), which tells it apart from ``sidegraph-ratify`` run by a person (the bare
+    name) and from a ratification policy (``auto:<policy>``). A drop stamps nothing.
+
     Cascade: accepting/dropping a decision id also flips every still-proposed fact that
     supports it (facts layer 2026-07-10) — each cascaded fact id gets its OWN entry in the
     returned dict too, ``f"accepted (evidence of {decision_id})"`` /
     ``f"dropped (evidence of {decision_id})"``, so nothing this call touched goes
     unreported.
     """
-    return _ratify_impl(_get_store(), accept=accept, drop=drop, reader=_load_reader())
+    return _ratify_with_verdict(_get_store(), accept, drop, verdict, reader=_load_reader())
 
 
 def _add_domain_impl(
@@ -5222,9 +5396,10 @@ def supersede_domain(
 
     The successor always lands ``status=proposed`` — same "one gate, no exceptions" rule
     every other domain-authoring tool follows (``add_domain``, ``propose_domains``) — and an
-    accepted predecessor stays live until a human calls ``ratify(accept=[...])`` on it, which
-    flips the predecessor to ``superseded`` (append-only: the record stays, fully retrievable,
-    never deleted). Only a live head can be superseded (a pending or closed domain is
+    accepted predecessor stays live until the owner's verdict reaches
+    ``ratify(accept=[...], verdict=...)`` for it, which flips the predecessor to
+    ``superseded`` (append-only: the record stays, fully retrievable, never deleted). Only a
+    live head can be superseded (a pending or closed domain is
     refused) and it takes one pending successor at a time; a DROPPED domain is the one
     exception, flipped to ``superseded`` at once (the mass-drop recovery).
 

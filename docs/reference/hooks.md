@@ -204,7 +204,10 @@ Behavior:
    root, so a session started in a subdirectory opens the repository's store and creates no
    second one. Every hook resolves the store this way. When the payload names a session, the
    hook first clears `mcp_sent:<session>:-:` when `source` is `compact` or `clear`: earlier
-   full bodies are no longer in the main agent's context. Codex resets both its canonical
+   full bodies are no longer in the main agent's context. It also clears the `pretool_file:`
+   claims of the agent the notice names (`-` for the session's own agent), once per notice: a
+   repeat of the notice within 60 seconds changes nothing. That agent's ten files start again,
+   and a file it reads again is delivered again. Codex resets both its canonical
    `rollout-<ts>-<threadId>` key and the verified bare-thread alias. Other sessions and
    subagents keep their state. This best-effort reset runs even within the duplicate window.
    The hook then checks the store's `session_start` ledger: a start for the same session within
@@ -246,8 +249,10 @@ Behavior:
 
    > When you need to find or understand code in this project, call get_task_context(files=[…])
    > with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-   > are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
-   > available. If the tool is listed only by name, load it first.
+   > are indexed here. If you know a symbol's name and not its file, call
+   > get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
+   > non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
+   > listed only by name, load it first.
 
    Unlike the `PreToolUse` records block below (the files a `Read`, `Edit`, `Write`, `Grep` or
    `sed`/`grep`/`rg`/`cat` line names, each at most once per agent), this line is unconditional
@@ -383,18 +388,29 @@ raises costs only its own line.
    Three more host checks sit beside it in the registry, all advisory, all with a notice, and
    each a line of its own after the stray-store line:
 
-   - **`version-skew`.** The hook compares the running package's version with the version in
-     the plugin manifest under `$CLAUDE_PLUGIN_ROOT`, or else `$PLUGIN_ROOT` (Codex sets both),
-     reading `.claude-plugin/plugin.json` and then `.codex-plugin/plugin.json`. It compares only
-     when the manifest's `name` is `sidegraph`, by numeric parts (`0.10.0` is above `0.9.0`) and
-     ignoring a local label (`+local`). Without a plugin root, a manifest, or a readable version
-     the check does not run. A package newer than the plugin says the installed plugin copy is
-     stale: update the plugin from its marketplace. A plugin newer than the package says the
-     session started before the plugin update, or Sidegraph is launched from a manual
-     registration (`claude mcp add`, a hand-written config) that pins an older version: restart
-     the session, or update that registration. The internal manifests
-     are bumped with the package, so the check stays quiet with them; an old binary cannot
-     report itself, so it catches a skew only once the binary that runs it is new enough.
+   - **`version-skew`.** The hook reads the plugin manifest under `$CLAUDE_PLUGIN_ROOT`, or else
+     `$PLUGIN_ROOT` (Codex sets both): `.claude-plugin/plugin.json`, then
+     `.codex-plugin/plugin.json`, and only a manifest whose `name` is `sidegraph`. Versions are
+     compared by numeric parts (`0.10.0` is above `0.9.0`), ignoring a local label (`+local`).
+     Without a plugin root, a manifest, or a readable version the check does not run. It reports
+     two things. *A newer version is installed than the session runs:* the plugin root's own
+     manifest, or a directory beside the plugin root, holds a version above the running package.
+     A directory beside the root counts only when the root's directory name is its own version
+     (the layout of Claude Code's and Codex's plugin cache), the directory's name is the version
+     in its own Sidegraph manifest, and it holds no `.orphaned_at` marker (Claude Code writes one
+     into a version that no install uses any more). *The package is newer than the plugin:* the
+     installed plugin copy is stale, which happens to installs made before 0.25.0, whose
+     manifests launch the newest release. Both lines end with what to do. In a Claude Code
+     session that is `claude plugin marketplace update sidegraph` and then `claude plugin update
+     sidegraph@sidegraph`, run in a terminal from the project's directory (on Claude Code older
+     than 2.1.281, with `--scope local` or `--scope project`), then a new session; on other
+     hosts, "Update the plugin from its marketplace, then start a new session." The model's line,
+     for both findings, also tells the model to tell the user and not to update the plugin
+     unasked. The check reads plugin files on this machine only: it makes no network call and
+     knows nothing of a release that was never installed here. The internal manifests are bumped
+     with the package, so the check stays quiet with them. An old binary cannot report itself, so
+     the check works for an install only once that install runs 0.29.0 or newer. See
+     [troubleshooting](../guides/troubleshooting.md#version-skew).
    - **`path-skew`.** A `sidegraph-*` command on `PATH` that is not the session's own package
      is a second Sidegraph (typically a `uv tool install` nobody updates). The hook
      reads the install without running it: the first of `sidegraph-session-start`,
@@ -944,7 +960,7 @@ only write besides the usage journal is one line of [the run log](#the-hook-run-
 cannot use the index it prints `{}` and writes nothing (apart from a `lock` line in the run log
 when the open lost to another process's lock), whichever of these holds: the index is
 missing; a store-owned entry (`index.db`, its `-journal`, `-wal` and
-`-shm` files, or a record directory) is a symlink, the same refusal `Store` makes; the store's format marker refuses this version; its
+`-shm` files, or a record directory) is a symlink, the same refusal `Store` makes; the store path leaves its repository through a link; the store's format marker refuses this version; its
 `schema_version` stamp is not the one its store's marker calls for (`0.6.0`, or
 `0.6.0+requires` for a format-1 store with a minimum Sidegraph version; `0.7.0+format2` for a
 [format-2 store](store-format.md#format-2-packed-shards)); `retrieval_events` has no `agent` column (an
@@ -976,7 +992,9 @@ Two consequences are visible:
   still create a missing store, only in the cases [configuration.md](configuration.md) lists.
 - A record that arrives mid-session (a `git pull`) can be missing from the block until the next
   MCP tool call, which re-checks the record files before it runs, or the next session.
-  `get_task_context` sees it.
+  `get_task_context` sees it. Once the index is rebuilt, such a record is delivered when its
+  anchor's entity was already checked by a sync; a record on a new anchor waits for the next
+  sync.
 
 Behavior, in order — any `{}` below means the tool call proceeds through Claude Code's normal
 permission flow, untouched:
@@ -1009,7 +1027,8 @@ permission flow, untouched:
    If any record-selection read fails, the hook refuses this delivery before claiming any
    file. An unreadable early file is not treated as an empty one: otherwise parallel hooks
    could choose different triples from the same command. A later clean call may deliver
-   the files because this refusal consumes no per-file claim or showing.
+   the files because this refusal consumes no per-file claim or showing. A `SessionStart` with
+   `source` `compact` or `clear` deletes the keys of the agent it names; other agents' keys stay.
 7. If at least one claim succeeded, the winner emits one non-blocking, `additionalContext`-only
    block for the files it won:
 
@@ -1055,10 +1074,11 @@ withheld by this size rule. To retrieve full facts, including omitted ids, use
 when the id is known. `get_task_context` also has text clips and is not a full-fact export.
 
 Standalone and supporting facts need their own live or degraded file binding; a `supports`
-link alone does not inherit a decision's anchor. Binding statuses must be certified by sync.
-Superseded, rejected and expired decisions never appear. Facts must be accepted or a surfaced
-proposal, with no `valid_to` at all; even a future closure excludes a fact. Orphaned or
-uncomputed bindings deliver neither kind. Malformed fact rows are skipped individually;
+link alone does not inherit a decision's anchor. Binding statuses must be computed by a
+sync; after an index rebuild the hook reads the status the last sync computed for each unchanged
+entity. Superseded, rejected and expired decisions never appear. Facts must be accepted or a
+surfaced proposal, with no `valid_to` at all; even a future closure excludes a fact. Orphaned
+or uncomputed bindings deliver neither kind. Malformed fact rows are skipped individually;
 a failed fact-table query preserves available decisions and uses the hook's protected diagnostic.
 
 The guard line comes once, first, and `More:` appears only when renderable records were left out.
@@ -1095,14 +1115,17 @@ id, so a key on the session alone let the main agent's delivery use up the one e
 needed, and the subagents read anchored files blind. A subagent never receives the `SessionStart`
 map (the [`SubagentStart` brief](#sidegraph-subagent-start) tells it memory exists, and nothing
 more), so its own first read of an anchored file is where memory can reach it with a record. The
-cap of ten files per agent bounds what one agent can be handed. The earlier decision-only field
-replay measured about 3,200 characters at the median recipient and 7,700 at the 90th percentile;
-those measurements do not estimate output after facts were added. The bound of
-three per call is applied before claiming, from the same list in every process, so the several
+cap of ten files per agent bounds what one agent can be handed. After a compaction or a clear
+the earlier blocks are gone from that agent's context, so its claims are deleted and the bound
+applies to the new context. The earlier decision-only field replay measured about 3,200
+characters at the median recipient and 7,700 at the 90th percentile; those measurements do not
+estimate output after facts were added. The bound of three per call is applied before claiming, from the same list in every process, so the several
 processes Claude Code starts for one Bash line cannot add up past it. `SessionStart` deletes
-`pretool_file:` keys whose claim is older than 30 days, the `Stop` hook's `capture_rearm:` keys
-on the same terms, the MCP per-agent `mcp_sent:` rows (even with telemetry off), and the two one-shot prefixes older versions wrote, `pretool_nudge:` and
-`pretool_nudge_path:`, which nothing writes now (`Store.prune_meta_prefixes`).
+`pretool_file:` keys whose claim is older than 30 days, the `pretool_reset:` stamps of the
+compact/clear reset on the same terms, the `Stop` hook's `capture_rearm:` keys on the same
+terms, the MCP per-agent `mcp_sent:` rows (even with telemetry off), and the two one-shot
+prefixes older versions wrote, `pretool_nudge:` and `pretool_nudge_path:`, which nothing writes
+now (`Store.prune_meta_prefixes`).
 
 **A character cap.** The block is held to 9,500 characters, under Claude Code's 10,000-character
 cap on `additionalContext` (see [Output size budget](#output-size-budget)). Three files of three
@@ -1314,9 +1337,11 @@ holds:
 
 > When you need to find or understand code in this project, call get_task_context(files=[…])
 > with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
-> available. If the tool is listed only by name, load it first. This project keeps a decision
-> memory (Sidegraph): N records anchored to code in M files, K of them recorded mistakes.
+> are indexed here. If you know a symbol's name and not its file, call
+> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
+> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
+> listed only by name, load it first. This project keeps a decision memory (Sidegraph): N
+> records anchored to code in M files, K of them recorded mistakes.
 
 ```json
 {
@@ -1372,6 +1397,24 @@ per run to `.sidegraph/index.db-hooks.log`, after they have printed their answer
 <epoch ms> <hook> <outcome> <elapsed ms>
 ```
 
+Some lines carry a fifth field. On an `empty` line it is the cause:
+
+| Cause | Written by | Meaning |
+|---|---|---|
+| `no-entity` | PreToolUse | no file the call names has an anchored entity |
+| `no-record` | PreToolUse, SubagentStart | an anchor is there, and no record that would be handed over |
+| `cold` | PreToolUse, SubagentStart | a record that would have been handed over was left out because no sync has checked that anchor: the store was never synced, or its index was rebuilt and the anchor is new or changed |
+| `repeat` | PreToolUse | every file with records was already delivered to this agent |
+| `cap` | PreToolUse | a file with records was refused: the agent holds its ten files |
+| `duplicate` | SessionStart | a second `SessionStart` for one session within 60 seconds |
+| `unknown` | PreToolUse, SubagentStart | the cause was not read: another process held the index lock, and a hook does not wait to learn why it had nothing to deliver |
+
+One cause per run; when several apply, the one furthest along is written (`cap`, then
+`repeat`, `cold`, `no-record`, `no-entity`). On a `lock` line the fifth field is
+`partial` when the run handed a record over before the lock refused the rest, and absent
+otherwise. A line written by a version before 0.29.0 has no fifth field. A reader older than
+0.29.0 skips lines that have one, so it counts fewer `empty` runs and fewer `lock` runs.
+
 The outcome is `delivered` (the answer carries records or a brief), `empty` (there was nothing to
 deliver), `lock` (another process held the index's lock while the hook opened the index, chose
 records or claimed a file, so records may have been left out) or `error` (any other failure after
@@ -1403,7 +1446,8 @@ hook), never writes through a symlink or a hard link, and never fails a hook. Wh
 110,000 to 220,000 runs. If that name cannot be used (a directory sits there), the log is emptied
 once it reaches 8 MiB instead. On Windows, runs that coincide can overwrite each other's lines, so
 counts there are a lower bound. `SIDEGRAPH_TELEMETRY=off` stops it. It is a plain text file: any
-text tool reads it.
+text tool reads it. `sidegraph-stats` counts these lines by hook and by cause (its `HOOK RUNS`
+block).
 
 ## Wiring
 

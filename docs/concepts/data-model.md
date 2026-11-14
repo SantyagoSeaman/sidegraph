@@ -69,13 +69,14 @@ contract; the examples below illustrate model values rather than exact committed
 | `scope` | `repo` \| `module` \| `global` | How broadly this decision applies (`global` decisions surface everywhere, not just on anchored entities). |
 | `layer` | `business` \| `technical` \| `null` | Optional filter axis for mixed corpora — "is this a business rule or a technical choice?" Additive, default `null`; set at capture (`add_decision(layer=...)` or a draft's `layer` field). |
 | `provenance` | `Provenance` | Always present; see below. |
-| `ratified_by` | str \| `null` | Who accepted it, stamped by the ratify transitions (best-effort `git config user.name`) — or `auto:<policy>` (e.g. `auto:auto-low-risk`) when an auto-ratification policy accepted it at write time. `null` = ratified before this field existed, or the identity was unavailable — never a guess. Additive since 2026-08-04; old files load unchanged. |
+| `ratified_by` | str \| `null` | Who accepted it, stamped by the ratify transitions (best-effort `git config user.name`) — or `agent-relayed:<name>` when the verdict came through the MCP `ratify` tool, where an agent passes the owner's words on (`agent-relayed` alone when git gives no name) — or `auto:<policy>` (e.g. `auto:auto-low-risk`) when an auto-ratification policy accepted it at write time. `null` = ratified before this field existed, or the identity was unavailable — never a guess. Additive since 2026-08-04; old files load unchanged. |
 | `ratified_at` | datetime \| `null` | When it was accepted. With `valid_from` this gives queue latency, which `sidegraph-doctor` reports as `time-to-ratify`. |
 | `retired` | `Retirement` \| `null` | Why a retired decision was closed, set only by `retire_decision` together with `accepted -> deprecated`; `null` on every other record. A `Retirement` holds `reason` (str, redacted) and `duplicate_of` (the ULID of the accepted decision that stays, or `null` when the subject is gone). Since 0.24.0; a store holding one needs every client on 0.24.0 or later ([mixed versions](../reference/stability.md#mixed-versions)). |
 
 `Provenance`: `source` (an open `str`, not a fixed enum — for a `Decision` specifically,
-shipped writers stamp `human` (`add_decision`/`supersede_decision` — the asking human was the
-gate), `agent` (`propose_decisions`, the agent-initiated draft pipeline), `import`
+shipped writers stamp `human` (`add_decision`, and `supersede_decision` called with
+`source="human"` — the asking human was the gate), `agent` (`propose_decisions`, the
+agent-initiated draft pipeline, and `supersede_decision` by default), `import`
 (rationale-node import), or `doc-import` (`--docs` markdown import); `manual` and `bootstrap`
 are the corresponding values for `Domain` provenance instead — see
 [`Domain`](#domain--the-owned-abstraction) below), `ref`, `author`, `session_id`,
@@ -99,14 +100,18 @@ fields differ:
 
 - **Only the live head can be superseded.** The target must be `accepted`. Decisions and facts must also be
   open (`valid_to` unset). Domains have no `valid_to` field. Superseding a `proposed` record is refused (`<id> is a pending proposal; amend
-  it by dropping it and proposing again, or ratify it first`); superseding a closed one
+  it by dropping it and proposing again, or ratify it first; if you did not write it in this
+  session, tell the owner`; for a proposal that supersedes a live record, drop it and call
+  `supersede_decision` on the predecessor instead, because a re-proposed draft that keeps the
+  title is answered `deduped` and writes nothing); superseding a closed one
   (`superseded`, `rejected`, `deprecated`, `dropped`) is refused and names its live successor
   when there is one (`<id> is no longer current; supersede its live successor <head id>
   instead`). The one exception: a `dropped` domain may still be superseded (the mass-drop
   recovery in the [naming guide](../guides/naming-your-domains.md#recovering-from-a-mass-drop)).
 - **At most one pending successor per record.** While a `proposed` successor exists, any
   further successor (another proposal, or a direct accepted replacement that would strand it)
-  is refused (`<id> already has a pending successor <P>; ratify or drop it first`). This
+  is refused (`<id> already has a pending successor <P>; it waits for the owner's verdict. Tell the owner: it
+  must be ratified or dropped first. Do not drop it yourself`). This
   holds for a `dropped` domain too.
 - **Decision and fact closure.** A non-proposed successor closes its predecessor in the
   same write (`valid_to` set, `status` changed to `superseded`, at the successor's
@@ -178,7 +183,7 @@ fields differ:
 | `valid_to` | datetime \| `null` | End of temporal validity; `null` = still open. |
 | `supersedes` | ULID \| `null` | The `Fact` this one replaces, if any — falsification is supersession, never an edit or a delete. |
 | `provenance` | `Provenance` | Always present; `source` is `"human"` for `add_fact`/`supersede_fact` (the asking human was the gate) or `"agent"` for the `propose_decisions` pipeline (attached or standalone drafts). |
-| `ratified_by` | str \| `null` | Who accepted it — stamped by the ratify transitions, including the cascade that rides a decision's verdict — or `auto:<policy>` (e.g. `auto:auto-low-risk`) when an auto-ratification policy accepted it at write time. `null` = ratified before this field existed, or identity unavailable; never a guess. |
+| `ratified_by` | str \| `null` | Who accepted it — stamped by the ratify transitions, including the cascade that rides a decision's verdict — or `agent-relayed:<name>` when the verdict came through the MCP `ratify` tool, where an agent passes the owner's words on (`agent-relayed` alone when git gives no name) — or `auto:<policy>` (e.g. `auto:auto-low-risk`) when an auto-ratification policy accepted it at write time. `null` = ratified before this field existed, or identity unavailable; never a guess. |
 | `ratified_at` | datetime \| `null` | When it was accepted. |
 
 Deliberately absent, by the same Obvious-to-an-LLM test `Decision`'s fields pass: `kind`,
@@ -273,7 +278,7 @@ like they'd bind to a `community:<id>` entity.
 | `supersedes` | ULID \| `null` | The `Domain` this one replaces, if any — description edits are a new row, like decisions. |
 | `provenance` | `Provenance` | `source` is `bootstrap` \| `agent` \| `manual` depending on which of the [three authoring paths](mind-model.md#domain-lifecycle) produced it. |
 | `seed_anchors` | list[`Descriptor`] | Committed authoring intent: "this domain includes the communities these entities currently live in." Unlike `communities` (a volatile last-seen snapshot, derived and never committed), these survive a fresh clone or rebuild because they anchor to durable entities rather than renumberable Leiden ids; `sidegraph-sync` re-resolves each to its current community every pass. |
-| `ratified_by` | str \| `null` | Who accepted the domain, stamped at ratification (which also mints its paired `domain:<slug>` entity) — or `auto:<policy>` (e.g. `auto:auto-all` — the only policy that admits domains) when an auto-ratification policy accepted it at write time. `null` for domains accepted before the field existed. |
+| `ratified_by` | str \| `null` | Who accepted the domain, stamped at ratification (which also mints its paired `domain:<slug>` entity) — or `agent-relayed:<name>` when the verdict came through the MCP `ratify` tool, where an agent passes the owner's words on (`agent-relayed` alone when git gives no name) — or `auto:<policy>` (e.g. `auto:auto-all` — the only policy that admits domains) when an auto-ratification policy accepted it at write time. `null` for domains accepted before the field existed. |
 | `ratified_at` | datetime \| `null` | When it was accepted. |
 
 Invariants enforced on write (`store.add_domain` / `store.supersede_domain`): slug uniqueness

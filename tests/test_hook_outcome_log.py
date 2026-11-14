@@ -630,6 +630,81 @@ def test_read_runs_keeps_a_whole_first_row_of_the_tail(
     assert [r.at_ms for r in _rows(tmp_path)] == [100037, 100038, 100039]
 
 
+def _link(link: Path, target: Path | str) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks cannot be created here")
+
+
+def test_read_runs_does_not_follow_a_link_at_the_log_path(tmp_path: Path) -> None:
+    """The writer refuses a link; so does the reader. Red against a reader that opens by name."""
+    (tmp_path / "elsewhere").write_text("\n100000 PreToolUse empty 1", encoding="ascii")
+    _link(tmp_path / hook_log.LOG_NAME, tmp_path / "elsewhere")
+    _link(tmp_path / hook_log.ROTATED_NAME, tmp_path / "elsewhere")
+
+    assert _rows(tmp_path) == []
+
+
+def test_read_runs_does_not_follow_a_link_where_the_platform_has_no_nofollow_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``O_NOFOLLOW`` (Windows) the refusal rests on ``lstat``. Red against a reader that
+    relies on the open flag alone."""
+    monkeypatch.setattr(hook_log, "_NOFOLLOW", 0)
+    (tmp_path / "elsewhere").write_text("\n100000 PreToolUse empty 1", encoding="ascii")
+    _link(tmp_path / hook_log.LOG_NAME, tmp_path / "elsewhere")
+
+    assert _rows(tmp_path) == []
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="no character devices here")
+@pytest.mark.parametrize("device", ["/dev/zero", "/dev/null"])
+def test_read_runs_returns_at_once_for_a_link_to_a_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device: str
+) -> None:
+    """A committed log that links to ``/dev/zero`` has size 0 and no end. Red against a reader that
+    follows it and reads without a size (``open`` is wrapped so that read fails the test at once
+    instead of filling memory)."""
+    _link(tmp_path / hook_log.LOG_NAME, device)
+    real_open = open
+
+    class _Unbounded:
+        def __init__(self, handle: object) -> None:
+            self._handle = handle
+
+        def read(self, size: int = -1) -> bytes:
+            assert size is not None and size >= 0, "read without a size"
+            return self._handle.read(size)  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._handle, name)
+
+        def __enter__(self) -> _Unbounded:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self._handle.close()  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(
+        hook_log, "open", lambda *a, **k: _Unbounded(real_open(*a, **k)), raising=False
+    )
+
+    assert _rows(tmp_path) == []
+
+
+def test_read_runs_reads_a_regular_file_larger_than_the_limit_as_its_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green before and after the reader opens without following links: the regular-file path
+    still returns the tail only."""
+    monkeypatch.setattr(hook_log, "MAX_BYTES", 53)
+    rows_text = "".join(f"\n{100000 + i} PreToolUse empty {i:02d}" for i in range(40))
+    (tmp_path / hook_log.LOG_NAME).write_text(rows_text, encoding="ascii")
+
+    assert [r.at_ms for r in _rows(tmp_path)] == [100037, 100038, 100039]
+
+
 def test_percentile_is_nearest_rank_for_every_sample_size() -> None:
     """Against an independent definition: the smallest value with at least ``percent`` % of the
     sample at or below it."""

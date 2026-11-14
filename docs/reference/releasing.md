@@ -73,7 +73,7 @@ schema-fixture references.
 
 ## Order of a release
 
-A release moves through five stages, and the public `main` moves only in the last:
+A release moves through five stages, and the public `main` moves only in the fourth:
 
 1. **Prepare** on the internal repository: refresh the dependency lock, bump the version, merge.
 2. **Cut** (`tools/release-public.sh "release: vX.Y.Z" --push`): pin the snapshot's
@@ -88,8 +88,15 @@ A release moves through five stages, and the public `main` moves only in the las
 5. **Check** the published release (see [Post-release checks](#post-release-checks)).
 
 A plugin manifest on the public `main` names a version that is on PyPI, because `main` moves
-only after step 3. Release candidates (`X.Y.ZrcN`) run the same stages, ending in a scratch
-repository instead of `main` (see [Release candidate validation](#release-candidate-validation)).
+only after step 3.
+
+The tools also accept a pre-release version (`X.Y.Zrc1`, or the `aN` and `bN` forms), and a
+release does not use it. The cut pushes its branch and tag, PyPI serves it as a pre-release that
+an unpinned install does not select, and the promote takes it only to the scratch repository
+`SantyagoSeaman/sidegraph-rc`, named by `SIDEGRAPH_PROMOTE_URL`, never to the public `main`. The
+GitHub Release step gives it none. The cut and the preflight still need the `## [X.Y.Z]` heading
+of its final version in `CHANGELOG.md`, dated or not. `package.json` carries the npm form of the version (`X.Y.Z-rc.1`
+for `X.Y.Zrc1`), which the preflight maps from it.
 
 ## Pre-release checklist
 
@@ -118,8 +125,7 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
 2. Update `CHANGELOG.md`: keep a fresh empty `## [Unreleased]` first and add
    `## [X.Y.Z] — YYYY-MM-DD` beneath it. Group changes using Keep a Changelog headings. In
    the link list at the end of the file, point `[Unreleased]` at `compare/vX.Y.Z...HEAD` and
-   add `[X.Y.Z]: …/compare/v<previous>...vX.Y.Z` above the previous version's line. A
-   candidate (`X.Y.ZrcN`) needs the `## [X.Y.Z]` heading too, dated or not.
+   add `[X.Y.Z]: …/compare/v<previous>...vX.Y.Z` above the previous version's line.
 3. Update every file in the version table above, including the launch literals, and any
    affected `docs/` page.
    Keep all four manifest/package versions together and update optional catalog entry
@@ -156,28 +162,38 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
    alone (running against the editable checkout) does not exercise.
    In the development repository, also run the four-host smoke against the same wheel:
    `uv run python -m tools.bench_hosts l1 --wheel ./dist/sidegraph-X.Y.Z-py3-none-any.whl`. It
-   runs locally with the maintainer's host logins and must exit 0.
+   runs locally with the maintainer's host logins and must exit 0. One of its eight questions
+   can be answered only by reading a file that has records, and on Claude Code and Grok a PASS
+   needs a PreToolUse delivery seen in the host's own transcript.
+   Then run the real-corpus run against the same wheel, on the maintainer's private testbed:
+   on every corpus the wheel must install, verify clean and connect its server, and no corpus
+   may miss its scenario in all three attempts.
 8. Commit the release preparation on the release-prep branch, open a Draft pull request,
-   and mark it Ready when final. Wait for `full-ci` to pass on its exact head SHA and settle
-   the Copilot review, then merge the PR and update internal `main`. A direct push to
+   and mark it Ready when final. Wait for `full-ci` to pass on its exact head SHA, settle the
+   Copilot review if one is posted, then merge the PR and update internal `main`. A direct push to
    internal `main` is refused by its ruleset. Both checkouts must now be clean; run the
    remaining steps from the merged internal `main`.
 9. Run `uv run python tools/preflight_release.py --online`. It verifies version agreement,
    changelog shape, clean branches, and target repository, and that `vX.Y.Z` is not already
    tagged in the **internal** checkout or its origin. Run it **after** the release changes are
    committed: running it first can only report the work you have not prepared yet.
-   Then validate the release candidate (see [Release candidate validation](#release-candidate-validation)).
 10. Cut the allowlisted public snapshot with
    `tools/release-public.sh "release: vX.Y.Z" --push` (see [The cut](#the-cut)). `--push` itself
    refuses unless `vX.Y.Z` is untagged in the **public** repository and `CHANGELOG.md` dates it.
    Refresh `demo` separately when required.
 11. Approve the `pypi` environment when `publish.yml` asks. Before promoting, run
     `uv run python -m tools.bench_hosts l1 --release X.Y.Z`; a tag-mode FAIL blocks the promote;
-    the fix ships as X.Y.(Z+1). Then promote with `tools/promote-release.sh vX.Y.Z` (see
-    [Publish and promote](#publish-and-promote)).
+    the fix ships as X.Y.(Z+1). The `--python 3.13` flag of that smoke leaves two routes
+    uncovered, so on a machine whose newest Python is a minor released after 3.13, run
+    `sidegraph-doctor --help` through `uvx` with the pin (`sidegraph==X.Y.Z`) but no `--python`
+    flag, and `pip install sidegraph==X.Y.Z` into a venv of that Python. Both must succeed; a
+    failure blocks the promote, and the fix ships as X.Y.(Z+1), like a tag-mode FAIL. Then
+    promote with `tools/promote-release.sh vX.Y.Z` (see [Publish and promote](#publish-and-promote)).
 
-Only after all eleven steps, the candidate validation and any requested
-[desktop smoke](#desktop-smoke-when-requested) pass is the release done.
+Only after all eleven steps is the release done. A requested
+[desktop smoke](#desktop-smoke-when-requested) or requested
+[fresh-install checks](#fresh-install-checks-when-requested) follow the promote; a check that
+fails there does not undo the release.
 
 ### The cut
 
@@ -270,8 +286,8 @@ Nothing before the tag is spent, and the public `main` does not move before the 
   replaces the branch while the tag is absent.
 - **The publish workflow fails after the tag.** Re-run its failed jobs; the `pypi` approval is
   asked again. A failure that repeats is deterministic: the tag cannot be deleted and the cut
-  refuses a tagged version, so fix on internal `main` and release the next release candidate or
-  patch version.
+  refuses a tagged version, so fix on internal `main` and release the fix as the next patch
+  version.
 - **Promote stops.** It changes nothing on `main` until the last push. Run it again with the same
   tag: it resumes from a promotion commit already on `release/vX.Y.Z` when that commit is exactly
   one commit on the tag that changes only the two plugin files and passes the lock checks.
@@ -283,68 +299,43 @@ Nothing before the tag is spent, and the public `main` does not move before the 
   releases overlapped. Promote refuses a final version whose tag is not a fast-forward of `main`;
   release the next version from the new `main`.
 - **The four-host smoke (L1) does not pass.** Exit 1 blocks the release or the promote; exit 2
-  means one rerun after fixing the environment. A tag-mode FAIL blocks the promote; the fix ships
-  as X.Y.(Z+1).
+  means one rerun after fixing the environment, and never lets the release proceed. On Claude
+  Code and Grok, a host that read the question's file in a way the hook answers and shows no
+  PreToolUse delivery is a FAIL. A host that made no such read is an ERROR and is rerun once; a
+  second such ERROR on the same host is reported in the release issue and the maintainer
+  decides. A tag-mode FAIL blocks the promote; the fix ships as X.Y.(Z+1).
+- **The real-corpus run does not pass.** A corpus that fails a gate, or its scenario three
+  times out of three, blocks the release until it is fixed or the maintainer accepts it by
+  name. An attempt that ended without a result is run again once, unless its server did not
+  start.
 
-### Release candidate validation
+### Fresh-install checks when requested
 
-Run this between step 9 (preflight) and step 10 (the real cut). The plugins' public manifests
-cannot be exercised by the repository's tests alone, so a candidate is published and promoted to
-a scratch repository first and checked there. Candidates are PyPI pre-releases (`X.Y.Zrc1`):
-a PyPI version can never be reused, and an unpinned install does not select a pre-release. The
-commands are the maintainer's; steps marked **[Owner]** are the repository owner's.
+Run these checks only when the owner requests them for a particular release. Run them against
+the released version, after the promote, with Sidegraph installed from the public `main`, each
+on a machine with an empty uv cache. A check that fails does not undo the release: record it in
+the release issue and ship the fix as the next version. The two routes the `--python 3.13` flag
+does not cover belong to step 11 and are not repeated here.
 
-The scratch repository is `SantyagoSeaman/sidegraph-rc`, kept private between candidates; the
-owner makes it public while the portal validates one. A candidate
-goes to the canonical public repository as a branch and a tag, and to PyPI, like a release; only
-its promoted lock commit goes to the scratch repository. The candidate's source is therefore
-public before the release.
-
-1. Bump the internal version to `X.Y.Zrc1` in every place of the version table, including the
-   launch literals. `package.json` carries the npm form `X.Y.Z-rc.1`, which `preflight_release.py`
-   maps from the PEP 440 version. Merge it.
-2. Cut it: `tools/release-public.sh "rc: vX.Y.Zrc1" --push`. The branch `release/vX.Y.Zrc1` and
-   the tag `vX.Y.Zrc1` go to the canonical repository, and after the `pypi` approval
-   `X.Y.Zrc1` is on PyPI.
-3. Promote it to the scratch repository once PyPI serves it:
-   `SIDEGRAPH_PROMOTE_URL=git@github.com:SantyagoSeaman/sidegraph-rc.git tools/promote-release.sh vX.Y.Zrc1`.
-   Promote refuses a pre-release for the canonical repository. A scratch target is replaced with
-   `--force-with-lease`, not fast-forwarded: a candidate's lineage is a sibling of the previous
-   candidate's.
-4. **[Owner]** Run the plugin directory portal's Validate on the scratch repository. A blocking
-   finding stops the release: fix it on internal `main` and repeat from step 1 with `rc2`.
-   Findings that only hold are noted for the submission.
-5. **[Owner]** The live checks, each on a machine with an empty uv cache:
-   - Claude Code, fresh `CLAUDE_CONFIG_DIR`, the plugin from the scratch marketplace, a session
-     started in a project subdirectory: the MCP server connects; the spawned command is
-     `uvx --from sidegraph==X.Y.ZrcN --python 3.13 …`; the environment's interpreter is 3.13;
-     the installed packages equal the wheel's pins; SessionStart prints the map; a Read fires
-     PreToolUse.
-   - Grok Build, fresh: the same, plus the Bash filter firing and `/sidegraph:stats` running the
-     pinned runner line.
-   - Codex: install, accept the hook trust, and see SessionStart and a hot hook fire.
-   - The cold first-start time with no Python 3.13 on the machine.
-   - The routes the `--python 3.13` flag does not cover, on a machine whose newest Python is a
-     minor released after 3.13: `sidegraph-doctor --help` through `uvx` with the pin but no
-     `--python` flag, and `pip install` into a venv of that Python, both succeed.
-   - A pre-update install: the previous release's public Codex manifest, which launches from the
-     repository's `main` branch, against the candidate's promoted source, with only that newest
-     Python on the PATH. SessionStart and a hot hook run.
-6. Bump to `X.Y.Z` and run steps 2 to 11 of the checklist. The final goes to the canonical
-   repository only.
-7. Delete the `release/vX.Y.ZrcN` branches of the canonical repository. The candidate tags stay;
-   the public ruleset blocks tag deletion.
-
-If the portal does not accept the scratch repository, skip its Validate part and record that in
-the release issue; the live checks still run from the scratch repository. Validation then happens
-on the released public `main`, and a remaining finding ships in the next release.
+- Claude Code, fresh `CLAUDE_CONFIG_DIR`, the plugin from the public marketplace, a session
+  started in a project subdirectory: the MCP server connects; the spawned command is
+  `uvx --from sidegraph==X.Y.Z --python 3.13 …`; the environment's interpreter is 3.13; the
+  installed packages equal the wheel's pins; SessionStart prints the map; a Read fires
+  PreToolUse.
+- Grok Build, fresh: the same, plus the Bash filter firing and `/sidegraph:stats` running the
+  pinned runner line.
+- Codex: install, accept the hook trust, and see SessionStart and a hot hook fire.
+- The cold first-start time with no Python 3.13 on the machine.
+- A pre-update install: an install older than 0.25.0, whose public Codex manifest launches from
+  the repository's `main` branch, now that `main` holds the released version, with only the
+  newest Python on the PATH. SessionStart and a hot hook run.
 
 ### Desktop smoke when requested
 
 Run this check only when the owner requests it for a particular release. Run it against the
-latest release candidate, once it is promoted to the scratch repository (step 3 of the
-candidate validation), and finish before the final cut. Record the scratch repository's
-promoted commit, app/OS, installation route, expected results and observed evidence. Before starting, create a
+released version, after the promote, with Sidegraph installed through the documented route from
+the public `main`. Record the promoted commit of the public `main`, app/OS, installation route,
+expected results and observed evidence. Before starting, create a
 separate local Git scratch repository for each surface and commit a source file in each.
 Run steps 1–4 in each surface and its own repository. A result belongs only to the surface
 where it was observed.
@@ -368,14 +359,14 @@ where it was observed.
    `anchors_orphaned` are empty. Then start a fresh session in that surface and confirm
    the opening map.
 3. Read the version from the installed plugin manifest and the opening context's
-   `Sidegraph X.Y.Z` line. Both must match the candidate version. Check source commits too:
+   `Sidegraph X.Y.Z` line. Both must match the released version. Check source commits too:
    version equality alone cannot distinguish two builds of the same version. Match the
-   installed plugin source commit to the scratch repository's promoted commit, or compare
+   installed plugin source commit to the promoted commit of the public `main`, or compare
    hashes of its loaded manifests, MCP configuration, hooks and skills with that commit if
    install metadata has no commit.
    Locate the running MCP server's Python environment from its process information, in the
    uv archive (`uv cache dir`, then `archive-v0/<id>/`), not a project Python installation.
-   Its `site-packages` must hold `sidegraph-X.Y.Z.dist-info` for the candidate version, with
+   Its `site-packages` must hold `sidegraph-X.Y.Z.dist-info` for the released version, with
    no `direct_url.json`: a PyPI install has none, so a file there means a git or path
    install. The same check serves every host, because every host launches the same pin.
    Confirm that the session did not write the
@@ -402,15 +393,12 @@ where it was observed.
    prompts. See the [capture gates](hooks.md#sidegraph-stop).
 
 Use separate result rows for the Code tab and Codex view of the ChatGPT desktop app.
-All applicable checks in a requested smoke must pass before the final cut. Skipped, unsupported
-or unobserved checks do not count as passes. The Codex read-hook item is not applicable.
+A requested smoke counts as passed only when all its applicable checks pass. Skipped,
+unsupported or unobserved checks do not count as passes. The Codex read-hook item is not applicable.
 The macOS live evidence does not establish native Windows desktop-app results.
 
-If a requested check fails, stop before the final cut. Fix it on internal `main`, put the
-fix's changelog entry under the version's heading, and release the next candidate (`rc2`)
-through a new release-preparation pull request: steps 3 to 9 of the checklist, then steps 2 and
-3 of the candidate validation. This includes the tests, private suite, pre-commit, build, wheel
-smoke and online preflight. Then repeat this whole desktop smoke against the new candidate.
+A requested check that fails does not undo the release. Record it in the release issue and
+ship the fix as the next version, then repeat the failed surface's smoke on that version.
 
 ### The public main moves only at promotes
 
@@ -452,7 +440,7 @@ repository and nowhere else. Pushing the release-prep branch and merging its Rea
 internal `main` triggers CI, but no publish.
 
 The tag push triggers [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml)
-(`v*.*.*` matches a release candidate such as `v0.25.0rc1` too), three jobs in sequence.
+(`v*.*.*` matches a pre-release tag such as `v0.25.0rc1` too), three jobs in sequence.
 
 1. **`test`**: reuses `ci.yml` wholesale (pre-commit lint plus the pytest matrix). `ci.yml`
    first checks whether the tag's tree already passed the full matrix on `release/vX.Y.Z`. If
@@ -480,9 +468,9 @@ When the workflow is green, run [the promote](#publish-and-promote).
 `publish.yml` does not create a GitHub Release; `tools/promote-release.sh` does, as its last
 step for a final version, so a release cannot be promoted without one. The notes are the dated
 `## [X.Y.Z]` section of the `CHANGELOG.md` at the tag, heading through the entries, up to the
-next `## [`. The step refuses a section that is missing, undated or empty, or that names an
-internal issue id. A release that already exists is left as it is, and a candidate
-(`X.Y.ZrcN`) gets none.
+next level-1 or level-2 heading or link definition outside a code fence. The step refuses a
+section that is missing, undated or empty, or that names an internal issue id. A release that already exists is left as it is, and a pre-release
+version (`X.Y.ZrcN`) gets none.
 
 If the promote stopped after `main` moved (the message says so), do not run it again; create
 the release alone:
@@ -510,6 +498,14 @@ Green CI and a pushed tag are not proof the release actually works for a consume
   bytes, the `Requires-Dist` set and `Requires-Python` must be equal. It cannot run earlier,
   because PyPI has no wheel for the version until the publish finishes. The promote runs the
   same comparison before it moves `main`.
+- The maintainer's own installs run the new version. A release does not reach a project whose
+  install record is older, and one project can hold a project-scope and a local-scope record
+  at different versions. In each project the maintainer works in, list the records with
+  `claude plugin list --json` and run `claude plugin update sidegraph@sidegraph --scope <scope>`
+  once for every scope the project has a record in. Read the path in the success line: it
+  names the record that changed. Restart the session and confirm the opening context's
+  `Sidegraph X.Y.Z` line. After some work in the project, `sidegraph-stats --json` must list
+  `X.Y.Z` under `runtime_versions` in `delivery_evidence`.
 
 The internal maintainer checkout also carries a network-bound install smoke script
 (`tools/verify-release.sh`; it is intentionally absent from the public snapshot) that exercises

@@ -40,7 +40,7 @@ fails the job when the report has an attention finding. It needs no explicit com
 ref: rebuild the graph, sync, then classify the report.
 
 Create a repository variable named `SIDEGRAPH_VERSION` containing a reviewed Sidegraph release
-(for example `0.28.0`). Every recipe reads it as `${{ vars.SIDEGRAPH_VERSION }}`. The published
+(for example `0.29.0`). Every recipe reads it as `${{ vars.SIDEGRAPH_VERSION }}`. The published
 package pins its own dependencies, so the version fixes the whole install. See
 [pinned releases](../getting-started/installation.md#mutable-development-references)
 for why CI should not follow the latest release unreviewed.

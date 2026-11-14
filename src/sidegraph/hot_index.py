@@ -31,7 +31,10 @@ from urllib.parse import quote
 
 from . import delivery as delivery_ledger
 from .store_layout import (
+    DELIVERABLE_STATUSES,
+    DESCRIPTOR_CHANGED_PREFIX,
     INDEX_JOURNAL_PRAGMA,
+    KEPT_STATUS_COLUMN,
     MISTAKE_KINDS,
     VOLATILE_STALE_KEY,
     StoreRequirementError,
@@ -73,6 +76,21 @@ CLAIM_FILE_SQL = (
     "ON CONFLICT(key) DO NOTHING"
 )
 _KEY_RANGE_END = "\U0010ffff"
+
+# Which binding rows a hook may deliver through, as WHERE clauses. The cold flag, the marks and
+# the rows are read by one statement, so they come from one snapshot: a rebuild that commits
+# between two statements would otherwise show reset rows as computed.
+_COLD_SQL = "EXISTS (SELECT 1 FROM meta WHERE key = ? AND value = '1')"
+_COLD_PARAMS = (VOLATILE_STALE_KEY,)
+# The entities whose descriptor was changed in place since the last rebuild (see
+# ``store_layout.DESCRIPTOR_CHANGED_PREFIX``). Uncorrelated, so SQLite evaluates it once.
+_CHANGED_SQL = "SELECT substr(key, ?) FROM meta WHERE key >= ? AND key < ?"
+_CHANGED_PARAMS = (
+    len(DESCRIPTOR_CHANGED_PREFIX) + 1,
+    DESCRIPTOR_CHANGED_PREFIX,
+    DESCRIPTOR_CHANGED_PREFIX + _KEY_RANGE_END,
+)
+_DELIVERABLE_SQL = ", ".join(f"'{status}'" for status in DELIVERABLE_STATUSES)
 
 # A rebuild holds the write lock for about 100 ms on a large store. ``Store`` sets no pragmas of
 # its own and gets sqlite3's 5 s default.
@@ -122,8 +140,30 @@ class Shown(NamedTuple):
 class HotIndex:
     """An open connection on a store's ``index.db``. Use :meth:`open`; it may return ``None``."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, kept_statuses: bool = False) -> None:
         self._conn = conn
+        # ``_ready_sql`` selects the rows a hook may deliver through: every row of an index
+        # that is not cold, and on a cold index the rows whose leaf status a rebuild kept as
+        # deliverable. ``_unready_sql`` selects the rest of a cold index: the rows whose status
+        # was not computed. An index without the column (an older version rebuilt it) is read
+        # as it always was: every row when not cold, none when cold.
+        if kept_statuses:
+            self._ready_sql = (
+                f"(NOT {_COLD_SQL} OR ({KEPT_STATUS_COLUMN} IN ({_DELIVERABLE_SQL}) "
+                f"AND entity_id NOT IN ({_CHANGED_SQL})))"
+            )
+            self._unready_sql = (
+                f"({_COLD_SQL} AND ({KEPT_STATUS_COLUMN} IS NULL OR entity_id IN ({_CHANGED_SQL})))"
+            )
+            self._gate_params: tuple = (*_COLD_PARAMS, *_CHANGED_PARAMS)
+        else:
+            self._ready_sql = f"NOT {_COLD_SQL}"
+            self._unready_sql = _COLD_SQL
+            self._gate_params = _COLD_PARAMS
+        # Set by ``memory_counts`` when it counted nothing and the cold index is why: a record
+        # it would have counted sits behind a binding whose status was not computed. ``None``
+        # when that could not be read without waiting for a lock.
+        self.cold_withheld: bool | None = False
         # Set when a write on this handle raised ``sqlite3.OperationalError`` (almost always the
         # busy timeout: a rebuild or another writer holds the lock), or a read was refused by a
         # busy or locked database. The hook reads it to stop asking for more work, since each
@@ -178,7 +218,10 @@ class HotIndex:
                 if on_error is not None:
                     with contextlib.suppress(Exception):
                         on_error(error)
-            return cls(conn)
+            kept = KEPT_STATUS_COLUMN in {
+                r[1] for r in conn.execute("PRAGMA table_info(anchor_bindings)")
+            }
+            return cls(conn, kept_statuses=kept)
         except StoreRequirementError:
             return None
         except Exception as error:
@@ -211,6 +254,23 @@ class HotIndex:
         with self._reading():
             row = self._conn.execute(GET_META_SQL, (key,)).fetchone()
         return row[0] if row else None
+
+    def has_meta_now(self, key: str) -> bool:
+        """Whether ``key`` is set, read without waiting for a lock. For naming why a run
+        delivered nothing: a lock another process holds raises at once, and the handle is
+        not marked ``lock_lost`` (nothing the run delivers depended on this read)."""
+        with delivery_ledger.no_wait(self._conn):
+            return self._conn.execute(GET_META_SQL, (key,)).fetchone() is not None
+
+    def claims_held_now(self, prefix: str) -> int:
+        """How many keys sit under ``prefix`` (the claim statement's own count), read without
+        waiting for a lock. For naming why a run delivered nothing; raises at once on a lock."""
+        with delivery_ledger.no_wait(self._conn):
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM meta WHERE key >= ? AND key < ?",
+                (prefix, prefix + _KEY_RANGE_END),
+            ).fetchone()
+        return int(row[0])
 
     def record_delivery(
         self,
@@ -335,8 +395,10 @@ class HotIndex:
         ``files`` is the number of distinct files those bindings point at, and ``mistakes`` the
         records among them of a mistake kind. A row that fails to parse is skipped on its own.
 
-        A new store or canonical reload leaves placeholder statuses; withhold counts until
-        sync certifies them. The flag and binding rows share one statement snapshot.
+        A new store or a rebuild leaves placeholder statuses. While the index is cold, only a
+        binding whose leaf status the rebuild kept counts (``store_layout.KEPT_STATUS_COLUMN``);
+        the flag, the marks and the binding rows share one statement snapshot. When nothing
+        counts and a cold binding is why, ``cold_withheld`` is set.
         see design/superpowers/specs/2026-10-03-subagent-start-brief-design.md (D2)
         """
         with self._reading():
@@ -374,9 +436,8 @@ class HotIndex:
         records: set[str] = set()
         files: set[str] = set()
         for record_id, entity_id, data in self._conn.execute(
-            "SELECT record_id, entity_id, data FROM anchor_bindings "
-            "WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key = ? AND value = '1')",
-            (VOLATILE_STALE_KEY,),
+            f"SELECT record_id, entity_id, data FROM anchor_bindings WHERE {self._ready_sql}",
+            self._gate_params,
         ):
             if record_id not in surfacing or entity_id not in file_of:
                 continue
@@ -384,9 +445,31 @@ class HotIndex:
                 status = json.loads(data).get("status")
             except Exception:
                 continue
-            if status in ("live", "degraded"):
+            if status in DELIVERABLE_STATUSES:
                 records.add(record_id)
                 files.add(file_of[entity_id])
+        if not records and surfacing:
+            # Nothing to count. Say whether the cold index is why, stopping at the first
+            # binding that would have counted, and without waiting for a lock: the answer is
+            # already decided, this only names its cause.
+            try:
+                with delivery_ledger.no_wait(self._conn):
+                    for record_id, entity_id, data in self._conn.execute(
+                        "SELECT record_id, entity_id, data FROM anchor_bindings "
+                        f"WHERE {self._unready_sql}",
+                        self._gate_params,
+                    ):
+                        if record_id not in surfacing or entity_id not in file_of:
+                            continue
+                        try:
+                            status = json.loads(data).get("status")
+                        except Exception:
+                            continue
+                        if status in DELIVERABLE_STATUSES:
+                            self.cold_withheld = True
+                            break
+            except sqlite3.OperationalError:
+                self.cold_withheld = None
         mistakes = sum(1 for record_id in records if surfacing[record_id] in MISTAKE_KINDS)
         return len(records), len(files), mistakes
 
@@ -432,7 +515,8 @@ class HotIndex:
         """Live bound records: accepted mistakes, other decisions, facts, then proposed
         decisions and facts. Decision order is unchanged; fact ties use ascending ids.
 
-        Only certified live/degraded bindings count. Deduplicate ids within this file's
+        Only live/degraded bindings count, and on a cold index only those whose leaf status
+        the rebuild kept as live or degraded. Deduplicate ids within this file's
         candidate list, never across files. Each record table fails independently, and
         operational SQL errors use the protected diagnostic callback.
         """
@@ -454,9 +538,8 @@ class HotIndex:
                 break
             try:
                 rows = self._conn.execute(
-                    "SELECT data FROM anchor_bindings WHERE entity_id = ? "
-                    "AND NOT EXISTS (SELECT 1 FROM meta WHERE key = ? AND value = '1')",
-                    (entity_id, VOLATILE_STALE_KEY),
+                    f"SELECT data FROM anchor_bindings WHERE entity_id = ? AND {self._ready_sql}",
+                    (entity_id, *self._gate_params),
                 ).fetchall()
             except sqlite3.Error as error:
                 report(error)
@@ -465,7 +548,7 @@ class HotIndex:
             for (data,) in rows:
                 try:
                     binding = json.loads(data)
-                    if binding.get("status") in ("live", "degraded") and isinstance(
+                    if binding.get("status") in DELIVERABLE_STATUSES and isinstance(
                         binding["record_id"], str
                     ):
                         record_ids.append(binding["record_id"])
@@ -516,6 +599,65 @@ class HotIndex:
             + [Record(d, True) for d, _ in proposals]
             + [Record(f, True, "fact") for f, _ in newest_first(proposed(facts))]
         )
+
+    def cold_withholds(
+        self,
+        entity_ids: Sequence[str],
+        accept: Callable[[Record], bool] | None = None,
+    ) -> bool:
+        """Whether the cold index keeps back a record that would be handed over through one
+        of ``entity_ids``: a binding whose status was not computed leads to a record
+        ``records_for`` would return, and ``accept`` (the caller's own last filter) takes it.
+
+        For naming why a run delivered nothing, so call it only for such a run. It stops at
+        the first record that qualifies and never loads the rest. Its worst case is a file
+        whose cold bindings all lead to records that do not qualify: one pass over them, the
+        work ``records_for`` does for that file on an index that is not cold. False on an
+        index that is not cold. A row or a record that cannot be read is passed over.
+
+        It never waits for a lock: the run's answer is already decided, and no run is kept
+        waiting to learn its cause. A lock another process holds raises
+        ``sqlite3.OperationalError`` at once, and the handle is not marked ``lock_lost``.
+        """
+        if self.lock_lost:
+            return False
+        now = datetime.now(UTC)
+        with delivery_ledger.no_wait(self._conn):
+            for entity_id in entity_ids:
+                cursor = self._conn.execute(
+                    f"SELECT data FROM anchor_bindings WHERE entity_id = ? AND {self._unready_sql}",
+                    (entity_id, *self._gate_params),
+                )
+                for (data,) in cursor:
+                    try:
+                        binding = json.loads(data)
+                        if binding.get("status") not in DELIVERABLE_STATUSES or not isinstance(
+                            binding["record_id"], str
+                        ):
+                            continue
+                    except (ValueError, TypeError, KeyError, AttributeError):
+                        continue
+                    record = self._eligible(binding["record_id"], now)
+                    if record is not None and (accept is None or accept(record)):
+                        return True
+        return False
+
+    def _eligible(self, record_id: str, now: datetime) -> Record | None:
+        """The record ``records_for`` would return for this id, or ``None``: an accepted
+        decision or fact, or a proposed one inside its surfacing window. The same two
+        readers and the same proposal rule as ``records_for``; a test holds the two equal."""
+        for is_fact in (False, True):
+            bound = (
+                self._facts_for_bindings([record_id])
+                if is_fact
+                else self._decisions_for_bindings([record_id], now)
+            )
+            for record, valid_from in bound:
+                if record["status"] == _ACCEPTED:
+                    return Record(record, False, "fact" if is_fact else "decision")
+                if record["status"] == _PROPOSED and proposal_surfaces(valid_from):
+                    return Record(record, True, "fact" if is_fact else "decision")
+        return None
 
     def _decisions_for_bindings(
         self, record_ids: Sequence[str], now: datetime

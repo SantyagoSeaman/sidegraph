@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Literal
 
 from .config import main_checkout_root
-from .gitenv import git_env
+from .gitenv import run_git
 
 HOOKS: tuple[str, ...] = ("post-commit", "post-merge", "post-checkout")
 HELPER_NAME = "sidegraph-graph-refresh"
@@ -207,10 +207,9 @@ class Choice:
 def _git(args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str] | None:
     """One git call from ``cwd``, never raising; ``None`` when git cannot run."""
     try:
-        return subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            env=git_env(),
+        return run_git(
+            args,
+            cwd,
             capture_output=True,
             text=True,
             encoding="utf-8",

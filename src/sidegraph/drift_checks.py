@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NamedTuple
 
-from .gitenv import git_env
+from .gitenv import git_env, run_git
 from .schema import CheckedCodeFile, Decision, DriftCheck, Entity, is_safe_record_id
 from .store_format import encode_body, split_lines
 from .store_layout import NOT_A_FILE_REASON, PACKED_CHECKS_NAME, VERIFICATIONS_SUBDIR
@@ -361,13 +361,13 @@ def _run(
         raise ValueError("Git check deadline exhausted")
     kwargs: dict[str, object] = {"input": data} if data is not None else {"stdin": stdin}
     try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=root,
+        result = run_git(
+            args,
+            root,
             capture_output=True,
             env=_env(no_lazy_fetch),
             timeout=timeout,
-            **kwargs,  # type: ignore[call-overload]
+            **kwargs,  # type: ignore[arg-type]
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ValueError("Git check unavailable") from error
@@ -631,9 +631,9 @@ def _config_lines(root: Path, args: list[str], timeout: float | None) -> list[st
     if timeout is not None and timeout <= 0:
         raise ValueError("Git check deadline exhausted")
     try:
-        result = subprocess.run(
-            ["git", "config", *args],
-            cwd=root,
+        result = run_git(
+            ["config", *args],
+            root,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             env=_env(True),

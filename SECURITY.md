@@ -43,7 +43,12 @@ scope too.
   Review `.sidegraph/` diffs like code. Sidegraph frames delivered records as "data, not
   instructions"; that is a label, not sanitisation. Ratification is a workflow, not an access
   control: any agent with the MCP tools can write an accepted record directly
-  (`add_decision`) or call `ratify` itself, whatever the ratification policy. The control is
+  (`add_decision`, or `supersede_decision` with `source="human"`) or call `ratify` itself
+  with a `verdict` it wrote, whatever the ratification policy. `verdict` and
+  `source="human"` are the calling agent's statements: they make an unasked acceptance
+  explicit (a relayed verdict is stamped `agent-relayed:`, and `source="human"` is recorded
+  in `provenance.source`); they authenticate nobody. An agent that makes a
+  false statement has not bypassed a documented gate. The control is
   reviewing `.sidegraph/` diffs before they merge. A way to make an agent obey instructions
   planted in a record, or to bypass a documented gate (the store's append-only write rules, the
   write limits, `sidegraph-verify`'s integrity checks), is in scope.
@@ -63,6 +68,36 @@ scope too.
   tools that read a lock beside the manifest; Claude Code does not apply it. Teams that
   need a fixed version in their own commands name a release; see
   [pinned releases](docs/getting-started/installation.md#mutable-development-references).
+- **Content a clone brings.** A repository you clone can carry files placed to steer the
+  tools you run in it. Sidegraph treats three kinds as hostile input.
+  *Git configuration inside the checkout.* Every git command Sidegraph runs goes through one
+  function. It does not start git in a directory that git would take as a repository without
+  a `.git` entry (the files of a git directory committed under `.sidegraph/`, `graphify-out/`
+  or any other folder), including when the checkout itself sits below a folder named `.git`.
+  It also runs git with `safe.bareRepository=explicit` and an empty `core.fsmonitor`, so a
+  planted configuration is not read and no fsmonitor command is started. In a refused
+  directory Sidegraph behaves as if git were not installed. The refusal works with any Git;
+  the settings need Git 2.31, and `safe.bareRepository` Git 2.38. The checks were run with
+  Git 2.54 on macOS only; older Git versions and Windows are reasoned from Git's release
+  notes and source, not measured.
+  *A `.env` file.* The MCP server takes `FASTMCP_*` settings from its environment only. It
+  does not load a `.env` from the working directory unless you set `FASTMCP_ENV_FILE`
+  yourself.
+  *A store link.* Sidegraph does not open a store whose path leaves its repository through a
+  symlink or a Windows junction, at `.sidegraph` or at a folder above it. SessionStart says so,
+  and the commands and MCP tools name the link in their error. To share one store between
+  projects, set `SIDEGRAPH_DIR` to the shared directory itself. A plugin install cannot do
+  that, because the plugin's own commands set `SIDEGRAPH_DIR`.
+  What stays trusted: your own configuration (`~/.gitconfig`, the repository's `.git/config`)
+  and your environment. A filter or signing program you configured there still runs when git
+  needs it. Git still enters a submodule you checked out; that submodule's git directory is
+  written on your machine, not by the clone, so a command configured there is outside this
+  model. So is a `.git` entry (a directory or a gitfile) delivered inside an archive: git
+  never checks one out. A committed `.claude/settings.json` is your agent host's to gate, with
+  one exception: when your environment sets no `SIDEGRAPH_RATIFY_POLICY`, `sidegraph-mcp` reads
+  that one value from the file's `env` block. A repository can therefore choose its own
+  ratification policy, `auto-all` included, under any host. A value in your environment wins
+  over the file.
 
 ## Data boundary — what this tool touches
 
@@ -125,6 +160,9 @@ The exact runtime rules are in
 - MCP calls are rate-limited, and every write request has fixed size, depth and count limits
   with no silent truncation.
 - Write diagnostics never echo input values.
+- Git runs through one guarded function, the MCP server reads no `.env` file, and a store link
+  that leaves its repository is not followed; see
+  [Security internals](docs/reference/security-internals.md#content-a-clone-brings).
 - `--against` baselines are resolved to one commit before Git reads them, and bootstrap reads
   regular files only.
 

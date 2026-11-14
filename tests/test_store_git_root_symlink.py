@@ -115,7 +115,7 @@ def _drift_findings(store_dir: Path) -> list:
 def _into_b(tmp_path: Path) -> tuple[Path, Path, Path]:
     """``(a, b, link)``: A holds ``.sidegraph -> ../b/store``, inside repository B."""
     a = _repo(tmp_path / "a", files={"trader/exec.py": "v1\n"})
-    b = _repo(tmp_path / "b")
+    b = _repo(a / "vendor" / "b")  # inside A: a link may not leave its project
     return a, b, _link(a, b / "store")
 
 
@@ -124,7 +124,7 @@ def _into_b(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 def test_t1_a_link_into_no_repository_stamps_the_projects_head(tmp_path):
     a = _repo(tmp_path / "a")
-    link = _link(a, tmp_path / "shared" / "store")  # shared/ is in no repository
+    link = _link(a, a / "shared" / "store")  # shared/ is inside A and in no repository of its own
     assert _capture_commit(Store(link)) == _head(a)
 
 
@@ -136,7 +136,7 @@ def test_t2_a_link_into_repository_b_stamps_the_projects_head_not_bs(tmp_path):
 
 def test_t10_a_project_with_no_commits_stamps_nothing_not_the_link_targets_head(tmp_path):
     a = _repo(tmp_path / "a", commit=False)
-    b = _repo(tmp_path / "b")
+    b = _repo(a / "vendor" / "b")  # inside A: a link may not leave its project
     link = _link(a, b / "store")
     assert _capture_commit(Store(link)) is None
 

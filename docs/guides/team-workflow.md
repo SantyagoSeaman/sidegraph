@@ -77,7 +77,8 @@ answered with Enter writes `SIDEGRAPH_RATIFY_POLICY=auto-low-risk` to
 `.claude/settings.json`, and under it an eligible gotcha, lesson or standalone fact arrives in
 the diff already `accepted`, stamped `ratified_by: "auto:auto-low-risk"` rather than a
 person's name ([auto-ratification policy](capturing-decisions.md#5-auto-ratification-policy)).
-Reviewers should read that field, not just `status`. A team that wants no automatic
+Reviewers should read that field, not just `status`. A record accepted through the
+agent's `ratify` tool reads `agent-relayed:<name>`. A team that wants no automatic
 acceptance answers no at init (or runs `sidegraph-init --ratify-policy manual` before
 anything is set), or changes the value in `.claude/settings.json`. `manual` stops only the
 policy: an agent with the MCP tools can still write an accepted record (`add_decision`) or
@@ -229,13 +230,19 @@ or a new decision reverses an old one:
 - For an accepted decision with `valid_to` unset, use `supersede_decision` or `supersedes`
   in a `propose_decisions` draft. The predecessor closes
   (`valid_to` set, `status=superseded`) at the moment its successor becomes accepted.
-  `supersede_decision` writes an accepted replacement, so it closes the predecessor in the
-  same call — both committed files land together. A `propose_decisions` draft with `supersedes`
-  lands `proposed`, under every ratify policy: the predecessor stays `accepted` and visible
-  until the successor is ratified, which closes it then. Dropping the proposal leaves the
+  A `supersede_decision`
+  call an agent makes on its own, and a `propose_decisions` draft with `supersedes`, both
+  land `proposed`: the predecessor stays `accepted` and visible until the successor is
+  ratified, which closes it then. (Under the `auto-all` policy either one is accepted at
+  write time when it has a live anchor.) `supersede_decision` with `source="human"`, for a
+  reversal the owner asked for and worded, writes an accepted replacement and closes the
+  predecessor in the same call — both committed files land together. Dropping the proposal leaves the
   predecessor exactly as it was. Only the live (accepted) head can be superseded, and it
   takes one pending successor at a time: to amend a pending proposal, drop it and propose
-  again. For closed history, inspect its live head or restate current knowledge when none
+  again. A pending proposal that supersedes a live record is amended differently: a
+  re-proposed draft that keeps the title is answered `deduped` and writes nothing, so drop
+  the proposal, then call `supersede_decision` on the predecessor with the corrected text.
+  For closed history, inspect its live head or restate current knowledge when none
   exists. Follow the [status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
   See [the supersession invariant](../concepts/data-model.md#the-supersession-invariant)
   for facts and domains, including recovery of a dropped domain.

@@ -178,7 +178,7 @@ delivering records on Bash lines without a word.
 The **Sidegraph plugin already supplies graph context for Claude Code**: its
 `SessionStart` hook injects the graph-derived top-tier map, its `PreToolUse` hook already
 hands over the records of a file when it is read or edited (non-blocking, each file at most
-**once per agent**), and its MCP server exposes the query surface. Graphify's `Read|Glob` hook, by contrast, fires on
+**once per agent**, and again after the agent's context is compacted or cleared), and its MCP server exposes the query surface. Graphify's `Read|Glob` hook, by contrast, fires on
 **every** qualifying read and asks for `graphify query`. With both installed, a read can
 receive both the graph-query instruction and Sidegraph's decision-memory block.
 

@@ -46,3 +46,18 @@ paths = [
   # Saved L0 reports pin canonical_sha256, task_key_sha256 and other digests.
   '''^design/testing/benches/l0/results/[^/]+\.json$''',
 ]
+
+# The spec-replay kit's regression lists name tests by node id, and a few of those tests carry a
+# fake PEM header, an example access key or a fake API key as a parameter. Allowlisted by line,
+# only where the line names one of those tests by its full node id (a staged scan sees the line
+# with a leading `+`, hence no anchor). A real secret anywhere else, or on any other line, still
+# fails the scan. (`paths` is left out on purpose: gitleaks then skips the whole file.)
+[[allowlists]]
+description = "Node ids of tests whose parameters are fake keys, as listed by the spec-replay kit"
+regexTarget = "line"
+regexes = [
+  '''tests/test_redaction_tokens\.py::test_pem_preserves_independent_header_grammar_and_first_end\[''',
+  '''tests/test_capture_propose\.py::test_propose_all_secret_or_blank_initiative_binds_nothing\[AKIAQWERTYUIOPASDFGH\]''',
+  '''tests/test_server_capture\.py::test_add_decision_all_secret_or_blank_initiative_binds_nothing\[AKIAQWERTYUIOPASDFGH\]''',
+  '''tests/test_capture_redact\.py::test_redact_never_less_than_before_on_glued_quotes\[API_KEY = """sk_live_abc123"""-abc123\]''',
+]

@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.28.0"
+version = "0.29.0"
 description = "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -181,6 +181,7 @@ markers = [
     "integration: spawns real git repositories and subprocesses (release-script contract)",
     "slow: creates thousands of files or spawns subprocesses",
     "network: asks PyPI a question; skipped when pypi.org is unreachable",
+    "docker: needs a running Docker daemon (the spec-replay kit); skipped without one",
 ]
 # A passing test leaves no temp dir behind; a failing one keeps its dir for inspection.
 tmp_path_retention_policy = "failed"

@@ -17,8 +17,10 @@ The host adds the standing instruction:
 
 > When you need to find or understand code in this project, call get_task_context(files=[…])
 > with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
-> available. If the tool is listed only by name, load it first.
+> are indexed here. If you know a symbol's name and not its file, call
+> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
+> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
+> listed only by name, load it first.
 
 The version line identifies the running package. Diagnostic lines indicate follow-up work. See [captured output](../reference/examples.md#sessionstart-map).
 
@@ -36,7 +38,7 @@ See [implementation details](../reference/retrieval-internals.md#drill_downdomai
 
 ## `get_task_context`: seeded, budgeted, mistakes-first
 
-Supply the files or entities for the task. The result prioritizes known mistakes, then decisions, facts and related records. Call `query_structure` with the same seeds for the map; `structure_budget` still sizes the walk that finds related records. If output is clipped, narrow the task or follow its hints.
+Supply the files or entities for the task. The result puts the records of a symbol you name in `entities` first, then the known mistakes of the named files, then their decisions, facts and related records. Call `query_structure` with the same seeds for the map; `structure_budget` still sizes the walk that finds related records. If output is clipped, narrow the task or follow its hints.
 
 For the scratch repository's `cache.py`, the memory excerpt is:
 
@@ -53,7 +55,7 @@ See the [detailed contract](../reference/retrieval-internals.md#get_task_context
 
 ### Seeds
 
-Pass a repository-relative file in `files`, or a name and file in `entities`. Example: `get_task_context(files=["cache.py"])`. A seed identifies the area you plan to inspect or edit.
+Pass a repository-relative file in `files`, or a symbol in `entities`: its name, with its file when you know it. A name alone is enough when one symbol holds it, so there is no need to search for the path first; a name that several symbols share is reported and not read. Example: `get_task_context(files=["cache.py"])`. A seed identifies the area you plan to inspect or edit.
 
 See [the detailed contract](../reference/retrieval-internals.md#seeds).
 
@@ -65,7 +67,7 @@ See [the detailed contract](../reference/retrieval-internals.md#char-based-budge
 
 ### Ranking buckets, and why mistakes come first
 
-Gotchas, lessons and constraints about the task come first. They explain approaches to avoid before the agent commits to a change. Directly anchored decisions follow before more distant related records.
+Gotchas, lessons and constraints about the task come first, except that the records of a symbol you named in `entities` are placed before them. They explain approaches to avoid before the agent commits to a change. Directly anchored decisions follow before more distant related records.
 
 See [the detailed contract](../reference/retrieval-internals.md#ranking-buckets-and-why-mistakes-come-first).
 
@@ -138,7 +140,8 @@ store's index directly (see [hooks](../reference/hooks.md)):
 - **At the point of reading.** When a `Read`, `Edit`, `Write` or `Grep` call, or a Bash `sed`,
   `grep`, `rg` or `cat` line, names a file that decisions are anchored to, the `PreToolUse` hook
   hands the agent the top decisions for that file in the same tool call, mistakes first. Each file
-  is delivered once per agent. `SIDEGRAPH_GREP_NUDGE=off` stops it.
+  is delivered once per agent; the count starts again after the agent's context is compacted
+  or cleared. `SIDEGRAPH_GREP_NUDGE=off` stops it.
 - **In a subagent's brief.** On an `Agent` call, the hook reads the files the brief names, and
   the files named in a plan or notes document it names, and appends the decisions anchored to them
   to the brief. The subagent sees the block in its first message; the parent's transcript keeps

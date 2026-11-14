@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sidegraph.engine.reader import GraphifyReader
-from sidegraph.retrieval import Seed, query_decisions, query_structure
+from sidegraph.retrieval import Seed, _fmt_decision, query_decisions, query_structure
 from sidegraph.schema import (
     AnchorBinding,
     Decision,
@@ -84,6 +84,44 @@ def test_query_decisions_surfaces_seed_mistake(tmp_path):
     assert "race" in out
     assert "[unratified]" not in out  # surfaced as an accepted seed mistake
     assert "## Structural map" not in out  # decisions-only, no structure block
+
+
+def test_query_decisions_puts_the_named_symbols_records_first(tmp_path):
+    reader = GraphifyReader(FIXTURE)
+    store = Store(tmp_path / "t.db")
+    lines = {}
+    for name, kind, title in [
+        ("Trader", DecisionKind.GOTCHA, "trader-gotcha"),
+        ("place_order", DecisionKind.ADR, "place-order-adr-with-a-longer-title"),
+    ]:
+        entity = store.upsert_entity(
+            Entity(
+                canonical_name=name,
+                descriptor=Descriptor(name=name, file_path="trader/exec.py"),
+            )
+        )
+        decision = Decision(
+            title=title,
+            kind=kind,
+            status=DecisionStatus.ACCEPTED,
+            context="c",
+            choice=f"do {title}",
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual"),
+        )
+        store._write_decision(decision)
+        store._conn.commit()
+        store.add_binding(
+            AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2, status="live")
+        )
+        lines[name] = _fmt_decision(decision, detailed=True)
+    seeds = [
+        Seed(file_path="trader/exec.py"),
+        Seed(name="place_order", file_path="trader/exec.py"),
+    ]
+    out = query_decisions(seeds, store, reader, budget_chars=len(lines["place_order"]))
+    assert "place-order-adr" in out
+    assert "trader-gotcha" not in out
 
 
 def test_query_decisions_no_decisions_found(tmp_path):

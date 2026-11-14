@@ -296,6 +296,7 @@ jobs:
             tests/test_store_format.py tests/test_store_rules.py `
             tests/test_maintenance_publish.py tests/test_migrate.py `
             tests/test_store_junctions.py tests/test_format2_windows.py `
+            tests/test_git_trust_boundary.py `
             tests/test_repo_relative_paths_portable.py `
             tests/test_command_windows.py `
             tests/test_hook_payload_encoding.py tests/test_hook_failure_diagnostics.py `

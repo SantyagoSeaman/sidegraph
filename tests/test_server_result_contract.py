@@ -115,7 +115,7 @@ def test_dictionary_and_partial_batch_results_keep_their_contract(isolated_serve
     assert partial.data[0]["status"] == "written"
     assert partial.data[1]["status"] == "rejected"
     assert partial.data[1]["reason"]
-    verdict = call("ratify", {"accept": ["unknown-record"]})
+    verdict = call("ratify", {"accept": ["unknown-record"], "verdict": "owner said accept"})
     assert not verdict.is_error
     assert "unknown-record" in verdict.structured_content
 

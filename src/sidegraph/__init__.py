@@ -13,7 +13,15 @@ see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D1)
 from __future__ import annotations
 
 import importlib
+import os
 from typing import TYPE_CHECKING, Any
+
+# FastMCP loads FASTMCP_* settings from a `.env` in the working directory when it is first
+# imported. A file a repository brings must not configure the MCP server, so the default
+# points at the null device before any module here can import FastMCP. A value the user
+# exports wins.
+# see design/superpowers/specs/2026-11-12-trust-boundary-clone-content-design.md (D7)
+os.environ.setdefault("FASTMCP_ENV_FILE", os.devnull)
 
 if TYPE_CHECKING:
     from .schema import (
@@ -29,7 +37,7 @@ if TYPE_CHECKING:
     )
     from .store import Store
 
-__version__ = "0.28.0"
+__version__ = "0.29.0"
 
 # name -> the submodule that defines it
 _LAZY = {

@@ -40,10 +40,11 @@ def _imports() -> dict[str, Any]:
     from sidegraph.adr_cli import _avoid_index_open
     from sidegraph.config import default_graph_path, resolve_store_path
     from sidegraph.engine.reader import GRAPHIFY_PACKAGE, TESTED_ENGINE_VERSIONS, GraphifyReader
-    from sidegraph.gitenv import git_env
+    from sidegraph.gitenv import run_git
     from sidegraph.host import claude_settings, hooks
     from sidegraph.integrity import binding_statuses_computed
     from sidegraph.stats.model import build_report
+    from sidegraph.store_layout import StoreLinkRefused, refuse_outside_store_link
 
     return {
         "__version__": sidegraph.__version__,
@@ -58,26 +59,22 @@ def _imports() -> dict[str, Any]:
         "GraphifyReader": GraphifyReader,
         "TESTED_ENGINE_VERSIONS": TESTED_ENGINE_VERSIONS,
         "GRAPHIFY_PACKAGE": GRAPHIFY_PACKAGE,
-        "git_env": git_env,
+        "run_git": run_git,
         "claude_settings": claude_settings,
         "hooks": hooks,
         "binding_statuses_computed": binding_statuses_computed,
         "build_report": build_report,
+        "StoreLinkRefused": StoreLinkRefused,
+        "refuse_outside_store_link": refuse_outside_store_link,
     }
 
 
-def _git_env(git_env: Any) -> dict[str, str]:
-    env = git_env()
-    env["GIT_OPTIONAL_LOCKS"] = "0"
-    return env
-
-
-def _git(args: list[str], cwd: Path, git_env: Any) -> str | None:
+def _git(args: list[str], cwd: Path, run_git: Any) -> str | None:
     try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            env=_git_env(git_env),
+        result = run_git(
+            args,
+            cwd,
+            env={"GIT_OPTIONAL_LOCKS": "0"},
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -90,14 +87,14 @@ def _git(args: list[str], cwd: Path, git_env: Any) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def _git_root(project: Path, git_env: Any) -> Path | None:
-    value = _git(["rev-parse", "--show-toplevel"], project, git_env)
+def _git_root(project: Path, run_git: Any) -> Path | None:
+    value = _git(["rev-parse", "--show-toplevel"], project, run_git)
     path = value.removesuffix("\n") if value is not None else ""
     return Path(path).resolve() if path else None
 
 
-def _git_index(project: Path, root: Path | None, git_env: Any) -> Path | None:
-    value = _git(["rev-parse", "--git-path", "index"], project, git_env)
+def _git_index(project: Path, root: Path | None, run_git: Any) -> Path | None:
+    value = _git(["rev-parse", "--git-path", "index"], project, run_git)
     if value is None:
         return None
     value = value.removesuffix("\n")
@@ -152,6 +149,12 @@ def _fingerprint(paths: list[tuple[str, Path]]) -> tuple[dict[str, str], list[st
     return values, errors
 
 
+def _inside(path: Path, directory: Path) -> bool:
+    """Whether ``path`` lies under ``directory``, as written or once resolved (path arithmetic
+    and link resolution only: nothing is opened)."""
+    return path.is_relative_to(directory) or path.resolve().is_relative_to(directory.resolve())
+
+
 def _protected_paths(
     project: Path,
     store: Path,
@@ -189,7 +192,7 @@ def _protected_paths(
 
 
 def _candidate_settings_dirs(
-    project: Path, root: Path, git_root: Path | None, git_env: Any, claude_settings: Any
+    project: Path, root: Path, git_root: Path | None, run_git: Any, claude_settings: Any
 ) -> tuple[list[Path], bool]:
     """Settings directories read by Claude reach: launch ancestors and indexed ancestors."""
     candidates = {project}
@@ -203,7 +206,7 @@ def _candidate_settings_dirs(
         break
     complete = True
     if git_root is not None:
-        listing = _git(["ls-files", "--cached", "-z"], git_root, git_env)
+        listing = _git(["ls-files", "--cached", "-z"], git_root, run_git)
         if listing is None:
             complete = False
         else:
@@ -511,7 +514,9 @@ def _hook_runs(store: Path) -> dict[str, Any]:
     """The hook run log (`index.db-hooks.log`), summarised per hook: runs, one count per outcome
     (`delivered`, `empty`, `lock`, `error`) and the p50/p95 elapsed time. A pure read of two small
     text files beside the store; it needs no index. `lock` counts runs whose delivery another
-    process's lock withheld."""
+    process's lock withheld. `empty_causes` gives, per hook, how many `empty` runs each cause
+    accounts for (`unrecorded` for a line written before causes existed); it is absent with a
+    Sidegraph that does not record causes."""
     try:
         from sidegraph.host import hook_log
     except ImportError:
@@ -523,13 +528,17 @@ def _hook_runs(store: Path) -> dict[str, Any]:
     if not rows:
         return {"available": True, "runs": 0, "hooks": {}}
     stamps = [row.at_ms for row in rows]
-    return {
+    result: dict[str, Any] = {
         "available": True,
         "runs": len(rows),
         "first_ms": min(stamps),
         "last_ms": max(stamps),
         "hooks": hook_log.summarize(rows),
     }
+    causes = getattr(hook_log, "empty_causes", None)
+    if causes is not None:
+        result["empty_causes"] = causes(rows)
+    return result
 
 
 def _stats_summary(report: Any) -> dict[str, Any]:
@@ -581,7 +590,7 @@ def collect(
     doctor = modules["doctor"]
     verify = modules["verify"]
     launch_dir = Path(project).absolute()
-    git_root = _git_root(launch_dir, modules["git_env"])
+    git_root = _git_root(launch_dir, modules["run_git"])
     root = git_root or launch_dir
     store_path = Path(
         modules["resolve_store_path"](
@@ -595,13 +604,25 @@ def collect(
     plugin_path = (
         Path(plugin_value).absolute() if plugin_value else Path(__file__).resolve().parents[3]
     )
-    git_index = _git_index(root, git_root, modules["git_env"])
+    # A store path that leaves its repository through a link is not read at all: not
+    # fingerprinted, listed or opened below the link's target.
+    store_refusal: str | None = None
+    try:
+        modules["refuse_outside_store_link"](store_path)
+    except modules["StoreLinkRefused"] as exc:
+        store_refusal = str(exc)
+    git_index = _git_index(root, git_root, modules["run_git"])
     candidate_dirs, settings_discovery_complete = _candidate_settings_dirs(
-        launch_dir, root, git_root, modules["git_env"], modules["claude_settings"]
+        launch_dir, root, git_root, modules["run_git"], modules["claude_settings"]
     )
     protected = _protected_paths(
         root, store_path, graph_path, plugin_path, git_index, candidate_dirs
     )
+    # Whatever lies inside a refused store is not inspected, the graph and its sidecars
+    # included when the graph sits there.
+    if store_refusal is not None:
+        protected = [item for item in protected if not _inside(item[1], store_path)]
+    graph_refused = store_refusal is not None and _inside(graph_path, store_path)
     before, before_errors = _fingerprint(protected)
     if not settings_discovery_complete:
         before_errors.append("claude-settings-directory-listing")
@@ -766,6 +787,8 @@ def collect(
     graph_status = "warning"
     graph_rebuild_scope_known = False
     try:
+        if graph_refused:
+            raise OSError(store_refusal)
         reader = modules["GraphifyReader"](str(graph_path))
         with _local_environment("GIT_OPTIONAL_LOCKS", "0"):
             graph_root = reader.repo_root()
@@ -819,7 +842,9 @@ def collect(
     except Exception:
         graph_evidence = {
             "status": "UNKNOWN",
-            "reason": "graph is missing, unreadable, or freshness could not be checked",
+            "reason": store_refusal
+            if graph_refused
+            else "graph is missing, unreadable, or freshness could not be checked",
         }
     sections.append(_section("graphify", graph_status, graph_evidence))
     graph_freshness_state = graph_evidence.get("freshness", {}).get("state")
@@ -873,13 +898,17 @@ def collect(
 
     violations: list[dict[str, str]] = []
     verify_error: str | None = None
-    try:
-        with _local_environment("GIT_OPTIONAL_LOCKS", "0"):
-            result = verify.verify_snapshot(store_path)
-        violations = [{"code": item.code} for item in result]
-    except Exception as exc:
-        verify_error = type(exc).__name__
-    index_safe, index_reason = _index_safety(store_path, modules["_avoid_index_open"])
+    if store_refusal is not None:
+        verify_error = "StoreLinkRefused"
+        index_safe, index_reason = False, store_refusal
+    else:
+        try:
+            with _local_environment("GIT_OPTIONAL_LOCKS", "0"):
+                result = verify.verify_snapshot(store_path)
+            violations = [{"code": item.code} for item in result]
+        except Exception as exc:
+            verify_error = type(exc).__name__
+        index_safe, index_reason = _index_safety(store_path, modules["_avoid_index_open"])
     findings: list[dict[str, str]] = []
     skipped: list[str] = []
     statistics: dict[str, Any]
@@ -929,17 +958,37 @@ def collect(
     else:
         skipped = ["all doctor advisory paths", "stats"]
         statistics = {"status": "UNKNOWN", "reason": index_reason}
-        recommendations.append(
-            _recommendation(
-                "integrity",
-                "Inspect the unsafe index manually after this report; ordinary SQLite "
-                "diagnostics may create sidecars.",
-                index_reason,
-                f"project={root}; store={store_path}; graph={graph_path}",
-                ["sidegraph-doctor", "--json", "--db", str(store_path), "--graph", str(graph_path)],
-                root,
+        if store_refusal is not None:
+            recommendations.append(
+                _recommendation(
+                    "integrity",
+                    "Point the store at a directory inside the repository; Sidegraph does not "
+                    "follow a link out of it.",
+                    store_refusal,
+                    f"project={root}; store={store_path}",
+                    None,
+                    root,
+                )
             )
-        )
+        else:
+            recommendations.append(
+                _recommendation(
+                    "integrity",
+                    "Inspect the unsafe index manually after this report; ordinary SQLite "
+                    "diagnostics may create sidecars.",
+                    index_reason,
+                    f"project={root}; store={store_path}; graph={graph_path}",
+                    [
+                        "sidegraph-doctor",
+                        "--json",
+                        "--db",
+                        str(store_path),
+                        "--graph",
+                        str(graph_path),
+                    ],
+                    root,
+                )
+            )
     findings_by_code = dict(Counter(item["code"] for item in findings))
     if not index_safe:
         doctor_evidence = {
@@ -962,7 +1011,7 @@ def collect(
             "findings": findings,
             "skipped": sorted(set(skipped)),
         }
-    git_status = _git(["status", "--porcelain"], root, modules["git_env"])
+    git_status = _git(["status", "--porcelain"], root, modules["run_git"])
     if git_status is not None:
         git_status = git_status.strip()
     store_status = (
@@ -1005,7 +1054,9 @@ def collect(
                     "error_type": verify_error,
                 },
                 "index": {
-                    "present": (store_path / "index.db").exists(),
+                    "present": "UNKNOWN"
+                    if store_refusal is not None
+                    else (store_path / "index.db").exists(),
                     "diagnostic_access": "safe" if index_safe else "skipped",
                     "reason": index_reason,
                 },
@@ -1030,6 +1081,8 @@ def collect(
         )
     )
     try:
+        if store_refusal is not None:
+            raise OSError(store_refusal)
         inventory = _inventory(store_path, doctor)
     except Exception:
         inventory = {
@@ -1041,7 +1094,11 @@ def collect(
             "unknown_reasons": ["inventory_read_failed"],
         }
     inventory["statistics"] = statistics
-    inventory["hook_runs"] = _hook_runs(store_path)
+    inventory["hook_runs"] = (
+        {"available": False, "reason": store_refusal}
+        if store_refusal is not None
+        else _hook_runs(store_path)
+    )
     usage_status = (
         "warning"
         if statistics.get("status") != "available"

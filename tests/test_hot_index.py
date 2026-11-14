@@ -135,14 +135,18 @@ def _reload_hot_pair(root: Path, record_path: Path) -> None:
         store.close()
 
 
-def test_reload_withholds_hot_records_until_sync(tmp_path):
+def test_reload_keeps_computed_hot_records_and_the_orphan_stays_silent(tmp_path):
+    """Red against a gate that withholds everything while the index is cold, and against one
+    that reads the reset rows as computed (the orphan's row reads ``live`` after the rebuild)."""
     root, reader, entities, record = _synced_hot_pair(tmp_path)
     _reload_hot_pair(root, record)
     index = HotIndex.open(root)
     assert index is not None
     try:
-        assert index.records_for([e.entity_id for e in entities]) == []
-        # Withholding selection does not disable the handle's independent telemetry.
+        assert [
+            r.decision["title"] for r in index.records_for([e.entity_id for e in entities])
+        ] == ["Legitimate live memory"]
+        # The handle's independent telemetry works on a cold index as on a warm one.
         index.record_touch("reload-session", "live.py", "Read")
         assert index.claim_meta("reload-claim", "1")
         assert index.get_meta("reload-claim") == "1"
@@ -169,13 +173,14 @@ def test_reload_withholds_hot_records_until_sync(tmp_path):
         index.close()
 
 
-def test_reload_withholds_hot_memory_counts(tmp_path):
+def test_reload_keeps_hot_memory_counts(tmp_path):
+    """Red against a gate that withholds every count while the index is cold."""
     root, _reader, _entities, record = _synced_hot_pair(tmp_path)
     _reload_hot_pair(root, record)
     index = HotIndex.open(root)
     assert index is not None
     try:
-        assert index.memory_counts() == (0, 0, 0)
+        assert index.memory_counts() == (1, 1, 1)
     finally:
         index.close()
 
@@ -185,6 +190,9 @@ def test_reload_withholds_hot_memory_counts(tmp_path):
 def test_uncomputed_statuses_withhold_real_hook_delivery(
     tmp_path, monkeypatch, capsys, event, reload_index
 ):
+    """The read names the orphan's file, so it prints nothing after a rebuild too. A store no
+    sync ever certified prints nothing on either hook. The one case that delivers is the
+    subagent brief after a rebuild: one record's status was computed and kept."""
     from sidegraph.host import subagent
 
     if reload_index:
@@ -210,13 +218,48 @@ def test_uncomputed_statuses_withhold_real_hook_delivery(
     monkeypatch.setattr(subagent, "_read_payload", lambda: payload)
     canonical = {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")}
     (hooks.pre_tool_use if event == "PreToolUse" else subagent.subagent_start)()
-    assert json.loads(capsys.readouterr().out) == {}
+    answer = json.loads(capsys.readouterr().out)
+    if reload_index and event == "SubagentStart":
+        assert (
+            "1 record anchored to code in 1 file"
+            in (answer["hookSpecificOutput"]["additionalContext"])
+        )
+    else:
+        assert answer == {}
+    assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")} == canonical
+
+
+def test_a_rebuilt_index_delivers_to_a_real_read(tmp_path, monkeypatch, capsys):
+    """Rebuild the index, then read an anchored file: the record is handed over with no sync in
+    between. Red against a gate that withholds everything while the index is cold."""
+    root, _reader, _entities, record = _synced_hot_pair(tmp_path)
+    _reload_hot_pair(root, record)
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(root))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "rebuilt-index-session",
+        "cwd": str(tmp_path),
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(tmp_path / "live.py")},
+    }
+    monkeypatch.setattr(hooks, "_read_payload", lambda: payload)
+    canonical = {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")}
+    hooks.pre_tool_use()
+    answer = json.loads(capsys.readouterr().out)
+    assert "Legitimate live memory" in answer["hookSpecificOutput"]["additionalContext"]
+    assert "Orphan must stay silent" not in json.dumps(answer)
     assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*.json")} == canonical
 
 
 @pytest.mark.parametrize("surface", ["records", "counts"])
-def test_reload_between_hot_queries_cannot_expose_reset_statuses(tmp_path, surface):
+@pytest.mark.parametrize("order", ["live-first", "orphan-first"])
+def test_reload_between_hot_queries_cannot_expose_reset_statuses(tmp_path, surface, order):
     root, _reader, entities, record = _synced_hot_pair(tmp_path)
+    if order == "orphan-first":
+        # The rebuild then lands just before the orphan's own rows are read: a flag read once
+        # per entity, in a statement of its own, has already said "computed" for it.
+        entities = entities[::-1]
     index = HotIndex.open(root)
     assert index is not None
     conn = index._conn
@@ -236,11 +279,42 @@ def test_reload_between_hot_queries_cannot_expose_reset_statuses(tmp_path, surfa
     interleaving = ReloadBeforeBindings()
     index._conn = interleaving
     try:
+        # The rebuild commits just before the statement runs, so the statement reads the
+        # rebuilt rows. Both read ``live``; only the one a sync had found live is kept. Red
+        # against a flag read in an earlier statement (once per call, or once per entity): it
+        # would still say "computed" and the orphan's reset row would be handed over.
         if surface == "records":
-            assert index.records_for([e.entity_id for e in entities]) == []
+            assert [
+                r.decision["title"] for r in index.records_for([e.entity_id for e in entities])
+            ] == ["Legitimate live memory"]
         else:
-            assert index.memory_counts() == (0, 0, 0)
+            assert index.memory_counts() == (1, 1, 1)
         assert interleaving.reloaded
+    finally:
+        index.close()
+
+
+def test_a_never_synced_index_hands_nothing_over_after_a_rebuild(tmp_path):
+    """Passes before and after the change that keeps statuses across a rebuild: no sync ever
+    computed a status here, so there is nothing to keep. It is the test that fails when a cold
+    index is read by its placeholder statuses."""
+    root = tmp_path / ".sidegraph"
+    store = Store(root)
+    seed = _Seeder(store)
+    seed.anchor(seed.decision("Uncomputed memory", DecisionKind.GOTCHA), "missing.py")
+    entity_ids = [e.entity_id for e in store.iter_concrete_entities()]
+    assert store.get_meta(VOLATILE_STALE_KEY) == "1"
+    store.close()
+    path = next((root / "decisions").glob("*.json"))
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["context"] = "An external edit"
+    path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    Store(root).close()  # the rebuild
+    index = HotIndex.open(root)
+    assert index is not None
+    try:
+        assert index.records_for(entity_ids) == []
+        assert index.memory_counts() == (0, 0, 0)
     finally:
         index.close()
 

@@ -189,7 +189,7 @@ and others concern the live host rather than stored records.
 | `store-files-skipped` | Canonical files could not be indexed | Run `sidegraph-verify`, resolve the named files and reopen the store. |
 | `refresh-hook-missing` | No Git hook keeps a graph current | Choose `sidegraph-init --hooks` or `--no-hooks`. See [hook setup](#refresh-hook-missing). |
 | `branch-only-records` | Records remain only on unmerged branches | Merge the intended branch through the normal pull request flow. |
-| `version-skew` | Plugin and runtime versions differ | Follow the direction-specific [version checks](#version-skew), then start a new session. |
+| `version-skew` | A newer Sidegraph is installed on this machine than the session runs, or the plugin copy is older than the runtime | Update the plugin as the line says ([version checks](#version-skew)), then start a new session. |
 | `path-skew` | The optional CLI install differs from the session runtime | Follow the [CLI update or removal path](#path-skew). |
 
 ### store-unreadable
@@ -205,6 +205,11 @@ that depends on the exception:
   `.sidegraph/index.db` and start a new session; it is rebuilt from the committed files. When
   there is no `index.db` to remove, or the database could not be opened at all (a read-only store
   directory, a `.sidegraph` that is a plain file), the advice is the generic one below instead.
+- A store path that leaves its repository through a link (`leaves its repository through a
+  link to …: …`): Sidegraph does not follow it. Replace the link with a real directory, or point
+  the link at a directory inside the repository. A store shared between projects needs a wiring
+  you write yourself that sets `SIDEGRAPH_DIR` to the shared directory itself; the plugin's own
+  commands set that variable, so a plugin install cannot do it.
 - A store that requires a newer Sidegraph (`This store requires Sidegraph >= X.Y.Z; this is
   A.B.C.`): upgrade to at least that version and start a new session. A teammate raised it
   with `sidegraph-require`. On the Claude plugin, a new session alone changes nothing: update
@@ -493,25 +498,33 @@ lists one finding, at `SIDEGRAPH_AUTO_ACCEPT`; `--check` reports it but does not
 
 ### version-skew
 
-The package that runs the hooks and the MCP server is not the version of the plugin that wired
-them. Every SessionStart prints `Sidegraph <version>` right after the standing instruction, so a
-session always shows which package it runs; this check compares that version with the plugin's
-manifest (`plugin.json` under `$CLAUDE_PLUGIN_ROOT`, or else `$PLUGIN_ROOT`, which Codex sets
-too). It compares numeric parts, so `0.10.0` is above `0.9.0`, and ignores a local label such as
+Every SessionStart prints `Sidegraph <version>` right after the standing instruction, so a
+session always shows which package it runs. This check compares that version with the plugin
+files on this machine: the plugin's manifest (`plugin.json` under `$CLAUDE_PLUGIN_ROOT`, or else
+`$PLUGIN_ROOT`, which Codex sets too) and the other installed versions the host keeps beside it.
+It compares numeric parts, so `0.10.0` is above `0.9.0`, and ignores a local label such as
 `+local`.
 
+- **A newer version is installed than the session runs.** The line reads "this session runs
+  Sidegraph X, and Y is installed on this machine". Another project, or another install scope of
+  this project, was updated and this install was not, or the session started before the update.
+  In Claude Code, run `claude plugin marketplace update sidegraph` and then `claude plugin update
+  sidegraph@sidegraph` in a terminal, from this project's directory, and start a new session.
+  Claude Code older than 2.1.281 updates only a user-scope install unless you add the scope the
+  plugin is installed at: `--scope local` or `--scope project`. If the new session still shows
+  the line, the update reached another install: open `/plugin` in that session and update
+  Sidegraph on the Installed tab.
 - **The package is newer than the plugin.** The installed plugin copy is stale: its skills and
-  hook wiring come from an older release. Update the plugin from its marketplace.
-- **The plugin is newer than the package.** The session started before the plugin update, or
-  Sidegraph is launched from a manual registration (`claude mcp add`, a hand-written config) that
-  pins an older version. Restart the session, or update that registration.
-- **What it can catch.** With the internal manifests the package and `plugin.json` come from one
-  checkout and are bumped in one commit, so it never fires there. A plugin launch names the
-  plugin's own version, so it does not fire there either. It fires when a manual registration pins
-  another version than the plugin, or when the installed plugin copy is older than the package that
-  runs. An old binary cannot report itself,
-  so a skew is visible only once the binary that checks is new enough; the version line is what
-  an older install lacks.
+  hook wiring come from an older release. This happens to installs made before 0.25.0, whose
+  manifests launch the newest release. Update the plugin the same way. From 0.29.0 this line
+  also asks the agent to tell you, so an agent raises it in each session until the install is
+  updated.
+- **What it can and cannot see.** It reads plugin files on this machine and makes no network
+  call. A version counts as installed when the host's plugin cache holds its directory and no
+  install has dropped it (Claude Code marks a dropped version with `.orphaned_at`). A release
+  that was never installed on this machine is invisible to it: turn on auto-update for the
+  `sidegraph` marketplace, or update after each release. An old binary cannot report itself, so
+  the check works for an install only once that install runs 0.29.0 or newer.
 - **Where it runs.** The session surface only, and not at all without a plugin root, a manifest,
   or a manifest named `sidegraph` with a version. A session's Bash tool has no plugin root, so
   the setup skill cannot run it.
@@ -577,6 +590,18 @@ not reported: nothing was switched off.
 - **Why only a root launch tells you.** A session started in a directory where the plugin is off
   runs no SessionStart hook, so nothing speaks there. The line (and the notice, with case (b))
   comes from a session at the root, and the finding from doctor and the setup skill.
+
+## A hook printed nothing for a file that has records
+
+Run `sidegraph-stats` and read the `HOOK RUNS` block. `not synced`: the index was rebuilt
+and no sync has checked that anchor yet; any `get_task_context` call, a new session or
+`sidegraph-sync` runs one. On a project with no code graph a sync cannot run, and these
+hooks deliver nothing; `get_task_context` still answers. `ten-file cap`: the agent was
+handed its ten files; `get_task_context(files=[…])` returns the rest, and the count starts
+again after a compaction. `already delivered`: the agent got that file's records earlier in
+the session. `no anchor` and `no current record`: nothing is recorded for that file, or
+what was recorded is superseded or its anchor is gone (`sidegraph-doctor` lists orphaned
+records).
 
 ## How a notice behaves
 

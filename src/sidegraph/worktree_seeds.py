@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from .gitenv import git_env
+from .gitenv import run_git
 
 WINDOWS = os.name == "nt"
 _CAP = 32
@@ -64,10 +64,9 @@ def linked_worktrees(root: Path) -> list[Worktree]:
     """The checkouts of ``root``'s repository other than ``root``, at most 32; any failure
     (no git, a timeout, not a repository) is ``[]``."""
     try:
-        done = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            cwd=root,
-            env=git_env(),
+        done = run_git(
+            ["worktree", "list", "--porcelain"],
+            root,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,

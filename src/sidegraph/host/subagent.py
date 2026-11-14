@@ -109,6 +109,11 @@ def _answer(diagnostics: HookDiagnostics | None = None, run: hook_log.Run | None
             stage = "cleanup"
             index.close()
         if not records:
+            if run is not None:
+                if index.cold_withheld is None:  # not read: the index was locked
+                    run.cause = hook_log.UNKNOWN
+                else:
+                    run.cause = hook_log.COLD if index.cold_withheld else hook_log.NO_RECORD
             return {}
         stage = "brief"
         return {

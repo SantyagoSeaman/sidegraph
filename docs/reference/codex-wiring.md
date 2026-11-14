@@ -29,7 +29,8 @@ global mistakes); `sidegraph-stop` emits the same guarded block-to-distill
 nudge, once per session and again after 30 minutes and 10 new commits (see
 [`reference/hooks.md`](hooks.md#re-arm-after-more-work)). `sidegraph-subagent-start`
 gives each subagent Codex starts a short brief, because a subagent gets no `SessionStart`
-context: the `get_task_context(files=[…])` call to make, and one sentence on how many records
+context: the `get_task_context` call to make (with file paths, or with a symbol's name alone),
+and one sentence on how many records
 memory holds and in how many files (see the
 [hooks reference](hooks.md#sidegraph-subagent-start); `SIDEGRAPH_SUBAGENT_BRIEF=off`
 disables it). `sidegraph-stop` and `sidegraph-subagent-start` degrade silently on any failure.
@@ -101,8 +102,11 @@ filesystem write. Fixture versions were synthetic; the committed package was not
 That check used an owned reserved HTTPS-shaped Git URL rewritten to a local bare origin.
 It did not repeat a public GitHub fetch, use a model, execute hooks or call MCP tools.
 The earlier 0.154.0 check verified the GitHub `owner/repo` shorthand and real MCP calls;
-those are historical observations, not fresh authenticated evidence for 0.162.1. Full
-native acceptance of the exact release candidate remains a separate Windows/macOS gate.
+those are historical observations, not fresh authenticated evidence for 0.162.1. Native
+acceptance on Windows and macOS is a separate check, run only when it is requested for a
+release. For the desktop apps it is the release runbook's
+[desktop smoke](releasing.md#desktop-smoke-when-requested), whose results hold only for the
+operating system they were observed on.
 
 Project trust and hook trust are separate. Project trust controls project-local settings;
 installing or enabling a plugin does not approve its hook hashes. A non-interactive

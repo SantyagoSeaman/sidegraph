@@ -28,7 +28,7 @@ from sidegraph.server import (
     _supersede_fact_impl,
 )
 from sidegraph.store import Store
-from sidegraph.store_layout import RECORD_FIELDS_REQUIREMENT
+from sidegraph.store_layout import RECORD_FIELDS_REQUIREMENT, StoreLinkRefused
 
 HINT = (
     "Commit {prefix} in the same change as the work that produced this record, so it reaches "
@@ -200,14 +200,12 @@ def linked_store(tmp_path: Path, target: Path) -> Store:
     return Store(repo / ".sidegraph")
 
 
-def test_a_store_symlinked_outside_the_repository_has_no_hint(tmp_path):
-    """Git commits the link, not the records in its target, so "commit .sidegraph/" is false."""
-    store = linked_store(tmp_path, tmp_path / "shared" / "store")
-
-    results = run_dict_tools(store)
-
-    assert all("commit_hint" not in result for result in results.values())
-    assert all("commit_hint" not in r for r in propose_decisions(store))
+def test_a_store_symlinked_outside_the_repository_is_refused(tmp_path):
+    """A link that leaves the repository is not followed, so no store opens and no hint is
+    given for it."""
+    with pytest.raises(StoreLinkRefused):
+        linked_store(tmp_path, tmp_path / "shared" / "store")
+    assert not (tmp_path / "shared" / "store" / "format").exists()
 
 
 def test_a_store_symlinked_into_the_repository_keeps_the_hint(tmp_path):

@@ -51,7 +51,8 @@ Bind a `Decision` to the code/doc entities it concerns (see [anchoring](anchorin
 task-scoped retrieval can find it. Delivery depends on the anchors, the host integration,
 and the retrieval budget — see [retrieval](retrieval.md). The `rejected` field preserves
 what was considered or tried and why it was abandoned; gotchas, lessons, and constraints
-rank ahead of ADRs on the task's own entities.
+rank ahead of ADRs on the task's own entities, and the records of a symbol the call names in
+`entities` rank ahead of both (see [retrieval](retrieval.md)).
 
 ## Append-only as a feature
 

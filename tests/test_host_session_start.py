@@ -245,6 +245,27 @@ def test_session_start_instruction_names_the_real_call_and_the_deferred_tool(
     assert "listed only by name" in ctx
 
 
+def test_session_start_instruction_names_the_call_for_a_symbol_with_no_known_file() -> None:
+    """A task often names a symbol and no file. Told to pass repo-relative paths only, an agent
+    searched for the path first and asked memory second. The instruction names the call that
+    needs no path, right after the sentence about paths. That sentence stays first and
+    unchanged, because host checks outside this package match on it. The tool's own
+    description says the same about ``file_path``."""
+    text = hooks.STANDING_SEARCH_INSTRUCTION
+    assert text.startswith(
+        "When you need to find or understand code in this project, call "
+        "get_task_context(files=[…]) with repo-relative paths before any grep or file search — "
+        "decisions, gotchas and a domain map are indexed here. If you know a symbol's name and "
+        'not its file, call get_task_context(entities=[{"name": "…"}]) instead of searching for '
+        "the path. "
+    )
+    from sidegraph import server
+
+    described = " ".join((server.get_task_context.__doc__ or "").split())
+    assert "``file_path`` is optional" in described
+    assert "pass the name alone instead of searching for the path first" in described
+
+
 def test_session_start_does_not_build_the_whole_toc_to_read_the_unratified_list(
     tmp_path, monkeypatch, capsys
 ):

@@ -12,6 +12,7 @@ import pytest
 
 from sidegraph import __version__
 from sidegraph.cli import stats_main
+from sidegraph.host.hook_log import read_runs as read_hook_runs
 from sidegraph.host.transcripts import cited_back as read_cited_back
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
 from sidegraph.stats.model import build_report
@@ -63,7 +64,13 @@ def test_text_and_json_come_from_one_report(tmp_path, capsys, monkeypatch):
 
     assert payload["activation"]["sessions_total"] == 1
     assert text == render_text(
-        build_report(tmp_path / ".sidegraph", None, window_days=30, cited_back=read_cited_back)
+        build_report(
+            tmp_path / ".sidegraph",
+            None,
+            window_days=30,
+            cited_back=read_cited_back,
+            hook_runs=read_hook_runs,
+        )
     )
 
 

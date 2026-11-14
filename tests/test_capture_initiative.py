@@ -81,7 +81,7 @@ def _link(project: Path, target: Path) -> Store:
 
 def test_symlinked_store_follows_the_project_holding_the_link(tmp_path, monkeypatch):
     p = _repo(tmp_path / "p", "feature/billing")
-    v = _repo(tmp_path / "v", "feature/vault-only")
+    v = _repo(p / "vendor" / "v", "feature/vault-only")  # inside P: a link may not leave it
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
@@ -92,7 +92,7 @@ def test_symlinked_store_follows_the_project_holding_the_link(tmp_path, monkeypa
 
 def test_symlinked_store_into_a_plain_directory_still_follows_the_project(tmp_path, cwd_repo):
     p = _repo(tmp_path / "p", "feature/billing")
-    plain = tmp_path / "plain"
+    plain = p / "plain"  # inside P: a link may not leave it
     plain.mkdir()
     store = _link(p, plain)
     propose([_draft()], store, None)

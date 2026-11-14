@@ -65,6 +65,28 @@ def test_backrefs_keep_position_and_only_full_bodies_are_eligible(memory):
     assert after.render_parts()[1].count("[sent earlier] =") == 1
 
 
+def test_named_adr_sent_earlier_gets_no_evidence_line(memory):
+    store, entity, records = memory
+    adr = records[3]
+    store.add_fact(
+        Fact(
+            statement="measured on the real corpus",
+            source="s",
+            status="accepted",
+            supports=[adr.id],
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual"),
+        )
+    )
+    seeds = [Seed(name="Seed", file_path="seed.py")]
+    budget = RetrievalBudget(memory_chars=10000)
+    fresh = get_task_context(seeds, store, None, budget)
+    assert any("evidence:" in line for line in fresh.decisions)
+    sent = get_task_context(seeds, store, None, budget, already_sent=frozenset({adr.id}))
+    assert adr.id in sent.backref_ids
+    assert not any("evidence:" in line for line in sent.decisions)
+
+
 def test_degraded_related_and_proposed_records_are_never_sent_bodies(memory):
     store, entity, records = memory
     small = rank_decisions([entity], [], [], store, RetrievalBudget(memory_chars=330))

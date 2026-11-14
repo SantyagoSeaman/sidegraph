@@ -18,6 +18,7 @@ from sidegraph.maintenance_clock import ClockError
 from sidegraph.migrate import migrate
 from sidegraph.schema import Decision
 from sidegraph.store import Store
+from sidegraph.store_layout import StoreLinkRefused
 from sidegraph.verify import verify_snapshot
 from tests.store_format2_support import (
     OLD,
@@ -267,3 +268,24 @@ def test_real_junction_store_root_is_allowed(tmp_path):
     with junction(link, target), Store(link):
         assert (target / "format").exists()
         assert (target / "index.db").exists()
+
+
+@windows
+def test_real_junction_out_of_the_repository_is_refused(tmp_path):
+    repo, target = tmp_path / "repo", tmp_path / "shared"
+    (repo / ".git").mkdir(parents=True)
+    target.mkdir()
+    with junction(repo / ".sidegraph", target):
+        with pytest.raises(StoreLinkRefused):
+            Store(repo / ".sidegraph")
+        assert list(target.iterdir()) == []
+
+
+@windows
+def test_real_junction_inside_the_repository_opens(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    target = repo / "stores" / "main"
+    target.mkdir(parents=True)
+    with junction(repo / ".sidegraph", target), Store(repo / ".sidegraph"):
+        assert (target / "format").exists()

@@ -41,6 +41,7 @@ from sidegraph.engine.reader import GraphifyReader
 from sidegraph.githooks import GRAPH_REBUILD
 from sidegraph.profiles import FlowProfile, detect_profile, get_profile
 from sidegraph.store import Store, refuse_symlinked_internals
+from sidegraph.store_layout import refuse_outside_store_link
 
 
 class BootstrapArgumentParser(argparse.ArgumentParser):
@@ -770,7 +771,9 @@ def render_completion(
 def _main(args: argparse.Namespace) -> int:
     started_at = monotonic()
     root = Path(args.root).resolve()
-    store_dir = Path(resolve_store_path(args.db, root=str(root), warn_on_create=False)).resolve()
+    store_path = Path(resolve_store_path(args.db, root=str(root), warn_on_create=False))
+    refuse_outside_store_link(store_path)
+    store_dir = store_path.resolve()
     graph_path = _resolve_graph_path(args.graph, root).resolve()
     # Refuse a symlinked store internal up front: otherwise it would surface only after both
     # prompts, as `STORE incomplete` with no reason.

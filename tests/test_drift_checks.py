@@ -780,7 +780,7 @@ def test_symlinked_store_checks_owning_project_not_physical_store_repository(
     project, tmp_path, monkeypatch
 ):
     root, store, decision = project
-    foreign = tmp_path / "foreign-repository"
+    foreign = root / "foreign-repository"  # inside the project: a link may not leave it
     foreign.mkdir()
     git(foreign, "init", "-q")
     git(foreign, "config", "user.name", "Synthetic Foreign")
@@ -938,14 +938,13 @@ def _capture_run(monkeypatch):
     return calls
 
 
-def test_git_bytes_default_env_is_exactly_git_env(monkeypatch, tmp_path):
-    """Guard (N): existing callers keep ``git_env()`` and gain no new variable."""
-    from sidegraph import drift_checks
-    from sidegraph.gitenv import git_env
+def test_git_bytes_default_env_is_the_protected_env(monkeypatch, tmp_path):
+    """Guard (N): existing callers keep ``git_env()`` and gain only the protective settings."""
+    from sidegraph import drift_checks, gitenv
 
     calls = _capture_run(monkeypatch)
     drift_checks.git_bytes(tmp_path, ["status"], 5.0)
-    assert calls[0]["env"] == git_env()
+    assert calls[0]["env"] == gitenv.protected_env()
     assert "GIT_NO_LAZY_FETCH" not in calls[0]["env"]
 
 

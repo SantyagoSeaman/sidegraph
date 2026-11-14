@@ -2,8 +2,9 @@
 
 Phase 2 (``get_task_context``): resolve explicit seeds (files + name/file entity refs) to
 graph nodes, pull a budgeted structural subgraph, gather currently-valid decisions
-(seed → community → peripheral → global), rank **mistakes first**, and serialize a compact
-``TaskContext``. Phase 1 (``top_tier_map``): an on-demand table of contents for SessionStart.
+(seed → community → peripheral → global), rank the records of a named symbol first and
+**mistakes first** among the rest, and serialize a compact ``TaskContext``. Phase 1
+(``top_tier_map``): an on-demand table of contents for SessionStart.
 
 Portable core: imports only the engine-seam interface (``GraphifyReader``/``NodeRef``) and the
 store; entity mapping uses the operation-scoped descriptor lookup. Budget is char-based
@@ -339,6 +340,10 @@ class SeedResolution:
     unresolved: bool = False
     file_bound_entity_ids: frozenset[str] = frozenset()
     ordinary_seed_entity_ids: frozenset[str] = frozenset()
+    # The seed entities a name seed reached (``entities=[{name, file_path}]``): the symbols
+    # the caller named. A file seed names no symbol, and neither does a name with no file
+    # that the graph holds more than once.
+    named_entity_ids: frozenset[str] = frozenset()
 
 
 def _entities_by_node(
@@ -373,6 +378,17 @@ def resolve_seeds(
     lookup = descriptor_lookup or store.descriptor_lookup()
     nodes: list[NodeRef] = []
     matched: set[tuple[str | None, str | None]] = set()
+    # The name seeds that name a symbol: one that carries a file, or one the graph resolves
+    # to exactly one node. `named_nodes` are the nodes such a seed resolved to.
+    naming: set[tuple[str | None, str | None]] = {
+        (s.name, s.file_path)
+        for s in seeds
+        if isinstance(s.name, str)
+        and s.name
+        and isinstance(s.file_path, str)
+        and s.file_path.strip()
+    }
+    named_nodes: set[str] = set()
     if reader is not None:
         for s in seeds:
             if s.name:  # entity ref (name [+ file])
@@ -382,6 +398,9 @@ def resolve_seeds(
                 nodes.extend(found)
                 if found and r.node_id is not None:
                     matched.add((s.name, s.file_path))
+                    naming.add((s.name, s.file_path))
+                if (s.name, s.file_path) in naming:
+                    named_nodes.update(n.node_id for n in found)
             elif s.file_path:  # file seed
                 found = list(reader.nodes_in_file(s.file_path))
                 nodes.extend(found)
@@ -401,6 +420,7 @@ def resolve_seeds(
 
     entities: list[Entity] = []
     seen_ents: set[str] = set()
+    named: set[str] = set()
 
     def add(e: Entity | None) -> None:
         if e is not None and e.entity_id not in seen_ents:
@@ -416,6 +436,8 @@ def resolve_seeds(
             add(entity)
             if entity is not None:
                 matched.add((s.name, s.file_path))
+                if (s.name, s.file_path) in naming:
+                    named.add(entity.entity_id)
     # A resolved node reaches its entities through the engine mapping the write path and sync
     # keep (`last_seen_node_id`), looked up in one map built once per call. The node's own
     # label still gets its descriptor lookup beside it: an entity that was never mapped (no
@@ -429,9 +451,11 @@ def resolve_seeds(
         )
     if by_node is not None:
         for n in nodes:
-            for e in by_node.get(n.node_id, []):
+            labelled = lookup.resolve_descriptor(n.name, n.file_path)
+            for e in [*by_node.get(n.node_id, []), labelled]:
                 add(e)
-            add(lookup.resolve_descriptor(n.name, n.file_path))
+                if e is not None and n.node_id in named_nodes:
+                    named.add(e.entity_id)
 
     # Exact file applicability is independent of symbol resolution. A graph-held file
     # (including non-anchorable types) must keep the ordinary orphan rules.
@@ -456,6 +480,7 @@ def resolve_seeds(
         any((s.name, s.file_path) not in matched for s in seeds),
         file_bound_entity_ids=frozenset(file_entities),
         ordinary_seed_entity_ids=ordinary_entities,
+        named_entity_ids=frozenset(named),
     )
 
 
@@ -820,8 +845,15 @@ def rank_decisions(
     file_bound_entity_ids: frozenset[str] = frozenset(),
     ordinary_seed_entity_ids: frozenset[str] = frozenset(),
     already_sent: frozenset[str] = frozenset(),
+    named_entity_ids: frozenset[str] = frozenset(),
 ) -> TaskContext:
     """Gather valid decisions and rank them mistakes-first under budget.memory_chars.
+
+    The records bound to a symbol the caller named (``named_entity_ids``) go first: their
+    mistake lines, then their ADR lines, placed without evidence. Everything after that is
+    the order described below, so a call that names no symbol is ranked as before. The
+    evidence of a named ADR is inserted after phase 2 of bucket A, never earlier.
+    # see design/superpowers/specs/2026-11-12-task-context-named-symbol-first-design.md (D1-D5)
 
     ``trailing_entities`` (the entities of guessed seeds, see ``get_task_context``) rank after
     everything the seeds' and peripheral entities' own records could fill, the unratified ones
@@ -852,21 +884,21 @@ def rank_decisions(
     first claim on ``budget.memory_chars``.
 
     Bucket A (mistakes) is two-phase, buckets B-D and the superseded one-liners are not
-    (spec-level ruling, plan amended in commit f496b39: inline evidence must never displace
-    a MISTAKE line, since mistakes-first is the one hard product guarantee; evidence
-    displacing a lower-ranked ADR/related/global decision within its own bucket is accepted
-    ranking noise, same as any other same-bucket ordering effect). Phase 1 places every
-    mistake DECISION line with ``evidence=False`` — no evidence spending interleaved, so an
-    early mistake's evidence can never eat the budget a LATER mistake's decision line needed
-    (the bug the immediate-inline approach had: within a single bucket, ``add()`` used to
-    spend on decision i's evidence before decision i+1's line was even attempted). Phase 2
-    then walks the placed mistake lines in their final order and inserts each one's evidence
-    directly after its decision line via ``add_line(..., at=...)`` — same cumulative
-    counter, adjacency preserved by construction (each insert shifts everything after it,
-    tracked by ``offset``), evidence simply stops being inserted once the budget is spent.
+    (spec-level ruling, plan amended in commit f496b39: inline evidence must never displace a
+    MISTAKE line: that is the one hard product guarantee, and it holds for a named symbol's
+    records too; evidence displacing a lower-ranked ADR/related/global decision within its own
+    bucket is accepted ranking noise, same as any other same-bucket ordering effect). Phase 1
+    places every mistake DECISION line with ``evidence=False`` — no evidence spending
+    interleaved, so an early mistake's evidence can never eat the budget a LATER mistake's
+    decision line needed (the bug the immediate-inline approach had: within a single bucket,
+    ``add()`` used to spend on decision i's evidence before decision i+1's line was even
+    attempted). Phase 2 then walks the placed mistake lines in their final order and inserts
+    each one's evidence directly after its decision line via ``add_line(..., at=...)`` — same
+    cumulative counter, adjacency preserved by construction (each insert shifts everything after
+    it, tracked by ``offset``), evidence simply stops being inserted once the budget is spent.
     Buckets B-D keep the pre-existing immediate-inline behavior (their own docstring-level
-    priority already runs decision-then-evidence-then-next-decision, and the plan-level
-    ruling only protects bucket A).
+    priority already runs decision-then-evidence-then-next-decision, and the plan-level ruling
+    only protects bucket A).
     """
     ctx = TaskContext()
     seen: set[str] = set()
@@ -1128,9 +1160,41 @@ def rank_decisions(
     # Ordinary direct routes win, even when the unverified file seed was listed first.
     file_bound_record_ids.difference_update(verified_ids)
 
-    # (A) mistakes on seeds — two-phase (see this function's docstring). Phase 1: place
-    # every mistake decision line with no evidence interleaved.
+    # The records of the symbols the caller named go first: their mistake lines, then their
+    # ADR lines, with no evidence. A record bound to a named symbol and to another symbol is
+    # one of them. With no named symbol this block places nothing.
+    named_ids = {
+        d.id
+        for e in seed_entities
+        if e.entity_id in named_entity_ids
+        for d in seed_accepted[e.entity_id]
+    }
     mistake_decisions: list[Decision] = []
+    named_adrs: list[Decision] = []
+    for e in seed_entities:
+        for d in _by_recency(
+            [
+                x
+                for x in seed_accepted[e.entity_id]
+                if x.kind in _MISTAKE_KINDS and x.id in named_ids
+            ]
+        ):
+            if add(ctx.mistakes, d, evidence=False):
+                mistake_decisions.append(d)
+    for e in seed_entities:
+        for d in _by_recency(
+            [
+                x
+                for x in seed_accepted[e.entity_id]
+                if x.kind == DecisionKind.ADR and x.id in named_ids
+            ]
+        ):
+            if add(ctx.decisions, d, evidence=False):
+                named_adrs.append(d)
+
+    # (A) mistakes on seeds — two-phase (see this function's docstring). Phase 1: place
+    # every mistake decision line with no evidence interleaved. The named ones are placed
+    # already and `add()` skips them.
     for e in seed_entities:
         for d in _by_recency([x for x in seed_accepted[e.entity_id] if x.kind in _MISTAKE_KINDS]):
             if add(ctx.mistakes, d, evidence=False):
@@ -1146,6 +1210,18 @@ def rank_decisions(
         insert_at = i + 1 + offset
         for fact, fact_line in _evidence_candidates(d):
             if place_fact(ctx.mistakes, fact, fact_line, at=insert_at):
+                insert_at += 1
+                offset += 1
+
+    # The evidence of the named ADRs, each inserted after its line: only now, so that it never
+    # takes the budget of a mistake line.
+    offset = 0
+    for i, d in enumerate(named_adrs):
+        if d.id in ctx.backref_ids:
+            continue
+        insert_at = i + 1 + offset
+        for fact, fact_line in _evidence_candidates(d):
+            if place_fact(ctx.decisions, fact, fact_line, at=insert_at):
                 insert_at += 1
                 offset += 1
 
@@ -1634,6 +1710,7 @@ def get_task_context(
         file_bound_entity_ids=res.file_bound_entity_ids,
         ordinary_seed_entity_ids=res.ordinary_seed_entity_ids,
         already_sent=already_sent,
+        named_entity_ids=res.named_entity_ids,
     )
     ctx.structure = structure
     ctx.delivery_unresolved = res.unresolved
@@ -1684,6 +1761,7 @@ def query_decisions(
         seed_node_ids=res.seed_node_ids,
         file_bound_entity_ids=res.file_bound_entity_ids,
         ordinary_seed_entity_ids=res.ordinary_seed_entity_ids,
+        named_entity_ids=res.named_entity_ids,
     )
     return ctx.render(include_structure=False)
 

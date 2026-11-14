@@ -7,6 +7,129 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-11-14
+
+### Added
+
+- The hook run log names why a run was empty (a fifth field on `empty` lines: `no-entity`,
+  `no-record`, `cold`, `repeat`, `cap`, `duplicate`, `unknown`) and marks a delivery that a
+  lock cut short (`partial` on a `lock` line). `sidegraph-stats` prints the counts in a
+  `HOOK RUNS` block. A Sidegraph older than 0.29.0 that reads a newer log skips the lines that
+  carry a fifth field, so it counts fewer empty runs and its delivered share reads higher than
+  it is.
+
+### Changed (Contract change)
+
+- **An agent's own `supersede_decision` waits for ratification.** The replacement lands
+  `proposed` unless the call passes `source="human"`, and the default of `source` is now
+  `"agent"` (it was `"human"`). The old decision stays accepted and current until the
+  replacement is accepted; a drop leaves it untouched. Before, every call wrote an accepted
+  replacement and closed the old decision at once, so an agent could replace a reviewed
+  record with no review. A client that relied on the immediate write must pass
+  `source="human"`, which states that a person asked for the reversal and worded it. The
+  ratification policy applies to a replacement that landed `proposed`: under
+  `SIDEGRAPH_RATIFY_POLICY=auto-all` one with a live anchor is accepted at write time and
+  stamped `auto:auto-all`, as a superseding `propose_decisions` draft is, unless the index
+  is waiting for a sync (after it was built: a pull that changed a record file, a fresh clone, a
+  deleted index, a new store before its first sync; or after a domain was accepted whose
+  membership the next sync settles), when it waits too; under `manual` and `auto-low-risk` it
+  waits. The deprecated `SIDEGRAPH_AUTO_ACCEPT` does not apply to
+  this tool: with it on and no policy set, the replacement waits. The result gains `status`
+  (`"proposed"` or `"accepted"`), `ratified_by` and `auto_ratify_error`. A second
+  replacement of a record whose first one is still waiting is refused, and the refusal now
+  says to tell the owner.
+- **`ratify` needs the owner's verdict to accept.** `ratify` now requires `verdict`, the
+  owner's own words that named the records, to accept a record and to drop one that is not
+  proposed (an accepted domain); without it such a call is refused and writes nothing. A
+  proposed record can still be dropped without a verdict. Records accepted through the MCP
+  tool are stamped `ratified_by: "agent-relayed:<git user name>"` instead of the bare name,
+  which stays the stamp of `sidegraph-ratify` run by a person; `auto:<policy>` is
+  unchanged. Sidegraph cannot verify who is speaking: `verdict` is the calling agent's
+  statement, and its text is not stored. Existing records keep their stamps. The bundled
+  skills pass `verdict`; a client or prompt of your own that calls `ratify(accept=...)`
+  must add it.
+- **A store path that leaves its repository through a link is refused.** `store-format.md`
+  said a linked store root was fine. It still is while the target stays inside the
+  repository. Otherwise every command and MCP tool reports the link and reads nothing, and
+  SessionStart reports that the store cannot be opened. To share one store between projects,
+  set `SIDEGRAPH_DIR` to the shared directory itself; that store then belongs to the directory
+  that holds it. A plugin install cannot do this, because the plugin's own commands set
+  `SIDEGRAPH_DIR`.
+- **`get_task_context` and `query_decisions` place the records of a symbol you name first.**
+  When a call names a symbol in `entities`, the records bound to that symbol now take the
+  memory budget before the records of the other symbols of the named files: the named
+  symbol's mistakes, then its decisions, then the mistakes and the decisions of the rest.
+  Until now every gotcha, constraint and lesson of every symbol in a named file came before
+  any decision, including the decision of the symbol you asked about. The mistakes section is
+  still printed above the decisions section, and evidence still never takes the budget of a
+  mistake line. A symbol counts as named when the item carries a `file_path`, or its name is
+  held by exactly one node of the graph; a bare name that several symbols share names
+  nothing. **Migration:** a call that names no symbol (`files` only) is ranked exactly as
+  before. If you need a file's mistakes ahead of a symbol's decisions, pass the file in
+  `files` and leave the symbol out of `entities` (the symbol's own records then lose their
+  lead, so that answer is not the old answer of the call that named it), or raise
+  `memory_budget`. `retrieve_decisions`, `drill_down` and the records a hook shows for a
+  file are unchanged. See `docs/reference/stability.md`.
+
+### Changed
+
+- **SessionStart says when a newer Sidegraph is installed on the machine than the session
+  runs.** The `version-skew` check now also compares the running package with the other
+  installed versions in the host's plugin cache. It reads plugin files only, with no network
+  call. In a Claude Code session the line names the update commands, and it tells the agent to
+  tell the user. The existing "installed plugin copy is stale" line, which installs made before
+  0.25.0 get, changes the same way: it now names the update commands and tells the agent to
+  tell the user, so agents in those projects raise it in each session until the plugin is
+  updated. The "plugin is newer than the package" line is removed: no install could produce it.
+  A release that was never installed on the machine stays invisible to the check.
+- **The SessionStart instruction names the call for a symbol whose file is not known.** It
+  gains one sentence: "If you know a symbol's name and not its file, call
+  get_task_context(entities=[{"name": "…"}]) instead of searching for the path." Asked for
+  repo-relative paths only, an agent that knew a class name ran one file search to get the path
+  and asked memory second. The first sentence is unchanged, and the SubagentStart brief carries
+  the same text. The description of `get_task_context` says that `file_path` in an `entities`
+  item is optional.
+
+### Security
+
+- **A cloned repository could make Sidegraph run a command.** A repository whose committed
+  `.sidegraph/` also held the files of a git directory made Sidegraph's own git commands read
+  that directory's configuration; with `core.fsmonitor` set there, SessionStart,
+  `sidegraph-doctor` and `sidegraph-stats` ran the configured command. Every git command now
+  goes through one function that refuses such a directory, also when the checkout sits below a
+  folder named `.git`, and runs git with `safe.bareRepository=explicit` and an empty
+  `core.fsmonitor`. In a refused directory the checks that need git are skipped. The refusal
+  works with any Git; the settings need Git 2.31, and `safe.bareRepository` Git 2.38. Only Git
+  2.54 on macOS was run. Sidegraph's git calls no longer use your own fsmonitor, and
+  `sidegraph-compact` and `sidegraph-migrate` can drop the fsmonitor extension from your index
+  until your next `git status`.
+- **A `.env` file in the working directory could change the MCP server.** FastMCP loaded
+  `FASTMCP_*` settings from it, including the transport, so a committed `.env` could replace
+  the stdio server with an HTTP listener. The server now reads these settings from the
+  environment only. Set `FASTMCP_ENV_FILE` to load a file on purpose. The variable is set when
+  `sidegraph` is imported, so a program that imports `sidegraph` before running its own FastMCP
+  server loses its `.env` too.
+- **A committed `.sidegraph` link could point a session at a store outside the repository.**
+  Sidegraph read that store and wrote captures into it. See the contract change above.
+- **A committed hook run log could make `sidegraph-stats` read without end.** The log
+  `.sidegraph/index.db-hooks.log` may be a link to a device such as `/dev/zero`, and the reader
+  followed it and read it whole. It now opens the file as the writer does, without following a
+  link, accepts only a regular file, and reads at most the tail it summarizes.
+
+### Fixed
+
+- After an index rebuild (a pull, a branch switch, a compaction) the `PreToolUse` and
+  `SubagentStart` hooks keep delivering. The rebuild keeps the anchor statuses the last
+  sync computed, and the hooks deliver through those for every unchanged anchor; before,
+  they delivered nothing until the next sync. A kept status is the last sync's verdict:
+  when the code changed since, a record can arrive through an anchor the next sync will
+  find gone, as it can between any two syncs. A record on a new or changed anchor still
+  waits for a sync, and a store no sync has ever checked still delivers nothing from these
+  hooks.
+- After its context is compacted or cleared, an agent is handed records for ten files
+  again. Before, an agent that had received ten files received nothing more for the rest
+  of the session.
+
 ## [0.28.0] — 2026-11-09
 
 ### Added
@@ -3098,7 +3221,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.25.1...v0.26.0

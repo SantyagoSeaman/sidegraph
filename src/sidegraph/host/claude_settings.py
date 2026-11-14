@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import _repository_boundary
-from ..gitenv import git_env
+from ..gitenv import run_git
 from ..verify import _find_repo_root
 
 RATIFY_POLICY_ENV_VAR = "SIDEGRAPH_RATIFY_POLICY"
@@ -385,10 +385,9 @@ def plugin_reach(project: Path) -> PluginReach | None:
         return PluginReach(root, project_only=False, off=())
     project_only = not _on(user, root_local)
     try:
-        done = subprocess.run(
-            ["git", "ls-files", "--cached", "-z"],
-            cwd=root,
-            env=git_env(),
+        done = run_git(
+            ["ls-files", "--cached", "-z"],
+            root,
             capture_output=True,
             timeout=_LS_FILES_TIMEOUT,
         )

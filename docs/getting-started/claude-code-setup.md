@@ -256,7 +256,8 @@ The env vars are inlined into the command because Claude Code hook entries have 
   `Read`, `Grep`, `Edit` or `Write`, or a Bash line whose `sed`, `grep`, `rg` or `cat` names it —
   as a non-blocking block: the top two records (three when the first two are mistakes) with their
   ids, and a line naming `get_task_context` for the rest. Each file arrives once per agent, at
-  most three files per call and ten per agent, and the session's own agent and every subagent it
+  most three files per call and ten per agent (the count starts again for an agent after its
+  context is compacted or cleared), and the session's own agent and every subagent it
   starts count separately; a file with no records prints nothing. Bash is wired as four entries
   (`if` is `Bash(sed *)`, `Bash(grep *)`, `Bash(rg *)`, `Bash(cat *)`) with the same command.
   The `if` field exists from Claude Code 2.1.85, and matching on compound command lines is

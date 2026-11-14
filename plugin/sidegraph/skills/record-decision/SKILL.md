@@ -23,7 +23,7 @@ right write path, right `kind`, filled `rejected`, tight prose, on-target anchor
   accepted at write time when the project's `SIDEGRAPH_RATIFY_POLICY` admits it, the result's
   `ratified_by` then reading `auto:<policy>`, so don't tell the human it awaits review),
   tagged `[unratified]` in retrieval, for a human to accept later via
-  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `sidegraph:ratify-decisions` / the `sidegraph-ratify` CLI (run as `uvx --from sidegraph==0.29.0 --python 3.13 sidegraph-ratify`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 **Never call `add_decision` on your own initiative.** Self-initiated writes always go
@@ -33,7 +33,7 @@ one by default).
 ## Field craft
 
 Draft shape (`propose_decisions` drafts; `add_decision` takes the same fields as
-parameters, minus `supersedes` — reversal on the accepted path is `supersede_decision`):
+parameters, minus `supersedes` — a reversal is `supersede_decision`):
 `{"title", "kind", "context", "choice", "rejected"?, "consequences"?,
 "anchors": [{"name", "file_path", "relation"?}], "initiative"?, "supersedes"?, "tags"?,
 "layer"?}`.
@@ -172,7 +172,7 @@ store.
 
 - **Falsification of an accepted, open fact is `supersede_fact`.** Apply the status checks
   in [Reversing an earlier decision](#reversing-an-earlier-decision) first. Same append-only
-  discipline as `supersede_decision`: the predecessor closes (`valid_to` set, `status`
+  discipline as a human-asked `supersede_decision`: the predecessor closes (`valid_to` set, `status`
   flipped to `superseded`) in the same transaction the successor writes, with `supersedes`
   pointing back. Omit `anchors` to inherit the predecessor's bindings verbatim — including
   any `orphaned` ones, carried as-is; `supports` likewise defaults to the predecessor's own
@@ -187,9 +187,17 @@ from a decision, and the discernment rules for attached vs. standalone — see
 **For an accepted, open predecessor, use `supersede_decision` (or
 `supersedes: <old_id>` in a draft).** The chain of "tried before, abandoned because..." is the product; the
 store closes the predecessor (`status=superseded`, `valid_to` set), never deletes it.
-`supersede_decision` closes it in the same transaction (its replacement lands accepted); a
-proposed draft's `supersedes` closes it only when the draft is ratified, under every policy
-— until then the predecessor stays accepted, and dropping the draft leaves it untouched. Only
+`supersede_decision` follows the same split as the two
+write paths above. Called on your own initiative (leave `source` out), its replacement
+lands `proposed`, exactly like a draft with `supersedes`: the predecessor stays accepted
+until the replacement is accepted, and dropping it leaves the predecessor untouched.
+Called because the human asked for the reversal and dictated or approved the
+replacement's text, pass `source="human"`: the replacement lands accepted and the
+predecessor closes in the same transaction. Never pass `source="human"` on your own
+initiative. The result's `status` says which happened. If the call is refused with
+`already has a pending successor <id>`, a replacement is already waiting for the human:
+stop and report that id. Do not drop a pending successor you did not write in this
+session; the tool will let you, and it is still not yours to drop. Only
 an accepted decision with `valid_to` unset can be superseded, one pending successor at a
 time. To amend a pending draft, ask the human to drop it, then propose corrected knowledge
 without superseding the dropped draft. For a closed record, keep its history and find the

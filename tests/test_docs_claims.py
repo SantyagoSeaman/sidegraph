@@ -881,6 +881,9 @@ def test_removed_stale_claims_do_not_return() -> None:
         # parameter (it takes `files` and `entities`), so an agent following it failed
         # validation.
         "get_task_context(seeds)",
+        # The order of get_task_context changed: the records of a symbol the caller names
+        # come before the mistakes of the other symbols of the named files.
+        "rank ahead of direct adrs and related/global memory",
     )
     for phrase in banned:
         assert phrase not in normalized
@@ -912,7 +915,11 @@ def test_every_doc_quote_of_the_session_start_instruction_equals_the_constant() 
         "docs/reference/hooks.md",
     }, f"parsed the quote from {sorted(quoting)}"
     for name, text in quoting.items():
-        assert constant in text, f"{name} quotes the SessionStart instruction inexactly"
+        # A page can quote the line more than once (the SubagentStart brief opens with it):
+        # every quote counts, not the first that matches.
+        assert text.count(constant) == text.count(opener) > 0, (
+            f"{name} quotes the SessionStart instruction inexactly"
+        )
 
 
 def _task_context_render_headings() -> list[str]:
@@ -1585,6 +1592,11 @@ def test_releasing_describes_the_branch_tag_publish_promote_order():
         "sidegraph-rc",
         "--compare",
         "py3-none-any",
+        "never to the public `main`",
+        "a release does not use it",
+        "`aN` and `bN`",
+        "`X.Y.Z-rc.1`",
+        "moves only in the fourth",
     ):
         assert needle in text, f"releasing.md no longer mentions {needle!r}"
     for stale in (
@@ -1592,8 +1604,79 @@ def test_releasing_describes_the_branch_tag_publish_promote_order():
         "GROK_PUBLIC_FORM",
         "its tag deleted",
         'tools/release-public.sh "release: vX.Y.Z" --push`. This creates and pushes the public',
+        "Release candidate validation",
+        "Then validate the release candidate",
+        "release the next candidate",
+        "Validate on the scratch repository",
+        "the candidate validation",
+        "next release candidate",
+        "portal",
     ):
         assert stale not in text, f"releasing.md still says {stale!r}"
+
+
+def test_releasing_step_eight_does_not_wait_on_a_paused_reviewer():
+    """Step 8 settles the Copilot review only when one is posted; a reviewer that does not run
+    on the maintainer's account must not block the merge."""
+    text = " ".join(_RELEASING.read_text(encoding="utf-8").split())
+    assert "settle the Copilot review if one is posted" in text
+
+
+def test_releasing_desktop_smoke_runs_on_the_released_version_after_the_promote():
+    """The requested desktop smoke checks the released version after the promote, and nothing in
+    it tells the maintainer to stop before the final cut or to release a candidate."""
+    text = _RELEASING.read_text(encoding="utf-8")
+    heading = "### Desktop smoke when requested"
+    assert heading in text, "releasing.md lost the desktop smoke section"
+    section = text.split(heading, 1)[1].split("\n### ", 1)[0]
+    section = " ".join(section.split())
+    assert "released version" in section
+    assert "promote" in section
+    assert "before the final cut" not in section
+    assert "candidate" not in section
+    assert "after the promote" in section
+    assert "does not undo the release" in section
+    assert "counts as passed only when all its applicable checks pass" in section
+    assert "installed through the documented route from the public `main`" in section
+    assert "Both must match the released version" in section
+    assert "to the promoted commit of the public `main`" in section
+    assert "ship the fix as the next version, then repeat the failed surface's smoke" in section
+
+
+def test_releasing_keeps_the_live_checks_the_candidate_section_held():
+    """Step 11 carries the two routes the ``--python 3.13`` smoke does not cover; the rest of the
+    old live checks are an optional section run on the released version after the promote."""
+    text = _RELEASING.read_text(encoding="utf-8")
+    step = " ".join(text.split("\n11. ", 1)[1].split("\n\n", 1)[0].split())
+    assert "sidegraph-doctor --help" in step
+    assert "pip install sidegraph==X.Y.Z" in step
+    assert "newest Python" in step
+    # The route's own sentences: the tag-mode sentence earlier in the step also says "blocks
+    # the promote", and a ``--python`` flag on this route would remove what it restores.
+    assert "with the pin (`sidegraph==X.Y.Z`) but no `--python` flag" in step
+    assert "Both must succeed" in step
+    assert "a failure blocks the promote, and the fix ships as X.Y.(Z+1)" in step
+    heading = "### Fresh-install checks when requested"
+    assert heading in text, "releasing.md lost the fresh-install checks section"
+    assert text.index(heading) < text.index("### Desktop smoke when requested")
+    section = " ".join(text.split(heading, 1)[1].split("\n### ", 1)[0].split())
+    assert "after the promote" in section
+    assert "empty uv cache" in section
+    assert "does not undo the release" in section
+    assert "with Sidegraph installed from the public `main`" in section
+    assert "ship the fix as the next version" in section
+    assert "candidate" not in section
+    assert "scratch" not in section
+    assert "[Owner]" not in text
+    flat = " ".join(text.split())
+    assert "[fresh-install checks](#fresh-install-checks-when-requested) follow the promote" in flat
+
+
+def test_releasing_release_notes_delimiters_match_the_tool():
+    """The notes end at the next level-1 or level-2 heading or link definition outside a code
+    fence, as ``tools/release_notes.py`` reads them."""
+    text = " ".join(_RELEASING.read_text(encoding="utf-8").split())
+    assert "next level-1 or level-2 heading or link definition outside a code fence" in text
 
 
 def test_releasing_desktop_provenance_names_the_uv_archive():
@@ -1602,3 +1685,40 @@ def test_releasing_desktop_provenance_names_the_uv_archive():
     text = " ".join(_RELEASING.read_text(encoding="utf-8").split())
     assert "sidegraph-X.Y.Z.dist-info" in text
     assert "archive_info" not in text
+
+
+def test_security_does_not_call_the_committed_settings_file_wholly_the_hosts():
+    """``sidegraph-mcp`` reads the ratification policy from the committed ``.claude/settings.json``
+    when the environment sets none, so the file is not only the agent host's to gate."""
+    text = " ".join((_ROOT / "SECURITY.md").read_text(encoding="utf-8").split())
+    assert "is your agent host's to gate." not in text
+    assert "`SIDEGRAPH_RATIFY_POLICY`" in text and "`auto-all`" in text
+
+
+def test_waiting_supersede_successor_is_named_in_the_policy_row_and_the_tool_description():
+    """A ``supersede_decision`` successor stays ``proposed`` while the index waits for a sync, and
+    the configuration row, the tool description and the tool reference say so (not one cause)."""
+    import asyncio
+
+    from sidegraph import server
+
+    async def description() -> str:
+        tools = {t.name: t for t in await server.mcp.list_tools()}
+        return " ".join((tools["supersede_decision"].description or "").split())
+
+    tool = asyncio.run(description())
+    row = " ".join(
+        next(
+            line
+            for line in (_ROOT / "docs/reference/configuration.md")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.startswith("| `SIDEGRAPH_RATIFY_POLICY`")
+        ).split()
+    )
+    reference = " ".join(
+        (_ROOT / "docs/reference/mcp-tools.md").read_text(encoding="utf-8").split()
+    )
+    for text in (row, tool, reference):
+        assert "waiting for a sync" in text
+    assert "exactly as a superseding" not in tool + reference

@@ -194,6 +194,14 @@ def test_t1_a_claude_subagent_gets_the_call_and_the_counts(
     assert len(text) < 700
 
 
+def test_the_brief_stays_under_its_limit_at_large_counts() -> None:
+    """The brief opens with the standing instruction, so a longer instruction eats its room.
+    The documented limit must hold for a large store, not only for a fixture's few records."""
+    from sidegraph.host.subagent import render_brief
+
+    assert len(render_brief(99_999, 9_999, 9_999)) < 700
+
+
 def test_t1_a_single_record_reads_in_the_singular(tmp_path, monkeypatch, capsys):
     root, store_dir = _project(tmp_path, seeded=False)
     store = Store(store_dir)

@@ -23,6 +23,7 @@ from .schema import (
     EntityKind,
     Fact,
 )
+from .store_layout import refuse_outside_store_link
 from .store_view import EffectiveRecord, effective_records
 from .verify import verify_snapshot
 
@@ -68,6 +69,7 @@ def read_snapshot(path: Path) -> AdrSnapshot:
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§7.2)
     """
     # The project holding a store symlink owns its relative descriptors.
+    refuse_outside_store_link(path)
     root = path.absolute()
     if not root.is_dir() or (root / "decisions.db").exists():
         raise ValueError(

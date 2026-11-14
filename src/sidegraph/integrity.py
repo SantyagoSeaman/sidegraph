@@ -52,7 +52,7 @@ from ulid import ULID
 from . import drift_checks, githooks, maintenance
 from .config import _store_project_root, path_state
 from .freshness import GraphFreshness, staleness_phrase
-from .gitenv import git_env
+from .gitenv import run_git
 from .schema import validate_record_body
 from .store import (
     _TERMINAL_DECISION_STATUSES,
@@ -268,6 +268,12 @@ def _open_error_fix(error: BaseException, store_dir: Path) -> str:
         return "Finish the interrupted migration with Sidegraph 0.23.x, then upgrade."
     if isinstance(error, LegacyStoreError):
         return "Open the store once with Sidegraph 0.23.x to migrate it, then upgrade."
+    if isinstance(error, StoreRequirementError) and error.kind == "link":
+        return (
+            "Replace the link with a real directory inside the repository; a store shared "
+            "between projects needs your own wiring that sets SIDEGRAPH_DIR to the directory "
+            "itself. Then start a new session."
+        )
     if isinstance(error, StoreRequirementError) and error.required is not None:
         return (
             "Update the Sidegraph plugin from its marketplace, or upgrade Sidegraph where you "
@@ -930,10 +936,9 @@ def _git(
     if remaining <= 0:
         raise _BudgetExhausted
     try:
-        done = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            env=git_env(),
+        done = run_git(
+            args,
+            cwd,
             input=stdin,
             capture_output=True,
             timeout=remaining,

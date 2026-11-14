@@ -27,7 +27,7 @@ The CLI runs at the plugin's pinned version, never the copy on `PATH` ([why](../
 Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 ```bash
-uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
+uvx --from sidegraph==0.29.0 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
 ```
 
 Read `drift_groups.groups` first: one group per drifted file, each listing the records whose
@@ -159,9 +159,15 @@ a rationale or a call, even when one file change re-armed both.
      }])
      ```
 
-     The direct `supersede_decision` path is legitimate only when the human has dictated
-     or approved the successor text in this conversation. For an invalidated *fact*,
-     the same split applies with `supersede_fact`.
+     `supersede_decision` without `source` lands `proposed`, as the draft above does. Pass
+     `source="human"` (accepted at once) only when the human has dictated or approved the
+     successor text in this conversation. If either route is refused with `already has a
+     pending successor <id>`, the record's replacement is already waiting: report that id to
+     the human and move on. Do not drop a pending successor you did not write in this
+     session. For an invalidated *fact*, propose the replacement as a draft fact with
+     `supersedes`; `supersede_fact` always lands accepted and has no `source` switch (its
+     `source` is the fact's evidence text), so call it only when the human dictated or
+     approved the text.
    - **(c) The anchored code is gone entirely** — deleted, not changed. Run
      `sidegraph:heal-anchors` to distinguish a rename from a lost subject. For accepted, open
      decisions, propose a meaningful supersession when part of the rule still holds

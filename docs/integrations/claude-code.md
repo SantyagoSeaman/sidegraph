@@ -55,8 +55,10 @@ The session starts with this instruction:
 
 > When you need to find or understand code in this project, call get_task_context(files=[…])
 > with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. Before a non-trivial change, run the sidegraph check-plan skill if it is
-> available. If the tool is listed only by name, load it first.
+> are indexed here. If you know a symbol's name and not its file, call
+> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
+> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
+> listed only by name, load it first.
 
 SessionStart gives the initial map. PreToolUse supplies records when a supported file read or edit runs. SubagentStart introduces the lookup tools. Stop reminds an agent to capture durable learning after substantial work. See [real output](../reference/examples.md).
 
@@ -84,7 +86,10 @@ session or use `/reload-plugins`. Review the host's update summary and approval 
 The plugin launches the published package at its own version, `uvx --from sidegraph==X.Y.Z
 --python 3.13 <entry point>`, and that package pins every one of its dependencies exactly. The
 Sidegraph version therefore changes only when the plugin does: a session start does not pick up a
-newer release, so update the plugin to get one. The first session after an update installs the new
+newer release, so update the plugin to get one. When a newer version is already installed on the
+machine, because another project or install scope was updated, SessionStart says so and names the update commands
+([`version-skew`](../guides/troubleshooting.md#version-skew)). It cannot know of a release the
+machine has not fetched. The first session after an update installs the new
 version's dependencies, which downloads them once (and, on a machine without Python 3.13, a
 uv-managed CPython 3.13); later starts need no network. The plugin needs uv 0.6.10 or newer, and
 installs made before 0.25.0 keep launching from `main` until they are updated. A running session keeps the skills and manifests it loaded. Third-party

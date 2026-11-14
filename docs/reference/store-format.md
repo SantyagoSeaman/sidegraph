@@ -78,9 +78,14 @@ replace it with a real directory or file. `sidegraph-verify` reports each such e
 An `--against` ref that does not resolve, or a store outside git, is checked before the stop and
 exits `1` without reporting the links.
 `sidegraph-doctor` does the same and skips its advisory checks. Junctions use the same
-`symlinked-store-entry` code and existing symlink error wording. A deliberately linked store **root**
-(`.sidegraph -> ../shared/store`) is fine: a deliberately shared store is a real use. Record
-files inside a real subdirectory are still read as they are.
+`symlinked-store-entry` code and existing symlink error wording. A linked store **root** is followed only while it stays inside the repository
+(`.sidegraph -> stores/main`). A path that leaves the repository through a symlink or a
+junction, at the store or at a folder above it, is refused before anything is read: every
+command and MCP tool names the link, and SessionStart reports that the store cannot be opened.
+To share one store between projects, set `SIDEGRAPH_DIR` to the shared directory itself. A
+store named that way belongs to the directory that holds it. A plugin install cannot do this,
+because the plugin's own commands set `SIDEGRAPH_DIR`. Record files inside a real subdirectory
+are still read as they are.
 
 On Windows, format-2 maintenance writes shard bytes in binary mode, avoiding Python's
 newline conversion. The store's `*.shard -text` Git attribute preserves those LF bytes
@@ -100,7 +105,8 @@ the edited hot file. A compaction comparison checks that each published body exi
 baseline; comparing an edited, compacted body directly to a ref before the edit does not meet
 that requirement.
 
-**A symlinked store belongs to the project that holds the link.** The code a record is anchored
+**A symlinked store belongs to the project that holds the link** (the link's target must be
+inside the repository). The code a record is anchored
 to lives in that project, so the repository Sidegraph asks about the store is the project's, not
 the one the link points into: the `provenance.commit` stamped at capture is the project's `HEAD`
 (`null` while the project has no commits), the code-drift check diffs that commit in the
@@ -575,8 +581,13 @@ lazy, no `--force` needed — rebuilds every derived field from the graph and cl
 mark. Until that pass runs, domain membership is empty, entity engine-mappings are unset,
 and every binding reads `live`; the committed files are untouched throughout, which is why
 none of this produces a git diff.
-Those reset statuses are placeholders: hot-hook record selection and memory counts are
-withheld until sync clears the mark, while the index remains usable for touches and claims.
+Those reset statuses are placeholders. The rebuild keeps, in the index-only column
+`anchor_bindings.kept_status`, the status the last sync computed for each entity whose
+descriptor is unchanged. Until sync clears the mark, hot-hook record selection and memory
+counts read that column, and leave out a record whose anchor has no kept status. A kept
+status is the last sync's verdict about the code as that sync saw it, not a fresh one. The
+index remains usable for touches and claims. The column is part of the derived index, not
+of the committed store format.
 
 ## Digest integrity
 

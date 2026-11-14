@@ -133,6 +133,48 @@ def test_a9_an_unresolved_name_only_entity_gets_its_own_line(tmp_path):
     assert NOT_IN_GRAPH not in out and EMPTY not in out
 
 
+def test_a_name_one_symbol_holds_reaches_its_records_with_no_file(tmp_path):
+    """The call the SessionStart instruction names for a symbol whose file is not known: the
+    name alone. One graph node holds the name, so the answer is that symbol's record and no
+    block about how the seed was read, with the key left out, empty or null."""
+    reader = make_reader(
+        tmp_path,
+        ["src/cache.py"],
+        extra=[{"id": "cache", "label": "Cache", "file": "src/cache.py"}],
+    )
+    store = Store(tmp_path / "t.db")
+    entity = store.upsert_entity(
+        Entity(
+            canonical_name="Cache",
+            descriptor=Descriptor(name="Cache", file_path="src/cache.py"),
+        )
+    )
+    record = store.add_decision(
+        Decision(
+            title="Cache keeps three entries",
+            kind=DecisionKind.GOTCHA,
+            status=DecisionStatus.ACCEPTED,
+            context="c",
+            choice="ch",
+            valid_from=datetime.now(UTC),
+            provenance=Provenance(source="manual"),
+        )
+    )
+    store.add_binding(
+        AnchorBinding(record_id=record.id, entity_id=entity.entity_id, tier=2, status="live")
+    )
+
+    for item in (
+        {"name": "Cache"},
+        {"name": "Cache", "file_path": ""},
+        {"name": "Cache", "file_path": None},
+    ):
+        out = _call(tmp_path, reader, entities=[item], store=store)
+        assert "Cache keeps three entries" in out, item
+        assert READ not in out, item
+    store.close()
+
+
 def test_a_name_missing_from_a_file_the_graph_holds_is_not_a_bare_empty_answer(tmp_path):
     reader = make_reader(tmp_path, ["pkg/m.py"])
 

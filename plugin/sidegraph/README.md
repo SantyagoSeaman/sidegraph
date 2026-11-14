@@ -72,7 +72,8 @@ The MCP server and the hooks run locally. uv starts them from the plugin's confi
   file per record, packed shard files, or archive segments), meant to be committed with your
   code. Sidegraph never commits for you. Each record carries its provenance where capture can read it:
   the agent session id, the commit, and an initiative named after the branch. A record you
-  ratify also carries your git user name. Review `.sidegraph/`
+  ratify also carries your git user name, prefixed `agent-relayed:` when the agent's `ratify`
+  tool passed your verdict on. Review `.sidegraph/`
   before you push it to a shared or public repository. A derived index (`.sidegraph/index.db`)
   and the graph (`graphify-out/`) stay local and can be rebuilt.
 - **What leaves your machine.** The Sidegraph runtime opens no network connections and sends no

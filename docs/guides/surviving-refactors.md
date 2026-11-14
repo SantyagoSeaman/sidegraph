@@ -86,9 +86,12 @@ this triage finding by finding:
   should still exist, restore it, rebuild the graph with `GRAPHIFY_NO_AUTO_REFRESH=1` and
   sync again.
 - **An accepted, open decision's content changed.** Write a real successor with explicit fresh
-  anchors. A `propose_decisions` draft with `supersedes` leaves the accepted predecessor
-  active until ratification. A direct accepted `supersede_decision` replacement closes it
-  in that call. Omitting fresh anchors inherits the old bindings, including orphaned ones.
+  anchors. A `propose_decisions`
+  draft with `supersedes`, or a `supersede_decision` call an agent makes on its own, leaves
+  the accepted predecessor active until ratification. `supersede_decision` with
+  `source="human"` (the owner asked and worded it) closes it in that call. While a
+  replacement waits, `sync` still lists the predecessor as stale and a second replacement
+  is refused: tell the owner which record is waiting. Omitting fresh anchors inherits the old bindings, including orphaned ones.
   See the [supersession invariant](../concepts/data-model.md#the-supersession-invariant).
 - **The knowledge is obsolete with no replacement.** For an accepted decision, use
   [`retire_decision`](../reference/mcp-tools.md#retire_decision) after checking its version,

@@ -193,7 +193,9 @@ the Sidegraph checkout):
    `already initialized: <path> exists.` instead of creating a store there. A legacy
    single-file store (a `decisions.db` inside the directory, or a legacy `*.db` file path) is
    refused at once, without that message: init prints `store not writable` with the 0.23.x
-   instruction and exits 1, and so does a path with an interrupted 0.23.x migration.
+   instruction and exits 1, and so does a path with an interrupted 0.23.x migration and a store
+   path that leaves its repository through a link (`store not writable (<path>): leaves its
+   repository through a link to <target>: <path>. Sidegraph does not follow it.`).
 2. Checks whether `--graph` exists. Prints `found graph: <path>` if so, or `missing graph:
    <path> — run \`graphify update .\` with the environment variable \`GRAPHIFY_NO_AUTO_REFRESH=1\` set, then \`sidegraph-sync\`, to anchor decisions to code
    (optional; Sidegraph works without it).` if not. The graph is optional at init time —
@@ -1266,7 +1268,10 @@ never folds checks.
   before it opens the store, with a one-line message on stderr: a flag that belongs to the other format
   (`--older-than` here, `--settled-days` or `--any-branch` on format 1), a negative
   `--settled-days`, a path that holds no store (the command never creates one), a branch other
-  than the default (`refused: …`), a git state it cannot read (`refused: …`), or a `--dry-run`
+  than the default (`refused: …`), a git state it cannot read (`refused: …`), a store path that
+  leaves its repository through a link (`store not readable (<path>): leaves its repository
+  through a link to <target>: <path>. Sidegraph does not follow it.`; on format-1 and format-2
+  alike, before the store is opened; `sidegraph-migrate` prints it as `refused: …`), or a `--dry-run`
   on a store that opening would write into (no `.gitignore`, no record yet). `1` also when a
   run stops: the report is printed on stdout with a `Stopped:` line giving the reason, for a store that
   fails an entry condition (a bad shard line, a shard conflict, an identity with no effective
@@ -1447,7 +1452,9 @@ for the current requirement again changes nothing. Sync, SessionStart and the MC
 raise the requirement.
 
 **Exit code:** `0` when the requirement is written or already in place; `1` when it is refused,
-or when there is no store (`run sidegraph-init first`).
+when the store path leaves its repository through a link (`sidegraph-require: leaves its
+repository through a link to <target>: <path>. Sidegraph does not follow it.`), or when there is
+no store (`run sidegraph-init first`).
 
 ## `sidegraph-verify`
 
@@ -1648,7 +1655,9 @@ lint on PR) and why the false positive happens.
 given, report zero violations). `1` **operational error** — the store directory doesn't
 exist or isn't readable (the store directory cannot be searched, or an existing record
 directory in it cannot be searched or listed: one `store not readable` line naming it, never
-a pile of dangling or deleted-record findings). The store directory itself need not be
+a pile of dangling or deleted-record findings), or the store path leaves its repository through a
+symlink or a junction (`store not readable (<path>): leaves its repository through a link to
+<target>: <path>. Sidegraph does not follow it.`, before anything is read). The store directory itself need not be
 listable: one that is searchable but not listable (`chmod 300`) is linted normally. When `--against` is present, an unresolvable ref or a store outside
 git is also operational error. Snapshot verification alone does not require git.
 `sidegraph-verify` never constructs a `Store`, so a missing or non-directory `--db` is not
@@ -1728,7 +1737,7 @@ plain-text line):
 | `code-drift` | an open (`proposed`/`accepted`) decision's anchored file(s) changed since capture, or an earlier scoped check (including its declared sections) no longer applies; `record_drift_check` can record an explicit current inspection without rewriting the decision (MCP only); when binding statuses are uncomputed or unavailable, excludes committed deletions and says "binding status unknown"; an anchored file with no status at all is set aside while it is unchanged since the check's commit, unless the recorded check required it, so an orphan the check left out does not re-arm it through either the required-file or the outside-scope comparison; such a file that did not exist at the check's commit, or has changed since, still re-arms it; also carries the "N record(s) predate commit stamping — not checkable" and git-unavailable notes, in place, when either applies. The default text groups the per-record lines by drifted file (`code-drift: N record(s) in M file group(s)`), numbers each distinct `git diff <old blob> <new blob>` once, and may add `anchored region unchanged; sibling sections of the file may still matter` to a record whose anchored Python function or Markdown section is textually identical at both ends; `--flat` restores one line per record. The hint is a reading aid, never a verdict: it changes no count and no exit code. `--json` adds a sibling `drift_groups` key (`partial`, `notes`, `groups[].records[]` with `basis`, `reason`, `diff` and `hint`); `findings` is unchanged |
 | `never-surfaced` | an accepted decision has `0` shows against `N > 0` queries on its anchored file(s) — anchored where people repeatedly work, never once rendered or injected by a hook |
 | `stale-instructions` | an auto-injected agent-instructions file beside the store (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`) still carries the distinctive wording of a **superseded** decision — that file reaches the agent at turn zero, before retrieval, so an abandoned rule surviving there outranks the store's correction by default. Verbatim-ish match on normalized text with length/word floors; superseded records only; no git call. Advisory: it reports a quotation, not a proven contradiction — the file may be narrating history |
-| `unratified-accept` | an **accepted** record whose provenance says `agent` and which carries no ratifier stamp — the signature `SIDEGRAPH_AUTO_ACCEPT=on` leaves in a shared store (one environment's setting bypassing the ratification gate for everyone). Scoped to records created at/after the EARLIER of the store's earliest ratifier stamp and its creation marker (`.sidegraph/stamping_live_since`, written once when a store is genuinely new — never backfilled onto an existing one), so a store predating both reports nothing rather than everything; a store that has never ratified anything but was created by a marker-writing version is still in scope from its own creation, closing the blind window an unratified store would otherwise sit in forever. A stamped record — including one stamped `auto:<policy>` by an auto-ratification policy — and a human-sourced one are never flagged. A **supersession successor** (`supersedes` set — `supersede_decision`/`supersede_fact`) is never flagged either: reversal has no ratification queue to bypass and lands accepted immediately by design, so it reproduces the signature with no relation to the env var this check hunts. Narrowed exception: a `supersedes`-bearing record IS still flagged if it carries a `layer`, a `provenance.ref`, or a tier-0 `tag:`/`initiative:` binding absent from its predecessor — neither `supersede_decision` nor `supersede_fact` can produce any of the three, so one present proves the `propose_decisions`/auto-accept path wrote it. (The fact half is defensive only: `supersede_fact` always stamps `source="human"`, so a fact successor never reaches this agent-sourced check, and no draft shape carries `supersedes` on a fact.) Only a MINIMAL superseding draft (none of the three) is indistinguishable from a legitimate successor by the record's own fields, and stays excluded — a known, accepted, narrower trade-off than treating every supersession alike. Advisory: the signature is not proof — verify before concluding |
+| `unratified-accept` | an **accepted** record whose provenance says `agent` and which carries no ratifier stamp — the signature `SIDEGRAPH_AUTO_ACCEPT=on` leaves in a shared store (one environment's setting bypassing the ratification gate for everyone). Scoped to records created at/after the EARLIER of the store's earliest ratifier stamp and its creation marker (`.sidegraph/stamping_live_since`, written once when a store is genuinely new — never backfilled onto an existing one), so a store predating both reports nothing rather than everything; a store that has never ratified anything but was created by a marker-writing version is still in scope from its own creation, closing the blind window an unratified store would otherwise sit in forever. A stamped record — including one stamped `auto:<policy>` by an auto-ratification policy — and a human-sourced one are never flagged. A **supersession successor** (`supersedes` set) is never flagged either: before 0.29.0 `supersede_decision` wrote every successor accepted at once with no stamp, whoever called it, so those records reproduce the signature with no relation to the env var this check hunts (from 0.29.0 an agent's own `supersede_decision` successor lands `proposed` and is stamped when it is accepted). Narrowed exception: a `supersedes`-bearing record IS still flagged if it carries a `layer`, a `provenance.ref`, or a tier-0 `tag:`/`initiative:` binding absent from its predecessor — neither `supersede_decision` nor `supersede_fact` can produce any of the three, so one present proves the `propose_decisions`/auto-accept path wrote it. (The fact half is defensive only: `supersede_fact` always stamps `source="human"`, so a fact successor never reaches this agent-sourced check, and no draft shape carries `supersedes` on a fact.) Only a MINIMAL superseding draft (none of the three) is indistinguishable from a legitimate successor by the record's own fields, and stays excluded — a known, accepted, narrower trade-off than treating every supersession alike. Advisory: the signature is not proof — verify before concluding |
 | `duplicate-entity` | two or more committed entity files share one logical identity (legal — see below — but ambiguous); reported once per group, at the winner's (lowest-`entity_id`) file, naming every id in the group and its binding count; names are compared folded to their file's basename, and an entity named by a path (full or partial) of its file beside one named by the basename is not a duplicate — it is listed on the informational `spelling twins` lines |
 | `graph-root-mismatch` | `graphify update` was likely run from a subdirectory instead of the repository root, so every recorded `source_file` is relative to that subdirectory instead — every anchor in the graph will look orphaned until it's rebuilt from the root. Detected from `--graph`: a sample of anchorable `source_file` values that mostly don't exist relative to the repo root, but DO all exist under one specific subdirectory (named in the finding). Silent on a legitimately partial graph (a doc-only corpus, an `--exclude`d build) and on too small a sample to judge safely; needs `--graph` to resolve (missing/unreadable simply skips it) |
 | `snapshot-split` | Two or more accepted domains descend from one covered snapshot domain, so neither holds its frozen membership. Refresh each part: `sidegraph-domains snapshot --refresh --domain <each part>` |
@@ -1879,8 +1888,8 @@ so startup may rebuild `index.db`. Binding status
 (live/degraded/orphaned) reflects the last `sidegraph-sync`; run sync first for a fresh view.
 Exit code 0 on success (a store with problems still exits 0 — the problems are the output), 1
 on an operational error: an uninitialized store, a store that cannot be opened (for example
-a corrupt `index.db`, an index row that does not parse, or a format marker this version
-does not read; one
+a corrupt `index.db`, an index row that does not parse, a format marker this version
+does not read, or a store path that leaves its repository through a link; one
 `store not readable (<path>): <error>` line on stderr, and with `--json` that line as
 `{"error": <message>}` on stdout),
 or an unwritable output path.
@@ -1966,7 +1975,8 @@ write failure there can leave a partial export. A killed export can leave `.<out
 or `.<out>.okf-old-*` beside `--out` (the repo root for the default `--out`). The `-old-`
 one holds the previous export: if `--out` is missing, rename it back; if `--out` already holds
 the new bundle, delete it. Exit `0` on success, `1` on an operational error
-(uninitialized store — never auto-created — a store that cannot be opened, printed as
+(uninitialized store — never auto-created — a store that cannot be opened or whose path
+leaves its repository through a link, printed as
 `store not readable (<path>): <error>` on stderr, or a refused/unwritable out dir or its
 parent).
 
@@ -1992,6 +2002,34 @@ Capacity-eviction counts cover this index's recording lifetime, not just the req
 window. Older writers, failed writes and host receipt remain unknown, and hooks have no
 all-attempt denominator. See [delivery evidence](store-format.md#delivery-evidence-derived-index-only)
 for exact surfaces, units, privacy and caps. This read-only command never migrates the ledger.
+
+A **HOOK RUNS** section (`hook_runs` in JSON) counts the runs of the delivering hooks that
+opened the index in the window, from the hook run log. Per hook: the runs and how many
+delivered, with the deliveries a lock cut short named. "A record was bound on N" is the
+runs that delivered plus the runs that held a record back (already delivered to that
+agent, the ten-file cap, an index not synced since its rebuild); it is the denominator of
+the delivered count beside it. It counts only runs the log explains: from the hook's first
+line that carries a cause ("since <date>" when the window also holds older runs), and it
+is left out while lines without a cause are still being written. "Other runs" lists the
+rest by cause; "cause unknown" counts the runs whose cause could not be read without
+waiting for the index lock, and they are outside the share. The section is absent when the
+log has no line in the window and with `SIDEGRAPH_TELEMETRY=off`. A call that names no file
+opens no index and is not in the log, so this is not a count of every hook call.
+`--json`: `hook_runs.hooks.<hook>` with `runs`, `delivered`, `partial`, `lock`, `error`,
+`empty` (cause to count), `delivered_with_causes` and `causes_since`. For example:
+
+```text
+HOOK RUNS   runs that opened the index, last 30 days (run log)
+            PreToolUse: 8,168 runs; delivered on 353 (3 cut short by a lock)
+              a record was bound on 2,580 since 2026-11-13: delivered 350 ·
+              already delivered 1,200 · ten-file cap 330 · not synced 700
+              other runs: no anchor 3,100 · no current record 432 ·
+              cause not recorded 2,044 · cause unknown 5 · lock 3 · error 1
+            SessionStart: 134 runs; delivered on 120
+              other runs: duplicate start 14
+            SubagentStart: 38 runs; delivered on 30
+              a record was bound on 38: delivered 30 · not synced 8
+```
 
 It states what was **shown, asked and touched** — never what was improved, prevented, saved
 or caused. A journal cannot separate "memory sent the agent there" from "the agent was going
@@ -2230,6 +2268,9 @@ read, an index or store directory the process may not search (`cannot read the s
 not "no store index"), a record directory it may not list or search, or one that a symlink
 loop or an I/O error stops (`cannot read the store`, naming that directory or file), a store whose format marker refuses this version
 (`cannot read the store (<dir>): This store requires Sidegraph >= X.Y.Z; this is A.B.C.`),
+a store path that leaves its repository through a symlink or a junction
+(`cannot read the store (<dir>): leaves its repository through a link to <target>: <dir>.
+Sidegraph does not follow it.`, checked before anything behind the link is read),
 or a record row in it that does not parse (the message names the index
 file, the table and the record id). An index from before the render journal, and a graph that is missing or unreadable, are
 not errors.

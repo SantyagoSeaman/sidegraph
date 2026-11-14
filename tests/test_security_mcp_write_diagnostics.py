@@ -134,7 +134,7 @@ def test_returned_ratification_failure_does_not_echo_exception(store, monkeypatc
         raise ValueError(MARKER)
 
     monkeypatch.setattr(store, "ratify", fail)
-    result = call(name, dict(accept=[existing]))
+    result = call(name, dict(accept=[existing], verdict="owner said accept"))
     assert invoked
     assert canonical(store) == before
     with Store(store.path) as reopened:
@@ -150,7 +150,7 @@ def test_returned_domain_ratification_failure_does_not_echo_outcome(store, monke
     identifier = existing["domain_id"]
     before = canonical(store)
     monkeypatch.setattr(store, "ratify_domains", lambda **kwargs: {identifier: "error: " + MARKER})
-    result = call("ratify", dict(accept=[identifier]))
+    result = call("ratify", dict(accept=[identifier], verdict="owner said accept"))
     assert canonical(store) == before
     with Store(store.path) as reopened:
         assert reopened.get_domain(identifier).status.value == "proposed"

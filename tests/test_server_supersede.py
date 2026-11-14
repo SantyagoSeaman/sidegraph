@@ -187,6 +187,7 @@ def test_supersede_closes_predecessor(tmp_path):
         kind="adr",
         context="c2",
         choice="ch2",
+        source="human",
     )
 
     reloaded_old = store.get_decision(old["id"])
@@ -243,9 +244,8 @@ def test_supersede_stamps_session_author_source_and_commit(tmp_path, monkeypatch
 
 
 def test_supersede_stamps_human_provenance(tmp_path):
-    """BEH-1 finding: supersede_decision is the human-asked path, same as
-    supersede_fact (which already stamps "human") -- it was stamping "agent", the value
-    reserved for the agent-initiated propose_decisions pipeline."""
+    """The owner-asked path stamps "human"; the default is covered by
+    tests/test_supersede_gate.py."""
     store = Store(tmp_path / "t.db")
     old = _add_decision_impl(store, None, title="t", kind="adr", context="c", choice="ch")
 
@@ -257,6 +257,7 @@ def test_supersede_stamps_human_provenance(tmp_path):
         kind="adr",
         context="c2",
         choice="ch2",
+        source="human",
     )
 
     assert store.get_decision(out["id"]).provenance.source == "human"

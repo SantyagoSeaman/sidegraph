@@ -114,6 +114,63 @@ A human-readable report can fail on a path the terminal cannot encode (exit `1`)
 For undecodable pathname bytes, use `--json`, which escapes the path and preserves
 the non-clean exit `2`. This reporting limitation does not produce a clean exit `0`.
 
+## Content a clone brings
+
+A repository you clone can carry files placed to steer the tools that run in it. Sidegraph
+treats three kinds as hostile input.
+
+**Git configuration inside the checkout.** Every git command Sidegraph runs goes through one
+function, and two layers apply to each call.
+
+- *The guard.* Git is not started in a directory that holds `HEAD` and `objects` (or
+  `commondir`) without a `.git` entry, anywhere between the directory git would start in and
+  the first `.git` above it. Git would adopt such a directory as a repository and read its
+  `config`, which a clone can bring. The guard reads directory entries only and works with
+  every Git version. A directory named `.git`, and the places Git itself creates below one
+  (`.git/worktrees/<name>`, `.git/modules/<name>`), are not refused. A checkout that sits
+  below a folder named `.git` is still guarded. A refusal looks like a missing git: the checks
+  that need git are skipped, and nothing runs.
+- *The settings.* Every call also carries `safe.bareRepository=explicit` and an empty
+  `core.fsmonitor`, through `GIT_CONFIG_COUNT` and its key and value variables, appended after
+  any pairs the environment already holds. The environment mechanism needs Git 2.31, and
+  `safe.bareRepository` needs Git 2.38; an older Git ignores them and the guard alone applies.
+  No fsmonitor command or daemon is started for these calls, so Sidegraph's git calls do not use
+  your own fsmonitor, and a `git status` that does not take optional locks can remove the
+  fsmonitor extension from your index until your next `git status` (only `sidegraph-compact` and
+  `sidegraph-migrate` run such a call). A `git -c` value that a parent git process passes to
+  Sidegraph through the environment is read after the two settings and wins over them; the
+  guard still applies.
+
+These checks were run with Git 2.54 on macOS. The version limits come from Git's release notes
+and source and were not run, and Windows was not measured.
+
+Git still enters a submodule you have checked out. Its git directory is written on your
+machine, not by the clone, so a command configured there needs someone who can already write
+on your machine and is outside this model. Your own configuration, your environment and a
+`.git` entry delivered inside an archive (Git never checks one out) are outside it as well, and
+a filter, diff driver or signing program in your own configuration still runs when Git needs it.
+
+**A `.env` file.** FastMCP reads `FASTMCP_*` settings from a `.env` file in the working
+directory when it is first imported, including the transport, so a committed file could replace
+the stdio server with an HTTP listener. Importing `sidegraph` sets `FASTMCP_ENV_FILE` to the
+null device unless you have set it, which makes the MCP server read its settings from the
+environment only. `FASTMCP_*` variables you export keep working, and so does a
+`FASTMCP_ENV_FILE` you set yourself. The variable is set for the whole process: a program that
+imports `sidegraph` and then runs its own FastMCP server does not get its `.env` read either.
+
+**A store link.** A store path that leaves its repository through a symlink or a Windows
+junction is refused before anything is read. The path counts as leaving when its real location
+is outside any repository that encloses the path as written, whether the link is the store
+itself or a folder above it. A link whose target stays inside the repository is followed. The
+commands and MCP tools name the link in their error, and SessionStart reports that the store
+cannot be opened. No setting allows the link. To share one store between projects, set
+`SIDEGRAPH_DIR` to the shared directory itself; a store named that way belongs to the directory
+that holds it. The plugins' own commands set `SIDEGRAPH_DIR=.sidegraph`, so a plugin install
+cannot place the store outside its repository.
+
+A committed `.claude/settings.json` can set environment variables for hooks and define hooks.
+Your agent host gates that file; it is not covered here.
+
 ## Bootstrap source validation
 
 The default source size limit is 512,000 bytes. Bootstrap excludes `.git/`, `.sidegraph/`,

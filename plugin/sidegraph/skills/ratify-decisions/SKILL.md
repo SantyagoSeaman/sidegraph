@@ -18,8 +18,16 @@ still waits for the human here.
 explicit whole-batch) verdicts.** Silence, "looks reasonable", or your own confidence that
 a draft is obviously good are NOT a verdict. Present, recommend, and wait — same
 discipline as `sidegraph:name-domains`' pick gate. The one exception is a human who
-already named the outcome in their request ("accept everything from the import",
-"drop those two") — that IS the verdict; don't re-ask.
+named the outcome for records they could already see ("accept everything in the queue",
+"drop those two" after you listed them) — that IS the verdict; don't re-ask. "Import and
+accept everything", said before the import ran, is NOT: show the result once and ask once.
+
+The tool enforces the accept side of this: `ratify` refuses an accept, and a drop of a
+record that is not proposed, without `verdict`, the human's own words that named the
+records. Quote them; never write a verdict the human did not give. An instruction given
+before the human could see what would be accepted ("heal everything", "ratify what you
+propose", "import and accept everything") is not a verdict: list the records and ask. Never invoke `sidegraph-ratify --accept` or `--all`
+yourself: that command is the human's.
 
 **Trigger: the `SessionStart` pending line.** Every session start, if the queue is
 non-empty, `SessionStart`'s injected context ends with one line:
@@ -65,7 +73,8 @@ see it).
 
    Then **STOP and wait** for verdicts.
 
-3. **On explicit verdicts, make ONE `ratify(accept=[...], drop=[...])` call** with all the
+3. **On explicit verdicts, make ONE `ratify(accept=[...], drop=[...], verdict="<the human's
+   words>")` call** with all the
    ids you were given verdicts for — a decision id alone is enough to also cover its
    nested evidence (see [cascade](#facts-ride-their-decision-cascade) below); you don't
    need to separately list a fact the human already accepted/dropped via its decision.
@@ -77,7 +86,8 @@ see it).
    `"already rejected"` / `"already dropped"` means the record already had that verdict (for
    example the ratify policy accepted it at write time): nothing is wrong, nothing changed.
    `"error: already <status>; it cannot be <verb>"` is the opposite verdict on a settled
-   record, a real refusal to relay.
+   record, a real refusal to relay. Records accepted this way are stamped
+   `ratified_by: agent-relayed:<git user name>`.
 
 ## Facts ride their decision (cascade)
 
@@ -104,7 +114,8 @@ verdict — one human gate, not two:
 
 ## Fixing a draft ("fix first")
 
-There is no in-place edit for a proposal. Two clean paths:
+There is no in-place edit for a proposal. Two clean paths, and a third for a proposal that
+supersedes a live record:
 
 - **Drop + re-propose** — `ratify(drop=[id])`, then `propose_decisions(drafts=[...])` with
   the corrected draft without superseding the dropped proposal. Stays gated: the fixed
@@ -113,6 +124,14 @@ There is no in-place edit for a proposal. Two clean paths:
   corrected text in this conversation. `add_decision` lands `status=accepted` immediately,
   and that's legitimate here: the human was the gate. Never use this path for a fix the
   human hasn't seen.
+- **A proposal that supersedes a live record** (it shows a `supersedes:` line) — use
+  neither path above. `add_decision` would lose the supersession link and leave two
+  accepted records, and a re-proposed draft that keeps the title is answered `deduped`
+  against the predecessor and writes nothing. Note the predecessor's id from the
+  `supersedes:` line, drop the proposal (`ratify(drop=[<id>])`), then call
+  `supersede_decision(old_decision_id=<the predecessor's id>, ...)` with the corrected
+  text and anchors. Leave `source` out unless the human dictated the text: the
+  correction comes back through this queue.
 
 Don't "accept then supersede" as an edit — it writes a pointless supersession chain for a
 record that was never valid in the first place.
@@ -122,7 +141,8 @@ record that was never valid in the first place.
 A proposal that `supersedes` an accepted predecessor shows a `supersedes: <id> <title>`
 line: accepting it closes that predecessor at ratification time, and dropping it leaves
 that predecessor live. Under any ratify policy an accepted predecessor stays accepted
-until then. A record has at
+until then. A `supersede_decision` call made without
+`source="human"` lands here too. A record has at
 most one pending successor, and decisions/facts must be accepted with `valid_to` unset
 to be superseded. Domains follow their separate dropped-domain exception. There is no chain
 to order. If accepting is refused because the predecessor is no longer the live head (a
@@ -155,8 +175,8 @@ decision proposed.
   [why selective, not --all](../../../../docs/guides/naming-your-domains.md#why-selective-not---all).
   Present the batch grouped, recommend a subset, let the human widen it.
 - **CLI parity:** `sidegraph-ratify` (no flags = the same pending listing;
-  `--accept`/`--drop`/`--all`) is the terminal/PR-review equivalent. Run it as
-  `uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-ratify`, at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `--accept`/`--drop`/`--all`) is the terminal/PR-review equivalent. The human runs it as
+  `uvx --from sidegraph==0.29.0 --python 3.13 sidegraph-ratify`, at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
   Point the human there when they'd rather review outside the session.
 - A proposed record is not hidden while it waits: by default it surfaces in retrieval tagged

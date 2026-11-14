@@ -63,6 +63,7 @@ from pydantic import BaseModel, Field
 from . import checkout_window, maintenance, maintenance_clock, store_format, store_layout
 from . import delivery as delivery_ledger
 from .domain_splits import split_added_by
+from .gitenv import run_git
 from .hot_index import CLAIM_META_SQL, GET_META_SQL, INSERT_EVENT_SQL, SHOW_UPSERT_SQL
 from .schema import (
     SCHEMA_VERSION,
@@ -96,8 +97,11 @@ from .store_format import (
     new_store_requirement,
 )
 from .store_layout import (
+    DESCRIPTOR_CHANGED_PREFIX,
     INDEX_JOURNAL_PRAGMA,
     INDEX_STAMPS,
+    KEPT_STATUS_COLUMN,
+    LEAF_STATUSES,
     LEGACY_DEFAULTS,
     NOT_A_FILE_REASON,
     SHARDS_SUBDIR,
@@ -149,6 +153,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     record_id TEXT NOT NULL,
     entity_id TEXT NOT NULL,
     data TEXT NOT NULL,
+    kept_status TEXT,
     PRIMARY KEY (record_id, entity_id)
 )""",
     # The key above leads with record_id, so a lookup by entity_id alone (every
@@ -1145,8 +1150,9 @@ def _ratifier_identity(actor: str | None = None) -> str | None:
     import subprocess
 
     try:
-        out = subprocess.run(
-            ["git", "config", "user.name"],
+        out = run_git(
+            ["config", "user.name"],
+            None,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -1158,6 +1164,27 @@ def _ratifier_identity(actor: str | None = None) -> str | None:
         return name or None
     except Exception:
         return None
+
+
+# What a ratifier stamp starts with when an agent passed the verdict on through the MCP
+# ``ratify`` tool; a person at the CLI stamps the bare name, a policy ``auto:<policy>``.
+_RELAYED_STAMP = "agent-relayed"
+
+
+def _relayed_stamp(name: str | None) -> str:
+    """The stamp for a verdict an agent relayed: ``agent-relayed:<name>``, or
+    ``agent-relayed`` alone when no name resolved. That an agent relayed it is known
+    either way, so it is recorded; the name is never guessed.
+    see design/superpowers/specs/2026-11-12-ratification-needs-a-human-verdict-design.md (D7)
+    """
+    return f"{_RELAYED_STAMP}:{name}" if name and name.strip() else _RELAYED_STAMP
+
+
+def _refuse_relayed_actor(actor: str | None, relayed: bool) -> None:
+    """A relayed verdict and an explicit actor are two different paths: refuse both
+    together, before anything is written."""
+    if relayed and actor is not None and actor.strip():
+        raise ValueError("relayed and an explicit actor are exclusive")
 
 
 def _descriptor_name_and_path(e: Entity) -> tuple[str, str | None]:
@@ -1506,6 +1533,8 @@ class Store:
         # (SessionStart makes five) waits for a held lock once, not once per write.
         self._stop_waiting_after_busy = stop_waiting_after_busy
 
+        # A dangling link is not a directory and would skip the gate below.
+        store_layout.refuse_outside_store_link(raw)
         if raw.is_dir():
             refuse_symlinked_internals(raw)
             # Refuse before the legacy refusal, directory creation or debris cleanup.
@@ -2573,6 +2602,111 @@ class Store:
             finally:
                 self._conn.execute(f"PRAGMA busy_timeout = {previous_timeout}")
 
+    def _computed_leaf_statuses(self) -> dict[str, tuple[object, str]]:
+        """``{entity id: (descriptor, leaf status)}`` for the entities of the index about to be
+        rebuilt whose leaf status a sync computed. Read inside the rebuild's transaction, before
+        the tables are dropped.
+
+        An index that is not cold holds computed statuses in its leaf (tier 2) rows. A cold
+        index holds placeholders (``live``), so there a verdict is a status an earlier rebuild
+        kept, or a row status other than the placeholder (a sync after that rebuild wrote it).
+        An entity's status is the worst of its verdicts; an entity with no verdict, or with one
+        this code does not know, is left out. A cold index without the column (never rebuilt by
+        this version), a first build and an unreadable index give nothing. A row that cannot be
+        parsed costs its entity, never the rebuild. An entity whose descriptor was changed in
+        place since the last rebuild (``DESCRIPTOR_CHANGED_PREFIX``) is left out: its statuses
+        were computed for the old descriptor.
+        """
+        try:
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(anchor_bindings)")}
+            if not columns:
+                return {}
+            cold = (
+                self._conn.execute(
+                    "SELECT 1 FROM meta WHERE key = ? AND value = '1'", (VOLATILE_STALE_KEY,)
+                ).fetchone()
+                is not None
+            )
+            has_kept = KEPT_STATUS_COLUMN in columns
+            if cold and not has_kept:
+                return {}
+            kept_column = KEPT_STATUS_COLUMN if has_kept else "NULL"
+            changed = {
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT substr(key, ?) FROM meta WHERE key >= ? AND key < ?",
+                    (
+                        len(DESCRIPTOR_CHANGED_PREFIX) + 1,
+                        DESCRIPTOR_CHANGED_PREFIX,
+                        DESCRIPTOR_CHANGED_PREFIX + "\U0010ffff",
+                    ),
+                )
+            }
+            verdicts: dict[str, list[object]] = {}
+            for entity_id, data, kept in self._conn.execute(
+                f"SELECT entity_id, data, {kept_column} FROM anchor_bindings"
+            ):
+                try:
+                    binding = json.loads(data)
+                    if binding.get("tier") != 2:
+                        continue
+                    status = binding.get("status")
+                except Exception:
+                    verdicts.setdefault(entity_id, []).append(None)
+                    continue
+                seen = verdicts.setdefault(entity_id, [])
+                if not cold or status != "live":
+                    seen.append(status)
+                if cold and kept is not None:
+                    seen.append(kept)
+            found: dict[str, tuple[object, str]] = {}
+            for entity_id, data in self._conn.execute("SELECT entity_id, data FROM entities"):
+                known = verdicts.get(entity_id)
+                if entity_id in changed or not known:
+                    continue
+                if any(verdict not in LEAF_STATUSES for verdict in known):
+                    continue
+                try:
+                    descriptor = json.loads(data).get("descriptor")
+                except Exception:
+                    continue
+                if descriptor:
+                    worst = next(status for status in LEAF_STATUSES if status in known)
+                    found[entity_id] = (descriptor, worst)
+            return found
+        except sqlite3.Error:
+            return {}
+
+    def _keep_leaf_statuses(self, kept: dict[str, tuple[object, str]]) -> None:
+        """Write ``kept`` into the rebuilt rows: every leaf row of an entity that the rebuild
+        left with the descriptor its status was computed for. A new record anchored to such an
+        entity is therefore delivered at once; an entity that is new, or whose descriptor
+        changed, stays without a kept status until a sync. The marks of descriptors changed
+        in place have done their work and are deleted. Called inside the rebuild's
+        transaction."""
+        self._conn.execute(
+            "DELETE FROM meta WHERE key >= ? AND key < ?",
+            (DESCRIPTOR_CHANGED_PREFIX, DESCRIPTOR_CHANGED_PREFIX + "\U0010ffff"),
+        )
+        if not kept:
+            return
+        same: dict[str, str] = {}
+        for entity_id, data in self._conn.execute("SELECT entity_id, data FROM entities"):
+            held = kept.get(entity_id)
+            if held is None:
+                continue
+            try:
+                if json.loads(data).get("descriptor") == held[0]:
+                    same[entity_id] = held[1]
+            except Exception:
+                continue
+        # The rows were written by this rebuild, so their ``data`` is the model's own JSON.
+        self._conn.executemany(
+            f"UPDATE anchor_bindings SET {KEPT_STATUS_COLUMN} = ? "
+            "WHERE entity_id = ? AND json_extract(data, '$.tier') = 2",
+            [(status, entity_id) for entity_id, status in same.items()],
+        )
+
     def _reset_record_tables(self) -> None:
         """DROP and recreate the record tables and ``canonical_stat`` inside the caller's open
         transaction (the first step of every rebuild; see ``_reload_index_from_canonical``)."""
@@ -2601,6 +2735,7 @@ class Store:
     def _rebuild_format1_in_transaction(self, digest: str) -> None:
         """The reload of a store below major 2, inside the caller's open ``BEGIN IMMEDIATE``
         (no ``BEGIN``, no commit): every per-record file and archive segment, as it always was."""
+        kept = self._computed_leaf_statuses()
         self._reset_record_tables()
         # Every loop below STATS the file BEFORE reading its content
         # (digest-integrity design §3's rule, applied to the reload): a
@@ -2752,7 +2887,7 @@ class Store:
 
         for stem, st in archive_stats.items():
             self._record_canonical_stat(_ARCHIVE_SUBDIR, stem, st)
-        self._finish_rebuild(skipped, digest)
+        self._finish_rebuild(skipped, digest, kept)
 
     def _rebuild_index_in_transaction(self, inv: Inventory, digest: str) -> None:
         """Rebuild the whole index of a format-2 store from the occurrence inventory ``inv``,
@@ -2768,6 +2903,7 @@ class Store:
         ``("shards", <lower-cased name>)``).
         # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.3, §5.4, §7.3)
         """
+        kept = self._computed_leaf_statuses()
         self._reset_record_tables()
         skipped: list[dict] = []
         stats = inv.stats
@@ -2837,7 +2973,7 @@ class Store:
             if rel.startswith(_ARCHIVE_SUBDIR + "/") and rel not in inv.images
         )
 
-        self._finish_rebuild(skipped, digest)
+        self._finish_rebuild(skipped, digest, kept)
 
     def _index_effective(self, record_type: str, record_id: str, raw: object) -> None:
         """Index one effective record body (already validated by the inventory)."""
@@ -2856,7 +2992,9 @@ class Store:
                     AnchorBinding.model_validate({**item, "record_id": record_id})
                 )
 
-    def _finish_rebuild(self, skipped: list[dict], digest: str) -> None:
+    def _finish_rebuild(
+        self, skipped: list[dict], digest: str, kept: dict[str, tuple[object, str]]
+    ) -> None:
         """The end of every rebuild, in its transaction: the slug-conflict notice, the three meta
         stamps, the membership reset and the skip list."""
         # design §6: warn about a cross-branch domain-slug race NOW, with the
@@ -2884,6 +3022,7 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+        self._keep_leaf_statuses(kept)
         self._uncertify_membership()
         self._conn.execute("DELETE FROM meta WHERE key = ?", (MEMBERSHIP_POPULATED_KEY,))
         # In the reload's own transaction (design D4): the list is exactly as
@@ -3148,6 +3287,14 @@ class Store:
             if identity_changed and not _is_derived_entity(entity):
                 self._write_entity_canonical(entity)
                 self._touch_digest()
+            if existing is not None and existing.descriptor != entity.descriptor:
+                # The leaf statuses the index holds for this entity were computed for the old
+                # descriptor. Mark it: the next rebuild keeps no status for it, and the hook
+                # index stops reading a kept one. A sync that moves a descriptor is marked
+                # too, which costs that entity one cold window.
+                self._conn.execute(
+                    CLAIM_META_SQL, (DESCRIPTOR_CHANGED_PREFIX + entity.entity_id, "1")
+                )
             self._index_write_entity(entity)
         return entity
 
@@ -3378,7 +3525,8 @@ class Store:
             if target_status == "proposed":
                 raise SupersessionConflictError(
                     f"{noun} {target_id} is a pending proposal; amend it by dropping it and "
-                    "proposing again, or ratify it first"
+                    "proposing again, or ratify it first; if you did not write it in this "
+                    "session, tell the owner"
                 )
             if target_status != "accepted" or not target_open:
                 head = self._live_head_after(table, id_col, target_id)
@@ -3391,8 +3539,9 @@ class Store:
         pending = self._pending_successor(table, id_col, target_id, exclude_id=new_id)
         if pending is not None:
             raise SupersessionConflictError(
-                f"{noun} {target_id} already has a pending successor {pending}; "
-                "ratify or drop it first"
+                f"{noun} {target_id} already has a pending successor {pending}; it waits for "
+                "the owner's verdict. Tell the owner: it must be ratified or dropped first. Do "
+                "not drop it yourself"
             )
 
     def _pending_successor(
@@ -4333,6 +4482,8 @@ class Store:
         drop: list[str] | None = None,
         *,
         actor: str | None = None,
+        relayed: bool = False,
+        drop_needs_verdict: bool = False,
     ) -> dict[str, str]:
         """Bulk ratification of proposed domains — mirrors the decisions ratify result
         shape (server.py's ``_ratify_impl``): a dict of domain_id -> outcome
@@ -4346,6 +4497,17 @@ class Store:
         having called it with an argument at all): every existing caller (MCP,
         ``sidegraph-ratify``) passes nothing, so behavior is byte-identical to before —
         the git identity lookup runs unchanged.
+
+        ``relayed`` (keyword-only): set by the MCP ``ratify`` tool. The stamp becomes
+        ``agent-relayed:<name>`` (``agent-relayed`` alone when no name resolves) instead
+        of the bare name: an agent passed the verdict on, nobody verified a person.
+        Exclusive with an explicit actor (``ValueError``, nothing written).
+
+        ``drop_needs_verdict`` (keyword-only): the call carried no owner's verdict, so a drop
+        must not retire an ACCEPTED domain. Checked on the status read inside the drop's own
+        transaction, where another writer's accept since the caller's earlier read is seen: that
+        id gets an ``error:`` entry and nothing is written for it. Off by default, so
+        ``sidegraph-ratify`` and every other caller drop an accepted domain as before.
 
         Accepting flips proposed -> accepted (PROPOSED only) AND mints (get-or-create,
         idempotent) the paired abstract entity ``domain:<slug>`` so AnchorBinding machinery
@@ -4381,6 +4543,7 @@ class Store:
         own nested one — ``RLock`` makes nesting the two free), so no other thread's write
         interleaves mid-batch.
         """
+        _refuse_relayed_actor(actor, relayed)
         out: dict[str, str] = {}
         with self._lock:
             for domain_id in accept or []:
@@ -4402,7 +4565,8 @@ class Store:
                         models_before = {m.domain_id: m for m in self.iter_domains()}
                         d.status = DomainStatus.ACCEPTED
                         d.ratified_at = datetime.now(UTC)
-                        d.ratified_by = _ratifier_identity(actor)
+                        who = _ratifier_identity(actor)
+                        d.ratified_by = _relayed_stamp(who) if relayed else who
                         self._write_domain(d)
                         if d.supersedes:
                             old = self.get_domain(d.supersedes)
@@ -4434,6 +4598,11 @@ class Store:
                             DomainStatus.ACCEPTED,
                         ):
                             raise ValueError(f"domain {domain_id!r} is not proposed or accepted")
+                        if drop_needs_verdict and d.status == DomainStatus.ACCEPTED:
+                            raise ValueError(
+                                f"domain {domain_id!r} was accepted in the meantime; "
+                                "dropping it needs the owner's verdict"
+                            )
                         d.status = DomainStatus.DROPPED
                         self._write_domain(d)
                         self._uncertify_membership()
@@ -4478,6 +4647,7 @@ class Store:
         decision_id: str,
         *,
         actor: str | None = None,
+        relayed: bool = False,
         cascade_guard: Callable[[Sequence[Fact]], bool] | None = None,
     ) -> tuple[Decision, list[Fact]]:
         """Flip a proposed decision to accepted (the human's one-tap gesture).
@@ -4511,6 +4681,11 @@ class Store:
         ``_ratifier_identity`` itself (falls back to the git identity, never stores the
         blank string).
 
+        ``relayed`` (keyword-only): set by the MCP ``ratify`` tool. The stamp becomes
+        ``agent-relayed:<name>`` (``agent-relayed`` alone when no name resolves) instead
+        of the bare name: an agent passed the verdict on, nobody verified a person.
+        Exclusive with an explicit actor (``ValueError``, nothing written).
+
         ``cascade_guard`` receives the proposed evidence fresh under the same writer
         reservation as human ratification. A refused guard leaves every canonical file
         unchanged. Human calls omit the guard but still reserve before checking status.
@@ -4521,6 +4696,7 @@ class Store:
         facts inherit ``ratified_by`` directly from ``d`` below, so an explicit ``actor``
         reaches them the same way the git identity always did — no separate threading.
         """
+        _refuse_relayed_actor(actor, relayed)
         with self._mutation():
             d = self.get_decision(decision_id)
             if d is None or d.status != DecisionStatus.PROPOSED:
@@ -4554,7 +4730,8 @@ class Store:
 
             d.status = DecisionStatus.ACCEPTED
             d.ratified_at = datetime.now(UTC)
-            d.ratified_by = _ratifier_identity(actor)
+            who = _ratifier_identity(actor)
+            d.ratified_by = _relayed_stamp(who) if relayed else who
             self._write_decision(d)
             if d.supersedes:
                 predecessor = self.get_decision(d.supersedes)
@@ -4712,8 +4889,9 @@ class Store:
             pending = self.pending_decision_successor(decision_id)
             if pending is not None:
                 raise RetireRefusedError(
-                    f"decision {decision_id} has a pending successor {pending}; ratify or "
-                    "drop it first"
+                    f"decision {decision_id} has a pending successor {pending}; it waits for "
+                    "the owner's verdict. Tell the owner: it must be ratified or dropped "
+                    "first. Do not drop it yourself"
                 )
             for fact in self.iter_proposed_facts():
                 if decision_id in fact.supports:
@@ -4857,14 +5035,20 @@ class Store:
             stranded.append(fact)
         return stranded
 
-    def ratify_fact(self, fact_id: str, *, actor: str | None = None) -> Fact:
+    def ratify_fact(self, fact_id: str, *, actor: str | None = None, relayed: bool = False) -> Fact:
         """Flip a proposed fact to accepted directly (no supporting decision involved).
 
         ``actor`` (keyword-only, design D2/T17): same contract as :meth:`ratify` — an
         explicit stamp for auto-ratification's standalone-fact path, defaulting to
         ``None`` so every existing caller (which passes nothing) is unaffected and still
         gets the plain git-identity lookup.
+
+        ``relayed`` (keyword-only): set by the MCP ``ratify`` tool. The stamp becomes
+        ``agent-relayed:<name>`` (``agent-relayed`` alone when no name resolves) instead
+        of the bare name: an agent passed the verdict on, nobody verified a person.
+        Exclusive with an explicit actor (``ValueError``, nothing written).
         """
+        _refuse_relayed_actor(actor, relayed)
         with self._mutation():
             f = self.get_fact(fact_id)
             if f is None or f.status != DecisionStatus.PROPOSED:
@@ -4873,7 +5057,8 @@ class Store:
                 self._refuse_conflicting_fact_successor(f)
             f.status = DecisionStatus.ACCEPTED
             f.ratified_at = datetime.now(UTC)
-            f.ratified_by = _ratifier_identity(actor)
+            who = _ratifier_identity(actor)
+            f.ratified_by = _relayed_stamp(who) if relayed else who
             self._write_fact(f)
             self._close_fact_predecessor(f)
         return f
@@ -5944,6 +6129,37 @@ class Store:
                 "DELETE FROM meta WHERE key >= ? AND key < ? AND key != 'schema_version'",
                 (prefix, upper),
             ).rowcount
+
+    def delete_meta_prefix_stamped(
+        self,
+        prefix: str,
+        stamp_key: str,
+        stamp_value: str,
+        skip: Callable[[str | None], bool],
+    ) -> int | None:
+        """Delete the derived keys under a literal prefix once per stamp, in ONE transaction.
+
+        Under the writer reservation: read ``stamp_key``; when ``skip(its value)`` is true,
+        change nothing and return ``None``; otherwise delete every key under ``prefix`` (as
+        ``delete_meta_prefix`` does), set ``stamp_key`` to ``stamp_value`` and return how many
+        keys went. The read, the deletion and the stamp commit or roll back together. Two
+        callers that arrive at once therefore cannot both find no stamp: the second waits for
+        the reservation and then reads the first one's. ``stamp_key`` must lie outside
+        ``prefix``.
+        """
+        if stamp_key.startswith(prefix):
+            raise ValueError("the stamp key must lie outside the prefix it guards")
+        with self._mutation():
+            row = self._conn.execute(GET_META_SQL, (stamp_key,)).fetchone()
+            if skip(row["value"] if row is not None else None):
+                return None
+            deleted = self.delete_meta_prefix(prefix)
+            self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (stamp_key, stamp_value),
+            )
+            return deleted
 
     def close(self) -> None:
         with self._lock:

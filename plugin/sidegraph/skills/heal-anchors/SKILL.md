@@ -10,7 +10,7 @@ Code and docs moved; the sync run re-resolved every tracked entity and reported 
 honestly, never guessing — what it could no longer follow. Sidegraph auto-heals everything
 it can prove (`rebound`, `moved`, community re-pointing); everything else is routed to a
 human, and this skill is how you walk them through it. CLI commands below run through
-`uvx --from sidegraph==0.28.0 --python 3.13 <command>` at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+`uvx --from sidegraph==0.29.0 --python 3.13 <command>` at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
 
 Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
@@ -46,7 +46,7 @@ entities; the `force=True` call above already re-runs everything, so it makes th
 **CLI fallback** (outside a session, scripted/CI use, or reviewing as plain text):
 
 ```bash
-uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
+uvx --from sidegraph==0.29.0 --python 3.13 sidegraph-sync           # prints the same rebind report; --force to re-run an unchanged graph
 ```
 
 (Reads also self-heal lazily — `get_task_context`/`SessionStart` run `maybe_sync()` — so
@@ -71,11 +71,18 @@ store write or a source change: confirm before acting.
    [record-authoring rules](../record-decision/SKILL.md#reversing-an-earlier-decision), then choose a heal:
    - **Restore the name** — the symbol/heading was renamed or dropped and the decision is
      still true of the code. Restoring it is a **source change**: propose the edit to the
-     human, never do it silently. Then run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, followed by `uvx --from sidegraph==0.28.0 --python 3.13 sidegraph-sync` — the anchor
+     human, never do it silently. Then run `graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set, followed by `uvx --from sidegraph==0.29.0 --python 3.13 sidegraph-sync` — the anchor
      heals back to `rebound`/`unchanged` on an exact match.
    - **Supersede an accepted, open decision** — the code it described moved into new code
      and the rule changed with it. `supersede_decision(...)` with **explicit fresh `anchors` pointing at the successor
-     code**. Do NOT omit `anchors` here: omitting inherits the predecessor's bindings
+     code**. Leave `source` out: the successor
+     lands `proposed` and the old decision stays current, and stays in this stale list, until
+     the human ratifies it (`sidegraph:ratify-decisions`). Pass `source="human"` only if the
+     human dictated or approved the successor's text. If the call is refused with `already
+     has a pending successor <id>`, this decision was healed before and its successor waits
+     for the human: stop and report the pending successor's id in your summary. Do not drop a
+     pending successor you did not write in this session; the tool will let you, and it is
+     still not yours to drop. Do NOT omit `anchors` here: omitting inherits the predecessor's bindings
      verbatim — *including their orphaned status* — which reproduces exactly the problem
      you're healing.
    - **Retire** — the subject is gone and no successor would say anything new (or the
@@ -102,8 +109,9 @@ store write or a source change: confirm before acting.
    `path_prefixes`; check its `hint` and use its local Store fallback if the row does not fit;
    for the actual `seed_anchors` list use local Python `Store.get_domain(domain_id)`
    on the configured store, which works for files and packed shards) and carry what's still
-   right — then `ratify(accept=[<new_id>])`. Or retire it: `ratify(drop=[<domain_id>])`
-   if the area is genuinely gone.
+   right — then, once the human says so, `ratify(accept=[<new_id>], verdict="<the human's words>")`.
+   Or retire it: `ratify(drop=[<domain_id>], verdict="<the human's words>")` if the area is
+   genuinely gone.
 5. **`path rule too broad — path contribution dropped (...):`** — a `path_prefixes` rule
    would claim > 20% of all communities, so sync dropped the path's contribution
    (`seed_anchors`, if any, still applied). Heal by narrowing: `supersede_domain` with
@@ -112,7 +120,7 @@ store write or a source change: confirm before acting.
    [naming guardrails](../../../../docs/guides/naming-your-domains.md#guardrails-against-an-over-broad-path-rule).
 6. **`slug conflicts — drop one (sidegraph-ratify --drop <loser-id>):`** — two live
    domains hold one slug (a cross-branch merge race). The human picks the loser;
-   `ratify(drop=[<loser-id>])` — domain drop legitimately works on an *accepted* domain.
+   `ratify(drop=[<loser-id>], verdict="<the human's words>")` — domain drop legitimately works on an *accepted* domain.
 7. **`domains that FAILED to refresh (fix, then re-run with --force):`** — an accepted
    domain's refresh itself raised (a malformed `seed_anchors` descriptor, the domain
    vanishing mid-run, a lock-contended write, an invalid `.sidegraph/domain-snapshot.json`).
@@ -135,7 +143,7 @@ store write or a source change: confirm before acting.
    split is intended. If it is, the command printed under the finding,
    `sidegraph-domains snapshot --refresh --domain <part> --domain <part>`, re-derives both
    parts from their rules and freezes them; commit `.sidegraph/domain-snapshot.json`. If it is
-   not, `ratify(drop=[<the part that should not exist>])`: the remaining domain takes the
+   not, `ratify(drop=[<the part that should not exist>], verdict="<the human's words>")`: the remaining domain takes the
    frozen membership back at once.
 
 ## Triage decision tree (re-anchor, supersede, or report an obsolete subject)
@@ -184,9 +192,11 @@ included, the *predecessor's own record* stays `accepted` and open until the suc
 ratified (automatically, or later by a human), and dropping the proposal leaves it
 untouched (only a live, accepted decision can be superseded, one pending successor at a
 time) — the predecessor closes (`accepted` → `superseded`) at the moment its successor
-is accepted, so an unreviewed proposal never retires a live decision. Never call `supersede_decision`/`supersede_fact` (the direct,
-immediately-`accepted` MCP tools) from an unattended/CI context — unlike `propose_decisions`,
-they skip the ratify gate entirely.
+is accepted, so an unreviewed proposal never retires a live decision. Do not call `supersede_fact` (always immediately `accepted`) or
+`supersede_decision` with `source="human"` from an unattended/CI context: both skip the
+ratify gate. A `supersede_decision` call without `source` lands `proposed` like the
+draft above; the recipe below still denies the tool, because a deny list cannot see a
+parameter.
 
 **(c) The subject is genuinely gone.** Confirm that it was deleted rather than renamed
 or moved. Check the record's current status. For an accepted, open decision, propose a meaningful

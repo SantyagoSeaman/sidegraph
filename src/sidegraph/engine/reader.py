@@ -35,7 +35,7 @@ from pydantic import BaseModel
 
 from ..config import borrowed_graph_path, main_checkout_root
 from ..freshness import GraphFreshness
-from ..gitenv import git_env
+from ..gitenv import run_git
 from ..schema import Descriptor, canonicalize, file_anchor_name, strip_decoration
 
 # Node file types that can carry anchors. Concepts (LLM-extracted thematic entities) and
@@ -860,17 +860,10 @@ class GraphifyReader:
         """
         repo = self.path.parent.parent
         try:
-            out = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(repo),
-                    "diff",
-                    "--name-only",
-                    "-z",
-                    "HEAD~1",
-                    "HEAD",
-                ],
+            out = run_git(
+                ["diff", "--name-only", "-z", "HEAD~1", "HEAD"],
+                repo,
+                dash_c=True,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
             )
@@ -896,10 +889,9 @@ class GraphifyReader:
         second lookup.
         """
         try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=self.path.parent,
-                env=git_env(),
+            result = run_git(
+                ["rev-parse", "--show-toplevel"],
+                self.path.parent,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -951,10 +943,9 @@ class GraphifyReader:
             if left <= 0:
                 raise _Unknown("git timed out")
             try:
-                return subprocess.run(
-                    ["git", *args],
-                    cwd=self.path.parent,
-                    env=git_env(),
+                return run_git(
+                    list(args),
+                    self.path.parent,
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     timeout=left,
@@ -1168,10 +1159,10 @@ def build_graph_at_head(
     # see design/superpowers/specs/2026-10-14-graphify-upgrade-design.md (D5.4)"""
     argv = graphify_build_command(version)
     archive, tree = workdir / "head.tar", workdir / "tree"
-    done = run(
-        ["git", "archive", "--format=tar", "-o", str(archive), "HEAD"],
-        cwd=repo_root,
-        env=git_env(),
+    done = run_git(
+        ["archive", "--format=tar", "-o", str(archive), "HEAD"],
+        repo_root,
+        run=run,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,

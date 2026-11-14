@@ -56,7 +56,8 @@ layout; a count cut suggests filters and raising `limit` only while it is below 
    `propose_domains(drafts=[{"slug": ..., "title": ..., "summary": ..., "seed_anchors":
    [...]}])` for a session-drafted proposal. Use `path_prefixes` instead of/alongside
    `seed_anchors` when the domain has one clean shared path.
-3. `ratify(accept=[<domain_id>])` to make it live — this also resolves `seed_anchors`/
+3. `ratify(accept=[<domain_id>], verdict="<the human's words>")` to make it live (the domain is
+   one the human asked for and saw; their words are the verdict) — this also resolves `seed_anchors`/
    `path_prefixes` into members immediately, so `drill_down` shows real membership without a
    separate sync — or leave it `proposed` for a human to accept later via `list_proposed` (or
    the `sidegraph-ratify` CLI; see the CLI note under Related). On a store with a domain
@@ -82,8 +83,8 @@ supersede_domain(
 
 It writes the successor and closes the old domain (`status -> superseded`: retrievable
 history, no longer live/TOC-visible) when the successor is accepted — same one-gate rule as
-everywhere else: the successor lands `status=proposed`, so `ratify(accept=[<new_domain_id>])`
-is what makes the rename live and retires the old (accepted) domain; dropping the successor
+everywhere else: the successor lands `status=proposed`, so `ratify(accept=[<new_domain_id>], verdict="<the human's words>")`
+(once the human says so) is what makes the rename live and retires the old (accepted) domain; dropping the successor
 leaves the old domain untouched. Only an accepted domain can be superseded, one pending
 successor at a time; a *dropped* domain is the one exception and is flipped at once.
 
@@ -116,7 +117,7 @@ membership, and the community stays claimed.
 ## Drop a wrong domain
 
 `ratify(drop=[<id>])` — works on **both** `proposed` and `accepted` domains (unlike a decision
-drop, which is proposal-only). This is also the resolution verb for a slug conflict: if two
+drop, which is proposal-only); an accepted one needs `verdict`, the human's words. This is also the resolution verb for a slug conflict: if two
 branches each independently accepted a domain at the same slug, drop the one that loses.
 Dropping is append-only (the record stays, status flips to `dropped`, fully retrievable) —
 never a hard delete.
@@ -160,6 +161,6 @@ include a note for frozen membership or a split.
 - [`docs/guides/naming-your-domains.md`](../../../../docs/guides/naming-your-domains.md) —
   background on bootstrap idempotency, mass-drop recovery, and the CLI equivalents
   (`sidegraph-domains add`, `sidegraph-ratify`).
-- CLI commands run as `uvx --from sidegraph==0.28.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
+- CLI commands run as `uvx --from sidegraph==0.29.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
   [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from .gitenv import git_env
+from .gitenv import run_git
 from .store_layout import (
     ARCHIVE_SUBDIR,
     FORMAT_MARKER_NAME,
@@ -776,13 +776,14 @@ def _git(
     """Run git in ``repo_root``. ``stdin=DEVNULL`` unless the call consumes input (a pipe
     carrying it): a child that inherits the parent's stdin reads it.
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§5.3)"""
-    result = subprocess.run(
-        ["git", "-C", str(repo_root), *args],
+    result = run_git(
+        args,
+        repo_root,
+        dash_c=True,
         input=stdin,
         stdin=subprocess.DEVNULL if stdin is None else None,
         capture_output=True,
         check=True,
-        env=git_env(),
         timeout=timeout,
     )
     return result.stdout
