@@ -15,12 +15,13 @@ The session map orients the agent before a task. With accepted domains, it lists
 
 The host adds the standing instruction:
 
-> When you need to find or understand code in this project, call get_task_context(files=[…])
-> with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. If you know a symbol's name and not its file, call
-> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
-> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
-> listed only by name, load it first.
+> Before you search or read files to answer a question about this project or to plan a change,
+> call retrieve_decisions(query="…") with a few words that name the topic — decisions, gotchas and
+> abandoned approaches are indexed here. For files or symbols you are about to change, call
+> get_task_context(files=[…]) with repo-relative paths, or
+> get_task_context(entities=[{"name": "…"}]) when you know a symbol's name and not its file; there
+> is no need to search for the path first. Before a non-trivial change, run the sidegraph
+> check-plan skill if it is available. If a tool is listed only by name, load it first.
 
 The version line identifies the running package. Diagnostic lines indicate follow-up work. See [captured output](../reference/examples.md#sessionstart-map).
 
@@ -38,7 +39,7 @@ See [implementation details](../reference/retrieval-internals.md#drill_downdomai
 
 ## `get_task_context`: seeded, budgeted, mistakes-first
 
-Supply the files or entities for the task. The result puts the records of a symbol you name in `entities` first, then the known mistakes of the named files, then their decisions, facts and related records. Call `query_structure` with the same seeds for the map; `structure_budget` still sizes the walk that finds related records. If output is clipped, narrow the task or follow its hints.
+Supply the files or entities for the task. The result puts the records of a symbol you name in `entities` first, or, when you name only files, the records bound to a file itself, then the known mistakes of the named files, then their decisions, facts and related records. Call `query_structure` with the same seeds for the map; `structure_budget` still sizes the walk that finds related records. If output is clipped, narrow the task or follow its hints.
 
 For the scratch repository's `cache.py`, the memory excerpt is:
 

@@ -41,6 +41,8 @@ from tests.graph_repo_support import stale_repo, write_graph
 from tests.test_seed_ladder import make_reader
 
 READ = "## How your seeds were read"
+# The name-only call the block offers, in the words of the SessionStart instruction.
+NAME_ONLY = 'entities=[{"name": "…"}] when you know a symbol\'s name and not its file'
 NOT_IN_GRAPH = "## Not in the code graph"
 EMPTY = "## Why this is empty"
 
@@ -328,6 +330,18 @@ def test_a13_every_spelling_of_the_same_file_counts_toward_the_denominator(tmp_p
     assert line.startswith("1 of 3 seed paths exists but is not in the code graph: pkg/n.py.")
 
 
+def test_a_trailing_slash_on_a_graph_file_is_not_reported_as_missing_from_the_graph(tmp_path):
+    """``pkg/m.py/`` named a file the graph holds and the answer said it "exists but is not in
+    the code graph: pkg/m.py". It reads as the file, as ``./pkg/m.py`` does."""
+    fx = stale_repo(tmp_path)
+    reader = GraphifyReader(fx.graph)
+
+    out = _call(tmp_path, reader, files=["pkg/m.py/"])
+
+    assert NOT_IN_GRAPH not in out and "exists but is not in the code graph" not in out
+    assert _section(out, READ) == ["- `pkg/m.py/` → read as `pkg/m.py` (normalised)"]
+
+
 # -- A14: an empty answer with no seeds ----------------------------------------------------
 
 
@@ -365,21 +379,23 @@ def test_a14_no_seeds_and_nothing_to_say_names_the_accepted_domains(tmp_path):
     assert out.startswith("No context found.\n\n" + EMPTY + "\n")
     assert _section(out, EMPTY) == [
         "No files or entities were given, so nothing could be matched. Pass files=[…] with the "
-        "repo-relative paths you are working on, or drill_down(<slug>) for a named area: "
-        "Auth (auth), Payments (payments)."
+        "repo-relative paths you are working on, or " + NAME_ONLY + ", or drill_down(<slug>) for "
+        "a named area: Auth (auth), Payments (payments)."
     ]
     assert "Legacy" not in out and "Proposed only" not in out
     store.close()
 
 
-def test_a14_with_no_accepted_domain_the_second_sentence_stops_at_working_on(tmp_path):
+def test_a14_with_no_accepted_domain_the_second_sentence_stops_at_the_name_only_call(tmp_path):
     reader = make_reader(tmp_path, ["pkg/m.py"])
 
     out = _call(tmp_path, reader)
 
     assert out == (
         "No context found.\n\n" + EMPTY + "\nNo files or entities were given, so nothing "
-        "could be matched. Pass files=[…] with the repo-relative paths you are working on."
+        "could be matched. Pass files=[…] with the repo-relative paths you are working on, or "
+        + NAME_ONLY
+        + "."
     )
 
 
@@ -432,7 +448,9 @@ def test_a14_with_no_seeds_and_no_graph_it_says_to_build_the_graph_first(tmp_pat
     assert line == (
         "No files or entities were given, so nothing could be matched. There is no code graph "
         f"to match against either: build it from the repository root by running {GRAPH_REBUILD} "
-        "first. Pass files=[…] with the repo-relative paths you are working on."
+        "first. Pass files=[…] with the repo-relative paths you are working on, or "
+        + NAME_ONLY
+        + "."
     )
     assert "## No code graph" not in out  # that block is for a call that named a seed
 

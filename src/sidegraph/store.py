@@ -3563,29 +3563,69 @@ class Store:
         (other than ``exclude_id``)."""
         return self._pending_successor("decisions", "id", decision_id, exclude_id=exclude_id)
 
+    def live_heads_after(
+        self, record_ids: Iterable[str], *, fact: bool = False, at: datetime
+    ) -> dict[str, str | None]:
+        """For each id, the live head of the chain that continues that decision (or fact, with
+        ``fact=True``) as a READER counts it: the last ``accepted`` record the ``supersedes``
+        links lead to whose ``valid_to`` is unset or later than ``at``, or ``None`` when no
+        branch holds one. This is the read side's "live" (a record is current until its
+        ``valid_to`` passes); the write side's walk (``_live_head_after``) names only a record
+        with no ``valid_to`` at all. The ids share one read of each record's successors, so a
+        call costs one read per chain member however many of its members are asked about.
+        Read-only.
+        see design/superpowers/specs/2026-11-14-retrieve-decisions-main-read-tool-design.md (D7)
+        """
+        table = "facts" if fact else "decisions"
+        children: dict[str, list[sqlite3.Row]] = {}
+
+        def current(valid_to: str | None) -> bool:
+            return valid_to is None or datetime.fromisoformat(valid_to) > at
+
+        return {
+            record_id: self._chain_head(table, "id", record_id, current, children)
+            for record_id in dict.fromkeys(record_ids)
+        }
+
     def _live_head_after(self, table: str, id_col: str, record_id: str) -> str | None:
         """The live head of the chain that continues ``record_id``: walk ALL of its
         ``accepted`` or ``superseded`` successors breadth-first (a merge can fork a chain;
         a visited set ends any cycle, so the walk is bounded by the table) and return the
         last ``accepted`` AND open record met (a closed one is passed through, never named),
         or ``None`` when no branch holds one. A domain has no ``valid_to``: always open."""
+        return self._chain_head(table, id_col, record_id, lambda valid_to: valid_to is None, {})
+
+    def _chain_head(
+        self,
+        table: str,
+        id_col: str,
+        record_id: str,
+        is_open: Callable[[str | None], bool],
+        children: dict[str, list[sqlite3.Row]],
+    ) -> str | None:
+        """The breadth-first walk of ``_live_head_after``; ``is_open`` says whether a record
+        with this ``valid_to`` (or ``None``) can be named. ``children`` caches the successor
+        rows read so far, by id: a caller walking several chains that share members passes one
+        dict and reads each member's successors once."""
         head, seen, frontier = None, {record_id}, [record_id]
         while frontier:
             level: list[str] = []
             for current in frontier:
-                with self._lock:
-                    rows = self._conn.execute(
-                        f"SELECT {id_col}, status, json_extract(data, '$.valid_to') IS NULL "
-                        f"AS is_open FROM {table} WHERE supersedes = ? "
-                        f"AND status IN ('accepted', 'superseded') ORDER BY {id_col}",
-                        (current,),
-                    ).fetchall()
+                rows = children.get(current)
+                if rows is None:
+                    with self._lock:
+                        rows = children[current] = self._conn.execute(
+                            f"SELECT {id_col}, status, json_extract(data, '$.valid_to') "
+                            f"AS valid_to FROM {table} WHERE supersedes = ? "
+                            f"AND status IN ('accepted', 'superseded') ORDER BY {id_col}",
+                            (current,),
+                        ).fetchall()
                 for row in rows:
                     if row[id_col] in seen:
                         continue
                     seen.add(row[id_col])
                     level.append(row[id_col])
-                    if row["status"] == "accepted" and row["is_open"]:
+                    if row["status"] == "accepted" and is_open(row["valid_to"]):
                         head = row[id_col]
             frontier = level
         return head
@@ -4065,6 +4105,100 @@ class Store:
                 "SELECT data FROM anchor_bindings WHERE record_id = ?", (record_id,)
             ).fetchall()
         return [AnchorBinding.model_validate_json(r["data"]) for r in rows]
+
+    def anchor_names(self) -> dict[str, tuple[str, ...]]:
+        """Record id -> the names a query can find the record by: the ``canonical_name`` and
+        the descriptor ``file_path`` of every entity behind one of its searchable bindings, in
+        binding order, each once. A label (an abstract entity: ``tag:<slug>``,
+        ``initiative:<name>``, ``domain:<slug>``) is given without its scheme, which says what
+        kind of label it is and is not part of its name. A record with no such binding has no
+        entry. Read-only: one pass over ``entities`` and ``anchor_bindings`` inside one read
+        snapshot, so a caller pays no read per record and gets one point in time.
+
+        A binding is searchable when its status is ``live`` or ``degraded``, the statuses a
+        record is delivered through (``valid_decisions_for_entity``). On a cold index
+        (``VOLATILE_STALE_KEY``) a row status is a placeholder: a row whose status the last
+        sync computed as ``orphaned``, kept by the rebuild (``KEPT_STATUS_COLUMN``), is left
+        out. A row with no kept status was never judged and is searched, and so is one whose
+        entity had its descriptor changed in place since (``DESCRIPTOR_CHANGED_PREFIX``): the
+        kept status was computed for the old descriptor. A derived entity (``community:<n>``,
+        see ``_is_derived_entity``) is left out: it exists only in a synced index, and its
+        name is a snapshot label. A row that cannot be parsed is skipped, and so is a name or a
+        path in it that is not a string.
+        see design/superpowers/specs/2026-11-14-retrieve-decisions-main-read-tool-design.md (D5)
+        """
+        with self._lock:
+            own_snapshot = not self._conn.in_transaction
+            if own_snapshot:
+                self._conn.execute("BEGIN DEFERRED")
+            try:
+                cold = (
+                    self._conn.execute(
+                        "SELECT 1 FROM meta WHERE key = ? AND value = '1'", (VOLATILE_STALE_KEY,)
+                    ).fetchone()
+                    is not None
+                )
+                kept_column = "NULL"
+                changed: set[str] = set()
+                if cold:
+                    columns = {
+                        row[1] for row in self._conn.execute("PRAGMA table_info(anchor_bindings)")
+                    }
+                    if KEPT_STATUS_COLUMN in columns:
+                        kept_column = KEPT_STATUS_COLUMN
+                    changed = {
+                        row[0]
+                        for row in self._conn.execute(
+                            "SELECT substr(key, ?) FROM meta WHERE key >= ? AND key < ?",
+                            (
+                                len(DESCRIPTOR_CHANGED_PREFIX) + 1,
+                                DESCRIPTOR_CHANGED_PREFIX,
+                                DESCRIPTOR_CHANGED_PREFIX + "\U0010ffff",
+                            ),
+                        )
+                    }
+                entity_rows = self._conn.execute("SELECT entity_id, data FROM entities").fetchall()
+                binding_rows = self._conn.execute(
+                    f"SELECT record_id, entity_id, data, {kept_column} FROM anchor_bindings "
+                    "ORDER BY rowid"
+                ).fetchall()
+            finally:
+                if own_snapshot and self._conn.in_transaction:
+                    # Ends a read-only snapshot; not a write path (``_mutation`` owns commits).
+                    self._conn.execute("COMMIT")
+        names: dict[str, tuple[str, ...]] = {}
+        for entity_id, data in entity_rows:
+            try:
+                body = json.loads(data)
+                if is_derived_entity_body(body):
+                    continue
+                found: list[str] = []
+                label = body["canonical_name"]
+                if isinstance(label, str):
+                    if body.get("kind") == "abstract":
+                        label = label.partition(":")[2] or label
+                    found.append(label)
+                path = (body.get("descriptor") or {}).get("file_path")
+                if path and isinstance(path, str):
+                    found.append(path)
+            except Exception:
+                continue
+            names[entity_id] = tuple(found)
+        out: dict[str, dict[str, None]] = {}
+        for record_id, entity_id, data, kept in binding_rows:
+            found_names = names.get(entity_id)
+            if found_names is None:
+                continue
+            try:
+                status = json.loads(data).get("status")
+            except Exception:
+                continue
+            if status not in store_layout.DELIVERABLE_STATUSES:
+                continue
+            if kept == "orphaned" and entity_id not in changed:
+                continue
+            out.setdefault(record_id, {}).update(dict.fromkeys(found_names))
+        return {record_id: tuple(held) for record_id, held in out.items()}
 
     def valid_decisions_for_entity(
         self, entity_id: str, as_of: datetime | None = None

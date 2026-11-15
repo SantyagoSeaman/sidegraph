@@ -11,6 +11,7 @@ the file they are about.
 
 from __future__ import annotations
 
+import functools
 import re
 from datetime import UTC, datetime, timedelta
 
@@ -42,10 +43,10 @@ RECORDS = "## Nearest anchored records (not anchored to your files)"
 EMPTY = "## Why this is empty"
 NOT_IN_GRAPH = "## Not in the code graph"
 
-# A structure budget of 120 characters walks one node: the seed's own. A hub's neighbourhood
-# overflows the node cap the same way, which is how a graph neighbour's records stay out of the
-# main answer's Related block.
-ONE_NODE = 120
+# A structure budget under 120 characters maps one node, the seed's own, and reaches no
+# neighbour, which is how a graph neighbour's records stay out of the main answer's Related
+# block.
+ONE_NODE = 119
 
 
 class _Repo:
@@ -734,3 +735,75 @@ def test_a_failure_in_combining_the_two_contexts_keeps_the_sentence(tmp_path, mo
 
     assert _section(out, EMPTY)[0].startswith("No current record is anchored to `core/a.py`.")
     assert RECORDS not in out
+
+
+# -- the named file's own record did not fit the memory budget --------------------------------
+
+
+def _too_long_for_the_budget(tmp_path) -> _Repo:
+    """``core/a.py`` is in no graph and carries one record too long for a small memory budget;
+    its sibling ``core/b.py`` has a short one that fits."""
+    repo = _repo(tmp_path, ["core/b.py"])
+    repo.record("core/a.py", "Long record " + "x" * 600)
+    repo.record("core/b.py", "Short sibling")
+    repo.fill(8)
+    return repo
+
+
+def _ask(repo: _Repo, memory_budget: int) -> str:
+    return _get_task_context_impl(
+        repo.store,
+        repo.reader,
+        files=["core/a.py"],
+        entities=None,
+        structure_budget=ONE_NODE,
+        memory_budget=memory_budget,
+    )
+
+
+def test_a_named_file_whose_record_did_not_fit_the_budget_is_not_called_unanchored(tmp_path):
+    repo = _too_long_for_the_budget(tmp_path)
+
+    out = _ask(repo, 100)
+
+    assert out.startswith(
+        "1 record found for what you named did not fit memory_budget=100: call again with a "
+        "larger memory_budget to get it. The records of the nearest anchored files follow.\n\n"
+    )
+    assert "No record is anchored" not in out
+    # The records of the sibling still follow, and the sentence about the named file still says
+    # one record is bound to it: the lead no longer contradicts it.
+    assert "Short sibling" in out.split(RECORDS + "\n", 1)[1]
+    assert "has 1 more record(s) bound to it" in out
+
+
+def test_a_named_file_with_no_record_keeps_the_nearest_only_lead(tmp_path):
+    repo = _area(tmp_path)
+
+    out = repo.call(files=["core/new.py"])
+
+    assert out.startswith(server._NEAREST_ONLY_LEAD + "\n\n")
+    assert "did not fit" not in out
+
+
+def test_the_budget_lead_is_gone_once_the_budget_holds_the_record(tmp_path):
+    repo = _too_long_for_the_budget(tmp_path)
+
+    out = _ask(repo, 2000)
+
+    assert "did not fit" not in out and "No record is anchored" not in out
+    assert "Long record" in out
+
+
+def test_the_cap_removing_the_nearest_records_keeps_the_budget_lead(tmp_path, monkeypatch):
+    repo = _too_long_for_the_budget(tmp_path)
+    full = _ask(repo, 100)
+    monkeypatch.setattr(
+        server, "_hard_cap", functools.partial(server._hard_cap, cap=full.index(RECORDS) + 40)
+    )
+
+    out = _ask(repo, 100)
+
+    assert RECORDS not in out and "Short sibling" not in out
+    assert out.startswith("1 record found for what you named did not fit memory_budget=100:")
+    assert "No record is anchored" not in out

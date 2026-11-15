@@ -178,6 +178,77 @@ def test_t3_routed_seeds_are_appended_to_explicit_values_without_duplicates(rece
     assert received["entities"] == [{"name": "fn_0()"}, {"name": "fn_1()"}]
 
 
+@pytest.mark.parametrize("alias", ["seeds", "paths"])
+def test_t3_a_string_holding_a_json_list_is_read_as_that_list(received, repo, alias):
+    """An agent passed the list as one string: ``'["pkg/a.py", "RetryPolicy"]'``. It is the two
+    seeds, not one seed named by the whole text."""
+    text("get_task_context", {alias: '["pkg/a.py", "RetryPolicy"]'})
+
+    if alias == "seeds":
+        assert received["files"] == ["pkg/a.py"]
+        assert received["entities"] == [{"name": "RetryPolicy"}]
+    else:
+        assert received["files"] == ["pkg/a.py", "RetryPolicy"]
+        assert received["entities"] is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['["RetryPolicy", 5]', '["RetryPolicy"', "[not json]", '{"a": "b"}', '"RetryPolicy"', "[]x"],
+)
+def test_t3_a_string_that_is_not_a_json_list_of_strings_stays_one_seed(received, repo, value):
+    """A list with a non-string item, invalid JSON, or anything that does not start with ``[``
+    and parse to a list of strings is the one string it always was."""
+    text("get_task_context", {"seeds": value})
+
+    assert received["files"] is None
+    assert received["entities"] == [{"name": value}]
+
+
+@pytest.mark.parametrize("value", ["[" * 100000, "[" * 10000 + "0" + "]" * 10000])
+def test_t3_a_deeply_nested_string_stays_one_seed(received, repo, value):
+    """``json.loads`` raises ``RecursionError``, not ``ValueError``, on nesting this deep: the
+    string is still one seed, not a tool error."""
+    text("get_task_context", {"seeds": value})
+
+    assert received["entities"] == [{"name": value}]
+
+
+def test_t3_an_empty_json_list_string_is_no_seeds(received, repo):
+    text("get_task_context", {"seeds": "[]"})
+
+    assert received["files"] is None
+    assert received["entities"] is None
+
+
+@pytest.mark.parametrize("tool", SEED_TOOLS)
+@pytest.mark.parametrize(
+    ("entities", "field"),
+    [
+        ([{"name": 5}], "entities[0].name"),
+        ([{"name": "fn_0()"}, {"name": ["fn_0()"]}], "entities[1].name"),
+        ([{"name": "fn_0()", "file_path": 5}], "entities[0].file_path"),
+    ],
+)
+def test_t3_an_entity_name_or_path_that_is_not_text_is_refused_by_field(
+    repo, caplog, tool, entities, field
+):
+    """``{"name": 5}`` reached ``.strip()`` and came back as "'int' object has no attribute
+    'strip'" with a traceback in the log; the refusal names the field and the type instead."""
+    message = error(tool, {"entities": entities})
+
+    assert f"`{field}` must be a string" in message
+    assert "strip" not in message and "Traceback" not in caplog.text
+
+
+def test_t3_an_entity_with_no_name_or_no_path_is_still_accepted(repo):
+    """``null`` is how a missing field is spelled; only a value of another type is refused."""
+    assert not call(
+        "get_task_context", {"entities": [{"name": None, "file_path": "pkg/a.py"}]}
+    ).is_error
+    assert not call("get_task_context", {"entities": [{"name": "fn_0()"}]}).is_error
+
+
 def test_t3_an_alias_that_is_not_text_is_named(repo):
     message = error("get_task_context", {"seeds": 5})
 

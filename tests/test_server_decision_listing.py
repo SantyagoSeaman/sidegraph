@@ -491,13 +491,14 @@ def test_t6_every_query_word_must_occur_in_the_text_fields(store):
     assert _ids(answer) == [both.id]
 
 
-def test_t6_a_query_that_matches_nothing_suggests_fewer_words(store):
+def test_t6_a_query_that_matches_nothing_says_why(store):
     _add(store, "Cache layout")
 
     answer = _ask(store, query="cache zebra")
 
     assert answer["matched"] == 0
-    assert "one or two" in answer["hint"]
+    assert "No searched record holds both words." in answer["hint"]
+    assert "In no searched record: zebra." in answer["hint"]
     assert "cache zebra" in answer["hint"]
 
 
@@ -593,7 +594,7 @@ def test_t8_the_serialized_answer_stays_within_the_clamped_budget(
 # -- T9: order ---------------------------------------------------------------------------
 
 
-def test_t9_gotchas_then_lessons_then_the_rest_newest_first(store):
+def test_t9_gotchas_then_lessons_and_constraints_then_the_rest(store):
     spec = [
         ("adr new", "adr", 1),
         ("gotcha old", "gotcha", 30),
@@ -612,9 +613,9 @@ def test_t9_gotchas_then_lessons_then_the_rest_newest_first(store):
         "gotcha new",
         "gotcha old",
         "lesson new",
+        "constraint mid",
         "lesson old",
         "adr new",
-        "constraint mid",
         "adr old",
     ]
 

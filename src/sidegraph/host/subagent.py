@@ -37,10 +37,10 @@ def _noun(count: int, word: str) -> str:
 
 
 def render_brief(records: int, files: int, mistakes: int) -> str:
-    """The brief: the standing call, then what memory holds, in under 700 characters.
+    """The brief: the standing call, then what memory holds, in under 800 characters.
 
     Host-neutral by construction: Codex defers MCP tools too, so the text names no host's
-    tool-loading mechanism, only the instruction's own "if the tool is listed only by name,
+    tool-loading mechanism, only the instruction's own "if a tool is listed only by name,
     load it first".
     see design/superpowers/specs/2026-10-03-subagent-start-brief-design.md (D2)
     """

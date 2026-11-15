@@ -243,18 +243,6 @@ def test_evidence_of_a_named_adr_follows_its_line_and_waits_for_mistake_evidence
     assert ctx.shown_ids[4:] == [of_mistake.id, of_newer.id, of_older.id]
 
 
-def test_call_with_no_named_symbol_keeps_the_old_order(tmp_path):
-    store, reader, e = _world(tmp_path)
-    adr = _record(store, [e["foo"]], "foo-adr", DecisionKind.ADR)
-    older = _record(store, [e["bar"]], "bar-gotcha", DecisionKind.GOTCHA, age_days=5)
-    newer = _record(store, [e["foo"]], "foo-gotcha", DecisionKind.GOTCHA, age_days=1)
-    whole = _record(store, [e["file"]], "file-adr", DecisionKind.ADR, age_days=9)
-    ctx = get_task_context(FILES_ONLY, store, reader)
-    # Mistakes of every symbol first, then the ADRs: nothing is a named record.
-    assert set(ctx.shown_ids[:2]) == {older.id, newer.id}
-    assert set(ctx.shown_ids[2:]) == {adr.id, whole.id}
-
-
 def test_blank_file_path_on_a_shared_name_names_nothing(tmp_path):
     store, reader, e = _world(tmp_path)
     seeds = [Seed(file_path=FILE), Seed(name="dup", file_path=" ")]

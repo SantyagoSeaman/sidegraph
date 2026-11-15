@@ -9,6 +9,7 @@ see design/superpowers/specs/2026-10-11-worktree-only-seeds-design.md (section 4
 
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 from datetime import UTC, datetime
@@ -593,3 +594,111 @@ def test_19c_an_ambiguous_entity_seed_with_a_remapped_path_is_journaled_normalis
         lambda: [Worktree(feat, "wt-feat")],
     )
     assert ladder.seed_paths == ["pkg/ghost.py"]
+
+
+def _filesystem_refuses(root: Path, rel: str) -> bool:
+    """Whether this filesystem answers ``ENAMETOOLONG`` for ``root / rel``: the tests of an
+    over-long path mean the same only where it does (a Linux path limit is 4,096, macOS's 1,024)."""
+    try:
+        (root / rel).stat()
+    except OSError as error:
+        return error.errno == errno.ENAMETOOLONG
+    return False
+
+
+def test_an_over_long_path_does_not_remove_the_advice_for_the_other_seeds(tmp_path, monkeypatch):
+    """A path component over 255 characters makes ``os.stat`` raise ``ENAMETOOLONG``. It used to
+    escape from the check of the one path, and the ``suppress`` around the whole block dropped
+    "How your seeds were read", "Not in the code graph" and the nearest-anchored advice for every
+    seed of the call. Each path is asked on its own: the over-long one is reported as refused by
+    the filesystem, the worktree-only one keeps its advice."""
+    main = repo(tmp_path)
+    feat_with(main, {"pkg/new.py": NEW})
+    too_long = "pkg/" + "x" * 300 + ".py"
+    if not _filesystem_refuses(main, too_long):
+        pytest.skip("this filesystem accepts a 300-character name")
+
+    out = ask(monkeypatch, main, ["pkg/new.py", too_long])
+
+    here, long_line = lines(out)
+    assert "1 of 2 seed paths exists only in another checkout" in here
+    assert "pkg/new.py (worktree .worktrees/feat, branch wt-feat)" in here
+    assert long_line.startswith("1 of 2 seed paths is refused by the filesystem as too long: ")
+    assert "xxxxxxxxxx" in long_line and "Check the path." in long_line
+    assert "`pkg/m.py`" in "\n".join(lines(out, NEAREST))  # the nearest-anchored advice stays
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["pkg/" + "x" * 300 + ".py", "/".join(["d" * 200] * 6) + "/f.py"],
+    ids=["one name over 255", "a path over 1024"],
+)
+def test_an_over_long_path_alone_is_reported_as_refused(tmp_path, monkeypatch, path):
+    main = repo(tmp_path)
+    if not _filesystem_refuses(main, path):
+        pytest.skip("this filesystem accepts that path")
+
+    out = ask(monkeypatch, main, [path])
+
+    (line,) = lines(out)
+    assert line.startswith("1 of 1 seed path is refused by the filesystem as too long: ")
+    assert "not a file in this checkout" not in line
+
+
+def test_an_over_long_path_is_never_guessed_to_be_another_graph_file(tmp_path, monkeypatch):
+    """The tail rung would read ``xxx…/m.py`` as ``pkg/m.py`` (the only file with that name).
+    A path the filesystem refused stops at that verdict: it is reported, not read as another."""
+    main = repo(tmp_path)
+    rel = "x" * 300 + "/m.py"
+    if not _filesystem_refuses(main, rel):
+        pytest.skip("this filesystem accepts a 300-character name")
+
+    out = ask(monkeypatch, main, [rel, "pkg/new.py"])
+
+    assert "read as" not in out and "How your seeds were read" not in out
+    assert any(
+        line.startswith("1 of 2 seed paths is refused by the filesystem as too long: ")
+        for line in lines(out)
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["\u00e9" * 140, "\u4e2d" * 90, "\u0436" * 200],
+    ids=["140 e-acute", "90 CJK", "200 Cyrillic"],
+)
+def test_an_existing_multibyte_name_is_not_called_too_long(tmp_path, monkeypatch, name):
+    """The name is over 255 bytes and under 255 characters: the filesystem holds it, so the file
+    exists and the graph lacks it. A byte count done before asking would call it impossible."""
+    main = repo(tmp_path)
+    rel = f"pkg/{name}.py"
+    try:
+        (main / rel).write_text(NEW, encoding="utf-8")
+    except OSError:
+        pytest.skip("this filesystem refuses that Unicode name")
+    assert len(name.encode("utf-8")) > 255
+
+    out = ask(monkeypatch, main, [rel])
+
+    (line,) = lines(out)
+    assert line.startswith("1 of 1 seed path exists but is not in the code graph: ")
+    assert "too long" not in out
+
+
+def test_a_path_with_a_nul_byte_keeps_the_advice_of_the_other_seeds(tmp_path, monkeypatch):
+    """`os.stat` raises ValueError, not OSError, on an embedded NUL; the path is no file and the
+    worktree-only seed beside it keeps its line."""
+    main = repo(tmp_path)
+    (main / "pkg/new.py").write_text(NEW, encoding="utf-8")
+    assert not seed_ladder.refused_as_too_long(main, "pkg/a\x00b.py")
+
+    out = ask(monkeypatch, main, ["pkg/a\x00b.py", "pkg/new.py"])
+
+    assert any("pkg/new.py" in line for line in lines(out))
+
+
+def test_is_file_exact_answers_false_for_a_path_the_filesystem_refuses(tmp_path):
+    assert seed_ladder.is_file_exact(tmp_path, "x" * 300 + ".py") is False
+    assert seed_ladder.refused_as_too_long(tmp_path, "x" * 300 + ".py")
+    assert not seed_ladder.refused_as_too_long(tmp_path, "x" * 255)
+    assert not seed_ladder.refused_as_too_long(tmp_path, "missing/file.py")

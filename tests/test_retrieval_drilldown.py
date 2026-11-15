@@ -136,6 +136,85 @@ def test_drill_down_unknown_slug_candidates_exclude_proposed_and_dropped(tmp_pat
     assert dropped.slug not in out["candidates"]
 
 
+def _accepted(store: Store, *slugs: str, **titles: str) -> None:
+    for slug in slugs:
+        _accept(store, _domain(store, slug, title=titles.get(slug.replace("-", "_"), slug.title())))
+
+
+def test_a_misspelt_slug_names_the_closest_domains_first(tmp_path):
+    store = Store(tmp_path / "t.db")
+    _accepted(store, "alpha", "billing", "checkout", "payments", "zeta")
+
+    out = drill_down("paymnets", store, None)
+
+    assert out["found"] is False
+    assert out["closest"] == ["payments"]
+    assert out["candidates"][0] == "payments"
+    assert sorted(out["candidates"]) == ["alpha", "billing", "checkout", "payments", "zeta"]
+    assert 'No domain has the slug "paymnets". Closest: payments.' in out["hint"]
+
+
+def test_a_guessed_slug_inside_a_title_finds_that_domain(tmp_path):
+    store = Store(tmp_path / "t.db")
+    _accepted(store, "alpha", "money-movement", "zeta", money_movement="Payments and invoicing")
+
+    out = drill_down("invoicing", store, None)
+
+    assert out["closest"] == ["money-movement"]
+
+
+def test_closeness_beats_the_alphabet_when_the_list_is_cut(tmp_path):
+    store = Store(tmp_path / "t.db")
+    _accepted(store, *(f"area-{i:02d}" for i in range(12)), "zzz-ingest")
+
+    out = drill_down("zzz-ingestion", store, None)
+
+    assert out["candidates"][0] == "zzz-ingest"
+    assert len(out["candidates"]) == 10
+    assert out["candidates"][1:] == sorted(out["candidates"][1:])
+
+
+def test_a_slug_near_nothing_keeps_the_alphabetical_candidates(tmp_path):
+    store = Store(tmp_path / "t.db")
+    _accepted(store, "alpha", "billing")
+
+    out = drill_down("qqqqqqqq", store, None)
+
+    assert out["candidates"] == ["alpha", "billing"]
+    assert "closest" not in out
+    assert out["hint"].startswith('No domain has the slug "qqqqqqqq".')
+
+
+def test_an_exact_slug_is_unchanged(tmp_path):
+    store = Store(tmp_path / "t.db")
+    _accepted(store, "payments")
+
+    out = drill_down("payments", store, None)
+
+    assert out["found"] is True
+    assert "closest" not in out and "candidates" not in out
+
+
+def test_the_closest_domain_comes_before_a_less_close_one_whatever_the_alphabet_says(tmp_path):
+    store = Store(tmp_path / "t.db")
+    # "bilng" sorts before "billing-api", but "billing" sits inside "billing-api" (0.9) and is
+    # only 0.83 of "bilng".
+    _accepted(store, "bilng", "billing-api", "unrelated")
+
+    out = drill_down("billing", store, None)
+
+    assert out["closest"] == ["billing-api", "bilng"]
+    assert out["candidates"] == ["billing-api", "bilng", "unrelated"]
+
+
+def test_a_slug_asked_with_capitals_spaces_or_underscores_is_read_as_a_slug(tmp_path):
+    store = Store(tmp_path / "t.db")
+    _accepted(store, "retrieval-path", "zeta")
+
+    for asked in ("Retrieval Path", "retrieval_path", "  RETRIEVAL-PATH-X "):
+        assert drill_down(asked, store, None)["closest"] == ["retrieval-path"], asked
+
+
 # -- found: domain shape -------------------------------------------------------------------
 
 

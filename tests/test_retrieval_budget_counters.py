@@ -254,12 +254,30 @@ def test_a_fact_refused_inline_then_placed_standalone_is_not_dropped(tmp_path):
     e = _entity(store, "f", "a.py")
     d = _decision(store, e, "a", 20, kind=DecisionKind.ADR)
     f = _fact(store, "y" * 80, supports=[d.id], entity=e)
-    standalone = len(_fmt_fact(f))
+    standalone = len(_fmt_fact(f, with_id=True))
     ctx = rank_decisions(
         [e], [], [], store, RetrievalBudget(memory_chars=_detailed_len(d) + standalone)
     )
     assert len(ctx.facts) == 1, "placed as a standalone fact"
     assert ctx.dropped_for_budget == 0
+    store.close()
+
+
+def test_the_id_of_each_placed_fact_is_charged_to_the_budget(tmp_path):
+    """The id a fact line ends with is part of the line, so it takes budget like the rest of
+    it, fact after fact: a budget one character short of the two lines places one."""
+    store = Store(tmp_path / "s")
+    e = _entity(store, "f", "a.py")
+    facts = [_fact(store, "short", entity=e) for _ in range(2)]
+    lines = [_fmt_fact(f, with_id=True) for f in facts]
+    assert len(lines[0]) == len(lines[1])
+    both = len(lines[0]) + len(lines[1])
+    ctx = rank_decisions([e], [], [], store, RetrievalBudget(memory_chars=both - 1))
+    assert len(ctx.facts) == 1 and ctx.dropped_for_budget == 1
+    assert ctx.chars_used == len(lines[0]) == _placed_chars(ctx)
+    ctx = rank_decisions([e], [], [], store, RetrievalBudget(memory_chars=both))
+    assert len(ctx.facts) == 2 and ctx.dropped_for_budget == 0
+    assert ctx.chars_used == both == _placed_chars(ctx)
     store.close()
 
 

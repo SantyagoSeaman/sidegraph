@@ -137,8 +137,8 @@ def test_nearest_only_backrefs_and_cap_keep_one_legend(tmp_path, monkeypatch):
 
     repo = _area(tmp_path)
     with caller():
-        first = repo.call(files=["core/a.py"], structure_budget=120)
-        second = repo.call(files=["core/a.py"], structure_budget=120)
+        first = repo.call(files=["core/a.py"], structure_budget=119)
+        second = repo.call(files=["core/a.py"], structure_budget=119)
         assert "## Nearest anchored records" in first
         assert "[sent earlier]" in second
         assert second.count("[sent earlier] =") == 1
@@ -149,7 +149,7 @@ def test_nearest_only_backrefs_and_cap_keep_one_legend(tmp_path, monkeypatch):
 
         with monkeypatch.context() as patch:
             patch.setattr(server, "_hard_cap", cap)
-            cut = repo.call(files=["core/a.py"], structure_budget=120)
+            cut = repo.call(files=["core/a.py"], structure_budget=119)
     assert "[output cut" in cut
     assert " [sent earlier] " in cut
     assert cut.count("[sent earlier] =") == 1

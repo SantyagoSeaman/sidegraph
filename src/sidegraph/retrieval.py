@@ -14,6 +14,7 @@ is absent or the store is empty. See ``docs/concepts/retrieval.md``.
 
 from __future__ import annotations
 
+import difflib
 import json
 import posixpath
 import re
@@ -24,7 +25,7 @@ from pathlib import PurePosixPath
 from typing import NamedTuple, TypeVar
 
 from .delivery import Placement, Snapshot
-from .engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader, NodeRef
+from .engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader, NodeRef, is_file_node
 from .schema import (
     Decision,
     DecisionKind,
@@ -244,6 +245,10 @@ class TaskContext:
     emitted: int = 0
     degraded: int = 0
     dropped_for_budget: int = 0
+    # The part of `dropped_for_budget` that is bound to the seed entities themselves (decisions
+    # and facts, never the related, global or neighbour records): "records found for what you
+    # named, that did not fit". Not rendered.
+    dropped_seed: int = 0
     # Related expansion records left out by `_RELATED_LINE_CAP` (not by the budget): the
     # count the closing `+N more related` line reports. Not rendered itself.
     related_overflow: int = 0
@@ -344,6 +349,11 @@ class SeedResolution:
     # the caller named. A file seed names no symbol, and neither does a name with no file
     # that the graph holds more than once.
     named_entity_ids: frozenset[str] = frozenset()
+    # The seed entities that are a named file as a whole. An entity reaches the file
+    # only through the file's own graph node (``engine.reader.is_file_node``): the
+    # store's mapping to that node, or the node's label when the store maps the entity
+    # to no node. The spelling of a stored descriptor alone never makes one.
+    whole_file_entity_ids: frozenset[str] = frozenset()
 
 
 def _entities_by_node(
@@ -443,6 +453,7 @@ def resolve_seeds(
     # label still gets its descriptor lookup beside it: an entity that was never mapped (no
     # `last_seen_node_id` yet) or whose carrier adopted a path-less name is found only that way.
     by_node = None
+    whole_file: set[str] = set()
     if nodes:
         by_node = (
             _entities_by_node(store, lookup.concrete_entities)
@@ -450,12 +461,24 @@ def resolve_seeds(
             else entities_by_node
         )
     if by_node is not None:
+        assert reader is not None  # `nodes` is filled only from a reader
         for n in nodes:
             labelled = lookup.resolve_descriptor(n.name, n.file_path)
             for e in [*by_node.get(n.node_id, []), labelled]:
                 add(e)
                 if e is not None and n.node_id in named_nodes:
                     named.add(e.entity_id)
+            mapped = by_node.get(n.node_id, [])
+            if (mapped or labelled is not None) and is_file_node(n):
+                # The store's own mapping decides. The entity that only the node's label
+                # reaches counts when the store holds no graph node for it; one the store last
+                # saw on another node (a symbol named like its file) is that symbol.
+                whole_file.update(e.entity_id for e in mapped)
+                if labelled is not None and (
+                    labelled.last_seen_node_id is None
+                    or reader.get_node(labelled.last_seen_node_id) is None
+                ):
+                    whole_file.add(labelled.entity_id)
 
     # Exact file applicability is independent of symbol resolution. A graph-held file
     # (including non-anchorable types) must keep the ordinary orphan rules.
@@ -481,6 +504,7 @@ def resolve_seeds(
         file_bound_entity_ids=frozenset(file_entities),
         ordinary_seed_entity_ids=ordinary_entities,
         named_entity_ids=frozenset(named),
+        whole_file_entity_ids=frozenset(whole_file),
     )
 
 
@@ -554,6 +578,10 @@ _LINE_CLIP_CHARS = 240  # tight tier: choice snippet only
 _RELATED_CLIP_CHARS = 80
 _RELATED_LINE_CAP = 5
 _FACT_SOURCE_CLIP_CHARS = 300
+# A fact statement in the task context (Known facts, inline evidence, unratified facts).
+# A fact is one statement with no title to fall back on, so a clip cuts its qualifiers.
+# The SessionStart map keeps the tight ``_LINE_CLIP_CHARS``.
+_FACT_STATEMENT_CLIP_CHARS = 700
 _DIRECT_FIELD_CLIP_CHARS = 1200  # direct tier: choice AND context, each
 _DIRECT_SIDE_CLIP_CHARS = 400  # direct tier: rejected AND consequences, each
 # Fix-wave D: a live A/B re-eval found every rendered `(consequences: ...)` suffix showed
@@ -676,7 +704,7 @@ def _reverted_prefix(d: Decision) -> str:
     return f"~ tried, reverted {d.valid_to:%Y-%m}: "
 
 
-def _id_suffix(d: Decision) -> str:
+def _id_suffix(d: Decision | Fact) -> str:
     """`` (id: <ULID>)`` — appended to a detailed-tier decision line (design D4) so an
     agent has the full id ``supersede_decision`` needs, without a second lookup. Always the
     FULL ULID, never a short prefix. Factored out so the degrade-before-drop path in
@@ -750,24 +778,36 @@ def _fmt_decision(
     return line + _id_suffix(d)
 
 
-def _fact_tail(f: Fact, statement_limit: int) -> tuple[str, str]:
-    """The clipped statement and source tail, with one note for either clipped part."""
+def _fact_tail(f: Fact, statement_limit: int, *, with_id: bool = False) -> tuple[str, str]:
+    """The clipped statement and source tail, with one note for either clipped part. With
+    ``with_id`` the tail ends with :func:`_id_suffix`, the form a decision line ends with."""
     statement = _clip_line(f.statement, statement_limit)
     source = _clip_line(f.source, _FACT_SOURCE_CLIP_CHARS)
     clipped = statement != f.statement or source != f.source
     note = f' (clipped; full: list_facts(ids=["{f.id}"]))' if clipped else ""
-    return statement, f" [{source}]{note}"
+    return statement, f" [{source}]{note}" + (_id_suffix(f) if with_id else "")
 
 
-def _fmt_fact(f: Fact, prefix: str = "- ", *, file_bound: bool = False) -> str:
+def _fmt_fact(
+    f: Fact,
+    prefix: str = "- ",
+    *,
+    file_bound: bool = False,
+    with_id: bool = False,
+    statement_limit: int = _LINE_CLIP_CHARS,
+) -> str:
     """Render one fact line for the ``## Known facts`` bucket (standalone facts — those not
-    already rendered inline under a supported decision, see ``rank_decisions``). Same tight
-    ``_LINE_CLIP_CHARS`` clip and ``[unratified]`` PROPOSED tag as an inline evidence line
-    (:func:`_fmt_decision`'s related tier) — a fact never gets the generous direct-tier
-    allowance, since it has no analogous "seed-anchored" render tier of its own. The source
-    has its own 300-character bound; either clipped part adds exactly one omission note."""
+    already rendered inline under a supported decision, see ``rank_decisions``). Same
+    ``[unratified]`` PROPOSED tag as an inline evidence line (:func:`_fmt_decision`'s related
+    tier) — a fact never gets the generous direct-tier allowance, since it has no analogous
+    "seed-anchored" render tier of its own. The statement clip is ``statement_limit``: 240
+    (``_LINE_CLIP_CHARS``) by default, the SessionStart map's, and 700
+    (``_FACT_STATEMENT_CLIP_CHARS``) for a line of the task context. The source has its own
+    300-character bound; either clipped part adds exactly one omission note.
+    A fact line of the task context ends with the fact's id (``with_id``); the default
+    renders the line of the SessionStart map, with no id."""
     tag = " [unratified]" if f.status == DecisionStatus.PROPOSED else ""
-    statement, tail = _fact_tail(f, _LINE_CLIP_CHARS)
+    statement, tail = _fact_tail(f, statement_limit, with_id=with_id)
     ftag = " [file-bound]" if file_bound else ""
     return f"{prefix}fact{tag}{ftag}: {statement}{tail}"
 
@@ -846,14 +886,18 @@ def rank_decisions(
     ordinary_seed_entity_ids: frozenset[str] = frozenset(),
     already_sent: frozenset[str] = frozenset(),
     named_entity_ids: frozenset[str] = frozenset(),
+    whole_file_entity_ids: frozenset[str] = frozenset(),
 ) -> TaskContext:
     """Gather valid decisions and rank them mistakes-first under budget.memory_chars.
 
-    The records bound to a symbol the caller named (``named_entity_ids``) go first: their
-    mistake lines, then their ADR lines, placed without evidence. Everything after that is
-    the order described below, so a call that names no symbol is ranked as before. The
-    evidence of a named ADR is inserted after phase 2 of bucket A, never earlier.
+    The leading records go first: their mistake lines, then their ADR lines, placed without
+    evidence. In a call that names a symbol they are the records bound to a named symbol
+    (``named_entity_ids``). In a call that names no symbol they are the records of the named
+    files as a whole: bound to a file's own graph node (``whole_file_entity_ids``) and to no
+    other seed entity. Everything after that is the order described below. The evidence of a
+    leading ADR is inserted after phase 2 of bucket A, never earlier.
     # see design/superpowers/specs/2026-11-12-task-context-named-symbol-first-design.md (D1-D5)
+    # see design/superpowers/specs/2026-11-14-task-context-files-only-design.md (D2-D4)
 
     ``trailing_entities`` (the entities of guessed seeds, see ``get_task_context``) rank after
     everything the seeds' and peripheral entities' own records could fill, the unratified ones
@@ -941,6 +985,20 @@ def rank_decisions(
 
     file_bound_record_ids: set[str] = set()
 
+    def render_fact(fact: Fact) -> str:
+        """A fact line of the task context: it ends with the fact's id, as a decision line
+        does, so the agent can cite the fact and ``sidegraph-stats`` can count it. One
+        physical line: a fact's text may hold line breaks, and a second line that looks
+        like an evidence line would be read as one."""
+        return one_line(
+            _fmt_fact(
+                fact,
+                file_bound=fact.id in file_bound_record_ids,
+                with_id=True,
+                statement_limit=_FACT_STATEMENT_CLIP_CHARS,
+            )
+        )
+
     def add_line(bucket: list[str], line: str, *, at: int | None = None) -> bool:
         """Shared budget primitive: place ``line`` into ``bucket`` iff it fits what's left of
         ``budget.memory_chars``, charging the ONE cumulative ``used`` counter every caller
@@ -1000,8 +1058,10 @@ def rank_decisions(
                 continue
             if fact.id in rendered_fact_ids:
                 continue
-            statement, tail = _fact_tail(fact, _LINE_CLIP_CHARS)
-            line = f"  evidence: {statement}{tail}"
+            statement, tail = _fact_tail(fact, _FACT_STATEMENT_CLIP_CHARS, with_id=True)
+            # One physical line: the stats parser reads an evidence line by its prefix
+            # and its closing id, and a fact's text may hold line breaks.
+            line = one_line(f"  evidence: {statement}{tail}")
             out.append((fact, line))
         return out
 
@@ -1042,13 +1102,15 @@ def rank_decisions(
         if detailed is None:
             detailed = bucket is not ctx.related
         drifted = detailed and d.id in drifted_ids
-        line = _fmt_decision(
-            d,
-            prefix,
-            detailed=detailed,
-            drifted=drifted,
-            file_bound=d.id in file_bound_record_ids,
-            choice_limit=_RELATED_CLIP_CHARS if capped else None,
+        line = _plain_prose(
+            _fmt_decision(
+                d,
+                prefix,
+                detailed=detailed,
+                drifted=drifted,
+                file_bound=d.id in file_bound_record_ids,
+                choice_limit=_RELATED_CLIP_CHARS if capped else None,
+            )
         )
         backref = (
             d.id in already_sent
@@ -1059,7 +1121,9 @@ def rank_decisions(
         if backref:
             dtag = " [drifted]" if drifted else ""
             ftag = " [file-bound]" if d.id in file_bound_record_ids else ""
-            line = f"{prefix}[{d.kind.value}]{dtag}{ftag} [sent earlier] {d.title}{_id_suffix(d)}"
+            line = _plain_prose(
+                f"{prefix}[{d.kind.value}]{dtag}{ftag} [sent earlier] {d.title}{_id_suffix(d)}"
+            )
             evidence = False
         if capped:
             line += _id_suffix(d)
@@ -1074,12 +1138,14 @@ def rank_decisions(
             # branch, which would also restore context/rejected/consequences. The drifted
             # marker rides the same ruling (drift→supersede I3), staying in the tag
             # cluster via the explicit flag rather than jumping after the id.
-            line = _fmt_decision(
-                d,
-                prefix,
-                detailed=False,
-                drifted=drifted,
-                file_bound=d.id in file_bound_record_ids,
+            line = _plain_prose(
+                _fmt_decision(
+                    d,
+                    prefix,
+                    detailed=False,
+                    drifted=drifted,
+                    file_bound=d.id in file_bound_record_ids,
+                )
             ) + _id_suffix(d)
             if not add_line(bucket, line):
                 refused.add(d.id)
@@ -1160,23 +1226,38 @@ def rank_decisions(
     # Ordinary direct routes win, even when the unverified file seed was listed first.
     file_bound_record_ids.difference_update(verified_ids)
 
-    # The records of the symbols the caller named go first: their mistake lines, then their
-    # ADR lines, with no evidence. A record bound to a named symbol and to another symbol is
-    # one of them. With no named symbol this block places nothing.
-    named_ids = {
-        d.id
-        for e in seed_entities
-        if e.entity_id in named_entity_ids
-        for d in seed_accepted[e.entity_id]
-    }
+    # The leading records go first: their mistake lines, then their ADR lines, with no
+    # evidence. A call that names a symbol: the records bound to a named symbol (one also bound
+    # to another symbol is still one of them). A call that names no symbol: the records of the
+    # named files as a whole, bound to a file's own node and to no other seed entity. A call
+    # with neither places nothing here.
+    if named_entity_ids:
+        leading_ids = {
+            d.id
+            for e in seed_entities
+            if e.entity_id in named_entity_ids
+            for d in seed_accepted[e.entity_id]
+        }
+    else:
+        leading_ids = {
+            d.id
+            for e in seed_entities
+            if e.entity_id in whole_file_entity_ids
+            for d in seed_accepted[e.entity_id]
+        } - {
+            d.id
+            for e in seed_entities
+            if e.entity_id not in whole_file_entity_ids
+            for d in seed_accepted[e.entity_id]
+        }
     mistake_decisions: list[Decision] = []
-    named_adrs: list[Decision] = []
+    leading_adrs: list[Decision] = []
     for e in seed_entities:
         for d in _by_recency(
             [
                 x
                 for x in seed_accepted[e.entity_id]
-                if x.kind in _MISTAKE_KINDS and x.id in named_ids
+                if x.kind in _MISTAKE_KINDS and x.id in leading_ids
             ]
         ):
             if add(ctx.mistakes, d, evidence=False):
@@ -1186,14 +1267,14 @@ def rank_decisions(
             [
                 x
                 for x in seed_accepted[e.entity_id]
-                if x.kind == DecisionKind.ADR and x.id in named_ids
+                if x.kind == DecisionKind.ADR and x.id in leading_ids
             ]
         ):
             if add(ctx.decisions, d, evidence=False):
-                named_adrs.append(d)
+                leading_adrs.append(d)
 
     # (A) mistakes on seeds — two-phase (see this function's docstring). Phase 1: place
-    # every mistake decision line with no evidence interleaved. The named ones are placed
+    # every mistake decision line with no evidence interleaved. The leading ones are placed
     # already and `add()` skips them.
     for e in seed_entities:
         for d in _by_recency([x for x in seed_accepted[e.entity_id] if x.kind in _MISTAKE_KINDS]):
@@ -1213,10 +1294,10 @@ def rank_decisions(
                 insert_at += 1
                 offset += 1
 
-    # The evidence of the named ADRs, each inserted after its line: only now, so that it never
-    # takes the budget of a mistake line.
+    # The evidence of the leading ADRs, each inserted after its line: only now, so that it
+    # never takes the budget of a mistake line.
     offset = 0
-    for i, d in enumerate(named_adrs):
+    for i, d in enumerate(leading_adrs):
         if d.id in ctx.backref_ids:
             continue
         insert_at = i + 1 + offset
@@ -1310,9 +1391,7 @@ def rank_decisions(
         for fact in accepted_facts:
             if fact.id in rendered_fact_ids:
                 continue
-            place_fact(
-                ctx.facts, fact, _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids)
-            )
+            place_fact(ctx.facts, fact, render_fact(fact))
         for fact in unratified_facts:
             direct_proposed_facts.setdefault(fact.id, fact)
 
@@ -1324,9 +1403,7 @@ def rank_decisions(
         for fact in accepted_facts:
             if fact.id in rendered_fact_ids:
                 continue
-            place_fact(
-                ctx.facts, fact, _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids)
-            )
+            place_fact(ctx.facts, fact, render_fact(fact))
         for fact in unratified_facts:
             if fact.id not in direct_proposed_facts:
                 related_proposed_facts.setdefault(fact.id, fact)
@@ -1348,7 +1425,7 @@ def rank_decisions(
                     place_fact(
                         ctx.facts,
                         fact,
-                        _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids),
+                        render_fact(fact),
                     )
 
     direct_records: list[Decision | Fact] = [*direct_proposed, *direct_proposed_facts.values()]
@@ -1368,7 +1445,7 @@ def rank_decisions(
                 place_fact(
                     ctx.unratified,
                     record,
-                    _fmt_fact(record, file_bound=record.id in file_bound_record_ids),
+                    render_fact(record),
                 )
 
     # Trailing entities (the guessed seeds): last of all, after every record an exact-only call
@@ -1396,9 +1473,7 @@ def rank_decisions(
         for fact in accepted_facts:
             if fact.id in rendered_fact_ids:
                 continue
-            place_fact(
-                ctx.facts, fact, _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids)
-            )
+            place_fact(ctx.facts, fact, render_fact(fact))
         for fact in unratified_facts:
             trailing_proposed_facts.setdefault(fact.id, fact)
     trailing_proposed = _by_recency(trailing_proposed)
@@ -1407,9 +1482,7 @@ def rank_decisions(
             if fact.status == DecisionStatus.PROPOSED:
                 trailing_proposed_facts.setdefault(fact.id, fact)
             elif fact.id not in rendered_fact_ids:
-                place_fact(
-                    ctx.facts, fact, _fmt_fact(fact, file_bound=fact.id in file_bound_record_ids)
-                )
+                place_fact(ctx.facts, fact, render_fact(fact))
     trailing_records: list[Decision | Fact] = [
         *trailing_proposed,
         *trailing_proposed_facts.values(),
@@ -1421,7 +1494,7 @@ def rank_decisions(
             place_fact(
                 ctx.unratified,
                 record,
-                _fmt_fact(record, file_bound=record.id in file_bound_record_ids),
+                render_fact(record),
             )
 
     # fact_order already tracks exactly the facts that made it into the render, in the
@@ -1439,6 +1512,13 @@ def rank_decisions(
         ) or add_line(ctx.related, f"- (+{ctx.related_overflow} more related not shown)")
 
     ctx.dropped_for_budget = len(refused - seen) + len(refused_facts - rendered_fact_ids)
+    seed_record_ids = {
+        d.id for found in (seed_accepted, seed_proposed) for ds in found.values() for d in ds
+    }
+    seed_fact_ids = {f.id for fs in seed_facts.values() for f in fs}
+    ctx.dropped_seed = len((refused - seen) & seed_record_ids) + len(
+        (refused_facts - rendered_fact_ids) & seed_fact_ids
+    )
     ctx.chars_used = used
     return ctx
 
@@ -1595,8 +1675,10 @@ def _gather_structure(
 ) -> tuple[list[str], list[Entity]]:
     """The structural-map + peripheral-entity walk shared by ``get_task_context`` and the
     thin tools (§5 FR8.2, ``query_structure``/``query_decisions``) — extracted so neither
-    duplicates the subgraph BFS + budget bookkeeping. Returns ``([], [])`` when there is no
-    reader or no resolved seed nodes."""
+    duplicates the subgraph BFS + budget bookkeeping. The map comes from the capped
+    subgraph; the peripheral entities come from the neighbours with the most edges to the
+    seed nodes (``GraphifyReader.connected_neighbours``). Returns ``([], [])`` when there is
+    no reader or no resolved seed nodes."""
     structure: list[str] = []
     peripheral: list[Entity] = []
     if reader is None or not res.seed_node_ids:
@@ -1610,7 +1692,6 @@ def _gather_structure(
     # `budget.structure_chars` (see `_structure_fallback_candidate_communities`) — the walk
     # saturation trigger for the NFR2 fallback below.
     walk_saturated = len(sub.nodes) >= node_cap
-    seed_set = set(res.seed_node_ids)
     seen_peri: set[str] = set()
     used = 0
     overflow_nodes: list[NodeRef] = []
@@ -1633,13 +1714,17 @@ def _gather_structure(
                 break
             used += len(line)
             structure.append(line)
-        if n.node_id not in seed_set:
-            # The engine mapping first (a stored `Type.member` is not the node's `.member()`
-            # label), then the label, as before.
-            for e in [*by_node.get(n.node_id, []), store.resolve_descriptor(n.name, n.file_path)]:
-                if e is not None and e.entity_id not in seen_peri:
-                    seen_peri.add(e.entity_id)
-                    peripheral.append(e)
+
+    # The peripheral entities are not read off the map above: a file seed alone fills the
+    # map's node cap with the file's own nodes. They are the entities of the neighbour nodes
+    # with the most edges to the seed nodes, `structure_chars // 120` of them at most.
+    for n in reader.connected_neighbours(res.seed_node_ids, budget.structure_chars // 120):
+        # The engine mapping first (a stored `Type.member` is not the node's `.member()`
+        # label), then the label, as before.
+        for e in [*by_node.get(n.node_id, []), store.resolve_descriptor(n.name, n.file_path)]:
+            if e is not None and e.entity_id not in seen_peri:
+                seen_peri.add(e.entity_id)
+                peripheral.append(e)
 
     if overflow_nodes or walk_saturated:
         candidate_ids = _structure_fallback_candidate_communities(
@@ -1711,6 +1796,7 @@ def get_task_context(
         ordinary_seed_entity_ids=res.ordinary_seed_entity_ids,
         already_sent=already_sent,
         named_entity_ids=res.named_entity_ids,
+        whole_file_entity_ids=res.whole_file_entity_ids,
     )
     ctx.structure = structure
     ctx.delivery_unresolved = res.unresolved
@@ -1762,6 +1848,7 @@ def query_decisions(
         file_bound_entity_ids=res.file_bound_entity_ids,
         ordinary_seed_entity_ids=res.ordinary_seed_entity_ids,
         named_entity_ids=res.named_entity_ids,
+        whole_file_entity_ids=res.whole_file_entity_ids,
     )
     return ctx.render(include_structure=False)
 
@@ -1790,6 +1877,19 @@ def one_line(text: str) -> str:
     return " ".join(text.splitlines())
 
 
+def _plain_prose(text: str) -> str:
+    """``text`` with the two leading spaces taken off each of its physical lines that starts
+    ``  evidence: ``. A task-context line of a record's own prose can hold a line break, and a
+    line that starts so is the form of a supporting fact's evidence line, which the stats parser
+    reads as a trailer of the record above it (``stats/echo.py``). Only a real evidence line
+    keeps the two spaces. The first line (the record's prefix) and every other line are kept.
+    # see design/superpowers/specs/2026-11-14-task-context-files-only-design.md (D7)"""
+    return "".join(
+        part[2:] if part.startswith("  evidence: ") else part
+        for part in text.splitlines(keepends=True)
+    )
+
+
 def render_sections(sections: Sequence[MapSection]) -> str:
     """The SessionStart map text for ``sections``: the guard line, the title, then each section
     that has entries, one line per entry."""
@@ -1814,7 +1914,7 @@ def top_tier_sections(
     mistakes. Proposed records are kept in a final unratified section. Computed on demand;
     degrades without a reader.
 
-    The standing "use get_task_context before searching" instruction is NOT part of this
+    The standing instruction (``host.hooks.STANDING_SEARCH_INSTRUCTION``) is NOT part of this
     output — it's prepended once, at the hook-assembly level, by
     ``host.hooks.session_start`` (ahead of whichever of this function or ``render_toc``
     produced the rest of the text), so this renderer stays a pure content formatter.
@@ -2051,6 +2151,32 @@ _DRILL_DOWN_MEMBER_CAP = 20
 
 # Cap on how many currently-accepted slugs an unknown-slug drill_down error surfaces.
 _DRILL_DOWN_CANDIDATE_CAP = 10
+# A slug counts as close to the one asked for at this similarity (difflib ratio, 0..1), or when
+# one contains the other.
+_DRILL_DOWN_CLOSE_RATIO = 0.6
+_DRILL_DOWN_CONTAINED = 0.9
+
+
+def _closeness(asked: str, name: str) -> float:
+    """How near ``name`` (a slug, or a title written as one) is to the slug ``asked``: 0..1."""
+    if not asked or not name:
+        return 0.0
+    if len(asked) >= 4 and len(name) >= 4 and (asked in name or name in asked):
+        return _DRILL_DOWN_CONTAINED
+    return difflib.SequenceMatcher(None, asked, name).ratio()
+
+
+def _closest_domains(asked: str, domains: Sequence[Domain]) -> list[str]:
+    """The slugs of ``domains`` close to the slug ``asked``, the closest first, ties by slug.
+    A domain is as close as the better of its slug and its title written as a slug."""
+    wanted = re.sub(r"[\s_]+", "-", asked.strip().lower())
+    scored: list[tuple[float, str]] = []
+    for domain in domains:
+        title = re.sub(r"[^a-z0-9]+", "-", domain.title.lower()).strip("-")
+        score = max(_closeness(wanted, domain.slug.lower()), _closeness(wanted, title))
+        if score >= _DRILL_DOWN_CLOSE_RATIO:
+            scored.append((score, domain.slug))
+    return [slug for _score, slug in sorted(scored, key=lambda item: (-item[0], item[1]))]
 
 
 def _domain_member_nodes(
@@ -2313,8 +2439,9 @@ def drill_down(
     Unknown ``domain_slug`` (``store.find_domain_by_slug`` finds nothing, i.e. no domain of
     any non-superseded status has ever used it) -> ``{"found": False, "candidates": [...]}``
     where ``candidates`` is up to :data:`_DRILL_DOWN_CANDIDATE_CAP` currently-ACCEPTED slugs
-    (never a guess — a caller picks one of these and retries) rather than a fuzzy prefix
-    match.
+    (never a guess — a caller picks one of these and retries). The slugs close to the one asked
+    for come first, the closest first (``closest`` lists them), then the rest in alphabetical
+    order; ``hint`` says so.
 
     ``reader`` may be ``None`` (best-effort, like every other MCP tool here): store-derived
     fields (``domain``, ``subdomains``, ``decisions``) are unaffected; ``members`` is empty
@@ -2327,10 +2454,27 @@ def drill_down(
     """
     domain = store.find_domain_by_slug(domain_slug)
     if domain is None:
-        candidates = sorted(d.slug for d in store.iter_domains(status=DomainStatus.ACCEPTED))[
-            :_DRILL_DOWN_CANDIDATE_CAP
-        ]
-        return {"found": False, "candidates": candidates}
+        listed_domains = list(store.iter_domains(status=DomainStatus.ACCEPTED))
+        closest = _closest_domains(domain_slug, listed_domains)
+        others = sorted(d.slug for d in listed_domains if d.slug not in closest)
+        candidates = [*closest, *others][:_DRILL_DOWN_CANDIDATE_CAP]
+        out: dict = {"found": False, "candidates": candidates}
+        if not candidates:
+            return out
+        if closest:
+            out["closest"] = closest[:_DRILL_DOWN_CANDIDATE_CAP]
+        said = f'No domain has the slug "{_clip_line(domain_slug, 80)}".'
+        if closest:
+            said += f" Closest: {', '.join(closest[:3])}. Retry with one of them."
+        else:
+            said += " None is close; candidates lists accepted domain slugs."
+        if len(listed_domains) > len(candidates):
+            said += (
+                f" {len(candidates)} of {len(listed_domains)} are listed: "
+                "list_domains(query=...) finds the rest."
+            )
+        out["hint"] = said
+        return out
 
     parent_slug = None
     if domain.parent_id:

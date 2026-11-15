@@ -287,6 +287,13 @@ try:
   to `files`. Any other item goes to `entities` as `{"name": item}`: a symbol (`RetryPolicy`,
   `Store.close`, whose `.close` is not a file extension), an issue id, free text. Routed values
   are appended to an explicit `files` or `entities`, order kept and duplicates dropped.
+  A `paths` or `seeds` string that starts with `[` and parses as a JSON list of strings is
+  read as that list; any other string, including a JSON list with an item that is not a
+  string and text that is not valid JSON, stays one string.
+
+An `entities` item whose `name` or `file_path` is not a string (`{"name": 5}`) is refused with
+``entities[0].name` must be a string, got int.``, naming the item and the field; `null` is a
+missing field and is accepted.
 
 `task` is not accepted: there is no free-text query. `intent` is a label for statistics and never
 affects the answer, so a query passed as `task` would become a call with no seeds that looks
@@ -655,7 +662,7 @@ retrieve_decisions(
     status: str | list[str] | None = None,   # proposed | accepted | superseded | rejected | deprecated
     kind: str | list[str] | None = None,     # adr | lesson | constraint | gotcha
     files: list[str] | None = None,          # repo-relative paths, read as get_task_context reads them
-    query: str | None = None,                # every word must occur in the record's text
+    query: str | None = None,                # every word in the record's text or its anchors' names and paths; else a partial answer
     ids: list[str] | None = None,            # exact record ids
     limit: int = 25,                         # clamped to 1..100
     budget_chars: int = 24000,               # clamped to 4000..40000
@@ -704,6 +711,26 @@ full to that agent by an MCP read in this session is a compact row with `id`, `k
 actually returned. Asking with `ids=[...]` always requests full records, even after an
 earlier delivery; use `ids=[...]` together with `include_provenance=True` for the full
 record including provenance. The flag alone keeps sent-earlier rows compact.
+
+#### A shortened id
+
+`ids` takes full ids. An id that is not a whole record id is read as the start of one, in either
+letter case, and the answer says what became of it: `id_lookup` has one entry per such id
+(at most 10; `id_lookup_omitted` counts the rest), and `hint` repeats it in words.
+
+| `status` | Meaning | Other keys |
+|---|---|---|
+| `resolved` | The id starts exactly one record, which is returned. | `id`: the full id |
+| `ambiguous` | It starts several records. None is returned. Pass a full id. | `candidates`: up to 10 ids, sorted; `candidates_omitted` |
+| `too_short` | Fewer than 8 characters: not resolved. | `min_length`: 8 |
+| `unknown` | No id of the kind being read starts with it (said for an entry shorter than a whole id, 26 characters, also when the store has none of that kind). | none |
+
+A whole id behaves as before and adds no entry. `list_facts(ids=[...])` resolves against fact
+ids, and `list_domains(ids=[...])` against domain ids (all domains, whatever the `status` filter),
+in the same way. The report never takes more than a quarter of `budget_chars`: at most 10 entries
+and 20 candidates across them, then candidates and entries are left out from the end, counted
+in `candidates_omitted` and `id_lookup_omitted`. In `retrieve_decisions` the hint says "records"
+because a query also reads facts.
 The normal limit, budget and proposal policy still apply. Overview rows
 are unchanged. Claude, Grok and unidentified callers keep receiving full filtered records.
 
@@ -721,10 +748,40 @@ are unchanged. Claude, Grok and unidentified callers keep receiving full filtere
 }
 ```
 
-When cut, `omitted_ids` lists the omitted record ids in pool order (mistakes first, then
-newest first). Read them with `retrieve_decisions(ids=[...])`. `omitted_ids_unlisted` counts
-ids that could not fit and appears only when positive; neither key appears on an uncut
-answer.
+When cut, `omitted_ids` lists the omitted record ids in pool order (mistakes first: gotchas,
+then lessons and constraints; then newest first). Read them with
+`retrieve_decisions(ids=[...])`. `omitted_ids_unlisted` counts ids that could not fit and
+appears only when positive; neither key appears on an uncut answer.
+
+**Facts that match a query.** A query also returns the facts that hold every word, in their
+`statement` or `source` or through an anchor, under their own key:
+
+```json
+{
+  "overview": false,
+  "matched": 11, "returned": 11, "omitted": 0,
+  "facts_matched": 3,
+  "decisions": [{"…": "as above"}],
+  "facts": [{"id": "01M…", "statement": "…", "source": "…", "supports": [], "ratified_by": null,
+             "ratified_at": null, "status": "accepted", "valid_from": "…", "valid_to": null,
+             "supersedes": null}],
+  "omitted_fact_ids": ["<ids of matching facts that did not fit, as many as fit>"],
+  "hint": "1 more fact matched; the character budget cut the list. Read them with list_facts(ids=[...]) (ids in omitted_fact_ids). Narrow with files=[...] or query=..., or raise budget_chars (max 40000)."
+}
+```
+
+Facts are searched when `query` is given and `kind` is not: a fact has no kind, so `kind`
+keeps them out. `status`, `include_superseded`, `ids` and `files` apply to facts as they do in
+`list_facts`. `matched`, `returned`, `omitted` and `omitted_ids` count decisions only, so a
+client that reads today's shape reads the same keys with the same meaning. `facts_matched`
+counts the matching facts, and the new keys appear only when a fact matched. A query answer
+with `matched: 0` can still hold facts: read `facts_matched`. Accepted records are placed
+first, and a match with no room is still counted (see Order and bounds below). A fact
+that holds every word is returned in full (in a partial answer it is a row, see below) and
+is never a `sent_earlier` row. A fact whose `valid_to` has passed is history here and
+comes back with `include_superseded=True`, `status` or `ids`, while `list_facts` still lists
+it by default. `omitted_fact_ids` are read with `list_facts(ids=[...])`;
+`omitted_fact_ids_unlisted` counts ids that could not fit.
 
 The filters combine with AND:
 
@@ -741,17 +798,84 @@ The filters combine with AND:
   any status (an orphaned one too), points at one of those entities: the question is where
   the record was anchored, not whether it is still delivered there. Without a code graph only
   the stored paths are compared.
-- **`query`** is split on whitespace; every word must occur, in any letter case, in the
-  record's `title`, `context`, `choice`, `rejected` or `consequences`.
+- **`query`** is split on whitespace; a full match holds every word, in any letter case, in the
+  record's `title`, `context`, `choice`, `rejected` or `consequences`, or in the name or the
+  file path of an entity behind one of the record's live or degraded bindings, as the store
+  holds them after the last sync. A binding the last sync found orphaned is not searched. A
+  label is found by its name, without the `tag:`, `initiative:` or `domain:` prefix. The code
+  graph is not read for a query, so the answer is the same without one. Such records come
+  after every record whose own text holds the words, mistakes first among them. A record
+  found this way starts with `matched_anchors`, the list of its anchors' names or paths that
+  held a word its text does not hold, and a `sent_earlier` row keeps the key. `files=[...]`
+  stays the way to list a file's records.
 - **`ids`** returns those records by exact id, superseded, rejected and retired ones too; the default
   exclusion does not apply to `ids` unless `status` is also given.
 
-**Order and bounds.** Records come back `gotcha`, then `lesson`, then everything else; within
-a rank newest `valid_from` first, `id` descending as the tie-break. Records are added in that
-order while the answer stays within `budget_chars` and the count within `limit`. A record is
+**A full match that was replaced.** When no live record holds every word of `query`, and
+a record of the hidden history does, the answer follows that record's `supersedes` links to
+the live record at the end of its chain and returns that record, a fact the same way through
+`supersede_fact`. The record is returned in full, like any match, and starts with
+`matched_history`: the ids of the history records that held every word and that it replaced.
+`hint` says that no live record holds every word and that these are the records that replaced
+the history ones; read a history record with `retrieve_decisions(ids=[...])` or
+`list_facts(ids=[...])`. `kind`, `files`, `limit` and `budget_chars` apply to the live record
+as to any other: a `files` call returns it only when it is itself anchored to a named file.
+A record is live here until its `valid_to` passes: a successor that ends next month is
+returned, one that has ended is not. `matched` counts every live decision that replaced a
+match, those cut by `limit` or `budget_chars` included (`omitted` and `omitted_ids` say which
+were left out); a replacing fact counts in `facts_matched`, not in `matched`. A history match that nothing replaced, or whose live
+successor a filter excludes, is answered as before: empty, with the history hint below.
+
+**Partial answer.** When no decision and no fact holds every word of `query`, in its text or
+through an anchor, and no record of the hidden history holds every word either, the answer
+is a partial answer if some record's own text holds at least half of the distinct words,
+rounded up, and at least two of them: 2 of 3, 2 of 4, 3 of 5. Words held only through an
+anchor do not count towards it, and a query of one or two words has no partial form: one word
+of two is an any-word match, so the answer stays empty and says why: it names a word only
+when some word occurs in no searched record.
+A partial answer carries `"match": "partial"`, and `decisions` and `facts` hold rows, not
+records:
+
+```json
+{
+  "overview": false,
+  "match": "partial",
+  "matched": 1, "returned": 1, "omitted": 0,
+  "facts_matched": 1,
+  "decisions": [{"matched_words": ["cold", "index"], "id": "01M…", "kind": "gotcha",
+                 "status": "accepted", "title": "…", "valid_from": "…"}],
+  "facts": [{"matched_words": ["cold", "index"], "id": "01M…", "status": "accepted",
+             "statement": "… clipped to 240 characters"}],
+  "hint": "No record holds every word of the query. These hold at least 2 of its 4 words; matched_words on each says which. Read the ones that are about your question with retrieve_decisions(ids=[...]) or list_facts(ids=[...])."
+}
+```
+
+A decision row is `matched_words`, `id`, `kind`, `status`, `title`, `valid_from`; a fact row is
+`matched_words`, `id`, `status` and the `statement`, clipped to 240 characters. Rows come
+in this order: records that are not proposed first; then the words held, most first; then
+mistakes first, then newest first; a fact after the decisions that hold as many words. Read
+a record in full with `retrieve_decisions(ids=[...])` or `list_facts(ids=[...])`. A row
+is a pointer, not a record sent to the agent: it is never a `sent_earlier` row, it does not
+make a later answer one, and it is not journaled as delivered. `limit` and `budget_chars`
+cut the rows as they cut records, and the counts and `omitted_ids` follow the rules above.
+Under `status`, `kind`, `files` or `ids` the first sentence of the hint reads `No record
+these filters admit holds every word of the query.`
+
+**Order and bounds.** Records come back `gotcha`, then `lesson` and `constraint`
+together, then everything else; within a rank newest `valid_from` first, `id` descending as
+the tie-break. Records are added in that order while the answer stays within `budget_chars` and the count within `limit`. A record is
 never cut in the middle: the first one that does not fit ends the list, and if even the first
 does not fit, `decisions` is empty and the hint says so. `limit` is clamped to 1..100 and
 `budget_chars` to 4,000..40,000, so no argument turns the call back into a dump.
+
+In a query answer the groups are placed in this order: the decisions whose own text holds
+every word, then the facts whose own text does, then the decisions that hold a word only
+through an anchor, then the facts that do. Every record that is not proposed, in any group,
+comes before the proposed ones, each half in the order above; a later group takes only the
+room the ones before it leave. A call without `query` keeps the order it had. Every match is counted and, when it is not returned, listed in `omitted_ids` or
+`omitted_fact_ids` as far as the ids fit. When the returned records fill the budget to within
+about a hundred characters, the last of them gives way to that account and is then the first
+id listed.
 
 **`unresolved_files` and `hint`.** When `files` was given, `unresolved_files` lists the entries
 nothing could read, at most ten, and `unresolved_omitted` counts the rest. Each entry says why:
@@ -772,12 +896,32 @@ nothing could read, at most ten, and `unresolved_omitted` counts the rest. Each 
 
 `hint` is `null` only when something matched, nothing was left out and every file was read.
 Otherwise it says which case applies: nothing matched (with the filters as given, and for
-`query` a suggestion to try one or two distinctive words; it also says that superseded and
+`query` the reason; it also says that superseded and
 rejected records need `status` or `include_superseded=True`, unless unreadable files already
-explain the empty answer); which bound cut the list, `limit` or the character budget, and how
+explain the empty answer); that the answer is a partial answer; which bound cut the list, `limit` or the character budget, and how
 to narrow or raise it (a bound already at its maximum is not offered); or that some files
 could not be read, which it leaves to `unresolved_files` to name. Read it before concluding
 that the store holds nothing.
+
+The reason for an empty answer to a `query` depends on its length. One word: `No searched
+record holds that word, in its text or in the name or path of the code it is anchored to. Try
+another word, a symbol or a file name.` No word of the query occurs in any searched record:
+`None of its words occurs in any searched record. Try other words, a symbol or a file name.`
+Two words: `No searched record holds both words.`, then `In no searched record: <words>.` when
+a word occurs nowhere, then `Try fewer or other words.` Three words or more: `No searched
+record holds every word, and none holds <need> of the <n> in its text.`, then the same two
+sentences. Under `status`, `kind`, `files` or `ids` the text speaks of the `record these
+filters admit` instead of the `searched record`, and ends `, or drop a filter.` When the
+records that hold every word are hidden history, the hint says so (`1 record that holds every
+word is history.`, `2 records that hold every word are history.`) and names `status` and
+`include_superseded=True`; it offers no partial answer. When a live record replaced a history
+record that holds every word, the answer is that live record instead: see **A full match that
+was replaced** above.
+
+When facts matched, the hint counts omitted decisions and omitted facts apart, as the keys do,
+and names `list_facts` for the omitted facts. A cut hint has three sentences: what was left out
+and which bound cut the list, how to read the omitted records, and how to narrow or raise the
+bound. A query answer keeps only the first when the returned records leave no room for more.
 
 Everything the caller's own text adds to the answer (the filters echoed in a hint, the paths
 and candidates of `unresolved_files`) is clipped to 80 characters as JSON writes them. If the
@@ -828,6 +972,9 @@ only when positive. Neither key appears on an uncut answer.
 Facts come back in full, newest first (facts carry no `kind`, so there is no mistakes-first
 order), added while the count stays within `limit` and the text within `budget_chars`. A fact is
 never cut in the middle. `hint` names the bound that cut the list, or says why it is empty.
+
+`retrieve_decisions(query=…)` returns matching facts beside the decisions; `list_facts` stays
+the tool that lists and filters facts alone.
 `counts` covers every fact the proposal policy lets through, history included, whatever the
 filters say. The default hides `superseded` and `rejected` facts; `include_superseded=True`
 shows them, and so does `status`, which takes one value or a list and replaces the default
@@ -958,8 +1105,9 @@ under the given character budgets.
 
 Inside the mistakes and decisions sections the records of a symbol named in `entities` come
 first and take the budget first: the named symbol's mistakes, then its decisions, then the
-mistakes and the decisions of the other symbols of the named files. A call that names no
-symbol places every direct mistake before every direct decision. See
+mistakes and the decisions of the other symbols of the named files. A call that names only
+files places first the records bound to a file itself and to none of the symbols the call
+reaches, mistakes before decisions, then the mistakes and the decisions of the file's symbols. See
 [retrieval: named symbols](retrieval-internals.md#named-symbols-what-you-named-comes-first).
 
 Related memory reached by expansion shows at most 5 short
@@ -968,12 +1116,16 @@ lines with ids, plus a count of the rest; see
 [retrieval: facts](../concepts/retrieval.md#facts-inline-evidence-and-the-known-facts-bucket)
 for the inline-vs-standalone split and the guarantee that facts never displace a mistake. The
 fact lines in `get_task_context`, `query_decisions`, and the SessionStart map of a store with
-no accepted domain show up to 240 characters of the statement and 300 of the source, with `…`
-on a clipped part. If either part is clipped, exactly one
+no accepted domain show up to 700 characters of the statement (240 in the SessionStart map)
+and 300 of the source, with `…` on a clipped part. If either part is clipped, exactly one
 ` (clipped; full: list_facts(ids=["<id>"]))` note names the call that returns the whole fact.
+A fact line of `get_task_context` and `query_decisions` ends with ` (id: <id>)`, after the
+clipped note when there is one: the id `supersede_fact` and `list_facts(ids=…)` take. The
+SessionStart map shows the same line without the id.
 The structural map is not included: call `query_structure` with the same seeds for it.
-`structure_budget` sets how far the graph walk that finds related records reaches; the walk
-and its ranking inputs are unchanged.
+`structure_budget` sets how far the graph walk that finds related records reaches: it
+takes the `structure_budget // 120` nodes outside your seeds that have the most edges
+to them.
 Related decisions on a seed's community also include the decisions of **every** accepted domain
 that currently covers that community (unioned, not just the newest one — more than one accepted
 domain can cover the same community at once) — see
@@ -998,18 +1150,22 @@ The label `drill_down` is reserved for the server's own `drill_down` records and
 recorded when passed here.
 
 `structure_budget` and `memory_budget` are capped at 40,000 each (no floor), and the whole
-text at 40,000 characters, which is under Claude Code's 50,000-character limit. A normal call
-(4,000 and 6,000) is far below it. Over the cap, the nearest-anchored records are cut first,
-then related memory and the records, always at a line boundary; a closing
-note says how many characters were not shown and from which sections, and the advice blocks (how
-the seeds were read, what is not in the graph, the supersede hint, the drift legend when a kept
-line is `[drifted]`) are kept. Only the records left in the text count as shown in the usage
-statistics: a record the cap cut is not journaled and not counted. Should the advice blocks alone
-exceed the cap (a seed path of tens of thousands of characters), they are cut from their front,
-the last lines of them are kept, and the closing note says so; a seed path in those
-blocks is shown clipped to its head and its file name.
+text at 40,000 characters, which is under Claude Code's 50,000-character limit. A normal
+call (4,000 and 6,000) is far below it. Over the cap, the nearest-anchored records are cut
+first, then related memory and the records, the records placed last first, so what the
+ranking put first (a named symbol's records, a file's own records) is cut last, always at a
+line boundary; a closing note says how many characters were not shown and from which
+sections, and the advice blocks (how the seeds were read, what is not in the graph, the
+supersede hint, the drift legend when a kept line is `[drifted]`) are kept. Only the records
+left in the text count as shown in the usage statistics: a record the cap cut is not
+journaled and not counted. Should the advice blocks alone exceed the cap (a seed path of
+tens of thousands of characters), they are cut from their front, the last lines of them are
+kept, and the closing note says so; a seed path in those blocks is shown clipped to its head
+and its file name.
 
-**Returns:** a Markdown string. `"No context found."` starts an answer only when it holds no memory.
+**Returns:** a Markdown string. `"No context found."` starts an answer only when it holds no memory
+and no record was found for what you named and refused by the budget (see
+[when the memory budget refuses every record](#when-the-memory-budget-refuses-every-record)).
 When a seed path (from `files`, or an entity's `file_path`) is not a file the code graph holds,
 the string ends with a `## Not in the code graph` block that says what happened to each such
 path instead of leaving a bare empty answer:
@@ -1030,7 +1186,11 @@ path instead of leaving a bare empty answer:
   anywhere, be misspelled, or be a directory): check the branch and the spelling;
 - a path that is not well-formed or points outside the repository (`../x`, `.`, an absolute path
   elsewhere, a drive-letter path no checkout holds): check the path. No rebuild would help, and no
-  graph comparison is made for it.
+  graph comparison is made for it;
+- a path the filesystem itself refused as too long (`stat` answered `ENAMETOOLONG`; what is too
+  long depends on the filesystem, and a long name of multibyte characters may be fine): it is
+  named on its own line, never read as another file, and the other seeds of the call keep their
+  advice.
 
 The paths named are the ones [the seed ladder](#seeds-are-read-tolerantly) could not read, in
 their normalised spelling: `./pkg/n.py`, `pkg//n.py` and an absolute path under the repository
@@ -1094,7 +1254,8 @@ For a file path (`files`, or an entity's `file_path`):
 3. **Directory.** A path with files under it in the graph reads as a directory: up to 8 files,
    shallowest first. A directory of more than 24 files is listed, not read, with its five largest
    subdirectories and their file counts (with some of its top-level files when the subdirectories
-   leave room), so you can pass a file or a smaller directory. A trailing slash means "a directory" and skips step 4.
+   leave room), so you can pass a file or a smaller directory. A trailing slash means "a directory" and skips step 4;
+   it does not hide a file the graph holds under that name: `pkg/m.py/` reads as `pkg/m.py` (step 1).
 4. **The shortest tail that matches.** Each tail of the path, longest first, is matched against
    the graph's files, and the first tail that matches anything decides. One file: it is read,
    marked `guessed: the only file with that path ending` (or `with that name`, when only the file
@@ -1129,12 +1290,12 @@ answer is exactly `No context found.`, ends with:
 ```
 ## Why this is empty
 No files or entities were given, so nothing could be matched. Pass files=[…] with the
-repo-relative paths you are working on, or drill_down(<slug>) for a named area: Auth (auth),
-Payments (payments).
+repo-relative paths you are working on, or entities=[{"name": "…"}] when you know a symbol's
+name and not its file, or drill_down(<slug>) for a named area: Auth (auth), Payments (payments).
 ```
 
 It names at most 12 accepted domains by title and slug (then `, and N more`), and stops at
-"working on." when the store has none. A seed with neither a name nor a path (`files=[""]`,
+"not its file." when the store has none. A seed with neither a name nor a path (`files=[""]`,
 `entities=[{}]`, blanks) counts as no seed. With no code graph the block also says to build it first
 (`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set). Every other empty answer already says why: a path the
 graph lacks gets the not-in-graph block, a name that matches nothing gets its own line above, and
@@ -1142,6 +1303,27 @@ a missing graph gets the `## No code graph` block above. When an empty primary l
 [the nearest anchored records](#the-nearest-anchored-records), the answer instead starts:
 "No record is anchored to the files you named; the records of the nearest anchored files follow."
 The sentence naming those files goes under `## Nearest anchored`.
+When the files or symbols you named do have records of their own (bound to them, not to a graph
+neighbour) and the memory budget refused them, that lead is not used: the answer starts with
+`N record(s) found for what you named did not fit memory_budget=B: call again with a larger
+memory_budget to get them.`, followed by "The records of the nearest anchored files follow."
+
+### When the memory budget refuses every record
+
+A call that names files or symbols, finds records bound to them and places none because the
+`memory_budget` is smaller than the first one no longer answers `No context found.`. The whole
+answer is the sentence `N record(s) found for what you named did not fit memory_budget=B: call
+again with a larger memory_budget to get them.`, followed by the usual advice blocks. `N` counts
+the refused records bound to the named files or symbols themselves: a refused graph neighbour's
+record, or a global one, is not counted. `B` is the budget the call really had (at most 40,000).
+At the largest budget there is nothing to raise, so the sentence reads `... did not fit
+memory_budget=40000, the largest allowed: name fewer or narrower seeds, or read it with
+retrieve_decisions(files=[...]).` A call that found nothing, a call whose only refused records
+belong to neighbours or are global, and a call that named nothing, still answer `No context
+found.`. `query_decisions` answers the same sentence with
+`budget_chars`. `retrieve_decisions` already said it in `hint`: when `matched` is positive and
+`returned` is 0 because of the budget, the hint reads "N matched, but the first one does not fit
+in budget_chars=B."
 
 ### The nearest anchored records
 
@@ -1203,7 +1385,8 @@ main answer that already has memory gets the sentence alone, so no record shows 
 records count as shown in the local statistics (their render counters are added to the call's),
 and the neighbour files are never recorded as seeds.
 If the hard cap removes every nearest record, the answer omits that records block and its
-supersede hint, and an empty primary lookup keeps "No context found." and `## Why this is empty`.
+supersede hint, and an empty primary lookup keeps its first line ("No context found.", or the
+budget sentence when the budget refused the named file's records) and `## Why this is empty`.
 
 ## `query_structure` / `query_decisions`
 
@@ -1234,10 +1417,12 @@ logic).
 - `query_decisions` renders `## ⚠ Known mistakes & gotchas`, `## Decisions` (with inline
   `evidence:` lines), `## Known facts` (standalone facts), `## Related`, and
   `## Unratified proposals` (proposed records inside the surfacing window, last), with no structural
-  map — internally it still walks the structural subgraph to resolve peripheral entities for
-  bucket C, it just never renders the map itself. Degrades exactly like `get_task_context`:
+  map — internally it still reads the graph for the neighbours of the seeds, whose entities
+  feed bucket C; it never renders the map. Degrades exactly like `get_task_context`:
   named-seed resolution needs a reader, but `scope: global` decisions still surface without
   one.
+  Over its 40,000-character cap it cuts the records placed last first, as `get_task_context`
+  does, so what the ranking put first (a named symbol's records) is cut last.
 
 `query_decisions` uses the same Codex per-agent `[sent earlier]` behavior as
 `get_task_context`, including when the earlier full body came from `retrieve_decisions`.
@@ -1334,8 +1519,14 @@ When decisions are left out the result adds
 counts the ids that did not fit) and a `hint`. The `legend` key is kept only when a shown line
 carries `[drifted]`. The usage statistics count only the decisions shown.
 
-**Unknown `domain_slug`:** `{"found": false, "candidates": [str, ...]}` — up to 10
-currently-accepted slugs to retry with (never a guess).
+**Unknown `domain_slug`:** `{"found": false, "candidates": [str, ...]}`, plus `"closest"` and
+`"hint"` when the store has accepted domains. `candidates` holds up to 10 currently-accepted
+slugs to retry with (never a guess). The slugs close to the one asked for come first, the closest
+first, and `closest` lists them (a domain is as close as the better of its slug and its title
+written as a slug; the key is absent when none is close). The other candidates follow in
+alphabetical order, and `hint` names the closest three, or says that none is close and, when
+accepted domains are left out, how many. A store with no accepted domain answers
+`{"found": false, "candidates": []}` and nothing else.
 
 ## `list_domain_candidates`
 
@@ -1416,7 +1607,9 @@ list_domains(
 The bounded, full-listing counterpart to `list_proposed` (proposed-only) and
 `list_domain_candidates` (unclaimed-only). `status`, when given, filters to one of
 `"proposed"`/`"accepted"`/`"dropped"`/`"superseded"`; omitted returns every status.
-`ids` matches exact domain ids (`Domain.domain_id`, the row's `id`, never its slug).
+`ids` matches domain ids (`Domain.domain_id`, the row's `id`, never its slug); an id of 8 or more
+characters may be shortened, and `id_lookup` and `hint` report what each shortened id became, as
+for [`retrieve_decisions`](#a-shortened-id).
 `query` is case-insensitive whitespace-separated AND terms searched across slug, title and
 summary joined with newlines. Filters combine with AND; blank query and blank-only ids are
 ignored. `limit` is clamped to 1..100 and `budget_chars` to 4,000..40,000. Read-only — writes

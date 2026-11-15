@@ -317,8 +317,17 @@ _NO_FREE_TEXT_QUERY = (
 
 
 def _seed_strings(name: str, value: object) -> list[str]:
-    """The strings in a ``paths`` / ``seeds`` argument: a list of them, or one bare string."""
+    """The strings in a ``paths`` / ``seeds`` argument: a list of them, or one bare string. A
+    string that starts with ``[`` and parses as a JSON list of strings is that list (an agent
+    passed the list as its text); any other string, whatever it looks like, is one seed."""
     if isinstance(value, str):
+        if value.startswith("["):
+            try:
+                parsed = json.loads(value)
+            except (ValueError, RecursionError):  # nesting too deep for the parser: not a list
+                return [value]
+            if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+                return parsed
         return [value]
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return value
@@ -354,10 +363,28 @@ def _extend(args: dict, key: str, routed: list) -> None:
     args[key] = merged
 
 
+def _check_entity_fields(entities: object) -> None:
+    """Refuse an ``entities`` item whose ``name`` or ``file_path`` is not text (``null`` is a
+    missing field and passes). Without it ``{"name": 5}`` reached ``.strip()`` as an unhandled
+    ``AttributeError``. An item that is not a dict is left for the tool's own validation."""
+    if not isinstance(entities, list):
+        return
+    for index, item in enumerate(entities):
+        if not isinstance(item, dict):
+            continue
+        for field in ("name", "file_path"):
+            value = item.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ToolError(
+                    f"`entities[{index}].{field}` must be a string, got {type(value).__name__}."
+                )
+
+
 def _route_seed_aliases(args: dict) -> dict:
     """``paths`` is ``files``; each ``seeds`` item goes to ``files`` or, as ``{"name": seed}``,
     to ``entities`` by its shape. Both are appended to any explicit ``files`` / ``entities``."""
     args = dict(args)
+    _check_entity_fields(args.get("entities"))
     files: list[str] = []
     entities: list[dict] = []
     if "paths" in args:
@@ -2027,7 +2054,135 @@ _HISTORY = frozenset(
 )
 _ROW_KEYS = ("id", "kind", "status", "title", "valid_from")
 _SEARCHED_FIELDS = ("title", "context", "choice", "rejected", "consequences")
-_MISTAKE_RANK = {DecisionKind.GOTCHA.value: 0, DecisionKind.LESSON.value: 1}
+# One definition of a mistake with ``get_task_context`` and the hooks: the kinds of
+# ``store_layout.MISTAKE_KINDS``. Gotchas first, then lessons and constraints together.
+_MISTAKE_RANK = {
+    DecisionKind.GOTCHA.value: 0,
+    DecisionKind.LESSON.value: 1,
+    DecisionKind.CONSTRAINT.value: 1,
+}
+_FACT_SEARCHED_FIELDS = ("statement", "source")
+# A fact's statement in a row of a partial answer, as serialized (design D7).
+_PARTIAL_FACT_CHARS = 240
+
+
+def _is_fact_row(row: dict) -> bool:
+    """A fact in a decision listing: it has no ``kind`` (a sent-earlier decision row keeps
+    one)."""
+    return "kind" not in row
+
+
+def _searched_text(row: dict) -> str:
+    """The lower-cased text a query word is looked for in: a decision's five prose fields, a
+    fact's statement and source (what ``list_facts`` searches)."""
+    fields = _FACT_SEARCHED_FIELDS if _is_fact_row(row) else _SEARCHED_FIELDS
+    return "\n".join(str(row.get(f) or "") for f in fields).lower()
+
+
+def _anchors_holding(names: tuple[str, ...], missing: list[str]) -> list[str]:
+    """The anchors of a record, as stored, that hold one of ``missing``, the query words the
+    record's own text lacks. Empty unless some anchor holds each of those words: then the
+    record is an anchor match, and this list is what the answer shows as ``matched_anchors``.
+    see design/superpowers/specs/2026-11-14-retrieve-decisions-main-read-tool-design.md (D5)
+    """
+    lowered = [(name, name.lower()) for name in names]
+    if not all(any(word in low for _, low in lowered) for word in missing):
+        return []
+    return [name for name, low in lowered if any(word in low for word in missing)]
+
+
+def _query_miss(words: list[str], seen: set[str], need: int, filtered: bool) -> str:
+    """Why a query matched nothing, for the hint. ``seen`` holds the words some searched
+    record holds, in its text or through an anchor; ``need`` is the number of words a partial
+    match must hold. The text speaks of the records the call searched: under a narrowing
+    filter, of the records the filters admit.
+    see design/superpowers/specs/2026-11-14-retrieve-decisions-main-read-tool-design.md (D8)
+    """
+    record = "record these filters admit" if filtered else "searched record"
+    other = ", or drop a filter" if filtered else ""
+    if len(words) == 1:
+        return (
+            f" No {record} holds that word, in its text or in the name or path of the code it "
+            f"is anchored to. Try another word, a symbol or a file name{other}."
+        )
+    absent = [w for w in words if w not in seen]
+    if len(absent) == len(words):
+        return (
+            f" None of its words occurs in any {record}. Try other words, a symbol or a file "
+            f"name{other}."
+        )
+    if len(words) == 2:
+        text = f" No {record} holds both words."
+    else:
+        text = (
+            f" No {record} holds every word, and none holds {need} of the {len(words)} in its text."
+        )
+    if absent:
+        text += f" In no {record}: {_clip(', '.join(absent))}."
+    return text + f" Try fewer or other words{other}."
+
+
+def _history_miss(count: int) -> str:
+    """The reason for an empty answer when the records that hold every word are history the
+    call hides. The sentence that names ``include_superseded`` follows it (``_listing_hint``).
+    see design/superpowers/specs/2026-11-14-retrieve-decisions-main-read-tool-design.md (D7)
+    """
+    verbs = ("holds", "is") if count == 1 else ("hold", "are")
+    return f" {_counted(count, 'record')} that {verbs[0]} every word {verbs[1]} history."
+
+
+def _replacements(store, matches: list[dict], live: dict[str, dict]) -> dict[str, list[str]]:
+    """Live head id -> the ids of the history records among ``matches`` it replaced, for the
+    heads that are in ``live``: the records of this call that its filters admit. ``matches``
+    are the records of the hidden history that hold every word; each is followed through its
+    ``supersedes`` links to the live end of its chain (``Store.live_heads_after``, one read of
+    each chain member for the whole call). A match with no live head, or whose head a filter
+    excludes, adds nothing.
+    see design/superpowers/specs/2026-11-14-retrieve-decisions-main-read-tool-design.md (D8)
+    """
+    now = datetime.now(UTC)
+    head_of: dict[str, str | None] = {}
+    for is_fact in (False, True):
+        ids = [row["id"] for row in matches if _is_fact_row(row) == is_fact]
+        head_of |= store.live_heads_after(ids, fact=is_fact, at=now) if ids else {}
+    heads: dict[str, list[str]] = {}
+    for row in matches:
+        head = head_of[row["id"]]
+        if head is not None and head in live:
+            heads.setdefault(head, []).append(row["id"])
+    return heads
+
+
+def _rank_listing(rows: list[dict]) -> None:
+    """Sort decisions in place as a filtered listing does: mistakes first, then newest."""
+    rows.sort(key=_newest_first, reverse=True)
+    rows.sort(key=lambda r: _MISTAKE_RANK.get(r["kind"], 2))
+
+
+def _expired(row: dict, now: datetime) -> bool:
+    """A record whose ``valid_to`` has passed: the store's own rule for "no longer valid"
+    (``Store.valid_decisions_for_entity``)."""
+    return row.get("valid_to") is not None and datetime.fromisoformat(row["valid_to"]) <= now
+
+
+def _accepted_first(groups: list[list[dict]]) -> list[list[dict]]:
+    """The groups of a query answer in the order they are placed: the records of every group
+    that are not proposals, then the proposals of every group. Unratified memory never
+    outranks accepted memory, whichever group it matched in
+    (``docs/reference/stability.md``); within each half the groups and their own order stand.
+    see design/superpowers/specs/2026-11-14-retrieve-decisions-main-read-tool-design.md (D1)
+    """
+    proposed = DecisionStatus.PROPOSED.value
+    settled = [[r for r in group if r["status"] != proposed] for group in groups]
+    drafts = [[r for r in group if r["status"] == proposed] for group in groups]
+    return settled + drafts
+
+
+def _counted(count: int, noun: str) -> str:
+    """``1 fact``, ``2 facts``."""
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
 # What an answer echoes of the caller's own text, counted as JSON writes it, so an echo cannot
 # break the budget.
 _ECHO_CHARS = 80
@@ -2064,6 +2219,141 @@ def _listing_values(value, enum, name: str) -> set[str] | None:
 def _listing_texts(values: list[str] | None) -> list[str]:
     """``files`` or ``ids`` without blank entries; an empty list is an absent filter."""
     return [text for item in values or [] if (text := str(item).strip())]
+
+
+# A shortened id: at least this many characters, so that a stray word never starts an id.
+_ID_PREFIX_MIN = 8
+# At most this many candidate ids, and this many notes, are listed for one call.
+_ID_CANDIDATES_LISTED = 10
+_ID_NOTES_LISTED = 10
+# At most this many candidates across all the notes of one call, and the share of the
+# ``budget_chars`` the notes and their hint may take (a quarter): the rest is for the records.
+_ID_CANDIDATES_TOTAL = 20
+_ID_ROOM_SHARE = 4
+# A whole id is this long: an entry of 8 or more characters and fewer than this is a prefix, even
+# when no record of the kind exists (and so there is no id to compare the length with).
+_ULID_LENGTH = 26
+
+
+def _resolve_id_prefixes(wanted: list[str], known: Iterable[str]) -> tuple[set[str], list[dict]]:
+    """The ids to look up for ``wanted`` (every entry, and the id each prefix resolved to) and a
+    note for each one that was not a whole id.
+
+    An entry that is a record's id is looked up as it always was. Any other entry is read as
+    the start of an id, in either letter case: it resolves to the one record it starts
+    (``resolved``), reads nothing when it starts several (``ambiguous``: the first
+    ``_ID_CANDIDATES_LISTED`` candidates, sorted, and how many more there were), when it is
+    shorter than ``_ID_PREFIX_MIN`` (``too_short``) or when it starts none (``unknown``, said
+    only for an entry shorter than a whole id: a longer one is not a prefix of anything).
+    Pure: reads no store. # see design/reviews/2026-11-07-mcp-tool-surface/README.md
+    """
+    ids = sorted(known)
+    present = set(ids)
+    longest = max((len(i) for i in ids), default=_ULID_LENGTH)
+    lowered = [(i.lower(), i) for i in ids]
+    # Every entry stays as it was written: whatever is not a whole id matches no record, as
+    # before, and a resolved prefix adds the id it names.
+    found: set[str] = set(wanted)
+    notes: list[dict] = []
+    for given in dict.fromkeys(wanted):
+        if given in present:
+            continue
+        shown = _clip(given)
+        if len(given) < _ID_PREFIX_MIN:
+            notes.append({"given": shown, "status": "too_short", "min_length": _ID_PREFIX_MIN})
+            continue
+        low = given.lower()
+        starts = [original for lower, original in lowered if lower.startswith(low)]
+        if len(starts) == 1:
+            found.add(starts[0])
+            notes.append({"given": shown, "status": "resolved", "id": starts[0]})
+        elif starts:
+            note: dict = {
+                "given": shown,
+                "status": "ambiguous",
+                "candidates": starts[:_ID_CANDIDATES_LISTED],
+            }
+            if len(starts) > _ID_CANDIDATES_LISTED:
+                note["candidates_omitted"] = len(starts) - _ID_CANDIDATES_LISTED
+            notes.append(note)
+        elif len(given) < max(longest, _ULID_LENGTH):
+            notes.append({"given": shown, "status": "unknown"})
+    return found, notes
+
+
+def _id_lookup_fields(notes: list[dict], omitted: int) -> dict:
+    """The envelope keys that carry the notes of :func:`_resolve_id_prefixes`: none when every
+    id was a whole one."""
+    if not notes:
+        return {}
+    return {"id_lookup": notes} | ({"id_lookup_omitted": omitted} if omitted else {})
+
+
+def _id_lookup(
+    wanted: list[str], known: Iterable[str], noun: str, budget: int
+) -> tuple[set[str], dict, str | None]:
+    """What a listing does with the ``ids`` it was given: the ids to look up, the envelope keys
+    that report the shortened ones, and the sentence for ``hint``.
+
+    The report is bounded so that it never takes more than a quarter of ``budget`` (the rest is
+    for the records): at most ``_ID_NOTES_LISTED`` notes and ``_ID_CANDIDATES_TOTAL`` candidates
+    across them, then candidates from the last note and notes from the end are left out, until
+    the keys and the hint fit. A note left out is counted in ``id_lookup_omitted``, a candidate
+    in the note's ``candidates_omitted``.
+    """
+    found, notes = _resolve_id_prefixes(wanted, known)
+    omitted = max(0, len(notes) - _ID_NOTES_LISTED)
+    notes = notes[:_ID_NOTES_LISTED]
+    left = _ID_CANDIDATES_TOTAL
+    for note in notes:
+        if "candidates" in note:
+            total = len(note["candidates"]) + note.get("candidates_omitted", 0)
+            note["candidates"] = note["candidates"][: max(0, left)]
+            left -= len(note["candidates"])
+            if total > len(note["candidates"]):
+                note["candidates_omitted"] = total - len(note["candidates"])
+
+    def cost() -> int:
+        return len(_dump(_id_lookup_fields(notes, omitted))) + len(
+            _id_lookup_hint(notes, omitted, noun) or ""
+        )
+
+    while notes and cost() > budget // _ID_ROOM_SHARE:
+        shown = next((n for n in reversed(notes) if n.get("candidates")), None)
+        if shown is not None:
+            shown["candidates"].pop()
+            shown["candidates_omitted"] = shown.get("candidates_omitted", 0) + 1
+        else:
+            notes.pop()
+            omitted += 1
+    return found, _id_lookup_fields(notes, omitted), _id_lookup_hint(notes, omitted, noun)
+
+
+def _id_lookup_hint(notes: list[dict], omitted: int, noun: str) -> str | None:
+    """The sentences that say what became of each shortened id (``noun``: what the listing
+    reads: ``record``, ``fact`` or ``domain``), ``None`` when every id was a whole one."""
+    said: list[str] = []
+    for note in notes:
+        given = note["given"]
+        if note["status"] == "resolved":
+            said.append(f'Id prefix "{given}" → {note["id"]}: pass full ids.')
+        elif note["status"] == "ambiguous":
+            count = len(note["candidates"]) + note.get("candidates_omitted", 0)
+            where = "candidates are in id_lookup; " if note["candidates"] else ""
+            said.append(
+                f'Id prefix "{given}" matches {count} {noun}s and none was read: '
+                f"{where}pass a full id."
+            )
+        elif note["status"] == "too_short":
+            said.append(
+                f'"{given}" is too short to resolve: pass the full id, or at least '
+                f"{_ID_PREFIX_MIN} characters of it."
+            )
+        else:
+            said.append(f'No {noun} id starts with "{given}": check the id.')
+    if omitted:
+        said.append(f"{omitted} more ids are not listed in id_lookup.")
+    return " ".join(said) or None
 
 
 def _listing_entities(
@@ -2266,6 +2556,7 @@ def _hard_cap(
     cap: int = _HARD_CAP,
     atoms: Iterable[str] = (),
     report: _CapReport | None = None,
+    placed: Iterable[str] = (),
 ) -> str:
     """``body``, the ``legend``, the ``trailer`` blocks and, at index ``near_at`` of the
     trailer, the ``near`` block, joined by blank lines, never longer than ``cap``. An answer
@@ -2285,8 +2576,14 @@ def _hard_cap(
     in it puts the id on a later line): each is cut whole or not at all, so a record never
     loses its id line alone. ``report`` receives the kept units (a line, or an atom), for
     telemetry on what was delivered.
+
+    ``placed`` are the record lines in the order the budget placed them. With it the decisions
+    and the mistakes sections are cut as one group, the last-placed line first, so a record the
+    ranking put first is cut last whichever section prints it; without it each section is cut
+    from its end.
     # see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D1, D7)
     # see design/superpowers/specs/2026-10-12-batch-panel-fixes.md (G1)
+    # see design/superpowers/specs/2026-11-14-task-context-files-only-design.md (D11)
     """
     multi = sorted({a for a in atoms if "\n" in a}, key=len, reverse=True)
     body_lines = _units(body, multi)
@@ -2361,11 +2658,31 @@ def _hard_cap(
     kept_len = len(body) + (len(near) + 2 if near else 0)
     done = False
     # The known sections in cut order, then whatever sits under no known heading.
+    # With `placed`, the decisions and the mistakes sections are one group of record lines,
+    # cut in the reverse of the order the budget placed them: what the ranking put first is
+    # cut last, whichever of the two sections prints it. A heading goes after its lines.
+    rank = {line: n for n, line in enumerate(placed)}
+    records_at = next(j for j, (head, _) in enumerate(_CUT_ORDER) if head == "## Decisions")
     for index in [*range(len(_CUT_ORDER)), None]:
         name = "text under no known heading" if index is None else _CUT_ORDER[index][1]
         members = [i for i, o in enumerate(owner) if o == index]
         # Content lines from the end first; the blank lines between sections stay.
-        for i in sorted(members, key=lambda m: (not lines[m].strip(), -m)):
+        order = sorted(members, key=lambda m: (not lines[m].strip(), -m))
+        if rank and index == records_at:
+            name = _CUT_ORDER[records_at + 1][1]
+            members = [i for i, o in enumerate(owner) if o in (records_at, records_at + 1)]
+            order = sorted(
+                members,
+                key=lambda m: (
+                    not lines[m].strip(),
+                    lines[m] not in rank,
+                    -rank.get(lines[m], 0),
+                    -m,
+                ),
+            )
+        elif rank and index == records_at + 1:
+            continue
+        for i in order:
             note = _cut_note(lost_chars, lost_lines, cut_sections, how)
             # An upper bound (legend counted, digits may grow): the result is checked below.
             if kept_len + len(note) + fixed + 16 <= cap:
@@ -2504,26 +2821,70 @@ def _listing_hint(
     has_query: bool,
     history_hint: bool,
     sent_earlier: int = 0,
+    sentences: int = 3,
+    main_omitted: int | None = None,
+    facts_omitted: int = 0,
+    facts_matched: int = 0,
+    miss: str | None = None,
+    partial: str | None = None,
+    replaced: str | None = None,
+    id_hint: str | None = None,
 ) -> str | None:
     """Why a filtered answer is empty, cut, or short of a file: ``None`` only when something
     matched, nothing was left out and every file was read. ``cut`` is the bound that ended
     the list, ``"limit"`` or ``"budget"``; ``unresolved`` counts the files nothing could read
     and ``unlisted`` those ``unresolved_files`` leaves out. No file is named here: the list is
     the one place that says which and why. ``echo`` is the caller's filters, ``None`` when the
-    answer had no room for them."""
+    answer had no room for them. ``matched`` and ``returned`` count every record of the answer;
+    when it holds facts, ``facts_matched`` and ``facts_omitted`` say how many of those are
+    facts and ``main_omitted`` how many records under ``key`` were left out, so the text can
+    count the two apart, as the answer's own keys do. A cut hint has three sentences: the
+    count and the bound, how to read the omitted records, the advice. ``sentences`` is how
+    many of them are kept: an answer that had no room for a whole group keeps the first,
+    and the others only beside every omitted id (``_bounded_records``)."""
     parts: list[str] = []
     tool = "retrieve_decisions" if key == "decisions" else "list_facts"
     read = f"Read them with {tool}(ids=[...]) (ids in omitted_ids)."
+    more = f"{matched - returned} more matched"
+    if facts_omitted:
+        # Facts are read with ``list_facts``: ``retrieve_decisions(ids=...)`` returns decisions.
+        facts_read = "list_facts(ids=[...]) (ids in omitted_fact_ids)"
+        read = (
+            f"Read them with {tool}(ids=[...]) (ids in omitted_ids) and {facts_read}."
+            if main_omitted
+            else f"Read them with {facts_read}."
+        )
+        # ``omitted`` counts decisions only, so the sentence counts the facts apart.
+        more = f"{_counted(facts_omitted, 'more fact')} matched"
+        if main_omitted:
+            more = f"{_counted(main_omitted, 'more decision')} and {more}"
+    if id_hint:
+        # What became of a shortened id explains the rest of the hint, so it comes first.
+        parts.append(id_hint)
+    if partial is not None and matched:
+        # The answer holds partial matches: say so before anything about a cut.
+        parts.append(partial)
+    if replaced is not None and matched:
+        # The answer holds the live records that replaced history that held every word.
+        parts.append(replaced)
     if matched == 0:
         text = f"Nothing matched {echo or 'the filters'}."
         if has_query:
-            text += " Every word of query must occur in a record: try one or two distinctive words."
+            # ``miss`` is the caller's own reason; ``list_facts`` keeps the every-word sentence.
+            text += miss or (
+                " Every word of query must occur in a record: try one or two distinctive words."
+            )
         if history_hint:
             text += " Superseded, rejected and retired records are searched only with"
             text += " status=[...] or include_superseded=True."
         parts.append(text)
     elif cut is not None and returned == 0:
-        text = f"{matched} matched, but the first one does not fit in budget_chars={budget}."
+        found = f"{matched} matched"
+        if facts_matched:
+            found = f"{_counted(facts_matched, 'fact')} matched"
+            if matched > facts_matched:
+                found = f"{_counted(matched - facts_matched, 'decision')} and {found}"
+        text = f"{found}, but the first one does not fit in budget_chars={budget}."
         if budget < _LISTING_BUDGET_MAX:
             text += f" Raise budget_chars (max {_LISTING_BUDGET_MAX})."
         else:
@@ -2533,20 +2894,24 @@ def _listing_hint(
         raise_it = (
             f", or raise limit (max {_LISTING_LIMIT_MAX})" if limit < _LISTING_LIMIT_MAX else ""
         )
-        parts.append(
-            f"{matched - returned} more matched; limit={limit} cut the list. {read} "
-            f"Narrow with files=[...] or query=...{raise_it}."
-        )
+        said = [
+            f"{more}; limit={limit} cut the list.",
+            read,
+            f"Narrow with files=[...] or query=...{raise_it}.",
+        ]
+        parts.append(" ".join(said[:sentences]))
     elif cut == "budget":
         raise_it = (
             f", or raise budget_chars (max {_LISTING_BUDGET_MAX})"
             if budget < _LISTING_BUDGET_MAX
             else ""
         )
-        parts.append(
-            f"{matched - returned} more matched; the character budget cut the list. {read} "
-            f"Narrow with files=[...] or query=...{raise_it}."
-        )
+        said = [
+            f"{more}; the character budget cut the list.",
+            read,
+            f"Narrow with files=[...] or query=...{raise_it}.",
+        ]
+        parts.append(" ".join(said[:sentences]))
     if unresolved:
         text = "Some files could not be read: unresolved_files says which, why, and what to try."
         if unlisted:
@@ -2632,46 +2997,197 @@ def _decision_listing_result(
         return _listing_overview(everything, include_superseded, limit, budget), []
 
     pool = everything
+    # A query also searches the facts, under the filters that mean something for a fact. A fact
+    # has no kind, so a ``kind`` filter keeps them out. ``_list_facts_impl`` applies the
+    # proposal policy and returns newest first.
+    # see design/superpowers/specs/2026-11-14-retrieve-decisions-main-read-tool-design.md (D2)
+    searched_facts = _list_facts_impl(store, include_superseded=True) if terms and not kinds else []
+    id_fields: dict = {}
+    id_hint: str | None = None
     if wanted_ids:
-        id_set = set(wanted_ids)
+        id_set, id_fields, id_hint = _id_lookup(
+            wanted_ids, (r["id"] for r in (*pool, *searched_facts)), "record", budget
+        )
         pool = [d for d in pool if d["id"] in id_set]
     # `status` replaces the default exclusion, and so does asking for a record by id.
     history_hidden = not (statuses or wanted_ids or include_superseded)
+    # ``history`` holds the records the default hides, under the call's other filters: a
+    # query that finds nothing looks there before it offers a partial match (design D7).
+    history: list[dict] = []
     if statuses:
         pool = [d for d in pool if d["status"] in statuses]
     elif history_hidden:
+        history = [d for d in pool if d["status"] in _HISTORY]
         pool = [d for d in pool if d["status"] not in _HISTORY]
     if kinds:
         pool = [d for d in pool if d["kind"] in kinds]
+        history = [d for d in history if d["kind"] in kinds]
     unresolved: list[dict] = []
+    anchored: set[str] | None = None
     if wanted_files:
         entity_ids, unresolved = _listing_entities(store, reader, wanted_files, borrowed_from)
         # Any binding counts, an orphaned one too: the question is where the record was
         # anchored, not whether it is still delivered there.
         anchored = {b.record_id for e in entity_ids for b in store.bindings_for_entity_group(e)}
         pool = [d for d in pool if d["id"] in anchored]
-    if terms:
-        pool = [
-            d
-            for d in pool
-            if all(
-                term in "\n".join(str(d.get(f) or "") for f in _SEARCHED_FIELDS).lower()
-                for term in terms
-            )
-        ]
+        history = [d for d in history if d["id"] in anchored]
+    facts: list[dict] = []
+    if terms and not kinds:
+        facts = searched_facts
+        if wanted_ids:
+            facts = [f for f in facts if f["id"] in id_set]
+        if statuses:
+            facts = [f for f in facts if f["status"] in statuses]
+        elif history_hidden:
+            # A fact whose validity window has closed is history, as a superseded one is: it
+            # comes back only when history is asked for (design D2).
+            now = datetime.now(UTC)
+            history += [
+                f
+                for f in facts
+                if (f["status"] in _HISTORY or _expired(f, now))
+                and (anchored is None or f["id"] in anchored)
+            ]
+            facts = [f for f in facts if f["status"] not in _HISTORY and not _expired(f, now)]
+        if anchored is not None:
+            facts = [f for f in facts if f["id"] in anchored]
+    # The live records the call's filters admit, by id: where a replaced history match looks
+    # for its live end (design D8).
+    live = {r["id"]: r for r in [*pool, *facts]}
+    # A word is held by a record's own text, or by the name or path of one of its anchors.
+    # The anchor names come from the store in one read, made at most once per call and only
+    # when some record's text misses a word: the code graph is never opened for a query.
+    words = list(dict.fromkeys(terms))
+    anchor_decisions: list[dict] = []
+    anchor_facts: list[dict] = []
+    via: dict[str, list[str]] = {}  # record id -> the anchors that hold a word its text lacks
+    candidates = [*pool, *facts]
+    held_by: dict[str, list[str]] = {}  # record id -> the words its own text holds
+    seen: set[str] = set()  # the words some searched record holds, in its text or an anchor
+    names_of: dict[str, tuple[str, ...]] | None = None
+
+    def anchors_of(record_id: str) -> tuple[str, ...]:
+        nonlocal names_of
+        if names_of is None:
+            names_of = store.anchor_names()
+        return names_of.get(record_id, ())
+
+    if words:
+        in_text: list[dict] = []
+        for row in candidates:
+            body = _searched_text(row)
+            held_by[row["id"]] = [w for w in words if w in body]
+            seen.update(held_by[row["id"]])
+            missing = [w for w in words if w not in body]
+            if not missing:
+                in_text.append(row)
+                continue
+            names = anchors_of(row["id"])
+            lowered = [name.lower() for name in names]
+            seen.update(w for w in missing if any(w in low for low in lowered))
+            holding = _anchors_holding(names, missing)
+            if holding:
+                via[row["id"]] = holding
+                (anchor_facts if _is_fact_row(row) else anchor_decisions).append(row)
+        pool = [r for r in in_text if not _is_fact_row(r)]
+        facts = [r for r in in_text if _is_fact_row(r)]
 
     # Mistakes first, then newest first; the sort is stable, so the rank keeps the recency order.
     pool.sort(key=_newest_first, reverse=True)
     pool.sort(key=lambda d: _MISTAKE_RANK.get(d["kind"], 2))
-    if not wanted_ids:
-        pool = [
-            {key: d[key] for key in _ROW_KEYS} | {"sent_earlier": True}
-            if d["id"] in sent and d["status"] != "proposed"
-            else d
-            for d in pool
+    # A query answer is a run of groups, each placed in the room the ones before it leave: the
+    # decisions and the facts whose own text holds every word, then the decisions and the
+    # facts that hold a word only through an anchor; and the proposals of all four after
+    # everything that is not a proposal. A call without a query keeps its one group as it is
+    # (design D1, D4, D5).
+    _rank_listing(anchor_decisions)
+    groups = _accepted_first([pool, facts, anchor_decisions, anchor_facts]) if terms else [pool]
+    # When nothing holds every word, the answer says why (design D7, D8). A record of the
+    # hidden history that holds every word ends it there: the answer points at history and
+    # offers no partial match. Otherwise the partial matches: the records whose own text
+    # holds at least half of the words and at least two of them, most words first. One word
+    # of two is an any-word match, so a query of one or two words has none: ``need`` is then
+    # more words than a record without a full match can hold.
+    partial: str | None = None
+    miss: str | None = None
+    replacement: str | None = None
+    replaced: dict[str, list[str]] = {}
+    if words and not any(groups):
+        filtered = bool(statuses or kinds or wanted_files or wanted_ids)
+        in_history: list[dict] = []
+        for row in history:
+            body = _searched_text(row)
+            missing = [w for w in words if w not in body]
+            if not missing or _anchors_holding(anchors_of(row["id"]), missing):
+                in_history.append(row)
+        need = max(2, (len(words) + 1) // 2)
+        leads = [r for r in candidates if not _is_fact_row(r) and len(held_by[r["id"]]) >= need]
+        _rank_listing(leads)
+        leads += [r for r in candidates if _is_fact_row(r) and len(held_by[r["id"]]) >= need]
+        leads.sort(key=lambda r: -len(held_by[r["id"]]))
+        # A full match in hidden history that a live record replaced answers with that record
+        # (design D8); one nothing replaced, or whose replacement a filter excludes, is the
+        # empty answer that points at history.
+        replaced = _replacements(store, in_history, live) if in_history else {}
+        if replaced:
+            heads = [live[head] for head in replaced]
+            head_decisions = [d for d in heads if not _is_fact_row(d)]
+            head_facts = [d for d in heads if _is_fact_row(d)]
+            _rank_listing(head_decisions)
+            head_facts.sort(key=_newest_first, reverse=True)
+            groups = _accepted_first([head_decisions, head_facts])
+            replacement = (
+                "No live record holds every word of the query. These are the live records that "
+                "replaced the history records named in matched_history, which held every word. "
+                "Read a history record with retrieve_decisions(ids=[...]) or list_facts(ids=[...])."
+            )
+        elif in_history:
+            miss = _history_miss(len(in_history))
+        elif leads:
+            groups = _accepted_first([leads])
+            record = "record these filters admit" if filtered else "record"
+            partial = (
+                f"No {record} holds every word of the query. These hold at least {need} of "
+                f"its {len(words)} words; matched_words on each says which. Read the ones "
+                "that are about your question with retrieve_decisions(ids=[...]) or "
+                "list_facts(ids=[...])."
+            )
+        else:
+            miss = _query_miss(words, seen, need, filtered)
+
+    def shaped(rows: list[dict]) -> list[dict]:
+        """Rows as the answer shows them. A fact is never a sent-earlier row (design D2)."""
+        if partial is not None:
+            # A partial match is a lead, not a record sent in full: a compact row that starts
+            # with the words the record's text holds. ``ids=[...]`` returns the body.
+            return [
+                {
+                    "matched_words": held_by[d["id"]],
+                    "id": d["id"],
+                    "status": d["status"],
+                    "statement": _clipped(d["statement"], _PARTIAL_FACT_CHARS),
+                }
+                if _is_fact_row(d)
+                else {"matched_words": held_by[d["id"]]} | {key: d[key] for key in _ROW_KEYS}
+                for d in rows
+            ]
+        if not wanted_ids:
+            rows = [
+                {key: d[key] for key in _ROW_KEYS} | {"sent_earlier": True}
+                if not _is_fact_row(d) and d["id"] in sent and d["status"] != "proposed"
+                else d
+                for d in rows
+            ]
+        if not include_provenance:
+            rows = [{k: v for k, v in d.items() if k != "provenance"} for d in rows]
+        # A record that is in the answer through an anchor says which anchor, and one that
+        # replaced a history match says which record held every word (design D8).
+        rows = [{"matched_anchors": via[d["id"]]} | d if d["id"] in via else d for d in rows]
+        return [
+            {"matched_history": replaced[d["id"]]} | d if d["id"] in replaced else d for d in rows
         ]
-    if not include_provenance:
-        pool = [{k: v for k, v in d.items() if k != "provenance"} for d in pool]
+
+    groups = [shaped(group) for group in groups]
     echo = ", ".join(
         f"{name}={_clip(value)}"
         for name, value in (
@@ -2687,10 +3203,10 @@ def _decision_listing_result(
     history_hint = history_hidden and not (wanted_files and len(unresolved) == len(wanted_files))
     returned: list[dict] = []
     text = _bounded_records(
-        pool,
+        groups[0],
         key="decisions",
-        lead={"overview": False},
-        middle={},
+        lead={"overview": False} | ({"match": "partial"} if partial is not None else {}),
+        middle=id_fields,
         limit=limit,
         budget=budget,
         echo=echo,
@@ -2699,9 +3215,21 @@ def _decision_listing_result(
         has_query=bool(terms),
         history_hint=history_hint,
         returned=returned,
+        extra=groups[1:],
+        is_fact=_is_fact_row,
+        miss=miss,
+        partial=partial,
+        replaced=replacement,
+        id_hint=id_hint,
     )
+    # Only decisions are claimed as sent: no surface back-references a fact. The rows of a
+    # partial answer are not records sent in full, so none of them is claimed.
+    if partial is not None:
+        return text, []
     return text, [
-        d["id"] for d in returned if d["status"] != "proposed" and not d.get("sent_earlier")
+        d["id"]
+        for d in returned
+        if not _is_fact_row(d) and d["status"] != "proposed" and not d.get("sent_earlier")
     ]
 
 
@@ -2719,53 +3247,77 @@ def _bounded_records(
     has_query: bool,
     history_hint: bool,
     returned: list[dict] | None = None,
+    extra: list[list[dict]] | None = None,
+    is_fact: Callable[[dict], bool] | None = None,
+    miss: str | None = None,
+    partial: str | None = None,
+    replaced: str | None = None,
+    id_hint: str | None = None,
 ) -> str:
     """The filtered answer both record listings share: ``pool`` (already sorted) cut at ``limit``
     or ``budget``, never mid-record, with the counts, the hint and the unresolved files. The
     length never exceeds ``budget``: when the caller's own text leaves no room, the echo of the
     filters goes first, then the unresolved entries, last one first. ``lead`` and ``middle`` are
     extra envelope fields placed before ``matched`` and before the records.
+    ``extra`` holds further groups of records, in order, placed after ``pool`` in the room it
+    leaves; ``is_fact`` says which rows are facts and go under ``facts``.
     see design/superpowers/specs/2026-10-04-bounded-decision-listing-design.md (D2-D5)
     see design/superpowers/specs/2026-10-11-bounded-listing-tools-design.md (D2)
     """
-    matched = len(pool)
+    later = [group for group in extra or [] if group]
+    wide = pool + [row for group in later for row in group]
     sizes: dict[int, int] = {}
 
     def size_of(i: int) -> int:
+        # Every list placed below is a head of ``wide``, so one index serves them all.
         if i not in sizes:
-            sizes[i] = len(_dump(pool[i]))
+            sizes[i] = len(_dump(wide[i]))
         return sizes[i]
-
-    def ended_by(k: int) -> str | None:
-        """The bound that ended a list of ``k`` records, as it will read if it ends there."""
-        if k >= matched:
-            return None
-        return "limit" if k >= limit else "budget"
 
     def render(*, echoed: bool, listed: int) -> str:
         """The answer with ``listed`` unresolved entries and, or not, the echo of the filters."""
         shown = unresolved[:listed]
 
-        def answer(k: int, decisions: list[dict]) -> dict:
+        def answer(over: list[dict], k: int, filled: bool, sentences: int = 3) -> dict:
+            """The answer that returns the first ``k`` records of ``over``; without ``filled``
+            the record lists are empty, which measures the envelope. Facts go under their own
+            key and are counted apart: ``matched``, ``returned``, ``omitted`` and
+            ``omitted_ids`` keep meaning the records under ``key``. ``sentences`` is how many
+            sentences a cut hint keeps."""
+            fact_at = [is_fact is not None and is_fact(r) for r in over]
+            fact_total = sum(fact_at)
+            matched = len(over) - fact_total
+            k_fact = sum(fact_at[:k])
+            k_main = k - k_fact
+            rows = over[:k] if filled else []
             out: dict = {
                 **lead,
                 "matched": matched,
-                "returned": k,
-                "omitted": matched - k,
+                "returned": k_main,
+                "omitted": matched - k_main,
                 **middle,
-                key: decisions,
             }
-            if k < matched:
+            if fact_total:
+                out["facts_matched"] = fact_total
+                out[key] = [r for r, f in zip(rows, fact_at, strict=False) if not f]
+                out["facts"] = [r for r, f in zip(rows, fact_at, strict=False) if f]
+            else:
+                out[key] = rows
+            if k_main < matched:
                 out["omitted_ids"] = []
-                out["omitted_ids_unlisted"] = matched - k
+                out["omitted_ids_unlisted"] = matched - k_main
+            if k_fact < fact_total:
+                out["omitted_fact_ids"] = []
+                out["omitted_fact_ids_unlisted"] = fact_total - k_fact
             if files_given:
                 out["unresolved_files"] = shown
                 out["unresolved_omitted"] = len(unresolved) - len(shown)
+            cut = None if k >= len(over) else ("limit" if k >= limit else "budget")
             out["hint"] = _listing_hint(
                 key=key,
-                matched=matched,
+                matched=len(over),
                 returned=k,
-                cut=ended_by(k),
+                cut=cut,
                 limit=limit,
                 budget=budget,
                 unresolved=len(unresolved),
@@ -2773,37 +3325,89 @@ def _bounded_records(
                 echo=echo if echoed else None,
                 has_query=has_query,
                 history_hint=history_hint,
-                sent_earlier=sum(bool(d.get("sent_earlier")) for d in pool[:k]),
+                sent_earlier=sum(bool(d.get("sent_earlier")) for d in over[:k]),
+                sentences=sentences,
+                main_omitted=matched - k_main,
+                facts_omitted=fact_total - k_fact,
+                facts_matched=fact_total,
+                miss=miss,
+                partial=partial,
+                replaced=replaced,
+                id_hint=id_hint,
             )
             return out
 
-        if matched <= limit:
-            complete = _dump(answer(matched, pool))
-            if len(complete) <= budget:
-                if returned is not None:
-                    returned[:] = pool
-                return complete
+        def place(over: list[dict]) -> int:
+            """How many of ``over`` the answer returns: all of them when the whole answer fits,
+            else the longest run from the start that fits."""
+            if len(over) <= limit and len(_dump(answer(over, len(over), True))) <= budget:
+                return len(over)
+            return _take(
+                min(len(over), limit), budget, size_of, lambda k: len(_dump(answer(over, k, False)))
+            )
 
-        taken = _take(min(matched, limit), budget, size_of, lambda k: len(_dump(answer(k, []))))
+        # ``pool`` is placed first, as if nothing else had matched. Then the groups of
+        # ``extra`` join one at a time, each only when the answer that names it still returns
+        # every record the answer without it returns: a group places its records in the room
+        # the earlier ones leave (design D4). A group that is refused places no record; the
+        # next one is tried on top of it.
+        over, taken = pool, place(pool)
+        end = len(pool)
+        for group in later:
+            end += len(group)
+            widened = place(wide[:end])
+            if widened >= taken:
+                over, taken = wide[:end], widened
+        refused = len(over) < len(wide)
+        if refused:
+            # Some group was refused. Its records are still counted and their ids listed as
+            # omitted: an answer never reads as complete when a match was left out. That
+            # account takes the room the placed records leave, so its hint is cut to its
+            # first sentence, and only when the counts and that sentence do not fit does the
+            # last placed record give way, one at a time (design D4).
+            over = wide
+            while taken and len(_dump(answer(over, taken, True, 1))) > budget:
+                taken -= 1
         if returned is not None:
-            returned[:] = pool[:taken]
-        out = answer(taken, pool[:taken])
-        if taken < matched:
-            room = budget - len(_dump(out))
-            for record in pool[taken:]:
-                cost = len(_dump(record["id"])) + 1
-                if cost > room:
+            returned[:] = over[:taken]
+
+        def with_ids(sentences: int) -> dict:
+            """The answer with the omitted ids, decisions before facts, as many as fit."""
+            out = answer(over, taken, True, sentences)
+            if taken < len(over):
+                room = budget - len(_dump(out))
+                for name, facts in (("omitted_ids", False), ("omitted_fact_ids", True)):
+                    if name not in out:
+                        continue
+                    rest = [
+                        r["id"]
+                        for r in over[taken:]
+                        if (is_fact is not None and is_fact(r)) == facts
+                    ]
+                    for record_id in rest:
+                        cost = len(_dump(record_id)) + 1
+                        if cost > room:
+                            break
+                        out[name].append(record_id)
+                        room -= cost
+                    unlisted = len(rest) - len(out[name])
+                    if unlisted:
+                        out[f"{name}_unlisted"] = unlisted
+                    else:
+                        del out[f"{name}_unlisted"]
+            return out
+
+        out = with_ids(1 if refused else 3)
+        if refused:
+            # The ids come before the rest of the hint: it says more only when every omitted
+            # id is listed and the longer text still fits.
+            for sentences in (3, 2):
+                longer = with_ids(sentences)
+                if len(_dump(longer)) <= budget and not any(
+                    name.endswith("_unlisted") for name in longer
+                ):
+                    out = longer
                     break
-                out["omitted_ids"].append(record["id"])
-                room -= cost
-            unlisted = matched - taken - len(out["omitted_ids"])
-            if unlisted:
-                out["omitted_ids_unlisted"] = unlisted
-            else:
-                del out["omitted_ids_unlisted"]
-            while len(_dump(out)) > budget and out["omitted_ids"]:
-                out["omitted_ids"].pop()
-                out["omitted_ids_unlisted"] = matched - taken - len(out["omitted_ids"])
         return _dump(out)
 
     # The ceiling is the contract: when the caller's own text leaves no room, drop the echo of
@@ -2833,11 +3437,11 @@ def retrieve_decisions(
     """List decisions from the store, bounded. The answer is one JSON object in one text block.
 
     With no narrowing filter you get an overview: the total, counts by status and kind, and the
-    newest records as compact rows. Pass a filter to get full records, gotchas and lessons
-    first, then newest first. On Codex, a record already sent in full to the calling agent
-    in this session becomes a compact row with ``sent_earlier: true``; ``ids=[...]`` always
-    requests full records. Proposed records never become sent-earlier rows. Answers are
-    cut at ``limit`` (default 25, max 100) or ``budget_chars``
+    newest records as compact rows. Pass a filter to get full records, mistakes first
+    (gotchas, then lessons and constraints), then newest first. On Codex, a record already sent
+    in full to the calling agent in this session becomes a compact row with
+    ``sent_earlier: true``; ``ids=[...]`` always requests full records. Proposed records never
+    become sent-earlier rows. Answers are cut at ``limit`` (default 25, max 100) or ``budget_chars``
     (default 24000, max 40000), whichever comes first; ``hint`` says what cut the list or why
     it is empty.
     Full records leave out ``provenance`` (capture source, session, commit); pass
@@ -2850,8 +3454,31 @@ def retrieve_decisions(
     rejected and retired (deprecated) records. ``files`` are repo-relative paths, read the way
     ``get_task_context`` reads them (a basename or a directory works); records anchored to them
     match, and ``unresolved_files`` says, for each path nothing could read, why and what to try
-    instead (``reason``, ``candidates``). ``query`` words must all occur in a record's text.
-    ``ids`` returns those records, superseded ones too. History of one topic:
+    instead (``reason``, ``candidates``). ``query`` is your question in a few words. For a
+    full match the ``query`` words must all occur in a record: in its text, or in the name or
+    path of the code it is anchored to through a live or degraded anchor, so a symbol or file
+    name finds its records. Records that hold every word in their own text come first. A
+    record found through an anchor starts with ``matched_anchors``, the anchors that held the
+    word. When only history holds every word and a live record replaced it, that record is
+    the answer and ``matched_history`` names the history record. When no record holds every
+    word, the answer is a partial answer
+    (``"match": "partial"``): compact rows of the records whose text holds at least half of
+    the words and at least two, each with ``matched_words``. A row is a pointer, not the
+    record: read the ones that are about your question with ``ids=[...]``. A query of one or
+    two words has no partial form. A query also returns the facts whose ``statement`` or
+    ``source`` hold every word, or hold it through an anchor, under ``facts``
+    (``facts_matched`` counts them). They come after the decisions that hold every word in
+    their own text and take the room the records before them leave; ``kind`` keeps
+    them out. A fact whose ``valid_to`` has passed is history, shown with
+    ``include_superseded=True``. Read an omitted fact with ``list_facts(ids=[...])`` (ids in
+    ``omitted_fact_ids``). In a query answer proposed records come after every record that
+    is not proposed. Every match is counted, returned or not: one that had no room is in
+    ``omitted_ids`` or ``omitted_fact_ids``.
+    ``ids`` returns those records, superseded ones too. An id may be shortened to its first 8
+    or more characters, in either letter case: it then reads the one record it starts, and
+    ``id_lookup`` and ``hint`` say which full id it resolved to. A prefix that starts several
+    records reads none and lists up to 10 candidate ids; one that is shorter than 8 characters
+    or starts no id is reported the same way (``id_lookup``). History of one topic:
     ``query="<words>", include_superseded=True``.
     """
     # A `ToolResult` return is what keeps FastMCP from declaring an output schema and sending the
@@ -2937,8 +3564,10 @@ def _fact_listing(
     counts = dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
     pool = everything
+    id_fields: dict = {}
+    id_hint: str | None = None
     if wanted_ids:
-        id_set = set(wanted_ids)
+        id_set, id_fields, id_hint = _id_lookup(wanted_ids, (f["id"] for f in pool), "fact", budget)
         pool = [f for f in pool if f["id"] in id_set]
     history_hidden = not (statuses or wanted_ids or include_superseded)
     if statuses:
@@ -2976,7 +3605,7 @@ def _fact_listing(
         pool,
         key="facts",
         lead={},
-        middle={"counts": {"status": counts}},
+        middle={"counts": {"status": counts}, **id_fields},
         limit=limit,
         budget=budget,
         echo=echo,
@@ -2984,6 +3613,7 @@ def _fact_listing(
         files_given=bool(wanted_files),
         has_query=bool(terms),
         history_hint=history_hint,
+        id_hint=id_hint,
     )
 
 
@@ -3010,7 +3640,9 @@ def list_facts(
     deprecated). Filters combine with AND, and an empty one is ignored. ``files`` are
     repo-relative paths, read the way ``get_task_context`` reads them; facts anchored to them
     match, and ``unresolved_files`` says, for each path nothing could read, why. ``query`` words
-    must all occur in ``statement`` or ``source``. ``ids`` returns those facts exactly.
+    must all occur in ``statement`` or ``source``. ``ids`` returns those facts; an id may be
+    shortened to its first 8 or more characters (see ``retrieve_decisions``: ``id_lookup`` and
+    ``hint`` report what each shortened id became).
     ``supports`` is a list of decision ids: only facts attached to (supporting) any of them
     match; an unknown id matches nothing.
     """
@@ -3492,6 +4124,14 @@ def _not_in_graph_block(
     root = worktree_root if borrowed else (lookup() if candidates else None)
     # Malformed is the ladder's own verdict (or no repository root): see the design, D1.
     wellformed = candidates if root is not None else []
+    # A path the filesystem itself refuses as too long (`ENAMETOOLONG`) is asked of the
+    # filesystem, one path at a time, and named on its own line below.
+    too_long = (
+        [p for p in wellformed if seed_ladder.refused_as_too_long(root, p)]
+        if root is not None
+        else []
+    )
+    wellformed = [p for p in wellformed if p not in too_long]
     present = (
         [p for p in wellformed if seed_ladder.is_file_exact(root, p)] if root is not None else []
     )
@@ -3529,7 +4169,7 @@ def _not_in_graph_block(
         if found:
             elsewhere[p] = found
     not_here = [p for p in left if p not in elsewhere]
-    other = [p for p in missing if p not in set(wellformed)]
+    other = [p for p in missing if p not in set(wellformed) and p not in set(too_long)]
     noun = "seed path" if len(seeds) == 1 else "seed paths"
     into = f" in {borrowed_from}" if borrowed else ""
     lines = ["## Not in the code graph"]
@@ -3593,6 +4233,13 @@ def _not_in_graph_block(
             f"{_listed(not_here)}. The path is well-formed as read, so it may be on a branch "
             "that is not checked out anywhere, be misspelled, or be a directory: check the "
             "branch and the spelling."
+        )
+    if too_long:
+        n = len(too_long)
+        verb = "is" if n == 1 else "are"
+        lines.append(
+            f"{n} of {len(seeds)} {noun} {verb} refused by the filesystem as too long: "
+            f"{_listed(too_long)}. Check the path."
         )
     if other:
         n = len(other)
@@ -3671,6 +4318,29 @@ _NEAREST_ONLY_LEAD = (
     "No record is anchored to the files you named; "
     "the records of the nearest anchored files follow."
 )
+_NEAREST_FOLLOW = "The records of the nearest anchored files follow."
+
+
+def _budget_missed(dropped: int, knob: str, budget: int) -> str:
+    """The sentence for an answer whose records were found for the named seeds and then refused
+    by the memory budget: how many, which argument to raise. It replaces "No context found."
+    (and "No record is anchored to the files you named") so that a real miss and a starved budget
+    read differently. ``budget`` is the value the call really had (clamped): at the largest one
+    there is nothing to raise, so the sentence says how to read the records instead.
+    """
+    count = "1 record" if dropped == 1 else f"{dropped} records"
+    they = "it" if dropped == 1 else "them"
+    if budget >= _LISTING_BUDGET_MAX:
+        return (
+            f"{count} found for what you named did not fit {knob}={budget}, the largest "
+            f"allowed: name fewer or narrower seeds, or read {they} with "
+            "retrieve_decisions(files=[...])."
+        )
+    return (
+        f"{count} found for what you named did not fit {knob}={budget}: "
+        f"call again with a larger {knob} to get {they}."
+    )
+
 
 # "Why this is empty": at most this many accepted domains are named.
 _EMPTY_DOMAINS_LISTED = 12
@@ -3720,7 +4390,10 @@ def _empty_block(store, *, graph_missing: bool = False) -> str:
             " There is no code graph to match against either: build it from the repository "
             f"root by running {GRAPH_REBUILD} first."
         )
-    text += " Pass files=[…] with the repo-relative paths you are working on"
+    text += (
+        " Pass files=[…] with the repo-relative paths you are working on, or "
+        'entities=[{"name": "…"}] when you know a symbol\'s name and not its file'
+    )
     if domains:
         named = ", ".join(f"{d.title} ({d.slug})" for d in domains[:_EMPTY_DOMAINS_LISTED])
         extra = len(domains) - _EMPTY_DOMAINS_LISTED
@@ -3894,8 +4567,19 @@ def _get_task_context_impl(
                     near_ctx, guarded=MEMORY_GUARD_LINE in text
                 )
         nearest_only = text == _NO_CONTEXT and near_ctx is not None and bool(near_records)
+        # Records the memory budget refused for the seeds are not "no record": the empty answer
+        # says they exist, and how to get them.
+        starved = (
+            _budget_missed(ctx.dropped_seed, "memory_budget", budget.memory_chars)
+            if seeds and text == _NO_CONTEXT and ctx.dropped_seed > 0
+            else None
+        )
+        empty_lead = starved or _NO_CONTEXT
         if nearest_only:
-            body = _NEAREST_ONLY_LEAD + body[len(_NO_CONTEXT) :]
+            lead = f"{starved} {_NEAREST_FOLLOW}" if starved else _NEAREST_ONLY_LEAD
+            body = lead + body[len(_NO_CONTEXT) :]
+        elif starved:
+            body = starved + body[len(_NO_CONTEXT) :]
         # Each block has its own try/except: advice about the seeds must never cost the answer it
         # follows, nor each other.
         blocks: list[str] = []
@@ -3963,6 +4647,7 @@ def _get_task_context_impl(
             near_at=near_at,
             atoms=recorded.line_ids,
             report=report,
+            placed=ctx.line_ids,
         )
         if (
             near_records
@@ -3972,12 +4657,13 @@ def _get_task_context_impl(
             # Do not retry the near block: the shorter empty lead could make a record fit.
             recorded = ctx
             answer = _hard_cap(
-                _NO_CONTEXT if nearest_only else body,
+                empty_lead if nearest_only else body,
                 empty_trailer,
                 _CONTEXT_CUT_ADVICE,
                 legend=legend,
                 atoms=ctx.line_ids,
                 report=report,
+                placed=ctx.line_ids,
             )
         # Telemetry follows the text: a record the hard cap removed was never shown.
         delivered = _delivered(recorded, report)
@@ -4113,6 +4799,11 @@ def _query_decisions_impl(
             already_sent=sent,
         )
         body, legend, hint = ctx.render_parts(include_structure=False)
+        if seeds and body == _NO_CONTEXT and ctx.dropped_seed > 0:
+            # Records were found for the seeds and the budget refused them all: not a miss.
+            body = _budget_missed(
+                ctx.dropped_seed, "budget_chars", min(budget_chars, _LISTING_BUDGET_MAX)
+            )
         report = _CapReport()
         answer = _hard_cap(
             body,
@@ -4121,6 +4812,7 @@ def _query_decisions_impl(
             legend=legend,
             atoms=ctx.line_ids,
             report=report,
+            placed=ctx.line_ids,
         )
         delivered = _delivered(ctx, report)  # telemetry follows the text, not the render
         if not claims or _claim_sent(
@@ -4159,7 +4851,8 @@ def get_task_context(
     Returns a compact slice: known mistakes/gotchas, then decisions, facts, related
     decisions and unratified proposals. Records of a symbol named in ``entities`` take the
     budget before the records of the other symbols in the named files; among each, mistakes
-    come before decisions. The structural map is not included: call ``query_structure`` with
+    come before decisions. When you name only files, the records bound to a file the graph
+    holds come first. The structural map is not included: call ``query_structure`` with
     the same seeds for it. ``structure_budget`` sets how far the graph walk that finds
     related records reaches. Best-effort — degrades if the graph or store is absent.
 
@@ -4173,7 +4866,8 @@ def get_task_context(
 
     Each budget is capped at 40000 (no floor) and the whole text never exceeds 40000 characters:
     over it, the nearest-anchored records, related and then the records are
-    cut, a closing note names what was cut, and the advice blocks are kept.
+    cut, the records placed last first, a closing note names what was cut, and the advice
+    blocks are kept.
     """
     return _get_task_context_with_sync(files, entities, structure_budget, memory_budget, intent)
 
@@ -4208,10 +4902,9 @@ def query_decisions(
     Same ``files``/``entities`` shape as ``get_task_context``, and the same ``paths`` and
     ``seeds`` aliases. Best-effort like every other tool here: degrades gracefully with no
     graph present (global-scope decisions still surface). This tool takes no
-    ``structure_budget``, but internally the "related" (peripheral) bucket is still gathered
-    by walking the structural subgraph with ``RetrievalBudget``'s DEFAULT ``structure_chars``
-    (the map itself is discarded — only the peripheral entities it surfaces feed decision
-    ranking).
+    ``structure_budget``: the "related" (peripheral) bucket is gathered from the graph
+    neighbours of the seeds, the nodes with the most edges to them, as many as
+    ``RetrievalBudget``'s DEFAULT ``structure_chars`` allows (``structure_chars // 120``).
 
     ``intent``: optional label for what asked (e.g. a skill name). Recorded for local
     statistics only; never affects what is returned.
@@ -4546,7 +5239,14 @@ def _journal_listing(
         parsed = json.loads(text)
         if parsed.get("overview"):
             return
-        ids = [row["id"] for row in parsed.get(field, []) if not row.get("sent_earlier")]
+        rows = list(parsed.get(field, []))
+        if field == "decisions":
+            # A fact returned in full counts as a record, as it does for ``list_facts``.
+            rows += parsed.get("facts", [])
+        ids = [row["id"] for row in rows if not row.get("sent_earlier")]
+        if parsed.get("match") == "partial":
+            # Rows that point at records: none was delivered in full.
+            ids = []
         _record_listing(store, tool, ids)
 
 
@@ -5827,8 +6527,16 @@ def _domain_listing(
     rows = _list_domains_impl(store, status=status)
     wanted_ids = _listing_texts(ids)
     terms = (query or "").lower().split()
+    limit = max(1, min(_LISTING_LIMIT_MAX, limit))
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
+    id_fields: dict = {}
+    id_hint: str | None = None
     if wanted_ids:
-        wanted = set(wanted_ids)
+        # A prefix is read against every domain, then ``status`` applies, as it does to decisions.
+        every = rows if status is None else _list_domains_impl(store)
+        wanted, id_fields, id_hint = _id_lookup(
+            wanted_ids, (r["id"] for r in every), "domain", budget
+        )
         rows = [row for row in rows if row["id"] in wanted]
     if terms:
         rows = [
@@ -5840,8 +6548,6 @@ def _domain_listing(
             )
         ]
 
-    limit = max(1, min(_LISTING_LIMIT_MAX, limit))
-    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
     matched = len(rows)
     filters = []
     if status is not None:
@@ -5852,6 +6558,9 @@ def _domain_listing(
         filters.append("ids")
 
     def hint_for(returned: int) -> str | None:
+        return " ".join(part for part in (id_hint, cut_hint(returned)) if part) or None
+
+    def cut_hint(returned: int) -> str | None:
         omitted = matched - returned
         if not matched:
             if not filters:
@@ -5890,6 +6599,7 @@ def _domain_listing(
             "matched": matched,
             "returned": returned,
             "omitted": matched - returned,
+            **id_fields,
             "domains": domains,
         }
         if returned < matched:
@@ -5945,7 +6655,8 @@ def list_domains(
 
     ``status``, when given, filters to one of ``"proposed"``/``"accepted"``/
     ``"dropped"``/``"superseded"``; omitted (the default) returns every domain regardless
-    of status. ``ids`` filters by exact domain id, and ``query`` applies case-insensitive
+    of status. ``ids`` filters by domain id (a prefix of 8 or more characters resolves as in
+    ``retrieve_decisions``), and ``query`` applies case-insensitive
     whitespace-separated AND terms across slug, title and summary. Filters combine with AND;
     blank query and blank-only ids are ignored. ``limit`` defaults to 25 and is clamped to
     1..100. ``budget_chars`` defaults to 24,000 and is clamped to 4,000..40,000. Read-only —
@@ -6311,8 +7022,9 @@ def drill_down(domain_slug: str, limit: int = 25, budget_chars: int = 24000) -> 
     never resolves to a superseded row) since a caller may drill into a not-yet-ratified
     domain.
 
-    Unknown ``domain_slug`` -> ``{"found": False, "candidates": [...]}`` with up to 10
-    currently-accepted slugs to retry with (never a guess). ``members`` is empty (with a
+    Unknown ``domain_slug`` -> ``{"found": False, "candidates": [...], "hint": ...}`` with up to
+    10 currently-accepted slugs to retry with (never a guess), the ones close to the slug you
+    gave first (``closest`` lists them). ``members`` is empty (with a
     ``"note"`` key) when no Graphify graph is present — everything else still returns.
 
     A decision line may carry a ``[drifted]`` tag (the code it is anchored to changed

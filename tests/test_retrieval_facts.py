@@ -106,7 +106,7 @@ def test_a_short_source_line_is_unchanged(source):
     [
         ("observed", "word " * 60 + "z", True),
         ("observed", ("word " * 60)[:299] + "z", False),
-        ("s" * 241, "benchmark run", True),
+        ("s" * 701, "benchmark run", True),
     ],
 )
 def test_the_evidence_line_follows_the_same_rule(populated, statement, source, clipped):
@@ -119,6 +119,9 @@ def test_the_evidence_line_follows_the_same_rule(populated, statement, source, c
     decision_idx = next(i for i, line in enumerate(lines) if "gotcha1" in line)
     line = lines[decision_idx + 1]
     assert line.startswith("  evidence:")
+    suffix = f" (id: {fact.id})"
+    assert line.endswith(suffix)
+    line = line.removesuffix(suffix)
     note = f' (clipped; full: list_facts(ids=["{fact.id}"]))'
     if clipped:
         assert line.endswith(note) and line.count("clipped; full:") == 1

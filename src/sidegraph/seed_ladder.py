@@ -15,6 +15,7 @@ Portable core: no engine imports. The reader is duck-typed (:class:`_Reader`): i
 from __future__ import annotations
 
 import bisect
+import errno
 import os
 import posixpath
 import re
@@ -119,6 +120,10 @@ class Ladder:
     # rewritten to one file, or unresolved. Duplicates are kept; a directory, an ambiguous seed
     # and an entity seed are not listed.
     file_seeds: list[FileSeed] = field(default_factory=list)
+    # The ``unresolved`` paths whose name the filesystem itself refused as too long
+    # (``ENAMETOOLONG``): such a path is never read as another file, and the not-in-graph block
+    # names it apart from a path that is merely absent.
+    too_long: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -133,6 +138,7 @@ class _FileRead:
     of_files: bool = False  # `listed` holds files because the directory has no subdirectories
     complete: bool = False  # `listed` names everything under the directory
     on_disk: bool = False  # unresolved because the path is a file on disk the graph lacks
+    too_long: bool = False  # unresolved because the filesystem refused the name as too long
     # the spelling came from mapping an absolute or nested path to another checkout (or a
     # Windows separator): said as a "normalised" note even though nothing read it
     remapped: bool = False
@@ -231,11 +237,28 @@ def _under_root(path: str, root: Path) -> str | None:
     return None
 
 
+def refused_as_too_long(root: Path, rel: str) -> bool:
+    """Whether the filesystem itself refuses ``root / rel`` as too long: ``stat`` raises
+    ``ENAMETOOLONG`` (``ERROR_FILENAME_EXCED_RANGE``, 206, on Windows). Asked of the filesystem
+    and never computed from a length: a name of 140 two-byte characters is over 255 bytes and
+    is a name APFS holds. Any other error, or none, is a path that is simply not a file."""
+    try:
+        os.stat(root / rel)
+    except OSError as error:
+        return error.errno == errno.ENAMETOOLONG or getattr(error, "winerror", None) == 206
+    except ValueError:  # an embedded NUL: no file, and the other seeds are still asked
+        return False
+    return False
+
+
 def is_file_exact(root: Path, rel: str) -> bool:
     """Whether ``rel`` is a regular file under ``root`` spelled with exactly its letter case.
     ``(root / rel).is_file()`` alone is true for ``Scripts/x.sh`` on a case-insensitive
     filesystem that holds ``scripts/x.sh``, so every component is looked up in its directory."""
-    if not (root / rel).is_file():
+    try:
+        if not (root / rel).is_file():
+            return False
+    except OSError:  # ENAMETOOLONG and the like: this one path is no file, the others are asked
         return False
     cur = root
     for part in PurePosixPath(rel).parts:
@@ -302,19 +325,26 @@ def _read_file(p: str, files: _Files, *, directories: bool) -> _FileRead:
     q, remapped = _normalise_ex(p, files)
     if q is None:
         return _FileRead("unresolved", shown=p)
-    dir_intent = p.strip().endswith("/")  # a trailing slash tries the directory rung only
+    # A trailing slash skips the guessing rungs (case, shortest tail), which would turn a
+    # directory name into a file. It does not hide a file the graph holds under that name:
+    # `pkg/m.py/` is the file `pkg/m.py` with a stray slash, so the rung below reads it.
+    dir_intent = p.strip().endswith("/")
     # A file may be named like a location (`notes:12`): the spelling with only `./` and the
     # path normalised comes before the one with the location stripped.
     spellings = list(dict.fromkeys([_normalise(p, files, location=False) or q, q]))
-    if not dir_intent:
-        for spelling in spellings:
-            if spelling != p and spelling in files.held:
-                return _FileRead("normalised", (spelling,), shown=spelling)
+    for spelling in spellings:
+        if spelling != p and spelling in files.held:
+            return _FileRead("normalised", (spelling,), shown=spelling)
     # The file exists but the graph lacks it: the not-in-graph block explains that as stale or
     # new. Guessing another file with the same name would be a wrong answer with authority.
     # "Exists" is case-exact: a case-insensitive filesystem says yes to the wrong letter case.
     root = files.root
     if root is not None:
+        # A name the filesystem refuses stops here: the rungs below would read its tail as
+        # another file (`xxx…/m.py` as `pkg/m.py`) and the path would never be reported.
+        for spelling in spellings:
+            if refused_as_too_long(root, spelling):
+                return _FileRead("unresolved", shown=spelling, too_long=True, remapped=remapped)
         for spelling in spellings:
             if is_file_exact(root, spelling):
                 # The hit may be a file of a worktree nested under the root.
@@ -394,6 +424,7 @@ class _Build:
         self.exact: list[Seed] = []
         self.guessed: list[Seed] = []
         self.unresolved: list[str] = []
+        self.too_long: list[str] = []
         self.notes: list[SeedNote] = []
         self.paths: list[str] = []
         self.file_seeds: list[FileSeed] = []
@@ -412,6 +443,7 @@ class _Build:
             exact=self.exact,
             guessed=guessed,
             unresolved=list(dict.fromkeys(self.unresolved)),
+            too_long=list(dict.fromkeys(self.too_long)),
             notes=self.notes,
             seed_paths=self.paths,
             file_seeds=self.file_seeds,
@@ -451,6 +483,8 @@ def _file_seed(seed: Seed, files: _Files, out: _Build) -> str:
         if read.remapped:
             out.notes.append(SeedNote(p, "normalised", (read.shown,)))
         out.unresolved.append(read.shown)
+        if read.too_long:
+            out.too_long.append(read.shown)
         out.file_seeds.append(
             FileSeed(read.shown, "unresolved", directory_intent=p.strip().endswith(("/", "\\")))
         )
@@ -514,13 +548,15 @@ def _entity_seed(seed: Seed, reader: _Reader, files: _Files, out: _Build) -> str
         read = _read_file(path, files, directories=False)
         if read.remapped:
             spelled = read.shown
-        if read.on_disk:
-            # A file on disk the graph lacks: the not-in-graph block explains it. The name is
-            # not hunted for in other files.
+        if read.on_disk or read.too_long:
+            # A file on disk the graph lacks, or a name the filesystem refused: the
+            # not-in-graph block explains it. The name is not hunted for in other files.
             out.exact.append(seed)
             if read.remapped:
                 out.notes.append(SeedNote(given, "normalised", (read.shown,), name=name))
             out.unresolved.append(read.shown)
+            if read.too_long:
+                out.too_long.append(read.shown)
             return read.shown if read.remapped else seed.file_path
         if read.outcome in _SINGLE_FILE:
             target = read.paths[0]

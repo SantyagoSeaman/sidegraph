@@ -396,7 +396,7 @@ def test_a_narrowed_retrieve_decisions_writes_one_render_row(listed):
     result = _call("retrieve_decisions", {"query": "alpha"})
     assert not result.is_error
     row = listed.render_events()[0]
-    assert (row["intent"], row["selected"], row["emitted"]) == ("retrieve_decisions", 2, 2)
+    assert (row["intent"], row["selected"], row["emitted"]) == ("retrieve_decisions", 4, 4)
     assert (row["degraded"], row["dropped_for_budget"], row["chars_used"]) == (0, 0, 0)
     assert row["had_rejected"] == 1
     assert len(listed.render_events()) == 1

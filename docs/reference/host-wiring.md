@@ -25,18 +25,21 @@ Either way, `session_start` prepends the same standing instruction ahead of whic
 renderer's text follows — added once at the hook-assembly level, not inside either renderer
 (see [`reference/hooks.md`](hooks.md#sidegraph-session-start)):
 
-> When you need to find or understand code in this project, call get_task_context(files=[…])
-> with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. If you know a symbol's name and not its file, call
-> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
-> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
-> listed only by name, load it first.
+> Before you search or read files to answer a question about this project or to plan a change,
+> call retrieve_decisions(query="…") with a few words that name the topic — decisions, gotchas and
+> abandoned approaches are indexed here. For files or symbols you are about to change, call
+> get_task_context(files=[…]) with repo-relative paths, or
+> get_task_context(entities=[{"name": "…"}]) when you know a symbol's name and not its file; there
+> is no need to search for the path first. Before a non-trivial change, run the sidegraph
+> check-plan skill if it is available. If a tool is listed only by name, load it first.
 
 Unlike the `PreToolUse` records block below (which fires only when a `Read`, `Edit`, `Write`,
 `Grep` or `sed`/`grep`/`rg`/`cat` line names a file with records, each file at most once per
-agent), this instruction is unconditional and covers every search surface — bash `find`, MCP
-structure-query tools, a search that names no file, everything — by telling the agent up front,
-not by gating a specific tool call.
+agent), this instruction is unconditional and asks for memory before the search that answers a
+question or plans a change, whatever the search tool — bash `find`, MCP structure-query tools, a
+search that names no file — by telling the agent up front, not by gating a specific tool call.
+The call it names for a question or a plan is `retrieve_decisions(query=…)`;
+`get_task_context` is for the files and symbols about to change.
 
 The next line names the package the hooks run, so a session that launched an old install says so
 in its own context: `Sidegraph X.Y.Z`, where `X.Y.Z` is the running version. It appears in every
@@ -170,9 +173,11 @@ No matcher. A subagent (Explore, Plan, general-purpose, or one you define) start
 `SessionStart` context, and Explore and Plan agents load no `CLAUDE.md` either, so nothing
 standing tells one that decision memory exists. When Claude Code creates a subagent, this hook
 answers with an `additionalContext` that arrives in front of its first turn: the same standing
-call `SessionStart` gives the main agent (`get_task_context(files=[…])` with repo-relative
-paths, or with a symbol's name alone when its file is not known, the check-plan skill before a
-non-trivial change, and a reminder to load the tool first if it is listed only by name), then
+call `SessionStart` gives the main agent (`retrieve_decisions(query=…)` before searching for
+a question or a plan, `get_task_context(files=[…])` with repo-relative paths for the files about
+to change, or with a symbol's name alone when its file is not known, the check-plan skill
+before a non-trivial change, and a reminder to load the tool first if it is listed only by
+name), then
 one sentence of what memory holds: how many records are anchored to code, in how many files,
 and how many of them are recorded mistakes. It carries no records:
 which ones matter depends on the files the subagent works on, and `get_task_context` answers

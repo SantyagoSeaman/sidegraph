@@ -498,7 +498,7 @@ def wire(name: str, arguments: dict | None = None) -> tuple[str, dict | None]:
 # T-542-4): fixed ids and timestamps, so an unconditional change to an answer breaks them.
 JOURNALED_LISTING_WIRE = {
     "retrieve_decisions": (
-        '{"overview":false,"matched":1,"returned":1,"omitted":0,"decisions":[{"id":"01DECISIONAAAAAAAAAAAAAAAA","title":"alpha lock order","kind":"gotcha","status":"accepted","context":"c","choice":"ch","rejected":"global lock","consequences":null,"valid_from":"2026-10-01T12:00:00Z","valid_to":null,"supersedes":null,"scope":"repo","layer":null,"provenance":{"source":"manual","ref":null,"author":null,"session_id":null,"graph_version":null,"commit":null},"ratified_by":null,"ratified_at":null,"retired":null}],"hint":null}'  # noqa: E501
+        '{"overview":false,"matched":1,"returned":1,"omitted":0,"facts_matched":1,"decisions":[{"id":"01DECISIONAAAAAAAAAAAAAAAA","title":"alpha lock order","kind":"gotcha","status":"accepted","context":"c","choice":"ch","rejected":"global lock","consequences":null,"valid_from":"2026-10-01T12:00:00Z","valid_to":null,"supersedes":null,"scope":"repo","layer":null,"provenance":{"source":"manual","ref":null,"author":null,"session_id":null,"graph_version":null,"commit":null},"ratified_by":null,"ratified_at":null,"retired":null}],"facts":[{"id":"01FACTAAAAAAAAAAAAAAAAAAAA","statement":"alpha fact","source":"bench","supports":[],"ratified_by":null,"ratified_at":null,"status":"accepted","valid_from":"2026-10-01T12:00:00Z","valid_to":null,"supersedes":null,"provenance":{"source":"manual","ref":null,"author":null,"session_id":null,"graph_version":null,"commit":null}}],"hint":null}'  # noqa: E501
     ),
     "list_facts": (
         '{"matched":1,"returned":1,"omitted":0,"counts":{"status":{"accepted":1}},"facts":[{"id":"01FACTAAAAAAAAAAAAAAAAAAAA","statement":"alpha fact","source":"bench","supports":[],"ratified_by":null,"ratified_at":null,"status":"accepted","valid_from":"2026-10-01T12:00:00Z","valid_to":null,"supersedes":null,"provenance":{"source":"manual","ref":null,"author":null,"session_id":null,"graph_version":null,"commit":null}}],"hint":null}'  # noqa: E501
@@ -885,7 +885,12 @@ def test_l8_a_small_domain_is_byte_identical_to_the_unbounded_answer(store):
     text, parsed = wire("drill_down", {"domain_slug": "capture"})
     assert parsed["found"] is True
     missing = call("drill_down", {"domain_slug": "no-such"})
-    assert json.loads(missing.content[0].text) == {"found": False, "candidates": ["capture"]}
+    assert json.loads(missing.content[0].text) == {
+        "found": False,
+        "candidates": ["capture"],
+        "hint": 'No domain has the slug "no-such". None is close; candidates lists accepted '
+        "domain slugs.",
+    }
 
 
 # -- L9: list_domain_candidates -----------------------------------------------------------

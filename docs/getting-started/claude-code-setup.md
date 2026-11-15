@@ -242,8 +242,9 @@ The env vars are inlined into the command because Claude Code hook entries have 
 `env`/`cwd` fields.
 
 - `SessionStart` injects a compact project-memory map at the start of every session, led by a
-  standing instruction to call `get_task_context` before any search — bash grep/rg/find and
-  MCP structure-query tools included, not just `Read`/`Grep` (see
+  standing instruction to call `retrieve_decisions(query=…)` before searching or reading files
+  to answer a question or plan a change, and `get_task_context` for the files or symbols about
+  to change — whatever the search tool, not just `Read`/`Grep` (see
   [`reference/hooks.md`](../reference/hooks.md#sidegraph-session-start)).
 - `Stop` nudges the agent, once per session and only once the session has produced
   **>= 2 real user prompts** (a substance gate — a session's very first `Stop` no longer

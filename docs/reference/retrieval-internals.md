@@ -45,8 +45,11 @@ what it's working on.
 
 `RetrievalBudget` is a hard split, in characters (`len(text)`, ≈4 chars/token — no tokenizer
 dependency): `structure_chars` (default 4000) and `memory_chars` (default 6000). The split
-sizes the graph walk independently of the memory render. `get_task_context` keeps that walk
-for related records but omits the map; `query_structure` renders it under `structure_chars`.
+sizes the graph walk independently of the memory render. `structure_chars // 120` is the
+number of map nodes and, separately, the number of neighbour nodes whose records are
+gathered as related: the neighbours with the most edges to the seed nodes.
+`get_task_context` keeps that walk for
+related records but omits the map; `query_structure` renders it under `structure_chars`.
 (`memory_chars` was raised from an original 2000 — see "Tiered rendering" below for why a bigger memory budget is what makes the tiered
 render actually deliver on real ADR-scale content instead of dropping it.)
 
@@ -78,8 +81,14 @@ direct mistake line, the evidence of the mistake lines, the evidence of the name
 the other ADRs, each followed by its evidence. The sections do not change: all mistakes are
 printed under **Known mistakes & gotchas** and all ADRs under **Decisions**, the named
 records first in each. So a named symbol's ADR takes the budget before another symbol's
-gotcha, and is printed below it. A call with no named symbol has no named record: every
-direct mistake is placed before every direct ADR.
+gotcha, and is printed below it. A call with no named symbol has no named record. Its leading
+records are the records of the named files as a whole: an accepted decision bound to a named
+file's own graph node and to no other seed entity. They take the positions the named records
+take above, their mistake lines first, then their ADR lines. A record bound to the file and to
+one of its symbols is not one of them. Whether an entity is the file as a whole is read from
+the graph node the store last saw it on, never from the spelling of its name, so a file the
+graph does not hold has no such record and keeps the plain order: every direct mistake, then
+every direct ADR.
 
 ### Bucket C: domains and communities
 
@@ -126,7 +135,7 @@ forms:
 
 - **Inline evidence.** In buckets B-D, the moment an accepted decision line is placed
   (`rank_decisions.add()`), its live **accepted** supporting facts render immediately as
-  adjacent `  evidence: <statement> [<source>]` lines. A live proposed supporting fact is
+  adjacent `  evidence: <statement> [<source>] (id: <id>)` lines. A live proposed supporting fact is
   quarantined in the final **Unratified proposals** section instead; a superseded fact does
   not render. Bucket A (mistakes) defers accepted evidence to a second pass
   instead of rendering it immediately — see the mistakes-budget guarantee below for why.
@@ -142,11 +151,14 @@ forms:
   decision bucket (A-D) and the superseded one-liners have already had first claim on the
   budget.
 
-Both fact-line forms clip the statement to 240 characters and the source to 300 characters,
+Both fact-line forms clip the statement to 700 characters and the source to 300 characters,
 at word boundaries where possible, appending `…` to a clipped part. If either part is clipped,
 the line carries exactly one ` (clipped; full: list_facts(ids=["<id>"]))` note, naming the
 call that returns the whole fact. The longer line spends the same shared character budget.
-The same format appears in the SessionStart fallback map of a store with no accepted domain.
+A fact line of `get_task_context` and `query_decisions` ends with ` (id: <id>)`, after the
+clipped note when there is one: the id `supersede_fact` and `list_facts(ids=…)` take. The
+SessionStart fallback map of a store with no accepted domain shows the same line without
+the id and clips the statement at 240 characters.
 
 **The mistakes-budget guarantee: facts can never displace a mistake.** Bucket A is two-phase
 specifically to protect this: phase 1 places every mistake decision's line, with NO evidence
@@ -317,7 +329,9 @@ accepted inline `evidence:` lines nested under the decision they support), **Kno
 (accepted standalone facts — see above), **Structural map** (the budgeted subgraph around the
 seeds, rendered as pointers — `- name (file_type) [file_path:line]`, never inlined code),
 **Related**, then **Unratified proposals**.
-Missing sections are omitted; an empty result renders `"No context found."`.
+Missing sections are omitted; an empty result renders `"No context found."`. When the memory budget
+refused records that were found for the named seeds, the empty answer says how many did not fit
+and to raise `memory_budget` (`budget_chars` for `query_decisions`) instead.
 `get_task_context` calls `render_parts(include_structure=False)`: it omits the map, including
 its domain-summary fallback, while leaving the graph walk and related records unchanged.
 After the rendered text, `get_task_context` appends a `## Not in the code graph` block when a
@@ -328,7 +342,9 @@ only in another checkout of the repository (a sibling linked worktree: the sente
 worktree and branch, and says to start the session there to read its graph and records),
 a well-formed path that is
 not a file in any checkout (check the branch and the spelling), or a path that is not a
-normalized repo-relative path (check it). In a linked worktree that borrows the
+normalized repo-relative path (check it), or a path the filesystem refused as too long (it answered
+`ENAMETOOLONG`: named on its own line, never read as another file, and the other seeds keep their
+advice). In a linked worktree that borrows the
 main checkout's graph, a file that exists only on the branch gets advice to build a graph in
 this worktree: rebuilding the main checkout's graph cannot add it.
 The rebuild advice for any other file names the main checkout. With no graph
@@ -341,7 +357,10 @@ holds no decision memory at all, the records of the named files follow under
 [the nearest anchored records](mcp-tools.md#the-nearest-anchored-records).
 When those records follow an empty primary lookup, the leading "No context found." becomes
 "No record is anchored to the files you named; the records of the nearest anchored files follow."
-If the hard cap removes every nearest record, the old lead and `## Why this is empty` heading
+When the memory budget refused records of the named files themselves, the lead says that instead
+(`N record(s) found for what you named did not fit memory_budget=B`) and then says that the
+records of the nearest anchored files follow.
+If the hard cap removes every nearest record, the old lead (that budget lead, when it applied) and `## Why this is empty` heading
 return, without the nearest-records block or its supersede hint. Telemetry and delivery claims
 exclude the removed records.
 `render()` itself produces none of these blocks.
@@ -377,13 +396,15 @@ whether the store has any accepted domains yet:
 Neither renderer includes the standing search instruction itself — `host.hooks.session_start`
 prepends it once, at the hook-assembly level, ahead of whichever renderer's text follows, so
 `render_toc`/`top_tier_map` stay pure content formatters (see
-[`reference/hooks.md`](hooks.md#sidegraph-session-start)). The instruction now
-covers every search surface, not just `Read`/`Grep`: *"When you need to find or understand
-code in this project, call `get_task_context(files=[…])` with repo-relative paths before any
-grep or file search — decisions, gotchas and a domain map are indexed here. If you know a
-symbol's name and not its file, call `get_task_context(entities=[{"name": "…"}])` instead of
-searching for the path. Before a non-trivial change, run the sidegraph check-plan skill if it
-is available. If the tool is listed only by name, load it first."* A `Sidegraph X.Y.Z` line
+[`reference/hooks.md`](hooks.md#sidegraph-session-start)). The instruction orders the
+decision memory before the search for a question or a plan, not before every grep: *"Before you
+search or read files to answer a question about this project or to plan a change, call
+`retrieve_decisions(query="…")` with a few words that name the topic — decisions, gotchas and
+abandoned approaches are indexed here. For files or symbols you are about to change, call
+`get_task_context(files=[…])` with repo-relative paths, or
+`get_task_context(entities=[{"name": "…"}])` when you know a symbol's name and not its file;
+there is no need to search for the path first. Before a non-trivial change, run the sidegraph
+check-plan skill if it is available. If a tool is listed only by name, load it first."* A `Sidegraph X.Y.Z` line
 follows it, so a session that launched an old install says so in its own context. Both
 degrade gracefully — an empty
 store still gets the instruction, the version line and the header. After the map the hook
@@ -434,7 +455,8 @@ Works on a not-yet-ratified
 (`proposed`) domain too; `status` in the result reflects that.
 
 Unknown `domain_slug` never guesses a match: it returns `{"found": false, "candidates": [...]}`
-with up to 10 currently-accepted slugs to retry with. No reader present degrades `members` to
+with up to 10 currently-accepted slugs to retry with, those close to the slug asked for first
+(`closest`, and a `hint`). No reader present degrades `members` to
 an empty list with an explanatory `"note"` key. The other store-derived parts (`domain`,
 `subdomains`) are unaffected, and so are the `decisions` found through the domain's own
 bindings. A decision reachable only through the whole-document branch of the drill-down
@@ -468,17 +490,22 @@ Whichever renderer ran, the `sidegraph-session-start` hook prepends the same **s
 search instruction**, once, ahead of the rest of the text (not inside either renderer — see
 [`reference/hooks.md`](hooks.md#sidegraph-session-start)):
 
-> When you need to find or understand code in this project, call get_task_context(files=[…])
-> with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. If you know a symbol's name and not its file, call
-> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
-> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
-> listed only by name, load it first.
+> Before you search or read files to answer a question about this project or to plan a change,
+> call retrieve_decisions(query="…") with a few words that name the topic — decisions, gotchas and
+> abandoned approaches are indexed here. For files or symbols you are about to change, call
+> get_task_context(files=[…]) with repo-relative paths, or
+> get_task_context(entities=[{"name": "…"}]) when you know a symbol's name and not its file; there
+> is no need to search for the path first. Before a non-trivial change, run the sidegraph
+> check-plan skill if it is available. If a tool is listed only by name, load it first.
 
 Unlike the records the `PreToolUse` hook delivers at the point of reading (see
-[Memory without asking](#memory-without-asking) below), this line is unconditional and covers
-every search surface behaviorally, not just calls that name a file with records — bash `find`
-and MCP structure-query tools included.
+[Memory without asking](#memory-without-asking) below), this line is unconditional and is told
+to the agent up front: it asks for memory before the search that answers a question or plans a
+change, whatever the search tool (bash `find`, an MCP structure query, a search that names no
+file), and does not wait for a call that names a file with records. Without that ordering
+cue agents searched and read first and asked memory second, so the instruction names
+`retrieve_decisions(query=…)` as the call for a question or a plan and keeps `get_task_context`
+for the files and symbols about to change.
 
 The next line names the package the hooks run: `Sidegraph X.Y.Z`. A session that launched an old
 install says so in its own context.

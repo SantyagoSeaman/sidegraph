@@ -277,12 +277,12 @@ def test_c2_get_task_context_counts_only_the_records_in_the_wire_text(tmp_path, 
 def test_c2_facts_the_cap_cut_are_not_counted_as_shown(tmp_path, monkeypatch):
     from sidegraph.schema import AnchorBinding, Fact
 
-    store, reader, ids = _mistakes(tmp_path, monkeypatch, count=59, size=300)
+    store, reader, ids = _mistakes(tmp_path, monkeypatch, count=58, size=300)
     entity = store.find_abstract_entity("Trader") or next(store.iter_concrete_entities())
     fact_ids = []
     for i in range(22):
         fact = Fact(
-            statement=f"fact {i:02d} " + "q" * 480,
+            statement=f"fact {i:02d} " + "q" * 200,
             source=f"bench {i}",
             status=DecisionStatus.ACCEPTED,
             valid_from=datetime(2026, 10, 1, tzinfo=UTC) - timedelta(minutes=i),

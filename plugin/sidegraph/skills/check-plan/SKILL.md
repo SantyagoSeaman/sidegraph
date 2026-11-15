@@ -23,10 +23,13 @@ plan would *delete or bypass* — that's where reversal records live.
 
 ## 2. Pull the memory, mistakes first
 
-- **Primary:** `get_task_context(files=[...], entities=[{"name": ..., "file_path": ...}])`
-  — name the symbols the plan changes in `entities`: their records take the budget first. Then
-  mistakes, decisions with evidence, facts and related records. This is the budget-bounded
-  view an agent would get mid-work; you're pulling it early.
+- **Primary, first call:** `retrieve_decisions(query="<a few words naming the plan's area>")`
+  — the plan is a question to memory before it is a list of files, and a query needs no path
+  the plan may not have yet. Run it before you search or read the code for the plan.
+- **Then the touchpoints:** `get_task_context(files=[...], entities=[{"name": ..., "file_path": ...}])`
+  for the files and symbols the plan changes — name the symbols in `entities`: their records
+  take the budget first. Then mistakes, decisions with evidence, facts and related records.
+  This is the budget-bounded view an agent would get mid-work; you're pulling it early.
 - **Area-level plans** ("rework how retrieval budgets work") → `list_domains()` +
   `drill_down(domain_slug)` — the domain's decisions, mistakes first.
 - **The reversal hunt — the step ordinary retrieval doesn't do:** live records answer

@@ -247,17 +247,22 @@ Behavior:
    each — added once here, at the hook-assembly level, so `render_toc`/`top_tier_map` themselves
    stay pure content formatters. Verbatim:
 
-   > When you need to find or understand code in this project, call get_task_context(files=[…])
-   > with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-   > are indexed here. If you know a symbol's name and not its file, call
-   > get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
-   > non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
-   > listed only by name, load it first.
+   > Before you search or read files to answer a question about this project or to plan a change,
+   > call retrieve_decisions(query="…") with a few words that name the topic — decisions, gotchas
+   > and abandoned approaches are indexed here. For files or symbols you are about to change, call
+   > get_task_context(files=[…]) with repo-relative paths, or
+   > get_task_context(entities=[{"name": "…"}]) when you know a symbol's name and not its file;
+   > there is no need to search for the path first. Before a non-trivial change, run the sidegraph
+   > check-plan skill if it is available. If a tool is listed only by name, load it first.
 
    Unlike the `PreToolUse` records block below (the files a `Read`, `Edit`, `Write`, `Grep` or
    `sed`/`grep`/`rg`/`cat` line names, each at most once per agent), this line is unconditional
-   and is meant to cover every search surface behaviorally — `find`, an MCP structure query, a
-   search that names no file — not just the calls that name a file with records.
+   and asks for memory before the search that answers a question or plans a change, whatever
+   the search tool — `find`, an MCP structure query, a search that names no file — not just
+   before the calls that name a file with records. It orders the call before the search only
+   for a question or a plan, not before every grep: without that ordering cue agents searched
+   and read first and asked memory second. `retrieve_decisions(query=…)` is the call for a
+   question or a plan; `get_task_context` is for the files and symbols about to change.
 
    The line after it names the package the hooks run, so a session that launched an old install
    says so in its own context. `X.Y.Z` is the running package's version. The line appears once
@@ -1335,19 +1340,21 @@ The brief is the call to make, the same standing instruction `SessionStart` give
 agent (the hook imports the constant, so the two cannot drift), and one sentence on what memory
 holds:
 
-> When you need to find or understand code in this project, call get_task_context(files=[…])
-> with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. If you know a symbol's name and not its file, call
-> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
-> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
-> listed only by name, load it first. This project keeps a decision memory (Sidegraph): N
-> records anchored to code in M files, K of them recorded mistakes.
+> Before you search or read files to answer a question about this project or to plan a change,
+> call retrieve_decisions(query="…") with a few words that name the topic — decisions, gotchas and
+> abandoned approaches are indexed here. For files or symbols you are about to change, call
+> get_task_context(files=[…]) with repo-relative paths, or
+> get_task_context(entities=[{"name": "…"}]) when you know a symbol's name and not its file; there
+> is no need to search for the path first. Before a non-trivial change, run the sidegraph
+> check-plan skill if it is available. If a tool is listed only by name, load it first. This
+> project keeps a decision memory (Sidegraph): N records anchored to code in M files, K of them
+> recorded mistakes.
 
 ```json
 {
   "hookSpecificOutput": {
     "hookEventName": "SubagentStart",
-    "additionalContext": "<the brief, under 700 characters>"
+    "additionalContext": "<the brief, under 800 characters>"
   }
 }
 ```

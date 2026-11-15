@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.29.0"
+version = "0.30.0"
 description = "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -37,18 +37,18 @@ dependencies = [
     "annotated-types==0.8.0",
     "anyio==4.16.0",
     "attrs==26.1.0",
-    "authlib==1.9.5",
+    "authlib==1.9.6",
     "beartype==0.23.1",
-    "cachetools==7.3.0",
+    "cachetools==8.0.0",
     "caio==0.12.10",
     "certifi==2026.10.23",
     "cffi==2.1.1 ; platform_python_implementation != 'PyPy'",
-    "click==8.5.0",
+    "click==8.5.1",
     "cryptography==50.0.2",
-    "cyclopts==5.3.3",
+    "cyclopts==5.5.0",
     "dnspython==2.9.2",
     "docstring-parser==0.18.0",
-    "email-validator==2.3.0",
+    "email-validator==2.4.0",
     "exceptiongroup==1.3.1",
     "fastmcp-slim==3.4.11",
     "fastmcp==3.4.11",
@@ -68,7 +68,7 @@ dependencies = [
     "jsonschema-specifications==2025.9.1",
     "jsonschema==4.26.0",
     "keyring==25.7.0",
-    "markdown-it-py==4.2.0",
+    "markdown-it-py==4.3.0",
     "mcp==1.30.0",
     "mdurl==0.1.2",
     "more-itertools==11.2.1",
@@ -80,7 +80,7 @@ dependencies = [
     "py-key-value-aio==0.4.6",
     "pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'",
     "pydantic-core==2.50.4",
-    "pydantic-settings==2.16.2",
+    "pydantic-settings==2.16.3",
     "pydantic==2.14.3",
     "pygments==2.21.0",
     "pyjwt==2.15.1",
@@ -96,11 +96,11 @@ dependencies = [
     "rich==15.0.0",
     "rpds-py==2026.9.1",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
-    "sse-starlette==3.6.0",
+    "sse-starlette==3.7.0",
     "starlette==1.10.0",
     "typing-extensions==4.16.0",
     "typing-inspection==0.4.5",
-    "uncalled-for==0.4.2",
+    "uncalled-for==0.6.1",
     "uvicorn==0.54.0",
     "watchfiles==1.3.0",
     "websockets==17.4",

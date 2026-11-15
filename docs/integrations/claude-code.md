@@ -53,12 +53,13 @@ claude mcp add sidegraph -s project --env SIDEGRAPH_DIR=.sidegraph --env SIDEGRA
 
 The session starts with this instruction:
 
-> When you need to find or understand code in this project, call get_task_context(files=[…])
-> with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. If you know a symbol's name and not its file, call
-> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
-> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
-> listed only by name, load it first.
+> Before you search or read files to answer a question about this project or to plan a change,
+> call retrieve_decisions(query="…") with a few words that name the topic — decisions, gotchas and
+> abandoned approaches are indexed here. For files or symbols you are about to change, call
+> get_task_context(files=[…]) with repo-relative paths, or
+> get_task_context(entities=[{"name": "…"}]) when you know a symbol's name and not its file; there
+> is no need to search for the path first. Before a non-trivial change, run the sidegraph
+> check-plan skill if it is available. If a tool is listed only by name, load it first.
 
 SessionStart gives the initial map. PreToolUse supplies records when a supported file read or edit runs. SubagentStart introduces the lookup tools. Stop reminds an agent to capture durable learning after substantial work. See [real output](../reference/examples.md).
 

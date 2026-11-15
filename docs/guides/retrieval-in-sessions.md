@@ -12,12 +12,13 @@ The session map gives a short orientation before work. A **domain** is a named a
 
 The standing instruction is:
 
-> When you need to find or understand code in this project, call get_task_context(files=[…])
-> with repo-relative paths before any grep or file search — decisions, gotchas and a domain map
-> are indexed here. If you know a symbol's name and not its file, call
-> get_task_context(entities=[{"name": "…"}]) instead of searching for the path. Before a
-> non-trivial change, run the sidegraph check-plan skill if it is available. If the tool is
-> listed only by name, load it first.
+> Before you search or read files to answer a question about this project or to plan a change,
+> call retrieve_decisions(query="…") with a few words that name the topic — decisions, gotchas and
+> abandoned approaches are indexed here. For files or symbols you are about to change, call
+> get_task_context(files=[…]) with repo-relative paths, or
+> get_task_context(entities=[{"name": "…"}]) when you know a symbol's name and not its file; there
+> is no need to search for the path first. Before a non-trivial change, run the sidegraph
+> check-plan skill if it is available. If a tool is listed only by name, load it first.
 
 `Sidegraph X.Y.Z` identifies the running package. A pending-ratification line means someone must review proposed records. A drift line asks for a content check. Read other diagnostic lines using [troubleshooting](troubleshooting.md). None of these lines means the whole store is loaded into the agent's context.
 
@@ -77,8 +78,8 @@ entirely if empty:
 
 | Block | What it means |
 |---|---|
-| `## ⚠ Known mistakes & gotchas` | `gotcha`/`lesson`/`constraint` decisions bound directly to your seed entities, those of a symbol you named in `entities` first. Read this first — these are the "someone already stepped on this" warnings. |
-| `## Decisions` | Accepted `adr` decisions bound directly to your seed entities, those of a named symbol first — accepted supporting facts may nest under them. |
+| `## ⚠ Known mistakes & gotchas` | `gotcha`/`lesson`/`constraint` decisions bound directly to your seed entities, those of a symbol you named in `entities` first, or, when you name only files, those bound to a file itself. Read this first — these are the "someone already stepped on this" warnings. |
+| `## Decisions` | Accepted `adr` decisions bound directly to your seed entities, those of a named symbol first, or, when you name only files, those bound to a file itself — accepted supporting facts may nest under them. |
 | `## Known facts` | Accepted facts bound to seed/peripheral entities that were not already shown inline. |
 | `## Related` | Accepted decisions reached indirectly, plus one-line superseded history for seed entities. |
 | `## Unratified proposals` | Proposed decisions and facts, always after accepted memory and omitted by the proposal policy when required. |
@@ -87,7 +88,9 @@ For the structural map, call `query_structure` with the same seeds. `structure_b
 sizes the graph walk that finds related records.
 
 If the final answer has no memory, it starts with `No context found.`, followed
-by a block that says why. A seed that was read some other way than written gets a
+by a block that says why. The exception is an answer the memory budget emptied: when the files
+or symbols you named have records and none fit `memory_budget`, it says how many did not fit and
+to call again with a larger `memory_budget` (at the largest, how to narrow the seeds), instead. A seed that was read some other way than written gets a
 `## How your seeds were read` line (guessed, normalised, a directory, ambiguous, or a name that
 matches no symbol). If a file you passed is not in the code graph, a trailing
 `## Not in the code graph` block says why: the graph is stale and needs a rebuild (`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set), the
@@ -98,8 +101,11 @@ sentence naming them, and when the answer holds no decision memory at all the re
 files follow under `## Nearest anchored records (not anchored to your files)` (see
 [the nearest anchored records](../reference/mcp-tools.md#the-nearest-anchored-records)). When those
 records follow an empty primary lookup, the answer starts: "No record is anchored to the files
-you named; the records of the nearest anchored files follow." If the hard cap removes all of
-them, it keeps "No context found." and the nearest-files sentence under `## Why this is empty`.
+you named; the records of the nearest anchored files follow." When the named file does have
+records and the budget refused them, that lead says so instead ("N record(s) found for what you
+named did not fit memory_budget=B ..."). If the hard cap removes all of the nearest records, the
+answer keeps its first line ("No context found." or the budget sentence) and the nearest-files
+sentence under `## Why this is empty`.
 A call with no seeds gets a `## Why this is empty` block. With no
 code graph at all, a trailing `## No code graph` block names the path that was looked at and says
 to build it: the graph is missing, so memory anchored to code could not be looked up. In a
@@ -131,7 +137,7 @@ tier.
 
 ```
 - [adr] Wrap HTTPX with an explicit retry policy for the exchange client: ...
-  evidence: HTTPX HTTPTransport retries connection establishment errors, not HTTP 5xx responses. [HTTPX Transports documentation]
+  evidence: HTTPX HTTPTransport retries connection establishment errors, not HTTP 5xx responses. [HTTPX Transports documentation] (id: 01J...)
 ```
 
 The mistakes-first guarantee holds here too — accepted evidence is spent from the same
@@ -148,16 +154,19 @@ after `## Decisions`, ahead of `## Related`:
 
 ```
 ## Known facts
-- fact: HTTPX HTTPTransport retries connection establishment errors, not HTTP 5xx responses. [HTTPX Transports documentation]
+- fact: HTTPX HTTPTransport retries connection establishment errors, not HTTP 5xx responses. [HTTPX Transports documentation] (id: 01J...)
 ```
 
 Only accepted facts appear here. A proposed standalone fact appears in the final unratified
 block while the proposal policy allows it to surface.
 
-Standalone and inline evidence lines show up to 240 characters of the statement and 300
+Standalone and inline evidence lines show up to 700 characters of the statement and 300
 characters of the source. A clipped part ends with `…`; if either part is clipped, exactly
 one ` (clipped; full: list_facts(ids=["<id>"]))` note gives the call to read the whole fact.
-The SessionStart map uses the same format when the store has no accepted domain.
+A fact line of `get_task_context` and `query_decisions` ends with ` (id: <id>)`, after the
+clipped note when there is one: the id `supersede_fact` and `list_facts(ids=…)` take. The
+SessionStart map shows the same line without the id when the store has no accepted domain,
+and clips its statement at 240 characters.
 
 ## When `related`-via-community appears
 
@@ -169,11 +178,11 @@ A decision shows up under `## Related` instead of the direct blocks in two situa
    decision alive and reachable when its leaf anchor degrades (ambiguous) or orphans, and
    it's also how a decision anchored to *ADR-A* can still surface while you're editing
    *ADR-B*, if both live in the same reference cluster.
-2. **Peripheral entities.** Anything that shows up as a non-seed node in the budgeted
-   structural subgraph (reachable from your seeds within the `structure_budget`) also
-   contributes its own decisions to `## Related` — a breadth-first neighbourhood of your
-   seeds, bounded by `structure_budget` (it can reach several hops on a sparse graph), not a
-   full graph walk.
+2. **Peripheral entities.** The code-graph neighbours of your seeds also contribute their
+   own decisions to `## Related` and their facts to `## Known facts`: the nodes outside
+   your seeds with the most edges to them, at most `structure_budget // 120` (33 at the
+   default), one hop away. A file seed counts every node of the file as a seed, so its
+   neighbours are what the file as a whole is most connected to.
 
 Global-scope decisions land in `## Related` too (after community/peripheral), so a
 repo-wide constraint you already saw at session start can resurface here if it's relevant.

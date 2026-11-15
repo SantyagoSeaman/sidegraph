@@ -27,7 +27,7 @@ import subprocess
 import tarfile
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -852,6 +852,22 @@ class GraphifyReader:
             if str(link.get("source")) in keep and str(link.get("target")) in keep
         ]
         return Subgraph(nodes=list(picked.values()), edges=edges)
+
+    def connected_neighbours(self, seed_ids: Sequence[str], limit: int) -> list[NodeRef]:
+        """Up to ``limit`` nodes that are not seeds, those with the most edges to seed nodes
+        first. Equal counts are ordered by node id, so the result depends on neither the
+        order of the seeds nor the order of nodes and links in ``graph.json``. A node with no
+        file path (an engine artifact such as ``Any``) counts like any other: a decision
+        anchored to a path-less mention is reached through it."""
+        seeds = {sid for sid in seed_ids if sid in self._by_id}
+        adjacency = self._adjacency_index()
+        edges: dict[str, int] = {}
+        for sid in seeds:
+            for other, _rel in adjacency.get(sid, []):
+                if other not in seeds and other in self._by_id:
+                    edges[other] = edges.get(other, 0) + 1
+        ranked = sorted(edges, key=lambda nid: (-edges[nid], nid))[: max(0, limit)]
+        return [self._by_id[nid] for nid in ranked]
 
     def changed_files(self, since: str | None = None) -> list[str]:
         """Repo-relative paths changed in the last commit (git diff HEAD~1 HEAD).

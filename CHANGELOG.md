@@ -7,6 +7,163 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-11-15
+
+### Changed (Contract change)
+
+- **`retrieve_decisions` answers a query that no record holds in full with a partial
+  answer.** Before, such a query answered empty. Now, when no decision and no fact holds
+  every word, the answer lists the records whose own text holds at least half of the distinct
+  words and at least two (two of three, two of four) as compact rows: `matched_words`, then
+  `id`, `kind`, `status`, `title` and `valid_from` for a decision, or `id`, `status` and the
+  statement clipped to 240 characters for a fact. The answer carries `"match": "partial"`,
+  and `hint` says that no record holds every word. A row is a pointer: read a record in full
+  with `retrieve_decisions(ids=[...])` or `list_facts(ids=[...])`. Rows do not count as
+  records sent to you. A query that some record holds in full is answered as before, and a
+  query of one or two words has no partial form. An empty answer now says why: which words
+  occur in no record the call searched, or that the records holding every word are history.
+- **`retrieve_decisions` answers a query whose only full match is replaced history with the
+  record that replaced it.** Before, when no live record held every word and a superseded
+  record did, the answer was empty with a hint to read history, and agents did not follow it.
+  Now `retrieve_decisions` follows the `supersedes` links of such a record to the live record
+  at the end of its chain and returns that record in full, a fact the same way. The record
+  starts with `matched_history`, the ids of the history records that held every word, and
+  `hint` says that no live record holds every word and that these records replaced the ones
+  that do. `kind`, `files`, `limit` and `budget_chars` apply to it. `matched` counts every
+  replacing decision, those cut by `limit` or `budget_chars` included, and `facts_matched`
+  every replacing fact. A history match that nothing replaced, or whose successor a filter excludes, is answered as
+  before, empty with the history hint.
+- **A call that names only files gets the file's own records first.** In
+  `get_task_context` and `query_decisions`, a call that names no symbol now places the
+  records bound to a named file itself and to none of the symbols the call reaches before
+  the mistakes of the file's symbols: their gotchas, constraints and lessons, then their ADRs. The
+  committed behaviour reads: what you named comes first (a symbol's records, or a file's
+  own records), then mistakes-first; evidence never takes the budget of a mistake line. A
+  call that names a symbol is ranked as in 0.29.0. Whether a record belongs to the file
+  itself is read from the code graph, so a file the graph does not hold keeps the earlier
+  order. **Migration:** no call returns the earlier files-only order. To get the records
+  of one symbol first, name it in `entities`.
+
+### Changed
+
+- **The standing instruction asks for memory before a search that answers a question or plans
+  a change, and names the call for it.** It no longer orders `get_task_context` "before any
+  grep or file search". It now says: before you search or read files to answer a question
+  about the project or to plan a change, call `retrieve_decisions(query="…")` with a few words
+  naming the topic; for the files or symbols you are about to change, call
+  `get_task_context`, with repo-relative paths or with a symbol's name alone. The call that
+  took paths could not be made for a question that names none, and an instruction with no
+  ordering at all left agents searching first. The text reaches the main agent at
+  `SessionStart`, a starting subagent (`SubagentStart`) and the Grok MCP instructions. The
+  `check-plan` skill now starts with `retrieve_decisions(query=…)` for the plan's area, then
+  pulls the files and symbols the plan changes.
+- **A shortened id says what became of it.** `retrieve_decisions(ids=[...])`,
+  `list_facts(ids=[...])` and `list_domains(ids=[...])` used to match nothing, and say nothing,
+  for an id that was not a whole one. Such an id is now read as the start of an id, in either
+  letter case: it returns the one record it starts, and the answer carries `id_lookup` (and a
+  sentence in `hint`) naming the full id. A prefix that starts several records returns none of
+  them and lists up to 10 candidates; one shorter than 8 characters is reported as too short,
+  and one that starts no id as unknown. A whole id behaves as before. The report never takes
+  more than a quarter of `budget_chars`: at most 20 candidates across all entries, and what
+  does not fit is left out from the end and counted (`candidates_omitted`, `id_lookup_omitted`).
+- **`get_task_context` and `query_decisions` say when the memory budget refused every record.**
+  Before, such a call answered "No context found.", the same as a call that found nothing. Now,
+  when records bound to the files or symbols you named were refused and none fit, the answer says
+  how many and to call again with a larger `memory_budget` (`budget_chars` for
+  `query_decisions`); at the largest budget it says how to narrow the seeds instead. A refused
+  record of a graph neighbour, or a global one, is not counted.
+- **`drill_down` names the closest domains first for a slug that does not exist.** The
+  `candidates` list is now ordered by how close each slug or title is to the one asked for,
+  and the answer adds `closest` (when any is close) and a `hint`. Before, the list was the
+  first ten accepted slugs in alphabetical order.
+- **`retrieve_decisions` ranks constraints with gotchas and lessons.** A constraint used to
+  come back among the ADRs here, and among the mistakes in `get_task_context` and the hook
+  blocks. The order of a filtered answer is now gotchas, then lessons and constraints
+  together, then everything else, newest first within each. The overview is unchanged.
+- **`retrieve_decisions` returns the facts that match `query`.** They come under a new key,
+  `facts`, with `facts_matched` and, when some did not fit, `omitted_fact_ids` (read those
+  with `list_facts(ids=[...])`). Accepted records are placed first, and `matched`,
+  `returned`, `omitted`, `omitted_ids` and the `decisions` array still count decisions only.
+  A match with no room is still counted: within about a hundred characters of the budget its
+  account can put out the last returned record, which is then listed first among the omitted
+  ids. A query answer with `matched: 0` can still hold facts (`facts_matched`). The new keys
+  appear only when a fact matched; `kind` keeps facts out,
+  and a fact whose `valid_to` has passed is history (`include_superseded=True` shows it).
+  `hint` counts the omitted decisions and facts apart. `sidegraph-stats` counts a returned
+  fact as a record of the call.
+- **A `retrieve_decisions` query answer places proposed records after accepted ones.** A
+  proposed record was sorted with the accepted ones, so under a tight `limit` or budget a
+  proposed gotcha could take the place of an accepted record. In a query answer every record
+  that is not proposed now comes first, decisions and facts alike, and proposed records take
+  the room that is left. A match that finds no room is still counted, and its id is listed
+  in `omitted_ids` or `omitted_fact_ids`.
+- **`retrieve_decisions` `query` also finds a record by the name or path of the code it is
+  anchored to.** A query that is a symbol name or a file name returned nothing unless a
+  record's text happened to hold it. A word is now also held through the name or path of an
+  entity behind one of the record's live or degraded anchors; a label is found by its name,
+  without the `tag:`, `initiative:` or `domain:` prefix. Such a record comes after every
+  record whose own text holds the words and takes only the room they leave, and it starts
+  with `matched_anchors`, the anchors that held the word. The code graph is not
+  read: the answer is the same with and without one.
+- Fact lines in `get_task_context` and `query_decisions` end with the fact's id,
+  ` (id: <id>)`, as decision lines do: `- fact:` lines, `- fact [unratified]:` lines and
+  the indented `  evidence:` lines. A clipped line keeps its
+  `(clipped; full: list_facts(ids=["<id>"]))` note before the id. Each fact line is 33
+  characters longer and is charged to the memory budget. `sidegraph-stats` now counts a
+  delivered fact as a placement, so its placement and cited-back counts rise. The
+  SessionStart map is unchanged.
+- A fact statement in `get_task_context` and `query_decisions` is shown whole up to 700
+  characters (it was 240), in Known facts, in unratified fact lines and in inline
+  evidence. A fact is one statement, so a clip cut its qualifiers. Longer statements are
+  still clipped with the `(clipped; full: …)` note; the source stays at 300 characters.
+  Fact lines are longer and are charged to the memory budget.
+- `get_task_context` and `query_decisions` reach the records of neighbouring code for a
+  file seed. The walk that finds related records now takes the nodes outside the seeds
+  with the most edges to them (equal counts by node id), at most `structure_budget // 120`
+  (33 by default), one hop away. Before, the cap counted the seed nodes too, so a file of
+  33 or more nodes reached no neighbour. Answers hold more related lines and facts. A seed
+  with few graph neighbours no longer reaches records two or more hops away, which the old
+  breadth-first walk did on a sparse graph. For a file with no record of its own and an
+  anchored neighbour, the neighbour's records now arrive as related lines and facts in the
+  main answer instead of the block of nearest-anchored records. `query_structure` is
+  unchanged.
+- The `## Why this is empty` block of a call with no seeds now also names the name-only
+  call: `entities=[{"name": "…"}]` when you know a symbol's name and not its file, the
+  wording of the SessionStart instruction. It comes after the `files=[…]` sentence and
+  before the `drill_down(<slug>)` one.
+
+### Fixed
+
+- Over 40,000 characters, `get_task_context` and `query_decisions` cut the records placed
+  last first. Before, the whole decisions section was cut before any mistake, so a named
+  symbol's ADR, which is placed first, could be cut while mistakes of other symbols stayed.
+  The closing note names the two record sections together as `records`.
+- `get_task_context`, `query_structure` and `query_decisions` refuse an `entities` item
+  whose `name` or `file_path` is not a string, with "`entities[0].name` must be a string,
+  got int." (`null` is still a missing field). Before, `get_task_context(entities=[{"name":
+  5}])` came back as the tool error "'int' object has no attribute 'strip'" and wrote a
+  traceback to the log.
+- One over-long file path no longer removes the advice for the other seeds of a
+  `get_task_context` call. A path with a name over 255 bytes (on macOS and Linux) made the filesystem answer
+  `ENAMETOOLONG`, and the error dropped the `## How your seeds were read`,
+  `## Not in the code graph` and nearest-anchored blocks for every seed. Each path is now
+  asked on its own. A path the filesystem refuses as too long is named in the not-in-graph
+  block, is never read as another file by the ladder, and leaves the advice for the other
+  seeds as it was. The filesystem decides what is too long: a long name of multibyte
+  characters that exists is still reported as a file the graph lacks.
+- `get_task_context` reads a file seed with a trailing slash (`pkg/m.py/`) as the graph's file
+  `pkg/m.py` when the graph holds it, and notes `read as pkg/m.py (normalised)`. Before, the
+  answer said the file "exists but is not in the code graph", though the graph held it.
+- `get_task_context`, `query_structure` and `query_decisions` read a `paths` or `seeds`
+  string that holds a JSON list of strings as that list. Before, an agent that passed
+  `seeds='["a.py", "RetryPolicy"]'` got one entity whose name was the whole text. Any other
+  string, including a JSON list with an item that is not a string, is still one seed.
+- `get_task_context` no longer opens with "No record is anchored to the files you named" when
+  the files you named do have records and the memory budget refused them while the records of
+  a nearby file fit. The answer now opens with how many records were left out and says to call
+  again with a larger `memory_budget`; the nearest anchored records still follow. A file with
+  no record keeps the earlier lead.
+
 ## [0.29.0] — 2026-11-14
 
 ### Added
@@ -3221,7 +3378,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.26.0...v0.27.0

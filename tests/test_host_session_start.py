@@ -248,22 +248,37 @@ def test_session_start_instruction_names_the_real_call_and_the_deferred_tool(
 def test_session_start_instruction_names_the_call_for_a_symbol_with_no_known_file() -> None:
     """A task often names a symbol and no file. Told to pass repo-relative paths only, an agent
     searched for the path first and asked memory second. The instruction names the call that
-    needs no path, right after the sentence about paths. That sentence stays first and
-    unchanged, because host checks outside this package match on it. The tool's own
-    description says the same about ``file_path``."""
-    text = hooks.STANDING_SEARCH_INSTRUCTION
-    assert text.startswith(
-        "When you need to find or understand code in this project, call "
-        "get_task_context(files=[…]) with repo-relative paths before any grep or file search — "
-        "decisions, gotchas and a domain map are indexed here. If you know a symbol's name and "
-        'not its file, call get_task_context(entities=[{"name": "…"}]) instead of searching for '
-        "the path. "
-    )
+    needs no path, in the sentence about the files and symbols about to change, and says
+    there is no need to search for the path first. The tool's own description says the same
+    about ``file_path``."""
+    text = " ".join(hooks.STANDING_SEARCH_INSTRUCTION.split())
+    assert 'get_task_context(entities=[{"name": "…"}])' in text
+    assert "when you know a symbol's name and not its file" in text
+    assert "there is no need to search for the path first" in text
     from sidegraph import server
 
     described = " ".join((server.get_task_context.__doc__ or "").split())
     assert "``file_path`` is optional" in described
     assert "pass the name alone instead of searching for the path first" in described
+
+
+def test_session_start_instruction_orders_retrieve_decisions_before_the_search() -> None:
+    """Told only "before you plan a change or answer a question", eight of eighteen live
+    sessions asked memory first: in every miss the agent searched or read first. Told "before
+    you search or read files", and handed ``retrieve_decisions(query=…)`` as the call for a
+    question or a plan, fifteen of eighteen did. So the instruction orders that call before
+    the search for a question or a plan, and keeps ``get_task_context`` for the files and
+    symbols about to change, which a question does not name."""
+    text = " ".join(hooks.STANDING_SEARCH_INSTRUCTION.split())
+    assert text.startswith(
+        "Before you search or read files to answer a question about this project or to plan a "
+        'change, call retrieve_decisions(query="…")'
+    )
+    assert text.index("retrieve_decisions(query=") < text.index("get_task_context(")
+    assert "For files or symbols you are about to change, call get_task_context(files=[…])" in text
+    # The order is for a question or a plan, not for every grep.
+    assert "before any grep" not in text
+    assert "When you need to find or understand" not in text
 
 
 def test_session_start_does_not_build_the_whole_toc_to_read_the_unratified_list(

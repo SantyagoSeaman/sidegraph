@@ -60,8 +60,8 @@ Stop reminder followed by a proposal. It did not exercise a first app-only insta
 review, or ratification inside the app.
 
 Codex has no Sidegraph read hook. Call `get_task_context` for the files you plan to inspect
-or change. The opening instruction asks for context before grep or file search and for
-check-plan before a non-trivial change. The live run verified explicit retrieval. An interactive Stop reminder asks the agent to propose durable learning;
+or change. The opening instruction asks for `retrieve_decisions` before a search or read that answers a
+question or plans a change, and for check-plan before a non-trivial change. The live run verified explicit retrieval. An interactive Stop reminder asks the agent to propose durable learning;
 it does not ratify by itself. Whether the separate proposal call lands accepted depends
 on the project's [ratification policy](../reference/configuration.md#environment-variables).
 The reminder also names updates to existing decisions. Follow

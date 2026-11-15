@@ -77,31 +77,37 @@ CAPTURE_NUDGE = (
 )
 
 # Standing SessionStart instruction (owner-approved design, 2026-07-08): tells the agent,
-# up front and unconditionally, to use the decision memory before ANY search -- bash
-# grep/rg/find, MCP structure-query tools, everything -- not just the files a Read, Edit or Bash
-# read command names (the PreToolUse delivery in `pre_tool_use` below covers those and fires once
-# per file per agent; this is the behavioral instruction that's meant to cover the rest by
-# telling the agent, not by gating a specific tool call). Prepended at the hook-assembly level
-# (here, in `session_start`) rather than inside `retrieval.render_toc`/`top_tier_map`
+# up front and unconditionally, to ask the decision memory before it searches or reads files
+# to answer a question or to plan a change. It orders memory before the search only for
+# those two cases, not before every grep: with no ordering cue ("before you plan a change or
+# answer a question") agents searched and read first and asked memory second, and with
+# "before any grep" the call it named (`get_task_context(files=[…])`) needs paths an
+# agent does not have yet for a question. So `retrieve_decisions(query=…)` is the read tool
+# for a question or a plan, and `get_task_context` for the files or symbols about to
+# change (the PreToolUse delivery in `pre_tool_use` below covers a Read, an Edit or a Bash
+# read command on a file, once per file per agent). The word is "files", not "code": a
+# question that named a document had the agent Glob first. Prepended at the hook-assembly
+# level (here, in `session_start`) rather than inside `retrieval.render_toc`/`top_tier_map`
 # themselves, so both renderers stay pure content-formatters and this line is written/tested
 # in exactly one place regardless of which of the two produced the rest of the text.
-# The call it names must be one the tool accepts: `get_task_context` takes `files` and
+# The calls it names must be ones the tools accept: `get_task_context` takes `files` and
 # `entities` and forbids extra properties, so an earlier wording (`seeds`) produced calls
-# that failed validation. The check-plan clause is conditional because the manual installs
+# that failed validation. The name-only `entities` call stays because a task often names a
+# symbol and no file: asked for repo-relative paths only, an agent ran one file-locating
+# search to get the path and asked memory second, although a name alone already reaches
+# the symbol's records. The check-plan clause is conditional because the manual installs
 # (the Codex hooks recipe, the uvx route) emit this line with no skill installed; the last
 # sentence is for a host that lists a tool by name only until it is loaded.
-# The second sentence is there because a task often names a symbol and no file: asked for
-# repo-relative paths only, an agent ran one file-locating search to get the path and asked
-# memory second, although a name alone already reaches the symbol's records. The first
-# sentence is kept word for word: host checks outside this package match on it.
 # see design/superpowers/specs/2026-10-01-session-start-text-design.md (D1)
 STANDING_SEARCH_INSTRUCTION = (
-    "When you need to find or understand code in this project, call "
-    "get_task_context(files=[…]) with repo-relative paths before any grep or file search — "
-    "decisions, gotchas and a domain map are indexed here. If you know a symbol's name and "
-    'not its file, call get_task_context(entities=[{"name": "…"}]) instead of searching for '
-    "the path. Before a non-trivial change, run the sidegraph check-plan skill if it is "
-    "available. If the tool is listed only by name, load it first."
+    "Before you search or read files to answer a question about this project or to plan a "
+    'change, call retrieve_decisions(query="…") with a few words that name the topic — '
+    "decisions, gotchas and abandoned approaches are indexed here. For files or symbols you "
+    "are about to change, call get_task_context(files=[…]) with repo-relative paths, or "
+    'get_task_context(entities=[{"name": "…"}]) when you know a symbol\'s name and not its '
+    "file; there is no need to search for the path first. Before a non-trivial change, run "
+    "the sidegraph check-plan skill if it is available. If a tool is listed only by name, "
+    "load it first."
 )
 
 

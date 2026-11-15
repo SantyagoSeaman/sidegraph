@@ -39,6 +39,7 @@ _TRAILER = re.compile(
 )
 # The tags that follow a record's kind: `- [adr] [unratified] [sent earlier] title`.
 _TAGS = re.compile(r"^\s*(?:- |~ tried[^:]*: )(?:\[[^\]]*\]|fact)((?:\s*\[[^\]]*\])*)")
+_EVIDENCE = re.compile(r"^  evidence: ")
 _SENT_EARLIER = "[sent earlier]"
 _LISTS = ("decisions", "facts", "records")
 # The hooks print one line per record (whitespace collapsed) between per-file headers, an
@@ -95,6 +96,17 @@ def _rendered(record: str) -> list[str]:
     return [tail.group(1)] if tail else []
 
 
+def _evidence_ids(lines: list[str]) -> list[str]:
+    """The facts rendered as evidence under a record: each ``  evidence:`` line among the
+    lines that follow the record's own id line ends with its fact's id."""
+    ids: list[str] = []
+    for line in lines[len(_body(lines)) :]:
+        tail = _ID_END.search(line) if _EVIDENCE.match(line) else None
+        if tail:
+            ids.append(tail.group(1))
+    return ids
+
+
 def _text_ids(text: str, *, one_line: bool = False) -> list[str]:
     ids: list[str] = []
     if one_line:
@@ -107,6 +119,7 @@ def _text_ids(text: str, *, one_line: bool = False) -> list[str]:
     def close() -> None:
         if block:
             ids.extend(_rendered("\n".join(block)))
+            ids.extend(_evidence_ids(block))
             block.clear()
 
     def open_record() -> bool:

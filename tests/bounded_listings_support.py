@@ -50,6 +50,13 @@ def build_context_graph(path: Path, files: int = 8) -> Path:
                 )
         if f:
             links.append({"source": f"f{f}n0", "target": f"f{f - 1}n5", "relation": "calls"})
+            # Every other file also calls into pkg0 node by node: the walk that finds
+            # related records takes the direct neighbours of the seed nodes, so a call on
+            # pkg0 reaches the other files in one hop.
+            links.extend(
+                {"source": f"f{f}n{i}", "target": f"f0n{i}", "relation": "calls"}
+                for i in range(1, 60)
+            )
     # a file with no record of its own, in pkg0's directory but not linked to it: the
     # nearest-anchored records answer for it
     for i in range(3):

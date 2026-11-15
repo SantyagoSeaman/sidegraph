@@ -189,9 +189,10 @@ def test_t1_a_claude_subagent_gets_the_call_and_the_counts(
     root, store_dir = _project(tmp_path)
     text = _brief(_run(monkeypatch, capsys, root, store_dir, CLAUDE_PAYLOAD, env))
     assert "get_task_context(files=" in text
+    assert "retrieve_decisions(query=" in text
     assert text.startswith(STANDING_SEARCH_INSTRUCTION)
     assert _numbers(text) == expected
-    assert len(text) < 700
+    assert len(text) < 800
 
 
 def test_the_brief_stays_under_its_limit_at_large_counts() -> None:
@@ -199,7 +200,7 @@ def test_the_brief_stays_under_its_limit_at_large_counts() -> None:
     The documented limit must hold for a large store, not only for a fixture's few records."""
     from sidegraph.host.subagent import render_brief
 
-    assert len(render_brief(99_999, 9_999, 9_999)) < 700
+    assert len(render_brief(99_999, 9_999, 9_999)) < 800
 
 
 def test_t1_a_single_record_reads_in_the_singular(tmp_path, monkeypatch, capsys):
@@ -226,7 +227,7 @@ def test_t2_a_codex_subagent_gets_the_same_brief_in_keys_codex_accepts(
     assert "get_task_context(files=" in text
     assert text.startswith(STANDING_SEARCH_INSTRUCTION)
     assert _numbers(text) == _DEFAULT
-    assert len(text) < 700
+    assert len(text) < 800
 
 
 # -- T3: where there is nothing to say, say nothing and write nothing ---------------------------

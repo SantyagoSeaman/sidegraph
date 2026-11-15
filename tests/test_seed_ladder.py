@@ -10,6 +10,7 @@ from a real corpus.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -132,6 +133,59 @@ def test_a1_an_absolute_path_that_goes_through_a_symlink_is_made_relative(tmp_pa
 
     assert ladder.guessed == [Seed(file_path="pkg/m.py")]
     assert _one_note(ladder).outcome == "normalised"
+
+
+@pytest.mark.parametrize("on_disk", [False, True], ids=["graph only", "graph and disk"])
+@pytest.mark.parametrize("given", ["pkg/m.py/", "./pkg/m.py/", "pkg//m.py/", " pkg/m.py/ "])
+def test_a1_a_trailing_slash_on_a_file_the_graph_holds_reads_as_that_file(
+    tmp_path, root, given, on_disk
+):
+    """``pkg/m.py/`` is the graph's file with a stray slash, not a directory and not "a file the
+    graph lacks": the answer reads it, as it reads ``./pkg/m.py``."""
+    if on_disk:
+        (root / "pkg").mkdir()
+        (root / "pkg" / "m.py").write_text("x = 1\n")
+    reader = make_reader(tmp_path, ["pkg/m.py", "pkg/other.py"])
+
+    ladder = _ladder().tolerate([Seed(file_path=given)], reader, root)
+
+    assert ladder.exact == []
+    assert ladder.guessed == [Seed(file_path="pkg/m.py")]
+    assert ladder.unresolved == []
+    note = _one_note(ladder)
+    assert (note.given, note.outcome, note.read_as) == (given, "normalised", ("pkg/m.py",))
+
+
+def test_a_trailing_slash_skips_the_letter_case_rung(tmp_path, root):
+    """``PKG/M.py/`` differs from the graph's ``pkg/m.py`` only by case, and a trailing slash
+    means a directory, so the case rung that reads ``PKG/M.py`` as ``pkg/m.py`` is not tried."""
+    reader = make_reader(tmp_path, ["pkg/m.py"])
+
+    as_dir = _ladder().tolerate([Seed(file_path="PKG/M.py/")], reader, root)
+    as_file = _ladder().tolerate([Seed(file_path="PKG/M.py")], reader, root)
+
+    assert as_dir.guessed == [] and as_dir.notes == [] and as_dir.unresolved == ["PKG/M.py"]
+    assert as_file.guessed == [Seed(file_path="pkg/m.py")]
+
+
+def test_a_path_the_filesystem_refused_as_too_long_is_not_guessed_to_be_another_file(
+    tmp_path, root
+):
+    rel = "x" * 300 + "/m.py"
+    try:
+        (root / rel).stat()
+    except OSError as error:
+        if error.errno != errno.ENAMETOOLONG:
+            raise
+    else:
+        pytest.skip("this filesystem accepts a 300-character name")
+    reader = make_reader(tmp_path, ["pkg/m.py"])
+
+    ladder = _ladder().tolerate([Seed(file_path=rel), Seed(file_path="m.py")], reader, root)
+
+    assert ladder.guessed == [Seed(file_path="pkg/m.py")]  # `m.py` still reads as it did
+    assert ladder.unresolved == [rel]
+    assert ladder.too_long == [rel]
 
 
 # -- A2: suffix and basename ---------------------------------------------------------------

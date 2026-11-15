@@ -125,11 +125,13 @@ def _txn_statement_callers(source: str, class_name: str = "Store") -> dict[str, 
 
 
 # Where a transaction may be opened or ended by SQL text: the writer scope, the reload, and the
-# read snapshot of ``bindings_for_entity_group`` (read-only, BEGIN DEFERRED ... COMMIT).
+# read snapshots of ``bindings_for_entity_group`` and ``anchor_names`` (read-only,
+# BEGIN DEFERRED ... COMMIT).
 _TXN_STATEMENT_ALLOWED = {
     "_mutation": {"BEGIN"},
     "_reload_index_from_canonical": {"BEGIN"},
     "bindings_for_entity_group": {"BEGIN", "COMMIT"},
+    "anchor_names": {"BEGIN", "COMMIT"},
 }
 
 

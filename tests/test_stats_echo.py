@@ -158,6 +158,14 @@ def test_placements_from_a_real_drill_down_with_rendered_string_items(tmp_path):
     store.close()
 
 
+def test_a_record_delivered_twice_in_one_answer_is_one_placement():
+    """A fact line that appears twice (a decision's evidence and a standalone entry, or two
+    decisions quoting the same fact) counts once."""
+    line = f"- fact: the queue holds 64 items [s] (id: {B})"
+    text = f"## Known facts\n{line}\n\n## Unratified\n{line}\n"
+    assert echo.placements(_delivery(text), KNOWN) == [B]
+
+
 def test_prose_references_are_not_placements():
     """A's prose mentions B's id; only A's own terminal suffix is a placement."""
     for choice in (f"see (id: {B})", f"see (id: {B})\ncontinued"):

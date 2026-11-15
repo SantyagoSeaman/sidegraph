@@ -870,7 +870,11 @@ def test_removed_stale_claims_do_not_return() -> None:
     """Guard the exact high-impact inaccuracies corrected in the 2026-09-19 audit."""
     corpus = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in [*sorted((_ROOT / "docs").rglob("*.md")), _ROOT / "README.md"]
+        for path in [
+            *sorted((_ROOT / "docs").rglob("*.md")),
+            *sorted((_ROOT / "plugin").rglob("*.md")),
+            _ROOT / "README.md",
+        ]
     )
     normalized = re.sub(r"\s+", " ", corpus.replace(">", " ")).lower()
     banned = (
@@ -884,9 +888,33 @@ def test_removed_stale_claims_do_not_return() -> None:
         # The order of get_task_context changed: the records of a symbol the caller names
         # come before the mistakes of the other symbols of the named files.
         "rank ahead of direct adrs and related/global memory",
+        # A call that names only files no longer keeps the pre-0.29.0 order: the records
+        # bound to a file itself come first.
+        "a call that names no symbol is ranked as before",
+        "a call that names no symbol places every direct mistake before every direct decision",
+        # The walk for related records no longer reads the peripheral entities off the
+        # structural subgraph: it takes the neighbours with the most edges to the seeds.
+        "walks the structural subgraph to resolve peripheral entities",
+        # The standing instruction orders memory before the search for a question or a plan,
+        # not "before any grep or file search" with a call that needs paths (retrieve_decisions
+        # takes a query, get_task_context the files about to change).
+        "before any grep or file search",
+        "when you need to find or understand code in this project",
     )
     for phrase in banned:
         assert phrase not in normalized
+
+
+def test_check_plan_asks_retrieve_decisions_with_a_query_first() -> None:
+    """The check-plan skill pulls memory for a plan with a query before anything else: a plan
+    is a question to memory before it is a list of files, as the standing instruction says.
+    The first tool call its "Pull the memory" step names is `retrieve_decisions(query=`."""
+    skill = (_ROOT / "plugin/sidegraph/skills/check-plan/SKILL.md").read_text(encoding="utf-8")
+    step = skill.split("## 2.", 1)[1].split("\n## ", 1)[0]
+    first_call = re.search(r"`(\w+)\(", step)
+    assert first_call is not None
+    assert first_call.group(1) == "retrieve_decisions"
+    assert "retrieve_decisions(query=" in step.split("get_task_context", 1)[0]
 
 
 def _flatten_quote(text: str) -> str:

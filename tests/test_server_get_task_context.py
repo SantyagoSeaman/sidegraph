@@ -87,3 +87,4 @@ def test_the_tool_description_says_what_comes_first():
     assert "mistakes ranked first" not in doc
     assert "Records of a symbol named in ``entities`` take the budget before" in doc
     assert "among each, mistakes come before decisions" in doc
+    assert "When you name only files, the records bound to a file the graph holds come first" in doc
