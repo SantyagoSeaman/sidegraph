@@ -176,8 +176,8 @@ update is also what moves the Sidegraph version. Update Codex itself if this com
 **Native Windows.** The MCP server needs no shell: `codex/mcp.json` starts `uvx` (`uv` in the
 development manifest) directly with an argument list. Each hook carries a second key,
 `commandWindows`, a PowerShell command that does the same job as the POSIX one: it moves to the
-git top-level, sets the host variable, runs `uvx`, and prints the same fallback message when the
-launch fails.
+git top-level, sets the host variable, runs `uvx` with `--offline` first and without it only
+when that fails, and prints the same fallback message when the launch fails.
 Codex picks the key on
 Windows, where it runs a hook with `pwsh` when PowerShell 7 is installed and with Windows
 PowerShell 5.1 otherwise; the commands are written so 5.1 parses them. So on native Windows the

@@ -219,7 +219,7 @@ def test_claimed_file_cannot_hide_shared_fact_from_new_file(fact_project, monkey
         ("proposed", 40, None, {}, False),
         ("proposed", 1, None, {"SIDEGRAPH_UNRATIFIED": "off"}, False),
         ("proposed", 40, None, {"SIDEGRAPH_PROPOSAL_WINDOW_DAYS": "0"}, True),
-        ("accepted", 10, 1, {}, False),
+        ("accepted", 10, 1, {}, True),
         ("accepted", 10, -1, {}, False),
         ("rejected", 10, None, {}, False),
         ("deprecated", 10, None, {}, False),
@@ -236,6 +236,9 @@ def test_fact_predicate_matches_explicit_typed_oracle(
     env,
     eligible,
 ):
+    """The hook path and the model-layer oracle agree on every row. Red target: unfixed code
+    closes the ``accepted, valid_to in the future`` row (``closure=1``) in both, which the rule
+    keeps live until ``valid_to``; the other rows are guards."""
     from sidegraph import store_layout
 
     now = datetime(2026, 10, 18, tzinfo=UTC)
@@ -252,7 +255,13 @@ def test_fact_predicate_matches_explicit_typed_oracle(
         fact_project,
         status=status,
         age_days=age_days,
-        valid_to=now + timedelta(days=closure) if closure is not None else None,
+        # A future end is measured from the real clock, which ``Store`` reads; a past one from
+        # the patched day, which the hook path and ``proposal_surfaces`` read.
+        valid_to=(
+            (datetime.now(UTC) if closure > 0 else now) + timedelta(days=closure)
+            if closure is not None
+            else None
+        ),
         assert_eligible=False,
     )
     store = Store(fact_project / ".sidegraph")

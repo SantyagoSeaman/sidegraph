@@ -11,9 +11,18 @@ The stub is a real ``.exe``, a console script built into a temporary venv: it re
 cwd, environment and stdin to a file and prints a marker. A ``.cmd`` stub would test cmd.exe's
 stdin handling, not the hook's. Windows only; the ``windows-core`` CI job runs it.
 
-Red targets, to be proven by the CI run (no Windows machine has run them yet): break the
-``-not $?`` guard, break the pinned argv, drop the ``Set-Location``. The classification of a
-command as public or internal is checked on every platform by the unit tests below.
+The public twin tries ``uvx --offline`` first with its output captured, and runs the online
+launch only when the exit code says the offline one failed; the online output is captured too
+(``$p = uvx ...``) and written only when its exit code is 0, so a failed online attempt prints
+the fallback alone. The stub records every call (one JSON line each), so a test sees how many
+launches ran, with which arguments and with which stdin.
+
+Red targets, to be proven by the CI run (no Windows machine has run them yet): write the online
+output uncaptured (``uvx ...; if (-not $?) ...``: the non-zero test then sees ``STUB-OUT`` before
+the fallback), break the pinned argv, drop the ``Set-Location``, drop ``--offline``, decide the
+offline attempt with ``$?`` (the stderr test then sees a second launch on Windows PowerShell 5.1).
+The classification of a command as public or internal is checked on every platform by the unit
+tests below.
 """
 
 from __future__ import annotations
@@ -64,16 +73,26 @@ import sys
 KEYS = ("SIDEGRAPH_HOST", "SIDEGRAPH_DIR", "SIDEGRAPH_GRAPH", "UV_PROJECT_ENVIRONMENT")
 
 
-def main():
-    stdin = sys.stdin.buffer.read()
+def record_call(stdin):
     record = {
         "argv": sys.argv[1:],
         "cwd": os.getcwd(),
         "env": {key: os.environ.get(key) for key in KEYS},
-        "stdin": stdin.hex(),
+        "stdin": None if stdin is None else stdin.hex(),
     }
-    with open(os.environ["STUB_RECORD"], "w", encoding="utf-8") as out:
-        json.dump(record, out)
+    with open(os.environ["STUB_RECORD"], "a", encoding="utf-8") as out:
+        out.write(json.dumps(record) + "\\n")
+
+
+def main():
+    if "--offline" in sys.argv and os.environ.get("STUB_OFFLINE_EXIT"):
+        # uv failing before it starts the entry: stdin is left unread, nothing is answered but
+        # a line the hook must not print
+        record_call(None)
+        sys.stdout.write("OFFLINE-OUT\\n")
+        sys.stdout.flush()
+        sys.exit(int(os.environ["STUB_OFFLINE_EXIT"]))
+    record_call(sys.stdin.buffer.read())
     sys.stdout.write("STUB-OUT\\n")
     sys.stdout.flush()
     if os.environ.get("STUB_STDERR"):
@@ -133,6 +152,19 @@ _DEV_SESSION_MESSAGE = (
     "uv run --package sidegraph --frozen --no-active sidegraph-session-start; "
     'if (-not $?) { \'{"systemMessage":"Sidegraph: ... (uv/uvx, network or project path) ..."}\' }'
 )
+
+
+def test_a_public_command_windows_decides_by_exit_code_alone() -> None:
+    """Both attempts are decided by ``$LASTEXITCODE``; ``-not $?`` would let a failed online
+    attempt's output reach the host before the fallback, and Windows PowerShell 5.1 sets ``$?``
+    to false after a redirected stderr even at exit 0. Runs on every platform."""
+    public = [c for c in _CASES if c.values[0] == "public"]
+    assert len(public) >= 3
+    for case in public:
+        _kind_, _event, command = case.values
+        assert "-not $?" not in command, case.id
+        assert command.count("if ($LASTEXITCODE -eq 0)") == 2, case.id
+        assert command.count("$global:LASTEXITCODE = 1;") == 2, case.id
 
 
 def test_an_internal_command_is_not_taken_for_a_public_one() -> None:
@@ -238,16 +270,26 @@ def _run(
     return result, record
 
 
-def _read(record: Path) -> dict[str, Any]:
+def _read_all(record: Path) -> list[dict[str, Any]]:
+    """Every call the stub saw, oldest first."""
     assert record.is_file(), "the stub did not run"
-    return json.loads(record.read_text(encoding="utf-8"))
+    lines = record.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines]
 
 
-def _expected_argv(kind: str, event: str) -> list[str]:
+def _read(record: Path) -> dict[str, Any]:
+    """The last call the stub saw."""
+    return _read_all(record)[-1]
+
+
+def _expected_argv(kind: str, event: str, *, offline: bool = True) -> list[str]:
+    """The arguments of the last launch that ran: for the public twin the offline attempt (the
+    only one when it succeeds), or the online one when ``offline`` is false."""
     entry = _ENTRY[event]
     if kind == "dev":
         return ["run", "--package", "sidegraph", "--frozen", "--no-active", entry]
-    return ["--from", f"sidegraph=={_VERSION}", "--python", "3.13", entry]
+    flag = ["--offline"] if offline else []
+    return ["--from", f"sidegraph=={_VERSION}", "--python", "3.13", *flag, entry]
 
 
 @windows_only
@@ -296,7 +338,12 @@ def test_a_launch_that_logs_to_stderr_and_exits_0_prints_no_fallback(
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.decode().strip() == "STUB-OUT"
-    _read(record)
+    # One launch only. On Windows PowerShell 5.1 a ``$?`` decision after ``2>$null`` calls the
+    # offline attempt failed, runs the online one on a stdin the first already read, and loses the
+    # answer; the exit code alone does not.
+    (call,) = _read_all(record)
+    assert call["argv"] == _expected_argv(kind, event)
+    assert bytes.fromhex(call["stdin"]) == _PAYLOAD
 
 
 @windows_only
@@ -305,7 +352,7 @@ def test_a_launch_that_logs_to_stderr_and_exits_0_prints_no_fallback(
 def test_a_launch_that_exits_non_zero_prints_the_fallback(
     kind: str, event: str, command: str, shell: str, repo: Path, stub_dir: Path, tmp_path: Path
 ) -> None:
-    result, _record = _run(
+    result, record = _run(
         shell,
         command,
         cwd=repo,
@@ -314,9 +361,50 @@ def test_a_launch_that_exits_non_zero_prints_the_fallback(
         stub_env={"STUB_EXIT": "2"},
     )
     lines = result.stdout.decode().strip().splitlines()
-    assert lines[0] == "STUB-OUT"
     expected = {"systemMessage": _SESSION_MESSAGE} if event == "SessionStart" else {}
     assert json.loads(lines[-1]) == expected
+    # The internal command writes the run's own output and then the fallback. The public twin
+    # captures both attempts and writes an attempt's output only on exit 0: here both exit 2, so
+    # the fallback is all the host gets.
+    assert lines[:-1] == (["STUB-OUT"] if kind == "dev" else [])
+    # The public twin made two launches (offline, then online), the internal one a single run.
+    calls = _read_all(record)
+    assert [c["argv"] for c in calls] == (
+        [_expected_argv(kind, event)]
+        if kind == "dev"
+        else [_expected_argv(kind, event), _expected_argv(kind, event, offline=False)]
+    )
+
+
+_PUBLIC_CASES = [c for c in _CASES if c.values[0] == "public"]
+
+
+@windows_only
+@pytest.mark.parametrize("shell", _SHELLS)
+@pytest.mark.parametrize(("kind", "event", "command"), _PUBLIC_CASES)
+def test_a_failed_offline_attempt_is_followed_by_one_online_attempt_that_gets_the_payload(
+    kind: str, event: str, command: str, shell: str, repo: Path, stub_dir: Path, tmp_path: Path
+) -> None:
+    """The offline launch exits 1 before it starts the entry (as uv does with an empty cache),
+    leaving stdin unread; the online launch then succeeds with the whole payload. The host gets
+    the online answer once and none of the offline attempt's output.
+
+    Red target (to be proven by the Windows CI run): a command with no online retry records one
+    call and prints the fallback; one that writes the offline output shows ``OFFLINE-OUT``."""
+    result, record = _run(
+        shell,
+        command,
+        cwd=repo,
+        path=_path(stub=stub_dir),
+        tmp_path=tmp_path,
+        stub_env={"STUB_OFFLINE_EXIT": "1"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.decode().strip().splitlines() == ["STUB-OUT"]
+    offline, online = _read_all(record)
+    assert offline["argv"] == _expected_argv(kind, event)
+    assert online["argv"] == _expected_argv(kind, event, offline=False)
+    assert bytes.fromhex(online["stdin"]) == _PAYLOAD
 
 
 @windows_only

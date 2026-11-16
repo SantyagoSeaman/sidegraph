@@ -25,15 +25,17 @@ import re
 import shutil
 import subprocess
 import tarfile
+import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ..config import borrowed_graph_path, main_checkout_root
+from ..drift_memo import is_object_id
 from ..freshness import GraphFreshness
 from ..gitenv import run_git
 from ..schema import Descriptor, canonicalize, file_anchor_name, strip_decoration
@@ -112,6 +114,12 @@ DOC_PART_SUFFIX = "~doc"
 
 
 class NodeRef(BaseModel):
+    """A graph node. Frozen: a reader is shared across calls, so every call sees the same nodes
+    and none may change one (``model_copy(update=...)`` makes a changed copy).
+    see design/superpowers/specs/2026-11-16-mcp-reader-reuse-design.md (D5)"""
+
+    model_config = ConfigDict(frozen=True)
+
     node_id: str
     name: str
     norm_name: str
@@ -237,6 +245,21 @@ def _relabelled_file_basename(raw: dict, colliding: frozenset[str]) -> str | Non
 # word-boundary cut ending in ``…`` since 0.9.62). A node of these types is never matched by
 # its label, only by its id.
 UNSTABLE_LABEL_FILE_TYPES = frozenset({"rationale"})
+
+
+def built_at_commit_of(graph_version: str | None) -> str | None:
+    """The build commit inside a ``graph_version`` string, or ``None`` when it names none.
+
+    The inverse of the ``f"{commit}:{content_hash}"`` form :meth:`GraphifyReader.graph_version`
+    writes: the part before the first ``:`` when it is a full lowercase object id (40 or 64 hex
+    characters, the rule ``drift_memo.is_object_id`` holds). ``content:<hash>`` (no commit was
+    stamped), a short or uppercase id and anything that is not a string all read as ``None``.
+    # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md (D1)
+    """
+    if not isinstance(graph_version, str):
+        return None
+    commit, separator, _rest = graph_version.partition(":")
+    return commit if separator and is_object_id(commit) else None
 
 
 def is_file_node(node: NodeRef) -> bool:
@@ -1122,19 +1145,84 @@ class GraphifyReader:
         return None
 
 
-def open_borrowed_reader(store_path: str | Path) -> tuple[GraphifyReader, Path] | None:
+class ReaderCache:
+    """One ``GraphifyReader`` per graph path, reused while the file is unchanged.
+
+    The key is ``os.path.abspath(path)``, and the stat and the build use that same absolute path
+    (a relative one would follow the cwd) -- not the resolved path: a reader keeps its label
+    sidecars, ``repo_root`` and sync's HEAD lookup next to the path it was built from, so two
+    symlinks to the same bytes need two readers. The reader is stored under the file's identity
+    ``(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`` read BEFORE the build: a change
+    during the parse then shows on the next call instead of being hidden by a later stat. A miss
+    drops the stale entry first (an old and a new reader are never alive together), and at most
+    ``max_entries`` readers are kept, least recently used evicted before a build. A failing stat
+    or factory is never cached. The build runs under the lock, so concurrent cold calls parse the
+    graph once. The cache assumes a writer replaces ``graph.json`` or moves its mtime, as
+    Graphify's atomic write does.
+    see design/superpowers/specs/2026-11-16-mcp-reader-reuse-design.md (D1)"""
+
+    def __init__(
+        self,
+        factory: Callable[[str | Path], GraphifyReader] = GraphifyReader,
+        max_entries: int = 2,
+    ) -> None:
+        self._factory = factory
+        self._max_entries = max_entries
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[str, tuple[tuple[int, ...], GraphifyReader]] = OrderedDict()
+
+    def get(self, path: str | Path) -> GraphifyReader:
+        """The reader over ``path``; raises what ``stat`` or the factory raises."""
+        # Stat and build from the absolute path too: a relative path read after a chdir would
+        # stat one file and keep the reader under another file's key.
+        key = os.path.abspath(path)
+        with self._lock:
+            try:
+                st = os.stat(key)
+            except OSError:
+                self._entries.pop(key, None)
+                raise
+            identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+            entry = self._entries.get(key)
+            if entry is not None and entry[0] == identity:
+                self._entries.move_to_end(key)
+                return entry[1]
+            entry = None  # the local must not keep the stale reader alive through the build
+            self._entries.pop(key, None)
+            while len(self._entries) >= self._max_entries:
+                self._entries.popitem(last=False)
+            reader = self._factory(key)
+            self._entries[key] = (identity, reader)
+            return reader
+
+    def clear(self) -> None:
+        """Forget every reader."""
+        with self._lock:
+            self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+def open_borrowed_reader(
+    store_path: str | Path,
+    *,
+    opener: Callable[[str | Path], GraphifyReader] = GraphifyReader,
+) -> tuple[GraphifyReader, Path] | None:
     """A reader over the main checkout's graph for a linked worktree whose store has no graph of
     its own, with the main checkout root; ``None`` when nothing is borrowable or the graph cannot
     be read. Never raises. The read tools and SessionStart call it after the store's own graph
     failed to open, and sync the result index-only (``canonical_writes=False``): the worktree's
     index is derived from the borrowed graph and no tracked file is rewritten. No write path
-    borrows.
-    see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)"""
+    borrows. ``opener`` builds the reader from the borrowed graph's path; the MCP server passes its
+    :class:`ReaderCache` so the borrowed reader is kept between calls.
+    see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)
+    and design/superpowers/specs/2026-11-16-mcp-reader-reuse-design.md (D2)"""
     try:
         graph, main = borrowed_graph_path(store_path), main_checkout_root(store_path)
         if graph is None or main is None:
             return None
-        return GraphifyReader(graph), main
+        return opener(graph), main
     except Exception:
         return None
 

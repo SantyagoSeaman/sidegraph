@@ -218,7 +218,11 @@ def test_8_capture_basis_for_outside_scope_reason(project):
     )
     batches, _s, _u, _h = doctor._apply_drift_checks(
         [batch],
-        {commit: [(store.path / "decisions" / "x.json", decision.id, {"code.py", "extra.py"})]},
+        {
+            (commit, "capture"): [
+                (store.path / "decisions" / "x.json", decision.id, {"code.py", "extra.py"})
+            ]
+        },
         doctor._iter_records(store.path, "decisions"),
         doctor._binding_entries(store.path),
         doctor._iter_records(store.path, "entities"),

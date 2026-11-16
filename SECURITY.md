@@ -94,10 +94,12 @@ scope too.
   written on your machine, not by the clone, so a command configured there is outside this
   model. So is a `.git` entry (a directory or a gitfile) delivered inside an archive: git
   never checks one out. A committed `.claude/settings.json` is your agent host's to gate, with
-  one exception: when your environment sets no `SIDEGRAPH_RATIFY_POLICY`, `sidegraph-mcp` reads
-  that one value from the file's `env` block. A repository can therefore choose its own
-  ratification policy, `auto-all` included, under any host. A value in your environment wins
-  over the file.
+  one exception: when your environment sets a `SIDEGRAPH_RATIFY_POLICY`, `sidegraph-mcp` reads
+  that one value from the file's `env` block and uses it only when it is stricter than yours
+  (`manual` < `auto-low-risk` < `auto-all`). A committed file can therefore tighten the
+  ratification policy under any host, but it can never loosen it and never turns auto-ratification
+  on where your environment sets none. Claude Code applies a committed `env` block itself, after
+  its own workspace-trust prompt; that gate belongs to the host.
 
 ## Data boundary — what this tool touches
 

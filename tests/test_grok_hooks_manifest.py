@@ -1,9 +1,9 @@
 """Grok Build reads its own hooks file from the plugin, one without ``if``.
 
-Grok skips every hook handler that sets ``if``, so the Claude manifest's four Bash
-``PreToolUse`` handlers fail there. ``.grok-plugin/plugin.json`` points Grok at
-``grok/hooks.json`` instead: the Claude file with four differences (no ``if``, one Bash handler
-behind a shell pre-filter, ``SIDEGRAPH_HOST=grok``, and explicit ``timeout`` values, because
+Grok skips every hook handler that sets ``if``, so a Claude manifest with ``if`` entries would
+fail there. Claude's single Bash handler now carries the same shell pre-filter and no ``if``.
+``.grok-plugin/plugin.json`` points Grok at ``grok/hooks.json``: the Claude file with two
+differences (``SIDEGRAPH_HOST=grok`` before every launch, and explicit ``timeout`` values, because
 Grok's default is 5 seconds and a first SessionStart on a cold ``uvx`` cache measured 5.4-7.0 s).
 These tests pin that file against the Claude one and run its Bash handler for real.
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -29,17 +30,6 @@ _PLUGIN = _ROOT / "plugin" / "sidegraph"
 _VARIANTS = [
     name for name in ("hooks.json", "hooks.public.json") if (_PLUGIN / "grok" / name).is_file()
 ]
-
-# The Bash pre-filter (design D3): a read word and a space after a non-identifier character,
-# or after a JSON whitespace escape (`\\n`, `\\t`, `\\r`), never a bare substring.
-# ``{cmd}`` is the Read group's command.
-_FILTER = (
-    "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*\\\\[ntr]'sed '*|"
-    "*[!A-Za-z0-9_]'grep '*|*\\\\[ntr]'grep '*|*[!A-Za-z0-9_]'rg '*|*\\\\[ntr]'rg '*|"
-    "*[!A-Za-z0-9_]'cat '*|*\\\\[ntr]'cat '*) printf '%s\\n' \"$p\" | "
-    "{{ {cmd} ; }} ;; *) echo '{{}}' ;; esac"
-)
-
 
 # Grok kills a hook at its `timeout`, 5 s by default (600 s for Stop). Measured on 0.21.0 with
 # the public commands: SessionStart 5.4-7.0 s on a cold uvx cache, a hot hook 2.8-3.8 s after
@@ -69,35 +59,29 @@ def _keys(node: object) -> set[str]:
 
 
 def _to_grok(claude: dict[str, Any]) -> dict[str, Any]:
-    """The expected Grok file, built from the Claude one by wrapping, never by unwrapping."""
+    """The expected Grok file, built from the Claude one by prefixing, never by unwrapping."""
     out = copy.deepcopy(claude)
     for groups in out["hooks"].values():
         for group in groups:
             for handler in group["hooks"]:
-                command = handler["command"]
-                if "SIDEGRAPH_HOST=claude" in command:
-                    command = command.replace("SIDEGRAPH_HOST=claude", "SIDEGRAPH_HOST=grok")
+                command = handler["command"].replace("SIDEGRAPH_HOST=claude", "SIDEGRAPH_HOST=grok")
+                if "SIDEGRAPH_DIR=.sidegraph" in command:
+                    # The development twin starts the launch with the store settings.
+                    anchor = "SIDEGRAPH_DIR=.sidegraph"
+                    if "SIDEGRAPH_HOST=grok" not in command:
+                        command = command.replace(anchor, f"SIDEGRAPH_HOST=grok {anchor}", 1)
                 else:
-                    # The development twin starts with the store settings, the public one with
-                    # the pinned launch.
-                    anchor = (
-                        "SIDEGRAPH_DIR=.sidegraph"
-                        if "SIDEGRAPH_DIR=.sidegraph" in command
-                        else "uvx --from "
+                    # The public twin names the pinned launch twice: offline, then online.
+                    command = re.sub(
+                        r"(?<!SIDEGRAPH_HOST=grok )uvx --from ",
+                        "SIDEGRAPH_HOST=grok uvx --from ",
+                        command,
                     )
-                    command = command.replace(anchor, f"SIDEGRAPH_HOST=grok {anchor}", 1)
                 handler["command"] = command
     for event, seconds in _GROK_TIMEOUTS.items():
         for group in out["hooks"][event]:
             for handler in group["hooks"]:
                 handler["timeout"] = seconds
-    groups = out["hooks"]["PreToolUse"]
-    read_group = next(g for g in groups if g["matcher"] == "Read|Grep|Edit|Write")
-    bash_group = next(g for g in groups if g["matcher"] == "Bash")
-    wrapped = _FILTER.format(cmd=read_group["hooks"][0]["command"])
-    bash_group["hooks"] = [
-        {"type": "command", "command": wrapped, "timeout": _GROK_TIMEOUTS["PreToolUse"]}
-    ]
     return out
 
 
@@ -121,7 +105,7 @@ def test_t1_no_if_key_at_any_depth(variant: str) -> None:
     assert "if" not in _keys(_load(_PLUGIN / "grok" / variant))
 
 
-def test_t2_the_grok_file_is_the_claude_file_with_four_differences(variant: str) -> None:
+def test_t2_the_grok_file_is_the_claude_file_with_two_differences(variant: str) -> None:
     claude = _load(_PLUGIN / "hooks" / variant)
     assert _load(_PLUGIN / "grok" / variant) == _to_grok(claude)
 

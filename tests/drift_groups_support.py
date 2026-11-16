@@ -16,9 +16,9 @@ from sidegraph import doctor, drift_groups
 from sidegraph.doctor import CodeDriftScan, _binding_entries, _iter_records
 
 
-def git(root: Path, *args: str) -> str:
+def git(root: Path, *args: str, input_text: str | None = None) -> str:
     return subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, check=True
+        ["git", *args], cwd=root, capture_output=True, text=True, check=True, input=input_text
     ).stdout.strip()
 
 
@@ -82,17 +82,22 @@ class GroupRepo:
         self,
         n: int,
         *,
-        commit: str,
+        commit: str | None,
         files: list[str | tuple[str, str]],
         kind: object = "gotcha",
         title: object = None,
         status: str = "accepted",
         tier: int = 2,
         binding_status: str = "live",
+        graph: str | None = None,
     ) -> str:
         """An open decision captured at ``commit``, anchored to ``files`` (a ``(path, name)``
-        pair anchors a symbol or section instead of the whole file)."""
+        pair anchors a symbol or section instead of the whole file). ``graph`` stamps the
+        record's ``provenance.graph_version`` as ``<graph>:<content hash>``, the engine's format."""
         record_id = rid(n)
+        provenance: dict[str, object] = {"source": "agent", "commit": commit}
+        if graph is not None:
+            provenance["graph_version"] = f"{graph}:0123456789ab"
         self._write(
             f"decisions/{record_id}.json",
             {
@@ -101,7 +106,7 @@ class GroupRepo:
                 "kind": kind,
                 "title": f"record {n}" if title is None else title,
                 "valid_to": None,
-                "provenance": {"source": "agent", "commit": commit},
+                "provenance": provenance,
             },
         )
         bindings = []

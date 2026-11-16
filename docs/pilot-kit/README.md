@@ -41,9 +41,10 @@ sessions. Ask the agent at the end: "Propose only the durable decisions, rejecte
 the write-side
 `propose_decisions` MCP path; deny `get_task_context`, `query_decisions`,
 `retrieve_decisions`, `list_facts`, `drill_down`, and other store reads. Start the shadow MCP
-server with `SIDEGRAPH_RATIFY_POLICY=manual` and without `SIDEGRAPH_AUTO_ACCEPT`: otherwise the
-server applies the repository's committed auto-ratify policy, and accepted records never reach
-the queue. Check with one sample capture that it stays `proposed`. Review the queue
+server with `SIDEGRAPH_RATIFY_POLICY=manual` and without `SIDEGRAPH_AUTO_ACCEPT`: otherwise a
+host that reads the repository's `.claude/settings.json` (Claude Code) applies its committed
+auto-ratify policy, and accepted records never reach the queue. Check with one sample
+capture that it stays `proposed`. Review the queue
 outside the measured agent session with `sidegraph-ratify --db .sidegraph-shadow`. A
 `propose_decisions` result also carries up to three neighbouring decision titles from the
 shadow store; accept that small leak or strip `neighbors` from the result.

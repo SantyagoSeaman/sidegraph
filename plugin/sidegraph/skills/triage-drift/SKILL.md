@@ -10,7 +10,9 @@ description: >-
 # Triage drift
 
 `code-drift` is a *signal*, not a verdict: a live decision's anchored file(s) changed
-since capture, or a previous scoped check no longer applies. The store cannot tell whether the change
+since capture (for a record with no capture commit, such as an imported one, since the build of
+the graph it was written against: any commit that touched the file counts, so a file changed and
+restored is listed too), or a previous scoped check no longer applies. The store cannot tell whether the change
 invalidated the record — file hashes move on every refactor while the decision stays
 true, and (the dangerous converse) logic can change semantics without the drift flag
 firing at all. This skill is the judgment step the flag exists to trigger: read the
@@ -27,7 +29,7 @@ The CLI runs at the plugin's pinned version, never the copy on `PATH` ([why](../
 Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 ```bash
-uvx --from sidegraph==0.30.0 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
+uvx --from sidegraph==0.31.0 --python 3.13 sidegraph-doctor --json    # drift_groups.groups[] and findings[] with "code": "code-drift"
 ```
 
 Read `drift_groups.groups` first: one group per drifted file, each listing the records whose
@@ -114,8 +116,8 @@ a rationale or a call, even when one file change re-armed both.
      Store: `bindings_for_record(decision_id)`, then `get_entity(binding.entity_id).descriptor`
      for each binding. Include every current checkable concrete file, not just the files
      named as changed by doctor. The files must be tracked regular files and clean relative to
-     that HEAD; unrelated dirt is allowed. The target must be open, commit-stamped and
-     concretely anchored. With no Git HEAD, dirty inspected files, incomplete scope or an
+     that HEAD; unrelated dirt is allowed. The target must be open, have a capture commit or a graph build commit that lies in `HEAD`'s
+     history, and be concretely anchored. With no Git HEAD, dirty inspected files, incomplete scope or an
      ineligible target, report the judgment and why no check was recorded; retain the
      advisory. Do not omit a required dirty file or substitute another revision.
 

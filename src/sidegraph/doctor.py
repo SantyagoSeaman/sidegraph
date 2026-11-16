@@ -25,7 +25,7 @@ import re
 import sqlite3
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -35,7 +35,8 @@ from urllib.parse import quote
 from ulid import ULID
 
 from . import domain_snapshot, domain_splits, drift_checks, integrity
-from .engine.reader import GraphifyReader
+from .drift_memo import DriftDiffMemo, gitmodules_digest
+from .engine.reader import GraphifyReader, built_at_commit_of
 from .githooks import GRAPH_REBUILD
 from .schema import DecisionStatus, Domain, DomainStatus, canonicalize, file_anchor_name
 from .store import (
@@ -999,8 +1000,11 @@ def _git_diff_name_only(
     *,
     timeout: float | None = None,
     exclude_deletions: bool = False,
+    head: str = "HEAD",
 ) -> list[str]:
-    """``git diff --name-only <commit>..HEAD -- <paths>``, from ``repo_root`` (design D5).
+    """``git diff --name-only <commit>..<head> -- <paths>``, from ``repo_root`` (design D5).
+    ``head`` is ``HEAD`` itself on the curate()/CLI path; the hook path passes the SHA it
+    resolved once, so a HEAD that moves mid-scan cannot mix two heads in one scan.
     Raises ``ValueError`` on a non-zero exit -- mirrors ``verify._git_diff_name_status``'s
     own raise-on-failure contract -- so every call site wraps this the same way that
     module's callers wrap ITS git helpers; ``_scan_code_drift`` is the one caller here, and
@@ -1011,22 +1015,152 @@ def _git_diff_name_only(
     deletion/addition paths, without confusing an old anchor with the new file."""
     options = ["--no-renames", "--diff-filter=d"] if exclude_deletions else []
     result = _run_git(
-        ["diff", "--name-only", "-z", *options, f"{commit}..HEAD", "--", *paths],
+        ["diff", "--name-only", "-z", *options, f"{commit}..{head}", "--", *paths],
         cwd=repo_root,
         timeout=timeout,
         text=False,  # raw bytes: universal newlines would turn a "\r" in a name into "\n"
     )
     if result.returncode != 0:
-        raise ValueError(f"git diff {commit}..HEAD failed: {os.fsdecode(result.stderr).strip()}")
+        raise ValueError(f"git diff {commit}..{head} failed: {os.fsdecode(result.stderr).strip()}")
     # -z: no octal-quoted paths
     return [os.fsdecode(name) for name in result.stdout.split(b"\0") if name]
+
+
+def drift_baseline(provenance: object) -> tuple[str, str] | None:
+    """The commit the drift scan compares a record against, and where it came from.
+
+    ``(commit, "capture")`` when the record carries a capture commit; else
+    ``(oid, "graph")`` when its ``graph_version`` names the graph's build commit
+    (:func:`~sidegraph.engine.reader.built_at_commit_of`); else ``None``: the record has no
+    usable baseline and stays unstamped. ``provenance`` is a raw record mapping or a
+    ``Provenance`` model; anything else has no baseline.
+    # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md (D1)
+    """
+    if isinstance(provenance, dict):
+        commit, graph_version = provenance.get("commit"), provenance.get("graph_version")
+    else:
+        commit = getattr(provenance, "commit", None)
+        graph_version = getattr(provenance, "graph_version", None)
+    if isinstance(commit, str) and commit:
+        return commit, "capture"
+    built = built_at_commit_of(graph_version)
+    return (built, "graph") if built else None
+
+
+def _git_log_touched(
+    repo_root: Path,
+    commit: str,
+    paths: list[str],
+    *,
+    timeout: float | None = None,
+    head: str = "HEAD",
+) -> list[str]:
+    """Every file any commit in ``<commit>..<head>`` touched among ``paths``, from ``repo_root``.
+
+    ``git log --name-only -m --full-history``, not a two-tree diff: a file changed and then
+    restored shows up here. ``-m`` and ``--full-history`` are both load-bearing. Without them
+    git's history simplification drops a side branch that changed and restored the file, an
+    ``-s ours`` merge that discarded a side change, and the diff of a merge that edited the
+    file itself. Do not replace them with ``--first-parent``. (On git 2.54 ``-m`` alone already
+    turns the simplification off, so ``--full-history`` is redundant there; it stays for gits
+    where that does not hold.) ``--diff-merges=separate`` is explicit because
+    ``log.diffMerges=off`` in a user's configuration would otherwise drop the merge's own diff,
+    and ``--no-show-signature`` keeps ``log.showSignature`` from printing into the name list.
+    The price is a false positive: a branch forked before ``commit`` and merged after it
+    lists files changed before it. Same contract as :func:`_git_diff_name_only`:
+    ``ValueError`` on a non-zero exit, ``timeout`` bounds the subprocess. Committed deletions
+    are not filtered here (a modified-then-deleted file is still listed); see
+    :func:`_present_at_head`.
+    # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md (D2)
+    """
+    result = _run_git(
+        [
+            "log",
+            "--format=",
+            "--name-only",
+            "-z",
+            "-m",
+            "--diff-merges=separate",
+            "--full-history",
+            "--no-renames",
+            "--no-show-signature",
+            f"{commit}..{head}",
+            "--",
+            *paths,
+        ],
+        cwd=repo_root,
+        timeout=timeout,
+        text=False,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"git log {commit}..{head} failed: {os.fsdecode(result.stderr).strip()}")
+    # -z: no octal-quoted paths; each touching commit repeats its names, so de-duplicate
+    return sorted({os.fsdecode(name) for name in result.stdout.split(b"\0") if name})
+
+
+def _present_at_head(
+    repo_root: Path, names: list[str], head: str, remaining: Callable[[], float | None]
+) -> list[str]:
+    """``names`` that exist in ``head``'s tree: the deletion exclusion of a graph batch.
+
+    The log lists a file's earlier modifications even after a commit deleted it, so with
+    uncomputed binding statuses (committed deletions are excluded) the touched names are
+    filtered against the committed tree, on the scan's deadline.
+    # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md (D2)
+    """
+    if not names:
+        return []
+    present = drift_checks.tree_entries_all(repo_root, head, set(names), lambda: _budget(remaining))
+    return [name for name in names if name in present]
+
+
+def _budget(remaining: Callable[[], float | None]) -> float | None:
+    """The time left, or ``ValueError`` once the scan budget is gone (a failed batch)."""
+    left = remaining()
+    if left is not None and left <= 0:
+        raise ValueError("drift scan budget exhausted")
+    return left
+
+
+def graph_build_state(
+    repo_root: Path, commit: str, head: str, remaining: Callable[[], float | None]
+) -> Literal["ancestor", "not-ancestor", "missing"]:
+    """Whether the graph build ``commit`` can be a drift baseline for ``head``.
+
+    ``git merge-base --is-ancestor``: 0 is an ancestor, 1 is not (a graph built on another
+    branch, or on a checkout of an older commit). Exit 128 is classified by ``git cat-file -e
+    <commit>^{commit}``'s exit code, never by stderr text: a commit absent from the repository
+    is ``"missing"``. Anything else (another exit code, a failed or timed-out git, a spent
+    budget) raises ``ValueError``, which callers treat as a failed batch.
+    # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md (D3)
+    """
+    result = _run_git(
+        ["merge-base", "--is-ancestor", commit, head],
+        cwd=repo_root,
+        timeout=_budget(remaining),
+        text=False,
+    )
+    if result.returncode == 0:
+        return "ancestor"
+    if result.returncode == 1:
+        return "not-ancestor"
+    if result.returncode == 128:
+        probe = _run_git(
+            ["cat-file", "-e", f"{commit}^{{commit}}"],
+            cwd=repo_root,
+            timeout=_budget(remaining),
+            text=False,
+        )
+        if probe.returncode != 0:
+            return "missing"
+    raise ValueError(f"git merge-base {commit} {head} failed: exit {result.returncode}")
 
 
 _CODE_DRIFT_GIT_NOTE = "code-drift: git unavailable — check skipped"
 
 
 class DriftEntry(NamedTuple):
-    """One open, commit-stamped decision whose anchored file(s) changed since capture —
+    """One open decision whose anchored file(s) changed since its baseline commit —
     the fields ``_check_code_drift`` needs to render today's finding exactly, plus the
     ``record_id`` the drift cache (sync.refresh_code_drift_cache) keys on.
     A changed file does not certify that its binding is live or its symbol still exists.
@@ -1044,16 +1178,33 @@ class DriftEntry(NamedTuple):
     basis: str = "capture"
     # path -> (blob_id, mode) from the check's stored checked_files, for check and scope basis.
     check_blobs: dict[str, tuple[str, str]] | None = None
+    # Where the baseline commit came from: "capture" (provenance.commit) or "graph" (the build
+    # commit inside provenance.graph_version). Only the wording and the JSON ``commit_source``
+    # differ; the comparison is the same. # see design/superpowers/specs/
+    # 2026-11-16-drift-graph-commit-fallback-design.md (D5)
+    commit_source: str = "capture"
 
 
 class DriftBatch(NamedTuple):
-    """One distinct ``provenance.commit``'s diff outcome, in ``by_commit`` iteration order
-    — findings order IS this order, including a failed batch's git-note emitted in place
-    (the mid-list interleaving the round-1 review pinned as a refactor constraint)."""
+    """One distinct baseline commit's outcome, in ``by_commit`` iteration order — findings
+    order IS this order, including a failed batch's git-note emitted in place (the mid-list
+    interleaving the round-1 review pinned as a refactor constraint). ``source`` says whether
+    the commit is a capture commit or a graph build commit: the same commit under both sources
+    is two batches.
+    # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md (D2)
+    """
 
     commit: str
     failed: bool
     entries: list[DriftEntry]
+    source: str = "capture"
+
+    @property
+    def cache_key(self) -> str:
+        """The key the persisted drift cache files this batch under: the bare commit for a
+        capture batch (so existing caches keep their meaning), ``graph:<commit>`` for a graph
+        batch, which may share its commit with a capture batch."""
+        return self.commit if self.source == "capture" else f"{self.source}:{self.commit}"
 
 
 class CodeDriftScan(NamedTuple):
@@ -1076,6 +1227,9 @@ class CodeDriftScan(NamedTuple):
     repo_root: Path | None = None
     binding_statuses: dict[tuple[str, str], str] | None = None
     compared_head: str | None = None
+    # record id -> (commit, source) for every record the scan put in a batch; ADR export reads it
+    # (design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md, D6).
+    baselines: dict[str, tuple[str, str]] | None = None
 
 
 # Re-arm reasons, in the order a record with several causes reports them (design/superpowers/
@@ -1197,7 +1351,7 @@ def _first_reason(judged: dict[str, list[str]]) -> str:
 
 def _apply_drift_checks(
     batches: list[DriftBatch],
-    by_commit: dict[str, list[tuple[Path, str, set[str]]]],
+    by_commit: dict[tuple[str, str], list[tuple[Path, str, set[str]]]],
     decisions: list[tuple[Path, dict]],
     bindings: dict[str, list[dict]],
     entities: list[tuple[Path, dict]],
@@ -1228,7 +1382,13 @@ def _apply_drift_checks(
         rid: path
         for batch in batches
         if not batch.failed
-        for path, rid, _ in by_commit[batch.commit]
+        for path, rid, _ in by_commit[(batch.commit, batch.source)]
+    }
+    sources = {
+        rid: batch.source
+        for batch in batches
+        if not batch.failed
+        for _, rid, _ in by_commit[(batch.commit, batch.source)]
     }
     old_entries = {entry.record_id: entry for batch in batches for entry in batch.entries}
     updates: dict[str, DriftEntry | None] = {}
@@ -1260,6 +1420,7 @@ def _apply_drift_checks(
                 check.checked_commit,
                 "scope",
                 _stored_blobs(check, candidates | set(check.required_files)),
+                sources[rid],
             )
             continue
         # A path with no binding status at all (no usable index) may be an orphan the check
@@ -1352,6 +1513,7 @@ def _apply_drift_checks(
                     check.checked_commit,
                     basis,
                     blobs,
+                    sources[rid],
                 )
     result = []
     for batch in batches:
@@ -1359,14 +1521,16 @@ def _apply_drift_checks(
             result.append(batch)
             continue
         entries = {entry.record_id: entry for entry in batch.entries}
-        for _, rid, _ in by_commit[batch.commit]:
+        for _, rid, _ in by_commit[(batch.commit, batch.source)]:
             if rid in updates:
                 update = updates[rid]
                 if update is None:
                     entries.pop(rid, None)
                 else:
                     entries[rid] = update
-        ordered = [entries[rid] for _, rid, _ in by_commit[batch.commit] if rid in entries]
+        ordered = [
+            entries[rid] for _, rid, _ in by_commit[(batch.commit, batch.source)] if rid in entries
+        ]
         result.append(batch._replace(entries=ordered))
     return result, skipped, False, compared_head
 
@@ -1390,6 +1554,7 @@ def _scan_code_drift(
     deadline: float | None = None,
     resolve_head: bool = False,
     busy_timeout_seconds: float = 5.0,
+    memo: DriftDiffMemo | None = None,
 ) -> CodeDriftScan:
     """The pure scan half of the code-drift check (D1): record → committed bindings →
     entity ``file_path`` join, orphaned-binding exclusion, one batched diff per distinct
@@ -1405,19 +1570,26 @@ def _scan_code_drift(
     wrapper). The root, when the caller passes none, is the repository of the store's
     PROJECT (``verify.find_store_project_repo``), so a symlinked store is measured where
     its anchored code lives.
-    # see design/superpowers/specs/2026-10-02-store-git-root-symlink-design.md (D3)"""
+    ``memo`` (the hook path only, with ``resolve_head=True``) lets a batch whose diff inputs
+    did not change reuse its stored answer; ``None`` is today's uncached scan. With
+    ``resolve_head`` the HEAD sha is resolved once, before the batches, and every diff runs
+    against that sha (``rev-parse`` moved from the end of the scan to just before the first
+    batch: still one call, still on the one budget).
+    # see design/superpowers/specs/2026-10-02-store-git-root-symlink-design.md (D3)
+    # and design/superpowers/specs/2026-11-15-sessionstart-drift-memo-design.md
+    """
     file_by_entity = _file_by_entity(entities)
     snapshot = _binding_status_snapshot(store_dir, busy_timeout_seconds=busy_timeout_seconds)
 
     unstamped = 0
-    by_commit: dict[str, list[tuple[Path, str, set[str]]]] = {}
+    # (commit, source) -> records; the same commit under two sources is two batches.
+    by_commit: dict[tuple[str, str], list[tuple[Path, str, set[str]]]] = {}
     for path, d in decisions:
         if not _is_open_decision(d):
             continue
-        prov = d.get("provenance")
-        commit = prov.get("commit") if isinstance(prov, dict) else None
+        baseline = drift_baseline(d.get("provenance"))
         rid = d.get("id")
-        if not isinstance(commit, str) or not commit:
+        if baseline is None:
             unstamped += 1
             continue
         if not isinstance(rid, str):
@@ -1433,7 +1605,7 @@ def _scan_code_drift(
             if fp:
                 paths.add(fp)
         if paths:
-            by_commit.setdefault(commit, []).append((path, rid, paths))
+            by_commit.setdefault(baseline, []).append((path, rid, paths))
 
     if not by_commit:
         return CodeDriftScan([], unstamped, False, False, None, snapshot.uncomputed)
@@ -1452,33 +1624,6 @@ def _scan_code_drift(
         if repo_root is None:
             return CodeDriftScan([], unstamped, True, True, None, snapshot.uncomputed)
 
-    batches: list[DriftBatch] = []
-    for commit, items in by_commit.items():
-        remaining = _remaining()
-        if remaining is not None and remaining <= 0:
-            batches.append(DriftBatch(commit, True, []))
-            continue
-        all_paths = sorted({p for _path, _rid, paths in items for p in paths})
-        try:
-            changed = set(
-                _git_diff_name_only(
-                    repo_root,
-                    commit,
-                    all_paths,
-                    timeout=remaining,
-                    exclude_deletions=snapshot.uncomputed,
-                )
-            )
-        except (ValueError, OSError, subprocess.TimeoutExpired):
-            batches.append(DriftBatch(commit, True, []))
-            continue
-        entries = [
-            DriftEntry(str(path), rid, drifted)
-            for path, rid, paths in items
-            if (drifted := sorted(paths & changed))
-        ]
-        batches.append(DriftBatch(commit, False, entries))
-
     head: str | None = None
     if resolve_head:
         remaining = _remaining()
@@ -1489,6 +1634,121 @@ def _scan_code_drift(
                     head = result.stdout.strip() or None
             except (ValueError, OSError, subprocess.TimeoutExpired):
                 head = None
+
+    if memo is not None and head is not None:
+
+        def _memo_git(args: list[str]) -> subprocess.CompletedProcess[bytes]:
+            left = _remaining()
+            if left is not None and left <= 0:
+                raise ValueError("drift scan budget exhausted")
+            return _run_git(args, cwd=repo_root, timeout=left, text=False)
+
+        memo.begin(head, _memo_git, gitmodules_digest(repo_root))
+    else:
+        memo = None
+    diff_head = head or "HEAD"
+
+    graph_paths = sorted(
+        {
+            path
+            for (_commit, src), items in by_commit.items()
+            if src == "graph"
+            for _p, _r, paths in items
+            for path in paths
+        }
+    )
+    touched: list[set[str] | None] = []  # one shared log of the memo's HEAD..this HEAD
+
+    def _touched_since_memo() -> set[str] | None:
+        """Files touched between the memo's HEAD and this one, for every graph batch at once;
+        ``None`` when the memo cannot extend (no forward move, argv too large, git failed)."""
+        if not touched:
+            touched.append(None)
+            previous = memo.forward_head() if memo is not None else None
+            if previous is not None and sum(len(os.fsencode(p)) + 1 for p in graph_paths) < 100_000:
+                try:
+                    touched[0] = set(
+                        _git_log_touched(
+                            repo_root,
+                            previous,
+                            graph_paths,
+                            timeout=_budget(_remaining),
+                            head=diff_head,
+                        )
+                    )
+                except (ValueError, OSError, subprocess.TimeoutExpired):
+                    touched[0] = None
+        return touched[0]
+
+    batches: list[DriftBatch] = []
+    for (commit, source), items in list(by_commit.items()):
+        remaining = _remaining()
+        if remaining is not None and remaining <= 0:
+            batches.append(DriftBatch(commit, True, [], source))
+            continue
+        graph = source == "graph"
+        all_paths = sorted({p for _path, _rid, paths in items for p in paths})
+        key = (
+            memo.batch_key(commit, all_paths, snapshot.uncomputed, "log" if graph else "diff")
+            if memo is not None
+            else None
+        )
+        reused = memo.lookup(key, all_paths, same_head_only=graph) if memo is not None else None
+        try:
+            if reused is not None:
+                changed = set(reused)
+            else:
+                names: list[str] | None = None
+                if graph and memo is not None:
+                    # HEAD moved forward from the memo's: the build is still an ancestor, and
+                    # B..H2 = B..H1 + H1..H2, so the stored answer plus one shared log of
+                    # H1..H2 is the exact new answer (no per-batch ancestry probe or walk).
+                    names = memo.extend(key, all_paths, _touched_since_memo)
+                if names is None:
+                    if graph:
+                        # The build must lie in HEAD's past: a graph built on another branch,
+                        # or a checkout of an older commit, says nothing about what changed.
+                        state = graph_build_state(repo_root, commit, diff_head, _remaining)
+                        if state != "ancestor":
+                            unstamped += len(items)
+                            del by_commit[(commit, source)]
+                            continue
+                        names = _git_log_touched(
+                            repo_root,
+                            commit,
+                            all_paths,
+                            timeout=_budget(_remaining),
+                            head=diff_head,
+                        )
+                    else:
+                        names = _git_diff_name_only(
+                            repo_root,
+                            commit,
+                            all_paths,
+                            timeout=remaining,
+                            exclude_deletions=snapshot.uncomputed,
+                            head=diff_head,
+                        )
+                if graph and snapshot.uncomputed:
+                    names = _present_at_head(repo_root, names, diff_head, _remaining)
+                changed = set(names)
+                if memo is not None:
+                    memo.record(key, names)
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            batches.append(DriftBatch(commit, True, [], source))
+            continue
+        entries = [
+            DriftEntry(str(path), rid, drifted, commit_source=source)
+            for path, rid, paths in items
+            if (drifted := sorted(paths & changed))
+        ]
+        batches.append(DriftBatch(commit, False, entries, source))
+    if memo is not None:
+        memo.finish()
+    if not by_commit:
+        # Every stamped record turned out to have a build that is not in HEAD's past: nothing is
+        # checkable, so the check stays as silent as on a store with no stamped record at all.
+        return CodeDriftScan([], unstamped, False, False, None, snapshot.uncomputed)
     batches, check_skipped, checks_unreadable, compared_head = _apply_drift_checks(
         batches,
         by_commit,
@@ -1513,6 +1773,7 @@ def _scan_code_drift(
         repo_root,
         snapshot.statuses,
         compared_head,
+        {rid: key for key, items in by_commit.items() for _path, rid, _paths in items},
     )
 
 
@@ -1522,6 +1783,7 @@ def scan_code_drift(
     *,
     deadline: float | None = None,
     busy_timeout_seconds: float = 5.0,
+    memo: DriftDiffMemo | None = None,
 ) -> CodeDriftScan:
     """Load-inclusive public entry point for the drift→supersede surfaces (D1): loads the
     three record sets itself (the same helpers ``curate()`` uses — no ``Store``, this
@@ -1544,6 +1806,7 @@ def scan_code_drift(
         deadline=deadline,
         resolve_head=True,
         busy_timeout_seconds=busy_timeout_seconds,
+        memo=memo,
     )
 
 
@@ -1566,10 +1829,12 @@ def _check_code_drift(
     -- a degraded binding is still included, same as ``valid_decisions_for_entity``'s own
     live/degraded-vs-orphaned split). If statuses are uncomputed or unavailable, committed
     deletions are excluded and findings explicitly qualify binding status as unknown;
-    existing-file changes remain checkable even without a graph. Records with NO commit (every
-    pre-wave record, by
-    design -- commits are never backfilled) are counted once, not silently dropped:
-    ``"N record(s) predate commit stamping — not checkable"``.
+    existing-file changes remain checkable even without a graph. A record with no capture
+    commit falls back to the build commit of its graph (:func:`drift_baseline`), compared
+    with ``git log`` so every touched file counts. A record with no usable baseline at all, or
+    whose graph build is not in HEAD's history, is counted once, not silently dropped:
+    ``"N record(s) have no usable commit to compare against — not checkable"``.
+    # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md
 
     That unstamped-count note (and the whole check) stays SILENT when there is not one
     single commit-stamped, checkable decision anywhere in the store: every decision written
@@ -1580,8 +1845,9 @@ def _check_code_drift(
     one commit-stamped, anchored decision to actually check — at which point the unstamped
     count rides alongside as informational context about the rest of the store.
 
-    Anchored file sets are grouped by their decision's ``provenance.commit`` so ``git diff``
-    runs ONCE per distinct commit (batched), never once per decision. Never raises and never
+    Anchored file sets are grouped by their decision's baseline commit (:func:`drift_baseline`)
+    so ``git diff`` (``git log`` for a graph build commit) runs ONCE per distinct commit
+    (batched), never once per decision. Never raises and never
     silently reports zero on a git failure (design ruling; C1's silent-zero shape rejected):
     a failed batch yields NO drift findings for that commit plus one
     :data:`_CODE_DRIFT_GIT_NOTE` finding, IN PLACE in the batch order, so a git-less run
@@ -1609,7 +1875,8 @@ def _render_code_drift(scan: CodeDriftScan, store_dir: Path) -> list[Finding]:
             Finding(
                 CODE_DRIFT,
                 str(store_dir),
-                f"{scan.unstamped} record(s) predate commit stamping — not checkable",
+                f"{scan.unstamped} record(s) have no usable commit to compare against"
+                " — not checkable",
             )
         )
     if scan.repo_root_failed:
@@ -1620,17 +1887,25 @@ def _render_code_drift(scan: CodeDriftScan, store_dir: Path) -> list[Finding]:
             findings.append(Finding(CODE_DRIFT, str(store_dir), _CODE_DRIFT_GIT_NOTE))
             continue
         for entry in batch.entries:
+            graph = entry.commit_source == "graph"
             findings.append(
                 Finding(
                     CODE_DRIFT,
                     entry.record_path,
                     (
                         f"content unverified: {entry.check_reason} "
-                        f"(capture {batch.commit[:8]}, check {entry.check_id}"
+                        f"({'graph build' if graph else 'capture'} {batch.commit[:8]}, "
+                        f"check {entry.check_id}"
                         + (f", checked {entry.checked_commit[:8]}" if entry.checked_commit else "")
                         + "): "
                         if entry.check_reason
-                        else f"anchored file(s) changed since capture (commit {batch.commit[:8]}): "
+                        else (
+                            f"anchored file(s) touched since the graph build "
+                            f"(commit {batch.commit[:8]}): "
+                            if graph
+                            else "anchored file(s) changed since capture "
+                            f"(commit {batch.commit[:8]}): "
+                        )
                     )
                     + ", ".join(entry.files)
                     + (

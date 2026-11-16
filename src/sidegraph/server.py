@@ -59,6 +59,7 @@ from .capture import (
     _unknown_support_positions,
     auto_ratify_eligible,
     format_communities_sample,
+    format_evidence_line,
     format_fact_proposal,
     format_path_prefixes,
     format_proposal,
@@ -89,7 +90,7 @@ from .config import (
     resolve_store_location,
 )
 from .domains import DEFAULT_CANDIDATE_LIMIT, collect_domain_candidates, community_group_path
-from .engine.reader import GraphifyReader, open_borrowed_reader
+from .engine.reader import GraphifyReader, ReaderCache, open_borrowed_reader
 from .freshness import staleness_phrase
 from .githooks import GRAPH_REBUILD
 from .input_limits import MAX_DRAFTS, InputLimitError, preflight_direct, preflight_drafts
@@ -136,7 +137,7 @@ from .store import (
     settled_after_failure,
     settled_ratify_result,
 )
-from .store_layout import StoreLinkRefused, refuse_outside_store_link
+from .store_layout import StoreLinkRefused, is_expired, refuse_outside_store_link
 from .sync import (
     activate_accepted_domain,
     ensure_domain_membership,
@@ -606,10 +607,19 @@ def _graph_path(store: Store | None = None) -> str:
     return str(default_graph_path((store or _get_store()).path))
 
 
+# The server lives for the whole host session, so it keeps the reader it built while the graph
+# file is unchanged instead of parsing the same ``graph.json`` on every tool call. Both the store's
+# own graph and a worktree's borrowed one go through it.
+# see design/superpowers/specs/2026-11-16-mcp-reader-reuse-design.md (D2)
+_READERS = ReaderCache()
+
+
 def _load_reader(store: Store | None = None) -> GraphifyReader | None:
-    """Best-effort reader over the store's own graph (see :func:`_graph_path`). None if absent."""
+    """Best-effort reader over the store's own graph (see :func:`_graph_path`). None if absent.
+    The reader is shared by every call while ``graph.json`` is unchanged (``_READERS``).
+    see design/superpowers/specs/2026-11-16-mcp-reader-reuse-design.md (D2)"""
     try:
-        return GraphifyReader(_graph_path(store))
+        return _READERS.get(_graph_path(store))
     except Exception:
         return None
 
@@ -1121,8 +1131,22 @@ def _record_drift_check_impl(
             DecisionStatus.ACCEPTED,
         }:
             raise SafeWriteError("decision_id")
-        if not decision.provenance.commit:
+        # A check is accepted only for a record the drift scan compares: one with a capture
+        # commit, or one whose graph build commit lies in this HEAD's past. A check the scan
+        # would never compare must not be written.
+        # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md (D4)
+        from .doctor import drift_baseline, graph_build_state
+
+        baseline = drift_baseline(decision.provenance)
+        if baseline is None:
             raise SafeWriteError("checked_commit")
+        if baseline[1] == "graph":
+            try:
+                state = graph_build_state(root, baseline[0], head, remaining)
+            except ValueError:
+                raise SafeWriteError("checked_commit") from None
+            if state != "ancestor":
+                raise SafeWriteError("checked_commit")
         bindings = store.bindings_for_record(decision_id)
         entities = {
             b.entity_id: entity.model_dump(mode="json")
@@ -2031,7 +2055,7 @@ def _retrieve_decisions_impl(store, include_superseded: bool = False) -> list[di
     # Mistakes first: gotchas and lessons before ADRs/constraints.
     rank = {DecisionKind.GOTCHA: 0, DecisionKind.LESSON: 1}
     decisions.sort(key=lambda d: rank.get(d.kind, 2))
-    return [d.model_dump(mode="json") for d in decisions]
+    return _with_expired_marker([d.model_dump(mode="json") for d in decisions])
 
 
 # -- the bounded decision listing -----------------------------------------------------------
@@ -2161,8 +2185,33 @@ def _rank_listing(rows: list[dict]) -> None:
 
 def _expired(row: dict, now: datetime) -> bool:
     """A record whose ``valid_to`` has passed: the store's own rule for "no longer valid"
-    (``Store.valid_decisions_for_entity``)."""
-    return row.get("valid_to") is not None and datetime.fromisoformat(row["valid_to"]) <= now
+    (``store_layout.is_expired``). ``row`` is a dumped record."""
+    return is_expired(row.get("valid_to"), now)
+
+
+def _with_expired_marker(dumps: list[dict]) -> list[dict]:
+    """The dumped records, each one whose ``valid_to`` has passed gaining ``"expired": true``,
+    so ``accepted`` beside it is not read as current. The key is absent on a live record, and
+    the stored status is not touched (see ``store_layout.is_expired``)."""
+    now = datetime.now(UTC)
+    for dump in dumps:
+        if _expired(dump, now):
+            dump["expired"] = True
+    return dumps
+
+
+def _in_history(row: dict) -> bool:
+    """A dumped record a default read hides: superseded, rejected, retired or expired.
+    ``row`` comes from a ``_with_expired_marker`` list."""
+    return row["status"] in _HISTORY or bool(row.get("expired"))
+
+
+def _compact(row: dict) -> dict:
+    """``row`` cut to ``_ROW_KEYS``, keeping its ``expired`` marker."""
+    out = {key: row[key] for key in _ROW_KEYS}
+    if row.get("expired"):
+        out["expired"] = True
+    return out
 
 
 def _accepted_first(groups: list[list[dict]]) -> list[list[dict]]:
@@ -2773,7 +2822,8 @@ def _listing_overview(
 ) -> str:
     """The answer to a call with no narrowing filter: what the store holds, and the newest few
     as compact rows. ``total`` and ``counts`` cover every record the proposal policy lets
-    through, history included, whatever ``include_superseded`` says."""
+    through, history included, whatever ``include_superseded`` says. ``counts`` are by stored
+    status; ``counts["expired"]`` is how many of them have expired (absent when none has)."""
 
     def tally(key: str) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -2781,10 +2831,12 @@ def _listing_overview(
             counts[record[key]] = counts.get(record[key], 0) + 1
         return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
-    admitted = [d for d in everything if include_superseded or d["status"] not in _HISTORY]
+    admitted = [d for d in everything if include_superseded or not _in_history(d)]
     admitted.sort(key=_newest_first, reverse=True)
-    rows = [{key: d[key] for key in _ROW_KEYS} for d in admitted[:limit]]
-    counts = {"status": tally("status"), "kind": tally("kind")}
+    rows = [_compact(d) for d in admitted[:limit]]
+    counts: dict = {"status": tally("status"), "kind": tally("kind")}
+    if lapsed := sum(1 for d in everything if d.get("expired")):
+        counts["expired"] = lapsed
     cut_hint = f"{_OVERVIEW_HINT} The newest list was cut by the character budget."
 
     def answer(shown: list[dict], hint: str) -> dict:
@@ -2875,7 +2927,7 @@ def _listing_hint(
                 " Every word of query must occur in a record: try one or two distinctive words."
             )
         if history_hint:
-            text += " Superseded, rejected and retired records are searched only with"
+            text += " History records (superseded, rejected, retired or expired) need"
             text += " status=[...] or include_superseded=True."
         parts.append(text)
     elif cut is not None and returned == 0:
@@ -3017,8 +3069,8 @@ def _decision_listing_result(
     if statuses:
         pool = [d for d in pool if d["status"] in statuses]
     elif history_hidden:
-        history = [d for d in pool if d["status"] in _HISTORY]
-        pool = [d for d in pool if d["status"] not in _HISTORY]
+        history = [d for d in pool if _in_history(d)]
+        pool = [d for d in pool if not _in_history(d)]
     if kinds:
         pool = [d for d in pool if d["kind"] in kinds]
         history = [d for d in history if d["kind"] in kinds]
@@ -3041,14 +3093,10 @@ def _decision_listing_result(
         elif history_hidden:
             # A fact whose validity window has closed is history, as a superseded one is: it
             # comes back only when history is asked for (design D2).
-            now = datetime.now(UTC)
             history += [
-                f
-                for f in facts
-                if (f["status"] in _HISTORY or _expired(f, now))
-                and (anchored is None or f["id"] in anchored)
+                f for f in facts if _in_history(f) and (anchored is None or f["id"] in anchored)
             ]
-            facts = [f for f in facts if f["status"] not in _HISTORY and not _expired(f, now)]
+            facts = [f for f in facts if not _in_history(f)]
         if anchored is not None:
             facts = [f for f in facts if f["id"] in anchored]
     # The live records the call's filters admit, by id: where a replaced history match looks
@@ -3167,13 +3215,14 @@ def _decision_listing_result(
                     "status": d["status"],
                     "statement": _clipped(d["statement"], _PARTIAL_FACT_CHARS),
                 }
+                | ({"expired": True} if d.get("expired") else {})
                 if _is_fact_row(d)
-                else {"matched_words": held_by[d["id"]]} | {key: d[key] for key in _ROW_KEYS}
+                else {"matched_words": held_by[d["id"]]} | _compact(d)
                 for d in rows
             ]
         if not wanted_ids:
             rows = [
-                {key: d[key] for key in _ROW_KEYS} | {"sent_earlier": True}
+                _compact(d) | {"sent_earlier": True}
                 if not _is_fact_row(d) and d["id"] in sent and d["status"] != "proposed"
                 else d
                 for d in rows
@@ -3451,17 +3500,20 @@ def retrieve_decisions(
     Filters combine with AND, and an empty one is ignored. ``status`` and ``kind`` take one
     value or a list (status: proposed, accepted, superseded, rejected, deprecated; kind: adr,
     lesson, constraint, gotcha) and ``status`` replaces the default, which hides superseded,
-    rejected and retired (deprecated) records. ``files`` are repo-relative paths, read the way
-    ``get_task_context`` reads them (a basename or a directory works); records anchored to them
-    match, and ``unresolved_files`` says, for each path nothing could read, why and what to try
-    instead (``reason``, ``candidates``). ``query`` is your question in a few words. For a
-    full match the ``query`` words must all occur in a record: in its text, or in the name or
-    path of the code it is anchored to through a live or degraded anchor, so a symbol or file
-    name finds its records. Records that hold every word in their own text come first. A
-    record found through an anchor starts with ``matched_anchors``, the anchors that held the
-    word. When only history holds every word and a live record replaced it, that record is
-    the answer and ``matched_history`` names the history record. When no record holds every
-    word, the answer is a partial answer
+    rejected, retired (deprecated) and expired records. A record is expired when its ``valid_to``
+    has passed, whatever its ``status``: it is history, and a row or record of one says
+    ``"expired": true`` beside its ``status``; ``counts["expired"]`` counts them. ``files`` are
+    repo-relative paths, read the way ``get_task_context`` reads them (a basename or a
+    directory works); records anchored to them match, and ``unresolved_files`` says, for each
+    path nothing could read, why and what to try instead (``reason``, ``candidates``).
+    ``query`` is your question in a few words. For a full match the
+    ``query`` words must all occur in a record: in its text, or in the name or path of the code
+    it is anchored to through a live or degraded anchor, so a symbol or file name finds its
+    records. Records that
+    hold every word in their own text come first. A record found through an anchor starts with
+    ``matched_anchors``, the anchors that held the word. When only history holds every word and
+    a live record replaced it, that record is the answer and ``matched_history`` names the
+    history record. When no record holds every word, the answer is a partial answer
     (``"match": "partial"``): compact rows of the records whose text holds at least half of
     the words and at least two, each with ``matched_words``. A row is a pointer, not the
     record: read the ones that are about your question with ``ids=[...]``. A query of one or
@@ -3469,7 +3521,7 @@ def retrieve_decisions(
     ``source`` hold every word, or hold it through an anchor, under ``facts``
     (``facts_matched`` counts them). They come after the decisions that hold every word in
     their own text and take the room the records before them leave; ``kind`` keeps
-    them out. A fact whose ``valid_to`` has passed is history, shown with
+    them out. A fact whose ``valid_to`` has passed is expired and history too, shown with
     ``include_superseded=True``. Read an omitted fact with ``list_facts(ids=[...])`` (ids in
     ``omitted_fact_ids``). In a query answer proposed records come after every record that
     is not proposed. Every match is counted, returned or not: one that had no room is in
@@ -3527,7 +3579,7 @@ def _list_facts_impl(store, include_superseded: bool = False) -> list[dict]:
     # Same policy application as `_retrieve_decisions_impl` — see its comment.
     facts = [f for f in facts if f.status != DecisionStatus.PROPOSED or proposal_surfaces(f)]
     facts.sort(key=lambda f: (f.valid_from, f.id), reverse=True)
-    return [f.model_dump(mode="json") for f in facts]
+    return _with_expired_marker([f.model_dump(mode="json") for f in facts])
 
 
 def _fact_listing(
@@ -3562,6 +3614,10 @@ def _fact_listing(
     for fact in everything:
         counts[fact["status"]] = counts.get(fact["status"], 0) + 1
     counts = dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+    # ``counts["expired"]`` says how many of those facts have expired; it is absent when none has.
+    count_fields: dict = {"status": counts}
+    if lapsed := sum(1 for fact in everything if fact.get("expired")):
+        count_fields["expired"] = lapsed
 
     pool = everything
     id_fields: dict = {}
@@ -3573,7 +3629,7 @@ def _fact_listing(
     if statuses:
         pool = [f for f in pool if f["status"] in statuses]
     elif history_hidden:
-        pool = [f for f in pool if f["status"] not in _HISTORY]
+        pool = [f for f in pool if not _in_history(f)]
     if wanted_supports:
         supported = set(wanted_supports)
         pool = [f for f in pool if supported.intersection(f["supports"])]
@@ -3605,7 +3661,7 @@ def _fact_listing(
         pool,
         key="facts",
         lead={},
-        middle={"counts": {"status": counts}, **id_fields},
+        middle={"counts": count_fields, **id_fields},
         limit=limit,
         budget=budget,
         echo=echo,
@@ -3635,11 +3691,13 @@ def list_facts(
     cut the list or why it is empty; ``counts`` covers every fact visible to the store's proposal
     policy, history included.
 
-    The default hides superseded and rejected facts; ``include_superseded=True`` shows them, and
-    so does ``status`` (one value or a list: proposed, accepted, superseded, rejected,
-    deprecated). Filters combine with AND, and an empty one is ignored. ``files`` are
-    repo-relative paths, read the way ``get_task_context`` reads them; facts anchored to them
-    match, and ``unresolved_files`` says, for each path nothing could read, why. ``query`` words
+    The default hides superseded, rejected, retired and expired facts (a fact is expired when its
+    ``valid_to`` has passed, whatever its ``status``; it then carries ``"expired": true`` and
+    ``counts["expired"]`` counts them); ``include_superseded=True`` shows them, and so does
+    ``status`` (one value or a list: proposed, accepted, superseded, rejected, deprecated).
+    Filters combine with AND, and an empty one is ignored. ``files`` are repo-relative paths,
+    read the way ``get_task_context`` reads them; facts anchored to them match, and
+    ``unresolved_files`` says, for each path nothing could read, why. ``query`` words
     must all occur in ``statement`` or ``source``. ``ids`` returns those facts; an id may be
     shortened to its first 8 or more characters (see ``retrieve_decisions``: ``id_lookup`` and
     ``hint`` report what each shortened id became).
@@ -3871,7 +3929,7 @@ def _get_entity_history_impl(store: Store, entity_id: str) -> list[dict]:
         dump = record.model_dump(mode="json")
         dump["record_type"] = record_type
         out.append(dump)
-    return out
+    return _with_expired_marker(out)
 
 
 def _history_row(record: dict) -> dict:
@@ -3883,7 +3941,7 @@ def _history_row(record: dict) -> dict:
         "status": record["status"],
         "valid_from": record["valid_from"],
         "title": _clip(str(record.get("title") or record.get("statement") or "")),
-    }
+    } | ({"expired": True} if record.get("expired") else {})
 
 
 def _entity_history_listing(
@@ -4005,7 +4063,8 @@ def get_entity_history(
     """Every decision AND fact anchored to an entity, newest first, bounded. The answer is one
     JSON object in one text block: ``{"entity_id", "matched", "returned", "omitted", "records",
     "omitted_records", "omitted_ids", "hint"}``. Every record carries ``"record_type":
-    "decision" | "fact"``; superseded records are included (the "tried before" chain). A
+    "decision" | "fact"``; superseded records are included (the "tried before" chain), and a
+    record whose ``valid_to`` has passed says ``"expired": true`` beside its ``status``. A
     proposed record obeys the proposal-surfacing policy (regulated mode, the window).
 
     ``records`` holds the newest records in full, up to half of ``budget_chars`` (default 24000,
@@ -4711,7 +4770,7 @@ def _synced_reader() -> tuple[GraphifyReader | None, Path | None]:
     see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)"""
     reader = _load_reader()
     if reader is None:
-        borrowed = open_borrowed_reader(_get_store().path)
+        borrowed = open_borrowed_reader(_get_store().path, opener=_READERS.get)
         if borrowed is None:
             return None, None
         with contextlib.suppress(Exception):
@@ -5373,7 +5432,7 @@ def _format_proposed_decision_block(store: Store, d: Decision) -> str:
     lines = [head]
     for f in store.facts_for_decision(d.id):
         if f.status == DecisionStatus.PROPOSED:
-            lines.append(f"  evidence: {f.statement} [{f.source}]  ({f.id})")
+            lines.append(format_evidence_line(f))
     return "\n".join(lines)
 
 
@@ -5573,7 +5632,8 @@ def list_proposed(budget_chars: int = 24000) -> str:
     The text is at most ``budget_chars`` long (default 24000, max 40000). A longer queue is
     shown in part: the first line counts the whole queue and what is shown, and the end lists
     the rest by id with local-read guidance. Read each item before deciding; ratify it, then
-    call again, or raise ``budget_chars``.
+    call again, or raise ``budget_chars``. A proposal whose ``valid_to`` has passed is tagged
+    ``[expired]`` and stays in the queue: it still needs a verdict.
     """
     budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
     return _hard_cap(_list_proposed_impl(_get_store(), budget), [], "Raise budget_chars.")

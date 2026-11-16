@@ -12,7 +12,11 @@ The copyable project-scoped POSIX recipe is in [Codex integration](../integratio
 The public plugin wraps its POSIX commands in `sh -c '...'`. Keep that explicit POSIX shell
 boundary when adapting the manual recipe for a host that launches another shell. The recipe
 uses POSIX assignments, substitutions and fallback guards. Windows uses the separate
-`commandWindows` launcher.
+`commandWindows` launcher. The public plugin runs its pinned `uvx` launch with `--offline` first
+and without it only when that fails (see
+[launcher details](host-wiring.md#plugin-launchers)); the manual recipe names no version and keeps
+the plain launch, because an offline-first launch of an unpinned package would keep running the
+release in uv's cache.
 
 The `cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"` prefix stands in for the
 `cd "${CLAUDE_PROJECT_DIR}"` prefix of the Claude Code hooks — Codex hook entries, like Claude Code's,

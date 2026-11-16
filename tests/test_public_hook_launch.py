@@ -91,11 +91,15 @@ def test_every_codex_posix_command_launches_the_pin_from_the_repository_root(
     for event, command in _commands(manifest).items():
         script_launch = f"{CODEX_CD} && "
         assert script_launch in command, (event, command)
+        # Offline first, with its output held back; the online launch only when that fails.
+        assert f"{_LAUNCH} --offline {ENTRY[event]}" in command, (event, command)
         assert f"{_LAUNCH} {ENTRY[event]}" in command, (event, command)
-        assert command.count("uvx --from") == 1, (event, command)
+        assert command.index("--offline") < command.index(f"{_LAUNCH} {ENTRY[event]}")
+        assert command.count("uvx --from") == 2, (event, command)
         for gone in ("launch-commit", "XDG_CACHE_HOME", "git+", "SIDEGRAPH_DIR", "SIDEGRAPH_GRAPH"):
             assert gone not in command, (event, gone)
-    assert "SIDEGRAPH_HOST=codex uvx" in _commands(manifest)["SessionStart"]
+    session = _commands(manifest)["SessionStart"]
+    assert session.count("SIDEGRAPH_HOST=codex uvx") == 2
 
 
 _WRAPPED = re.compile(r"^sh -c '[^']*' \|\| printf( '[^']*')+$")
@@ -141,14 +145,34 @@ def test_every_codex_hook_has_a_powershell_command_windows_on_the_pin(manifest: 
             "$r=git rev-parse --show-cdup 2>$null; if ($r) { Set-Location -LiteralPath $r }"
             in command
         )
-        assert command.count("uvx --from") == 1, (event, command)
+        assert command.count("uvx --from") == 2, (event, command)
         for gone in ("launch-commit", "XDG_CACHE_HOME", "git+", "SIDEGRAPH_DIR", "$u"):
             assert gone not in command, (event, gone)
-        assert f"; {_LAUNCH} {ENTRY[event]}; if (-not $?) {{ " in command, (event, command)
+        # Offline first with its output captured; written when it succeeded, else the online
+        # launch, captured the same way and written only on exit 0, and then the fallback. The
+        # decision is the exit code alone, reset to 1 before each launch so that the 0 left by
+        # ``git rev-parse`` cannot pass for a ``uvx`` that never ran: Windows
+        # PowerShell 5.1 sets ``$?`` to false after a native program writes to a redirected
+        # stderr, even at exit 0, and the online attempt would then run on a stdin the offline
+        # one already read. With the exit code alone the online launch runs only when uv failed,
+        # before the entry started, so the payload is still unread.
+        offline = f"$global:LASTEXITCODE = 1; $o = {_LAUNCH} --offline {ENTRY[event]} 2>$null; "
+        online = (
+            f"{{ $global:LASTEXITCODE = 1; $p = {_LAUNCH} {ENTRY[event]}; "
+            "if ($LASTEXITCODE -eq 0) { $p } else { "
+        )
+        assert offline + "if ($LASTEXITCODE -eq 0) { $o } else " + online in command, (
+            event,
+            command,
+        )
+        assert "if ($?" not in command, (event, command)
+        # Neither attempt is judged by ``$?``, and the online one is captured like the offline
+        # one: a failed online attempt's output is discarded, not printed before the fallback.
+        assert "-not $?" not in command, (event, command)
     assert "$env:SIDEGRAPH_HOST='codex'" in windows["SessionStart"]
-    assert windows["SessionStart"].endswith(f"{{ '{_CODEX_SESSION_FALLBACK}' }}")
+    assert windows["SessionStart"].endswith(f"{{ '{_CODEX_SESSION_FALLBACK}' }} }}")
     for event in ("Stop", "SubagentStart"):
-        assert windows[event].endswith("{ '{}' }")
+        assert windows[event].endswith("{ '{}' } }")
 
 
 def _stub(path: Path, body: str) -> None:
@@ -197,10 +221,54 @@ def test_a_codex_hook_runs_the_pin_from_the_repository_root_under_a_posix_shell(
 
     ok = run({"uvx": 'printf \'%s|%s|%s\\n\' "$*" "$SIDEGRAPH_HOST" "$(pwd)"'})
     host = "codex" if event == "SessionStart" else ""
-    args = f"--from sidegraph=={_VERSION} --python 3.13 {ENTRY[event]}"
+    args = f"--from sidegraph=={_VERSION} --python 3.13 --offline {ENTRY[event]}"
     assert ok.returncode == 0, ok
     assert ok.stdout == f"{args}|{host}|{repo.resolve()}\n", ok
     failed = run({"uvx": "exit 3"})
     assert failed.returncode == 0 and failed.stdout == fallback + "\n", failed
     no_sh = run({"uvx": 'printf "unreachable\\n"', "sh": "exit 127"})
     assert no_sh.returncode == 0 and no_sh.stdout == fallback + "\n", no_sh
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell semantics")
+@pytest.mark.parametrize("manifest", _CODEX_PUBLIC, ids=lambda m: m.name)
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash"])
+@pytest.mark.parametrize("event", sorted(ENTRY))
+def test_a_codex_hook_goes_online_once_when_the_offline_attempt_fails(
+    manifest: Path, shell: str, event: str, tmp_path: Path
+) -> None:
+    """Red target: the unfixed command makes one launch with no ``--offline``. The offline attempt
+    exits 1 and prints nothing the host may see; the online one answers once, from the
+    repository root, with the whole payload on its stdin."""
+    if not Path(shell).exists():
+        pytest.skip(f"{shell} is not installed")
+    command = _commands(manifest)[event]
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls"
+    _stub(bin_dir / "git", f"printf '%s\\n' '{repo}'")
+    _stub(
+        bin_dir / "uvx",
+        f'printf \'%s|%s\\n\' "$*" "$(pwd)" >> {log}\n'
+        'case " $* " in *" --offline "*) printf "BAD\\n"; exit 1;; esac\n'
+        "printf 'online:'; cat",
+    )
+    done = subprocess.run(
+        [shell, "-c", command],
+        cwd=repo / "sub",
+        input='{"hook_event_name":"x"}\n',
+        env={"HOME": str(tmp_path), "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"},
+        capture_output=True,
+        text=True,
+        timeout=_LAUNCH_TIMEOUT,
+        check=False,
+    )
+    assert done.returncode == 0, done
+    assert done.stdout == 'online:{"hook_event_name":"x"}\n', done
+    args = f"--from sidegraph=={_VERSION} --python 3.13"
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        f"{args} --offline {ENTRY[event]}|{repo.resolve()}",
+        f"{args} {ENTRY[event]}|{repo.resolve()}",
+    ]

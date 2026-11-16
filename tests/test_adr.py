@@ -94,6 +94,68 @@ def test_complete_projection_is_read_only_and_excludes_unratified_evidence(tmp_p
     assert bytes_under(db) == before
 
 
+def test_a_supporting_fact_that_ends_in_the_future_is_still_evidence(tmp_path):
+    """Red target: the exporter treated any set ``valid_to`` as closed, so a fact that ends
+    tomorrow vanished from the ADR's evidence while an expired one is rightly left out."""
+    from sidegraph.adr import read_snapshot, render_record
+    from sidegraph.profiles import get_profile
+
+    db = seed(tmp_path)
+    with Store(db) as store:
+        for rid, ends in [("AHEAD", datetime.now(UTC) + timedelta(days=30)), ("LAPSED", NOW)]:
+            store.add_fact(
+                Fact(
+                    id=rid,
+                    statement=f"{rid}: one more observation.",
+                    source="Synthetic run.",
+                    supports=["ADR"],
+                    status="accepted",
+                    valid_from=NOW - timedelta(days=1),
+                    valid_to=ends,
+                    provenance=Provenance(source="manual"),
+                )
+            )
+    config = get_profile("generic-adr").adr_export
+
+    text = render_record(
+        read_snapshot(db), "ADR", {"ADR": "ADR.md", "RULE": "RULE.md"}, config, tmp_path / "adr"
+    )
+
+    assert "AHEAD: one more observation." in text
+    assert "LAPSED:" not in text and "CLOSED:" not in text
+
+
+def test_drift_advisories_open_a_decision_that_ends_in_the_future_and_close_an_expired_one(
+    tmp_path,
+):
+    """Red target: ``adr_cli.drift_advisories`` called any accepted decision with a ``valid_to``
+    closed, so one that ends in the future was reported ``not-applicable``."""
+    from sidegraph.adr import read_snapshot
+    from sidegraph.adr_cli import drift_advisories
+
+    db = seed(tmp_path)
+    with Store(db) as store:
+        for rid, ends in [("AHEADADR", datetime.now(UTC) + timedelta(days=30)), ("LAPSEDADR", NOW)]:
+            store.add_decision(
+                Decision(
+                    id=rid,
+                    title=f"Synthetic {rid}",
+                    kind="adr",
+                    status="accepted",
+                    context="c",
+                    choice="ch",
+                    valid_from=NOW - timedelta(days=1),
+                    valid_to=ends,
+                    provenance=Provenance(source="manual"),
+                )
+            )
+
+    values, _ = drift_advisories(read_snapshot(db))
+
+    assert values["LAPSEDADR"]["reason"] == "closed or archived decision"
+    assert values["AHEADADR"].get("reason") != "closed or archived decision"
+
+
 def test_minimal_custom_prose_cannot_remove_evidence_status_or_source(tmp_path):
     from sidegraph.adr import read_snapshot, render_record
     from sidegraph.profiles import AdrExport

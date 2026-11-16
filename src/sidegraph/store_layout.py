@@ -82,6 +82,9 @@ DESCRIPTOR_CHANGED_PREFIX = "descriptor_changed:"
 REBIND_PENDING_KEY = "rebind_pending_gen"
 REBIND_DONE_KEY = "rebind_done_gen"
 DRIFT_CACHE_KEY = "code_drift_cache"
+# The drift scan's memo of per-capture-commit diffs (sidegraph.drift_memo), published beside the
+# cache in one write. Derived: any unreadable value is ignored and the scan runs uncached.
+DRIFT_MEMO_KEY = "code_drift_diff_memo"
 # How long a record the refresh stopped seeing keeps its first-seen stamp, so a transient
 # absence (a failed capture group, an orphan then rebind) does not re-announce it as new.
 DRIFT_TOMBSTONE_RETENTION: timedelta = timedelta(days=30)
@@ -394,6 +397,24 @@ def proposal_surfaces(valid_from: datetime) -> bool:
     if days <= 0:
         return True
     return (datetime.now(UTC) - valid_from) <= timedelta(days=days)
+
+
+def is_expired(valid_to: datetime | str | None, now: datetime | None = None) -> bool:
+    """Whether a record whose validity ends at ``valid_to`` is expired: it has an end and the
+    end is ``now`` or earlier. A ``valid_to`` in the future is live until that moment, and the
+    stored ``status`` does not matter: an expired record is history in every read, the way a
+    superseded one is, and its status is never rewritten (the store is append-only).
+
+    ``valid_to`` is a ``datetime`` or the ISO string of one; a naive value reads as UTC.
+    ``now`` defaults to this module's clock, the one ``proposal_surfaces`` reads. The one
+    predicate for every read site: the model layer, the listings and the hot path.
+    # see design/superpowers/specs/2026-11-15-0310-batch-a-design.md (D3)"""
+    if valid_to is None:
+        return False
+    end = datetime.fromisoformat(valid_to) if isinstance(valid_to, str) else valid_to
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=UTC)
+    return end <= (now if now is not None else datetime.now(UTC))
 
 
 # Why a record-directory entry that is not a regular file (a directory or FIFO named like a

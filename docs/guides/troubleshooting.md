@@ -85,8 +85,10 @@ published package at the plugin's own version, `uvx --from sidegraph==X.Y.Z --py
 go wrong is the first start after each plugin update, or the environment that start needs. When a
 hook cannot start, its guard hides the error: `SessionStart` shows "Sidegraph: the SessionStart
 hook could not start", the other hooks answer `{}`, and the MCP server shows as failed in
-`claude mcp list`. To see the error, run the hook command in a terminal, in the project, with
-stdin closed. `X.Y.Z` is the version in the plugin's manifest:
+`claude mcp list`. A hook tries `--offline` first and goes online only when that fails, so a
+cached package starts without the network. To see the error, run the online form of the hook
+command in a terminal, in the project, with stdin closed. `X.Y.Z` is the version in the plugin's
+manifest:
 
 ```bash
 uvx --from sidegraph==X.Y.Z --python 3.13 sidegraph-session-start --repo-root </dev/null
@@ -242,19 +244,21 @@ notice.
 A record-specific finding means anchored code changed or a previous scoped inspection no
 longer applies. Inspect the current claim. Use `record_drift_check` if it still holds, or
 follow the [status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings)
-if it changed. The drift-check tool requires a stamped, open
-subject and an exact inspected Git revision. See its [write contract](../reference/mcp-tools.md#record_drift_check).
+if it changed. The drift-check tool requires an open subject with a comparison baseline (a capture
+commit, or the graph build commit of an imported record) and an exact inspected Git revision. See its [write contract](../reference/mcp-tools.md#record_drift_check).
 
 A store-path line saying "not checkable" or "check skipped" has no decision id to inspect.
 It reports unavailable comparison evidence, such as missing Git, an unavailable scoped
-check or records that predate commit stamping. It does not prove a claim changed. Restore
+check or records with no usable commit to compare against. It does not prove a claim changed. Restore
 Git or the missing comparison evidence where possible and rerun doctor.
 
-For records that predate commit stamping, the capture revision is absent historical
-provenance. There is no comparison evidence to restore. That note remains while the check
-counts those open legacy records. Close them only for a genuine content replacement,
-retirement or proposal-drop reason. Do not backfill provenance or invent a content-free
-successor to clear the note.
+A record with no capture commit is compared from the build commit of the graph it was written
+against, when `provenance.graph_version` names one that lies in this checkout's history. If that
+commit is missing here (a shallow clone) or sits on another branch, fetching it or checking out
+the right history makes the record checkable again. A record with no graph build commit either has
+no comparison evidence to restore. The note counts these open records for as long as they stay
+open. Close them only for a genuine content replacement, retirement or proposal-drop reason. Do
+not backfill provenance or invent a content-free successor to clear the note.
 
 These store-level notes are `code-drift` findings, so `sidegraph-doctor --check` exits 2
 on them. They are separate from the JSON `skipped` list. See the

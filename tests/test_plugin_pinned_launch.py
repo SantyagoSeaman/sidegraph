@@ -57,13 +57,18 @@ _SESSION_GUARD = (
     "error\"}'"
 )
 _EMPTY_GUARD = "echo '{}'"
-# The Grok Bash pre-filter: a read word and a space after a non-identifier character, or after a
-# JSON whitespace escape, never a bare substring.
-_GROK_PATTERNS = (
-    "*[!A-Za-z0-9_]'sed '*|*\\\\[ntr]'sed '*|*[!A-Za-z0-9_]'grep '*|*\\\\[ntr]'grep '*|"
-    "*[!A-Za-z0-9_]'rg '*|*\\\\[ntr]'rg '*|*[!A-Za-z0-9_]'cat '*|*\\\\[ntr]'cat '*"
+# The Bash pre-filter, on Claude and Grok alike: a read word after a non-identifier character, or
+# after a JSON whitespace escape, and followed by a space, a JSON tab or carriage-return escape,
+# a quote or a JSON-escaped double quote. Never a bare substring.
+_BASH_PATTERNS = "|".join(
+    pattern
+    for word in ("sed", "grep", "rg", "cat")
+    for before in ("*[!A-Za-z0-9_]", "*\\\\[ntr]")
+    for pattern in (
+        *(f"{before}'{word}{after}'*" for after in (" ", "\\t", "\\r", '\\"')),
+        f"{before}'{word}'\"'\"*",
+    )
 )
-_BASH_IFS = ["Bash(sed *)", "Bash(grep *)", "Bash(rg *)", "Bash(cat *)"]
 _ENTRY = {
     "SessionStart": "sidegraph-session-start",
     "Stop": "sidegraph-stop",
@@ -101,20 +106,34 @@ def _load(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
-def _expected(host: str, event: str) -> str:
-    """The public hook command for ``host`` (``claude`` or ``grok``) on ``event``."""
+def _body(host: str, event: str) -> str:
+    """The offline-first launch of ``event`` on ``host`` (``claude`` or ``grok``): ``--offline``
+    first with its output held back, the online launch (output held back too) when that fails, then
+    the fallback."""
     guard = _SESSION_GUARD if event == "SessionStart" else _EMPTY_GUARD
     if host == "grok":
         prefix = "SIDEGRAPH_HOST=grok "
     else:
         prefix = "SIDEGRAPH_HOST=claude " if event == "SessionStart" else ""
-    return f"{prefix}{_LAUNCH} {_ENTRY[event]} --repo-root || {guard}"
-
-
-def _grok_filter(inner: str) -> str:
+    off = f"{prefix}{_LAUNCH} --offline {_ENTRY[event]} --repo-root"
+    on = f"{prefix}{_LAUNCH} {_ENTRY[event]} --repo-root"
     return (
-        f'p=$(cat); case "$p" in {_GROK_PATTERNS}) printf \'%s\\n\' "$p" | '
-        f"{{ {inner} ; }} ;; *) echo '{{}}' ;; esac"
+        f"o=$(printf '%s\\n' \"$p\" | {off} 2>/dev/null) && printf '%s\\n' \"$o\" || "
+        f"{{ o=$(printf '%s\\n' \"$p\" | {on}) && printf '%s\\n' \"$o\" || {guard} ; }}"
+    )
+
+
+def _expected(host: str, event: str) -> str:
+    """The public hook command for ``host`` (``claude`` or ``grok``) on ``event``."""
+    return f"p=$(cat); {_body(host, event)}"
+
+
+def _bash_filter(host: str) -> str:
+    """The Bash entry: the same launch behind a case on the read words. One entry on Claude
+    Code and on Grok."""
+    return (
+        f'p=$(cat); case "$p" in {_BASH_PATTERNS}) {_body(host, "PreToolUse")} ;; '
+        "*) echo '{}' ;; esac"
     )
 
 
@@ -151,15 +170,15 @@ def test_the_claude_mcp_entry_launches_the_pin() -> None:
 
 
 def test_every_claude_hook_command_launches_the_pin() -> None:
-    for event, _matcher, command in _commands(_CLAUDE_HOOKS):
-        assert command == _expected("claude", event), (event, command)
+    for event, matcher, command in _commands(_CLAUDE_HOOKS):
+        want = _bash_filter("claude") if matcher == "Bash" else _expected("claude", event)
+        assert command == want, (event, command)
 
 
 def test_claude_commands_keep_their_shell_fallback_and_the_reworded_session_message() -> None:
     for event, _matcher, command in _commands(_CLAUDE_HOOKS):
-        assert command.endswith(
-            f" || {_SESSION_GUARD if event == 'SessionStart' else _EMPTY_GUARD}"
-        ), command
+        guard = _SESSION_GUARD if event == "SessionStart" else _EMPTY_GUARD
+        assert f" || {guard} ; }}" in command, command
     session = next(c for e, _m, c in _commands(_CLAUDE_HOOKS) if e == "SessionStart")
     assert "plugin runtime" not in session
     assert "read-only plugin folder" not in session
@@ -174,10 +193,9 @@ def test_no_claude_or_grok_public_file_carries_a_forbidden_token() -> None:
 
 
 def test_every_grok_hook_command_launches_the_pin() -> None:
-    inner = _expected("grok", "PreToolUse")
     for event, matcher, command in _commands(_GROK_HOOKS):
         if matcher == "Bash":
-            assert command == _grok_filter(inner), command
+            assert command == _bash_filter("grok"), command
         else:
             assert command == _expected("grok", event), (event, command)
 
@@ -198,8 +216,11 @@ def test_every_codex_hook_command_launches_the_pin_in_posix_and_powershell() -> 
                     commands += [hook["command"], hook["commandWindows"]]
     assert len(commands) == 6
     for command in commands:
+        # The offline launch, then the online one: each names the pin and the entry.
+        assert f"{_LAUNCH} --offline sidegraph-" in command, command
         assert f"{_LAUNCH} sidegraph-" in command, command
-        assert command.count("uvx --from") == 1, command
+        assert command.count("uvx --from") == 2, command
+        assert command.index("--offline") < command.index(f"{_LAUNCH} sidegraph-"), command
         _assert_no_forbidden(command, command[:60])
     posix = [c for c in commands if c.startswith("sh -c ")]
     assert len(posix) == 3
@@ -246,7 +267,8 @@ def test_the_muse_hook_adapter_launches_the_pin(monkeypatch: pytest.MonkeyPatch)
     ):
         with pytest.raises(Stop):
             hook._run(event, entry, b"{}", {})
-        assert seen[-1] == ["uvx", f"--from={_SOURCE}", "--python", "3.13", entry]
+        # The first launch is offline; the online argv is the same without the flag.
+        assert seen[-1] == ["uvx", f"--from={_SOURCE}", "--python", "3.13", "--offline", entry]
     # The adapter sets the store paths in the child's environment itself (a launcher script, not
     # a manifest); everything else a launch must not carry is absent.
     text = _MUSE_HOOK.read_text(encoding="utf-8")
@@ -294,7 +316,7 @@ def test_the_launch_site_gate_is_clean_on_every_public_manifest() -> None:
         assert gate.launch_site_violations(path.read_text(encoding="utf-8"), _VERSION) == []
 
 
-# --- T8: Bash is four ``if`` entries on one command, and Agent|Task one more group -----------
+# --- T8: Bash is one entry with no ``if``, and Agent|Task one more group ---------------------
 
 
 @pytest.mark.parametrize(
@@ -302,34 +324,33 @@ def test_the_launch_site_gate_is_clean_on_every_public_manifest() -> None:
     [p for p in (_CLAUDE_BASE, _shipped(_CLAUDE_BASE)) if p.is_file()],
     ids=lambda p: p.name,
 )
-def test_t8_the_claude_manifest_wires_bash_as_four_if_entries_on_one_command(
-    manifest: Path,
-) -> None:
-    """Each ``if`` entry is one rule that Claude Code spawns on its own: ten read commands cost
-    more processes than a plain ``Bash`` matcher, four cost fewer. The four share the command of
-    the Read/Grep/Edit/Write entry byte for byte, so a host that predates ``if`` and ignores it
-    dedupes them to one spawn. The ``Agent|Task`` group, which hands a subagent's brief its
-    records, runs that same command."""
+def test_t8_the_claude_manifest_wires_bash_as_one_filtered_entry(manifest: Path) -> None:
+    """Claude Code starts a hook for every ``if`` entry that matches, and for all of them when
+    it cannot split the Bash command (``echo "$PATH"``, a loop, ``${HOME}``): four launches. One
+    entry with no ``if`` runs a shell filter that starts ``uvx`` only on a read word. The
+    ``Agent|Task`` group, which hands a subagent's brief its records, runs the Read command."""
     groups = _load(manifest)["hooks"]["PreToolUse"]
     assert [g.get("matcher") for g in groups] == ["Read|Grep|Edit|Write", "Bash", "Agent|Task"]
     read_group, bash_group, agent_group = groups
     assert [h.get("if") for h in read_group["hooks"]] == [None]
-    assert [h.get("if") for h in bash_group["hooks"]] == _BASH_IFS
-    assert {h["type"] for h in bash_group["hooks"]} == {"command"}
-    assert {h["command"] for h in bash_group["hooks"]} == {read_group["hooks"][0]["command"]}
+    (bash,) = bash_group["hooks"]
+    assert bash["type"] == "command"
+    assert "if" not in bash
+    assert f'case "$p" in {_BASH_PATTERNS})' in bash["command"]
     assert [h.get("if") for h in agent_group["hooks"]] == [None]
     assert agent_group["hooks"][0]["command"] == read_group["hooks"][0]["command"]
 
 
 # --- the commands, run ---------------------------------------------------------------------
 
-# The stub prints its arguments one per line, then marker lines, to stderr, and answers ``{}``.
+# The stub appends its arguments one per line, then marker lines, to the file named by
+# ``STUB_LOG`` (the offline attempt's stderr is discarded by the command), and answers ``{}``.
 _STUB = """#!/bin/sh
 {
   printf '%s\\n' "$@"
   printf '@@host %s\\n' "$SIDEGRAPH_HOST"
   printf '@@pwd %s\\n' "$(pwd)"
-} >&2
+} >> "$STUB_LOG"
 printf '{}\\n'
 """
 _SED_PAYLOAD = '{"tool_name":"Bash","tool_input":{"command":"sed -n 1p f"}}\n'
@@ -350,9 +371,9 @@ def _run_cases() -> list[Any]:
 def test_every_public_command_runs_the_pin_from_the_project_directory(
     host: str, event: str, command: str, tmp_path: Path
 ) -> None:
-    """The stub ``uvx`` receives ``--from sidegraph==<V> --python 3.13 sidegraph-<entry>
-    --repo-root``, the host variable, and the directory the host started the hook in: the
-    command does not ``cd``."""
+    """The stub ``uvx`` receives ``--from sidegraph==<V> --python 3.13 --offline
+    sidegraph-<entry> --repo-root``, the host variable, and the directory the host started the
+    hook in: the command does not ``cd``."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     stub = bin_dir / "uvx"
@@ -368,6 +389,7 @@ def test_every_public_command_runs_the_pin_from_the_project_directory(
             "PATH": f"{bin_dir}:/usr/bin:/bin",
             "HOME": str(tmp_path / "home"),
             "CLAUDE_PROJECT_DIR": str(tmp_path / "elsewhere"),
+            "STUB_LOG": str(tmp_path / "stub.log"),
         },
         capture_output=True,
         text=True,
@@ -376,16 +398,19 @@ def test_every_public_command_runs_the_pin_from_the_project_directory(
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "{}\n"
-    lines = result.stderr.splitlines()
+    lines = (tmp_path / "stub.log").read_text(encoding="utf-8").splitlines()
     marker = next(i for i, line in enumerate(lines) if line.startswith("@@host "))
+    # One call: the offline attempt answered, so the online launch never ran.
     assert lines[:marker] == [
         "--from",
         _SOURCE,
         "--python",
         "3.13",
+        "--offline",
         _ENTRY[event],
         "--repo-root",
     ]
+    assert sum(line.startswith("@@host ") for line in lines) == 1
     assert lines[marker] == (
         "@@host " + {"claude": "claude" if event == "SessionStart" else "", "grok": "grok"}[host]
     )

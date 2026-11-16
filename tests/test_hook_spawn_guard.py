@@ -255,9 +255,13 @@ def test_t1_every_hook_command_ends_with_the_guard_for_its_event(
     guard = _event_guard(event, host, command)
     assert command.count(guard) == 1
     if command.startswith("p=$(cat); case "):
-        # Grok's Bash pre-filter: the hook command inside it carries the guard, and the filter
-        # answers `{}` itself for a command that reads no file.
+        # The Bash pre-filter (Claude Code and Grok): the hook command inside it carries the
+        # guard, and the filter answers `{}` itself for a command that reads no file.
         assert command.endswith(guard + " ; } ;; *) echo '{}' ;; esac"), command
+    elif command.startswith("p=$(cat); o=$("):
+        # A pinned launch tries `--offline` first; the guard follows the online launch inside
+        # the brace group that closes the command.
+        assert command.endswith(guard + " ; }"), f"{event} command lacks its guard: {command!r}"
     else:
         assert command.endswith(guard), f"{event} command lacks its guard: {command!r}"
 
@@ -378,7 +382,7 @@ def test_t5_the_bootstrap_verifier_still_recognises_a_guarded_command(
 _RECIPE_DOCS = {
     "docs/integrations/codex.md": 3,
     "docs/getting-started/codex-setup.md": 3,
-    "docs/getting-started/claude-code-setup.md": 8,
+    "docs/getting-started/claude-code-setup.md": 5,
 }
 _COMMAND_RE = re.compile(r'"command":\s*("(?:[^"\\]|\\.)*")')
 _ENTRY_RE = re.compile(r"sidegraph-(?:session-start|stop|pre-tool-use|subagent-start)\b")
@@ -418,4 +422,6 @@ def test_t6_the_doc_recipes_carry_the_guard() -> None:
             entry = _ENTRY_RE.search(command)
             assert entry is not None
             guard = _ENTRY_GUARDS[entry.group(0)]
+            if command.startswith("p=$(cat); case "):  # the Bash filter wraps the guarded launch
+                guard += " ; } ;; *) printf '{}\\n' ;; esac"
             assert command.endswith(guard), f"{doc}: recipe lacks its guard: {command!r}"

@@ -320,8 +320,9 @@ raises costs only its own line.
    in-session walkthrough.
 
 7. **Code-drift line.** The hook refreshes the code-drift cache
-   (`sync.refresh_code_drift_cache` — one bounded git scan: which live, commit-stamped
-   decisions are anchored to files that changed since their capture commit; the same
+   (`sync.refresh_code_drift_cache` — one bounded git scan: which live decisions
+   are anchored to files that changed since their capture commit, or, with no capture commit,
+   to files touched since the graph's build commit; the same
    detection `sidegraph-doctor`'s `code-drift` check runs, including applicable scoped
    checks). The refresh is UNCONDITIONAL —
    it is what keeps the `[drifted]` retrieval markers fresh. When the count is non-zero and
@@ -1082,7 +1083,8 @@ Standalone and supporting facts need their own live or degraded file binding; a 
 link alone does not inherit a decision's anchor. Binding statuses must be computed by a
 sync; after an index rebuild the hook reads the status the last sync computed for each unchanged
 entity. Superseded, rejected and expired decisions never appear. Facts must be accepted or a
-surfaced proposal, with no `valid_to` at all; even a future closure excludes a fact. Orphaned
+surfaced proposal, not expired: a `valid_to` still ahead is live, as it is for a decision, and
+one that has passed excludes the fact. Orphaned
 or uncomputed bindings deliver neither kind. Malformed fact rows are skipped individually;
 a failed fact-table query preserves available decisions and uses the hook's protected diagnostic.
 
@@ -1143,21 +1145,28 @@ read still delivers it, and the block ends with one line:
 
 ### Bash lines
 
-The plugin wires Bash as one group of four hook entries, with `if` set to `Bash(sed *)`,
-`Bash(grep *)`, `Bash(rg *)` and `Bash(cat *)`. Claude Code runs an entry when the pattern matches
-a command anywhere in a compound line (`cd sub && sed …`, `ls; cat …`), and each matching entry is
-its own process: a line that matches two of the four starts two. The four commands are
-byte-identical, which is what keeps the two processes on the same three files (above). Four
-entries start fewer processes than a plain `Bash` matcher would (2,977 against 3,923 over 3,923
-Bash calls in the field replay) and lose 8 of 386 injections; wiring all ten read commands starts
-more (5,090).
+The plugin wires Bash as one `Bash` entry with no `if`. Its command is a shell filter: it reads
+the payload, and starts the hook only when the payload holds `sed`, `grep`, `rg` or `cat` followed
+by a space, a JSON tab or carriage-return escape, a single quote or an escaped double quote, after a
+character that cannot be part of a word or after a JSON escape for a newline, tab or carriage
+return. Any other Bash line prints `{}` after one `sh` (a few
+milliseconds), so a line without a read word starts no hook process at all.
 
-**Host version.** `if` exists from Claude Code 2.1.85, compound-command matching is correct from
-2.1.89, and spurious matches on `$()` and `$VAR` were fixed in 2.1.163 and 2.1.243. The documented
-minimum for correct matching is **2.1.89**. A host older than 2.1.85 most likely ignores `if` and
-runs the hook on every Bash call; because the four commands are identical it dedupes them to one
-process, which exits early with no output (about 27 ms from a source checkout, about 190 ms for
-the public `uvx` form).
+The filter replaces four `if` entries (`Bash(sed *)`, `Bash(grep *)`, `Bash(rg *)` and
+`Bash(cat *)`). Claude Code runs an entry when its pattern matches a command anywhere in a
+compound line, and each matching entry is its own process: a line that matched two of the four
+started two. When Claude Code cannot split a command into subcommands, it runs every entry whatever
+its `if` (a quoted variable it cannot resolve such as `echo "$PATH"`, a loop body that uses its
+variable, `${…}`, `{ …; }`, `case`, a heredoc followed by a redirect, `Y=$(…); echo $Y`): that was
+four launches for one call, 1.76 launches per Bash call over a field audit. The filter starts at
+most one, and only for a line that names a read word. It is a superset of the lines the hook
+answers, with one exception: `read_paths` answers only when a command word's basename is one of
+those four, and such a word appears in the payload after a non-word character and before a space,
+a tab, a carriage return or a quote, unless the word is split by quotes (`c'at' file`), which a
+`case` pattern cannot match in general and which the filter leaves unanswered. The filter can launch for a line
+that then names no file (`echo cat file`, `git grep x`), which prints `{}` as before. It needs no
+Claude Code version beyond the one that runs hooks at all; Claude Code runs hook commands through
+a POSIX shell (Git Bash on native Windows).
 
 `sidegraph.bash_paths.read_paths(command, cwd, root)` decides which files a line reads, as a pure
 function over the text of the line. It splits the line into simple commands on newlines, `;`,
@@ -1460,7 +1469,8 @@ block).
 
 The Claude Code and Grok Build plugins wire all four hooks the same way: each command runs
 `uvx --from sidegraph==X.Y.Z --python 3.13 <entry point> --repo-root` and ends with the command
-guard. No `cd` prefix, no `UV_*` variable and no `@main` resolution is involved, so the Sidegraph
+guard. The launch first runs with `--offline` and goes online only when that fails (see
+[launcher details](host-wiring.md#plugin-launchers)). No `cd` prefix, no `UV_*` variable and no `@main` resolution is involved, so the Sidegraph
 version changes only when the plugin updates. The commands set no `SIDEGRAPH_DIR` or
 `SIDEGRAPH_GRAPH`: a value exported in your shell steers the plugin as it steers the CLIs, and
 otherwise the defaults apply. The development twins (`hooks/hooks.json`, `grok/hooks.json`) run the

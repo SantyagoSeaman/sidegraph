@@ -67,9 +67,11 @@ yes, so pressing Enter accepts them.
   no earlier record (see
   [auto-ratification policy](../guides/capturing-decisions.md#5-auto-ratification-policy));
   ADRs, constraints and domains still wait for a person. The
-  answer is saved in `.claude/settings.json`, which you commit. Sidegraph applies it in every MCP integration unless an explicit
-  `SIDEGRAPH_RATIFY_POLICY` overrides it, so teammates use the same project policy; the
-  `export` line init prints is for CLI and CI runs outside a host. See
+  answer is saved in `.claude/settings.json`, which you commit. Claude Code applies that file to the Sidegraph
+  MCP server, so teammates on Claude Code share the project policy. Codex, Grok and Muse do
+  not read it: there Sidegraph honours the committed value only when it is stricter than the
+  host's own `SIDEGRAPH_RATIFY_POLICY`, and a looser policy is set in that host's
+  environment. The `export` line init prints is for CLI and CI runs outside a host. See
   [`sidegraph-init`](../reference/cli.md#sidegraph-init).
 
 Without a terminal it asks neither question, so the project keeps the `manual` policy and no

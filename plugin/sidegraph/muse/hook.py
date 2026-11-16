@@ -17,10 +17,11 @@ import os
 import signal
 import subprocess
 import sys
+import time
 
 # The exact PyPI pin the adapter launches: the version bump writes it, with the manifests. The
 # interpreter flag follows the package, as in every other host's launch.
-SOURCE = "sidegraph==0.30.0"
+SOURCE = "sidegraph==0.31.0"
 
 # Muse's ``timeoutMs`` per event, pinned to the manifest by a test. The child gets the rest of
 # the budget minus the margin, so a slow runtime ends as ``{}`` and not as a Muse ``timed_out``.
@@ -87,11 +88,9 @@ def _guarded(event: str, out: bytes) -> bytes:
     return (json.dumps({"systemMessage": message}) + "\n").encode("utf-8")
 
 
-def _run(event: str, entry_point: str, raw: bytes, payload: dict) -> bytes:
-    env = _child_env(payload)
-    cwd = payload.get("cwd")
-    argv = ["uvx", "--from=" + SOURCE, "--python", "3.13", entry_point]
-    timeout = (TIMEOUTS_MS[event] - CHILD_MARGIN_MS) / 1000.0
+def _attempt(argv: list[str], raw: bytes, env: dict, cwd: object, timeout: float) -> bytes | None:
+    """One launch: the child's stdout when it exited 0, ``None`` when it exited non-zero, and
+    ``{}`` when it ran past ``timeout`` (the whole process group is killed)."""
     child = subprocess.Popen(
         argv,
         stdin=subprocess.PIPE,
@@ -116,7 +115,30 @@ def _run(event: str, entry_point: str, raw: bytes, payload: dict) -> bytes:
         except subprocess.TimeoutExpired:
             child.wait()
         return b"{}\n"
-    return _guarded(event, out) if child.returncode == 0 else b"{}\n"
+    return out if child.returncode == 0 else None
+
+
+def _run(event: str, entry_point: str, raw: bytes, payload: dict) -> bytes:
+    """Launch the runtime offline first, then online when that exits non-zero. A warm cache
+    never revalidates the index, and a machine with no network never waits for uv's retries
+    (several seconds). The pin is exact, so a stale index cannot change what runs. One budget
+    covers both launches: a child that runs past it ends the hook as ``{}``.
+    see design/superpowers/specs/2026-11-15-hook-launch-form-design.md (D2)"""
+    env = _child_env(payload)
+    cwd = payload.get("cwd")
+    launches = [
+        ["uvx", "--from=" + SOURCE, "--python", "3.13", "--offline", entry_point],
+        ["uvx", "--from=" + SOURCE, "--python", "3.13", entry_point],
+    ]
+    deadline = time.monotonic() + (TIMEOUTS_MS[event] - CHILD_MARGIN_MS) / 1000.0
+    for argv in launches:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return b"{}\n"
+        out = _attempt(argv, raw, env, cwd, remaining)
+        if out is not None:
+            return _guarded(event, out)
+    return b"{}\n"
 
 
 def main(event: str, entry_point: str) -> None:

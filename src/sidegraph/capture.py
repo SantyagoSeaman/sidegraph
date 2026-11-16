@@ -64,7 +64,7 @@ from .store import (
     SupersessionConflictError,
     UnknownSupportError,
 )
-from .store_layout import REBIND_PENDING_KEY
+from .store_layout import REBIND_PENDING_KEY, is_expired
 from .sync import activate_accepted_domain
 from .validation_errors import format_validation_error, unknown_support_reason
 from .verify import _run_git, find_store_project_repo
@@ -368,6 +368,23 @@ def parse_ratify_policy(raw: str | None) -> RatifyPolicy:
         return RatifyPolicy.MANUAL
     # LEGACY_ACCEPT is the deprecated AUTO_ACCEPT switch's internal stand-in, not a setting.
     return RatifyPolicy.MANUAL if policy is RatifyPolicy.LEGACY_ACCEPT else policy
+
+
+# `LEGACY_ACCEPT` lands records accepted with no stamp and no anchor check: the loosest.
+_POLICY_STRICTNESS = {
+    RatifyPolicy.LEGACY_ACCEPT: 3,
+    RatifyPolicy.AUTO_ALL: 2,
+    RatifyPolicy.AUTO_LOW_RISK: 1,
+    RatifyPolicy.MANUAL: 0,
+}
+
+
+def stricter_ratify_policy(a: RatifyPolicy, b: RatifyPolicy) -> RatifyPolicy:
+    """The stricter of two policies: ``manual`` < ``auto-low-risk`` < ``auto-all``, the one
+    that admits fewer records to self-ratify. On a tie the first argument is returned. Pure.
+    # see design/superpowers/specs/2026-11-15-0310-batch-a-design.md (D1)
+    """
+    return b if _POLICY_STRICTNESS[b] < _POLICY_STRICTNESS[a] else a
 
 
 # Kinds `auto-low-risk` admits by shape (D3 gate 1): `gotcha`/`lesson` decisions and
@@ -1921,12 +1938,17 @@ def propose_facts(
     return results
 
 
+_EXPIRED_TAG = "  [expired]"
+
+
 def format_proposal(d: Decision, predecessor: Decision | None = None) -> str:
     """Human-readable render of a pending proposal (shared by the ratify CLI and MCP).
 
     A superseding proposal names the record ratifying it will close (``predecessor``, when
-    the caller could look it up), so the human sees what the verdict replaces."""
-    lines = [f"{d.id}  [{d.kind.value}] {d.title}"]
+    the caller could look it up), so the human sees what the verdict replaces. A proposal whose
+    ``valid_to`` has passed carries ``[expired]`` on the title line: it stays in the queue, because
+    it still needs a verdict, but is not current."""
+    lines = [f"{d.id}  [{d.kind.value}] {d.title}{_EXPIRED_TAG if is_expired(d.valid_to) else ''}"]
     if d.supersedes:
         replaced = f"{d.supersedes} {predecessor.title}" if predecessor else d.supersedes
         lines.append(f"  supersedes: {replaced}")
@@ -1944,12 +1966,20 @@ def format_proposal(d: Decision, predecessor: Decision | None = None) -> str:
 def format_fact_proposal(f: Fact) -> str:
     """Human-readable render of a pending fact proposal — mirrors ``format_proposal``'s
     exact visual style (shared by the ratify CLI and MCP)."""
-    lines = [f"{f.id}  [fact] {f.statement}"]
+    lines = [f"{f.id}  [fact] {f.statement}{_EXPIRED_TAG if is_expired(f.valid_to) else ''}"]
     lines.append(f"  source:   {f.source}")
     lines.append(f"  supports: {', '.join(f.supports) if f.supports else '-'}")
     prov = f.provenance
     lines.append(f"  from:     session={prov.session_id or '-'} author={prov.author or '-'}")
     return "\n".join(lines)
+
+
+def format_evidence_line(f: Fact) -> str:
+    """The indented ``evidence:`` line of a still-proposed supporting fact under its decision's
+    block (shared by ``list_proposed`` and the ratify CLI). An expired fact carries
+    ``[expired]``, as ``format_fact_proposal`` does for the same fact listed alone."""
+    tag = _EXPIRED_TAG if is_expired(f.valid_to) else ""
+    return f"  evidence: {f.statement}{tag} [{f.source}]  ({f.id})"
 
 
 def _lint_domain_path_prefixes(

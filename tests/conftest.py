@@ -77,6 +77,16 @@ def _fresh_tool_admission_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _fresh_reader_cache() -> None:
+    """The MCP server keeps a graph reader between calls; no test sees another test's reader.
+    A rewrite the cache's publication model does not cover, inside one test, is a test defect.
+    see design/superpowers/specs/2026-11-16-mcp-reader-reuse-design.md (D2)"""
+    server = sys.modules.get("sidegraph.server")
+    if server is not None:
+        server._READERS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_sidegraph_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove every ``SIDEGRAPH_``-prefixed variable from the environment for the
     duration of one test. See module docstring for why and for the scope choice.

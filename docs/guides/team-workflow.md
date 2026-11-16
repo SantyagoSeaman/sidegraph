@@ -74,9 +74,11 @@ That's the founding promise of moving off a single opaque database file: ratific
 
 That gate holds only under the `manual` ratification policy. A terminal `sidegraph-init`
 answered with Enter writes `SIDEGRAPH_RATIFY_POLICY=auto-low-risk` to
-`.claude/settings.json`, and under it an eligible gotcha, lesson or standalone fact arrives in
-the diff already `accepted`, stamped `ratified_by: "auto:auto-low-risk"` rather than a
-person's name ([auto-ratification policy](capturing-decisions.md#5-auto-ratification-policy)).
+`.claude/settings.json`, and under it (on Claude Code, which applies that file; Codex, Grok and
+Muse honour a committed value only when it is stricter than their own environment's policy) an
+eligible gotcha, lesson or standalone fact arrives in the diff already `accepted`, stamped
+`ratified_by: "auto:auto-low-risk"` rather than a person's name
+([auto-ratification policy](capturing-decisions.md#5-auto-ratification-policy)).
 Reviewers should read that field, not just `status`. A record accepted through the
 agent's `ratify` tool reads `agent-relayed:<name>`. A team that wants no automatic
 acceptance answers no at init (or runs `sidegraph-init --ratify-policy manual` before

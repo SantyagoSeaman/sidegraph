@@ -1,4 +1,6 @@
-"""Pure-read, deterministic record-to-ADR projection; no engine or host integration."""
+"""Pure-read record-to-ADR projection, deterministic for a given store and date; no engine or
+host integration. The date matters only for evidence: a supporting fact drops out once its
+``valid_to`` passes."""
 
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ from .schema import (
     EntityKind,
     Fact,
 )
-from .store_layout import refuse_outside_store_link
+from .store_layout import is_expired, refuse_outside_store_link
 from .store_view import EffectiveRecord, effective_records
 from .verify import verify_snapshot
 
@@ -183,7 +185,7 @@ def render_record(
     for fact in sorted(snapshot.facts.values(), key=lambda f: f.id):
         if (
             fact.status is DecisionStatus.ACCEPTED
-            and fact.valid_to is None
+            and not is_expired(fact.valid_to)
             and record_id in fact.supports
         ):
             evidence_lines.append(

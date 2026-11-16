@@ -134,6 +134,7 @@ def test_the_flag_is_gone_from_argv_when_the_server_starts(tmp_path, monkeypatch
 
 
 def test_anchoring_precedes_the_ratify_policy_read(tmp_path, monkeypatch, seen):
+    """Red target: unfixed code lets the environment's auto-all win over the committed value."""
     project = tmp_path / "project"
     (project / ".claude").mkdir(parents=True)
     (project / ".claude" / "settings.json").write_text(
@@ -144,5 +145,6 @@ def test_anchoring_precedes_the_ratify_policy_read(tmp_path, monkeypatch, seen):
     monkeypatch.chdir(elsewhere)
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    monkeypatch.setenv(VAR, "auto-all")  # the committed value only tightens a set policy
     _launch(monkeypatch, "--repo-root")
     assert seen["policy"] == "auto-low-risk"

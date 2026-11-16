@@ -4336,3 +4336,35 @@ def test_manual_mcp_propose_schema_has_exact_additive_null_fields(store, tmp_pat
     assert set(auto_domain) == _T19_PRE_FEATURE_DOMAIN_KEYS | _T19_NEW_KEYS
     assert auto_domain["ratified_by"] == "auto:auto-all"
     assert auto_domain["auto_ratify_error"] is None
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "expected"),
+    [
+        ("manual", "auto-all", "manual"),
+        ("auto-all", "manual", "manual"),
+        ("auto-low-risk", "auto-all", "auto-low-risk"),
+        ("auto-all", "auto-low-risk", "auto-low-risk"),
+        ("manual", "auto-low-risk", "manual"),
+        ("auto-all", "auto-all", "auto-all"),
+    ],
+)
+def test_stricter_ratify_policy_picks_the_one_that_admits_fewer(a, b, expected):
+    """Red target: new code, no unfixed form (the order is manual < auto-low-risk < auto-all)."""
+    result = capture.stricter_ratify_policy(
+        capture.parse_ratify_policy(a), capture.parse_ratify_policy(b)
+    )
+    assert result.value == expected
+
+
+def test_stricter_ratify_policy_ranks_legacy_accept_loosest():
+    """Red target: unfixed code ranks `LEGACY_ACCEPT` as strict as `manual`, so it wins over
+    `auto-all` as "the stricter"."""
+    legacy, auto_all, manual = (
+        capture.RatifyPolicy.LEGACY_ACCEPT,
+        capture.RatifyPolicy.AUTO_ALL,
+        capture.RatifyPolicy.MANUAL,
+    )
+    assert capture.stricter_ratify_policy(legacy, auto_all) is auto_all
+    assert capture.stricter_ratify_policy(auto_all, legacy) is auto_all
+    assert capture.stricter_ratify_policy(legacy, manual) is manual

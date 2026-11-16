@@ -269,7 +269,11 @@ entirely (auto-accept, above), it lets a *deterministic, stamped* policy stand i
 human at write time — useful for an unattended import pipeline where nobody is going to run
 `sidegraph-ratify` at all. Set it in the environment the MCP server or
 CLI command runs in; matching is exact after trimming surrounding whitespace, and any unknown
-or empty value falls back to `manual`.
+or empty value falls back to `manual`. The value committed to `.claude/settings.json` is
+applied by Claude Code itself, and it also caps a looser value from your own local settings. Under Codex, Grok and Muse, which do not read that file,
+`sidegraph-mcp` uses the committed value only when it is stricter than the environment's
+policy (`manual` < `auto-low-risk` < `auto-all`), so a committed file there can tighten the
+policy but never loosen it.
 
 | Policy | Admits |
 |---|---|

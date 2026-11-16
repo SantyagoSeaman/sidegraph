@@ -1,16 +1,20 @@
 """Move a host entry point to the project root, which the plugin manifests ask for with a flag.
 
 The flag is ``--repo-root``. Shared by ``sidegraph-mcp`` and the four hook entries, so there is
-one copy. Standard library only at module level: the hook hot path imports this on every call,
-and the settings helper (which pulls in pydantic) is imported inside the one branch that needs it.
-see design/superpowers/specs/2026-11-03-claude-plugin-bundled-runtime-design.md (§4.6) and
-design/superpowers/specs/2026-10-13-sh-free-plugin-launch-design.md (D3)
+one copy. Standard library only, through ``gitenv``: the hook hot path imports this on every call
+and never loads pydantic for the git top level.
+see design/superpowers/specs/2026-11-03-claude-plugin-bundled-runtime-design.md (§4.6),
+design/superpowers/specs/2026-10-13-sh-free-plugin-launch-design.md (D3) and
+design/superpowers/specs/2026-11-15-hook-launch-form-design.md (D3)
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
+
+from ..gitenv import run_git
 
 REPO_ROOT_FLAG = "--repo-root"
 
@@ -37,13 +41,36 @@ def anchor_to_project() -> None:
     """
     project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
     try:
-        if project and Path(project).is_dir():
-            target = Path(project)
-        else:
-            # Lazy: pydantic is behind this import, and the hook hot path avoids it.
-            from .claude_settings import repo_root_for_settings
-
-            target = repo_root_for_settings()
+        target = Path(project) if project and Path(project).is_dir() else _git_top_level()
         os.chdir(target)
     except Exception:  # noqa: BLE001 - anchoring must never stop the entry point
         return
+
+
+def _git_top_level() -> Path:
+    """The git top level of the cwd, else the resolved cwd: the answer of
+    ``claude_settings.repo_root_for_settings()`` without importing it.
+
+    That module pulls in pydantic and the engine reader, about 75 ms on every hook run of a host
+    that sets no ``CLAUDE_PROJECT_DIR``. The same ``git rev-parse --show-toplevel`` through the
+    same standard-library launcher (``gitenv``) gives the same answer in a repository, a linked
+    worktree and a ``.git`` file; a failed git, an unusable git or no repository leaves the
+    process in its resolved cwd, as that function does. Like that function, it sets no timeout
+    on git.
+    see design/superpowers/specs/2026-11-15-hook-launch-form-design.md (D3)
+    """
+    try:
+        done = run_git(
+            ["rev-parse", "--show-toplevel"],
+            Path.cwd(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+        )
+        if done.returncode == 0 and done.stdout.strip():
+            return Path(done.stdout.strip()).resolve()
+    except (ValueError, OSError):
+        pass
+    return Path.cwd().resolve()

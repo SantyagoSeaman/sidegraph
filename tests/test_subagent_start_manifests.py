@@ -59,12 +59,19 @@ def test_t6_every_manifest_carries_the_subagent_start_entry(manifest: Path) -> N
     command = hook["command"]
     assert "sidegraph-subagent-start" in command
     guard = _GUARDS[manifest.parent.name]
-    assert command.endswith(guard) and command.count(guard) >= 1
+    # A public Claude command closes the brace group of its online launch: offline first, then
+    # the launch, then the guard.
+    tail = " ; }" if "uvx" in command and manifest.parent.name == "hooks" else ""
+    assert command.endswith(guard + tail) and command.count(guard) >= 1
     codex = manifest.parent.name == "codex"
     if codex:  # native Windows runs `commandWindows` (PowerShell) instead of `command`
         windows = hook["commandWindows"]
         assert "sidegraph-subagent-start" in windows
-        assert windows.endswith("; if (-not $?) { '{}' }"), windows
+        if "uvx" in windows:  # the public one: both attempts captured
+            assert windows.endswith("if ($LASTEXITCODE -eq 0) { $p } else { '{}' } }"), windows
+            assert "-not $?" not in windows, windows
+        else:
+            assert windows.endswith("; if (-not $?) { '{}' }"), windows
         assert "&&" not in windows and "||" not in windows, windows
         assert "launch-commit" not in windows and "XDG_CACHE_HOME" not in windows
         assert ("uvx" in windows) == ("uvx" in command)

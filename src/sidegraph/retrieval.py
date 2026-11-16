@@ -40,7 +40,7 @@ from .schema import (
 )
 from .store import _TERMINAL_DECISION_STATUSES, DescriptorLookup, Store
 from .store_layout import DRIFT_CACHE_KEY as DRIFT_CACHE_KEY
-from .store_layout import MEMORY_GUARD_LINE, MISTAKE_KINDS, parse_stamp
+from .store_layout import MEMORY_GUARD_LINE, MISTAKE_KINDS, is_expired, parse_stamp
 from .store_layout import clip_line as _clip_line
 from .store_layout import proposal_surfaces as _proposal_surfaces
 from .worktree_seeds import has_drive
@@ -118,8 +118,10 @@ _DRIFT_LEGEND = (
 # TOC_CACHE_KEY's own write-in-sync/read-elsewhere split for the same reason: retrieval
 # reads the shared store_layout key; sync owns the freshness.
 # Value shape: {"head": "<sha>", "computed_at": "<iso>", "by_commit": {"<sha>": [ids]}}
-# — grouped by capture commit so a partially failed scan can merge per commit instead of
-# choosing between erasing real markers and never updating again (spec round-2 N1).
+# — grouped by baseline commit so a partially failed scan can merge per commit instead of
+# choosing between erasing real markers and never updating again (spec round-2 N1). A capture
+# commit is keyed bare, a graph build commit as "graph:<sha>" (design/superpowers/specs/
+# 2026-11-16-drift-graph-commit-fallback-design.md, D2).
 
 
 def drifted_record_ids(store: Store) -> frozenset[str]:
@@ -159,7 +161,11 @@ def live_drifted_ids(store: Store, by_commit: object) -> frozenset[str]:
             if not isinstance(rid, str):
                 continue
             d = store.get_decision(rid)
-            if d is not None and d.status not in _TERMINAL_DECISION_STATUSES:
+            if (
+                d is not None
+                and d.status not in _TERMINAL_DECISION_STATUSES
+                and not is_expired(d.valid_to)
+            ):
                 out.add(rid)
     return frozenset(out)
 
@@ -814,13 +820,14 @@ def _fmt_fact(
 
 def _live_facts(facts: list[Fact]) -> list[Fact]:
     """Facts still worth surfacing: PROPOSED (unratified, tagged as such) or ACCEPTED, and
-    not yet superseded (``valid_to is None``). A superseded fact always has ``valid_to``
-    set (``add_fact``'s supersession path), so this excludes it with no extra status check
-    needed — REJECTED/DEPRECATED facts are excluded by the status filter alone."""
+    not expired (``store_layout.is_expired``: a ``valid_to`` still ahead is live). A superseded
+    fact always has ``valid_to`` set (``add_fact``'s supersession path) at or before now, so
+    this excludes it with no extra status check needed — REJECTED/DEPRECATED facts are excluded
+    by the status filter alone."""
     return [
         f
         for f in facts
-        if f.valid_to is None
+        if not is_expired(f.valid_to)
         and (
             f.status == DecisionStatus.ACCEPTED
             or (f.status == DecisionStatus.PROPOSED and proposal_surfaces(f))
@@ -1963,7 +1970,7 @@ def top_tier_sections(
     others = [
         d
         for d in store.iter_decisions()
-        if d.id not in shown and d.valid_to is None and d.status == DecisionStatus.ACCEPTED
+        if d.id not in shown and not is_expired(d.valid_to) and d.status == DecisionStatus.ACCEPTED
     ]
     sections.append(
         MapSection(
@@ -1981,7 +1988,11 @@ def top_tier_sections(
     proposed_decisions = [
         d
         for d in store.iter_decisions()
-        if d.valid_to is None and d.status == DecisionStatus.PROPOSED and proposal_surfaces(d)
+        if (
+            not is_expired(d.valid_to)
+            and d.status == DecisionStatus.PROPOSED
+            and proposal_surfaces(d)
+        )
     ]
     proposals = [MapEntry(_fmt_decision(d)) for d in _by_recency(proposed_decisions)[:10]]
     proposals += [

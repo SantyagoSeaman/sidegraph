@@ -59,6 +59,7 @@ from . import __version__, domain_snapshot, githooks, gitio, maintenance_clock
 from .capture import (
     RatifyPolicy,
     format_domain_proposal,
+    format_evidence_line,
     format_fact_proposal,
     format_proposal,
     parse_ratify_policy,
@@ -265,6 +266,13 @@ def _report_ratify_policy_write(
             "  restart your Claude Code session so the Sidegraph MCP server picks it up: "
             "a running server keeps the environment it started with"
         )
+        if value != "manual":
+            # Other hosts do not read `.claude/settings.json` themselves: sidegraph-mcp
+            # applies a committed value there only when it tightens the environment's policy.
+            print(
+                "  Claude Code applies this value; other hosts honour a committed value only "
+                f"when it is stricter than their own {RATIFY_POLICY_ENV_VAR}"
+            )
     elif result.outcome == "already_set":
         print(
             f"{rel_settings} already sets "
@@ -922,7 +930,7 @@ def _format_proposed_decision_block(store: Store, d: Decision) -> str:
     lines = [head]
     for f in store.facts_for_decision(d.id):
         if f.status == DecisionStatus.PROPOSED:
-            lines.append(f"  evidence: {f.statement} [{f.source}]  ({f.id})")
+            lines.append(format_evidence_line(f))
     return "\n".join(lines)
 
 

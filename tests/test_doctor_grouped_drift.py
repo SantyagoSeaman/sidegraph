@@ -399,7 +399,7 @@ def test_9_notes_print_before_the_block_and_are_in_the_json(tmp_path, monkeypatc
     _code, out = _cli(repo.store, "--json")
     notes = json.loads(out)["drift_groups"]["notes"]
     assert notes == [
-        "1 record(s) predate commit stamping \u2014 not checkable",
+        "1 record(s) have no usable commit to compare against \u2014 not checkable",
         "code-drift: git unavailable \u2014 check skipped",
         "code-drift: scoped check unavailable \u2014 check skipped",
     ]
@@ -471,8 +471,9 @@ def test_partial_clone_through_the_cli_json(tmp_path):
 
 # --- guards: the hot path and the core's purity (both pass before and after; N) ----------
 
-# Git calls refresh_code_drift_cache makes on the ``project`` fixture, measured on unchanged code.
-REFRESH_GIT_CALLS = 3
+# Git calls refresh_code_drift_cache makes on the ``project`` fixture: root, HEAD, the one
+# batch diff, and (since the drift memo) one ``git config --get diff.renames``.
+REFRESH_GIT_CALLS = 4
 
 
 def test_hot_path_unchanged(project, monkeypatch):

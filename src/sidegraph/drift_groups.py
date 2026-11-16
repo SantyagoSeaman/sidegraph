@@ -63,6 +63,10 @@ class DriftRecordEntry:
     capture_commit: str | None
     diff: dict[str, Any]
     hint: str | None = None
+    # "capture", or "graph" when ``capture_commit`` is the graph's build commit (the JSON key
+    # keeps its name, a public contract). # see design/superpowers/specs/
+    # 2026-11-16-drift-graph-commit-fallback-design.md (D5)
+    commit_source: str = "capture"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +79,7 @@ class DriftRecordEntry:
             "check_id": self.check_id,
             "checked_commit": self.checked_commit,
             "capture_commit": self.capture_commit,
+            "commit_source": self.commit_source,
             "diff": dict(self.diff),
             "hint": self.hint,
         }
@@ -293,6 +298,7 @@ def build(
                 check_id=pair.entry.check_id,
                 checked_commit=pair.entry.checked_commit,
                 capture_commit=pair.commit,
+                commit_source=pair.entry.commit_source,
                 diff=_diff_dict(pair.old, pair.new, pair.change, _command(pair), pair.unavailable),
             )
         )
@@ -483,9 +489,10 @@ def render_groups_text(groups: DriftGroups) -> list[str]:
             tail = []
             if record.reason:
                 commit = (record.capture_commit or "")[:8]
+                baseline = "graph build" if record.commit_source == "graph" else "capture"
                 tail.append(
                     f"{'scope advisory' if record.basis == 'scope' else 'check'}: {record.reason} "
-                    f"(check {record.check_id}, capture {commit})"
+                    f"(check {record.check_id}, {baseline} {commit})"
                 )
                 if record.basis == "scope":
                     tail.append(_SCOPE_TEXT)

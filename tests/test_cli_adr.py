@@ -233,6 +233,84 @@ def test_capture_to_head_drift_is_report_only_with_real_git(tmp_path, monkeypatc
     assert bytes_under(db) == before
 
 
+def test_graph_build_to_head_drift_is_reported_for_a_record_with_no_capture_commit(
+    tmp_path, capsys
+):
+    import subprocess
+
+    from sidegraph.adr_cli import main
+    from sidegraph.gitenv import git_env
+    from sidegraph.schema import AnchorBinding, Decision, Provenance
+    from sidegraph.store import Store
+    from sidegraph.store_layout import VOLATILE_STALE_KEY
+    from tests.test_adr import NOW
+
+    db = seed(tmp_path)
+    hooks = tmp_path / "disabled-hooks"
+    hooks.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(
+            [
+                "git",
+                "-c",
+                "user.name=ADR fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                f"core.hooksPath={hooks}",
+                *args,
+            ],
+            cwd=tmp_path,
+            env=git_env(),
+            text=True,
+        ).strip()
+
+    git("init", "-q")
+    source = tmp_path / "src/cache.py"
+    source.parent.mkdir()
+    source.write_text("class Cache: pass\n")
+    git("add", "src/cache.py")
+    git("commit", "-qm", "initial source")
+    build = git("rev-parse", "HEAD")
+    with Store(db) as store:
+        entity = store.find_entity("Cache", "src/cache.py")
+        assert entity is not None
+        store.add_decision(
+            Decision(
+                id="GRAPH",
+                title="Imported decision",
+                kind="adr",
+                status="accepted",
+                context="Synthetic context.",
+                choice="Keep scope.",
+                valid_from=NOW,
+                provenance=Provenance(source="manual", graph_version=f"{build}:0123456789ab"),
+            )
+        )
+        store.add_binding(AnchorBinding(record_id="GRAPH", entity_id=entity.entity_id, tier=2))
+        store.set_meta(VOLATILE_STALE_KEY, "0")
+    args = ["--db", str(db), "--out", str(tmp_path / "docs"), "--json"]
+    assert main(args) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["advisories"]["GRAPH"] == {
+        "state": "not-detected",
+        "reason": "completed graph-build-to-HEAD file check",
+    }
+    source.write_text("class Cache: pass\n# changed after the build\n")
+    git("add", "src/cache.py")
+    git("commit", "-qm", "change source")
+    assert main(args) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["advisories"]["GRAPH"] == {
+        "state": "changed",
+        "paths": ["src/cache.py"],
+        "reason": "graph-build-to-HEAD file advisory",
+    }
+
+
 def test_written_projection_roundtrip_does_not_create_or_change_memory(
     tmp_path, monkeypatch, capsys
 ):

@@ -24,8 +24,10 @@ records need not have a ratifier-name stamp. Context, choice, rejected alternati
 consequences come from the record. Missing optional reasoning says `Not recorded.`
 
 A fixed footer retains status, validity, history, source pointers, durable code descriptors
-and complete accepted, unclosed supporting facts. Even a future `valid_to` closes a fact;
-the exporter never infers a sample size or runtime qualifier. Store records (the ADR's own
+and complete accepted, unexpired supporting facts. A fact whose `valid_to` has passed is
+left out; one whose `valid_to` is still ahead is still evidence. So the same store can export
+differently after such a date passes, with no change to the store. The exporter never infers a
+sample size or runtime qualifier. Store records (the ADR's own
 record, supporting facts, domains, a successor of another kind) are named by id, never by a
 path into `.sidegraph/`, so migrating or maintaining the store changes no generated
 document. `index.md` groups documents by
@@ -117,7 +119,8 @@ replacement or a simultaneous source/index-mode change is claimed.
 ## Drift and round trips
 
 Code drift is advisory output, not rewritten ADR prose. A completed capture-to-HEAD check
-can report a changed anchored file; it does not prove semantic invalidity. Missing stamps,
+(graph-build-to-HEAD for a record with no capture commit, compared from its graph's build
+commit) can report a changed anchored file; it does not prove semantic invalidity. Missing stamps,
 uncomputed binding statuses or failed checks remain unknown. Closed/archived decisions are
 not applicable. Uncommitted source edits are outside this existing drift check.
 

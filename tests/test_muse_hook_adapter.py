@@ -36,6 +36,8 @@ PIN = f"sidegraph=={VERSION}"
 # A launch-commit record an older SessionStart left in the cache: nothing reads it any more.
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
+OFFLINE = "--offline"
+
 EVENTS = {
     "SessionStart": ("session_start.py", "sidegraph-session-start"),
     "SubagentStart": ("subagent_start.py", "sidegraph-subagent-start"),
@@ -67,11 +69,13 @@ if os.environ.get("STUB_STDERR_BYTES"):
     sys.stderr.write("e" * int(os.environ["STUB_STDERR_BYTES"]))
     sys.stderr.flush()
 time.sleep(float(os.environ.get("STUB_SLEEP", "0")))
-out = os.environ.get("STUB_OUT")
+offline = "--offline" in sys.argv
+out = os.environ.get("STUB_OFFLINE_OUT" if offline else "STUB_OUT") or os.environ.get("STUB_OUT")
 if out:
     sys.stdout.buffer.write(open(out, "rb").read())
     sys.stdout.buffer.flush()
-sys.exit(int(os.environ.get("STUB_EXIT", "0")))
+code = os.environ.get("STUB_OFFLINE_EXIT" if offline else "STUB_EXIT")
+sys.exit(int(code or os.environ.get("STUB_EXIT", "0")))
 """
 
 
@@ -245,7 +249,7 @@ def test_the_adapter_forwards_payload_argv_and_stdout_verbatim(rig: Rig, event: 
     assert result.returncode == 0, result.stderr
     assert result.stdout == answer % event.encode()
     (call,) = rig.calls()
-    assert call["argv"] == [f"--from={PIN}", "--python", "3.13", entry_point]
+    assert call["argv"] == [f"--from={PIN}", "--python", "3.13", OFFLINE, entry_point]
     assert call["stdin"].encode("latin-1") == stdin
 
 
@@ -336,7 +340,7 @@ def test_every_event_launches_the_pin_whatever_is_recorded(rig: Rig, event: str)
 
     assert result.returncode == 0, result.stderr
     (call,) = rig.calls()
-    assert call["argv"] == [f"--from={PIN}", "--python", "3.13", entry_point]
+    assert call["argv"] == [f"--from={PIN}", "--python", "3.13", OFFLINE, entry_point]
 
 
 def test_a_fifo_at_the_record_path_is_never_opened(rig: Rig) -> None:
@@ -389,6 +393,115 @@ def test_a_failing_or_unparseable_child_prints_empty_json(
     result = rig.run(rig.payload(), env=rig.env(STUB_EXIT=str(code)))
 
     assert result.returncode == 0 and result.stdout.strip() == b"{}"
+
+
+# -- offline first ---------------------------------------------------------------------------
+
+
+def test_a_failed_offline_launch_is_followed_by_the_online_launch(rig: Rig) -> None:
+    """Red target: the unfixed adapter makes one online call and no ``--offline`` attempt."""
+    answer = rig.tmp / "offline-out"
+    answer.write_bytes(b'{"offline": true}\n')
+    rig.set_stdout(b'{"online": true}\n')
+
+    result = rig.run(
+        rig.payload(), env=rig.env(STUB_OFFLINE_EXIT="1", STUB_OFFLINE_OUT=str(answer))
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b'{"online": true}\n'
+    offline, online = rig.calls()
+    assert offline["argv"] == [
+        f"--from={PIN}",
+        "--python",
+        "3.13",
+        OFFLINE,
+        "sidegraph-session-start",
+    ]
+    assert online["argv"] == [f"--from={PIN}", "--python", "3.13", "sidegraph-session-start"]
+    assert online["stdin"] == offline["stdin"]
+
+
+def test_a_successful_offline_launch_is_the_only_launch(rig: Rig) -> None:
+    """Red target: the unfixed adapter never passes ``--offline``."""
+    answer = rig.tmp / "offline-out"
+    answer.write_bytes(b'{"offline": true}\n')
+    rig.set_stdout(b'{"online": true}\n')
+
+    result = rig.run(rig.payload(), env=rig.env(STUB_OFFLINE_OUT=str(answer)))
+
+    assert result.stdout == b'{"offline": true}\n'
+    (call,) = rig.calls()
+    assert OFFLINE in call["argv"]
+
+
+def test_when_both_launches_fail_the_answer_is_empty_json(rig: Rig) -> None:
+    """A guard, red against nothing: two failed launches are ``{}`` and exit 0."""
+    result = rig.run(rig.payload(), env=rig.env(STUB_EXIT="3"))
+
+    assert result.returncode == 0 and result.stdout.strip() == b"{}"
+    assert len(rig.calls()) == 2
+
+
+def test_an_offline_launch_that_runs_past_the_budget_ends_the_hook_without_a_second_launch(
+    rig: Rig,
+) -> None:
+    """A guard, red against nothing: the budget is one for both launches, so a hung first
+    attempt is ``{}`` and the online one is not started."""
+    result = rig.run(
+        rig.payload("SubagentStart"),
+        entry="subagent_start.py",
+        env=rig.env(STUB_SLEEP="30"),
+        timeout=15,
+    )
+
+    assert result.returncode == 0 and result.stdout.strip() == b"{}"
+    assert len(rig.calls()) == 1
+
+
+def _fake_clock_run(spent: list[float], event: str = "SessionStart") -> tuple[list[float], bytes]:
+    """Run ``hook._run`` in process with a deterministic clock and a fake launcher.
+
+    Launch ``n`` fails (exit non-zero) after ``spent[n]`` seconds of the fake clock; returns the
+    timeout each launch was given and what ``_run`` answered.
+    """
+    from types import SimpleNamespace
+
+    hook = _load_hook()
+    now = [1000.0]
+    timeouts: list[float] = []
+
+    def attempt(argv: list[str], raw: bytes, env: dict, cwd: object, timeout: float) -> None:
+        timeouts.append(timeout)
+        now[0] += spent[len(timeouts) - 1]
+
+    hook.time = SimpleNamespace(monotonic=lambda: now[0])
+    hook._attempt = attempt
+    answer = hook._run(event, "sidegraph-session-start", b"{}", {})
+    return timeouts, answer
+
+
+def test_the_online_launch_gets_what_the_offline_launch_left_of_the_one_budget() -> None:
+    """The two launches share one budget: a failed offline launch that used 4 s of the 14 s a
+    SessionStart child may take leaves the online launch 10 s, not a fresh 14.
+
+    Red target: giving each attempt the full budget (the mutant of both reviews) left every test
+    green, and a slow offline failure followed by a slow online run could then take twice the
+    budget and end as a Muse ``timed_out`` instead of ``{}``.
+    """
+    timeouts, answer = _fake_clock_run([4.0, 0.0])
+
+    assert timeouts == [14.0, 10.0]
+    assert answer == b"{}\n"
+
+
+def test_no_online_launch_starts_once_the_offline_launch_used_the_whole_budget() -> None:
+    """A guard, red against nothing: an offline failure that ran to the end of the budget ends
+    the hook as ``{}`` with no second launch."""
+    timeouts, answer = _fake_clock_run([14.5, 0.0])
+
+    assert timeouts == [14.0]
+    assert answer == b"{}\n"
 
 
 # -- the output guard ------------------------------------------------------------------------

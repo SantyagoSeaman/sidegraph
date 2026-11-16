@@ -178,23 +178,7 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "if": "Bash(sed *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
-          },
-          {
-            "type": "command",
-            "if": "Bash(grep *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
-          },
-          {
-            "type": "command",
-            "if": "Bash(rg *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
-          },
-          {
-            "type": "command",
-            "if": "Bash(cat *)",
-            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
+            "command": "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*[!A-Za-z0-9_]'sed\\t'*|*[!A-Za-z0-9_]'sed\\r'*|*[!A-Za-z0-9_]'sed\\\"'*|*[!A-Za-z0-9_]'sed'\"'\"*|*\\\\[ntr]'sed '*|*\\\\[ntr]'sed\\t'*|*\\\\[ntr]'sed\\r'*|*\\\\[ntr]'sed\\\"'*|*\\\\[ntr]'sed'\"'\"*|*[!A-Za-z0-9_]'grep '*|*[!A-Za-z0-9_]'grep\\t'*|*[!A-Za-z0-9_]'grep\\r'*|*[!A-Za-z0-9_]'grep\\\"'*|*[!A-Za-z0-9_]'grep'\"'\"*|*\\\\[ntr]'grep '*|*\\\\[ntr]'grep\\t'*|*\\\\[ntr]'grep\\r'*|*\\\\[ntr]'grep\\\"'*|*\\\\[ntr]'grep'\"'\"*|*[!A-Za-z0-9_]'rg '*|*[!A-Za-z0-9_]'rg\\t'*|*[!A-Za-z0-9_]'rg\\r'*|*[!A-Za-z0-9_]'rg\\\"'*|*[!A-Za-z0-9_]'rg'\"'\"*|*\\\\[ntr]'rg '*|*\\\\[ntr]'rg\\t'*|*\\\\[ntr]'rg\\r'*|*\\\\[ntr]'rg\\\"'*|*\\\\[ntr]'rg'\"'\"*|*[!A-Za-z0-9_]'cat '*|*[!A-Za-z0-9_]'cat\\t'*|*[!A-Za-z0-9_]'cat\\r'*|*[!A-Za-z0-9_]'cat\\\"'*|*[!A-Za-z0-9_]'cat'\"'\"*|*\\\\[ntr]'cat '*|*\\\\[ntr]'cat\\t'*|*\\\\[ntr]'cat\\r'*|*\\\\[ntr]'cat\\\"'*|*\\\\[ntr]'cat'\"'\"*) printf '%s\\n' \"$p\" | { SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n' ; } ;; *) printf '{}\\n' ;; esac"
           }
         ]
       },
@@ -223,7 +207,8 @@ Add to `.claude/settings.json` (merge into an existing file):
 ```
 
 These non-plugin recipes name the package without a version, which is simpler to copy: each
-call runs the latest release. To pin a version for reproducible environments, write
+call runs the latest release (so they keep the plain launch: the plugin's offline-first launch
+suits an exact pin, and would keep running the release in uv's cache here). To pin a version for reproducible environments, write
 `sidegraph==X.Y.Z` in every command; see
 [pinned releases](installation.md#mutable-development-references). The Claude plugin names its
 own version in every command; see
@@ -259,10 +244,10 @@ The env vars are inlined into the command because Claude Code hook entries have 
   ids, and a line naming `get_task_context` for the rest. Each file arrives once per agent, at
   most three files per call and ten per agent (the count starts again for an agent after its
   context is compacted or cleared), and the session's own agent and every subagent it
-  starts count separately; a file with no records prints nothing. Bash is wired as four entries
-  (`if` is `Bash(sed *)`, `Bash(grep *)`, `Bash(rg *)`, `Bash(cat *)`) with the same command.
-  The `if` field exists from Claude Code 2.1.85, and matching on compound command lines is
-  correct from 2.1.89, so use 2.1.89 or later. Set `SIDEGRAPH_GREP_NUDGE=off` (alongside the
+  starts count separately; a file with no records prints nothing. Bash is wired as one entry with
+  no `if`: its command is a shell filter that starts the hook only when the Bash line holds
+  `sed`, `grep`, `rg` or `cat` (the snippet above; see
+  [launcher details](../reference/host-wiring.md#plugin-launchers)). Set `SIDEGRAPH_GREP_NUDGE=off` (alongside the
   other env vars in the command) to turn off all of it. See
   [`reference/hooks.md`](../reference/hooks.md#sidegraph-pre-tool-use).
 - The `Agent|Task` group runs that same command when the agent spawns a subagent. It appends the

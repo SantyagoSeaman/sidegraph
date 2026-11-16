@@ -264,6 +264,94 @@ def test_a_fact_past_its_validity_window_is_history(store):
     assert _ids(_ask(store, query="alpha", ids=[ended.id])["facts"]) == [ended.id]
 
 
+def _expired(store, title, *, fact=False, status=DecisionStatus.ACCEPTED, valid_to=None):
+    """A record whose validity ended an hour before now, or at ``valid_to``: stored as it is,
+    with the status it had when it was written (the store never rewrites it)."""
+    start = datetime.now(UTC) - timedelta(hours=3)
+    fields = {
+        "status": status,
+        "valid_from": start,
+        "valid_to": valid_to or start + timedelta(hours=2),
+        "provenance": Provenance(source="manual"),
+    }
+    if fact:
+        return _put(store, Fact(statement=title, source="bench", **fields))
+    return _put(
+        store, Decision(title=title, kind=DecisionKind.ADR, context="c", choice="ch", **fields)
+    )
+
+
+def test_an_expired_decision_is_history_and_says_so_when_asked_for(store):
+    """Red target: unfixed code lists an accepted decision whose ``valid_to`` has passed as live
+    (status only) and returns it with no ``expired`` marker."""
+    live = _add(store, "alpha now", kind="adr")
+    ended = _expired(store, "alpha then")
+    future = _expired(store, "alpha later", valid_to=datetime.now(UTC) + timedelta(days=1))
+
+    assert set(_ids(_ask(store, query="alpha")["decisions"])) == {live.id, future.id}
+    for asked in (
+        {"query": "alpha", "include_superseded": True},
+        {"query": "alpha", "ids": [ended.id]},
+        {"ids": [ended.id]},
+        {"query": "alpha", "status": "accepted"},
+    ):
+        by_id = {row["id"]: row for row in _ask(store, **asked)["decisions"]}
+        assert by_id[ended.id]["expired"] is True, asked
+        assert "expired" not in by_id.get(live.id, {}), asked
+        assert "expired" not in by_id.get(future.id, {}), asked
+
+
+def test_a_fact_past_its_validity_window_carries_the_expired_marker(store):
+    """Red target: unfixed code returns the expired fact with no ``expired`` key."""
+    live = _add_fact(store, "alpha now")
+    ended = _expired(store, "alpha then", fact=True)
+    future = _expired(
+        store, "alpha later", fact=True, valid_to=datetime.now(UTC) + timedelta(days=1)
+    )
+
+    assert set(_ids(_ask(store, query="alpha")["facts"])) == {live.id, future.id}
+    for asked in (
+        {"query": "alpha", "include_superseded": True},
+        {"query": "alpha", "ids": [ended.id]},
+        {"query": "alpha", "status": "accepted"},
+    ):
+        by_id = {row["id"]: row for row in _ask(store, **asked)["facts"]}
+        assert by_id[ended.id]["expired"] is True, asked
+        assert "expired" not in by_id.get(live.id, {}), asked
+        assert "expired" not in by_id.get(future.id, {}), asked
+
+
+def test_a_sent_earlier_row_of_an_expired_decision_keeps_the_expired_marker(store):
+    """Red target: the compact ``sent_earlier`` row was cut to the row keys and lost the
+    ``expired`` marker, so history asked for a second time showed ``accepted`` with no sign
+    it had lapsed."""
+    live = _add(store, "alpha now", kind="adr")
+    ended = _expired(store, "alpha then")
+
+    text, _ = _decision_listing_result(
+        store,
+        None,
+        query="alpha",
+        include_superseded=True,
+        sent=frozenset({live.id, ended.id}),
+    )
+
+    by_id = {row["id"]: row for row in json.loads(text)["decisions"]}
+    assert by_id[ended.id]["sent_earlier"] is True and by_id[ended.id]["expired"] is True
+    assert by_id[live.id]["sent_earlier"] is True and "expired" not in by_id[live.id]
+
+
+def test_a_future_valid_to_keeps_a_decision_live_in_a_filtered_answer(store):
+    """Red target: none, an over-reach guard (declared): a decision valid until a later date
+    stays in the default answer, with no marker."""
+    future = _expired(store, "alpha later", valid_to=datetime.now(UTC) + timedelta(days=1))
+
+    answer = _ask(store, query="alpha")
+
+    assert _ids(answer["decisions"]) == [future.id]
+    assert "expired" not in answer["decisions"][0]
+
+
 # -- accepted before proposed, and the cascade ---------------------------------------------------
 
 
@@ -1244,6 +1332,33 @@ def test_an_expired_fact_without_a_successor_stays_history(store):
 
     assert answer["matched"] == 0 and "facts" not in answer
     assert "1 record that holds every word is history." in answer["hint"]
+
+
+def test_an_expired_decision_without_a_successor_stays_history(store):
+    """Red target: unfixed code returns the expired accepted decision as a live match, so the
+    answer has a decision where the superseded twin of this case has the history hint."""
+    _expired(store, "redis cache eviction policy")
+
+    answer = _ask(store, query="redis cache eviction")
+
+    assert answer["matched"] == 0 and answer["decisions"] == []
+    assert "1 record that holds every word is history." in answer["hint"]
+
+
+def test_a_live_record_that_replaced_an_expired_decision_is_the_answer(store):
+    """Red target: unfixed code answers with the expired decision itself, so the live successor
+    and ``matched_history`` never appear."""
+    old = _put(store, _chain_link("redis cache eviction policy", None, live=True, valid_to=None))
+    old = _put(
+        store,
+        old.model_copy(update={"valid_to": datetime.now(UTC) - timedelta(hours=1)}),
+    )
+    new = _put(store, _chain_link("lru everywhere", old.id, live=True, month=2))
+
+    answer = _ask(store, query="redis cache eviction")
+
+    assert _ids(answer["decisions"]) == [new.id]
+    assert answer["decisions"][0]["matched_history"] == [old.id]
 
 
 def test_replacements_are_ranked_mistakes_first_then_newest(store):

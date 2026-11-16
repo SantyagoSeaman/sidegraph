@@ -136,8 +136,9 @@ def test_scan_inactive_store_makes_no_git_call(tmp_path, monkeypatch):
 
 
 def test_wrapper_makes_exactly_three_bounded_git_calls(git_repo, monkeypatch):
-    """Review I-1: the hook-path wrapper makes exactly root + diff + head — no duplicate
-    root resolution — and EVERY call carries a timeout drawn from the one deadline."""
+    """Review I-1: the hook-path wrapper makes exactly root + head + diff — no duplicate
+    root resolution — and EVERY call carries a timeout drawn from the one deadline. HEAD is
+    resolved BEFORE the batches (the diffs run against that sha), so it sits second."""
     import sidegraph.verify as verify_mod
 
     store_dir, _rid, _commit = _drifted_repo(git_repo)
@@ -153,7 +154,7 @@ def test_wrapper_makes_exactly_three_bounded_git_calls(git_repo, monkeypatch):
     scan = scan_code_drift(store_dir, deadline=10.0)
     assert scan.head == _head(git_repo)
     kinds = [args[0] if args[0] != "rev-parse" else args[1] for args, _ in calls]
-    assert kinds == ["--show-toplevel", "diff", "HEAD"]
+    assert kinds == ["--show-toplevel", "HEAD", "diff"]
     assert all(t is not None for _args, t in calls)
 
 

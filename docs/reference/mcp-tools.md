@@ -692,11 +692,21 @@ serialized answer never exceeds the clamped `budget_chars`.**
 }
 ```
 
-`total` and `counts` cover every record the proposal policy lets through, superseded and
-rejected ones included, whatever `include_superseded` says: they tell the caller that history
-exists. `newest` holds up to `limit` compact rows (exactly the five keys above), newest
-`valid_from` first, of the records `include_superseded` admits: by default everything except
-`superseded`, `rejected` and `deprecated`.
+`total` and `counts` cover every record the proposal policy lets through, superseded,
+rejected and expired ones included, whatever `include_superseded` says: they tell the caller
+that history exists. `counts` are by stored status; when some of those records have expired,
+`counts` also holds `"expired": <how many>` (the key is absent when none has). `newest`
+holds up to `limit` compact rows (the five keys above, and `"expired": true` on an expired
+row), newest `valid_from` first, of the records `include_superseded` admits: by default
+everything except `superseded`, `rejected`, `deprecated` and expired records.
+
+**Expired records.** A decision or fact is expired when its `valid_to` is set and has
+passed, whatever its `status`; one whose `valid_to` is still ahead is live until that moment.
+An expired record is history, the same as a superseded one: the default leaves it out, and
+`include_superseded=True`, `ids` or a `status` that matches its stored status brings it back,
+with `"expired": true` beside its `status` (so `accepted` is not read as current). The stored
+status is never rewritten. The same rule holds in [`list_facts`](#list_facts),
+[`get_entity_history`](#get_entity_history) and [`list_proposed`](#list_proposed).
 
 **With a narrowing filter, full records or sent-earlier rows.**
 
@@ -778,17 +788,17 @@ counts the matching facts, and the new keys appear only when a fact matched. A q
 with `matched: 0` can still hold facts: read `facts_matched`. Accepted records are placed
 first, and a match with no room is still counted (see Order and bounds below). A fact
 that holds every word is returned in full (in a partial answer it is a row, see below) and
-is never a `sent_earlier` row. A fact whose `valid_to` has passed is history here and
-comes back with `include_superseded=True`, `status` or `ids`, while `list_facts` still lists
-it by default. `omitted_fact_ids` are read with `list_facts(ids=[...])`;
+is never a `sent_earlier` row. A fact whose `valid_to` has passed is expired, and history
+here as in `list_facts`: it comes back with `include_superseded=True`, `status` or `ids`, and
+says `"expired": true`. `omitted_fact_ids` are read with `list_facts(ids=[...])`;
 `omitted_fact_ids_unlisted` counts ids that could not fit.
 
 The filters combine with AND:
 
 - **`status`** and **`kind`** take one value or a list, in any letter case. An unknown value is
   an error that names the valid ones. `status` replaces the default exclusion of `superseded`,
-  `rejected` and `deprecated` (a [retired](#retire_decision) decision); without it, those three
-  are left out unless `include_superseded=True`.
+  `rejected`, `deprecated` (a [retired](#retire_decision) decision) and expired records;
+  without it, those are left out unless `include_superseded=True`.
 - **`files`** are read the way [`get_task_context`](#get_task_context) reads file seeds, so a
   basename, a path suffix, a letter-case slip, a `./` prefix, an absolute path inside the
   repository or any linked worktree and a directory all work: a path the code graph does not hold goes through the
@@ -808,7 +818,7 @@ The filters combine with AND:
   found this way starts with `matched_anchors`, the list of its anchors' names or paths that
   held a word its text does not hold, and a `sent_earlier` row keeps the key. `files=[...]`
   stays the way to list a file's records.
-- **`ids`** returns those records by exact id, superseded, rejected and retired ones too; the default
+- **`ids`** returns those records by exact id, superseded, rejected, retired and expired ones too; the default
   exclusion does not apply to `ids` unless `status` is also given.
 
 **A full match that was replaced.** When no live record holds every word of `query`, and
@@ -897,7 +907,7 @@ nothing could read, at most ten, and `unresolved_omitted` counts the rest. Each 
 `hint` is `null` only when something matched, nothing was left out and every file was read.
 Otherwise it says which case applies: nothing matched (with the filters as given, and for
 `query` the reason; it also says that superseded and
-rejected records need `status` or `include_superseded=True`, unless unreadable files already
+rejected, retired and expired records need `status` or `include_superseded=True`, unless unreadable files already
 explain the empty answer); that the answer is a partial answer; which bound cut the list, `limit` or the character budget, and how
 to narrow or raise it (a bound already at its maximum is not offered); or that some files
 could not be read, which it leaves to `unresolved_files` to name. Read it before concluding
@@ -976,7 +986,9 @@ never cut in the middle. `hint` names the bound that cut the list, or says why i
 `retrieve_decisions(query=…)` returns matching facts beside the decisions; `list_facts` stays
 the tool that lists and filters facts alone.
 `counts` covers every fact the proposal policy lets through, history included, whatever the
-filters say. The default hides `superseded` and `rejected` facts; `include_superseded=True`
+filters say. The default hides `superseded`, `rejected`, retired and expired facts (a fact
+is expired when its `valid_to` has passed, whatever its `status`: it carries `"expired":
+true`, and `counts` holds `"expired": <how many>` when any has); `include_superseded=True`
 shows them, and so does `status`, which takes one value or a list and replaces the default
 exclusion. Filters combine with AND; an empty one is ignored. `files` match facts anchored to
 those paths (read the way `get_task_context` reads file seeds; the graph is read without a lazy
@@ -1053,7 +1065,8 @@ entity's display name; get one from `add_decision`/`supersede_decision`'s `entit
 from [`find_entity`](#find_entity). Returns every decision **and** fact with any binding to
 that entity, newest (`valid_from`) first, regardless of binding status or decision/fact
 status (superseded and retired records are the "tried before" chain, so they are included;
-a retired decision carries its `retired` object with the reason), except that
+a retired decision carries its `retired` object with the reason; a record whose `valid_to`
+has passed carries `"expired": true`, in its short row too), except that
 a `proposed` record obeys the proposal-surfacing policy like every other raw listing: it is
 left out under `SIDEGRAPH_UNRATIFIED=off` or once it is older than the surfacing window.
 `list_proposed` and `sidegraph-ratify` still show the whole review queue.
@@ -1885,7 +1898,10 @@ fits `budget_chars` is shown whole; a longer one is shown in part (see below):
   what/why, rejected, learned, provenance) **plus one indented `  evidence: <statement>
   [<source>]  (<id>)` line per still-proposed fact that decision's `facts`/`supports`
   attaches** (`store.facts_for_decision`) — a preview of the ratify cascade: accepting or
-  dropping this decision carries those facts with it (see [`ratify`](#ratify) below).
+  dropping this decision carries those facts with it (see [`ratify`](#ratify) below). A
+  proposal whose `valid_to` has passed carries `[expired]` after its title (a fact's block
+  too, and an expired `evidence:` line carries it after its statement): it stays in the queue,
+  because it still needs a verdict.
 - **"Facts:"** — standalone facts only, via `format_fact_proposal` (id, statement, source,
   `supports`, provenance): facts already nested under a decision above are excluded here,
   never double-listed.
@@ -2272,7 +2288,9 @@ record_drift_check(
 ) -> dict
 ```
 
-Append one immutable agent assertion that an open, commit-stamped decision still holds.
+Append one immutable agent assertion that an open decision still holds. The decision needs a
+comparison baseline: a capture commit, or a graph build commit in `provenance.graph_version` that
+is an ancestor of the checked HEAD.
 On a format-2 store `sidegraph-compact` later packs the check file into
 `verifications/packed.shard` and drops it once it is dead; drift readers consult both.
 This is a local write. Author and session are currently always unknown; this operation
@@ -2284,7 +2302,8 @@ Supply 1–256 unique, safe repository-relative paths (at most 1024 UTF-8 bytes 
 that exact HEAD; unrelated dirty files do not block the check. All current checkable
 concrete anchor files are required; explicitly inspected dependencies may extend coverage.
 Unknown binding status conservatively includes existing committed anchor paths. Abstract-only,
-unstamped, skipped or terminal subjects, missing Git HEAD, incomplete scope and dirty
+subjects with no baseline (no capture commit and no usable graph build commit in `HEAD`'s
+history), skipped or terminal subjects, missing Git HEAD, incomplete scope and dirty
 inspected files are refused without a new check. Missing required anchors return the
 fixed code `missing_required_files`, distinct from `no_checkable_files` and `untracked_files`.
 To inspect the scope locally without querying SQLite, open the configured Store, call

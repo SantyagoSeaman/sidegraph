@@ -1,4 +1,5 @@
-"""Review and explicitly write deterministic ADR projections; source stores stay read-only."""
+"""Review and explicitly write ADR projections, deterministic for a given store and date;
+source stores stay read-only."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from .config import resolve_store_path
 from .doctor import _binding_status_snapshot, scan_code_drift
 from .profiles import AdrExport, get_profile
 from .schema import DecisionStatus
+from .store_layout import is_expired
 
 
 def _template(path: Path) -> str:
@@ -60,13 +62,19 @@ def _avoid_index_open(root: Path) -> str | None:
     return None
 
 
+_BASELINE_LABEL = {"capture": "capture-to-HEAD", "graph": "graph-build-to-HEAD"}
+
+
 def drift_advisories(snapshot: AdrSnapshot) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Reuse capture-to-HEAD advisories without treating missing entries as clean."""
+    """Reuse capture-to-HEAD (or graph-build-to-HEAD) advisories without treating missing
+    entries as clean. The baseline of each record is the one the scan used for it.
+    # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md (D6)
+    """
     values: dict[str, dict[str, Any]] = {}
     opened = {
         rid: decision
         for rid, decision in snapshot.exported.items()
-        if decision.status is DecisionStatus.ACCEPTED and decision.valid_to is None
+        if decision.status is DecisionStatus.ACCEPTED and not is_expired(decision.valid_to)
     }
     for rid in snapshot.exported.keys() - opened.keys():
         values[rid] = {"state": "not-applicable", "reason": "closed or archived decision"}
@@ -81,7 +89,8 @@ def drift_advisories(snapshot: AdrSnapshot) -> tuple[dict[str, dict[str, Any]], 
         return values, [f"Code drift unknown for {len(opened)} ADR(s): {avoid}."]
     assert statuses is not None
     scan = scan_code_drift(snapshot.root, deadline=5.0)
-    batches = {batch.commit: batch for batch in scan.batches}
+    batches = {(batch.commit, batch.source): batch for batch in scan.batches}
+    baselines = scan.baselines or {}
     changed = {
         entry.record_id: entry
         for batch in scan.batches
@@ -90,9 +99,9 @@ def drift_advisories(snapshot: AdrSnapshot) -> tuple[dict[str, dict[str, Any]], 
     }
     warnings = []
     unknown = 0
-    for rid, decision in opened.items():
-        commit = decision.provenance.commit
-        batch = batches.get(commit) if commit else None
+    for rid in opened:
+        baseline = baselines.get(rid)
+        batch = batches.get(baseline) if baseline else None
         scope = [
             entity.descriptor.file_path
             for binding in snapshot.bindings.get(rid, [])
@@ -105,7 +114,6 @@ def drift_advisories(snapshot: AdrSnapshot) -> tuple[dict[str, dict[str, Any]], 
             or scan.check_skipped
             or scan.binding_statuses_uncomputed
             or not scan.head
-            or not commit
             or batch is None
             or batch.failed
             or not scope
@@ -120,7 +128,8 @@ def drift_advisories(snapshot: AdrSnapshot) -> tuple[dict[str, dict[str, Any]], 
             values[rid] = {
                 "state": "changed",
                 "paths": entry.files,
-                "reason": entry.check_reason or "capture-to-HEAD file advisory",
+                "reason": entry.check_reason
+                or f"{_BASELINE_LABEL[entry.commit_source]} file advisory",
             }
             warnings.append(
                 f"{rid}: code drift advisory in {', '.join(entry.files)}; "
@@ -129,7 +138,7 @@ def drift_advisories(snapshot: AdrSnapshot) -> tuple[dict[str, dict[str, Any]], 
         else:
             values[rid] = {
                 "state": "not-detected",
-                "reason": "completed capture-to-HEAD file check",
+                "reason": f"completed {_BASELINE_LABEL[batch.source]} file check",
             }
     if unknown:
         warnings.append(f"Code drift unknown for {unknown} ADR(s); absence is not a clean verdict.")

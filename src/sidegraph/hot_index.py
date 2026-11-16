@@ -40,6 +40,7 @@ from .store_layout import (
     StoreRequirementError,
     accepted_index_stamps,
     check_store_requirement,
+    is_expired,
     proposal_surfaces,
     symlinked_internals,
 )
@@ -690,8 +691,9 @@ class HotIndex:
     def _facts_for_bindings(self, record_ids: Sequence[str]) -> list[tuple[dict, datetime]]:
         """Raw equivalent of retrieval's composed live-fact oracle; skip damaged rows alone.
 
-        Unlike decisions, even a future valid_to closes a fact. Accepted future valid_from
-        remains eligible, as in explicit retrieval. Proposal windows use the shared rule.
+        As for decisions, a valid_to still ahead is live and one that has passed closes the
+        fact (``store_layout.is_expired``). Accepted future valid_from remains eligible, as in
+        explicit retrieval. Proposal windows use the shared rule.
         """
         out: list[tuple[dict, datetime]] = []
         for record_id in record_ids:
@@ -700,7 +702,7 @@ class HotIndex:
                 continue
             try:
                 fact = json.loads(row[0])
-                if fact["id"] != record_id or fact.get("valid_to") is not None:
+                if fact["id"] != record_id or is_expired(fact.get("valid_to")):
                     continue
                 if fact["status"] not in (_ACCEPTED, _PROPOSED):
                     continue

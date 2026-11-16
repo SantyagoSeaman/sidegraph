@@ -178,7 +178,7 @@ def test_terminal_decision_is_not_a_drift_target(git_repo):
 
 def test_store_with_no_commit_stamped_decision_at_all_is_silent(tmp_path):
     """Every pre-existing store (created before this wave shipped) has ZERO commit-stamped
-    decisions -- an unconditional "N record(s) predate commit stamping" note would cost
+    decisions -- an unconditional "N record(s) have no usable commit" note would cost
     every one of them a clean sidegraph-doctor run forever, which contradicts the
     pre-existing CLI contract (test_cli_doctor.py's healthy-store fixtures, uncommented,
     have no ``provenance.commit`` and must stay ``clean``). The check stays a complete
@@ -212,7 +212,9 @@ def test_unstamped_and_drift_findings_coexist(git_repo):
     report = curate(store_dir)
     findings = [f for f in report.findings if f.code == CODE_DRIFT]
     assert len(findings) == 2
-    note = next(f for f in findings if "1 record(s) predate commit stamping" in f.detail)
+    note = next(
+        f for f in findings if "1 record(s) have no usable commit to compare against" in f.detail
+    )
     assert note.record_id is None and note.record_type is None
     assert any("trader/exec.py" in f.detail for f in findings)
 
@@ -746,7 +748,9 @@ def _apply(scan, store, root, batches=None):
     """Run the overlay directly, optionally over hand-built capture batches."""
     batches = scan.batches if batches is None else batches
     by_commit = {
-        batch.commit: [(Path(e.record_path), e.record_id, set(e.files)) for e in batch.entries]
+        (batch.commit, batch.source): [
+            (Path(e.record_path), e.record_id, set(e.files)) for e in batch.entries
+        ]
         for batch in batches
     }
     return doctor._apply_drift_checks(

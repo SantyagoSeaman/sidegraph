@@ -59,8 +59,9 @@ sandbox that lets them write those two places, or run without one.
 ## Hooks on Grok
 
 Grok Build does not support the `if` field of a hook handler, so it skips a handler that sets one.
-The plugin gives Grok its own hooks file without `if`, so a shell read (`sed`, `grep`, `rg` or
-`cat`) reaches the hook.
+The plugin's Bash handler sets none: it is a shell filter that starts the hook for a shell read
+(`sed`, `grep`, `rg` or `cat`), the same one Claude Code uses. Grok has its own hooks file for
+the host variable and the timeouts.
 
 Grok names its tools differently from Claude Code, and the hook maps
 Grok's `read_file`, `grep`, `search_replace`, `write` and `spawn_subagent` to the tools it knows, and

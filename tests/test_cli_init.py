@@ -320,6 +320,45 @@ def test_init_interactive_prompt_accepted_by_yes_writes_auto_low_risk(
     assert _settings_data(tmp_path) == {"env": {RATIFY_POLICY_ENV_VAR: RATIFY_POLICY_DEFAULT}}
 
 
+_OTHER_HOSTS_NOTE = (
+    "Claude Code applies this value; other hosts honour a committed value only when it is "
+    "stricter than their own SIDEGRAPH_RATIFY_POLICY"
+)
+
+
+def test_init_says_other_hosts_only_honour_a_stricter_committed_policy(
+    tmp_path, capsys, monkeypatch
+):
+    """Red target: unfixed init prints no host note after writing a policy looser than manual."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("\n"))
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    out = capsys.readouterr().out
+    assert _OTHER_HOSTS_NOTE in out
+    assert out.count(_OTHER_HOSTS_NOTE) == 1
+
+
+def test_init_prints_the_host_note_once_for_auto_all(tmp_path, capsys, monkeypatch):
+    """Red target: unfixed init prints no host note; a note limited to `auto-low-risk` would
+    miss `auto-all`."""
+    monkeypatch.chdir(tmp_path)
+    db = tmp_path / ".sidegraph"
+    args = ["--db", str(db), "--graph", str(tmp_path / "no.json"), "--ratify-policy", "auto-all"]
+    assert init_main(args) == 0
+    out = capsys.readouterr().out
+    assert out.count(_OTHER_HOSTS_NOTE) == 1
+
+
+def test_init_prints_no_host_note_for_a_manual_policy(tmp_path, capsys, monkeypatch):
+    """Red target: none, guards against over-reach (manual loosens nothing, so no note)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", _FakeTTY("no\n"))
+    db = tmp_path / ".sidegraph"
+    assert init_main(["--db", str(db), "--graph", str(tmp_path / "no.json")]) == 0
+    assert _OTHER_HOSTS_NOTE not in capsys.readouterr().out
+
+
 def test_init_interactive_prompt_declined_writes_manual(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.stdin", _FakeTTY("no\n"))

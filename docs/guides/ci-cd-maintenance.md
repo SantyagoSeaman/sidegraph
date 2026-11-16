@@ -22,7 +22,9 @@ unattended.
    The scheduled recipe therefore pins `SIDEGRAPH_RATIFY_POLICY=manual` and
    `SIDEGRAPH_AUTO_ACCEPT=off` in the MCP server's `env`. A deployment that does want a
    policy pins it in a committed `.claude/settings.json` `env` block, never in the ambient
-   shell.
+   shell. Claude Code applies that block; under another host the committed value counts only
+   when it is stricter than the server's own environment, so there the policy is set in the
+   MCP server's `env`.
 2. **CI never auto-pushes canonical files to a branch nobody reviewed.** `sidegraph-sync`
    and the triage playbook's tools (`add_anchors`, `propose_decisions`) can **write** — sync
    normally changes derived `index.db` state and may canonically update a confirmed moved
@@ -40,7 +42,7 @@ fails the job when the report has an attention finding. It needs no explicit com
 ref: rebuild the graph, sync, then classify the report.
 
 Create a repository variable named `SIDEGRAPH_VERSION` containing a reviewed Sidegraph release
-(for example `0.30.0`). Every recipe reads it as `${{ vars.SIDEGRAPH_VERSION }}`. The published
+(for example `0.31.0`). Every recipe reads it as `${{ vars.SIDEGRAPH_VERSION }}`. The published
 package pins its own dependencies, so the version fixes the whole install. See
 [pinned releases](../getting-started/installation.md#mutable-development-references)
 for why CI should not follow the latest release unreviewed.

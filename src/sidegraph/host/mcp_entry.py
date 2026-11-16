@@ -25,6 +25,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from .. import server
+from ..capture import parse_ratify_policy, stricter_ratify_policy
 from ..config import (
     CURRENT_SESSION,
     TELEMETRY_SESSION_STAMP_PREFIX,
@@ -297,15 +298,20 @@ def install(mcp: FastMCP) -> None:
 
 
 def apply_project_ratify_policy() -> None:
-    """Apply the selected store project's committed policy when the environment sets none.
+    """Let the selected store project's committed policy tighten the environment's, never loosen it.
 
     `sidegraph-init` commits the policy to `.claude/settings.json`'s `env` block. Claude Code
-    applies that block to its MCP servers, Codex does not, so without this a Codex session
-    proposed every record whatever the team chose. An explicit, non-blank environment value
-    wins; the core keeps reading only the environment. A settings problem never stops the
-    server: anything but a readable committed value leaves the default.
+    applies that block to its MCP servers itself; Codex, Grok and Muse do not. For them the
+    committed value counts only when it is stricter than the environment's policy
+    (`manual` < `auto-low-risk` < `auto-all`): the stricter of the two is written back to the
+    environment. A committed file therefore never supplies a policy when the environment sets
+    none (the core default stays `manual`) and never loosens one. Unknown, empty and blank
+    values, in either place, parse as `manual`. A settings problem never stops the server:
+    anything but a readable committed value leaves the environment as it was.
+    see design/superpowers/specs/2026-11-15-0310-batch-a-design.md (D1)
     """
-    if os.environ.get(RATIFY_POLICY_ENV_VAR, "").strip():
+    raw = os.environ.get(RATIFY_POLICY_ENV_VAR, "")
+    if not raw.strip():
         return
     try:
         store_path = resolve_store_location(search_ancestors=True, warn_on_create=False).path
@@ -313,8 +319,14 @@ def apply_project_ratify_policy() -> None:
         state = current_ratify_policy(project_root)
     except Exception:  # noqa: BLE001 - a settings problem must never stop the MCP server
         return
-    if state.outcome == "already_set" and state.existing_value:
-        os.environ[RATIFY_POLICY_ENV_VAR] = state.existing_value
+    # A key that is present always counts, whatever it holds: an empty, blank or unreadable
+    # value is a team saying something the parser reads as `manual`, and that only tightens.
+    if state.outcome != "already_set" or state.existing_value is None:
+        return
+    environment = parse_ratify_policy(raw)
+    effective = stricter_ratify_policy(environment, parse_ratify_policy(state.existing_value))
+    if effective is not environment:
+        os.environ[RATIFY_POLICY_ENV_VAR] = effective.value
 
 
 def main() -> None:

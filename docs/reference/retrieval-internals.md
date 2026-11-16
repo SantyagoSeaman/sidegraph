@@ -232,6 +232,10 @@ A direct-tier decision line (bucket A/B, and every `drill_down` decision line) c
 `[drifted]` tag in its tag cluster — `- [gotcha] [drifted] Title …` — meaning: at least one
 file this record is anchored to has changed since the record's capture commit (`git diff
 <provenance.commit>..HEAD`, the same detection as `sidegraph-doctor`'s `code-drift` check).
+A record with no capture commit, such as one written by `sidegraph-import`, is compared from the
+build commit of the graph it was written against (`provenance.graph_version`): every file
+a commit touched since that build counts, so the tag is more eager there, and a build commit
+that is not in `HEAD`'s history leaves the record unchecked.
 The record can still be relevant, but its premise may have changed. Verify the current
 code before relying on it and
 follow the [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings)
@@ -244,9 +248,9 @@ related tight tier never carries the marker, even on the capped lines that show 
 freshness rides a store-meta cache refreshed by the SessionStart/Stop hooks
 (`sync.refresh_code_drift_cache`, one bounded git scan); records superseded mid-session are
 filtered out at read time, so a marker never outlives its record's liveness. Only
-commit-stamped records (captured since provenance commit-stamping shipped) can ever be
-flagged — imported/pre-wave records are invisible to this check, and `sidegraph-doctor`
-counts them as "not checkable".
+records with a baseline commit can ever be flagged: a capture commit, or a graph build commit
+in `provenance.graph_version` that lies in `HEAD`'s history. Records with neither are
+invisible to this check, and `sidegraph-doctor` counts them as "not checkable".
 
 ### Budget fallback: summaries instead of leaves
 

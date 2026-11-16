@@ -138,11 +138,13 @@ def test_session_start_line_carries_the_recency_clause(tmp_path, monkeypatch, ca
 
 def test_session_start_clause_is_stable_and_adds_no_meta_keys(tmp_path, monkeypatch, capsys):
     """Two real SessionStarts over real drift: the same clause both times, and the hook
-    writes no meta key of its own beyond the cache (its per-session bookkeeping aside)."""
+    writes no meta key of its own beyond the cache and its diff memo (its per-session
+    bookkeeping aside)."""
     from datetime import UTC, datetime, timedelta
 
     from sidegraph.retrieval import DRIFT_CACHE_KEY
     from sidegraph.store import Store
+    from sidegraph.store_layout import DRIFT_MEMO_KEY
     from tests.test_hook_contention import _make_drift_repo
 
     repo, store_dir, _old = _make_drift_repo(tmp_path, cold=False)
@@ -177,7 +179,7 @@ def test_session_start_clause_is_stable_and_adds_no_meta_keys(tmp_path, monkeypa
     for session in ("s-one", "s-two"):
         out = _run_session_start(monkeypatch, capsys, store_dir, {"session_id": session})
         assert clause in out["hookSpecificOutput"]["additionalContext"]
-    assert own_keys() - before <= {DRIFT_CACHE_KEY}
+    assert own_keys() - before <= {DRIFT_CACHE_KEY, DRIFT_MEMO_KEY}
     store.close()
 
 

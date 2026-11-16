@@ -54,6 +54,7 @@ from pydantic import BaseModel
 from . import domain_snapshot
 from .doctor import SECTION_UNAVAILABLE, CodeDriftScan, scan_code_drift
 from .domain_splits import domain_splits
+from .drift_memo import DriftDiffMemo
 from .engine.reader import ANCHORABLE_FILE_TYPES, GraphifyReader, NodeRef
 from .retrieval import (
     DRIFT_CACHE_KEY,
@@ -81,6 +82,7 @@ from .store import (
     StoreBusyError,
 )
 from .store_layout import (
+    DRIFT_MEMO_KEY,
     REBIND_DONE_KEY,
     REBIND_PENDING_KEY,
     snapshot_signature,
@@ -2204,11 +2206,11 @@ class DriftRefresh(NamedTuple):
 def build_cache(raw: str | None, scan: CodeDriftScan, now: datetime) -> dict:
     """The next code-drift cache value from the previous raw value and a finished scan.
 
-    Per capture commit a successful batch replaces its entry and a failed batch retains the
-    previous one; the first-seen stamps and tombstones come from `stamp_cache`. Ids whose
-    optional check comparison did not run (a section scope that could not be bounded
-    included) are `retained`, and never stamped ``now``. Pure:
-    no git, no store reads.
+    Per baseline commit (a capture commit, or ``graph:<build commit>``) a successful batch
+    replaces its entry and a failed batch retains the previous one; the first-seen stamps and
+    tombstones come from `stamp_cache`. Ids whose optional check comparison did not run (a
+    section scope that could not be bounded included) are `retained`, and never stamped
+    ``now``. Pure: no git, no store reads.
     # see design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.2, 4.3)
     """
     prev: object = None
@@ -2229,10 +2231,10 @@ def build_cache(raw: str | None, scan: CodeDriftScan, now: datetime) -> dict:
     retained: set[str] = set()
     for batch in scan.batches:
         if batch.failed:
-            if batch.commit in prev_by_commit:
-                by_commit[batch.commit] = prev_by_commit[batch.commit]
+            if batch.cache_key in prev_by_commit:
+                by_commit[batch.cache_key] = prev_by_commit[batch.cache_key]
         else:
-            by_commit[batch.commit] = sorted({e.record_id for e in batch.entries})
+            by_commit[batch.cache_key] = sorted({e.record_id for e in batch.entries})
             retained.update(
                 e.record_id
                 for e in batch.entries
@@ -2257,6 +2259,59 @@ def build_cache(raw: str | None, scan: CodeDriftScan, now: datetime) -> dict:
     }
 
 
+def _retire_graph_entries(store: Store, now: datetime | None) -> None:
+    """Drop the cached ``graph:<oid>`` entries once the scan has gone inactive.
+
+    An inactive scan writes nothing, which leaves a graph record's old marker and first-seen
+    stamp in the cache after its build commit stopped being checkable (HEAD moved to unrelated
+    history). Only ``graph:`` keys are retired, through the normal stamp rules, so a store with
+    capture records only is left byte-untouched. Best-effort: a failure leaves the cache as it
+    was.
+    # see design/superpowers/specs/2026-11-16-drift-graph-commit-fallback-design.md (D3)
+    """
+    try:
+
+        def decide(raw: str | None) -> str | None:
+            try:
+                prev = json.loads(raw) if raw is not None else None
+            except json.JSONDecodeError:
+                return None
+            groups = prev.get("by_commit") if isinstance(prev, dict) else None
+            if not isinstance(groups, dict) or not any(
+                isinstance(key, str) and key.startswith("graph:") for key in groups
+            ):
+                return None
+            kept = {
+                k: v
+                for k, v in groups.items()
+                if not (isinstance(k, str) and k.startswith("graph:"))
+            }
+            ids = {
+                rid
+                for ids in kept.values()
+                if isinstance(ids, list)
+                for rid in ids
+                if isinstance(rid, str)
+            }
+            instant = now if now is not None else datetime.now(UTC)
+            since, first_seen, absent = stamp_cache(prev, ids, set(), instant)
+            assert isinstance(prev, dict)
+            payload = dict(prev)
+            payload.update(
+                by_commit=kept,
+                computed_at=instant.isoformat(),
+                first_seen_since=since,
+                first_seen=first_seen,
+                first_seen_absent=absent,
+            )
+            payload.pop("first_seen_checked", None)  # stamp_cache consumed the marks
+            return json.dumps(payload)
+
+        store.update_meta_if(DRIFT_CACHE_KEY, decide)
+    except Exception:
+        return
+
+
 def refresh_code_drift_snapshot(
     store: Store,
     *,
@@ -2278,11 +2333,12 @@ def refresh_code_drift_snapshot(
     and backward HEAD movement. Cost is bounded by ``deadline`` (a TOTAL scan budget,
     see ``scan_code_drift``).
 
-    Merge semantics, per capture commit (spec round-2 N1 — a partial git failure must
-    neither erase real markers nor freeze the cache forever):
+    Merge semantics, per baseline commit (a capture commit, or ``graph:<oid>``; spec round-2
+    N1 — a partial git failure must neither erase real markers nor freeze the cache forever):
 
     - inactive scan (nothing commit-stamped and anchored) → return ``DriftRefresh(0, None)``,
-      write nothing;
+      write nothing, except that cached ``graph:`` entries are retired
+      (:func:`_retire_graph_entries`);
     - unscanned (repo root resolution failed — no batch ran) → leave any existing cache
       byte-untouched, return ``None``. A failed HEAD resolution alone does NOT discard a
       scan whose batches ran (review M-2: ``head`` is provenance only and gates nothing
@@ -2301,13 +2357,19 @@ def refresh_code_drift_snapshot(
     # and design/superpowers/specs/2026-10-27-drift-notice-delta-design.md (4.3)
     """
     try:
+        try:
+            memo = DriftDiffMemo(store.get_meta(DRIFT_MEMO_KEY))
+        except Exception:  # the memo is an optimization: no read of it may cost the refresh
+            memo = DriftDiffMemo(None)
         scan = scan_code_drift(
             store.path,
             repo_root,
             deadline=deadline,
             busy_timeout_seconds=busy_timeout_seconds,
+            memo=memo,
         )
         if not scan.active:
+            _retire_graph_entries(store, now)
             return DriftRefresh(0, None)
         # A hook that cannot certify binding membership must not read an old drift cache or
         # publish a result filtered against incomplete statuses. With zero wait, this guard
@@ -2325,6 +2387,10 @@ def refresh_code_drift_snapshot(
             instant = now if now is not None else datetime.now(UTC)
             payload.update(build_cache(raw, scan, instant))
             stamped_at.append(instant)
+            if memo.next is not None:
+                # Same transaction as the cache; a failure here must not cost the cache.
+                with contextlib.suppress(TypeError, ValueError):
+                    store.set_meta(DRIFT_MEMO_KEY, json.dumps(memo.next))
             return json.dumps(payload)
 
         store.update_meta_if(DRIFT_CACHE_KEY, decide)

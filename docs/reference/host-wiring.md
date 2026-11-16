@@ -110,8 +110,8 @@ transcript.
 
 Three groups in the snippet (see
 [`claude-code-setup.md`](../getting-started/claude-code-setup.md#2-add-the-hooks)): matcher
-`Read|Grep|Edit|Write`, matcher `Bash` with four entries whose `if` is `Bash(sed *)`,
-`Bash(grep *)`, `Bash(rg *)` and `Bash(cat *)`, and matcher `Agent|Task` (below). When a `Read`,
+`Read|Grep|Edit|Write`, matcher `Bash` with one entry that has no `if` and runs a shell filter
+for `sed`, `grep`, `rg` and `cat` (below), and matcher `Agent|Task` (below). When a `Read`,
 `Grep`, `Edit`, `Write` or Bash call names a file that decisions are anchored to, the hook hands
 the agent those records in the same call, as a **non-blocking**, `additionalContext`-only
 `hookSpecificOutput` (the `Agent|Task` group is the exception: it returns `updatedInput`, below):
@@ -131,10 +131,8 @@ needed. A call that names no file with records prints `{}`, and no counting form
 anywhere. Set `SIDEGRAPH_GREP_NUDGE=off` to stop delivery at the point of reading, on every tool
 but `Agent` (that has its own switch, below); touch recording is not affected. A Bash line counts only for the regular files that its `sed`, `grep`, `rg` and `cat`
 commands read (`head`, `awk` and `git grep` name nothing), and a Bash read is not a touch event;
-the `if` field exists from Claude Code 2.1.85 and matching on compound command lines is correct
-from 2.1.89, so use 2.1.89 or later; a host older than 2.1.85 runs the hook on every
-Bash call and gets an early exit with no output (details in the
-[hooks reference](hooks.md#bash-lines)). It reads the store's index directly rather
+the Bash entry is a shell filter that starts the hook only for a line holding one of those words
+(details in the [hooks reference](hooks.md#bash-lines)). It reads the store's index directly rather
 than opening the store (see the [hooks reference](hooks.md#sidegraph-pre-tool-use)),
 so a call costs a few tens of milliseconds, and in a project with no store it does nothing and
 creates nothing. Like the other hooks, it never crashes or blocks the tool call: any failure (or
@@ -222,6 +220,47 @@ every variant starts `uvx` or `uv` directly, with no `sh`; the Claude Code hooks
 Git Bash on Windows. Git for Windows provides it and Claude Code finds it; if it cannot,
 `CLAUDE_CODE_GIT_BASH_PATH` points it there. Without Git Bash, Claude Code runs hooks in
 PowerShell, which cannot parse Sidegraph's POSIX hook commands.
+
+**Hooks try `--offline` first.** Every hook launch on every host (Claude Code, Grok Build, Codex
+and Muse) runs `uvx --from sidegraph==X.Y.Z --python 3.13 --offline <entry point>` first, with
+its output held back, and runs the same launch without `--offline` only when that fails. Without
+the flag, uv revalidates its package index once the cached pages are ten minutes old (about 68
+pages, 220 to 460 ms with a network), and with no network it retries three times before it gives
+up: 5.8 and 10 s per hook were measured with an aged index. The version is an exact pin and the
+package pins its whole dependency set, so a stale index cannot change what runs, and nothing needs
+the index once the package is in uv's cache. On a first run the offline attempt fails in about
+45 ms and the online launch installs the package as before. The POSIX commands read the hook
+payload once into a shell variable (`p=$(cat)`) and hand it to each attempt, so the second one
+gets it whole, and they hold back the online attempt's output as well: the host gets the answer
+of the attempt that succeeded, or the fallback (`{}`, or the `SessionStart` message) when both
+failed, never a half-written answer followed by the fallback. The Codex PowerShell form runs the
+offline launch with its output captured and writes it when its exit code is 0. Otherwise it runs
+the online launch, captured the same way and written only when that exit code is 0, and then, if
+that failed too, the fallback alone. It resets `$LASTEXITCODE` to 1 before each launch, so the 0
+that `git rev-parse` left cannot pass for a `uvx` that never ran, and it decides on the exit code
+alone: Windows PowerShell 5.1 sets `$?` to false after a native program writes to a redirected
+stderr, even at exit 0, and uv logs there. PowerShell does not buffer stdin for a second
+attempt (5.1 mangles non-ASCII text piped to a native command), so the online attempt reads
+whatever the offline one left. With the exit code alone that is the whole payload in practice:
+the online attempt runs only when uv failed, and uv fails before it starts the entry, so stdin is
+unread. An entry that starts and then exits non-zero has consumed it, and the online attempt
+then gets an empty stdin and answers `{}`. Muse's adapter runs the two argument lists in turn
+under its one time budget. The MCP server starts once per session, so its launch keeps the plain
+form.
+
+**Bash is one entry.** Claude Code starts a hook for every `if` entry whose rule matches a Bash
+command, and for all of them when it cannot split the command into subcommands (a quoted
+variable it cannot resolve, a loop body that uses its variable, `${…}`, a brace group, `case`, a
+heredoc followed by a redirect): four launches for one call. The plugin therefore wires Bash as
+one entry with no `if`. Its command reads the payload and starts `uvx` only when the payload holds
+`sed`, `grep`, `rg` or `cat` followed by a space, a JSON tab or carriage-return escape, a single
+quote or an escaped double quote, after a character that cannot be part of a word or after a JSON
+newline, tab or carriage-return escape; every other command prints `{}` after one `sh`. That is a
+superset of what `sidegraph.bash_paths.read_paths` answers (it answers only for those four command
+words), with one exception: a command word split by quotes (`c'at' file`) names a file for
+`read_paths` and does not pass, because a `case` pattern cannot match every way to split a word.
+Grok's Bash entry is the same command with
+`SIDEGRAPH_HOST=grok`, and Grok skips handlers that set `if`, so the one form serves both.
 
 The [launch-commit contract](hooks.md#the-launch-commit-file) explains how installs older than
 0.25.0, which launched `@main`, pinned the package between hook calls. A failed first start is

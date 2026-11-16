@@ -312,6 +312,7 @@ jobs:
             tests/test_hook_outcome_log.py::test_the_log_stays_bounded_when_the_rotated_name_cannot_be_used `
             tests/test_hook_outcome_log.py::test_a_log_just_past_the_limit_is_not_truncated `
             tests/test_checkout_window.py tests/test_store_marker_checkout_race.py `
+            tests/test_reader_cache.py `
             $privateTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

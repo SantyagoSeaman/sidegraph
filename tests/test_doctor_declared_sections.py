@@ -421,11 +421,12 @@ def test_scope_hashes_each_section_once_and_stops_after_expiry(declared, monkeyp
 
 # --- call counts --------------------------------------------------------------------------
 
-# Captured by running the scan below on the code before declared sections existed.
+# Captured by running the scan below on the code before declared sections existed. HEAD is
+# resolved once before the batch diffs since the drift memo, so it sits ahead of the diff.
 PLAIN_SCAN_GIT_CALLS = [
     ["rev-parse", "--show-toplevel"],
-    ["diff", "--name-only"],
     ["rev-parse", "HEAD"],
+    ["diff", "--name-only"],
     ["--literal-pathspecs", "ls-tree"],
 ]
 

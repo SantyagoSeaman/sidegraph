@@ -7,6 +7,130 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-11-16
+
+### Changed (Behaviour change)
+
+- **Code drift now checks records that have no capture commit.** Until now `code-drift`
+  skipped every record without a `provenance.commit` and counted it as "predates commit
+  stamping". That left out every record written by `sidegraph-import` and the older ones, and
+  a changed file could go unnoticed behind one of them for as long as nobody looked. Such a
+  record is now compared from the build commit of the code graph it was written against (the
+  commit in `provenance.graph_version`), and the finding says "touched since the graph build"
+  where a captured record says "changed since capture". Every file any commit touched between
+  that build and `HEAD` counts, so a file that was changed and then restored is listed, and so
+  is a formatting-only commit. A build commit that is not in `HEAD`'s history (a graph built
+  on another branch, or a commit this checkout does not hold) leaves the record unchecked; the
+  note for such records now reads "N record(s) have no usable commit to compare against — not
+  checkable". It catches almost every change, not every one: a record captured on a
+  checkout older than its graph build, or on a branch that was then squash-merged, rebased or
+  cherry-picked, can have a change that falls outside the range compared, and the store cannot
+  tell without the capture commit.
+  `record_drift_check` accepts such a record when its build commit is an ancestor of the
+  checked `HEAD`, and `sidegraph-export-adr` reports `graph-build-to-HEAD` advisories for it.
+  The first scan after upgrading can flag many records at once on a store with imported
+  decisions: most of the files they anchor were touched since the graph was built. Clear each
+  one with `record_drift_check` or supersede it. The grouped `--json` output gains
+  `commit_source` (`"capture"` or `"graph"`) beside `capture_commit`, which holds the graph's
+  build commit for a graph record. A store whose only checkable records have graph build commits
+  now prints the "git unavailable — check skipped" note when the repository root cannot be found.
+  Cost: one `git merge-base` and one `git log` per distinct build commit on a cold start; after
+  that, a `HEAD` that moved forward costs one shared `git log` of the new commits for all of them.
+
+- **A committed ratify policy can only tighten the policy under Codex, Grok and Muse.**
+  Those hosts do not read `.claude/settings.json`, so `sidegraph-mcp` read the committed
+  `SIDEGRAPH_RATIFY_POLICY` itself when its environment set none, and a repository could turn
+  on `auto-low-risk` or `auto-all` that way. Now the committed value counts only when it is
+  stricter than the environment's policy (`manual` < `auto-low-risk` < `auto-all`): it can
+  tighten the policy and never loosen it, and where the environment sets none the policy stays
+  `manual`. If you committed `auto-low-risk` or `auto-all` and use Codex, Grok or Muse, those
+  agents now propose every record for review; to keep the looser policy, set
+  `SIDEGRAPH_RATIFY_POLICY` in the host's own environment. Under Claude Code the committed
+  value is still applied by the host, and it now also caps a looser value that comes from the
+  user's local settings or the environment. `sidegraph-init` now says so when it writes a
+  policy looser than `manual`.
+
+### Changed
+
+- **An expired record is history in every read.** A decision or fact is expired when its
+  `valid_to` has passed, whatever its `status`; one whose `valid_to` is still ahead is live
+  until then. Before, `retrieve_decisions` and `list_facts` listed an expired accepted
+  decision or fact beside live ones and the session map and a file's hook context hid a fact
+  or decision whose `valid_to` was still ahead. Now an expired record is left out of a default
+  answer, the `retrieve_decisions` overview and `list_facts`, and comes back with
+  `include_superseded=True`, `ids` or a matching `status`. Every row or record of one says
+  `"expired": true` beside its `status`, in `retrieve_decisions`, `list_facts` and
+  `get_entity_history`; the key is absent on a live record. `counts` gains `"expired"` when
+  any counted record has expired. `list_proposed` and `sidegraph-ratify` tag an expired
+  proposal `[expired]` and keep it in the queue. The Stop-hook drift nudge no longer counts an
+  expired decision, and an empty answer's hint names expired records among the hidden history.
+  The nested evidence of a proposal in those listings is tagged the same way. `sidegraph-export-adr`
+  no longer drops a supporting fact whose `valid_to` is still ahead, and its drift check
+  no longer treats an accepted decision with such a `valid_to` as closed. A record with
+  a `valid_to` in the future is live in each of these reads. Stored statuses are not
+  rewritten.
+
+### Changed (performance)
+
+- **The MCP server keeps one graph reader while `graph.json` is unchanged.** It parsed the
+  whole graph again on every tool call that needs it; on this repository's 66 MB graph the parse
+  was 270 ms of a 606 ms `get_task_context` call. The server now keeps the reader it built and
+  builds a new one only when the graph file is replaced or its modification time changes, which
+  is how Graphify writes it. The same holds for the graph a linked worktree borrows from the
+  main checkout. The server holds that reader between calls, about 215 MB for a graph of that
+  size, where it used to free it after each call. `NodeRef` is now immutable, since calls share
+  its instances. A tool that rewrote `graph.json` in place, at the same size and keeping its
+  modification time, would leave the server on the older reader until the next write; on Windows
+  this also holds across clock ticks, because there the change time is the file's creation time.
+
+- **The session-start drift refresh remembers each capture-commit diff whose inputs did not
+  change.** The refresh ran one `git diff` per distinct capture commit on every session start
+  and every re-armed Stop, so a store whose records each have their own commit started in
+  about 2.3 s with nothing changed. It now keeps the answer of each diff in `index.db` (a
+  derived key beside the drift cache) and reruns only the diffs whose pathspecs a new commit
+  touched: on this repository's store a warm start takes about 1.0 s and one commit to an
+  anchored file about 1.2 s, and the output is byte-identical. HEAD is resolved once and every
+  diff of a scan runs against that commit. A changed `diff.*` or `submodule.*` git setting, a
+  change to a `.gitmodules` file, an unreachable earlier HEAD, a failed diff, an unreadable memo
+  or a capture commit that is a movable ref instead of a commit id makes the scan run as before;
+  `sidegraph-doctor` keeps the uncached scan.
+
+- **Performance: one Bash hook entry on Claude Code, and `uvx` starts only for a read word.**
+  The plugin wired Bash as four `if` entries (`sed`, `grep`, `rg`, `cat`). Claude Code runs
+  every entry when it cannot split a command into subcommands (a quoted variable it cannot
+  resolve such as `echo "$PATH"`, a loop body that uses its variable, `${…}`, a brace group,
+  `case`, a heredoc followed by a redirect), so one Bash call could start four hook processes:
+  1.76 launches per Bash call in a field audit. The Claude manifests now carry one `Bash` entry
+  with no `if`. Its command is the shell filter Grok already shipped: it starts `uvx` only when
+  the payload holds one of the four words, and any other command prints `{}` after one `sh`.
+  The filter is a superset of the lines the hook answers, with one exception (a read word split
+  by quotes, `c'at' file`). It accepts a space, a tab, a carriage return or a quote after the
+  word, on Claude Code, Grok Build and the manual-wiring snippet in
+  [`docs/getting-started/claude-code-setup.md`](docs/getting-started/claude-code-setup.md). On
+  the audit's mix of commands it starts at most 0.79 launches per Bash call against the 1.76.
+- **Performance: every hook launch tries `uvx --offline` first.** A hook runs
+  `uvx --from sidegraph==X.Y.Z --python 3.13 --offline <entry point>` with its output held back,
+  and the same launch without `--offline` only when that fails; the online attempt's output is
+  held back too, so the host gets one answer or the fallback and never both. This holds on Claude
+  Code, Grok Build, Codex (POSIX and PowerShell) and Muse. The version is an exact pin and the
+  package pins its dependencies, so a stale index cannot change what runs. A warm cache no longer
+  revalidates uv's package index after ten minutes, a launch that did cost 220 to 460 ms. The
+  shell overhead of the new form is about 4 ms per hook. On a first run the offline attempt fails
+  in about 45 ms and the online launch installs the package as before. The MCP server launch is
+  unchanged.
+- **Performance: `--repo-root` finds the git top level without loading pydantic.** When the host
+  sets no `CLAUDE_PROJECT_DIR` (Grok Build and Muse), every hook run imported the settings
+  module, which pulls in pydantic and the engine reader. The entry now runs the same
+  `git rev-parse --show-toplevel` through the standard-library launcher and gives the same
+  answer. The entry's median fell from about 215 ms to about 55 ms.
+
+### Fixed
+
+- **A hook no longer stalls for seconds when the machine has no network.** With an aged uv
+  index cache and no network, every hook spent 6 to 10 s on uv's retries before the guard
+  answered `{}` (5.8 s and 10 s measured), and a failed run does not refresh the cache, so
+  every later hook paid it again. The offline attempt succeeds from the cache in about 85 ms.
+
 ## [0.30.0] — 2026-11-15
 
 ### Changed (Contract change)
@@ -3378,7 +3502,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.27.0...v0.28.0
