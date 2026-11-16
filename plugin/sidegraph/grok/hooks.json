@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 --offline sidegraph-session-start --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 sidegraph-session-start --repo-root) && printf '%s\\n' \"$o\" || echo '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv, the first download of Sidegraph, or no network); run the hook command in a terminal to see the error\"}' ; }",
+            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 --offline sidegraph-session-start --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 sidegraph-session-start --repo-root) && printf '%s\\n' \"$o\" || echo '{\"systemMessage\":\"Sidegraph: the SessionStart hook could not start (uv, the first download of Sidegraph, or no network); run the hook command in a terminal to see the error\"}' ; }",
             "timeout": 30
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 --offline sidegraph-stop --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 sidegraph-stop --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; }"
+            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 --offline sidegraph-stop --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 sidegraph-stop --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; }"
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 --offline sidegraph-pre-tool-use --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 sidegraph-pre-tool-use --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; }",
+            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 --offline sidegraph-pre-tool-use --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 sidegraph-pre-tool-use --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; }",
             "timeout": 10
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*[!A-Za-z0-9_]'sed\\t'*|*[!A-Za-z0-9_]'sed\\r'*|*[!A-Za-z0-9_]'sed\\\"'*|*[!A-Za-z0-9_]'sed'\"'\"*|*\\\\[ntr]'sed '*|*\\\\[ntr]'sed\\t'*|*\\\\[ntr]'sed\\r'*|*\\\\[ntr]'sed\\\"'*|*\\\\[ntr]'sed'\"'\"*|*[!A-Za-z0-9_]'grep '*|*[!A-Za-z0-9_]'grep\\t'*|*[!A-Za-z0-9_]'grep\\r'*|*[!A-Za-z0-9_]'grep\\\"'*|*[!A-Za-z0-9_]'grep'\"'\"*|*\\\\[ntr]'grep '*|*\\\\[ntr]'grep\\t'*|*\\\\[ntr]'grep\\r'*|*\\\\[ntr]'grep\\\"'*|*\\\\[ntr]'grep'\"'\"*|*[!A-Za-z0-9_]'rg '*|*[!A-Za-z0-9_]'rg\\t'*|*[!A-Za-z0-9_]'rg\\r'*|*[!A-Za-z0-9_]'rg\\\"'*|*[!A-Za-z0-9_]'rg'\"'\"*|*\\\\[ntr]'rg '*|*\\\\[ntr]'rg\\t'*|*\\\\[ntr]'rg\\r'*|*\\\\[ntr]'rg\\\"'*|*\\\\[ntr]'rg'\"'\"*|*[!A-Za-z0-9_]'cat '*|*[!A-Za-z0-9_]'cat\\t'*|*[!A-Za-z0-9_]'cat\\r'*|*[!A-Za-z0-9_]'cat\\\"'*|*[!A-Za-z0-9_]'cat'\"'\"*|*\\\\[ntr]'cat '*|*\\\\[ntr]'cat\\t'*|*\\\\[ntr]'cat\\r'*|*\\\\[ntr]'cat\\\"'*|*\\\\[ntr]'cat'\"'\"*) o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 --offline sidegraph-pre-tool-use --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 sidegraph-pre-tool-use --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; } ;; *) echo '{}' ;; esac",
+            "command": "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*[!A-Za-z0-9_]'sed\\t'*|*[!A-Za-z0-9_]'sed\\r'*|*[!A-Za-z0-9_]'sed\\\"'*|*[!A-Za-z0-9_]'sed'\"'\"*|*\\\\[ntr]'sed '*|*\\\\[ntr]'sed\\t'*|*\\\\[ntr]'sed\\r'*|*\\\\[ntr]'sed\\\"'*|*\\\\[ntr]'sed'\"'\"*|*[!A-Za-z0-9_]'grep '*|*[!A-Za-z0-9_]'grep\\t'*|*[!A-Za-z0-9_]'grep\\r'*|*[!A-Za-z0-9_]'grep\\\"'*|*[!A-Za-z0-9_]'grep'\"'\"*|*\\\\[ntr]'grep '*|*\\\\[ntr]'grep\\t'*|*\\\\[ntr]'grep\\r'*|*\\\\[ntr]'grep\\\"'*|*\\\\[ntr]'grep'\"'\"*|*[!A-Za-z0-9_]'rg '*|*[!A-Za-z0-9_]'rg\\t'*|*[!A-Za-z0-9_]'rg\\r'*|*[!A-Za-z0-9_]'rg\\\"'*|*[!A-Za-z0-9_]'rg'\"'\"*|*\\\\[ntr]'rg '*|*\\\\[ntr]'rg\\t'*|*\\\\[ntr]'rg\\r'*|*\\\\[ntr]'rg\\\"'*|*\\\\[ntr]'rg'\"'\"*|*[!A-Za-z0-9_]'cat '*|*[!A-Za-z0-9_]'cat\\t'*|*[!A-Za-z0-9_]'cat\\r'*|*[!A-Za-z0-9_]'cat\\\"'*|*[!A-Za-z0-9_]'cat'\"'\"*|*\\\\[ntr]'cat '*|*\\\\[ntr]'cat\\t'*|*\\\\[ntr]'cat\\r'*|*\\\\[ntr]'cat\\\"'*|*\\\\[ntr]'cat'\"'\"*) o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 --offline sidegraph-pre-tool-use --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 sidegraph-pre-tool-use --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; } ;; *) echo '{}' ;; esac",
             "timeout": 10
           }
         ]
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 --offline sidegraph-pre-tool-use --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 sidegraph-pre-tool-use --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; }",
+            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 --offline sidegraph-pre-tool-use --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 sidegraph-pre-tool-use --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; }",
             "timeout": 10
           }
         ]
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 --offline sidegraph-subagent-start --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.31.0 --python 3.13 sidegraph-subagent-start --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; }",
+            "command": "p=$(cat); o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 --offline sidegraph-subagent-start --repo-root 2>/dev/null) && printf '%s\\n' \"$o\" || { o=$(printf '%s\\n' \"$p\" | SIDEGRAPH_HOST=grok uvx --from sidegraph==0.32.0 --python 3.13 sidegraph-subagent-start --repo-root) && printf '%s\\n' \"$o\" || echo '{}' ; }",
             "timeout": 10
           }
         ]

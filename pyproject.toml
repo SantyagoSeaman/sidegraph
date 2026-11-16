@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.31.0"
+version = "0.32.0"
 description = "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -45,7 +45,7 @@ dependencies = [
     "cffi==2.1.1 ; platform_python_implementation != 'PyPy'",
     "click==8.5.1",
     "cryptography==50.0.2",
-    "cyclopts==5.5.1",
+    "cyclopts==5.5.2",
     "dnspython==2.9.2",
     "docstring-parser==0.18.0",
     "email-validator==2.4.0",

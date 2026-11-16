@@ -1487,7 +1487,7 @@ hooks against a project without the plugin.
 The launch-commit file serves plugin installs older than 0.25.0, which launched `@main`. No
 current plugin reads it: every manifest names an exact version. For those older installs, the
 `Stop`, `PreToolUse` and `SubagentStart` hooks (Codex's `Stop` and `SubagentStart`, an older
-Claude plugin's `Stop`, `PreToolUse` and `SubagentStart`, and Muse's `SubagentStart`) launch from a
+Claude or Grok plugin's `Stop`, `PreToolUse` and `SubagentStart`, and Muse's `SubagentStart`) launch from a
 commit, not from `@main`, which tracks a mutable branch: `uv` re-resolves a branch reference on
 every call and serves a commit from its cache. `SessionStart` writes the commit. The writer stays
 for a migration window so that an older install, whose `SessionStart` now runs the current code,

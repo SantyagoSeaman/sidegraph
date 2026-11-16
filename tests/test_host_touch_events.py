@@ -19,12 +19,14 @@ from sidegraph.store import Store
 
 
 def _run(monkeypatch, capsys, payload, db, root, extra_env=None):
-    # SIDEGRAPH_DIR, not the deprecated SIDEGRAPH_DB: config._dispatch_sidegraph_db rescues
-    # a nonexistent path with a directory component to its PARENT (pinned by
-    # test_config.py::test_sidegraph_db_nonexistent_decisions_db_rescued_to_parent_dir) --
-    # exactly `db`'s shape on a test's first-ever write, before anything else has created it.
-    # SIDEGRAPH_DIR has no such rescue: the literal `db` path is what both this hook call and
-    # _events()'s direct Store(db) must agree on.
+    # SIDEGRAPH_DIR, not the deprecated SIDEGRAPH_DB: the hook and _events()'s direct Store(db)
+    # must open the literal `db` path. An absolute SIDEGRAPH_DIR is taken as given, while
+    # SIDEGRAPH_DB goes through config._dispatch_sidegraph_db (a nonexistent `*.db` path is
+    # rescued to its PARENT, pinned by
+    # test_config.py::test_sidegraph_db_nonexistent_decisions_db_rescued_to_parent_dir; a bare
+    # filename goes to the default store) and warns on stderr. `db` would
+    # pass through today only because _seed_store has already created it; SIDEGRAPH_DIR keeps
+    # the test independent of those rules.
     monkeypatch.setenv("SIDEGRAPH_DIR", str(db))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(root))
     for key, value in (extra_env or {}).items():
@@ -194,8 +196,8 @@ def test_payload_without_session_id_records_nothing_but_with_one_does(
     # No mutant turns this red: the NOT NULL column backs the gate. It pins the user-visible
     # end-to-end behaviour only.
     no_id = {"tool_name": "Read", "tool_input": {"file_path": target}}
-    # SIDEGRAPH_DIR — same reasoning as _run() above: SIDEGRAPH_DB's legacy-dispatch rescue
-    # would otherwise defang this test's absence assertion below.
+    # SIDEGRAPH_DIR, same reasoning as _run() above: the absence assertion below must read the
+    # store the hook would write to, so the path must not go through SIDEGRAPH_DB's dispatch.
     monkeypatch.setenv("SIDEGRAPH_DIR", str(db))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(root))
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(no_id)))

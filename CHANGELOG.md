@@ -7,6 +7,20 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.32.0] — 2026-11-16
+
+A maintenance release: no change to what Sidegraph does.
+
+### Changed
+
+- **Dependency refresh.** The published package pins `cyclopts` 5.5.2 (was 5.5.1). An audit of
+  the pinned runtime dependencies found no known vulnerabilities.
+
+### Documentation
+
+- `docs/reference/hooks.md` now names the Grok plugin beside the Claude plugin among the older
+  installs whose hooks read the launch-commit file.
+
 ## [0.31.0] — 2026-11-16
 
 ### Changed (Behaviour change)
@@ -3502,7 +3516,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.28.0...v0.29.0

@@ -1,21 +1,23 @@
 """The launch-commit record: the commit SessionStart resolved for ``@main``.
 
-Every public hook command used to launch ``uvx --from git+…@main``, and uv re-resolves a
-branch ref on every call. SessionStart keeps that (once per session, and it is what carries a
-release to a running machine); the hot-path hooks (Stop, PreToolUse) read the commit it
-recorded here and launch from that exact commit, which uv serves from its cache. Only a
-fallback on ``CANONICAL_REF`` takes the record: a plugin pinned to a tag (a snapshot cut
-with ``tools/release-public.sh --ref``) keeps its own ref, so the hot prefix compares the
-fallback's ref before it repoints.
+Plugin installs older than 0.25.0 launched every hook with ``uvx --from git+…@main``, and uv
+re-resolves a branch ref on every call. Their SessionStart kept ``@main`` (once per session,
+and it is what carried a release to a running machine); their hot-path hooks read the commit
+it recorded here and launched from that exact commit, which uv serves from its cache: Stop,
+PreToolUse and SubagentStart on Claude and Grok, Stop and SubagentStart on Codex, and Muse's
+SubagentStart (read in Python by ``muse/hook.py``). Only a fallback on ``CANONICAL_REF``
+took the record: a plugin pinned to a tag kept its own ref.
+
+No current manifest reads the record: since 0.25.0 every public manifest launches an exact
+PyPI version (``uvx --from sidegraph==X.Y.Z``), so a current install writes nothing here.
+This module stays as the writer for a migration window only: an older install, whose
+SessionStart now runs the current code, keeps its hot hooks on that same code
+(``tests/test_host_launch.py`` guards it with an old manifest's Stop command). It can go once
+pre-0.25.0 installs are out of support, together with that test.
 
 The record is user-level and host-neutral, ``${XDG_CACHE_HOME:-$HOME/.cache}/sidegraph/
-launch-commit``, and holds exactly the 40 hex bytes of a commit. The shell prefix that reads
-it lives in the public hook manifests (``plugin/sidegraph/hooks/hooks.public.json``,
-``plugin/sidegraph/codex/hooks.public.json``); this module is the writer.
-
-The Claude plugin's bundled runtime installs Sidegraph from a local wheel, so it has no
-``@main`` direct URL to record and writes nothing here. The record serves Codex, Muse and
-Claude installs older than the bundled runtime.
+launch-commit``, and holds exactly the 40 hex bytes of a commit. Only an install whose
+``direct_url.json`` names the canonical URL at ``requested_revision`` ``main`` writes it.
 
 # see design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md (D1-D4)
 """
@@ -30,8 +32,8 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-# The branch the public manifests install from. tools/release-public.sh declares the same
-# value; tests/test_public_hook_launch_release.py pins the two equal.
+# The branch a pre-0.25.0 install launched (``@main``): only an install of this ref writes the
+# record. tests/test_host_launch.py pins the value.
 CANONICAL_REF = "main"
 CANONICAL_URL = "https://github.com/SantyagoSeaman/sidegraph.git"
 
@@ -41,7 +43,7 @@ _COMMIT = re.compile(r"[0-9a-f]{40}")
 def launch_commit_path() -> Path:
     """Where the record lives: ``$XDG_CACHE_HOME/sidegraph/launch-commit``, falling back to
     ``~/.cache`` when the variable is unset or empty (the shell's ``${…:-…}`` treats empty as
-    unset, and the hot commands read the same path).
+    unset, and an older install's hot commands read the same path).
 
     # see design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md (D2)
     """
@@ -98,7 +100,7 @@ def record_launch_commit(
     *,
     on_error: Callable[[Exception], None] | None = None,
 ) -> None:
-    """Record the commit of an ``@main`` install for the hot-path hooks to launch from.
+    """Record the commit of an ``@main`` install for an older install's hot-path hooks.
 
     Writes only for an install that asked for ``@main`` (``requested_revision``): the record
     is shared by every project on the machine, so a pinned install used for CI or a pilot must
@@ -106,7 +108,7 @@ def record_launch_commit(
     replaced atomically, and is left untouched when it already holds the same value. The existing
     value is read only from a regular file of exactly 40 bytes, so a FIFO or an oversized file at
     the path never blocks or slows SessionStart. Never raises and never prints: a failure leaves
-    the hot hooks on the ``@main`` fallback, which is today's behaviour.
+    an older install's hot hooks on the ``@main`` fallback.
 
     # see design/superpowers/specs/2026-10-03-launch-from-session-commit-design.md (D2)
     """
