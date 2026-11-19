@@ -1,0 +1,23 @@
+{
+  "record": {
+    "id": "01KAA00000000000000000000J",
+    "title": "Keep transient read errors visible in diagnostics",
+    "kind": "lesson",
+    "status": "accepted",
+    "context": "Read failures and service restarts overlap in the fixture.",
+    "choice": "Record the error before retrying.",
+    "valid_from": "2026-11-17T09:00:00Z",
+    "provenance": {
+      "source": "human",
+      "author": "Jo Rivera"
+    },
+    "ratified_by": null,
+    "ratified_at": null
+  },
+  "history": [],
+  "evidence": [],
+  "keepable_evidence": [],
+  "drifted": false,
+  "pending_evidence": [],
+  "anchors": []
+}

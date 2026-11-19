@@ -18,7 +18,7 @@ import difflib
 import json
 import posixpath
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
@@ -1599,7 +1599,12 @@ def _structure_fallback_candidate_nodes(
 
 
 def _structure_fallback_lines(
-    community_ids: list[str], store: Store, remaining_budget: int, node_ids: Sequence[str] = ()
+    community_ids: list[str],
+    store: Store,
+    remaining_budget: int,
+    node_ids: Sequence[str] = (),
+    *,
+    on_budget_cut: Callable[[], None] | None = None,
 ) -> list[str]:
     """Prefer published membership for ``node_ids``. With no node ids, map the legacy
     ``community_ids`` (see :func:`_structure_fallback_candidate_communities`) to
@@ -1630,7 +1635,7 @@ def _structure_fallback_lines(
     and the caller's ``structure.extend([])`` is a no-op — old truncation behavior,
     byte-identical (see docs/concepts/mind-model.md).
     """
-    if remaining_budget <= 0:
+    if remaining_budget <= 0 and on_budget_cut is None:
         return []
     seen_domains: set[str] = set()
     domains: list[Domain] = []
@@ -1665,6 +1670,8 @@ def _structure_fallback_lines(
         else:
             line = f"- [domain] {d.title}: {_truncate_summary(summary)}"
         if used + len(line) > remaining_budget:
+            if on_budget_cut is not None:
+                on_budget_cut()
             break
         used += len(line)
         lines.append(line)
@@ -1679,6 +1686,8 @@ def _gather_structure(
     store: Store,
     reader: GraphifyReader | None,
     budget: RetrievalBudget,
+    *,
+    on_budget_cut: Callable[[], None] | None = None,
 ) -> tuple[list[str], list[Entity]]:
     """The structural-map + peripheral-entity walk shared by ``get_task_context`` and the
     thin tools (§5 FR8.2, ``query_structure``/``query_decisions``) — extracted so neither
@@ -1693,16 +1702,18 @@ def _gather_structure(
 
     node_cap = max(1, budget.structure_chars // 120)
     by_node = res.entities_by_node if res.entities_by_node is not None else _entities_by_node(store)
-    sub = reader.subgraph(res.seed_node_ids, node_cap)
+    # Look one node past the cap when reporting cuts. A full walk may fit the cap exactly.
+    sub = reader.subgraph(res.seed_node_ids, node_cap + int(on_budget_cut is not None))
+    nodes = sub.nodes if on_budget_cut is None else sub.nodes[:node_cap]
     # The BFS walk itself is capped at `node_cap` nodes; when it fills that cap, the
     # subgraph was truncated regardless of whether every rendered line happened to fit
     # `budget.structure_chars` (see `_structure_fallback_candidate_communities`) — the walk
     # saturation trigger for the NFR2 fallback below.
-    walk_saturated = len(sub.nodes) >= node_cap
+    walk_saturated = len(nodes) >= node_cap
     seen_peri: set[str] = set()
     used = 0
     overflow_nodes: list[NodeRef] = []
-    for i, n in enumerate(sub.nodes):
+    for i, n in enumerate(nodes):
         # Pathless nodes (engine artifacts with no source_file) are dead weight in the
         # structural map's hard char budget — drop them from the rendered lines only.
         # Truthiness check (not `is not None`): Graphify emits `source_file: ""` (empty
@@ -1717,7 +1728,7 @@ def _gather_structure(
         if n.file_path:
             line = _fmt_node(n)
             if used + len(line) > budget.structure_chars:
-                overflow_nodes = sub.nodes[i:]
+                overflow_nodes = nodes[i:]
                 break
             used += len(line)
             structure.append(line)
@@ -1733,6 +1744,8 @@ def _gather_structure(
                 seen_peri.add(e.entity_id)
                 peripheral.append(e)
 
+    if on_budget_cut is not None and (overflow_nodes or len(sub.nodes) > node_cap):
+        on_budget_cut()
     if overflow_nodes or walk_saturated:
         candidate_ids = _structure_fallback_candidate_communities(
             overflow_nodes, res.seed_communities, walk_saturated
@@ -1742,7 +1755,11 @@ def _gather_structure(
         )
         structure.extend(
             _structure_fallback_lines(
-                candidate_ids, store, budget.structure_chars - used, candidate_nodes
+                candidate_ids,
+                store,
+                budget.structure_chars - used,
+                candidate_nodes,
+                on_budget_cut=on_budget_cut,
             )
         )
     return structure, peripheral
@@ -1815,6 +1832,8 @@ def query_structure(
     store: Store,
     reader: GraphifyReader | None,
     budget_chars: int = 4000,
+    *,
+    on_budget_cut: Callable[[], None] | None = None,
 ) -> str:
     """Thin tool (§5 FR8.2): the structural-map half of ``get_task_context`` alone, for a
     cheap follow-up once the caller already has decision memory. Reader absent -> an
@@ -1824,7 +1843,11 @@ def query_structure(
         return "No graph reader available; structural map omitted."
     res = resolve_seeds(seeds, reader, store)
     structure, _peripheral = _gather_structure(
-        res, store, reader, RetrievalBudget(structure_chars=budget_chars)
+        res,
+        store,
+        reader,
+        RetrievalBudget(structure_chars=budget_chars),
+        on_budget_cut=on_budget_cut,
     )
     if not structure:
         return "No structural context found."

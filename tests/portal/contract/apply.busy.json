@@ -1,0 +1,25 @@
+{
+  "outcomes": {
+    "01KAA000000000000000000007": {
+      "outcome": "accepted"
+    },
+    "01KAA000000000000000000008": {
+      "outcome": "refused",
+      "error": {
+        "code": "refused",
+        "message": "This domain was accepted in the meantime.",
+        "details": {
+          "reason": "domain_accepted_meanwhile"
+        }
+      }
+    },
+    "01KAA000000000000000000003": {
+      "outcome": "busy",
+      "error": {
+        "code": "busy",
+        "message": "The store is busy. Try again shortly.",
+        "details": {}
+      }
+    }
+  }
+}

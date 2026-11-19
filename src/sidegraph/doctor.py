@@ -2356,13 +2356,11 @@ def _has_propose_only_signal(
     entity_canonical_by_id: dict[str, str],
 ) -> bool:
     """True iff ``rec`` (a ``supersedes``-bearing, accepted, agent-sourced, stamp-less
-    record) carries at least one field only the propose/``auto_accept`` path can produce —
-    review Major 1: ``layer``, a ``provenance.ref``, or a tier-0 ``tag:``/``initiative:``
-    binding not already on its predecessor. One-directional by construction (see the
-    constant above's comment): presence proves propose wrote it; absence does NOT prove
-    ``supersede_decision``/``supersede_fact`` wrote it -- a minimal propose draft (no
-    layer/ref/tags) is genuinely indistinguishable from a genuine successor, and stays
-    excluded either way (see the check's own docstring)."""
+    record) carries a signal separating it from a pre-0.29.0 direct supersession:
+    ``layer``, a ``provenance.ref``, or a tier-0 ``tag:``/``initiative:`` binding absent
+    from its predecessor. A minimal propose draft with none of these stays excluded.
+    Current ``supersede_decision`` can inherit a layer. The source and ratifier stamp
+    checks in ``_check_unratified_accepts`` already exclude its accepted successors."""
     if rec.get("layer"):
         return True
     provenance = rec.get("provenance")
@@ -2428,17 +2426,11 @@ def _check_unratified_accepts(
     them were DECISION successors. The fact half of this exclusion is defensive only --
     ``supersede_fact`` always stamps ``source="human"``, so a fact successor never reaches
     this agent-sourced check at all, and ``DraftFact`` carries no ``supersedes`` field, so
-    the propose path cannot write one either. No current writer produces the shape the
-    fact half excludes; it is kept so the rule does not silently depend on that staying
-    true -- fix round 2 re-review, Minor B.) Reversal
-    (``supersede_decision``/``supersede_fact``) has no ratification queue to bypass in the
-    first place — it writes its successor ``accepted`` immediately, unconditionally, by
-    design (CLAUDE.md invariant #2's "reversal = new record with supersedes"), and its
-    ``provenance.source`` is legitimately ``"agent"`` (that tool's own docstring names an
-    agent-initiated caller as an anticipated shape, and every real successor in this
-    project's own store already is exactly that). Left unscoped, that reproduces this
-    check's whole signature — accepted, agent-sourced, no ratifier stamp — on every
-    superseding record, with no relation to the env var this check exists to catch.
+    the propose path cannot write one either. The rule also covers facts in case those
+    writers change -- fix round 2 re-review, Minor B.) Before 0.29.0, a reversal via
+    ``supersede_decision`` wrote its successor ``accepted`` immediately. A call with
+    ``source="agent"`` reproduced this check's whole signature without
+    using the environment switch.
 
     From 0.29.0 ``supersede_decision`` writes an agent's own successor ``proposed`` (see
     design/superpowers/specs/2026-11-12-ratification-needs-a-human-verdict-design.md).
@@ -2449,16 +2441,12 @@ def _check_unratified_accepts(
     ``supersedes``-bearing record on the claim that a ``supersede_decision`` successor and
     an auto-accepted superseding ``propose_decisions`` draft are "genuinely
     indistinguishable" — measurement refuted that for a real, non-trivial share of drafts.
-    ``_has_propose_only_signal`` checks three fields only the propose/``auto_accept`` path
-    can produce and ``supersede_decision``/``supersede_fact`` structurally cannot: a
-    ``layer`` (no parameter on either supersede tool), a ``provenance.ref`` (same), or a
-    tier-0 ``tag:``/``initiative:`` binding not already on the predecessor (the supersede
-    tools either inherit the predecessor's bindings verbatim or resolve explicit anchors
-    with no ``tags``/``initiative`` parameter to mint one from). A ``supersedes``-bearing
-    record is now excluded ONLY when none of the three is present — one-directional and
-    zero-false-positive by construction: presence proves the propose path wrote it, but a
-    MINIMAL superseding draft (no layer/ref/tags) still carries none of the three and stays
-    excluded, correctly indistinguishable from a genuine successor, exactly as before.
+    The pre-0.29.0 supersede tools that could write an accepted, agent-sourced successor
+    without a stamp could produce none of the three signals in ``_has_propose_only_signal``.
+    Current ``supersede_decision`` can inherit a layer, and its accepted successors are
+    human-sourced or ratifier-stamped. Among the records left after the source and stamp
+    checks, a ``supersedes``-bearing record stays excluded when it carries none of the
+    three signals.
 
     Known, accepted gap this still leaves (record the trade-off, don't pretend it isn't
     one): a minimal superseding ``propose_decisions`` draft — no ``layer``, no ``ref``, no
@@ -2500,7 +2488,7 @@ def _check_unratified_accepts(
         if rec.get("supersedes") and not _has_propose_only_signal(
             rec, bindings, entity_canonical_by_id
         ):
-            continue  # a reversal's successor -- no ratify queue exists for it to bypass
+            continue  # indistinguishable from a pre-0.29.0 direct supersession
         created = _parse_aware_iso(rec.get("valid_from"))
         if created is None or created < scope_start:
             continue  # predates observable stamping (or the store's own creation) here

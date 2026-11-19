@@ -311,9 +311,10 @@ per-record files, every record complete. After a maintenance run, revert **both*
 
 Your checkout keeps its local `index.db`, which is stamped for format 2. A 0.14–0.16 `Store`
 opens the rolled-back store and re-stamps the index, but their hooks read the index directly and
-serve nothing while it carries the format-2 stamp. After a rollback, delete `.sidegraph/index.db`
-(it is derived, gitignored and rebuilt on the next open) before relying on a 0.14–0.16 client's
-hooks.
+serve nothing while it carries the format-2 stamp. Open the rolled-back store with a compatible
+Sidegraph version before relying on those hooks. An in-place reload keeps local journals. Back
+up `.sidegraph/index.db` before any removal because deletion loses local state, including Portal
+advice and operation recovery information.
 
 ## Checking afterwards
 

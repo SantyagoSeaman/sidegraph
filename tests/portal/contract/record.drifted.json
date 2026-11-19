@@ -1,0 +1,93 @@
+{
+  "record": {
+    "id": "01KAB123000000000000000001",
+    "title": "Keep the retry delay bounded",
+    "kind": "constraint",
+    "status": "accepted",
+    "context": "A reader can briefly lose its connection while the service restarts.",
+    "choice": "Retry the read with a delay capped at 30 seconds.",
+    "rejected": "Waiting indefinitely delayed recovery after a restart.",
+    "consequences": "The reader can check for recovery without a tight loop.",
+    "valid_from": "2026-11-17T09:00:00Z",
+    "supersedes": "01KAA000000000000000000002",
+    "scope": "module",
+    "layer": "technical",
+    "provenance": {
+      "source": "manual",
+      "author": "Jo Rivera",
+      "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7"
+    },
+    "ratified_by": "Jo Rivera",
+    "ratified_at": "2026-11-17T09:00:00Z"
+  },
+  "history": [
+    {
+      "id": "01KAA000000000000000000002",
+      "type": "decision",
+      "kind": "constraint",
+      "status": "superseded",
+      "domains": [
+        "transport"
+      ],
+      "title": "Retry reads after a restart",
+      "layer": "technical",
+      "anchor_tiers": [
+        2
+      ],
+      "anchor_statuses": [
+        "found"
+      ]
+    },
+    {
+      "id": "01KAB123000000000000000001",
+      "type": "decision",
+      "kind": "constraint",
+      "status": "accepted",
+      "domains": [
+        "transport"
+      ],
+      "title": "Keep the retry delay bounded",
+      "layer": "technical",
+      "anchor_tiers": [
+        2
+      ],
+      "anchor_statuses": [
+        "found"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "01KAA000000000000000000005",
+      "statement": "In the restart fixture, reads resumed after 12 seconds.",
+      "status": "accepted",
+      "source": "Local restart fixture",
+      "valid_from": "2026-11-17T09:00:00Z",
+      "supports": [
+        "01KAB123000000000000000001"
+      ],
+      "provenance": {
+        "source": "manual",
+        "author": "Jo Rivera",
+        "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7"
+      }
+    }
+  ],
+  "keepable_evidence": [],
+  "drifted": true,
+  "pending_evidence": [],
+  "anchors": [
+    {
+      "entity_id": "01KAA000000000000000000009",
+      "name": "retry_read",
+      "tier": 2,
+      "file": "src/client.py",
+      "start": 8,
+      "end": 207,
+      "status_word": "found",
+      "internal_status": "live",
+      "community": "transport",
+      "editor_path": "/example-project/src/client.py"
+    }
+  ]
+}

@@ -61,9 +61,11 @@ from .diagnostics import HookDiagnostics
 from .project_anchor import anchor_to_project, take_repo_root_flag
 
 if TYPE_CHECKING:
+    from ..engine.reader import GraphifyReader
     from ..hot_index import HotIndex, Record
     from ..integrity import Check, Problem, RunResult
     from ..retrieval import MapSection
+    from ..store import Store
 
 CAPTURE_NUDGE = (
     "Sidegraph: if this session produced a durable decision, lesson, or gotcha — or a "
@@ -738,7 +740,7 @@ _PLUGIN_OFF_NESTED = (
 )
 
 
-def host_checks(location: StoreLocation) -> tuple[Check, ...]:
+def host_checks(location: StoreLocation, *, host_family: str | None = None) -> tuple[Check, ...]:
     """The integrity checks that need the host: ``stray-store``, a closure over this launch's
     ``StoreLocation`` because the portable registry's ``Inputs`` stays host-free, and the three
     host-wiring checks, ``version-skew``, ``path-skew`` and ``plugin-off-in-subdirectories``.
@@ -777,7 +779,8 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
         package_release, plugin_release = _numeric_version(__version__), _numeric_version(plugin)
         if package_release is None or plugin_release is None:
             raise _NotRun
-        update = _UPDATE_PLUGIN_CLAUDE if _host_family() == "claude" else _UPDATE_PLUGIN
+        family = _host_family() if host_family is None else host_family
+        update = _UPDATE_PLUGIN_CLAUDE if family == "claude" else _UPDATE_PLUGIN
         newer = _newer_installed_version(root, plugin, package_release)
         if newer is not None:
             notice = _INSTALL_BEHIND.format(package=__version__, newer=newer, update=update)
@@ -876,13 +879,19 @@ def host_checks(location: StoreLocation) -> tuple[Check, ...]:
     )
 
 
-def session_host_checks(location: StoreLocation) -> tuple[Check, ...]:
+def session_host_checks(
+    location: StoreLocation, host_family: str | None = None
+) -> tuple[Check, ...]:
     """``host_checks`` for the SessionStart hook. ``plugin-off-in-subdirectories`` reads Claude
     Code's settings files, so a Muse or Grok session leaves it out; ``sidegraph-doctor`` keeps it.
     see design/superpowers/specs/2026-10-28-muse-hooks-design.md (Host seam changes)
     """
-    checks = host_checks(location)
-    if _host_family() in ("muse", "grok"):
+    if host_family is None:
+        checks = host_checks(location)
+        host_family = _host_family()
+    else:
+        checks = host_checks(location, host_family=host_family)
+    if host_family in ("muse", "grok"):
         return tuple(check for check in checks if check.id != "plugin-off-in-subdirectories")
     return checks
 
@@ -905,8 +914,8 @@ def _is_transient_lock(error: BaseException) -> bool:
     return hook_log.is_lock_error(error)
 
 
-def _report_unreadable_store(location: StoreLocation, error: BaseException, now: datetime) -> None:
-    """Print what a store that cannot open says: the registry runs ``store-unreadable`` alone
+def _render_unreadable_store(location: StoreLocation, error: BaseException, now: datetime) -> str:
+    """Render what a store that cannot open says: the registry runs ``store-unreadable`` alone
     (the other checks read the store or the graph this path does not have), and the human gets
     the notice as ``systemMessage`` while the model is told memory tools will fail. No noise
     control and no dedupe here: both live in the store that did not open, and a broken store is
@@ -918,10 +927,9 @@ def _report_unreadable_store(location: StoreLocation, error: BaseException, now:
     inputs = integrity.Inputs(store_dir=Path(location.path), now=now, open_error=error)
     result = integrity.run(inputs, "session", (integrity.STORE_UNREADABLE,))
     if not result.problems:
-        print(json.dumps({}))
-        return
+        return json.dumps({})
     problem = result.problems[0]
-    print(_bounded_output(problem.notice, problem.line))
+    return _bounded_output(problem.notice, problem.line)
 
 
 def _notice_is_due(stamp: str | None, severity: str, now: datetime) -> bool:
@@ -998,6 +1006,15 @@ def _recorded_notice_keys(
     return frozenset(row[0] for row in rows)
 
 
+def _ordered_notices(result: RunResult) -> list[Problem]:
+    from ..integrity import SEVERITY_RANK
+
+    # Stable sort: registry order within a severity.
+    return sorted(
+        (p for p in result.problems if p.notice), key=lambda p: -SEVERITY_RANK[p.severity]
+    )
+
+
 def _due_notices(
     store,
     result: RunResult,
@@ -1018,13 +1035,9 @@ def _due_notices(
     notices are sent unclaimed, a duplicate being better than silence.
     see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D5)
     """
-    from ..integrity import SEVERITY_RANK
-
-    with_notice = [p for p in result.problems if p.notice]
-    with_notice.sort(key=lambda p: -SEVERITY_RANK[p.severity])  # stable: registry order kept
     writable = True
     notices: list[str] = []
-    for problem in with_notice:
+    for problem in _ordered_notices(result):
         claimed = True
         if writable:
             try:
@@ -1544,6 +1557,149 @@ def _is_substantial(stats: _TranscriptStats) -> bool:
     return stats.real_prompts >= _MIN_USER_PROMPTS
 
 
+def _session_sections(
+    store: Store,
+    reader: GraphifyReader | None,
+    borrowed_from: Path | None,
+    diagnostics: HookDiagnostics | None = None,
+) -> list[MapSection] | None:
+    """Read the domain sections, leaving a missing or unusable TOC to the map fallback."""
+    from ..retrieval import (
+        TOC_CACHE_KEY,
+        build_toc,
+        live_global_mistakes,
+        render_sections,
+        toc_sections,
+    )
+
+    # Real TOC (§5): the sync path precomputes named domains into store meta. Read it
+    # when present and non-empty; any accepted domain means the mind model has a name
+    # to show. Malformed/missing cache or zero accepted domains falls back to today's
+    # community-listing map exactly (no accepted domains = no behavior change). The
+    # cache is untrusted (a manual edit, or a shape mismatch from a future/older
+    # version) — render_toc is called under its own try/except so a shape it can't
+    # handle degrades to the legacy map too, rather than escaping to the outer handler
+    # and losing store-only content along with it (never-crash AND graceful-degrade).
+    sections = None
+    try:
+        cache = json.loads(store.get_meta(TOC_CACHE_KEY) or "null")
+    except json.JSONDecodeError:
+        cache = None
+    if borrowed_from is not None:
+        # A worktree's cache is only as fresh as its last sync, and the sync is best-effort:
+        # build the domain map in memory instead of trusting a cached one. The count walks
+        # every domain's decisions (about 0.1 s on a real store), which is the price of a
+        # map that is never older than the store. The borrowed reader is open, so the
+        # count includes the decisions anchored to a whole document, like the main
+        # checkout's.
+        try:
+            cache = build_toc(store, reader)
+        except Exception as error:
+            if diagnostics is not None:
+                diagnostics.report("cache", error)
+            cache = None
+    if isinstance(cache, dict) and cache.get("domains"):
+        try:
+            # Domain/initiative summaries remain cache-owned, but the global mistakes
+            # (accepted and unratified) must reflect the live Store even when the graph
+            # is unavailable and lazy sync cannot refresh the cache: a retired or
+            # superseded one must not be served from it.
+            try:
+                cache = {**cache, **live_global_mistakes(store)}
+            except Exception as error:
+                if diagnostics is not None:
+                    diagnostics.report("cache", error)
+                raise
+            sections = toc_sections(cache)
+            render_sections(sections)  # a shape it cannot render falls back here
+        except Exception:
+            sections = None
+    return sections
+
+
+def _session_drift(
+    store: Store, diagnostics: HookDiagnostics | None = None
+) -> tuple[int, tuple[int, str] | None] | None:
+    """Refresh retrieval's drift markers even when the drift notice is off.
+
+    The switch controls prose, as gating the refresh froze the cache at its pre-off state.
+    See design/superpowers/specs/2026-07-30-drift-supersede-affordance-design.md (I5, option b).
+    """
+    try:
+        from ..sync import refresh_code_drift_snapshot
+
+        return refresh_code_drift_snapshot(store, busy_timeout_seconds=0.0)
+    except Exception as error:
+        if diagnostics is not None:
+            diagnostics.report("drift", error)
+        return None
+
+
+def _session_integrity(
+    store: Store,
+    location: StoreLocation,
+    reader: GraphifyReader | None,
+    graph_path: Path | None,
+    borrowed_from: Path | None,
+    drift: tuple[int, tuple[int, str] | None] | None,
+    host_family: str | None = None,
+    diagnostics: HookDiagnostics | None = None,
+) -> tuple[RunResult, frozenset[str], datetime]:
+    """Read model lines and candidate notices in registry order before the caller claims them.
+    See design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D1, D5).
+    """
+    from .. import integrity
+    from ..gitio import open_index_ro
+
+    def report(stage: str, error: Exception) -> None:
+        if diagnostics is not None:
+            diagnostics.report(stage, error)
+
+    now = datetime.now(UTC)
+    drift_count, drift_recent = drift if drift is not None else (None, None)
+    index = open_index_ro(
+        Path(store.path),
+        on_error=lambda error: report("integrity", error),
+        busy_timeout_seconds=0.0,
+    )
+    try:
+        recorded = _recorded_notice_keys(index, diagnostics)
+        result = integrity.run(
+            integrity.Inputs(
+                store_dir=Path(store.path),
+                now=now,
+                store=store,
+                index=index,
+                reader=reader,
+                graph_path=graph_path,
+                borrowed_from=borrowed_from,
+                drift_count=drift_count,
+                drift_recent=drift_recent,
+            ),
+            "session",
+            integrity.CHECKS[:5]
+            + session_host_checks(location, host_family)
+            + integrity.CHECKS[5:],
+        )
+    finally:
+        if index is not None:
+            try:
+                index.close()
+            except Exception as error:
+                report("cleanup", error)
+    return result, recorded, now
+
+
+def _render_session_start(
+    sections: Sequence[MapSection], status: Sequence[str], notices: Sequence[str]
+) -> str:
+    """Fit the opening instructions, running version, map, and due notices.
+    See design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D1).
+    """
+    head = f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}\n\n"
+    return _fit_session_output(head, sections, status, notices)
+
+
 def session_start() -> None:
     """SessionStart hook (Stage 4): inject the phase-1 top-tier map as additionalContext.
 
@@ -1599,14 +1755,7 @@ def session_start() -> None:
             resolve_store_location,
         )
         from ..engine.reader import GraphifyReader, open_borrowed_reader
-        from ..retrieval import (
-            TOC_CACHE_KEY,
-            build_toc,
-            live_global_mistakes,
-            render_sections,
-            toc_sections,
-            top_tier_sections,
-        )
+        from ..retrieval import top_tier_sections
         from ..store import Store
 
         stage = "payload"
@@ -1638,7 +1787,7 @@ def session_start() -> None:
                 diagnostics.report("store", e)
             if _is_transient_lock(e):
                 raise
-            _report_unreadable_store(location, e, datetime.now(UTC))
+            print(_render_unreadable_store(location, e, datetime.now(UTC)))
             return
         # Not payload["session_id"] directly: that field is the umbrella workspace session
         # on Codex, not this session — see _session_identity.
@@ -1765,127 +1914,29 @@ def session_start() -> None:
         except Exception as error:
             diagnostics.report("sync", error)  # the map still renders un-synced
 
-        # Real TOC (§5): the sync path precomputes named domains into store meta. Read it
-        # when present and non-empty; any accepted domain means the mind model has a name
-        # to show. Malformed/missing cache or zero accepted domains falls back to today's
-        # community-listing map exactly (no accepted domains = no behavior change). The
-        # cache is untrusted (a manual edit, or a shape mismatch from a future/older
-        # version) — render_toc is called under its own try/except so a shape it can't
-        # handle degrades to the legacy map too, rather than escaping to the outer handler
-        # and losing store-only content along with it (never-crash AND graceful-degrade).
-        sections = None
         stage = "cache"
-        try:
-            cache = json.loads(store.get_meta(TOC_CACHE_KEY) or "null")
-        except json.JSONDecodeError:
-            cache = None
-        if borrowed_from is not None:
-            # A worktree's cache is only as fresh as its last sync, and the sync is best-effort:
-            # build the domain map in memory instead of trusting a cached one. The count walks
-            # every domain's decisions (about 0.1 s on a real store), which is the price of a
-            # map that is never older than the store. The borrowed reader is open, so the
-            # count includes the decisions anchored to a whole document, like the main
-            # checkout's.
-            try:
-                cache = build_toc(store, reader)
-            except Exception as error:
-                diagnostics.report("cache", error)
-                cache = None
-        if isinstance(cache, dict) and cache.get("domains"):
-            try:
-                # Domain/initiative summaries remain cache-owned, but the global mistakes
-                # (accepted and unratified) must reflect the live Store even when the graph
-                # is unavailable and lazy sync cannot refresh the cache: a retired or
-                # superseded one must not be served from it.
-                try:
-                    cache = {**cache, **live_global_mistakes(store)}
-                except Exception as error:
-                    diagnostics.report("cache", error)
-                    raise
-                sections = toc_sections(cache)
-                render_sections(sections)  # a shape it cannot render falls back here
-            except Exception:
-                sections = None
+        sections = _session_sections(store, reader, borrowed_from, diagnostics)
         if sections is None:
             stage = "render"
             sections = top_tier_sections(store, reader)
-        # Standing instruction goes first, ahead of either renderer's content — see
-        # STANDING_SEARCH_INSTRUCTION's docstring for why it lives here and not in the
-        # renderers. The version line follows it, so a session names the package it runs.
-        # see design/superpowers/specs/2026-10-03-host-wiring-checks-design.md (D1)
-        head = f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}\n\n"
+        drift = _session_drift(store, diagnostics)
         status: list[str] = []
-
-        # Drift refresh (drift→supersede D4): it runs UNCONDITIONALLY — it is what keeps the
-        # retrieval markers' cache fresh; SIDEGRAPH_DRIFT_NUDGE=off gates the PROSE only (spec I5,
-        # option b — gating the refresh froze markers at their last pre-off state with no
-        # self-heal path). Its return value is the drift check's input: `None` when the refresh
-        # could not run, which the check treats as "not run", never as the old cache's count.
-        # Own try/except: a drift failure must never cost the map.
-        drift_count: int | None = None
-        drift_recent: tuple[int, str] | None = None
-        try:
-            from .. import sync as _sync_drift
-
-            snap = _sync_drift.refresh_code_drift_snapshot(store, busy_timeout_seconds=0.0)
-            if snap is not None:
-                drift_count, drift_recent = snap
-        except Exception as error:
-            diagnostics.report("drift", error)
-
-        # The status lines and the notices for the human: one registry decides what is wrong
-        # (pending ratification, drift, borrowed graph, stale graph, stray store, missing
-        # graph, orphaned records, skipped files). Its model lines are appended in registry
-        # order, as the inline blocks they replace were; its notices go out as `systemMessage`.
-        # Own try/except: the map is this hook's only real deliverable.
-        # see design/superpowers/specs/2026-10-02-integrity-self-check-design.md (D1, D5)
         notices: list[str] = []
         try:
-            from .. import integrity
-            from ..gitio import open_index_ro
-
-            now = datetime.now(UTC)
-            index = open_index_ro(
-                Path(store.path),
-                on_error=lambda error: diagnostics.report("integrity", error),
-                busy_timeout_seconds=0.0,
+            result, recorded, now = _session_integrity(
+                store,
+                location,
+                reader,
+                graph_path,
+                borrowed_from,
+                drift,
+                diagnostics=diagnostics,
             )
-            try:
-                recorded = _recorded_notice_keys(index, diagnostics)
-                result = integrity.run(
-                    integrity.Inputs(
-                        store_dir=Path(store.path),
-                        now=now,
-                        store=store,
-                        index=index,
-                        reader=reader,
-                        graph_path=graph_path,
-                        borrowed_from=borrowed_from,
-                        drift_count=drift_count,
-                        drift_recent=drift_recent,
-                    ),
-                    "session",
-                    integrity.CHECKS[:5] + session_host_checks(location) + integrity.CHECKS[5:],
-                )
-            except Exception as error:
-                diagnostics.report("integrity", error)
-                raise
-            finally:
-                if index is not None:
-                    try:
-                        index.close()
-                    except Exception as error:
-                        diagnostics.report("cleanup", error)
-            for problem in result.problems:
-                if problem.line:
-                    status.append(problem.line)
+            status = [problem.line for problem in result.problems if problem.line]
             notices = _due_notices(store, result, now, recorded, diagnostics)
         except Exception as error:
             diagnostics.report("integrity", error)
-
-        # The one composition point every host's SessionStart shares: the size budget is
-        # applied here, after all sections are rendered.
-        print(_fit_session_output(head, sections, status, notices))
+        print(_render_session_start(sections, status, notices))
         delivered = True
     except Exception as error:
         run.note(error)
@@ -2004,6 +2055,35 @@ def _rearm_commits(
         return None
     commits = _commits_since(store_path, last, diagnostics)
     return commits if commits is not None and commits >= _REARM_MIN_COMMITS else None
+
+
+def _stop_drift(store: Store, diagnostics: HookDiagnostics | None = None) -> int | None:
+    """Refresh drift at Stop so commits made in this session count in its nudge.
+    See design/superpowers/specs/2026-07-30-drift-supersede-affordance-design.md (D5).
+    """
+    try:
+        from ..sync import refresh_code_drift_cache
+
+        return refresh_code_drift_cache(store, busy_timeout_seconds=0.0)
+    except Exception as error:
+        if diagnostics is not None:
+            diagnostics.report("drift", error)
+        return None
+
+
+def _render_stop(drift_count: int | None, rearm_commits: int | None) -> str:
+    """Build a nudge with the caller's drift count and optional re-arm commit count."""
+    reason = CAPTURE_NUDGE
+    if drift_count:
+        # Keep this clause within the Stop nudge's 800/850 character bounds.
+        reason += (
+            f" Also: {drift_count} drifted record(s) — changed code or prior check no longer "
+            "applies; inspect before record_drift_check or supersede_decision "
+            "(ids: get_task_context or sidegraph-doctor)."
+        )
+    if rearm_commits is not None:
+        reason += f" Since the last capture prompt: {rearm_commits} commits."
+    return reason
 
 
 def stop() -> None:
@@ -2157,20 +2237,7 @@ def stop() -> None:
         # specify-time, implement commits later in the SAME session), so at Stop the
         # drifted set is precisely what SessionStart could not yet see. Own try/except:
         # a refresh failure omits the clause, never the nudge.
-        reason = CAPTURE_NUDGE
-        try:
-            from .. import sync as _sync_drift
-
-            n = _sync_drift.refresh_code_drift_cache(store, busy_timeout_seconds=0.0)
-            if n and os.environ.get("SIDEGRAPH_DRIFT_NUDGE") != "off":
-                # Keep this clause within the Stop nudge's 800/850 character bounds.
-                reason += (
-                    f" Also: {n} drifted record(s) — changed code or prior check no longer "
-                    "applies; inspect before record_drift_check or supersede_decision "
-                    "(ids: get_task_context or sidegraph-doctor)."
-                )
-        except Exception as error:
-            diagnostics.report("drift", error)
+        drift_count = _stop_drift(store, diagnostics)
 
         if rearm_commits is None:
             store.mark_captured(session_id)  # before emitting: a crash cannot double-nudge
@@ -2180,8 +2247,10 @@ def stop() -> None:
                 store.set_meta(rearm_key, datetime.now(UTC).isoformat())
             except Exception as error:
                 diagnostics.report("capture", error)
-        else:
-            reason += f" Since the last capture prompt: {rearm_commits} commits."
+        reason = _render_stop(
+            drift_count if os.environ.get("SIDEGRAPH_DRIFT_NUDGE") != "off" else None,
+            rearm_commits,
+        )
         print(json.dumps({"decision": "block", "reason": reason, "suppressOutput": True}))
     except Exception as error:
         if not isinstance(error, StoreRequirementError):
@@ -2745,42 +2814,10 @@ def _journal_delivery(
             on_error(error)
 
 
-def _delivery(payload: dict, hot: _HotOpener) -> str | None:
-    """The text :func:`pre_tool_use` hands the agent for this call, or ``None`` for nothing.
-
-    The order is the one the three delivery rules need: the files are taken first (no index is
-    opened for a call that names none), then ONE scan of the entities finds the anchored ones,
-    the first three that have records are chosen (the same three in every process of one Bash
-    line), and only then does each claim go through, so a file another process or an earlier
-    call already delivered, or an agent already at its cap, costs nothing and prints nothing.
-    see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2, D3, D5)
-    """
-    if os.environ.get("SIDEGRAPH_GREP_NUDGE") == "off":
-        return None
-    tool = payload.get("tool_name")
-    if tool not in _POINT_OF_READ_TOOLS:
-        return None
-    tool_input = payload.get("tool_input")
-    if not isinstance(tool_input, dict):
-        return None
-    session_id, _ = _session_identity(payload)
-    if not session_id:
-        return None
-
-    from ..config import resolve_store_location
-
-    # warn_on_create=False: a tool call never creates a store (D3), so the "creating new
-    # store" notice would announce something that is not going to happen.
-    location = resolve_store_location(
-        root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
-    )
-    files = _files_named(tool, payload, tool_input, _touch_root(location))
-    if not files:
-        return None
-    index = hot(location.path)
-    if index is None:
-        return None
-
+def _select_delivery(
+    files: list[str], index: HotIndex, hot: _HotOpener
+) -> tuple[dict[str, list[str]], list[tuple[str, list[Record]]], int] | None:
+    """Select the files that fit before making any delivery claims."""
     anchored = index.anchored_entities(files)
     if not anchored:
         hot.empty_because(hook_log.NO_ENTITY)
@@ -2820,6 +2857,64 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
             chosen.append((rel, records))
             if len(chosen) == _FILES_PER_CALL:
                 break
+    return anchored, chosen, left_out
+
+
+def _render_delivery(winning: Sequence[tuple[str, Sequence[Record]]], left_out: int) -> str | None:
+    """Render the blocks for successful claims and the pointer for omitted files."""
+    omitted = _PRETOOL_OMITTED.format(count=left_out) if left_out else None
+    if not winning:
+        return omitted
+    seen: list[Record] = []
+    lines = [
+        MEMORY_GUARD_LINE,
+        *(_records_block(rel, records, seen=seen) for rel, records in winning),
+    ]
+    if omitted:
+        lines.append(omitted)
+    return "\n".join(lines)
+
+
+def _delivery(payload: dict, hot: _HotOpener) -> str | None:
+    """The text :func:`pre_tool_use` hands the agent for this call, or ``None`` for nothing.
+
+    The order is the one the three delivery rules need: the files are taken first (no index is
+    opened for a call that names none), then ONE scan of the entities finds the anchored ones,
+    the first three that have records are chosen (the same three in every process of one Bash
+    line), and only then does each claim go through, so a file another process or an earlier
+    call already delivered, or an agent already at its cap, costs nothing and prints nothing.
+    see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2, D3, D5)
+    """
+    if os.environ.get("SIDEGRAPH_GREP_NUDGE") == "off":
+        return None
+    tool = payload.get("tool_name")
+    if tool not in _POINT_OF_READ_TOOLS:
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    session_id, _ = _session_identity(payload)
+    if not session_id:
+        return None
+
+    from ..config import resolve_store_location
+
+    # warn_on_create=False: a tool call never creates a store (D3), so the "creating new
+    # store" notice would announce something that is not going to happen.
+    location = resolve_store_location(
+        root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
+    )
+    files = _files_named(tool, payload, tool_input, _touch_root(location))
+    if not files:
+        return None
+    index = hot(location.path)
+    if index is None:
+        return None
+
+    selected = _select_delivery(files, index, hot)
+    if selected is None:
+        return None
+    anchored, chosen, left_out = selected
 
     agent_id = _agent_identity(payload)
     prefix = f"{_PRETOOL_FILE_KEY_PREFIX}{session_id}:{agent_id or '-'}:"
@@ -2840,8 +2935,6 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
         )
         return None
 
-    blocks: list[str] = []
-    seen: list[Record] = []
     winning: list[tuple[str, Sequence[Record]]] = []
     refused: list[str] = []
     for rel, records in chosen:
@@ -2857,28 +2950,24 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
         )
         try:
             if index.claim_file(prefix, rel, now, _FILES_PER_AGENT, shown=shown):
-                blocks.append(_records_block(rel, records, seen=seen))
-                winning.append((rel, _shown_slice(records)))
+                winning.append((rel, records))
             else:
                 refused.append(rel)
         except sqlite3.OperationalError as error:
             hot.note(error)
             hot.report("claim", error)
             break  # contention refusal: deliver what is already claimed, claim no more
-    if not blocks:
-        # Nothing delivered, so nothing to journal; the files left out still deserve the
-        # pointer to get_task_context.
-        if left_out:
-            return _PRETOOL_OMITTED.format(count=left_out)
-        if refused:
-            hot.empty_because(_refusal_cause(index, prefix, refused, hot))
-        return None
-    text = "\n".join([MEMORY_GUARD_LINE, *blocks])
-    if left_out:
-        text += "\n" + _PRETOOL_OMITTED.format(count=left_out)
-    _journal_delivery(
-        payload, index, "hook_read", winning, lambda error: hot.report("delivery", error)
-    )
+    text = _render_delivery(winning, left_out)
+    if winning:
+        _journal_delivery(
+            payload,
+            index,
+            "hook_read",
+            [(rel, _shown_slice(records)) for rel, records in winning],
+            lambda error: hot.report("delivery", error),
+        )
+    elif text is None and refused:
+        hot.empty_because(_refusal_cause(index, prefix, refused, hot))
     return text
 
 
@@ -3020,48 +3109,16 @@ def _journal_brief(
         return
 
 
-def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
-    """The ``hookSpecificOutput`` for an ``Agent`` call: its tool input with the records for the
-    files its brief names appended to ``prompt``, or ``None`` for nothing to add.
-
-    ``None`` when ``SIDEGRAPH_AGENT_BRIEF`` is ``off``, the session is in Claude Code's auto mode
-    (not Grok's), ``prompt`` is not a string, the prompt already holds the opening marker (a brief
-    forwarded from another agent), the store has no usable index, or no file the brief names has
-    records. The files are the ones ``text_paths`` finds in the brief and, one hop away, in the
-    text documents it names (``brief_files``); each resolves against the payload's ``cwd`` and
-    then the store's project root, and the suffix fallback matches against the one scan of the
-    anchored files. The call's other fields are copied through untouched and no
-    ``permissionDecision`` is set. It claims none of the Read path's per-agent keys: the parent
-    cannot see the block, so claiming them would only suppress the parent's own first delivery.
-    see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1-D4)
-    """
-    if os.environ.get("SIDEGRAPH_AGENT_BRIEF") == "off":
-        return None
-    if payload.get("permission_mode") == _AUTO_MODE and _host_family() != "grok":
-        return None
-    tool_input = payload.get("tool_input")
-    if not isinstance(tool_input, dict):
-        return None
-    prompt = tool_input.get("prompt")
-    if not isinstance(prompt, str) or _BRIEF_OPEN in prompt:
-        return None
-
-    from ..config import resolve_store_location
+def _build_agent_brief(
+    prompt: str, root: str, cwd: str | None, index: HotIndex, hot: _HotOpener
+) -> tuple[str | None, list[tuple[str | None, str, Sequence[Record]]]]:
+    """Select and render the appended text, and return the groups it shows for journaling."""
     from ..text_paths import brief_files
 
-    location = resolve_store_location(
-        root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
-    )
-    index = hot(location.path)
-    if index is None:
-        return None
     anchored = index.anchored_files()
     chosen: list[tuple[str | None, str, list[Record]]] = []
     named: list[str] = []  # the entities of the anchored files the brief names
-    cwd = payload.get("cwd")
-    for doc, rel in brief_files(
-        prompt, _touch_root(location), anchored, cwd if isinstance(cwd, str) else None
-    ):
+    for doc, rel in brief_files(prompt, root, anchored, cwd):
         named.extend(anchored.get(rel, ()))
         records = _renderable_records(
             index.records_for(anchored[rel], on_error=lambda error: _select_error(hot, error))
@@ -3081,6 +3138,52 @@ def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
             hot.empty_because(_cold_or_no_record(index, named, hot))
         else:
             hot.empty_because(hook_log.NO_ENTITY)
+    return (f"\n\n{block}" if block is not None else None), plan
+
+
+def _agent_brief(payload: dict, hot: _HotOpener, host_family: str) -> dict | None:
+    """The ``hookSpecificOutput`` for an ``Agent`` call: its tool input with the records for the
+    files its brief names appended to ``prompt``, or ``None`` for nothing to add.
+
+    ``None`` when ``SIDEGRAPH_AGENT_BRIEF`` is ``off``, the session is in Claude Code's auto mode
+    (not Grok's), ``prompt`` is not a string, the prompt already holds the opening marker (a brief
+    forwarded from another agent), the store has no usable index, or no file the brief names has
+    records. The files are the ones ``text_paths`` finds in the brief and, one hop away, in the
+    text documents it names (``brief_files``); each resolves against the payload's ``cwd`` and
+    then the store's project root, and the suffix fallback matches against the one scan of the
+    anchored files. The call's other fields are copied through untouched and no
+    ``permissionDecision`` is set. It claims none of the Read path's per-agent keys: the parent
+    cannot see the block, so claiming them would only suppress the parent's own first delivery.
+    see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1-D4)
+    """
+    if os.environ.get("SIDEGRAPH_AGENT_BRIEF") == "off":
+        return None
+    if payload.get("permission_mode") == _AUTO_MODE and host_family != "grok":
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str) or _BRIEF_OPEN in prompt:
+        return None
+
+    from ..config import resolve_store_location
+
+    location = resolve_store_location(
+        root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
+    )
+    index = hot(location.path)
+    if index is None:
+        return None
+    cwd = payload.get("cwd")
+    addition, plan = _build_agent_brief(
+        prompt,
+        _touch_root(location),
+        cwd if isinstance(cwd, str) else None,
+        index,
+        hot,
+    )
+    if addition is None:
         return None
     _journal_brief(payload, index, plan, lambda error: hot.report("brief_journal", error))
     _journal_delivery(
@@ -3093,7 +3196,7 @@ def _agent_brief(payload: dict, hot: _HotOpener) -> dict | None:
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "updatedInput": {**tool_input, "prompt": f"{prompt}\n\n{block}"},
+            "updatedInput": {**tool_input, "prompt": prompt + addition},
         }
     }
 
@@ -3102,7 +3205,7 @@ def _hook_output(payload: dict, hot: _HotOpener) -> dict:
     """What :func:`pre_tool_use` prints: the Agent branch's ``updatedInput`` for a subagent
     spawn, else the Read path's ``additionalContext``, else ``{}``."""
     if payload.get("tool_name") in _AGENT_TOOLS:
-        return _agent_brief(payload, hot) or {}
+        return _agent_brief(payload, hot, _host_family()) or {}
     text = _delivery(payload, hot)
     if text is None:
         return {}

@@ -67,7 +67,7 @@ stamp of their family or to `unattributed`, see [hooks](hooks.md#session-attribu
 | Item | Size here | Grows with |
 |---|---|---|
 | Canonical store (`.sidegraph/**/*.json`, committed) | **968 KiB / 1,426 files, ~695 B per record** | Records. ~695 B/record means 10,000 records ≈ 7 MiB of git-friendly text |
-| Derived index (`.sidegraph/index.db`, gitignored) | 2.5 MiB | Records + telemetry rows; disposable, rebuilt on demand |
+| Local index (`.sidegraph/index.db`, gitignored) | 2.5 MiB | Record index and local journals. An in-place reload rebuilds records and keeps the journals. |
 | Code graph (`graphify-out/graph.json`, gitignored) | 10.5 MiB | Your codebase, not your store |
 
 Records are written one file each, so a store grows linearly and diffs per record — that is the

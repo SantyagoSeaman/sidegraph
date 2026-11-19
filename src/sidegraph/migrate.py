@@ -198,14 +198,17 @@ def _index_reasons(store_dir: Path, marker: Marker | None) -> list[str]:
     own: the journal mode and the schema, then the two ``meta`` reads of the freshness check
     and the verdict of :func:`sidegraph.store.index_freshness` against the digest of the store
     on disk. An index that cannot be read, is not a database, has a schema the current one
-    cannot be laid over, or is current with a stamp nothing re-stamps is a refusal; it is
-    derived and gitignored, so deleting it is the remedy. A failure of the scratch space
-    (a full disk) is not the index's: it propagates.
+    cannot be laid over, or is current with a stamp nothing re-stamps is a refusal. The
+    remedy backs up the database before removal because it can hold local journals. A
+    failure of the scratch space (a full disk) is not the index's: it propagates.
     # see design/superpowers/specs/2026-10-20-packed-store-format-design.md (§6.1)"""
     db = store_dir / "index.db"
     if not db.exists():
         return []
-    remedy = "it is derived and gitignored: delete it and run the migration again"
+    remedy = (
+        "Back up the database before removing it and running the migration again. Removing it "
+        "loses local journals, including Portal advice and operation recovery information."
+    )
     scratch = Path(tempfile.mkdtemp(prefix="sidegraph-index-probe-"))
     try:
         for suffix in ("", "-wal", "-shm", "-journal"):

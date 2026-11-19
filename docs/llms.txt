@@ -54,6 +54,7 @@ and exact contracts; it does not replace their version-specific requirements.
 - [guides/surviving-refactors.md](guides/surviving-refactors.md) — rebuilding the graph, syncing anchors, healing stale decisions
 - [guides/troubleshooting.md](guides/troubleshooting.md) — symptom-to-fix triage, every doctor finding code, and session notice recovery
 - [guides/team-workflow.md](guides/team-workflow.md) — committing the store, PR review, merge conflicts, compaction, and onboarding
+- [guides/portal.md](guides/portal.md) — Sidegraph Portal, the local web page: opening it, the ratification queue and cascade preview, editing a record as a new version, Agent view, status words, and who can open it
 - [guides/semantic-docs.md](guides/semantic-docs.md) — the two-pass (AST + LLM) workflow over docs, concept/rationale anchoring, and the sidegraph-import bootstrap walkthrough
 - [guides/verifying-your-setup.md](guides/verifying-your-setup.md) — a four-case post-install checklist: host wiring, durable capture/retrieval, ratification with evidence, and sync/repository hygiene
 - [guides/ci-cd-maintenance.md](guides/ci-cd-maintenance.md) — GitHub Actions recipes for anchor health, store lint, and scheduled triage; CI proposes and opens PRs without ratifying

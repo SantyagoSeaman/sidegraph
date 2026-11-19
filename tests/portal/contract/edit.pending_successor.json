@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "pending_successor",
+    "message": "Decide on the proposed replacement first.",
+    "details": {
+      "pending": "01KAA000000000000000000003"
+    }
+  }
+}

@@ -141,7 +141,8 @@ sessions of several hosts can share one repository, so each tool call is attribu
   2.1.163 (on 2.1.154-2.1.162 a resumed session reads as two sessions in `sidegraph-stats`).
   On **Codex** (`codex-mcp-client`) it is the request's `threadId`, matched to the
   SessionStart stamp whose key ends in that id (each Codex subagent thread is its own
-  session, as everywhere on Codex), or the bare thread id when there is no stamp. On **Grok
+  session, as everywhere on Codex). The middleware reads stamps from an existing index and
+  uses the bare thread id when it cannot read a matching stamp. On **Grok
   Build** (`grok-shell-<server name>`) it is `GROK_SESSION_ID` in the server's environment:
   the session that started the server, which Grok's hooks key by the same id. A Grok subagent
   reuses its parent's server, so its MCP calls count toward the parent session while its own
@@ -980,8 +981,9 @@ repairs it, the hook keeps printing `{}`. `Store` repairs some of these and refu
   with a real file or directory); a store whose format marker requires a newer Sidegraph; an index stamped with any
   `schema_version` its store does not accept (see above), such as a newer
   release's, while the record files are unchanged ("use a fresh store"); and an unreadable
-  `index.db` ("file is not a database"). The index is derived, so deleting `index.db` is safe, and
-  the next open rebuilds it.
+  `index.db` ("file is not a database"). Back up the database before removing it. The next
+  open rebuilds the record index. Removing the database loses local journals, including
+  Portal advice and operation recovery information.
 - A **running MCP server** does not recreate a deleted `index.db` or add the missing column. It
   re-checks the record files before each call, but it keeps the connection it opened, so a deleted
   `index.db` stays gone for it until it restarts.

@@ -1,0 +1,17 @@
+{
+  "text": "",
+  "emitted": false,
+  "chars": 0,
+  "assumptions": [
+    "Fresh session"
+  ],
+  "firing_conditions": [
+    "A file read or edit reaches an anchored path."
+  ],
+  "prepared": {
+    "synced": false,
+    "adopted_moves": 0
+  },
+  "ids_in_text": [],
+  "not_emitted_reason": "PreToolUse is not wired on Codex."
+}

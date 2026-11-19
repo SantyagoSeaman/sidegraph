@@ -144,9 +144,10 @@ The rule of thumb: anything a human decided is committed; anything the engine ca
 from `graph.json` is derived. The dividing line for a Tier-1 binding is the *entity*, not the
 tier number: a `domain:<slug>` or `tag:<slug>` Tier-1/Tier-0 anchor is a durable, human-named
 identity and stays canonical; a bare `community:<id>` Tier-1 anchor is an engine-recomputed
-snapshot label and is derived, exactly like `Entity.last_seen_community` itself. `index.db` is
-symmetric with the engine's own `graph.json` — both are disposable, rebuildable-from-source
-local artifacts. Nothing in the derived column is ever written to a committed file — a
+snapshot label and is derived, exactly like `Entity.last_seen_community` itself. An in-place reload
+rebuilds the record index and keeps local journals. Deleting `index.db` also loses those journals,
+including Portal advice and operation recovery information. Nothing in the derived column is ever
+written to a committed file — a
 `sidegraph-sync` pass that only refreshes volatile state (the ordinary case: unchanged/rebound
 leaves, status flips, community re-pointing) touches `index.db` alone, never a file under
 `decisions/`, `domains/`, `entities/`, or `bindings/`, not even when it repoints a decision's
@@ -318,8 +319,10 @@ a half-checked-out tree. Accepted and unguarded; do not pull while agents are wr
 On most format-1 stores it is one line, `sidegraph-store 0.6.0` (a store without a requirement). Only `sidegraph-require`, `sidegraph-migrate`, `sidegraph-domains snapshot` (which raises the minimum version only when the snapshot needs it) and `sidegraph-compact` on a format-2 store (which raises it to 0.22.0 the first time it folds drift checks) rewrite it: a format-1 store with a requirement has two lines; a store created by 0.17 is format 2 (three lines, above). It exists
 **outside** the gitignored `index.db` specifically so a teammate on an incompatible store format
 is rejected the moment they open the repo's `.sidegraph/`, not just when their own local index
-happens to disagree. An existing layout from before this marker existed gets one backfilled
-silently on next open.
+happens to disagree. An ordinary open backfills the marker for an existing layout from before
+the marker was introduced. The existing-only open used by Portal requests, polling and
+`advise_ratification` reports the missing marker and leaves the canonical files unchanged.
+SessionStart and Stop previews also leave the canonical files unchanged during open.
 
 Before backfilling, an ordinary open checks whether git may be writing the marker. While git
 holds the repository's index lock, the open waits up to 2 seconds for the file. With git idle
@@ -726,6 +729,19 @@ Same contract as `retrieval_events`: gitignored `index.db` only, not dropped by 
 silenced by `SIDEGRAPH_TELEMETRY=off`, and pruned to 30 days at each `SessionStart`
 unconditionally. An index written before the table existed has no rows; those sessions are
 counted as having no transcript recorded, never as sessions that cited nothing.
+
+### Portal journals (local, index-only)
+
+`ratify_advice` holds one recommendation per `record_id` with its `verdict`, `reason`,
+`record_hash`, optional `session_id` and timestamp `at`. The hash ties advice to the
+effective canonical body.
+
+`portal_operations` holds one row per `op_key`, with the `request_digest`, optional
+`draft_id` and `record_id`, `planned` record ids, operation `state` and timestamp `at`.
+The planned ids let a retry find the records written by the same operation.
+
+Both journals live in gitignored `index.db`, survive a canonical reload and are pruned
+by `at` after 30 days at SessionStart.
 
 ### Delivery evidence (derived, index-only)
 

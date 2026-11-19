@@ -1,0 +1,17 @@
+{
+  "text": "Known constraints\n- Keep the retry delay bounded (01KAB123000000000000000001)\n",
+  "emitted": true,
+  "chars": 78,
+  "assumptions": [
+    "Fresh session"
+  ],
+  "firing_conditions": [],
+  "prepared": {
+    "synced": false,
+    "adopted_moves": 0
+  },
+  "ids_in_text": [
+    "01KAB123000000000000000001"
+  ],
+  "budget": 2000
+}

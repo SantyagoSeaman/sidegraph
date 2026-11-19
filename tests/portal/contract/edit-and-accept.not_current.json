@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "not_current",
+    "message": "This draft was already decided.",
+    "details": {
+      "offer_save_as_new": true
+    }
+  }
+}

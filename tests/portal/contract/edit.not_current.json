@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "not_current",
+    "message": "There is a newer version of this record.",
+    "details": {
+      "head": "01KAA00000000000000000000A"
+    }
+  }
+}

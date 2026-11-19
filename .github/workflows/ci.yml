@@ -61,6 +61,10 @@ jobs:
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-ubuntu-slim-${{ hashFiles('.pre-commit-config.yaml') }}
+          # pre-commit reuses a hook environment whose repo and rev are unchanged, so a config
+          # change rebuilds only bumped hooks. A gitleaks bump still builds it from source (up
+          # to 13 minutes on slim), and a timed-out job saves no cache.
+          restore-keys: pre-commit-ubuntu-slim-
 
       - name: Install dependencies
         run: uv sync --locked
@@ -68,9 +72,21 @@ jobs:
       - name: Run pre-commit checks
         run: uv run pre-commit run --all-files
 
+      # What reaches main was scanned on its way: internally in a pull request whose full-ci
+      # must pass, publicly on the release branch the promotion waits on. A commit scanned clean
+      # stays clean, so a run scans only the commits origin/main cannot reach: a pull request's
+      # branch, a release snapshot; nothing new on a push to main. The hook excludes whatever
+      # refs/secret-scan-base/ holds; without origin/main it scans the full history. A scanner
+      # or rule change meets the internal history at release step 5 (docs/reference/releasing.md).
       - name: Scan committed history for secrets
         run: |
           test "$(git rev-parse --is-shallow-repository)" = false
+          if git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            git update-ref refs/secret-scan-base/base refs/remotes/origin/main
+            echo "Scanning the commits origin/main cannot reach"
+          else
+            echo "Scanning the full history"
+          fi
           uv run pre-commit run gitleaks-history --hook-stage manual --all-files
 
       - name: Exercise secret scanner integration
@@ -304,6 +320,9 @@ jobs:
             tests/test_delivery_evidence.py tests/test_delivery_stats.py tests/test_delivery_surfaces.py `
             tests/test_git_output_utf8.py `
             tests/test_githooks_atomic_lock.py::test_windows_pid_probe_is_never_a_signal_from_python `
+            tests/portal/test_launch.py::test_lifetime_handle_windows `
+            tests/portal/test_open_portal.py::test_windows_spawn_passes_only_read_handle `
+            tests/portal/test_snippets.py::test_windows_realpath_branch `
             tests/test_health_check_skill.py `
             tests/test_search_ignore.py `
             tests/test_hook_outcome_log.py::test_record_rotates_once_the_file_passes_the_limit `

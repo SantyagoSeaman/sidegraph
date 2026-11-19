@@ -14,7 +14,9 @@ import dataclasses
 import json
 import os
 import posixpath
+import queue
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -24,6 +26,7 @@ from functools import wraps
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path, PurePosixPath
+from types import EllipsisType
 from typing import Annotated, Literal, cast, get_args
 
 import anyio.to_thread
@@ -33,6 +36,7 @@ from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import FunctionTool, Tool, ToolResult
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from ulid import ULID
 
 from . import delivery as delivery_ledger
 from . import (
@@ -90,6 +94,7 @@ from .config import (
     resolve_store_location,
 )
 from .domains import DEFAULT_CANDIDATE_LIMIT, collect_domain_candidates, community_group_path
+from .emulation_types import Preparation, ToolEmulation
 from .engine.reader import GraphifyReader, ReaderCache, open_borrowed_reader
 from .freshness import staleness_phrase
 from .githooks import GRAPH_REBUILD
@@ -125,19 +130,29 @@ from .schema import (
     Fact,
     Provenance,
     Relation,
+    Scope,
     file_anchor_descriptors,
     is_safe_record_id,
 )
 from .store import (
+    _STORE_MOVED_OR_MISSING,
     FILE_BOUND_ORPHAN,
     VOLATILE_STALE_KEY,
     Store,
     SupersessionConflictError,
     UnknownSupportError,
+    _has_existing_store,
+    _is_derived_entity,
     settled_after_failure,
     settled_ratify_result,
 )
-from .store_layout import StoreLinkRefused, is_expired, refuse_outside_store_link
+from .store_layout import (
+    LegacyStoreError,
+    StoreLinkRefused,
+    StoreRequirementError,
+    is_expired,
+    refuse_outside_store_link,
+)
 from .sync import (
     activate_accepted_domain,
     ensure_domain_membership,
@@ -151,6 +166,7 @@ from .verify import find_store_project_repo, verify_snapshot
 from .write_boundary import (
     CONFIGURATION_ERROR,
     WRITE_FAILURE,
+    _arguments_validator,
     is_safe_write,
     safe_write,
     validate_write_arguments,
@@ -179,10 +195,12 @@ mcp.add_middleware(ToolCallRateLimit())
 # sends anything off the machine (``openWorldHint`` false) and none deletes a record
 # (``destructiveHint`` false: the store is append-only, a write adds a record or closes one with
 # ``valid_to``). ``readOnlyHint`` is true only for a tool that never changes a tracked file:
-# a write to ``.sidegraph/index.db`` (derived index, statistics, ledgers; gitignored, never sent)
-# and the first open of a store do not count. The tools that run the lazy sync
+# index maintenance and bookkeeping in ``.sidegraph/index.db`` and the first open of a store
+# do not count. Advice writes change what a person sees in the ratification queue and use
+# the write boundary. The tools that run the lazy sync
 # (``_synced_reader``) are not read-only: its moved rung can adopt a moved symbol into a tracked
 # entity file. ``tests/test_server_borrowed_graph.py::test_t2_*`` holds the read-only set to it.
+# Starting a local process with ``open_portal`` is a side effect too.
 # see design/superpowers/specs/2026-10-04-tool-annotations-and-argument-names-design.md (D1, D2)
 _READ_ONLY = mt.ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
 _LOCAL_WRITE = mt.ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
@@ -207,6 +225,10 @@ _store: Store | None = None
 # end up disagreeing on which instance is "the" store.
 _store_lock = threading.Lock()
 
+_PORTAL_MODULE = "sidegraph.portal"
+_portal_lock = threading.Lock()
+_portal_child: tuple[subprocess.Popen[bytes], int, str] | None = None
+
 
 def _missing_store_setup(path: str) -> str | None:
     """Refuse implicit creation below or outside the selected logical Git root, and a store
@@ -222,11 +244,12 @@ def _missing_store_setup(path: str) -> str | None:
     return None
 
 
-def _get_store() -> Store:
+def _get_store(*, existing_only: bool = False) -> Store:
     """Lazily create and memoize the process-wide Store on first actual use.
 
     A missing destination must sit directly in its logical Git root; otherwise explicit
     CLI initialization is required. Existing non-Git stores remain usable.
+    An existing-only caller without a cached store owns its handle for that one call.
 
     Double-checked locking: the lock is only taken on the (rare) cold-start race window:
     once `_store` is set, every later call reads it lock-free.
@@ -236,15 +259,18 @@ def _get_store() -> Store:
         with _store_lock:
             if _store is None:
                 location = resolve_store_location(search_ancestors=True, warn_on_create=False)
-                setup = _missing_store_setup(location.path)
-                if setup is not None:
-                    raise ValueError(setup)
-                _store = Store(location.path)
+                if existing_only:
+                    return Store(location.path, existing_only=True)
+                else:
+                    setup = _missing_store_setup(location.path)
+                    if setup is not None:
+                        raise ValueError(setup)
+                    _store = Store(location.path)
     return _store
 
 
-def _refresh_store() -> None:
-    """Re-check the process's store against the record files, if it is open yet.
+def _refresh_store(store: Store | None = None) -> None:
+    """Re-check the open store against the record files.
 
     A store that is not open yet is not refreshed: the tool body that needs it opens it, and a
     fresh open is current by construction. A filesystem error (``OSError``) does not fail the
@@ -255,7 +281,8 @@ def _refresh_store() -> None:
     a tool call fails loudly rather than answer from an index it could not verify.
     see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D4)
     """
-    store = _store
+    if store is None:
+        store = _store
     if store is None:
         return
     try:
@@ -425,6 +452,7 @@ _WRITE_TOOLS = frozenset(
         "supersede_fact",
         "propose_decisions",
         "ratify",
+        "advise_ratification",
         "add_domain",
         "supersede_domain",
         "propose_domains",
@@ -450,6 +478,7 @@ _LAZY_READ_TOOLS = frozenset(
         "query_structure",
         "query_decisions",
         "drill_down",
+        "open_portal",
     }
 )
 
@@ -720,6 +749,30 @@ def _require_fact_reachability(store, anchors: list[dict] | None, supports: list
         raise SafeWriteError("supports", "no_live_support")
 
 
+def _copy_bindings(store: Store, source_id: str, target_id: str) -> int:
+    """Copy a record's bindings verbatim, skipping entities already bound to the target."""
+    with store._mutation():
+        if not store.record_types([source_id]):
+            raise ValueError("source_id must name an existing decision or fact")
+        if store.is_skipped("bindings", source_id):
+            raise ValueError(store.skipped_refusal("bindings", source_id))
+        existing = {binding.entity_id for binding in store.bindings_for_record(target_id)}
+        pending = [
+            binding
+            for binding in store.bindings_for_record(source_id)
+            if binding.entity_id not in existing
+        ]
+        for binding in pending:
+            if store.get_entity(binding.entity_id) is None:
+                raise ValueError(f"binding references unknown entity {binding.entity_id!r}")
+        for binding in pending:
+            store.add_binding(
+                binding.model_copy(update={"record_id": target_id}),
+                inherit_retained_from=source_id,
+            )
+        return len(pending)
+
+
 def _add_decision_impl(
     store,
     reader,
@@ -735,8 +788,15 @@ def _add_decision_impl(
     initiative: str | None = None,
     tags: list[str] | str | None = None,
     layer: str | None = None,
+    record_id: str | None = None,
+    scope: str | None = None,
+    inherit_from: str | None = None,
 ) -> dict:
-    """Testable core: redact, write the decision, then best-effort multi-anchor it (+ tag it)."""
+    """Testable core: redact, write the decision, then best-effort multi-anchor it (+ tag it).
+
+    A planned ``record_id`` supports recovery after publication. ``inherit_from`` copies
+    bindings in the record's mutation (Portal design D8).
+    """
     preflight_direct(
         title,
         kind,
@@ -750,7 +810,17 @@ def _add_decision_impl(
         initiative,
         tags,
         layer,
+        record_id,
+        scope,
+        inherit_from,
     )
+    if record_id is not None:
+        try:
+            record_id = str(ULID.from_str(record_id))
+        except (TypeError, ValueError):
+            raise SafeWriteError("record_id", "string_pattern_mismatch") from None
+    if inherit_from is not None and anchors is not None:
+        raise ValueError("anchors and inherit_from are mutually exclusive")
     _validate_anchors(anchors)
     # title/context/choice are required (non-Optional) here, so they're redacted directly
     # (keeps them typed `str`, not the `str | None` `_redact_fields` returns uniformly);
@@ -779,6 +849,7 @@ def _add_decision_impl(
         # pydantic validates/rejects at construction (same as `DecisionKind(kind)` above),
         # this cast only satisfies the static type, it changes no runtime behavior.
         layer=cast(Literal["business", "technical"] | None, layer),
+        scope=Scope(scope) if scope is not None else Scope.REPO,
         valid_from=datetime.now(UTC),
         provenance=Provenance(
             source="human",
@@ -789,8 +860,22 @@ def _add_decision_impl(
             # helper _supersede_decision_impl already uses -- mechanical I1 twin.
             commit=_capture_commit(store),
         ),
+        **({"id": record_id} if record_id is not None else {}),
     )
-    store.add_decision(decision)
+    with store._mutation():
+        if inherit_from is not None and not store.record_types([inherit_from]):
+            raise ValueError("inherit_from must name an existing decision or fact")
+        if inherit_from is not None and store.is_skipped("bindings", inherit_from):
+            raise ValueError(store.skipped_refusal("bindings", inherit_from))
+        inherited = store.bindings_for_record(inherit_from) if inherit_from is not None else []
+        for binding in inherited:
+            if store.get_entity(binding.entity_id) is None:
+                raise ValueError(f"binding references unknown entity {binding.entity_id!r}")
+        if record_id is not None:
+            store._require_unused_planned_record_id(record_id)
+        store.add_decision(decision)
+        if inherit_from is not None:
+            _copy_bindings(store, inherit_from, decision.id)
 
     anchors_skipped, anchors_orphaned = _resolve_anchors(decision.id, anchors, reader, store)
     # Decision-level, so it binds whatever the reader and the anchors: cleaned like every
@@ -1361,8 +1446,15 @@ def _supersede_decision_impl(
     author: str | None = None,
     source: str = "agent",
     ratify_policy: RatifyPolicy = RatifyPolicy.MANUAL,
+    record_id: str | None = None,
+    inherit_from: str | None = None,
+    layer: str | None | EllipsisType = ...,
+    scope: str | None = None,
 ) -> dict:
     """Testable core: write the successor, then anchor it (explicit anchors, or inherit).
+
+    Inherit the predecessor's layer and scope when omitted. An explicit ``layer=None``
+    clears the layer.
 
     See CLAUDE.md gap notes: an unanchored successor was invisible to task-seeded retrieval
     exactly where a reversal matters most. Two paths, never both:
@@ -1373,12 +1465,10 @@ def _supersede_decision_impl(
       (Gate finding: this used to discard ``resolve_and_bind``'s per-anchor result outright,
       so an ambiguous explicit anchor on a supersede silently produced no Tier-2 leaf and no
       feedback about why).
-    - ``anchors`` omitted -> copy the predecessor's existing bindings verbatim (same
-      entity_id/tier/weight/relation/status) onto the successor. This is the obviously-right
-      default: a reversal concerns the same entities the original decision did, so retrieval
-      should find the successor everywhere it found the predecessor. Nothing is "skipped" on
-      this path (inheritance never resolves against the graph), so ``anchors_skipped`` is
-      always ``[]`` here.
+    - ``anchors`` omitted -> copy existing bindings verbatim in the successor's mutation.
+      Inheritance defaults to the predecessor. A portal edit can pass ``inherit_from`` to
+      copy the draft's bindings instead (Portal design D8). Inheritance never resolves
+      against the graph, so ``anchors_skipped`` is always ``[]`` here.
 
     ``source`` decides the landing status as well as the provenance stamp. Only the exact
     value ``"human"`` (the owner asked for this reversal and dictated or approved the
@@ -1411,13 +1501,20 @@ def _supersede_decision_impl(
         session_id,
         author,
         source,
+        record_id,
+        inherit_from,
+        None if layer is ... else layer,
+        scope,
     )
+    if record_id is not None:
+        try:
+            record_id = str(ULID.from_str(record_id))
+        except (TypeError, ValueError):
+            raise SafeWriteError("record_id", "string_pattern_mismatch") from None
+    if inherit_from is not None and anchors is not None:
+        raise ValueError("anchors and inherit_from are mutually exclusive")
     _validate_anchors(anchors)
-    if not anchors and store.is_skipped("bindings", old_decision_id):
-        # Inheritance reads the predecessor's bindings from the index, and a bindings file the
-        # reload left out has no rows there, so the successor would be written with no anchors.
-        # see design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md D5
-        raise ValueError(store.skipped_refusal("bindings", old_decision_id))
+    inheritance_source = inherit_from if inherit_from is not None else old_decision_id
     # See _add_decision_impl: title/context/choice are required, redacted directly (stays
     # `str`); only the optional pair goes through `_redact_fields` (returns `str | None`).
     title, n1 = redact(title)
@@ -1439,6 +1536,8 @@ def _supersede_decision_impl(
         choice=choice,
         rejected=rejected,
         consequences=consequences,
+        layer=None if layer is ... else cast(Literal["business", "technical"] | None, layer),
+        scope=Scope(scope) if scope is not None else Scope.REPO,
         valid_from=datetime.now(UTC),
         supersedes=old_decision_id,
         provenance=Provenance(
@@ -1448,8 +1547,31 @@ def _supersede_decision_impl(
             graph_version=graph_version,
             commit=_capture_commit(store),
         ),
+        **({"id": record_id} if record_id is not None else {}),
     )
-    store.add_decision(replacement)
+    with store._mutation():
+        if inherit_from is not None and not store.record_types([inherit_from]):
+            raise ValueError("inherit_from must name an existing decision or fact")
+        if not anchors and store.is_skipped("bindings", inheritance_source):
+            # A bindings file the reload left out has no rows to inherit.
+            # See design/superpowers/specs/2026-10-03-store-survives-a-bad-file-design.md (D5).
+            raise ValueError(store.skipped_refusal("bindings", inheritance_source))
+        inherited = store.bindings_for_record(inheritance_source) if not anchors else []
+        for binding in inherited:
+            if store.get_entity(binding.entity_id) is None:
+                raise ValueError(f"binding references unknown entity {binding.entity_id!r}")
+        if record_id is not None:
+            store._require_unused_planned_record_id(record_id)
+        if (layer is ... or scope is None) and (
+            predecessor := store.get_decision(old_decision_id)
+        ) is not None:
+            if layer is ...:
+                replacement.layer = predecessor.layer
+            if scope is None:
+                replacement.scope = predecessor.scope
+        store.add_decision(replacement)
+        if not anchors:
+            _copy_bindings(store, inheritance_source, replacement.id)
 
     if anchors:
         anchors_skipped, anchors_orphaned = _resolve_anchors(replacement.id, anchors, reader, store)
@@ -1461,17 +1583,6 @@ def _supersede_decision_impl(
         # passed did not resolve", and answering it here would report a state this call
         # neither created nor could fix.
         anchors_skipped, anchors_orphaned = [], []
-        for b in store.bindings_for_record(old_decision_id):
-            store.add_binding(
-                AnchorBinding(
-                    record_id=replacement.id,
-                    entity_id=b.entity_id,
-                    tier=b.tier,
-                    weight=b.weight,
-                    status=b.status,
-                    relation=b.relation,
-                )
-            )
 
     # A gated successor follows the configured ratification policy, as a superseding
     # draft does: after the anchor step, through the same gates and the same transition.
@@ -1544,6 +1655,7 @@ def supersede_decision(
     ``neighbors``. Never leave a new record contradicting a live old one.
 
     The predecessor is not deleted — it stays retrievable as "tried before, abandoned".
+    The replacement keeps the predecessor's ``layer`` and ``scope``.
     Every text field is redacted first, exactly like ``add_decision``'s.
 
     Anchoring: pass ``anchors`` (same shape as ``add_decision``'s — a list of
@@ -1751,6 +1863,8 @@ def _add_fact_impl(
     anchors: list[dict] | None = None,
     author: str | None = None,
     session_id: str | None = None,
+    record_id: str | None = None,
+    inherit_from: str | None = None,
 ) -> dict:
     """Testable core: redact, write the fact, then best-effort multi-anchor it.
 
@@ -1762,12 +1876,35 @@ def _add_fact_impl(
     design D8, had no reachability gate at all: a bare ``add_fact(statement, source)`` — no
     anchors, no supports — wrote a record no retrieval surface could ever find, and
     ``add_fact(..., supports=[<terminal id>])`` wrote one born flagged by doctor's tightened
-    ``dangling-record`` check. ``_require_fact_reachability`` closes both.
+    ``dangling-record`` check. ``_require_fact_reachability`` closes both. A binding from
+    ``inherit_from`` satisfies the gate and is copied in the fact's mutation (Portal design D8).
     """
     with store._mutation():
-        preflight_direct(statement, source, supports, anchors, author, session_id)
+        preflight_direct(
+            statement, source, supports, anchors, author, session_id, record_id, inherit_from
+        )
+        if record_id is not None:
+            try:
+                record_id = str(ULID.from_str(record_id))
+            except (TypeError, ValueError):
+                raise SafeWriteError("record_id", "string_pattern_mismatch") from None
+        if inherit_from is not None and anchors is not None:
+            raise ValueError("anchors and inherit_from are mutually exclusive")
         _validate_anchors(anchors)
-        _require_fact_reachability(store, anchors, supports or [])
+        if inherit_from is not None and not store.record_types([inherit_from]):
+            raise ValueError("inherit_from must name an existing decision or fact")
+        if inherit_from is not None and store.is_skipped("bindings", inherit_from):
+            raise ValueError(store.skipped_refusal("bindings", inherit_from))
+        inherited = store.bindings_for_record(inherit_from) if inherit_from is not None else []
+        has_durable_binding = False
+        for binding in inherited:
+            entity = store.get_entity(binding.entity_id)
+            if entity is None:
+                raise ValueError(f"binding references unknown entity {binding.entity_id!r}")
+            if not _is_derived_entity(entity):
+                has_durable_binding = True
+        if not has_durable_binding:
+            _require_fact_reachability(store, anchors, supports or [])
         # statement/source are both required (non-Optional) — redact directly, same reasoning
         # as _add_decision_impl (keeps them typed `str`, not `_redact_fields`'s `str | None`).
         statement, n1 = redact(statement)
@@ -1792,9 +1929,14 @@ def _add_fact_impl(
                 # _add_decision_impl's.
                 commit=_capture_commit(store),
             ),
+            **({"id": record_id} if record_id is not None else {}),
         )
+        if record_id is not None:
+            store._require_unused_planned_record_id(record_id)
         store.add_fact(fact)
 
+        if inherit_from is not None:
+            _copy_bindings(store, inherit_from, fact.id)
         anchors_skipped, anchors_orphaned = _bind_fact_anchors(fact.id, anchors, reader, store)
         bindings = store.bindings_for_record(fact.id)
         return _with_commit_hint(
@@ -1883,6 +2025,8 @@ def _supersede_fact_impl(
     anchors: list[dict] | None = None,
     session_id: str | None = None,
     author: str | None = None,
+    record_id: str | None = None,
+    inherit_from: str | None = None,
 ) -> dict:
     """Testable core: write the successor, then anchor it (explicit anchors, or inherit).
 
@@ -1890,10 +2034,10 @@ def _supersede_fact_impl(
     predecessor must already exist; ``supports`` defaults to the PREDECESSOR's ``supports``
     when omitted (a superseding fact informs the same decisions unless told otherwise).
     ``anchors`` given -> resolve fresh via ``_bind_fact_anchors`` (same no-graph-orphans
-    guarantee ``add_fact`` gives). ``anchors`` omitted -> copy the predecessor's bindings
-    verbatim (same entity_id/tier/weight/relation/status, including ``orphaned``) onto the
-    successor — nothing is "skipped" on this path since inheritance never resolves against
-    the graph.
+    guarantee ``add_fact`` gives). ``anchors`` omitted -> copy bindings verbatim in the
+    successor's mutation. Inheritance defaults to the predecessor. ``inherit_from`` selects
+    the draft's bindings in a portal edit (Portal design D8). Nothing is "skipped" on this
+    path since inheritance never resolves against the graph.
 
     ``session_id``/``author`` (I1, R1 improvement wave §1 — design D6 shape, same fields
     ``_supersede_decision_impl`` takes): stamped onto the successor's ``Provenance``, plus
@@ -1906,24 +2050,50 @@ def _supersede_fact_impl(
     Reachability gate (design D8), no-anchors path only: this path used to inherit the
     predecessor's ``supports`` verbatim with no re-check, so a predecessor whose sole
     supporting decision has since gone terminal produced a successor born flagged by
-    doctor's tightened ``dangling-record`` check. Gated only when the predecessor has NO
-    binding to inherit either — when it does, the binding-inheritance loop below carries a
-    real anchor forward regardless of ``supports``, and that already-reachable ordinary case
-    must not be rejected (``anchors`` requested is what "anchorless" means here, per D8's
-    residual note, but a predecessor's inherited BINDING is not a request — it is the same
-    reachability the predecessor already had).
+    doctor's tightened ``dangling-record`` check. At least one binding to inherit from the
+    selected source also satisfies the gate, regardless of ``supports``. It is an existing
+    route, so the gate needs no anchor-resolution request.
     """
     with store._mutation():
-        preflight_direct(old_fact_id, statement, source, supports, anchors, session_id, author)
+        preflight_direct(
+            old_fact_id,
+            statement,
+            source,
+            supports,
+            anchors,
+            session_id,
+            author,
+            record_id,
+            inherit_from,
+        )
+        if record_id is not None:
+            try:
+                record_id = str(ULID.from_str(record_id))
+            except (TypeError, ValueError):
+                raise SafeWriteError("record_id", "string_pattern_mismatch") from None
+        if inherit_from is not None and anchors is not None:
+            raise ValueError("anchors and inherit_from are mutually exclusive")
         predecessor = store.get_fact(old_fact_id)
         if predecessor is None:
             raise ValueError(f"unknown fact {old_fact_id!r}")
         _validate_anchors(anchors)
-        if not anchors and store.is_skipped("bindings", old_fact_id):
+        inheritance_source = inherit_from if inherit_from is not None else old_fact_id
+        if inherit_from is not None and not store.record_types([inherit_from]):
+            raise ValueError("inherit_from must name an existing decision or fact")
+        if not anchors and store.is_skipped("bindings", inheritance_source):
             # As in _supersede_decision_impl, skipped bindings cannot be inherited.
-            raise ValueError(store.skipped_refusal("bindings", old_fact_id))
+            raise ValueError(store.skipped_refusal("bindings", inheritance_source))
+        inherited = store.bindings_for_record(inheritance_source) if not anchors else []
+        has_reachable_binding = False
+        for binding in inherited:
+            entity = store.get_entity(binding.entity_id)
+            if entity is None:
+                raise ValueError(f"binding references unknown entity {binding.entity_id!r}")
+            # Explicit inheritance must still have a route after a rebuild.
+            if inherit_from is None or not _is_derived_entity(entity):
+                has_reachable_binding = True
         effective_supports = supports if supports is not None else predecessor.supports
-        if not anchors and not store.bindings_for_record(old_fact_id):
+        if not anchors and not has_reachable_binding:
             _require_fact_reachability(store, anchors, effective_supports)
         # statement/source are both required (non-Optional) — redact directly, same reasoning
         # as _add_decision_impl (keeps them typed `str`, not `_redact_fields`'s `str | None`).
@@ -1949,7 +2119,10 @@ def _supersede_fact_impl(
                 # other write path in the mirror now applies.
                 commit=_capture_commit(store),
             ),
+            **({"id": record_id} if record_id is not None else {}),
         )
+        if record_id is not None:
+            store._require_unused_planned_record_id(record_id)
         store.add_fact(replacement)
 
         if anchors:
@@ -1959,17 +2132,7 @@ def _supersede_fact_impl(
         else:
             # Inheritance resolves nothing — same reasoning as _supersede_decision_impl's.
             anchors_skipped, anchors_orphaned = [], []
-            for b in store.bindings_for_record(old_fact_id):
-                store.add_binding(
-                    AnchorBinding(
-                        record_id=replacement.id,
-                        entity_id=b.entity_id,
-                        tier=b.tier,
-                        weight=b.weight,
-                        status=b.status,
-                        relation=b.relation,
-                    )
-                )
+            _copy_bindings(store, inheritance_source, replacement.id)
 
         bindings = store.bindings_for_record(replacement.id)
         return _with_commit_hint(
@@ -2035,7 +2198,13 @@ def supersede_fact(
     )
 
 
-def _retrieve_decisions_impl(store, include_superseded: bool = False) -> list[dict]:
+def _retrieve_decisions_impl(
+    store: Store, include_superseded: bool = False, *, all_proposals: bool = False
+) -> list[dict]:
+    """Build the decision pool, with all proposals available to the Portal.
+
+    See design/superpowers/specs/2026-11-17-portal-design.md (D4).
+    """
     decisions = list(store.iter_decisions())
     if not include_superseded:
         decisions = [
@@ -2049,9 +2218,10 @@ def _retrieve_decisions_impl(store, include_superseded: bool = False) -> list[di
     # policy exemption: regulated mode and the surfacing window exist to keep unreviewed
     # text away from an agent, and an MCP tool that hands it over anyway is a documented
     # bypass of a security control. Accepted records are untouched.
-    decisions = [
-        d for d in decisions if d.status != DecisionStatus.PROPOSED or proposal_surfaces(d)
-    ]
+    if not all_proposals:
+        decisions = [
+            d for d in decisions if d.status != DecisionStatus.PROPOSED or proposal_surfaces(d)
+        ]
     # Mistakes first: gotchas and lessons before ADRs/constraints.
     rank = {DecisionKind.GOTCHA: 0, DecisionKind.LESSON: 1}
     decisions.sort(key=lambda d: rank.get(d.kind, 2))
@@ -2339,7 +2509,12 @@ def _id_lookup_fields(notes: list[dict], omitted: int) -> dict:
 
 
 def _id_lookup(
-    wanted: list[str], known: Iterable[str], noun: str, budget: int
+    wanted: list[str],
+    known: Iterable[str],
+    noun: str,
+    budget: int,
+    *,
+    on_cut: Callable[[str], None] | None = None,
 ) -> tuple[set[str], dict, str | None]:
     """What a listing does with the ``ids`` it was given: the ids to look up, the envelope keys
     that report the shortened ones, and the sentence for ``hint``.
@@ -2367,7 +2542,9 @@ def _id_lookup(
             _id_lookup_hint(notes, omitted, noun) or ""
         )
 
+    cut = False
     while notes and cost() > budget // _ID_ROOM_SHARE:
+        cut = True
         shown = next((n for n in reversed(notes) if n.get("candidates")), None)
         if shown is not None:
             shown["candidates"].pop()
@@ -2375,6 +2552,8 @@ def _id_lookup(
         else:
             notes.pop()
             omitted += 1
+    if cut and on_cut is not None:
+        on_cut("Some ID lookup candidates or notes did not fit the budget.")
     return found, _id_lookup_fields(notes, omitted), _id_lookup_hint(notes, omitted, noun)
 
 
@@ -2818,7 +2997,12 @@ def _delivered(ctx: TaskContext, report: _CapReport) -> TaskContext:
 
 
 def _listing_overview(
-    everything: list[dict], include_superseded: bool, limit: int, budget: int
+    everything: list[dict],
+    include_superseded: bool,
+    limit: int,
+    budget: int,
+    *,
+    on_cut: Callable[[str], None] | None = None,
 ) -> str:
     """The answer to a call with no narrowing filter: what the store holds, and the newest few
     as compact rows. ``total`` and ``counts`` cover every record the proposal policy lets
@@ -2856,6 +3040,11 @@ def _listing_overview(
         lambda i: len(_dump(rows[i])),
         lambda k: len(_dump(answer([], _OVERVIEW_HINT if k == len(rows) else cut_hint))),
     )
+    if on_cut is not None:
+        if taken < len(rows):
+            on_cut(cut_hint)
+        elif len(rows) < len(admitted):
+            on_cut("The newest list reached its record limit.")
     return _dump(answer(rows[:taken], _OVERVIEW_HINT if taken == len(rows) else cut_hint))
 
 
@@ -3011,6 +3200,119 @@ def _decision_listing(
     )[0]
 
 
+@dataclasses.dataclass
+class QueryMatch:
+    """Ordered full or partial matches and the anchors or history that explain them.
+
+    A live replacement appears in ``full``, with its predecessors in ``history_replacements``.
+    The private fields preserve the MCP listing's budget groups and empty-answer hints.
+    See design/superpowers/specs/2026-11-17-portal-design.md (D4).
+    """
+
+    words: list[str]
+    full: list[str]
+    partial: list[tuple[str, list[str]]]
+    via_anchor: dict[str, list[str]]
+    history_replacements: dict[str, list[str]]
+
+    def __post_init__(self) -> None:
+        self._groups: list[list[dict]] = []
+        self._seen: set[str] = set()
+        self._history_count = 0
+
+
+def match_query(
+    store: Store, candidates: list[dict], history: list[dict], query: str
+) -> QueryMatch:
+    """Match record text and anchors after the caller has applied visibility filters.
+
+    Search hidden history only when there is no full match in the candidate pool, and offer
+    partial matches only when neither holds every word. The caller supplies facts in the
+    newest-first order of the listing pool. See design/superpowers/specs/
+    2026-11-17-portal-design.md (D4).
+    """
+    words = list(dict.fromkeys(query.lower().split()))
+    match = QueryMatch(words, [], [], {}, {})
+    if not words:
+        return match
+
+    # Anchor names come from the store in one read, only when some record's text misses
+    # a word. The code graph is never opened for a query.
+    names_of: dict[str, tuple[str, ...]] | None = None
+
+    def anchors_of(record_id: str) -> tuple[str, ...]:
+        nonlocal names_of
+        if names_of is None:
+            names_of = store.anchor_names()
+        return names_of.get(record_id, ())
+
+    in_text: list[dict] = []
+    anchor_decisions: list[dict] = []
+    anchor_facts: list[dict] = []
+    held_by: dict[str, list[str]] = {}
+    for row in candidates:
+        record_id = row["id"]
+        body = _searched_text(row)
+        held_by[record_id] = [w for w in words if w in body]
+        match._seen.update(held_by[record_id])
+        missing = [w for w in words if w not in body]
+        if not missing:
+            in_text.append(row)
+            continue
+        names = anchors_of(record_id)
+        lowered = [name.lower() for name in names]
+        match._seen.update(w for w in missing if any(w in low for low in lowered))
+        holding = _anchors_holding(names, missing)
+        if holding:
+            match.via_anchor[record_id] = holding
+            (anchor_facts if _is_fact_row(row) else anchor_decisions).append(row)
+
+    # Records with full matches in their text get the first group, followed by those
+    # holding a word through an anchor. Proposals in every group follow settled records.
+    pool = [r for r in in_text if not _is_fact_row(r)]
+    facts = [r for r in in_text if _is_fact_row(r)]
+    pool.sort(key=_newest_first, reverse=True)
+    # The L0 listing-reorder mutation targets this sort.
+    pool.sort(key=lambda d: _MISTAKE_RANK.get(d["kind"], 2))
+    _rank_listing(anchor_decisions)
+    groups = _accepted_first([pool, facts, anchor_decisions, anchor_facts])
+    if any(groups):
+        match._groups = groups
+        match.full = [row["id"] for group in groups for row in group]
+        return match
+
+    in_history: list[dict] = []
+    for row in history:
+        body = _searched_text(row)
+        missing = [w for w in words if w not in body]
+        if not missing or _anchors_holding(anchors_of(row["id"]), missing):
+            in_history.append(row)
+    if in_history:
+        match._history_count = len(in_history)
+        live = {row["id"]: row for row in candidates}
+        match.history_replacements = _replacements(store, in_history, live)
+        heads = [live[head] for head in match.history_replacements]
+        head_decisions = [d for d in heads if not _is_fact_row(d)]
+        head_facts = [d for d in heads if _is_fact_row(d)]
+        _rank_listing(head_decisions)
+        head_facts.sort(key=_newest_first, reverse=True)
+        groups = _accepted_first([head_decisions, head_facts])
+        match._groups = groups
+        match.full = [row["id"] for group in groups for row in group]
+        return match
+
+    # Partial matches need at least half of the words in the record's own text, with
+    # a minimum of two. This rules out an any-word match for queries of two words.
+    need = max(2, (len(words) + 1) // 2)
+    leads = [r for r in candidates if not _is_fact_row(r) and len(held_by[r["id"]]) >= need]
+    _rank_listing(leads)
+    leads += [r for r in candidates if _is_fact_row(r) and len(held_by[r["id"]]) >= need]
+    leads.sort(key=lambda r: -len(held_by[r["id"]]))
+    match._groups = _accepted_first([leads])
+    match.partial = [(row["id"], held_by[row["id"]]) for group in match._groups for row in group]
+    return match
+
+
 def _decision_listing_result(
     store,
     reader,
@@ -3026,6 +3328,7 @@ def _decision_listing_result(
     borrowed_from: Path | None = None,
     sent: frozenset[str] = frozenset(),
     include_provenance: bool = False,
+    on_cut: Callable[[str], None] | None = None,
 ) -> tuple[str, list[str]]:
     """The text ``retrieve_decisions`` sends: an overview, or, with a narrowing filter, full
     records. The length of the text never exceeds the clamped ``budget_chars``.
@@ -3046,7 +3349,7 @@ def _decision_listing_result(
     terms = (query or "").lower().split()
     everything = _retrieve_decisions_impl(store, include_superseded=True)
     if not (statuses or kinds or wanted_files or wanted_ids or terms):
-        return _listing_overview(everything, include_superseded, limit, budget), []
+        return _listing_overview(everything, include_superseded, limit, budget, on_cut=on_cut), []
 
     pool = everything
     # A query also searches the facts, under the filters that mean something for a fact. A fact
@@ -3058,7 +3361,7 @@ def _decision_listing_result(
     id_hint: str | None = None
     if wanted_ids:
         id_set, id_fields, id_hint = _id_lookup(
-            wanted_ids, (r["id"] for r in (*pool, *searched_facts)), "record", budget
+            wanted_ids, (r["id"] for r in (*pool, *searched_facts)), "record", budget, on_cut=on_cut
         )
         pool = [d for d in pool if d["id"] in id_set]
     # `status` replaces the default exclusion, and so does asking for a record by id.
@@ -3099,109 +3402,42 @@ def _decision_listing_result(
             facts = [f for f in facts if not _in_history(f)]
         if anchored is not None:
             facts = [f for f in facts if f["id"] in anchored]
-    # The live records the call's filters admit, by id: where a replaced history match looks
-    # for its live end (design D8).
-    live = {r["id"]: r for r in [*pool, *facts]}
-    # A word is held by a record's own text, or by the name or path of one of its anchors.
-    # The anchor names come from the store in one read, made at most once per call and only
-    # when some record's text misses a word: the code graph is never opened for a query.
-    words = list(dict.fromkeys(terms))
-    anchor_decisions: list[dict] = []
-    anchor_facts: list[dict] = []
-    via: dict[str, list[str]] = {}  # record id -> the anchors that hold a word its text lacks
-    candidates = [*pool, *facts]
-    held_by: dict[str, list[str]] = {}  # record id -> the words its own text holds
-    seen: set[str] = set()  # the words some searched record holds, in its text or an anchor
-    names_of: dict[str, tuple[str, ...]] | None = None
-
-    def anchors_of(record_id: str) -> tuple[str, ...]:
-        nonlocal names_of
-        if names_of is None:
-            names_of = store.anchor_names()
-        return names_of.get(record_id, ())
-
-    if words:
-        in_text: list[dict] = []
-        for row in candidates:
-            body = _searched_text(row)
-            held_by[row["id"]] = [w for w in words if w in body]
-            seen.update(held_by[row["id"]])
-            missing = [w for w in words if w not in body]
-            if not missing:
-                in_text.append(row)
-                continue
-            names = anchors_of(row["id"])
-            lowered = [name.lower() for name in names]
-            seen.update(w for w in missing if any(w in low for low in lowered))
-            holding = _anchors_holding(names, missing)
-            if holding:
-                via[row["id"]] = holding
-                (anchor_facts if _is_fact_row(row) else anchor_decisions).append(row)
-        pool = [r for r in in_text if not _is_fact_row(r)]
-        facts = [r for r in in_text if _is_fact_row(r)]
-
-    # Mistakes first, then newest first; the sort is stable, so the rank keeps the recency order.
-    pool.sort(key=_newest_first, reverse=True)
-    pool.sort(key=lambda d: _MISTAKE_RANK.get(d["kind"], 2))
-    # A query answer is a run of groups, each placed in the room the ones before it leave: the
-    # decisions and the facts whose own text holds every word, then the decisions and the
-    # facts that hold a word only through an anchor; and the proposals of all four after
-    # everything that is not a proposal. A call without a query keeps its one group as it is
-    # (design D1, D4, D5).
-    _rank_listing(anchor_decisions)
-    groups = _accepted_first([pool, facts, anchor_decisions, anchor_facts]) if terms else [pool]
-    # When nothing holds every word, the answer says why (design D7, D8). A record of the
-    # hidden history that holds every word ends it there: the answer points at history and
-    # offers no partial match. Otherwise the partial matches: the records whose own text
-    # holds at least half of the words and at least two of them, most words first. One word
-    # of two is an any-word match, so a query of one or two words has none: ``need`` is then
-    # more words than a record without a full match can hold.
     partial: str | None = None
     miss: str | None = None
     replacement: str | None = None
+    held_by: dict[str, list[str]] = {}
+    via: dict[str, list[str]] = {}
     replaced: dict[str, list[str]] = {}
-    if words and not any(groups):
-        filtered = bool(statuses or kinds or wanted_files or wanted_ids)
-        in_history: list[dict] = []
-        for row in history:
-            body = _searched_text(row)
-            missing = [w for w in words if w not in body]
-            if not missing or _anchors_holding(anchors_of(row["id"]), missing):
-                in_history.append(row)
-        need = max(2, (len(words) + 1) // 2)
-        leads = [r for r in candidates if not _is_fact_row(r) and len(held_by[r["id"]]) >= need]
-        _rank_listing(leads)
-        leads += [r for r in candidates if _is_fact_row(r) and len(held_by[r["id"]]) >= need]
-        leads.sort(key=lambda r: -len(held_by[r["id"]]))
-        # A full match in hidden history that a live record replaced answers with that record
-        # (design D8); one nothing replaced, or whose replacement a filter excludes, is the
-        # empty answer that points at history.
-        replaced = _replacements(store, in_history, live) if in_history else {}
+    if terms:
+        match = match_query(store, [*pool, *facts], history, query or "")
+        groups = match._groups
+        via = match.via_anchor
+        replaced = match.history_replacements
         if replaced:
-            heads = [live[head] for head in replaced]
-            head_decisions = [d for d in heads if not _is_fact_row(d)]
-            head_facts = [d for d in heads if _is_fact_row(d)]
-            _rank_listing(head_decisions)
-            head_facts.sort(key=_newest_first, reverse=True)
-            groups = _accepted_first([head_decisions, head_facts])
             replacement = (
                 "No live record holds every word of the query. These are the live records that "
                 "replaced the history records named in matched_history, which held every word. "
                 "Read a history record with retrieve_decisions(ids=[...]) or list_facts(ids=[...])."
             )
-        elif in_history:
-            miss = _history_miss(len(in_history))
-        elif leads:
-            groups = _accepted_first([leads])
-            record = "record these filters admit" if filtered else "record"
-            partial = (
-                f"No {record} holds every word of the query. These hold at least {need} of "
-                f"its {len(words)} words; matched_words on each says which. Read the ones "
-                "that are about your question with retrieve_decisions(ids=[...]) or "
-                "list_facts(ids=[...])."
-            )
-        else:
-            miss = _query_miss(words, seen, need, filtered)
+        elif not match.full:
+            filtered = bool(statuses or kinds or wanted_files or wanted_ids)
+            need = max(2, (len(match.words) + 1) // 2)
+            if match._history_count:
+                miss = _history_miss(match._history_count)
+            elif match.partial:
+                held_by = dict(match.partial)
+                record = "record these filters admit" if filtered else "record"
+                partial = (
+                    f"No {record} holds every word of the query. These hold at least {need} of "
+                    f"its {len(match.words)} words; matched_words on each says which. "
+                    "Read the ones that are about your question with "
+                    "retrieve_decisions(ids=[...]) or list_facts(ids=[...])."
+                )
+            else:
+                miss = _query_miss(match.words, match._seen, need, filtered)
+    else:
+        _rank_listing(pool)
+        groups = [pool]
 
     def shaped(rows: list[dict]) -> list[dict]:
         """Rows as the answer shows them. A fact is never a sent-earlier row (design D2)."""
@@ -3564,20 +3800,26 @@ def retrieve_decisions(
     return ToolResult(content=text)
 
 
-def _list_facts_impl(store, include_superseded: bool = False) -> list[dict]:
+def _list_facts_impl(
+    store: Store, include_superseded: bool = False, *, all_proposals: bool = False
+) -> list[dict]:
     """Testable core for list_facts (Gap 1, design/superpowers/specs/
     2026-07-10-ratification-ux-and-mcp-gaps-design.md) -- mirrors
     ``_retrieve_decisions_impl``'s default filtering (excludes SUPERSEDED/REJECTED) and
     full model-dump contract. Sort differs: facts carry no ``kind``, so there is no
     mistakes-first ranking analogue -- sorted purely newest-first (``valid_from`` desc,
-    ``id`` desc as a deterministic tiebreak)."""
+    ``id`` desc as a deterministic tiebreak).
+
+    The Portal can request all proposals (2026-11-17-portal-design.md, D4).
+    """
     facts = list(store.iter_facts())
     if not include_superseded:
         facts = [
             f for f in facts if f.status not in (DecisionStatus.SUPERSEDED, DecisionStatus.REJECTED)
         ]
     # Same policy application as `_retrieve_decisions_impl` — see its comment.
-    facts = [f for f in facts if f.status != DecisionStatus.PROPOSED or proposal_surfaces(f)]
+    if not all_proposals:
+        facts = [f for f in facts if f.status != DecisionStatus.PROPOSED or proposal_surfaces(f)]
     facts.sort(key=lambda f: (f.valid_from, f.id), reverse=True)
     return _with_expired_marker([f.model_dump(mode="json") for f in facts])
 
@@ -3595,6 +3837,7 @@ def _fact_listing(
     limit: int = 25,
     budget_chars: int = 24000,
     borrowed_from: Path | None = None,
+    on_cut: Callable[[str], None] | None = None,
 ) -> str:
     """The text ``list_facts`` sends: the newest facts in full, cut at ``limit`` or
     ``budget_chars`` (the length never exceeds the clamped budget), with the counts of every
@@ -3623,7 +3866,9 @@ def _fact_listing(
     id_fields: dict = {}
     id_hint: str | None = None
     if wanted_ids:
-        id_set, id_fields, id_hint = _id_lookup(wanted_ids, (f["id"] for f in pool), "fact", budget)
+        id_set, id_fields, id_hint = _id_lookup(
+            wanted_ids, (f["id"] for f in pool), "fact", budget, on_cut=on_cut
+        )
         pool = [f for f in pool if f["id"] in id_set]
     history_hidden = not (statuses or wanted_ids or include_superseded)
     if statuses:
@@ -3782,7 +4027,9 @@ def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
     }
 
 
-def _find_entity_listing(store: Store, name: str, file_path: str | None, budget_chars: int) -> str:
+def _find_entity_listing(
+    store: Store, name: str, file_path: str | None = None, budget_chars: int = 24000
+) -> str:
     """Bound the wire lookup, preserving identities and whole binding/candidate rows."""
     budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
     full = _find_entity_impl(store, name, file_path)
@@ -4510,18 +4757,16 @@ def _observe_delivery_errors(surface: str):
     return decorate
 
 
-@_observe_delivery_errors("get_task_context")
-def _get_task_context_impl(
-    store,
-    reader,
-    files: list[str] | None,
-    entities: list[dict] | None,
-    structure_budget: int,
-    memory_budget: int,
-    intent: str | None = None,
+def _build_task_context(
+    store: Store,
+    reader: GraphifyReader | None,
+    files: list[str] | None = None,
+    entities: list[dict] | None = None,
+    structure_budget: int = 4000,
+    memory_budget: int = 6000,
     borrowed_from: Path | None = None,
-) -> str:
-    """Testable core: build seeds, run retrieval, return the rendered slice.
+) -> tuple[Callable[[frozenset[str]], tuple[str, TaskContext, _CapReport]], list[str], bool]:
+    """Prepare seeds once and return a renderer reusable on a sent-claim retry.
 
     A seed the graph does not hold is first read through the seed ladder
     (:func:`seed_ladder.tolerate`): a path with a stray ``./``, a wrong prefix or a bare name, a
@@ -4550,7 +4795,7 @@ def _get_task_context_impl(
     def root_of() -> Path | None:
         # Where "does this file exist?" is asked: the worktree for a borrowed graph, else the
         # git root of the graph. One lookup per call, shared by the ladder and the block.
-        return worktree_of() or reader.repo_root()
+        return worktree_of() or (reader.repo_root() if reader is not None else None)
 
     root_once = _once(root_of)
     worktrees_once = _worktrees_provider(root_once)
@@ -4582,9 +4827,8 @@ def _get_task_context_impl(
             ),
         ]
     descriptor_lookup = store.descriptor_lookup()
-    prefix = _sent_prefix(store)
-    sent, claims = _sent_ids(store, prefix) if prefix is not None else (frozenset(), False)
-    for _attempt in range(2):
+
+    def render(sent: frozenset[str]) -> tuple[str, TaskContext, _CapReport]:
         ctx = _retrieve(
             exact,
             store,
@@ -4724,6 +4968,40 @@ def _get_task_context_impl(
                 report=report,
                 placed=ctx.line_ids,
             )
+        return answer, recorded, report
+
+    seed_paths = (
+        ladder.seed_paths if ladder is not None else [s.file_path for s in seeds if s.file_path]
+    )
+    unresolved = ladder is not None and (
+        bool(ladder.unresolved)
+        or any(
+            note.outcome in ("ambiguous", "directory-too-large", "unresolved-name")
+            for note in ladder.notes
+        )
+    )
+    return render, seed_paths, unresolved
+
+
+@_observe_delivery_errors("get_task_context")
+def _get_task_context_impl(
+    store,
+    reader,
+    files: list[str] | None,
+    entities: list[dict] | None,
+    structure_budget: int,
+    memory_budget: int,
+    intent: str | None = None,
+    borrowed_from: Path | None = None,
+) -> str:
+    """Render task context and record only the answer the caller receives."""
+    render, seed_paths, unresolved = _build_task_context(
+        store, reader, files, entities, structure_budget, memory_budget, borrowed_from
+    )
+    prefix = _sent_prefix(store)
+    sent, claims = _sent_ids(store, prefix) if prefix is not None else (frozenset(), False)
+    for _attempt in range(2):
+        answer, recorded, report = render(sent)
         # Telemetry follows the text: a record the hard cap removed was never shown.
         delivered = _delivered(recorded, report)
         if not claims or _claim_sent(
@@ -4734,25 +5012,48 @@ def _get_task_context_impl(
     _record(
         store,
         delivered.shown_ids,
-        ladder.seed_paths if ladder is not None else [s.file_path for s in seeds if s.file_path],
+        seed_paths,
         ctx=delivered,
         intent=_caller_intent(intent),
         delivery=_delivery_data(
             "get_task_context",
             delivered,
-            unresolved_extra=ladder is not None
-            and (
-                bool(ladder.unresolved)
-                or any(
-                    note.outcome in ("ambiguous", "directory-too-large", "unresolved-name")
-                    for note in ladder.notes
-                )
-            ),
+            unresolved_extra=unresolved,
             structure=False,
             reason="graph_unavailable" if reader is None else None,
         ),
     )
     return answer
+
+
+def prepare_reader(
+    store: Store,
+    reader: GraphifyReader | None,
+    *,
+    borrowed_from: Path | None,
+    sync: bool,
+) -> tuple[GraphifyReader | None, Preparation]:
+    """Run the same best-effort lazy sync as the MCP read tools.
+    See design/superpowers/specs/2026-11-17-portal-design.md (D10).
+    """
+    if not sync:
+        return reader, Preparation(False, 0, "The CLI graph differs from the agent's graph.")
+    if reader is None:
+        return None, Preparation(False, 0, None)
+    try:
+        if borrowed_from is None:
+            report = maybe_sync(store, reader)
+        else:
+            report = maybe_sync(store, reader, canonical_writes=False)
+    except Exception:
+        return reader, Preparation(False, 0, "The code graph could not be synced.")
+    if report is None:
+        return reader, Preparation(False, 0, None)
+    # A Tier-1 community reconcile retry also reports "moved", but has no adopted node.
+    adopted = sum(
+        outcome.status == "moved" and outcome.node_id is not None for outcome in report.outcomes
+    )
+    return reader, Preparation(not report.skipped, adopted, None)
 
 
 def _synced_reader() -> tuple[GraphifyReader | None, Path | None]:
@@ -4769,16 +5070,15 @@ def _synced_reader() -> tuple[GraphifyReader | None, Path | None]:
     rung abstains. Otherwise ``borrowed_from`` is ``None``.
     see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2)"""
     reader = _load_reader()
+    store = _get_store()
+    borrowed_from = None
     if reader is None:
-        borrowed = open_borrowed_reader(_get_store().path, opener=_READERS.get)
+        borrowed = open_borrowed_reader(store.path, opener=_READERS.get)
         if borrowed is None:
             return None, None
-        with contextlib.suppress(Exception):
-            maybe_sync(_get_store(), borrowed[0], canonical_writes=False)
-        return borrowed
-    with contextlib.suppress(Exception):
-        maybe_sync(_get_store(), reader)
-    return reader, None
+        reader, borrowed_from = borrowed
+    reader, _ = prepare_reader(store, reader, borrowed_from=borrowed_from, sync=True)
+    return reader, borrowed_from
 
 
 def _get_task_context_with_sync(
@@ -4809,9 +5109,12 @@ _BUDGET_CUT_ADVICE = "Narrow with files=[...]; lower budget_chars."
 def _query_structure_impl(
     store,
     reader,
-    files: list[str] | None,
-    entities: list[dict] | None,
-    budget_chars: int,
+    files: list[str] | None = None,
+    entities: list[dict] | None = None,
+    budget_chars: int = 4000,
+    *,
+    report: _CapReport | None = None,
+    on_budget_cut: Callable[[], None] | None = None,
 ) -> str:
     """Testable core for the query_structure thin tool (§5 FR8.2).
 
@@ -4823,9 +5126,52 @@ def _query_structure_impl(
     design's "record seeds to prove an area was visited").
     """
     text = _query_structure(
-        _seeds_from_args(files, entities), store, reader, min(budget_chars, _LISTING_BUDGET_MAX)
+        _seeds_from_args(files, entities),
+        store,
+        reader,
+        min(budget_chars, _LISTING_BUDGET_MAX),
+        on_budget_cut=on_budget_cut,
     )
-    return _hard_cap(text, [], _BUDGET_CUT_ADVICE)
+    return _hard_cap(text, [], _BUDGET_CUT_ADVICE, report=report)
+
+
+def _build_query_decisions(
+    store: Store,
+    reader: GraphifyReader | None,
+    seeds: list[Seed],
+    budget_chars: int,
+    sent: frozenset[str],
+) -> tuple[str, TaskContext, _CapReport]:
+    """Render the memory half of task context, keeping the full TaskContext.
+
+    _retrieve keeps the shown IDs and rendered lines so the wrapper can claim and record the
+    records that survive the final cap. The memory budget limits records, and the default
+    structure budget still gathers graph neighbors that can contribute related records.
+    """
+    ctx = _retrieve(
+        seeds,
+        store,
+        reader,
+        RetrievalBudget(memory_chars=min(budget_chars, _LISTING_BUDGET_MAX)),
+        already_sent=sent,
+    )
+    body, legend, hint = ctx.render_parts(include_structure=False)
+    if seeds and body == _NO_CONTEXT and ctx.dropped_seed > 0:
+        # Records were found for the seeds and the budget refused them all: not a miss.
+        body = _budget_missed(
+            ctx.dropped_seed, "budget_chars", min(budget_chars, _LISTING_BUDGET_MAX)
+        )
+    report = _CapReport()
+    answer = _hard_cap(
+        body,
+        [hint] if hint else [],
+        _BUDGET_CUT_ADVICE,
+        legend=legend,
+        atoms=ctx.line_ids,
+        report=report,
+        placed=ctx.line_ids,
+    )
+    return answer, ctx, report
 
 
 @_observe_delivery_errors("query_decisions")
@@ -4837,42 +5183,12 @@ def _query_decisions_impl(
     budget_chars: int,
     intent: str | None = None,
 ) -> str:
-    """Testable core for the query_decisions thin tool (§5 FR8.2).
-
-    Reuses ``retrieval.get_task_context`` (aliased ``_retrieve``) rather than
-    ``retrieval.query_decisions`` (a render-only wrapper that discards its ``TaskContext``)
-    — same ``resolve_seeds`` -> ``_gather_structure`` -> ``rank_decisions`` pipeline,
-    equivalent budget (``memory_chars=budget_chars``, default ``structure_chars`` since this
-    tool takes none), just with the ``ctx`` kept around long enough to read
-    ``ctx.shown_ids`` for telemetry before rendering with ``include_structure=False``.
-    """
+    """Render decisions and record only the answer the caller receives."""
     seeds = _seeds_from_args(files, entities)
     prefix = _sent_prefix(store)
     sent, claims = _sent_ids(store, prefix) if prefix is not None else (frozenset(), False)
     for _attempt in range(2):
-        ctx = _retrieve(
-            seeds,
-            store,
-            reader,
-            RetrievalBudget(memory_chars=min(budget_chars, _LISTING_BUDGET_MAX)),
-            already_sent=sent,
-        )
-        body, legend, hint = ctx.render_parts(include_structure=False)
-        if seeds and body == _NO_CONTEXT and ctx.dropped_seed > 0:
-            # Records were found for the seeds and the budget refused them all: not a miss.
-            body = _budget_missed(
-                ctx.dropped_seed, "budget_chars", min(budget_chars, _LISTING_BUDGET_MAX)
-            )
-        report = _CapReport()
-        answer = _hard_cap(
-            body,
-            [hint] if hint else [],
-            _BUDGET_CUT_ADVICE,
-            legend=legend,
-            atoms=ctx.line_ids,
-            report=report,
-            placed=ctx.line_ids,
-        )
+        answer, ctx, report = _build_query_decisions(store, reader, seeds, budget_chars, sent)
         delivered = _delivered(ctx, report)  # telemetry follows the text, not the render
         if not claims or _claim_sent(
             store, prefix, [i for i in delivered.full_body_ids if i not in sent]
@@ -5620,6 +5936,11 @@ def propose_decisions(
     return results
 
 
+def _build_list_proposed(store: Store, budget_chars: int = 24000) -> str:
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
+    return _hard_cap(_list_proposed_impl(store, budget), [], "Raise budget_chars.")
+
+
 @mcp.tool(annotations=_READ_ONLY, output_schema=None)
 def list_proposed(budget_chars: int = 24000) -> str:
     """List decisions, facts, AND domains awaiting ratification, human-readably.
@@ -5635,8 +5956,7 @@ def list_proposed(budget_chars: int = 24000) -> str:
     call again, or raise ``budget_chars``. A proposal whose ``valid_to`` has passed is tagged
     ``[expired]`` and stays in the queue: it still needs a verdict.
     """
-    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
-    return _hard_cap(_list_proposed_impl(_get_store(), budget), [], "Raise budget_chars.")
+    return _build_list_proposed(_get_store(), budget_chars)
 
 
 _RATIFY_FAILED = "error: ratification failed; reopen the store and inspect status before retrying"
@@ -5942,6 +6262,197 @@ def ratify(
     unreported.
     """
     return _ratify_with_verdict(_get_store(), accept, drop, verdict, reader=_load_reader())
+
+
+@mcp.tool(annotations=_LOCAL_WRITE)
+@safe_write
+def advise_ratification(items: list[dict]) -> ToolResult:
+    """Save recommendations for pending proposals in the Sidegraph Portal queue.
+
+    Each item has the full proposal ``id``, a ``verdict`` of accept, reject or edit, and a
+    one-line ``reason``. New advice replaces any previous advice for that id. The JSON
+    result maps each id to ``recorded`` or a refusal. A person applies their own verdict
+    in the Portal. Advice leaves the proposal's status unchanged.
+
+    See design/superpowers/specs/2026-11-17-portal-design.md (D9).
+    """
+    preflight_direct(items)
+    advice: list[tuple[str, str, str]] = []
+    for item in items:
+        record_id = item.get("id")
+        verdict = item.get("verdict")
+        reason = item.get("reason")
+        if not isinstance(record_id, str) or not is_safe_record_id(record_id):
+            raise SafeWriteError("id")
+        if not isinstance(verdict, str) or verdict not in ("accept", "reject", "edit"):
+            raise SafeWriteError("verdict", "literal_error")
+        if not isinstance(reason, str):
+            raise SafeWriteError("reason", "string_type")
+        advice.append((record_id, verdict, redact(reason)[0]))
+    try:
+        store = _get_store(existing_only=True)
+    except FileNotFoundError as exc:
+        if exc.filename is None or exc.strerror != _STORE_MOVED_OR_MISSING:
+            raise
+        return ToolResult(content=missing_store_message(exc.filename), is_error=True)
+    except StoreLinkRefused as exc:
+        return ToolResult(content=f"Sidegraph: the store path {exc}", is_error=True)
+    except LegacyStoreError as exc:
+        return ToolResult(content=redact(str(exc))[0], is_error=True)
+    except StoreRequirementError as exc:
+        if exc.kind not in ("layout", "missing"):
+            raise
+        return ToolResult(content=redact(str(exc))[0], is_error=True)
+    try:
+        return ToolResult(content=_dump(store.write_advice(advice, _session_key(store))))
+    finally:
+        if store is not _store:
+            store.close()
+
+
+def _open_portal_impl(*, open_browser: bool, session_host: str) -> dict:
+    """Start or reuse this server's Portal. See the Portal design (D1–D2)."""
+    global _portal_child
+    deadline = time.monotonic() + 15
+    terminal_hint = "\nRun sidegraph-portal from a terminal to see startup diagnostics."
+    timeout = {"error": f"Sidegraph: Portal did not start within 15 seconds.{terminal_hint}"}
+    if not _portal_lock.acquire(timeout=15):
+        return timeout
+    try:
+        if _portal_child is not None:
+            running_child, write_fd, url = _portal_child
+            if running_child.poll() is None:
+                return {"url": url}
+            os.close(write_fd)
+            _portal_child = None
+
+        try:
+            store = _store
+            if store is None:
+                path = Path(
+                    resolve_store_location(search_ancestors=True, warn_on_create=False).path
+                )
+                refuse_outside_store_link(path)
+            else:
+                path = store.path
+            if path.is_file():
+                return {"error": "Sidegraph: set the store path to its directory."}
+            if not _has_existing_store(path):
+                destination = (
+                    path.parent.resolve(strict=True) / path.name if ".." in path.parts else path
+                )
+                return {"error": missing_store_message(destination)}
+        except StoreLinkRefused as error:
+            return {"error": f"Sidegraph: the store path {error}"}
+        except (OSError, ValueError) as error:
+            return {
+                "error": f"Sidegraph: could not inspect the Portal store: {error}.\n"
+                "Check the configured store path."
+            }
+
+        if time.monotonic() >= deadline:
+            return timeout
+
+        child: subprocess.Popen[bytes] | None = None
+        try:
+            read_fd, write_fd = os.pipe()
+        except OSError as exc:
+            return {"error": f"Sidegraph: could not create the Portal lifetime pipe: {exc}"}
+        try:
+            try:
+                args = [sys.executable, "-m", _PORTAL_MODULE, "--db", os.fspath(path.absolute())]
+                if session_host:
+                    args.extend(("--host-family", session_host))
+                options: dict = {"pass_fds": (read_fd,)}
+                lifetime = read_fd
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    lifetime = msvcrt.get_osfhandle(read_fd)
+                    startup = subprocess.STARTUPINFO()
+                    startup.lpAttributeList = {"handle_list": [lifetime]}
+                    os.set_handle_inheritable(lifetime, True)
+                    options = {"startupinfo": startup, "close_fds": True}
+                args.extend(("--lifetime-fd", str(lifetime)))
+                if not open_browser:
+                    args.append("--no-browser")
+                child = subprocess.Popen(
+                    args,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=0,
+                    **options,
+                )
+            finally:
+                os.close(read_fd)
+
+            pipe = child.stdout
+            assert pipe is not None
+            response: queue.Queue[bytes] = queue.Queue()
+            line_limit = 4096
+
+            def read_response() -> None:
+                try:
+                    response.put(pipe.readline(line_limit))
+                except (OSError, ValueError):
+                    response.put(b"")
+
+            threading.Thread(target=read_response, daemon=True).start()
+            try:
+                line = response.get(timeout=max(0, deadline - time.monotonic()))
+            except queue.Empty:
+                return timeout
+            complete = line.endswith(b"\n")
+            reply = line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if reply.startswith("error ") and reply[6:].strip():
+                if complete:
+                    return {"error": reply[6:]}
+                if len(line) == line_limit:
+                    return {"error": f"{reply[6:]} (truncated)"}
+            if complete:
+                match = re.fullmatch(
+                    r"url (http://127\.0\.0\.1:(\d{1,5})/#t=[\w-]{43})", reply, re.ASCII
+                )
+                if match and 0 < int(match[2]) <= 65535:
+                    url = match[1]
+                    _portal_child = (child, write_fd, url)
+                    return {"url": url}
+            return {
+                "error": f"Sidegraph: Portal returned an invalid startup response.{terminal_hint}"
+            }
+        except OSError as exc:
+            return {"error": f"Sidegraph: could not start Portal: {exc}{terminal_hint}"}
+        finally:
+            if _portal_child is None:
+                os.close(write_fd)
+                if child is not None:
+                    child.kill()
+                    child.wait()
+            if child is not None and child.stdout is not None:
+                child.stdout.close()
+    finally:
+        _portal_lock.release()
+
+
+@mcp.tool(annotations=_LOCAL_WRITE)
+def open_portal(open_browser: bool = True) -> ToolResult:
+    """Open the Sidegraph Portal for an existing store, or reuse this session's Portal.
+
+    Always show the returned URL as a clickable link, even if a browser opens. If the
+    ratification queue has pending proposals, review them and call ``advise_ratification``
+    with your recommendations. Set ``open_browser=False`` to launch a new Portal without
+    opening a browser. A running Portal returns its existing link.
+
+    See design/superpowers/specs/2026-11-17-portal-design.md (D1, D9).
+    """
+    session = CURRENT_SESSION.get()
+    result = _open_portal_impl(
+        open_browser=open_browser, session_host=(session.family or "") if session else ""
+    )
+    if "error" in result:
+        return ToolResult(content=result["error"], is_error=True)
+    return ToolResult(content=f"Show this URL as a clickable link: {result['url']}")
 
 
 def _add_domain_impl(
@@ -6459,6 +6970,26 @@ def _candidates_note(
     return text
 
 
+def _build_domain_candidates(
+    store: Store,
+    reader: GraphifyReader | None,
+    min_members: int = 5,
+    paths: list[str] | None = None,
+    limit: int = DEFAULT_CANDIDATE_LIMIT,
+    budget_chars: int = 24000,
+) -> str:
+    resolved_limit = None if limit == 0 else limit
+    result = _list_domain_candidates_impl(
+        store,
+        reader,
+        min_members=min_members,
+        paths=paths,
+        limit=resolved_limit,
+        budget_chars=max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars)),
+    )
+    return _dump(result)
+
+
 @mcp.tool(annotations=_READ_ONLY)
 def list_domain_candidates(
     min_members: int = 5,
@@ -6522,16 +7053,11 @@ def list_domain_candidates(
     because a non-superseded domain (or a slug collision) already claims them — never
     listed in ``groups``/``ungrouped``.
     """
-    resolved_limit = None if limit == 0 else limit
-    result = _list_domain_candidates_impl(
-        _get_store(),
-        _load_reader(),
-        min_members=min_members,
-        paths=paths,
-        limit=resolved_limit,
-        budget_chars=max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars)),
+    return ToolResult(
+        content=_build_domain_candidates(
+            _get_store(), _load_reader(), min_members, paths, limit, budget_chars
+        )
     )
-    return ToolResult(content=_dump(result))
 
 
 def _list_domains_impl(store: Store, status: str | None = None) -> list[dict]:
@@ -6582,6 +7108,7 @@ def _domain_listing(
     ids: list[str] | None = None,
     limit: int = 25,
     budget_chars: int = 24000,
+    on_cut: Callable[[str], None] | None = None,
 ) -> str:
     """Return whole domain rows in a compact, character-bounded JSON envelope."""
     rows = _list_domains_impl(store, status=status)
@@ -6595,7 +7122,7 @@ def _domain_listing(
         # A prefix is read against every domain, then ``status`` applies, as it does to decisions.
         every = rows if status is None else _list_domains_impl(store)
         wanted, id_fields, id_hint = _id_lookup(
-            wanted_ids, (r["id"] for r in every), "domain", budget
+            wanted_ids, (r["id"] for r in every), "domain", budget, on_cut=on_cut
         )
         rows = [row for row in rows if row["id"] in wanted]
     if terms:
@@ -6982,6 +7509,30 @@ def _cut_drill_down(result: dict, decision_ids: list[str], limit: int, budget: i
     return list(decision_ids[:taken])
 
 
+def _prepare_drill_down(store: Store, reader: GraphifyReader | None) -> None:
+    if reader is not None:
+        # Direct impl callers can reach this after an index reload. Rebuild membership
+        # best-effort like every lazy sync in this module.
+        with contextlib.suppress(Exception):
+            ensure_domain_membership(store, reader)
+
+
+def _build_drill_down(
+    store: Store,
+    reader: GraphifyReader | None,
+    domain_slug: str,
+    limit: int | None,
+    budget_chars: int | None,
+) -> tuple[dict, list[str], list[delivery_ledger.Snapshot]]:
+    result = _drill_down(domain_slug, store, reader)
+    decision_ids = result.pop("decision_ids", [])
+    # Remove private snapshots BEFORE any public result sizing/cut.
+    snapshots = result.pop("_delivery_snapshots", [])
+    if result.get("found") and limit is not None and budget_chars is not None:
+        decision_ids = _cut_drill_down(result, decision_ids, limit, budget_chars)
+    return result, decision_ids, snapshots
+
+
 @_observe_delivery_errors("drill_down")
 def _drill_down_impl(
     store: Store,
@@ -7005,18 +7556,11 @@ def _drill_down_impl(
     before anything is recorded, so the telemetry counts what was shown; without them the
     answer is whole.
     """
-    if reader is not None:
-        # A reload empties the membership index and drill_down does not sync: rebuild it first,
-        # best-effort like every lazy sync in this module.
-        with contextlib.suppress(Exception):
-            ensure_domain_membership(store, reader)
-    result = _drill_down(domain_slug, store, reader)
-    decision_ids = result.pop("decision_ids", [])
-    # Remove private snapshots BEFORE any public result sizing/cut.
-    snapshots = result.pop("_delivery_snapshots", [])
+    _prepare_drill_down(store, reader)
+    result, decision_ids, snapshots = _build_drill_down(
+        store, reader, domain_slug, limit, budget_chars
+    )
     if result.get("found"):
-        if limit is not None and budget_chars is not None:
-            decision_ids = _cut_drill_down(result, decision_ids, limit, budget_chars)
         # A drill-down delivers records, so it writes a render row like any other lookup: the
         # report counts a session's showings from that journal, and a drill-down absent from
         # it would drop out of the count as soon as the session made an ordinary lookup too.
@@ -7244,7 +7788,9 @@ def _verify_store_impl(store: Store) -> dict:
     }
 
 
-def _verify_listing(store: Store, budget_chars: int) -> str:
+def _verify_listing(
+    store: Store, budget_chars: int = 24000, *, on_cut: Callable[[str], None] | None = None
+) -> str:
     """Count every violation, and fit whole findings in the wire response."""
     budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
     full = _verify_store_impl(store)
@@ -7270,9 +7816,14 @@ def _verify_listing(store: Store, budget_chars: int) -> str:
     if len(complete) <= budget:
         return complete
 
+    clipped_fields = False
     for i, row in enumerate(rows):
         if len(_dump(answer(1, [row]))) > budget:
-            rows[i] = {**row, "detail": _clip(row["detail"]), "path": _clip(row["path"])}
+            clipped = {**row, "detail": _clip(row["detail"]), "path": _clip(row["path"])}
+            clipped_fields |= clipped != row
+            rows[i] = clipped
+    if clipped_fields and on_cut is not None:
+        on_cut("Long violation fields were clipped to fit the budget.")
     complete = _dump(answer(total, rows))
     if len(complete) <= budget:
         return complete
@@ -7313,6 +7864,132 @@ def verify_store(budget_chars: int = 24000) -> ToolResult:
     oversized detail and path fields are clipped. ``clean`` describes the entire store.
     """
     return ToolResult(content=_verify_listing(_get_store(), budget_chars))
+
+
+def emulate_tool(
+    name: str,
+    args: dict,
+    *,
+    store: Store,
+    reader: GraphifyReader | None,
+    borrowed_from: Path | None,
+    sync: bool = True,
+) -> ToolEmulation:
+    """Render a read tool for a fresh session while preserving existing session state.
+    See design/superpowers/specs/2026-11-17-portal-design.md (D10).
+    """
+    # open_portal shares the audited lazy class for process startup.
+    if name == "open_portal" or (name not in _READ_TOOLS and name not in _LAZY_READ_TOOLS):
+        raise ValueError(f"Unknown read tool: {name}")
+    if name in _SEED_TOOLS:
+        args = _route_seed_aliases(args)
+    _, args = _arguments_validator(_REGISTERED_CALLABLES[name], False).validate_python(args)
+    _refresh_store(store)
+
+    decision_files = name == "retrieve_decisions" and bool(_listing_texts(args.get("files")))
+    prepared = Preparation(False, 0, None)
+    if name in _SEED_TOOLS or name == "drill_down" or decision_files or not sync:
+        reader, prepared = prepare_reader(store, reader, borrowed_from=borrowed_from, sync=sync)
+
+    if name in _SEED_TOOLS:
+        args.pop("intent", None)
+        ctx: TaskContext | None = None
+        structure_cut = False
+        match name:
+            case "get_task_context":
+                render, _, _ = _build_task_context(
+                    store, reader, borrowed_from=borrowed_from, **args
+                )
+                text, ctx, report = render(frozenset())
+                budget = min(args.get("memory_budget", 6000), _LISTING_BUDGET_MAX)
+            case "query_decisions":
+                seeds = _seeds_from_args(args.get("files"), args.get("entities"))
+                budget = min(args.get("budget_chars", 6000), _LISTING_BUDGET_MAX)
+                text, ctx, report = _build_query_decisions(
+                    store, reader, seeds, budget, frozenset()
+                )
+            case _:
+
+                def note_structure_cut() -> None:
+                    nonlocal structure_cut
+                    structure_cut = True
+
+                report = _CapReport()
+                text = _query_structure_impl(
+                    store, reader, **args, report=report, on_budget_cut=note_structure_cut
+                )
+                budget = min(args["budget_chars"], _LISTING_BUDGET_MAX)
+        cut = None
+        if report.cut:
+            cut = f"The response exceeded the {_HARD_CAP:,}-character limit."
+        elif ctx is not None and ctx.dropped_for_budget:
+            cut = "Some records did not fit the memory budget."
+        elif ctx is not None and ctx.degraded:
+            cut = "Some records were shortened to fit the memory budget."
+        elif structure_cut:
+            cut = "The structural map reached its budget."
+        return ToolEmulation(text, prepared, budget, cut)
+
+    budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, args.get("budget_chars", 24000)))
+    local_reader = reader if borrowed_from is None else None
+    builder_cut: str | None = None
+
+    def note_listing_cut(reason: str) -> None:
+        nonlocal builder_cut
+        builder_cut = reason
+
+    match name:
+        case "retrieve_decisions":
+            text, _ = _decision_listing_result(
+                store,
+                reader if decision_files else None,
+                borrowed_from=borrowed_from if decision_files else None,
+                on_cut=note_listing_cut,
+                **args,
+            )
+        case "drill_down":
+            if sync:
+                _prepare_drill_down(store, reader)
+            limit = max(1, min(_LISTING_LIMIT_MAX, args.get("limit", 25)))
+            result, _, _ = _build_drill_down(store, reader, args["domain_slug"], limit, budget)
+            text = _dump(result)
+        case "find_entity":
+            text = _find_entity_listing(store, **args)
+        case "get_entity_history":
+            text = _entity_history_listing(store, **args)
+        case "list_domains":
+            text = _domain_listing(store, **args, on_cut=note_listing_cut)
+        case "list_domain_candidates":
+            text = _build_domain_candidates(store, local_reader, **args)
+        case "list_facts":
+            fact_reader = local_reader if _listing_texts(args.get("files")) else None
+            text = _fact_listing(store, fact_reader, **args, on_cut=note_listing_cut)
+        case "list_proposed":
+            text = _build_list_proposed(store, **args)
+            cut = text.partition("\n")[0] if text.startswith("Pending: ") else None
+            return ToolEmulation(text, prepared, budget, cut)
+        case "verify_store":
+            text = _verify_listing(store, **args, on_cut=note_listing_cut)
+        case _:
+            raise ValueError(f"Unknown read tool: {name}")
+
+    result = json.loads(text)
+    hint = result.get("hint") or result.get("note")
+    cut = (
+        hint
+        if (
+            result.get("omitted")
+            or result.get("omitted_fact_ids")
+            or result.get("omitted_fact_ids_unlisted")
+            or result.get("unresolved_omitted")
+            or result.get("id_lookup_omitted")
+            or result.get("truncated")
+            or (name == "find_entity" and result.get("hint"))
+            or (name == "drill_down" and result.get("found") and result.get("hint"))
+        )
+        else None
+    )
+    return ToolEmulation(text, prepared, budget, cut or builder_cut)
 
 
 def _anchor_leaf_summary(store: Store, name: str, file_path: str | None) -> dict | None:

@@ -1,0 +1,215 @@
+{
+  "decisions": [
+    {
+      "record": {
+        "id": "01KAA000000000000000000003",
+        "title": "Treat a restart as a temporary read failure",
+        "kind": "lesson",
+        "status": "proposed",
+        "context": "Read failures and service restarts overlap in the fixture.",
+        "choice": "Retry when the failure is temporary.",
+        "valid_from": "2026-11-17T09:00:00Z",
+        "provenance": {
+          "source": "agent",
+          "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7",
+          "session_id": "example-run"
+        }
+      },
+      "evidence": [
+        {
+          "id": "01KAA00000000000000000000B",
+          "statement": "In the restart fixture, reads resumed after 12 seconds.",
+          "status": "proposed",
+          "source": "Local restart fixture",
+          "valid_from": "2026-11-17T09:00:00Z",
+          "supports": [
+            "01KAA000000000000000000003"
+          ],
+          "provenance": {
+            "source": "manual",
+            "author": "Jo Rivera",
+            "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7"
+          }
+        },
+        {
+          "id": "01KAA000000000000000000006",
+          "statement": "The fixture recorded two temporary read errors.",
+          "status": "proposed",
+          "source": "Local restart fixture",
+          "valid_from": "2026-11-17T09:00:00Z",
+          "supports": [
+            "01KAA000000000000000000003",
+            "01KAA000000000000000000004"
+          ],
+          "provenance": {
+            "source": "manual",
+            "author": "Jo Rivera",
+            "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7"
+          }
+        }
+      ],
+      "advice": {
+        "verdict": "edit",
+        "reason": "Name the temporary failure in the proposed rule."
+      },
+      "signals": {
+        "anchors": [
+          {
+            "entity_id": "01KAA000000000000000000009",
+            "name": "retry_read",
+            "tier": 2,
+            "file": "src/client.py",
+            "start": 8,
+            "end": 207,
+            "status_word": "found",
+            "internal_status": "live",
+            "community": "transport",
+            "editor_path": "/example-project/src/client.py"
+          }
+        ],
+        "similar": [
+          {
+            "id": "01KAB123000000000000000001",
+            "type": "decision",
+            "kind": "constraint",
+            "status": "accepted",
+            "domains": [
+              "transport"
+            ],
+            "title": "Keep the retry delay bounded",
+            "layer": "technical",
+            "anchor_tiers": [
+              2
+            ],
+            "anchor_statuses": [
+              "found"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "record": {
+        "id": "01KAA000000000000000000004",
+        "title": "Keep transient read errors visible in diagnostics",
+        "kind": "lesson",
+        "status": "proposed",
+        "context": "Read failures and service restarts overlap in the fixture.",
+        "choice": "Record the error before retrying.",
+        "valid_from": "2026-11-17T09:00:00Z",
+        "provenance": {
+          "source": "agent",
+          "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7",
+          "session_id": "example-run"
+        }
+      },
+      "evidence": [
+        {
+          "id": "01KAA000000000000000000006",
+          "statement": "The fixture recorded two temporary read errors.",
+          "status": "proposed",
+          "source": "Local restart fixture",
+          "valid_from": "2026-11-17T09:00:00Z",
+          "supports": [
+            "01KAA000000000000000000003",
+            "01KAA000000000000000000004"
+          ],
+          "provenance": {
+            "source": "manual",
+            "author": "Jo Rivera",
+            "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7"
+          }
+        }
+      ],
+      "advice": null,
+      "signals": {
+        "anchors": [],
+        "similar": [
+          {
+            "id": "01KAB123000000000000000001",
+            "type": "decision",
+            "kind": "constraint",
+            "status": "accepted",
+            "domains": [
+              "transport"
+            ],
+            "title": "Keep the retry delay bounded",
+            "layer": "technical",
+            "anchor_tiers": [
+              2
+            ],
+            "anchor_statuses": [
+              "found"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "facts": [
+    {
+      "record": {
+        "id": "01KAA000000000000000000007",
+        "statement": "The test reader accepts an injected clock.",
+        "status": "proposed",
+        "source": "Local restart fixture",
+        "valid_from": "2026-11-17T09:00:00Z",
+        "supports": [
+          "01KAB123000000000000000001"
+        ],
+        "provenance": {
+          "source": "manual",
+          "author": "Jo Rivera",
+          "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7"
+        }
+      },
+      "advice": {
+        "verdict": "accept",
+        "reason": "Reproduced against the test reader."
+      },
+      "signals": {
+        "anchors": [],
+        "similar": [
+          {
+            "id": "01KAB123000000000000000001",
+            "type": "decision",
+            "kind": "constraint",
+            "status": "accepted",
+            "domains": [
+              "transport"
+            ],
+            "title": "Keep the retry delay bounded",
+            "layer": "technical",
+            "anchor_tiers": [
+              2
+            ],
+            "anchor_statuses": [
+              "found"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "domains": [
+    {
+      "record": {
+        "domain_id": "01KAA000000000000000000008",
+        "title": "Client recovery",
+        "slug": "client-recovery",
+        "summary": "How the client handles temporary service failures.",
+        "status": "proposed",
+        "provenance": {
+          "source": "agent",
+          "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7",
+          "session_id": "example-run"
+        }
+      },
+      "advice": null,
+      "signals": {
+        "anchors": [],
+        "similar": []
+      }
+    }
+  ]
+}

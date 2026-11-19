@@ -26,13 +26,14 @@ READ_ONLY = {
     "list_domain_candidates",
     "verify_store",
 }
-# Tools that run the lazy sync, which can adopt a moved symbol into a tracked entity file.
-LOCAL_WRITE_SYNC = {
+# Tools that may adopt a moved symbol during lazy sync or start a Portal process.
+LOCAL_SIDE_EFFECTS = {
     "retrieve_decisions",
     "get_task_context",
     "query_structure",
     "query_decisions",
     "drill_down",
+    "open_portal",
 }
 LOCAL_WRITE = {
     "record_drift_check",
@@ -43,6 +44,7 @@ LOCAL_WRITE = {
     "supersede_fact",
     "propose_decisions",
     "ratify",
+    "advise_ratification",
     "add_domain",
     "supersede_domain",
     "propose_domains",
@@ -74,16 +76,16 @@ def test_t1_read_only_is_true_exactly_for_the_read_only_set():
 
     hint = {n: getattr(t.annotations, "readOnlyHint", None) for n, t in tools.items()}
     assert {n for n, v in hint.items() if v is True} == READ_ONLY
-    assert {n for n, v in hint.items() if v is False} == LOCAL_WRITE_SYNC | LOCAL_WRITE
+    assert {n for n, v in hint.items() if v is False} == LOCAL_SIDE_EFFECTS | LOCAL_WRITE
 
 
 def test_t1_the_three_sets_cover_every_registered_tool():
     """A tool added later must be classified here, and so annotated, before this passes."""
     registered = set(_listed_tools())
 
-    assert not (READ_ONLY & LOCAL_WRITE_SYNC or READ_ONLY & LOCAL_WRITE)
-    assert not LOCAL_WRITE_SYNC & LOCAL_WRITE
-    assert registered == READ_ONLY | LOCAL_WRITE_SYNC | LOCAL_WRITE
+    assert not (READ_ONLY & LOCAL_SIDE_EFFECTS or READ_ONLY & LOCAL_WRITE)
+    assert not LOCAL_SIDE_EFFECTS & LOCAL_WRITE
+    assert registered == READ_ONLY | LOCAL_SIDE_EFFECTS | LOCAL_WRITE
 
 
 def test_ratify_decisions_is_not_a_registered_tool():

@@ -113,7 +113,9 @@ def damaged_template(tmp_path_factory):
 
 
 def test_B1_registry():
-    assert set(WORST_CALLS) == server._READ_TOOLS | server._LAZY_READ_TOOLS
+    # open_portal spawns a process and has no text budget.
+    assert set(WORST_CALLS) | {"open_portal"} == server._READ_TOOLS | server._LAZY_READ_TOOLS
+    assert "advise_ratification" in server._WRITE_TOOLS
 
 
 @pytest.mark.parametrize("name", sorted(WORST_CALLS))

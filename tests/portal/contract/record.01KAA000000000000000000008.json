@@ -1,0 +1,20 @@
+{
+  "record": {
+    "domain_id": "01KAA000000000000000000008",
+    "title": "Client recovery",
+    "slug": "client-recovery",
+    "summary": "How the client handles temporary service failures.",
+    "status": "proposed",
+    "provenance": {
+      "source": "agent",
+      "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7",
+      "session_id": "example-run"
+    }
+  },
+  "history": [],
+  "evidence": [],
+  "keepable_evidence": [],
+  "drifted": false,
+  "pending_evidence": [],
+  "anchors": []
+}

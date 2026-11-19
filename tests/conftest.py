@@ -87,6 +87,19 @@ def _fresh_reader_cache() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_portal_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Portal launches from opening a browser during tests."""
+    from sidegraph import server
+
+    open_portal = server._open_portal_impl
+
+    def open_without_browser(*, open_browser: bool, session_host: str) -> dict:
+        return open_portal(open_browser=False, session_host=session_host)
+
+    monkeypatch.setattr(server, "_open_portal_impl", open_without_browser)
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_sidegraph_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove every ``SIDEGRAPH_``-prefixed variable from the environment for the
     duration of one test. See module docstring for why and for the scope choice.

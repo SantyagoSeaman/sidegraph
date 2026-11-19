@@ -7,6 +7,55 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-11-18
+
+The Sidegraph Portal: a local page to see, ratify and edit the decision store.
+
+### Added
+
+- **Sidegraph Portal.** A local web page for the decision store: review the queue, edit a
+  record, browse the graph, and see what a model would receive. Run `sidegraph-portal` in a
+  terminal, or ask your agent to "show the portal": the `open_portal` MCP tool returns a
+  clickable link, and a Portal opened that way closes with its session. The command prints
+  the launch link, serves `127.0.0.1` only, works on an existing store (it never creates one),
+  and closes after an idle period (30 minutes by default). Preferences are in the user-level `portal.json`;
+  the page's theme button saves the theme there.
+  - **Queue.** Mark each pending decision, standalone fact and domain Accept or Reject (the CLI's *drop*),
+    see what the marks do to the evidence before applying, and apply them together. Agents
+    can leave a recommendation on each pending item with the new `advise_ratification` MCP
+    tool; the Portal shows it beside the item and never acts on it.
+  - **Edit.** Saving a change to an accepted record writes a new version and closes the old
+    one, which stays in the record's history. "Edit and accept" corrects an agent's proposal
+    on the way in. If either stops part-way, Retry continues it and writes nothing twice.
+  - **Browse.** The store as a graph, a searchable table of records, and a card for each
+    record with the code it is anchored to: file, line, snippet and a found, ambiguous,
+    missing or unchecked status.
+  - **Agent view.** Run SessionStart, PreToolUse, the Agent brief, the subagent brief, Stop, the MCP server
+    instructions or any retrieval or inspection MCP tool, for any supported host, and see the text the
+    model would receive in a fresh session. A run of SessionStart or of a tool that syncs prepares the store the way the agent's next call would, so it
+    can follow a moved file and update the moved code's entity file under `.sidegraph/`; it records no session
+    activity and does not count in `sidegraph-stats`.
+
+  See the [Portal guide](docs/guides/portal.md).
+
+### Changed
+
+- **Dependency refresh.** The published package pins `authlib` 1.9.9, `cachetools` 8.0.1,
+  `platformdirs` 4.14.7 and `python-ulid` 4.2.0. An audit of the pinned runtime dependencies
+  found no known vulnerabilities.
+- **Contributors: CI's history secret scan covers only new commits.** It scans the commits
+  `main` cannot reach instead of the whole history on every run; a full-history run stays
+  available locally (see `CONTRIBUTING.md`).
+
+### Fixed
+
+- **Codex session binding leaves missing stores alone.** Matching the request's thread ID to a
+  SessionStart stamp no longer creates a store or rebuilds its index.
+- **Decision supersession preserves layer and scope.** The `supersede_decision` MCP tool keeps
+  these fields from the predecessor.
+- **Portal, ratification advice and hook previews detect a store that moves while opening.** They
+  leave the old location without a store. Existing-only opens also report a missing format marker.
+
 ## [0.32.0] — 2026-11-16
 
 A maintenance release: no change to what Sidegraph does.
@@ -3516,7 +3565,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.29.0...v0.30.0

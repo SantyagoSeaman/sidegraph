@@ -112,10 +112,10 @@ source would silently make them unretrievable. `add()` dedupes by decision id, s
 reachable through more than one of these sources renders once. A store with no accepted domains
 covering any seed community sees byte-identical output to before this layer existed.
 
-Bucket D's `scope: global` decisions are not currently settable through the MCP tools —
-`add_decision`/`propose_decisions` always write `scope="repo"` (the `Decision` model
-default); the global bucket only fills for decisions written with `scope="global"` by other
-means (direct store access). See [`mcp-tools.md`](mcp-tools.md#add_decision).
+Bucket D uses decisions with `scope="global"`, including successors that inherit it through
+[`supersede_decision`](mcp-tools.md#supersede_decision). `add_decision` and `propose_decisions`
+write decisions with the model default, `scope="repo"`. Direct store access can create an
+initial global decision.
 
 Bucket A renders first because a gotcha or constraint is a **known trap for exactly this
 code** — the whole point of the store is that an agent about to edit something sees "this

@@ -1,0 +1,349 @@
+{
+  "cache": {
+    "overview": false,
+    "matched": 3,
+    "returned": 3,
+    "omitted": 0,
+    "facts_matched": 2,
+    "decisions": [
+      {
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZW",
+        "title": "Cache retry: Повтор после сбоя",
+        "kind": "gotcha",
+        "status": "accepted",
+        "context": "A failed request may be retried.",
+        "choice": "Back off before retrying.",
+        "rejected": null,
+        "consequences": null,
+        "valid_from": "2026-11-13T12:00:00Z",
+        "valid_to": null,
+        "supersedes": null,
+        "scope": "repo",
+        "layer": null,
+        "ratified_by": null,
+        "ratified_at": null,
+        "retired": null
+      },
+      {
+        "matched_anchors": [
+          "cache/index.py"
+        ],
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZY",
+        "title": "Use a mutex",
+        "kind": "adr",
+        "status": "accepted",
+        "context": "A rebuild needs exclusive access.",
+        "choice": "Acquire the mutex.",
+        "rejected": null,
+        "consequences": null,
+        "valid_from": "2026-11-16T12:00:00Z",
+        "valid_to": null,
+        "supersedes": "01M2B0F19RPYSVTTWG9D6XSHZX",
+        "scope": "repo",
+        "layer": null,
+        "ratified_by": null,
+        "ratified_at": null,
+        "retired": null
+      },
+      {
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZZ",
+        "title": "Cache retry jitter",
+        "kind": "lesson",
+        "status": "proposed",
+        "context": "A failed request may be retried.",
+        "choice": "Add jitter to backoff.",
+        "rejected": null,
+        "consequences": null,
+        "valid_from": "2026-11-16T12:00:00Z",
+        "valid_to": null,
+        "supersedes": null,
+        "scope": "repo",
+        "layer": null,
+        "ratified_by": null,
+        "ratified_at": null,
+        "retired": null
+      }
+    ],
+    "facts": [
+      {
+        "id": "01M2B0F19RPYSVTTWG9D6XSJ00",
+        "statement": "Cache rebuild measurements.",
+        "source": "Cache retry benchmark",
+        "supports": [],
+        "ratified_by": null,
+        "ratified_at": null,
+        "status": "accepted",
+        "valid_from": "2026-11-15T12:00:00Z",
+        "valid_to": null,
+        "supersedes": null
+      },
+      {
+        "id": "01M2B0F19RPYSVTTWG9D6XSJ03",
+        "statement": "Cache capacity measurements.",
+        "source": "Cache retry capacity run",
+        "supports": [],
+        "ratified_by": null,
+        "ratified_at": null,
+        "status": "accepted",
+        "valid_from": "2026-11-14T12:00:00Z",
+        "valid_to": null,
+        "supersedes": null
+      }
+    ],
+    "hint": null
+  },
+  "CACHE retry absent CACHE": {
+    "overview": false,
+    "match": "partial",
+    "matched": 2,
+    "returned": 2,
+    "omitted": 0,
+    "facts_matched": 2,
+    "decisions": [
+      {
+        "matched_words": [
+          "cache",
+          "retry"
+        ],
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZW",
+        "kind": "gotcha",
+        "status": "accepted",
+        "title": "Cache retry: Повтор после сбоя",
+        "valid_from": "2026-11-13T12:00:00Z"
+      },
+      {
+        "matched_words": [
+          "cache",
+          "retry"
+        ],
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZZ",
+        "kind": "lesson",
+        "status": "proposed",
+        "title": "Cache retry jitter",
+        "valid_from": "2026-11-16T12:00:00Z"
+      }
+    ],
+    "facts": [
+      {
+        "matched_words": [
+          "cache",
+          "retry"
+        ],
+        "id": "01M2B0F19RPYSVTTWG9D6XSJ00",
+        "status": "accepted",
+        "statement": "Cache rebuild measurements."
+      },
+      {
+        "matched_words": [
+          "cache",
+          "retry"
+        ],
+        "id": "01M2B0F19RPYSVTTWG9D6XSJ03",
+        "status": "accepted",
+        "statement": "Cache capacity measurements."
+      }
+    ],
+    "hint": "No record holds every word of the query. These hold at least 2 of its 3 words; matched_words on each says which. Read the ones that are about your question with retrieve_decisions(ids=[...]) or list_facts(ids=[...])."
+  },
+  "cache rebuild_index": {
+    "overview": false,
+    "matched": 2,
+    "returned": 2,
+    "omitted": 0,
+    "decisions": [
+      {
+        "matched_anchors": [
+          "rebuild_index"
+        ],
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZW",
+        "title": "Cache retry: Повтор после сбоя",
+        "kind": "gotcha",
+        "status": "accepted",
+        "context": "A failed request may be retried.",
+        "choice": "Back off before retrying.",
+        "rejected": null,
+        "consequences": null,
+        "valid_from": "2026-11-13T12:00:00Z",
+        "valid_to": null,
+        "supersedes": null,
+        "scope": "repo",
+        "layer": null,
+        "ratified_by": null,
+        "ratified_at": null,
+        "retired": null
+      },
+      {
+        "matched_anchors": [
+          "rebuild_index",
+          "cache/index.py"
+        ],
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZY",
+        "title": "Use a mutex",
+        "kind": "adr",
+        "status": "accepted",
+        "context": "A rebuild needs exclusive access.",
+        "choice": "Acquire the mutex.",
+        "rejected": null,
+        "consequences": null,
+        "valid_from": "2026-11-16T12:00:00Z",
+        "valid_to": null,
+        "supersedes": "01M2B0F19RPYSVTTWG9D6XSHZX",
+        "scope": "repo",
+        "layer": null,
+        "ratified_by": null,
+        "ratified_at": null,
+        "retired": null
+      }
+    ],
+    "hint": null
+  },
+  "old latch": {
+    "overview": false,
+    "matched": 1,
+    "returned": 1,
+    "omitted": 0,
+    "decisions": [
+      {
+        "matched_history": [
+          "01M2B0F19RPYSVTTWG9D6XSHZX"
+        ],
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZY",
+        "title": "Use a mutex",
+        "kind": "adr",
+        "status": "accepted",
+        "context": "A rebuild needs exclusive access.",
+        "choice": "Acquire the mutex.",
+        "rejected": null,
+        "consequences": null,
+        "valid_from": "2026-11-16T12:00:00Z",
+        "valid_to": null,
+        "supersedes": "01M2B0F19RPYSVTTWG9D6XSHZX",
+        "scope": "repo",
+        "layer": null,
+        "ratified_by": null,
+        "ratified_at": null,
+        "retired": null
+      }
+    ],
+    "hint": "No live record holds every word of the query. These are the live records that replaced the history records named in matched_history, which held every word. Read a history record with retrieve_decisions(ids=[...]) or list_facts(ids=[...])."
+  },
+  "ПОВТОР": {
+    "overview": false,
+    "matched": 1,
+    "returned": 1,
+    "omitted": 0,
+    "decisions": [
+      {
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZW",
+        "title": "Cache retry: Повтор после сбоя",
+        "kind": "gotcha",
+        "status": "accepted",
+        "context": "A failed request may be retried.",
+        "choice": "Back off before retrying.",
+        "rejected": null,
+        "consequences": null,
+        "valid_from": "2026-11-13T12:00:00Z",
+        "valid_to": null,
+        "supersedes": null,
+        "scope": "repo",
+        "layer": null,
+        "ratified_by": null,
+        "ratified_at": null,
+        "retired": null
+      }
+    ],
+    "hint": null
+  },
+  "missing cache": {
+    "overview": false,
+    "matched": 0,
+    "returned": 0,
+    "omitted": 0,
+    "decisions": [],
+    "hint": "Nothing matched query=\"missing cache\". No searched record holds both words. In no searched record: missing. Try fewer or other words. History records (superseded, rejected, retired or expired) need status=[...] or include_superseded=True."
+  },
+  "discarded throttle": {
+    "overview": false,
+    "matched": 0,
+    "returned": 0,
+    "omitted": 0,
+    "decisions": [],
+    "hint": "Nothing matched query=\"discarded throttle\". 1 record that holds every word is history. History records (superseded, rejected, retired or expired) need status=[...] or include_superseded=True."
+  },
+  "cache (limit=2)": {
+    "overview": false,
+    "matched": 3,
+    "returned": 1,
+    "omitted": 2,
+    "facts_matched": 2,
+    "decisions": [
+      {
+        "id": "01M2B0F19RPYSVTTWG9D6XSHZW",
+        "title": "Cache retry: Повтор после сбоя",
+        "kind": "gotcha",
+        "status": "accepted",
+        "context": "A failed request may be retried.",
+        "choice": "Back off before retrying.",
+        "rejected": null,
+        "consequences": null,
+        "valid_from": "2026-11-13T12:00:00Z",
+        "valid_to": null,
+        "supersedes": null,
+        "scope": "repo",
+        "layer": null,
+        "ratified_by": null,
+        "ratified_at": null,
+        "retired": null
+      }
+    ],
+    "facts": [
+      {
+        "id": "01M2B0F19RPYSVTTWG9D6XSJ00",
+        "statement": "Cache rebuild measurements.",
+        "source": "Cache retry benchmark",
+        "supports": [],
+        "ratified_by": null,
+        "ratified_at": null,
+        "status": "accepted",
+        "valid_from": "2026-11-15T12:00:00Z",
+        "valid_to": null,
+        "supersedes": null
+      }
+    ],
+    "omitted_ids": [
+      "01M2B0F19RPYSVTTWG9D6XSHZY",
+      "01M2B0F19RPYSVTTWG9D6XSHZZ"
+    ],
+    "omitted_fact_ids": [
+      "01M2B0F19RPYSVTTWG9D6XSJ03"
+    ],
+    "hint": "2 more decisions and 1 more fact matched; limit=2 cut the list. Read them with retrieve_decisions(ids=[...]) (ids in omitted_ids) and list_facts(ids=[...]) (ids in omitted_fact_ids). Narrow with files=[...] or query=..., or raise limit (max 100)."
+  },
+  "_result_order": {
+    "cache": [
+      "01M2B0F19RPYSVTTWG9D6XSHZW",
+      "01M2B0F19RPYSVTTWG9D6XSJ00",
+      "01M2B0F19RPYSVTTWG9D6XSJ03",
+      "01M2B0F19RPYSVTTWG9D6XSHZY",
+      "01M2B0F19RPYSVTTWG9D6XSHZZ"
+    ],
+    "CACHE retry absent CACHE": [
+      "01M2B0F19RPYSVTTWG9D6XSHZW",
+      "01M2B0F19RPYSVTTWG9D6XSJ00",
+      "01M2B0F19RPYSVTTWG9D6XSJ03",
+      "01M2B0F19RPYSVTTWG9D6XSHZZ"
+    ],
+    "cache rebuild_index": [
+      "01M2B0F19RPYSVTTWG9D6XSHZW",
+      "01M2B0F19RPYSVTTWG9D6XSHZY"
+    ],
+    "old latch": [
+      "01M2B0F19RPYSVTTWG9D6XSHZY"
+    ],
+    "ПОВТОР": [
+      "01M2B0F19RPYSVTTWG9D6XSHZW"
+    ],
+    "missing cache": [],
+    "discarded throttle": []
+  }
+}

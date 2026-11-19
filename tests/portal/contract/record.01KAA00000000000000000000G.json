@@ -1,0 +1,48 @@
+{
+  "record": {
+    "id": "01KAA00000000000000000000G",
+    "statement": "In the restart fixture, reads resumed after 12 seconds.",
+    "status": "accepted",
+    "source": "Local restart fixture",
+    "valid_from": "2026-11-17T09:00:00Z",
+    "supports": [
+      "01KAB123000000000000000001"
+    ],
+    "provenance": {
+      "source": "human",
+      "author": "Jo Rivera"
+    },
+    "supersedes": "01KAA000000000000000000005",
+    "ratified_by": null,
+    "ratified_at": null
+  },
+  "history": [
+    {
+      "id": "01KAA000000000000000000005",
+      "type": "fact",
+      "status": "superseded",
+      "domains": [
+        "transport"
+      ],
+      "title": "In the restart fixture, reads resumed after 12 seconds.",
+      "anchor_tiers": [],
+      "anchor_statuses": []
+    },
+    {
+      "id": "01KAA00000000000000000000G",
+      "type": "fact",
+      "status": "accepted",
+      "domains": [
+        "transport"
+      ],
+      "title": "In the restart fixture, reads resumed after 12 seconds.",
+      "anchor_tiers": [],
+      "anchor_statuses": []
+    }
+  ],
+  "evidence": [],
+  "keepable_evidence": [],
+  "drifted": false,
+  "pending_evidence": [],
+  "anchors": []
+}

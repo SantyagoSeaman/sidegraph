@@ -1,0 +1,24 @@
+{
+  "record": {
+    "id": "01KAA000000000000000000006",
+    "statement": "The fixture recorded two temporary read errors.",
+    "status": "proposed",
+    "source": "Local restart fixture",
+    "valid_from": "2026-11-17T09:00:00Z",
+    "supports": [
+      "01KAA000000000000000000003",
+      "01KAA000000000000000000004"
+    ],
+    "provenance": {
+      "source": "manual",
+      "author": "Jo Rivera",
+      "commit": "b14c25ade1444d01f9f1b834de3c2390c23a3ee7"
+    }
+  },
+  "history": [],
+  "evidence": [],
+  "keepable_evidence": [],
+  "drifted": false,
+  "pending_evidence": [],
+  "anchors": []
+}

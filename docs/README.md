@@ -27,6 +27,7 @@ If the repository already has ADRs or specs, use the
 - [Capture decisions and supporting facts](guides/capturing-decisions.md).
 - [Name domains for the SessionStart table of contents](guides/naming-your-domains.md).
 - [Share and review the store as a team](guides/team-workflow.md).
+- [Review and browse the store in Sidegraph Portal](guides/portal.md).
 
 ## Operate and maintain it
 

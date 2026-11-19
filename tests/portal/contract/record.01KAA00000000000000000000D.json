@@ -1,0 +1,55 @@
+{
+  "record": {
+    "id": "01KAA00000000000000000000D",
+    "title": "Treat a restart as a temporary read failure",
+    "kind": "lesson",
+    "status": "accepted",
+    "context": "Read failures and service restarts overlap in the fixture.",
+    "choice": "Retry when the failure is temporary.",
+    "valid_from": "2026-11-17T09:00:00Z",
+    "provenance": {
+      "source": "human",
+      "author": "Jo Rivera"
+    },
+    "supersedes": null,
+    "ratified_by": null,
+    "ratified_at": null
+  },
+  "history": [],
+  "evidence": [
+    {
+      "id": "01KAA00000000000000000000C",
+      "statement": "In the restart fixture, reads resumed after 12 seconds.",
+      "status": "accepted",
+      "source": "Local restart fixture",
+      "valid_from": "2026-11-17T09:00:00Z",
+      "supports": [
+        "01KAA00000000000000000000D"
+      ],
+      "provenance": {
+        "source": "human",
+        "author": "Jo Rivera"
+      },
+      "supersedes": null,
+      "ratified_by": null,
+      "ratified_at": null
+    }
+  ],
+  "keepable_evidence": [],
+  "drifted": false,
+  "pending_evidence": [],
+  "anchors": [
+    {
+      "entity_id": "01KAA000000000000000000009",
+      "name": "retry_read",
+      "tier": 2,
+      "file": "src/client.py",
+      "start": 8,
+      "end": 207,
+      "status_word": "found",
+      "internal_status": "live",
+      "community": "transport",
+      "editor_path": "/example-project/src/client.py"
+    }
+  ]
+}

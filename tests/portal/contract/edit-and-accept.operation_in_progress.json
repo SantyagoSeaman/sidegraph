@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "operation_in_progress",
+    "message": "Another edit is in progress for this draft.",
+    "details": {}
+  }
+}

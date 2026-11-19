@@ -150,8 +150,9 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
    clean, including store-only changes; also zizmor, actionlint, and the shipped-surface/
    public-twin/docs-link checkers described in `CONTRIBUTING.md`. Additionally run
    `uv run pre-commit run gitleaks-history --hook-stage manual --all-files` from a full
-   checkout: CI rejects shallow history and scans all reachable commits, including merge
-   changes, separately from the staged hook.
+   checkout. It scans all reachable commits, including merge changes, separately from the
+   staged hook. CI scans only the commits `origin/main` cannot reach, so this run is where a
+   new scanner version or rule meets the internal history.
 6. `uv build`. Must succeed and produce both `dist/sidegraph-X.Y.Z.tar.gz` and
    `dist/sidegraph-X.Y.Z-py3-none-any.whl`. This is the internal build, which keeps the source's
    dependency ranges. The cut builds the wheel that is published from the pinned snapshot and
@@ -183,10 +184,14 @@ through a Ready pull request, then run the clean-tree preflight on merged `main`
    Refresh `demo` separately when required.
 11. Approve the `pypi` environment when `publish.yml` asks. Before promoting, run
     `uv run python -m tools.bench_hosts l1 --release X.Y.Z`; a tag-mode FAIL blocks the promote;
-    the fix ships as X.Y.(Z+1). The `--python 3.13` flag of that smoke leaves two routes
+    the fix ships as X.Y.(Z+1). The smoke fetches the tag into the public checkout when it is
+    missing and refreshes the `sidegraph` index entry in every uv cache its hosts use, so it can run
+    right after the publish. The `--python 3.13` flag of that smoke leaves two routes
     uncovered, so on a machine whose newest Python is a minor released after 3.13, run
     `sidegraph-doctor --help` through `uvx` with the pin (`sidegraph==X.Y.Z`) but no `--python`
-    flag, and `pip install sidegraph==X.Y.Z` into a venv of that Python. Both must succeed; a
+    flag, adding `--refresh-package sidegraph` (without it uv can answer "no version" from an
+    index cached before the publish), and `pip install sidegraph==X.Y.Z` into a venv of that
+    Python. Both must succeed; a
     failure blocks the promote, and the fix ships as X.Y.(Z+1), like a tag-mode FAIL. Then
     promote with `tools/promote-release.sh vX.Y.Z` (see [Publish and promote](#publish-and-promote)).
 

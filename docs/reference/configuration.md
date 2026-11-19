@@ -52,6 +52,21 @@ and compares case-insensitively, so `OFF` also disables recording.
 opt-in that removes a safety gate should default closed, not open. `SIDEGRAPH_RATIFY_POLICY` is
 neither: a three-value knob matched exactly (after trimming), failing safe to `manual`.
 
+## Portal settings
+
+Both CLI and chat launches read the user-level `portal.json` from
+`${XDG_CONFIG_HOME:-~/.config}/sidegraph/`. Missing or unreadable settings use
+the defaults. Changing the theme in the browser saves the file atomically and
+preserves existing values for other keys. If the file cannot be parsed as a JSON object,
+the Portal refuses to save the theme. The other settings take effect at launch.
+
+| Setting | Default | Behavior |
+|---|---|---|
+| `theme` | `dark` | Use `dark` or `light`. The first page renders with the saved theme. |
+| `poll_seconds` | `5` | Seconds between live update checks, clamped to 2–60. |
+| `editor_url` | `vscode://file/{path}:{line}` | Editor link template with the file path and line number. |
+| `idle_minutes` | `30` | Shut down after this many minutes without a user-initiated request. The minimum is `0.05` minutes. |
+
 ## Store path resolution
 
 `SIDEGRAPH_DIR` and `SIDEGRAPH_DB` both feed one shared resolver

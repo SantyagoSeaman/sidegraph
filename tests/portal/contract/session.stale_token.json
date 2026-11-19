@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "The portal you opened has closed.",
+    "details": {}
+  }
+}

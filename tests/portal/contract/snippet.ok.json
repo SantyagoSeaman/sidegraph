@@ -1,0 +1,20 @@
+{
+  "file": "src/client.py",
+  "start": 8,
+  "end": 19,
+  "lines": [
+    "def retry_read(reader, *, sleep, maximum=30):",
+    "    \"\"\"Read through temporary failures using the fixture delay schedule.\"\"\"",
+    "    fixture_schedule = (",
+    "         1,  # Repeatable recovery sample 001",
+    "         2,  # Repeatable recovery sample 002",
+    "         4,  # Repeatable recovery sample 003",
+    "         8,  # Repeatable recovery sample 004",
+    "        16,  # Repeatable recovery sample 005",
+    "        30,  # Repeatable recovery sample 006",
+    "        30,  # Repeatable recovery sample 007",
+    "        30,  # Repeatable recovery sample 008",
+    "        30,  # Repeatable recovery sample 009"
+  ],
+  "shifted": false
+}

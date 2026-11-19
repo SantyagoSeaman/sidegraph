@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "bad_host",
+    "message": "Use the portal address printed at launch.",
+    "details": {}
+  }
+}

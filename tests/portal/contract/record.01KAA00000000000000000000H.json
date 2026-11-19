@@ -1,0 +1,25 @@
+{
+  "record": {
+    "id": "01KAA00000000000000000000H",
+    "statement": "The test reader accepts an injected clock.",
+    "status": "accepted",
+    "source": "Local restart fixture",
+    "valid_from": "2026-11-17T09:00:00Z",
+    "supports": [
+      "01KAB123000000000000000001"
+    ],
+    "provenance": {
+      "source": "human",
+      "author": "Jo Rivera"
+    },
+    "supersedes": null,
+    "ratified_by": null,
+    "ratified_at": null
+  },
+  "history": [],
+  "evidence": [],
+  "keepable_evidence": [],
+  "drifted": false,
+  "pending_evidence": [],
+  "anchors": []
+}

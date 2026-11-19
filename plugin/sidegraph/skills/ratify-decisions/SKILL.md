@@ -71,6 +71,10 @@ see it).
      out") isn't falsifiable later; recommend "fix first" over accepting one with no
      real source.
 
+   If the Portal is open in this session, call `advise_ratification` after reviewing each
+   item. Use its full id and your one-line reason. Send `accept` for accept, `reject` for
+   drop, or `edit` for fix first. The person can apply their own verdicts in the Portal.
+
    Then **STOP and wait** for verdicts.
 
 3. **On explicit verdicts, make ONE `ratify(accept=[...], drop=[...], verdict="<the human's
@@ -176,7 +180,7 @@ decision proposed.
   Present the batch grouped, recommend a subset, let the human widen it.
 - **CLI parity:** `sidegraph-ratify` (no flags = the same pending listing;
   `--accept`/`--drop`/`--all`) is the terminal/PR-review equivalent. The human runs it as
-  `uvx --from sidegraph==0.32.0 --python 3.13 sidegraph-ratify`, at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
+  `uvx --from sidegraph==0.33.0 --python 3.13 sidegraph-ratify`, at the plugin's pinned version, never the copy on `PATH` ([why](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin)).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
   Point the human there when they'd rather review outside the session.
 - A proposed record is not hidden while it waits: by default it surfaces in retrieval tagged

@@ -62,6 +62,7 @@ _FIELDS = frozenset(
         "accept",
         "drop",
         "verdict",
+        "reason",
         "record_id",
         "decision_id",
         "checked_commit",

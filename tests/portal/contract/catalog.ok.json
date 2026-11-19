@@ -1,0 +1,668 @@
+{
+  "tools": [
+    {
+      "name": "retrieve_decisions",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_superseded": {
+            "default": false,
+            "type": "boolean"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 25,
+            "type": "integer"
+          },
+          "budget_chars": {
+            "default": 24000,
+            "type": "integer"
+          },
+          "include_provenance": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_task_context",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "entities": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "structure_budget": {
+            "default": 4000,
+            "type": "integer"
+          },
+          "memory_budget": {
+            "default": 6000,
+            "type": "integer"
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "query_decisions",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "entities": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "budget_chars": {
+            "default": 6000,
+            "type": "integer"
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "query_structure",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "entities": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "budget_chars": {
+            "default": 4000,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "drill_down",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "domain_slug": {
+            "type": "string"
+          },
+          "limit": {
+            "default": 25,
+            "type": "integer"
+          },
+          "budget_chars": {
+            "default": 24000,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "domain_slug"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "find_entity",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "file_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "budget_chars": {
+            "default": 24000,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_entity_history",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "entity_id": {
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 25,
+            "type": "integer"
+          },
+          "budget_chars": {
+            "default": 24000,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entity_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_domains",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 25,
+            "type": "integer"
+          },
+          "budget_chars": {
+            "default": 24000,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_domain_candidates",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "min_members": {
+            "default": 5,
+            "type": "integer"
+          },
+          "paths": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 100,
+            "type": "integer"
+          },
+          "budget_chars": {
+            "default": 24000,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_facts",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_superseded": {
+            "default": false,
+            "type": "boolean"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "supports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 25,
+            "type": "integer"
+          },
+          "budget_chars": {
+            "default": 24000,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_proposed",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_chars": {
+            "default": 24000,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "verify_store",
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_chars": {
+            "default": 24000,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    }
+  ],
+  "hook_surfaces": [
+    {
+      "event": "session_start",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "startup",
+              "resume",
+              "compact"
+            ]
+          }
+        }
+      },
+      "wired_on": [
+        "claude",
+        "codex",
+        "grok",
+        "muse"
+      ],
+      "firing_conditions": [
+        "The session starts, resumes or compacts."
+      ]
+    },
+    {
+      "event": "pre_tool_use",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          }
+        }
+      },
+      "wired_on": [
+        "claude",
+        "grok"
+      ],
+      "firing_conditions": [
+        "A file read or edit reaches an anchored path."
+      ]
+    },
+    {
+      "event": "agent_brief",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string"
+          }
+        }
+      },
+      "wired_on": [
+        "claude",
+        "grok"
+      ],
+      "firing_conditions": [
+        "The host starts an Agent or Task."
+      ]
+    },
+    {
+      "event": "subagent_start",
+      "params_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "wired_on": [
+        "claude",
+        "codex",
+        "grok",
+        "muse"
+      ],
+      "firing_conditions": [
+        "A subagent starts in the repository."
+      ]
+    },
+    {
+      "event": "stop",
+      "params_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "wired_on": [
+        "claude",
+        "codex",
+        "grok"
+      ],
+      "firing_conditions": [
+        "The transcript gate passes."
+      ]
+    },
+    {
+      "event": "mcp_instructions",
+      "params_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "wired_on": [
+        "grok"
+      ],
+      "firing_conditions": [
+        "The host reads the MCP server instructions."
+      ]
+    }
+  ],
+  "host_families": [
+    "claude",
+    "codex",
+    "grok",
+    "muse"
+  ]
+}

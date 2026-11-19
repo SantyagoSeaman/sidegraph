@@ -16,7 +16,7 @@ import sqlite3
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import mcp.types as mt
@@ -35,6 +35,8 @@ from ..config import (
     resolve_store_location,
 )
 from ..schema import Decision
+from ..store import _has_existing_store
+from ..store_layout import refuse_outside_store_link, symlinked_internals
 from .claude_settings import RATIFY_POLICY_ENV_VAR, current_ratify_policy
 from .project_anchor import (  # noqa: F401  (REPO_ROOT_FLAG is re-exported)
     REPO_ROOT_FLAG,
@@ -50,10 +52,26 @@ GROK_MAP_MAX_CHARS = 2000
 
 
 def _stored_stamp_keys() -> list[str]:
-    """The session keys SessionStart stamped (Codex bridge). Runs on a worker thread; a store
-    that fails to open raises and the caller falls back to the bare thread id."""
-    store = server._get_store()
-    return stamp_keys_of(store.meta_with_prefix(TELEMETRY_SESSION_STAMP_PREFIX))
+    """Read the Codex bridge stamps without opening a Store or creating an index."""
+    prefix = TELEMETRY_SESSION_STAMP_PREFIX
+    store = server._store
+    if store is not None:
+        return stamp_keys_of(store.meta_with_prefix(prefix))
+
+    store_dir = Path(resolve_store_location(search_ancestors=True, warn_on_create=False).path)
+    refuse_outside_store_link(store_dir)
+    if (
+        not store_dir.is_dir()
+        or symlinked_internals(store_dir)
+        or not _has_existing_store(store_dir)
+    ):
+        return []
+
+    def read(conn: sqlite3.Connection) -> list[str]:
+        rows = conn.execute("SELECT key, value FROM meta WHERE key GLOB ?", (prefix + "*",))
+        return stamp_keys_of({row["key"]: row["value"] for row in rows})
+
+    return _query_index_ro(store_dir, read) or []
 
 
 def _request_facts(context: MiddlewareContext[Any]) -> tuple[str | None, dict[str, Any]]:
@@ -78,8 +96,7 @@ class _BindSession(Middleware):
         hint: SessionHint | None = None
         try:
             name, meta = _request_facts(context)
-            # The Codex bridge reads the store; off the event loop like `_RefreshStore`, so
-            # the loop never waits on the store's lock.
+            # Read Codex stamps off the event loop, like `_RefreshStore`.
             keys: list[str] = []
             if name is not None and isinstance(meta.get("threadId"), str):
                 try:
@@ -96,7 +113,17 @@ class _BindSession(Middleware):
             CURRENT_SESSION.reset(token)
 
 
-def _grok_session_map() -> str | None:
+def _render_grok_map(cache: dict | None) -> str:
+    from ..retrieval import render_toc
+    from .hooks import STANDING_SEARCH_INSTRUCTION, version_line
+
+    head = f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}"
+    if cache is None:
+        return head
+    return _fit(f"{head}\n\n{render_toc(cache)}", GROK_MAP_MAX_CHARS)
+
+
+def _grok_session_map(store_path: Path | None = None) -> str | None:
     """The session map for a Grok session: read-only, from the store alone, never the graph.
 
     The standing instruction and the version line, then the domain table of contents that
@@ -121,38 +148,35 @@ def _grok_session_map() -> str | None:
         TOC_CACHE_KEY,
         global_mistakes_from,
         live_global_mistakes,
-        render_toc,
     )
-    from .hooks import STANDING_SEARCH_INSTRUCTION, version_line
 
-    head = f"{STANDING_SEARCH_INSTRUCTION}\n\n{version_line()}"
-    store = server._store
-    if store is None:
-        location = resolve_store_location(search_ancestors=True, warn_on_create=False)
-        if not os.path.lexists(location.path):
-            return None
+    store = server._store if store_path is None else None
+    if store is None and store_path is None:
+        store_path = Path(resolve_store_location(search_ancestors=True, warn_on_create=False).path)
+    if store_path is not None and not os.path.lexists(store_path):
+        return None
     try:
-        if store is None:
-            raw = _read_meta_ro(Path(location.path), TOC_CACHE_KEY)
-        else:
-            raw = store.get_meta(TOC_CACHE_KEY)
+        raw = (
+            _read_meta_ro(cast(Path, store_path), TOC_CACHE_KEY)
+            if store is None
+            else store.get_meta(TOC_CACHE_KEY)
+        )
         cache = json.loads(raw or "null")
         if not (isinstance(cache, dict) and cache.get("domains")):
-            return head
+            return _render_grok_map(None)
         if store is not None:
             cache = {**cache, **live_global_mistakes(store)}
-        elif _index_is_current(Path(location.path)):
-            rows = _read_global_decisions_ro(Path(location.path)) or []
+        elif store_path is not None and _index_is_current(store_path):
+            rows = _read_global_decisions_ro(store_path) or []
             cache = {**cache, **global_mistakes_from(rows)}
         else:
             # The record files changed since this index was built (a `git pull`), so its rows
             # and the cache's own lists may still hold a retired rule. Serve no global
             # sections; the first tool call opens the store and refreshes the index.
             cache = {k: v for k, v in cache.items() if k not in _GLOBAL_SECTIONS}
-        text = f"{head}\n\n{render_toc(cache)}"
+        return _render_grok_map(cache)
     except Exception:  # noqa: BLE001 - a bad cache costs the table, not the map
-        return head
-    return _fit(text, GROK_MAP_MAX_CHARS)
+        return _render_grok_map(None)
 
 
 # The cache keys that carry global rules; the cold map drops them when the index is behind.

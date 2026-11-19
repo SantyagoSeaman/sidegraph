@@ -246,13 +246,13 @@ def _validation_error() -> ValidationError:
         (_validation_error(), VERIFY_SENTENCE),
         (
             sqlite3.DatabaseError("file is not a database"),
-            "The index is derived and safe to delete: remove {dir}/index.db and start a new "
-            "session.",
+            "Deleting the index loses local journals, including Portal advice and operation "
+            "recovery. Back up the index, then remove {dir}/index.db and start a new session.",
         ),
         (
             sqlite3.OperationalError("attempt to write a readonly database"),
-            "The index is derived and safe to delete: remove {dir}/index.db and start a new "
-            "session.",
+            "Deleting the index loses local journals, including Portal advice and operation "
+            "recovery. Back up the index, then remove {dir}/index.db and start a new session.",
         ),
         (
             ValueError(

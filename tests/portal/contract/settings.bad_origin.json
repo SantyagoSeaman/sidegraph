@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "bad_origin",
+    "message": "This request must come from the portal page.",
+    "details": {}
+  }
+}

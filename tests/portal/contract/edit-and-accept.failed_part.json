@@ -1,0 +1,33 @@
+{
+  "op_key": "00000000-0000-4000-8000-000000000001",
+  "state": "started",
+  "new_record_id": "01KAA00000000000000000000D",
+  "offer_save_as_new": false,
+  "parts": [
+    {
+      "part": "drop_draft",
+      "id": "01KAA000000000000000000003",
+      "outcome": "done"
+    },
+    {
+      "part": "version",
+      "id": "01KAA00000000000000000000D",
+      "outcome": "done"
+    },
+    {
+      "part": "bindings",
+      "id": "01KAA00000000000000000000D",
+      "outcome": "done"
+    },
+    {
+      "part": "fact:01KAA00000000000000000000C",
+      "id": "01KAA00000000000000000000C",
+      "outcome": "failed",
+      "message": "The kept fact could not be written."
+    },
+    {
+      "part": "cascade",
+      "outcome": "skipped"
+    }
+  ]
+}

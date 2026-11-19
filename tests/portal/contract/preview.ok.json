@@ -1,0 +1,19 @@
+{
+  "outcomes": {
+    "01KAA000000000000000000003": {
+      "outcome": "accepted"
+    },
+    "01KAA00000000000000000000B": {
+      "outcome": "accepted",
+      "evidence_of": [
+        "01KAA000000000000000000003"
+      ]
+    },
+    "01KAA000000000000000000006": {
+      "outcome": "accepted",
+      "evidence_of": [
+        "01KAA000000000000000000003"
+      ]
+    }
+  }
+}

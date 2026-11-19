@@ -1,0 +1,14 @@
+{
+  "text": "## Sidegraph memory\nNo decisions yet.\n",
+  "emitted": true,
+  "chars": 38,
+  "assumptions": [
+    "Fresh session"
+  ],
+  "firing_conditions": [],
+  "prepared": {
+    "synced": false,
+    "adopted_moves": 0
+  },
+  "ids_in_text": []
+}

@@ -1,0 +1,15 @@
+{
+  "text": "No matching records.\n",
+  "emitted": true,
+  "chars": 21,
+  "assumptions": [
+    "Fresh session"
+  ],
+  "firing_conditions": [],
+  "prepared": {
+    "synced": false,
+    "adopted_moves": 0
+  },
+  "ids_in_text": [],
+  "budget": 2000
+}

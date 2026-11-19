@@ -1,0 +1,17 @@
+{
+  "op_key": "00000000-0000-4000-8000-000000000001",
+  "state": "started",
+  "offer_save_as_new": false,
+  "parts": [
+    {
+      "part": "drop_draft",
+      "outcome": "done",
+      "id": "01KAA000000000000000000007"
+    },
+    {
+      "part": "version",
+      "outcome": "failed",
+      "message": "The version could not be written."
+    }
+  ]
+}

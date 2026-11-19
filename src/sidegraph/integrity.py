@@ -305,8 +305,9 @@ def _open_error_fix(error: BaseException, store_dir: Path) -> str:
         )
     if isinstance(error, sqlite3.DatabaseError) and _index_is_to_blame(error, store_dir):
         return (
-            f"The index is derived and safe to delete: remove {store_dir}/index.db and start a "
-            "new session."
+            "Deleting the index loses local journals, including Portal advice and operation "
+            f"recovery. Back up the index, then remove {store_dir}/index.db "
+            "and start a new session."
         )
     if isinstance(error, ValueError) and "migration tooling is deferred" in str(error):
         return (

@@ -10,7 +10,8 @@
 # .sidegraph/ is excluded repo-wide: the store is append-only and machine-written, and
 # letting a whitespace fixer rewrite its records would mutate the store as a side effect
 # of committing. src/sidegraph/viz/assets/ holds a vendored 688 KB bundle that is not
-# ours to reformat. sidegraph-graph.html is the --demo release's generated decision-graph
+# ours to reformat; src/sidegraph/portal/static/vendor/ holds the Portal's vendored Preact, hooks
+# and htm builds, equally not ours. sidegraph-graph.html is the --demo release's generated decision-graph
 # viz (tools/release-public.sh force-adds it since it's gitignored internally): it's over a
 # megabyte and its size tracks the store, so check-added-large-files (--maxkb=1024) would
 # fail the FIRST --demo release at its own verification gate — a generated release artifact,
@@ -31,7 +32,7 @@
 # and three receipts exceed the 1 MiB large-file cap. Prose files outside those directories
 # (the session recap, the index, the plan) are still linted. The corpus leak gate and gitleaks
 # still scan the packages.
-exclude: '^(\.sidegraph/|src/sidegraph/viz/assets/|sidegraph-graph\.html|(design|docs)/whitepaper/evidence/artifact-bundle/|design/reviews/2026-11-0[67]-[^/]+/)'
+exclude: '^(\.sidegraph/|src/sidegraph/viz/assets/|src/sidegraph/portal/static/vendor/|sidegraph-graph\.html|(design|docs)/whitepaper/evidence/artifact-bundle/|design/reviews/2026-11-0[67]-[^/]+/)'
 
 # A plain `pre-commit install` (no --hook-types flag) wires up BOTH the pre-commit stage and
 # the commit-msg stage below, so the `no-session-links` hook actually runs for a contributor
@@ -84,10 +85,13 @@ repos:
         # its upstream entry reads the staged Git index without filtered filenames.
         always_run: true
         stages: [pre-commit]
+      # Scans every commit reachable from HEAD except those reachable from a ref under
+      # refs/secret-scan-base/. Locally there is none, so the whole history is scanned; CI sets
+      # one to origin/main (see ci.yml).
       - id: gitleaks
         alias: gitleaks-history
         name: Detect hardcoded secrets in committed history
-        entry: gitleaks git --redact "--log-opts=--diff-merges=first-parent HEAD" --verbose
+        entry: gitleaks git --redact "--log-opts=--diff-merges=first-parent HEAD --not --glob=refs/secret-scan-base/*" --verbose
         always_run: true
         stages: [manual]
 

@@ -100,8 +100,9 @@ GitHub Actions security and correctness checks (`zizmor`, `actionlint`), `check-
 
 The Gitleaks commit hook scans staged content even when every changed path is excluded from
 formatting, including `.sidegraph/`; `--all-files` does not turn it into a scan of committed
-history. CI additionally scans all history reachable from `HEAD`, merge changes included,
-with the same pinned scanner. Findings are redacted. To run that scan yourself, use a full
+history. CI additionally scans committed history, merge changes included, with the same pinned
+scanner: the commits `main` cannot reach, since what reaches `main` was scanned before it got
+there. Findings are redacted. To scan all history reachable from `HEAD` yourself, use a full
 checkout (CI rejects shallow history):
 
 ```bash

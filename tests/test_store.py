@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -42,6 +44,85 @@ def _decision(**overrides) -> Decision:
 
 def test_store_stamps_schema_version(store: Store) -> None:
     assert store.schema_version == SCHEMA_VERSION
+
+
+def test_existing_only_open_leaves_empty_directory_untouched(tmp_path: Path) -> None:
+    with (
+        pytest.raises(FileNotFoundError, match="store moved or missing"),
+        Store(tmp_path, existing_only=True),
+    ):
+        pass
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("layout", ["absent", "replacement", "replacement-with-index", "cold"])
+def test_existing_only_open_refuses_move_at_sqlite_connect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout: str
+) -> None:
+    root = tmp_path / ".sidegraph"
+    index = root / "index.db"
+    with Store(root):
+        pass
+    if layout == "cold":
+        index.unlink()
+    connect = sqlite3.connect
+
+    def move_then_connect(*args, **kwargs):
+        root.rename(tmp_path / "moved")
+        if layout != "absent":
+            root.mkdir()
+        if layout == "replacement-with-index":
+            index.touch()
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", move_then_connect)
+    with (
+        pytest.raises(FileNotFoundError, match="store moved or missing"),
+        Store(root, existing_only=True),
+    ):
+        pass
+
+    if layout in ("replacement-with-index", "cold"):
+        assert list(root.iterdir()) == [index]
+        assert index.stat().st_size == 0
+    elif layout == "replacement":
+        assert list(root.iterdir()) == []
+    else:
+        assert not root.exists()
+
+
+def test_existing_only_open_waits_for_checkout_marker(tmp_path: Path, monkeypatch) -> None:
+    from sidegraph import checkout_window
+
+    with Store(tmp_path) as store:
+        decision = store.add_decision(_decision())
+    marker = tmp_path / "format"
+    moved = tmp_path / "checkout-format"
+    marker.rename(moved)
+
+    def restore_marker(path: Path) -> None:
+        assert path == tmp_path
+        moved.rename(marker)
+
+    monkeypatch.setattr(checkout_window, "await_marker", restore_marker)
+    with Store(tmp_path, existing_only=True) as store:
+        assert store.get_decision(decision.id) == decision
+
+
+def test_existing_only_open_rebuilds_missing_derived_index(tmp_path: Path) -> None:
+    with Store(tmp_path) as store:
+        decision = store.add_decision(_decision())
+    index = tmp_path / "index.db"
+    index.unlink()
+    marker = tmp_path / "format"
+    before = marker.read_bytes(), marker.stat().st_mtime_ns
+
+    with Store(tmp_path, existing_only=True) as store:
+        assert store.get_decision(decision.id) == decision
+
+    assert index.is_file()
+    assert (marker.read_bytes(), marker.stat().st_mtime_ns) == before
 
 
 def test_add_and_get_decision(store: Store) -> None:
@@ -248,8 +329,9 @@ def test_a_failed_directory_flush_at_first_open_is_redone_by_the_next_open(
         assert len(synced) > before
 
 
+@pytest.mark.parametrize("existing_only", [False, True])
 def test_opening_an_existing_store_flushes_its_root_once_and_writes_add_none(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, existing_only: bool
 ) -> None:
     from pathlib import Path
 
@@ -266,7 +348,7 @@ def test_opening_an_existing_store_flushes_its_root_once_and_writes_add_none(
         real(path, full=full)
 
     monkeypatch.setattr(maintenance, "fsync_dir", _spy)
-    with Store(root) as s:
+    with Store(root, existing_only=existing_only) as s:
         assert synced.count(tmp_path) == 1 and synced.count(root) == 1
         for i in range(20):
             s.add_decision(_decision(title=f"d{i}"))

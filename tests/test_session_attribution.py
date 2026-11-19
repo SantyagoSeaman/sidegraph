@@ -32,6 +32,8 @@ from sidegraph.config import (
 from sidegraph.host import hooks, mcp_entry
 from sidegraph.host.session_identity import bridge_codex_thread, hint_for
 from sidegraph.store import Store
+from sidegraph.store_layout import StoreLinkRefused
+from tests.graph_repo_support import git
 
 ROOT = Path(__file__).resolve().parent.parent
 P = TELEMETRY_SESSION_STAMP_PREFIX
@@ -48,7 +50,7 @@ def _stamp(store: Store, key: str, family: str, age: timedelta = timedelta(0)) -
 
 
 def _call(
-    store: Store,
+    store: Store | None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     client: str,
@@ -114,14 +116,25 @@ def test_t1_two_hosts_do_not_cross_attribute(store, monkeypatch, tmp_path):
     assert _journal_sessions(store) == {"claude-A"}
 
 
-def test_t2_codex_thread_id_is_bridged_to_the_rollout_stamp(store, monkeypatch, tmp_path):
+@pytest.mark.parametrize("warm", [False, True])
+def test_t2_codex_thread_id_is_bridged_to_the_rollout_stamp(store, monkeypatch, tmp_path, warm):
     _stamp(store, ROLLOUT, "codex")
     _stamp(store, "claude-A", "claude")
     store.set_meta(TELEMETRY_SESSION_KEY, f"claude-A|{_now()}")
 
-    _call(store, monkeypatch, tmp_path, "codex-mcp-client", [(*ADD[:2], {"threadId": THREAD})])
-
-    assert _written_session(store) == ROLLOUT
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(store.path))
+    try:
+        _call(
+            store if warm else None,
+            monkeypatch,
+            tmp_path,
+            "codex-mcp-client",
+            [(*ADD[:2], {"threadId": THREAD})],
+        )
+        assert _written_session(store) == ROLLOUT
+    finally:
+        if not warm and server._store is not None:
+            server._store.close()
 
 
 def test_t2_a_codex_thread_with_no_stamp_keeps_the_bare_id(store, monkeypatch, tmp_path):
@@ -139,6 +152,66 @@ def test_t2_an_old_codex_stamp_still_bridges(store, monkeypatch, tmp_path):
     _call(store, monkeypatch, tmp_path, "codex-mcp-client", [(*ADD[:2], {"threadId": THREAD})])
 
     assert _written_session(store) == ROLLOUT
+
+
+def test_cold_stamp_lookup_ignores_an_index_left_after_a_branch_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.name", "Test")
+    git(tmp_path, "config", "user.email", "test@example.invalid")
+    git(tmp_path, "commit", "--allow-empty", "-qm", "No store")
+    store_dir = tmp_path / ".sidegraph"
+    store_dir.mkdir()
+    (store_dir / "format").write_text(
+        "sidegraph-store 1.0.0\nrequires-sidegraph >= 0.17.0\n", encoding="utf-8"
+    )
+    with Store(store_dir) as stamp_store:
+        _stamp(stamp_store, ROLLOUT, "codex")
+    git(tmp_path, "add", ".sidegraph")
+    git(tmp_path, "commit", "-qm", "Add store")
+    git(tmp_path, "switch", "--detach", "HEAD^")
+
+    assert (store_dir / "index.db").is_file()
+    assert not (store_dir / "format").exists()
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
+    monkeypatch.setattr(server, "_store", None)
+    assert mcp_entry._stored_stamp_keys() == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs a privilege")
+def test_cold_stamp_lookup_ignores_a_symlinked_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_dir = tmp_path / ".sidegraph"
+    with Store(store_dir) as stamp_store:
+        _stamp(stamp_store, ROLLOUT, "codex")
+    index = store_dir / "index.db"
+    target = index.rename(tmp_path / "other.db")
+    index.symlink_to(target)
+
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
+    monkeypatch.setattr(server, "_store", None)
+    assert mcp_entry._stored_stamp_keys() == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs a privilege")
+def test_cold_stamp_lookup_refuses_a_store_link_outside_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    target = tmp_path / "store"
+    with Store(target) as stamp_store:
+        _stamp(stamp_store, ROLLOUT, "codex")
+    store_dir = repo / ".sidegraph"
+    store_dir.symlink_to(target, target_is_directory=True)
+
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(store_dir))
+    monkeypatch.setattr(server, "_store", None)
+    with pytest.raises(StoreLinkRefused, match="leaves its repository"):
+        mcp_entry._stored_stamp_keys()
 
 
 def test_t3_an_unknown_client_ignores_an_inherited_claude_id(store, monkeypatch, tmp_path):
@@ -348,11 +421,11 @@ def test_t10_an_unreadable_request_context_sets_no_hint():
     assert asyncio.run(run()) == [None]
 
 
-def test_t10_a_store_that_fails_to_open_yields_the_bare_thread_id(store, monkeypatch, tmp_path):
+def test_t10_a_stamp_lookup_that_fails_yields_the_bare_thread_id(monkeypatch):
     def boom():
         raise RuntimeError("cannot open")
 
-    monkeypatch.setattr(server, "_get_store", boom)
+    monkeypatch.setattr(mcp_entry, "_stored_stamp_keys", boom)
     seen: list[SessionHint | None] = []
 
     async def run():
@@ -651,11 +724,73 @@ def test_t15_the_console_script_initializes_and_lists_the_tools(tmp_path):
     }
     transport = StdioTransport(command=str(_console_script()), args=[], env=env, cwd=str(tmp_path))
 
-    async def run() -> int:
+    async def run() -> set[str]:
         async with fastmcp.Client(transport) as client:
-            return len(await client.list_tools())
+            return {tool.name for tool in await client.list_tools()}
 
-    assert asyncio.run(run()) == 25
+    names = asyncio.run(run())
+    assert len(names) == 27
+    assert {"advise_ratification", "open_portal"} <= names
+
+
+@pytest.mark.slow
+def test_codex_portal_call_does_not_create_a_missing_store(tmp_path: Path) -> None:
+    from fastmcp.client.transports import StdioTransport
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    destination = tmp_path / ".sidegraph"
+    transport = StdioTransport(
+        command=str(_console_script()),
+        args=[],
+        env={"SIDEGRAPH_DIR": str(destination)},
+        cwd=str(tmp_path),
+    )
+
+    async def run() -> None:
+        async with fastmcp.Client(
+            transport, client_info=mt.Implementation(name="codex-mcp-client", version="1")
+        ) as client:
+            result = await client.call_tool(
+                "open_portal",
+                {"open_browser": False},
+                meta={"threadId": THREAD},
+                raise_on_error=False,
+            )
+            assert not destination.exists()
+            assert result.is_error
+            assert "no store" in result.content[0].text
+
+    asyncio.run(run())
+
+
+@pytest.mark.slow
+def test_codex_advice_against_missing_store_leaves_repository_untouched(tmp_path: Path) -> None:
+    from fastmcp.client.transports import StdioTransport
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    destination = tmp_path / ".sidegraph"
+    transport = StdioTransport(
+        command=str(_console_script()),
+        args=[],
+        env={"SIDEGRAPH_DIR": str(destination)},
+        cwd=str(tmp_path),
+    )
+
+    async def run() -> None:
+        async with fastmcp.Client(
+            transport, client_info=mt.Implementation(name="codex-mcp-client", version="1")
+        ) as client:
+            result = await client.call_tool(
+                "advise_ratification",
+                {"items": [{"id": "missing", "verdict": "accept", "reason": "Reviewed."}]},
+                meta={"threadId": THREAD},
+                raise_on_error=False,
+            )
+            assert result.is_error
+            assert "no store" in result.content[0].text
+
+    asyncio.run(run())
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize("stamps", [[], [ROLLOUT]])

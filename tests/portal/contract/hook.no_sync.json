@@ -1,0 +1,15 @@
+{
+  "text": "## Sidegraph memory\n",
+  "emitted": true,
+  "chars": 20,
+  "assumptions": [
+    "Fresh session"
+  ],
+  "firing_conditions": [],
+  "prepared": {
+    "synced": false,
+    "adopted_moves": 0,
+    "skipped_reason": "The CLI graph differs from the agent's graph."
+  },
+  "ids_in_text": []
+}

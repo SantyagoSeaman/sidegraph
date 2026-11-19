@@ -1,0 +1,17 @@
+{
+  "mode": "cli",
+  "host_family": "claude",
+  "settings": {
+    "theme": "dark",
+    "poll_seconds": 5,
+    "editor_url": "vscode://file/{path}:{line}",
+    "idle_minutes": 30
+  },
+  "repo_name": "example-project",
+  "branch": "main",
+  "index_cold": false,
+  "graph_newer_than_sync": false,
+  "store_changes": 2,
+  "started_at": "2026-11-17T09:00:00Z",
+  "reviewing_until": null
+}

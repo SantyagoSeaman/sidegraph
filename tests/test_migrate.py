@@ -813,6 +813,7 @@ def test_unusable_index_is_a_refusal_that_writes_nothing(git_repo, tmp_path, cap
         (store / "index.db").chmod(0o644)
     out = capsys.readouterr().err
     assert out.startswith("refused:") and "index.db" in out
+    assert "Back up the database" in out and "Portal advice and operation recovery" in out
     assert after == before  # no .gitignore, no format, nothing
     assert not (store / ".gitignore").exists()
 

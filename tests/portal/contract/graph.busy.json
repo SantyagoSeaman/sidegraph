@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "busy",
+    "message": "The store is busy. Try again shortly.",
+    "details": {}
+  }
+}

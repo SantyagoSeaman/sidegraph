@@ -1,0 +1,16 @@
+{
+  "text": "## Sidegraph memory\nA fresh session can look up repository decisions.\n",
+  "emitted": true,
+  "chars": 70,
+  "assumptions": [
+    "Fresh session"
+  ],
+  "firing_conditions": [
+    "The session starts, resumes or compacts."
+  ],
+  "prepared": {
+    "synced": false,
+    "adopted_moves": 0
+  },
+  "ids_in_text": []
+}

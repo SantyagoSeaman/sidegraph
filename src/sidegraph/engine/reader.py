@@ -552,6 +552,41 @@ class GraphifyReader:
         """All anchorable nodes (code symbols / doc headings) whose source_file matches."""
         return list(self._file_index().get(file_path, []))
 
+    def symbol_span(self, node_id: str) -> tuple[str, int, int | None] | None:
+        """Return the file and inclusive line bounds, with ``None`` as the end at EOF.
+
+        The end is the line before the next greater code start or, for a document, the
+        next heading. The document's page node is on line 1.
+        See design/superpowers/specs/2026-11-17-portal-design.md (D5).
+        """
+        node = self.get_node(node_id)
+        if node is None or not node.file_path:
+            return None
+        location = re.compile(r"L([1-9][0-9]*)")
+        first_line = location.fullmatch(node.line or "")
+        if first_line is None:
+            return None
+
+        try:
+            start = int(first_line[1])
+        except ValueError:
+            return None
+        boundary_type = "document" if node.file_type == "document" else "code"
+        next_start: int | None = None
+        for sibling in self.nodes_in_file(node.file_path):
+            if sibling.file_type != boundary_type:
+                continue
+            candidate = location.fullmatch(sibling.line or "")
+            if candidate is None:
+                continue
+            try:
+                line = int(candidate[1])
+            except ValueError:
+                continue
+            if line > start and (next_start is None or line < next_start):
+                next_start = line
+        return node.file_path, start, next_start - 1 if next_start is not None else None
+
     def _resolve_index(self) -> dict[str, list[NodeRef]]:
         """``canonicalize(name) -> anchorable nodes`` with that canonical name, built once
         from a single pass over ``self._nodes`` (memoized). Backs ``resolve()``."""

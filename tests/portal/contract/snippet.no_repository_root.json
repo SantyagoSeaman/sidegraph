@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "refused",
+    "message": "Source snippets require a repository root.",
+    "details": {
+      "reason": "no_repository_root"
+    }
+  }
+}

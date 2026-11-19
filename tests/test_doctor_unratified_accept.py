@@ -257,17 +257,16 @@ def test_non_superseding_stamp_less_accept_still_flagged_beside_a_supersession(t
     assert culprit.id in hits[0].path
 
 
-# -- Fix round 2 (2026-09-15, review Major 1): a supersession successor carrying a
-# propose-only signal (layer / provenance.ref / a NEW tier-0 tag or initiative binding) is
-# NOT a supersede_decision/supersede_fact successor -- neither tool can produce any of the
-# three -- so it must still be flagged. RED against fix round 1's blanket `supersedes`
+# -- Fix round 2 (2026-09-15, review Major 1): flag an unstamped agent successor with a
+# signal that pre-0.29.0 supersede tools could not produce (layer / provenance.ref / a
+# new tier-0 tag or initiative binding). RED against fix round 1's blanket `supersedes`
 # exclusion, confirmed by running these against a scratchpad extract of commit 1964cd6
 # (fix round 1's HEAD) before writing the round-2 fix.
 
 
 def test_superseding_decision_with_layer_is_still_flagged(tmp_path):
-    """`supersede_decision` has no `layer` parameter at all -- `layer` set on a
-    `supersedes`-bearing record can only have come from the propose/auto_accept path."""
+    """Current `supersede_decision` successors that inherit a layer are human-sourced
+    or ratifier-stamped when accepted. This unstamped agent draft still triggers the check."""
     db = tmp_path / "store"
     store = Store(db)
     predecessor = _decision(store, "predecessor", source="agent", stamped=True)

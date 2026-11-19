@@ -44,6 +44,7 @@ a paused generator.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -116,7 +117,8 @@ from .store_layout import (
     stat_entry,
     symlinked_internals,
 )
-from .store_rules import archive_candidate, effective_all, is_derived_entity_body
+from .store_rules import archive_candidate, effective, effective_all, is_derived_entity_body
+from .store_view import inventory_of
 
 # One definition, two consumers: __init__ bootstraps with executescript (not inside a
 # transaction, so its implicit COMMIT is harmless), while _reload_index_from_canonical must
@@ -231,6 +233,25 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     path       TEXT NOT NULL,
     PRIMARY KEY (session_id, path)
 )""",
+    """CREATE TABLE IF NOT EXISTS ratify_advice (
+    record_id TEXT PRIMARY KEY,
+    verdict TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    record_hash TEXT NOT NULL,
+    session_id TEXT,
+    at TEXT NOT NULL
+)""",
+    """CREATE TABLE IF NOT EXISTS portal_operations (
+    op_key TEXT PRIMARY KEY,
+    request_digest TEXT NOT NULL,
+    draft_id TEXT,
+    record_id TEXT,
+    planned TEXT NOT NULL,
+    state TEXT NOT NULL,
+    at TEXT NOT NULL
+)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_operations_draft
+    ON portal_operations (draft_id) WHERE state IN ('planned', 'started')""",
     # Each accepted domain's effective membership over the graph sync last read: derived like
     # Domain.communities, dropped by every reload and recomputed (sync, or
     # sync.ensure_domain_membership). Keyed by domain; capture and retrieval look up by node.
@@ -639,6 +660,39 @@ def refuse_symlinked_internals(store_path: Path) -> None:
         )
 
 
+def _has_existing_store(path: Path) -> bool:
+    """Recognize a store on disk without opening it. See the Portal design (D1–D2)."""
+    if not path.is_dir():
+        return False
+    has_marker = os.path.lexists(path / _FORMAT_MARKER_NAME)
+    legacy = path / "decisions.db"
+    if legacy.is_file():
+        with legacy.open("rb") as file:
+            if file.read(16) == b"SQLite format 3\x00":
+                return True
+        if not has_marker:
+            return False
+        raise StoreRequirementError(f"{legacy} is not a SQLite database", kind="malformed")
+    if has_marker:
+        return True
+    # A markerless store must contain a recognizable record before Store can backfill it.
+    check_store_requirement(path)
+    refuse_symlinked_internals(path)
+    return any(
+        entry.readable and entry.record_type not in (None, "bindings")
+        for entry in inventory_of(path).occurrences
+    )
+
+
+def _store_root_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return info.st_dev, info.st_ino
+
+
+_STORE_MOVED_OR_MISSING = "store moved or missing"
 _MarkerSignature = tuple[tuple[int, int, int, int] | None, bool]
 
 
@@ -1146,7 +1200,14 @@ def _ratifier_identity(actor: str | None = None) -> str | None:
     """
     if actor is not None and actor.strip():
         return actor
+    return git_user_name()
 
+
+def git_user_name() -> str | None:
+    """Read the configured Git user name for attribution, returning None if unavailable.
+
+    See design/superpowers/specs/2026-11-17-portal-design.md (D7).
+    """
     import subprocess
 
     try:
@@ -1154,10 +1215,11 @@ def _ratifier_identity(actor: str | None = None) -> str | None:
             ["config", "user.name"],
             None,
             stdin=subprocess.DEVNULL,
+            check=True,
             capture_output=True,
             text=True,
             encoding="utf-8",
-            errors="strict",  # a wrong decode would be stamped into history: None instead
+            errors="strict",  # never attribute a record to a misdecoded name
             timeout=5,
         )
         name = out.stdout.strip()
@@ -1345,8 +1407,25 @@ def live_slug_conflicts(rows: Iterable[Mapping[str, Any]]) -> list[dict]:
 
 
 class SupersessionConflictError(ValueError):
-    """``Store.ratify`` refused a successor whose predecessor it cannot close; the message
-    names only record ids and the next step, so a host may show it as is."""
+    """A write refused a successor or a ratification. The message names record ids and
+    the next step, and callers can map the structured reason without parsing it.
+    See design/superpowers/specs/2026-11-17-portal-design.md (D7).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: Literal[
+            "not_current", "pending_successor", "pending_proposal", "evidence_conflict"
+        ],
+        head: str | None = None,
+        pending: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.head = head
+        self.pending = pending
 
 
 class UnknownSupportError(ValueError):
@@ -1485,6 +1564,8 @@ class Store:
     directory containing ``decisions.db``) is refused, never migrated (``_refuse_legacy_store``).
     ``creating=True`` explicitly declares new-store initialization when a Git probe times
     out. Ordinary opens refuse an unresolved timeout instead of replacing Git's marker.
+    ``existing_only=True`` requires a recognized store and skips canonical housekeeping.
+    See design/superpowers/specs/2026-11-17-portal-design.md (D1–D2, T-A8).
     """
 
     def __init__(
@@ -1494,6 +1575,7 @@ class Store:
         busy_timeout_seconds: float | None = None,
         stop_waiting_after_busy: bool = False,
         creating: bool = False,
+        existing_only: bool = False,
         _allow_unmigrated_shards: bool = False,
     ) -> None:
         # ``_allow_unmigrated_shards`` is private to ``sidegraph.migrate``: it opens the one
@@ -1535,35 +1617,85 @@ class Store:
 
         # A dangling link is not a directory and would skip the gate below.
         store_layout.refuse_outside_store_link(raw)
+        root_identity = _store_root_identity(raw) if existing_only else None
         if raw.is_dir():
             refuse_symlinked_internals(raw)
             # Refuse before the legacy refusal, directory creation or debris cleanup.
-            self._check_requirement(force=True)
+            try:
+                self._check_requirement(force=True)
+            except StoreRequirementError as error:
+                if (
+                    existing_only
+                    and error.kind == "malformed"
+                    and not os.path.lexists(raw / _FORMAT_MARKER_NAME)
+                    and has_shard_files(raw)
+                ):
+                    diagnostic = store_layout.unmigrated_shards_error(raw)
+                    raise StoreRequirementError(str(diagnostic), kind="layout") from error
+                raise
 
         self._refuse_interrupted_migration(raw)
 
         if raw.is_file():
             self._reject_file_inside_a_store(raw)
-            self._refuse_legacy_store(raw)
-        else:
-            legacy = raw / "decisions.db"
-            if legacy.is_file():
-                self._refuse_legacy_store(legacy)
+            try:
+                self._refuse_legacy_store(raw)
+            except sqlite3.DatabaseError as error:
+                if not existing_only:
+                    raise
+                raise FileNotFoundError(errno.ENOENT, _STORE_MOVED_OR_MISSING, raw) from error
 
-        self._ensure_canonical_subdirs()
-        self._sweep_stale_tmp_files()
-        self._ensure_format_marker()
-        self._ensure_stamping_marker()
-        self._ensure_gitignore()
-        if busy_timeout_seconds is not None:
-            self._conn = sqlite3.connect(
-                str(self.path / "index.db"),
-                timeout=busy_timeout_seconds,
-                check_same_thread=False,
-            )
+        index = raw / "index.db"
+        index_path = str(index)
+        index_exists = False
+        if existing_only:
+            found = _has_existing_store(raw)
+            if not found or root_identity is None or root_identity != _store_root_identity(raw):
+                raise FileNotFoundError(errno.ENOENT, _STORE_MOVED_OR_MISSING, raw)
+        legacy = raw / "decisions.db"
+        if legacy.is_file():
+            self._refuse_legacy_store(legacy)
+
+        if existing_only:
+            marker = raw / _FORMAT_MARKER_NAME
+            if not os.path.lexists(marker):
+                checkout_window.await_marker(raw)
+            self._check_requirement()
+            if root_identity != _store_root_identity(raw):
+                raise FileNotFoundError(errno.ENOENT, _STORE_MOVED_OR_MISSING, raw)
+            if self._marker_signature is None or self._marker_signature[0] is None:
+                raise StoreRequirementError(f"format marker missing at {marker}", kind="layout")
+            # Preserve the durability guarantee for later record writes through this handle.
+            maintenance.fsync_dir(raw.parent, full=False)
+            maintenance.fsync_dir(raw, full=False)
+            index_exists = index.is_file()
+            if index_exists:
+                index_path = index.absolute().as_uri() + "?mode=rw"
+            if root_identity != _store_root_identity(raw):
+                raise FileNotFoundError(errno.ENOENT, _STORE_MOVED_OR_MISSING, raw)
         else:
-            self._conn = sqlite3.connect(str(self.path / "index.db"), check_same_thread=False)
+            self._ensure_canonical_subdirs()
+            self._sweep_stale_tmp_files()
+            self._ensure_format_marker()
+            self._ensure_stamping_marker()
+            self._ensure_gitignore()
         try:
+            if busy_timeout_seconds is not None:
+                self._conn = sqlite3.connect(
+                    index_path,
+                    timeout=busy_timeout_seconds,
+                    check_same_thread=False,
+                    uri=index_exists,
+                )
+            else:
+                self._conn = sqlite3.connect(index_path, check_same_thread=False, uri=index_exists)
+        except sqlite3.OperationalError as exc:
+            if existing_only and root_identity != _store_root_identity(raw):
+                raise FileNotFoundError(errno.ENOENT, _STORE_MOVED_OR_MISSING, raw) from exc
+            raise
+        try:
+            if existing_only and root_identity != _store_root_identity(raw):
+                raise FileNotFoundError(errno.ENOENT, _STORE_MOVED_OR_MISSING, raw)
             # First, before any write: a journal-mode change after the schema/freshness writes
             # would let those transactions create and delete the journal once per open. A
             # database another tool holds in WAL cannot switch (locked); stay in its mode.
@@ -1582,11 +1714,14 @@ class Store:
                         )
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA_SQL)
-            self._migrate_retrieval_events_agent()
+            if not existing_only:
+                self._migrate_retrieval_events_agent()
             self._refresh_freshness()
             self._warn_skipped_files()
             self._delivery_available: bool | None = None
             self._delivery_write(delivery_ledger.create_schema, initialize=True)
+            if existing_only and root_identity != _store_root_identity(raw):
+                raise FileNotFoundError(errno.ENOENT, _STORE_MOVED_OR_MISSING, raw)
         except BaseException:
             self._conn.close()
             raise
@@ -3526,7 +3661,9 @@ class Store:
                 raise SupersessionConflictError(
                     f"{noun} {target_id} is a pending proposal; amend it by dropping it and "
                     "proposing again, or ratify it first; if you did not write it in this "
-                    "session, tell the owner"
+                    "session, tell the owner",
+                    reason="pending_proposal",
+                    pending=target_id,
                 )
             if target_status != "accepted" or not target_open:
                 head = self._live_head_after(table, id_col, target_id)
@@ -3534,14 +3671,18 @@ class Store:
                     f"{noun} {target_id} is no longer current; supersede its live successor "
                     f"{head} instead"
                     if head
-                    else f"{noun} {target_id} is no longer current and cannot be superseded"
+                    else f"{noun} {target_id} is no longer current and cannot be superseded",
+                    reason="not_current",
+                    head=head,
                 )
         pending = self._pending_successor(table, id_col, target_id, exclude_id=new_id)
         if pending is not None:
             raise SupersessionConflictError(
                 f"{noun} {target_id} already has a pending successor {pending}; it waits for "
                 "the owner's verdict. Tell the owner: it must be ratified or dropped first. Do "
-                "not drop it yourself"
+                "not drop it yourself",
+                reason="pending_successor",
+                pending=pending,
             )
 
     def _pending_successor(
@@ -3647,13 +3788,17 @@ class Store:
         if predecessor_status == "proposed":
             raise SupersessionConflictError(
                 f"{noun} {record_id!r} cannot be ratified: its predecessor {predecessor_id} "
-                "is still proposed; ratify or drop it first"
+                "is still proposed; ratify or drop it first",
+                reason="pending_proposal",
+                pending=predecessor_id,
             )
         head = self._live_head_after(table, id_col, predecessor_id)
         if head is not None and head != record_id:
             raise SupersessionConflictError(
                 f"{noun} {record_id!r} cannot be ratified: {predecessor_id} is already "
-                f"superseded by {head}; supersede that one instead"
+                f"superseded by {head}; supersede that one instead",
+                reason="not_current",
+                head=head,
             )
 
     def add_decision(self, decision: Decision) -> Decision:
@@ -3891,6 +4036,67 @@ class Store:
             row = self._conn.execute("SELECT data FROM facts WHERE id = ?", (fact_id,)).fetchone()
         return Fact.model_validate_json(row["data"]) if row else None
 
+    def close_superseded_predecessor(self, successor_id: str) -> Decision | Fact:
+        """Finish an interrupted supersession after its accepted successor was published.
+
+        Call after refreshing the store from canonical files. Returns the closed predecessor.
+        See design/superpowers/specs/2026-11-17-portal-design.md (D8).
+        """
+        with self._mutation():
+            successor = self.get_decision(successor_id) or self.get_fact(successor_id)
+            if successor is None or successor.status != DecisionStatus.ACCEPTED:
+                raise ValueError(f"successor {successor_id!r} is missing or not accepted")
+            if not successor.supersedes or successor.supersedes == successor_id:
+                raise ValueError(f"successor {successor_id!r} does not name a predecessor")
+            predecessor: Decision | Fact | None
+            if isinstance(successor, Decision):
+                predecessor = self.get_decision(successor.supersedes)
+            else:
+                predecessor = self.get_fact(successor.supersedes)
+            if (
+                predecessor is None
+                or predecessor.status != DecisionStatus.ACCEPTED
+                or predecessor.valid_to is not None
+            ):
+                raise ValueError(f"predecessor {successor.supersedes!r} is missing or not open")
+            predecessor.status = DecisionStatus.SUPERSEDED
+            predecessor.valid_to = max(successor.valid_from, predecessor.valid_from)
+            if isinstance(predecessor, Decision):
+                self._write_decision(predecessor)
+            else:
+                self._write_fact(predecessor)
+            return predecessor
+
+    def _require_unused_planned_record_id(self, record_id: str) -> None:
+        """Refuse to reuse a planned ULID, including legacy spellings. Call inside a mutation."""
+        occupied = self._conn.execute(
+            "SELECT 1 FROM decisions WHERE id = ? COLLATE NOCASE "
+            "UNION ALL SELECT 1 FROM facts WHERE id = ? COLLATE NOCASE "
+            "UNION ALL SELECT 1 FROM anchor_bindings WHERE record_id = ? COLLATE NOCASE LIMIT 1",
+            (record_id, record_id, record_id),
+        ).fetchone()
+        if occupied is not None:
+            raise ValueError(f"record {record_id} already exists")
+
+        subdirs = ("decisions", "facts", "bindings")
+        paths = {f"{subdir}/{record_id}.json".lower() for subdir in subdirs}
+        for entry in self._read_skip_list():
+            skipped_id = entry.get("id")
+            if entry["path"].lower() in paths or (
+                entry.get("type") in ("decision", "fact", "bindings")
+                and isinstance(skipped_id, str)
+                and skipped_id.upper() == record_id
+            ):
+                raise ValueError(f"record {record_id} already exists")
+
+        # A rolled-back publish can leave canonical files without index rows.
+        for subdir in subdirs:
+            try:
+                _record_file(self.path, subdir, record_id).lstat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            raise ValueError(f"record {record_id} already exists")
+
     def record_types(self, ids: Iterable[str]) -> dict[str, Literal["decision", "fact"]]:
         """The type of each record id, from one read of ``index.db`` rather than one lookup per
         id: ``"decision"`` or ``"fact"``. An id found in neither table is ABSENT from the
@@ -3985,7 +4191,9 @@ class Store:
 
     # -- anchor bindings ----------------------------------------------------
 
-    def add_binding(self, binding: AnchorBinding) -> AnchorBinding:
+    def add_binding(
+        self, binding: AnchorBinding, *, inherit_retained_from: str | None = None
+    ) -> AnchorBinding:
         """Link a record (a decision OR a fact) to an entity. The entity must already
         exist, and ``binding.record_id`` must resolve to a real decision or fact —
         neither existing is a hard error.
@@ -3995,6 +4203,10 @@ class Store:
         (entity_id/tier/relation/weight) actually changed. A pure status flip (sync's
         live/degraded/orphaned transitions — see ``sync._set_leaf_status``,
         ``_reconcile_tier1_communities``) touches ONLY the index.
+
+        On a new inherited binding, ``inherit_retained_from`` carries the source row's
+        retained status in the index alongside the binding's current status when the
+        index has that column.
 
         An identity change on a binding whose entity is DERIVED (a ``community:*``
         abstract entity — see ``_is_derived_entity``) never triggers a canonical rewrite
@@ -4019,6 +4231,26 @@ class Store:
                 existing
             ) != _binding_identity_payload(binding)
             self._index_write_binding(binding)
+            if (
+                existing is None
+                and inherit_retained_from is not None
+                and any(
+                    row[1] == KEPT_STATUS_COLUMN
+                    for row in self._conn.execute("PRAGMA table_info(anchor_bindings)")
+                )
+            ):
+                self._conn.execute(
+                    f"UPDATE anchor_bindings SET {KEPT_STATUS_COLUMN} = ("
+                    f"SELECT {KEPT_STATUS_COLUMN} FROM anchor_bindings "
+                    "WHERE record_id = ? AND entity_id = ?) "
+                    "WHERE record_id = ? AND entity_id = ?",
+                    (
+                        inherit_retained_from,
+                        binding.entity_id,
+                        binding.record_id,
+                        binding.entity_id,
+                    ),
+                )
             if identity_changed and not _is_derived_entity(entity):
                 self._write_bindings_canonical_for_record(binding.record_id)
                 self._touch_digest()
@@ -4105,6 +4337,24 @@ class Store:
                 "SELECT data FROM anchor_bindings WHERE record_id = ?", (record_id,)
             ).fetchall()
         return [AnchorBinding.model_validate_json(r["data"]) for r in rows]
+
+    def binding_fingerprint(self) -> str:
+        """Hash the binding identities, statuses and resolved node IDs in the index.
+
+        See design/superpowers/specs/2026-11-17-portal-design.md (D11).
+        """
+        with self._lock:
+            rows = [
+                tuple(row)
+                for row in self._conn.execute(
+                    "SELECT b.record_id, b.entity_id, json_extract(b.data, '$.status'), "
+                    "json_extract(e.data, '$.last_seen_node_id') "
+                    "FROM anchor_bindings AS b "
+                    "LEFT JOIN entities AS e ON b.entity_id = e.entity_id "
+                    "ORDER BY b.record_id, b.entity_id"
+                )
+            ]
+        return hashlib.sha256(store_format.encode_body(rows).encode("utf-8")).hexdigest()
 
     def anchor_names(self) -> dict[str, tuple[str, ...]]:
         """Record id -> the names a query can find the record by: the ``canonical_name`` and
@@ -4850,7 +5100,8 @@ class Store:
                         raise SupersessionConflictError(
                             f"decision {decision_id!r} cannot be ratified: its evidence facts "
                             f"{first} and {fact.id} both supersede {fact.supersedes}; drop one "
-                            f"of them (in a separate call), then ratify {decision_id} again"
+                            f"of them (in a separate call), then ratify {decision_id} again",
+                            reason="evidence_conflict",
                         )
 
             if cascade_guard is not None:
@@ -5451,9 +5702,225 @@ class Store:
                 )
             ]
 
-    # Every append-only journal table. The prune sweeps this list, so a journal added
+    def record_body_hash(self, record_id: str) -> str | None:
+        """Hash the effective canonical body.
+
+        See design/superpowers/specs/2026-11-17-portal-design.md (D9).
+        """
+        with self._lock:
+            inventory = inventory_from_disk(self.path, validate=validate_record_body)
+            legacy_format = inventory.marker is None or inventory.marker.major < 2
+            for record_type in ("decision", "fact", "domain"):
+                body = effective(inventory, record_type, record_id).raw
+                if body is None and legacy_format:
+                    # A skipped format-1 file does not shadow its archived copy.
+                    archived = archive_candidate(
+                        [
+                            occurrence
+                            for occurrence in inventory.occurrences
+                            if occurrence.record_type == record_type
+                            and occurrence.record_id == record_id
+                        ]
+                    )
+                    if archived is not None:
+                        body = archived.raw
+                if isinstance(body, dict):
+                    if record_type == "domain":
+                        body = {key: value for key, value in body.items() if key != "communities"}
+                    try:
+                        return hashlib.sha256(
+                            store_format.encode_body(body).encode("utf-8")
+                        ).hexdigest()
+                    except store_format.UnencodableBody:
+                        return None
+        return None
+
+    def write_advice(
+        self, items: list[tuple[str, str, str]], session_id: str | None
+    ) -> dict[str, str]:
+        """Record local advice for pending proposals.
+
+        See design/superpowers/specs/2026-11-17-portal-design.md (D9).
+        """
+        if not items:
+            return {}
+        results: dict[str, str] = {}
+        with self._mutation():
+            inventory = inventory_from_disk(self.path, validate=validate_record_body)
+            if inventory.marker is None or inventory.marker.major < 2:
+                # A skipped format-1 file does not shadow its archived copy.
+                inventory.occurrences = [
+                    item for item in inventory.occurrences if item.kind != "file" or item.readable
+                ]
+            bodies = effective_all(inventory)
+            at = datetime.now(UTC).isoformat()
+            for record_id, verdict, reason in items:
+                body = None
+                for record_type in ("decision", "fact", "domain"):
+                    record = bodies.get((record_type, record_id))
+                    if record is not None and isinstance(record.raw, dict):
+                        body = record.raw
+                        break
+                if body is None or body.get("status", "proposed") != "proposed":
+                    results[record_id] = "error: record is not proposed"
+                    continue
+                if record_type == "domain":
+                    body = {key: value for key, value in body.items() if key != "communities"}
+                try:
+                    body_hash = hashlib.sha256(
+                        store_format.encode_body(body).encode("utf-8")
+                    ).hexdigest()
+                except store_format.UnencodableBody:
+                    results[record_id] = "error: record body is unavailable"
+                    continue
+                self._conn.execute(
+                    "INSERT INTO ratify_advice (record_id, verdict, reason, record_hash, "
+                    "session_id, at) VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(record_id) DO UPDATE SET verdict = excluded.verdict, "
+                    "reason = excluded.reason, record_hash = excluded.record_hash, "
+                    "session_id = excluded.session_id, at = excluded.at",
+                    (record_id, verdict, reason, body_hash, session_id, at),
+                )
+                results[record_id] = "recorded"
+        return results
+
+    def advice_rows(self) -> list[dict[str, str | None]]:
+        """Return local advice ordered by record id.
+
+        See design/superpowers/specs/2026-11-17-portal-design.md (D9).
+        """
+        with self._lock:
+            return [
+                dict(row)
+                for row in self._conn.execute("SELECT * FROM ratify_advice ORDER BY record_id")
+            ]
+
+    def advice_fingerprint(self) -> str:
+        """Hash the fields which drive advice change events.
+
+        See design/superpowers/specs/2026-11-17-portal-design.md (D9).
+        """
+        with self._lock:
+            rows = [
+                tuple(row)
+                for row in self._conn.execute(
+                    "SELECT record_id, verdict, reason, record_hash, at "
+                    "FROM ratify_advice ORDER BY record_id"
+                )
+            ]
+        return hashlib.sha256(store_format.encode_body(rows).encode("utf-8")).hexdigest()
+
+    def put_operation(
+        self,
+        op_key: str,
+        request_digest: str,
+        draft_id: str | None,
+        record_id: str | None,
+        planned: list[str],
+    ) -> None:
+        """Reserve planned ids, replacing a different unstarted plan.
+
+        Replaying the same key and digest keeps the ids already reserved. A
+        settled draft keeps its plan so an interrupted operation can recover.
+
+        See design/superpowers/specs/2026-11-17-portal-design.md (D8).
+        """
+        with self._mutation():
+            previous = self.get_operation(op_key)
+            if previous is not None:
+                if previous["request_digest"] == request_digest:
+                    return
+                raise sqlite3.IntegrityError("portal operation key already exists")
+            if (
+                draft_id is not None
+                and (
+                    plan := self._conn.execute(
+                        "SELECT planned FROM portal_operations WHERE draft_id = ? "
+                        "AND state = 'planned'",
+                        (draft_id,),
+                    ).fetchone()
+                )
+                is not None
+            ):
+                digest, _ = self._compute_canonical_digest()
+                if digest != self.canonical_digest():
+                    # The canonical rejection may have survived a rollback of the started mark.
+                    raise StoreBusyError("refresh the store before replacing an operation plan")
+                draft = self.get_decision(draft_id) or self.get_fact(draft_id)
+                if draft is not None and draft.status != DecisionStatus.PROPOSED:
+                    ids = json.loads(plan["planned"])
+                    published = (
+                        (self.get_decision(ids[0]) or self.get_fact(ids[0])) if ids else None
+                    )
+                    raise SupersessionConflictError(
+                        "draft is no longer proposed",
+                        reason="not_current",
+                        head=published.id if published is not None else None,
+                    )
+            planned_json = json.dumps(planned)
+            at = datetime.now(UTC).isoformat()
+            # A single statement replaces the unstarted plan without an intermediate delete.
+            replaced = self._conn.execute(
+                "UPDATE portal_operations SET op_key = ?, request_digest = ?, record_id = ?, "
+                "planned = ?, at = ? WHERE draft_id = ? AND state = 'planned'",
+                (op_key, request_digest, record_id, planned_json, at, draft_id),
+            ).rowcount
+            if replaced:
+                return
+            self._conn.execute(
+                "INSERT INTO portal_operations (op_key, request_digest, draft_id, record_id, "
+                "planned, state, at) VALUES (?, ?, ?, ?, ?, 'planned', ?)",
+                (op_key, request_digest, draft_id, record_id, planned_json, at),
+            )
+
+    def get_operation(self, op_key: str) -> dict | None:
+        """Return the local operation and its planned ids.
+
+        See design/superpowers/specs/2026-11-17-portal-design.md (D8).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM portal_operations WHERE op_key = ?", (op_key,)
+            ).fetchone()
+        if row is None:
+            return None
+        operation = dict(row)
+        operation["planned"] = json.loads(operation["planned"])
+        return operation
+
+    def set_operation_state(
+        self, op_key: str, state: Literal["planned", "started", "done"]
+    ) -> None:
+        """Set the operation state in the caller's transaction, or raise if it is gone.
+
+        See design/superpowers/specs/2026-11-17-portal-design.md (D8).
+        """
+        with self._mutation():
+            updated = self._conn.execute(
+                "UPDATE portal_operations SET state = ? WHERE op_key = ?", (state, op_key)
+            ).rowcount
+            if not updated:
+                raise ValueError("portal operation not found")
+
+    def release_operation(self, op_key: str) -> None:
+        """Remove a plan which has not started.
+
+        See design/superpowers/specs/2026-11-17-portal-design.md (D8).
+        """
+        with self._mutation():
+            self._conn.execute(
+                "DELETE FROM portal_operations WHERE op_key = ? AND state = 'planned'", (op_key,)
+            )
+
+    # Every journal table. The prune sweeps this list, so a journal added
     # without being listed here would grow without bound -- the reason it is one constant.
-    _JOURNAL_TABLES: tuple[str, ...] = ("retrieval_events", "render_events", "session_transcripts")
+    _JOURNAL_TABLES: tuple[str, ...] = (
+        "retrieval_events",
+        "render_events",
+        "session_transcripts",
+        "ratify_advice",
+        "portal_operations",
+    )
 
     def prune_telemetry_events(self, older_than_days: int = 30) -> int:
         """Delete events older than the retention window across EVERY journal table.

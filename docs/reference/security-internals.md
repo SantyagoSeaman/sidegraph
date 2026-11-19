@@ -72,7 +72,7 @@ strings are omitted. At most 10 errors, 8 path components and 1,024 characters a
 
 Logical MCP writes check raw admission before signature coercion and intercept exceptions
 before FastMCP warning/error logging. The finite input policy also applies to raw
-`ratify`, `sync_anchors` and `add_anchors` arguments. Read-tool aliases
+`ratify`, `advise_ratification`, `sync_anchors` and `add_anchors` arguments. Read-tool aliases
 and diagnostic help retain their existing behavior; write errors list valid parameters
 without repeating unknown argument names. Unsupported or unaudited tool registrations
 fail closed. The compatibility adapter's tested versions are listed under

@@ -42,6 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from .config import repository_root
 from .gitenv import run_git
 from .store_layout import StoreRequirementError, check_store_requirement, index_stamp_problem
 
@@ -71,7 +72,9 @@ BLAME_ROW_CAP = 50
 BLAME_CHAR_CAP = 6000
 
 
-def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
+def _run_git(
+    args: list[str], cwd: Path, *, keep_repository_env: bool = True
+) -> subprocess.CompletedProcess[str] | None:
     """Run one git subprocess, never raising. ``None`` on any failure (git missing, cwd
     unusable, timeout) -- every caller treats that the same as a clean "nothing to
     report" degrade (G9)."""
@@ -79,7 +82,7 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | N
         return run_git(
             args,
             cwd,
-            keep_repository_env=True,
+            keep_repository_env=keep_repository_env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -98,6 +101,32 @@ def _run_git_bytes(args: list[str], cwd: Path) -> subprocess.CompletedProcess[by
         )
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def store_change_count(store_path: Path) -> int | None:
+    """Count Git status entries under the store without updating Git's index (Portal D13)."""
+    root = store_path.absolute() if (store_path / ".git").exists() else repository_root(store_path)
+    if root is None:
+        from .verify import find_store_project_repo
+
+        root = find_store_project_repo(store_path, timeout=_GIT_TIMEOUT_SECONDS)
+        if root is None:
+            return None
+    result = _run_git(
+        [
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            str(store_path.absolute()),
+        ],
+        root,
+        keep_repository_env=False,
+    )
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout.count("\n")
 
 
 def head_commit(cwd: Path) -> str | None:

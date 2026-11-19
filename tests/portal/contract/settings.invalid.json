@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "invalid",
+    "message": "Theme must be dark or light.",
+    "details": {
+      "field": "theme"
+    }
+  }
+}

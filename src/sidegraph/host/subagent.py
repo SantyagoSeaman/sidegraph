@@ -51,6 +51,10 @@ def render_brief(records: int, files: int, mistakes: int) -> str:
     )
 
 
+def _brief_text(counts: tuple[int, int, int]) -> str | None:
+    return render_brief(*counts) if counts[0] else None
+
+
 def _answer(diagnostics: HookDiagnostics | None = None, run: hook_log.Run | None = None) -> dict:
     """The hook's output: the brief, or ``{}`` where there is nothing to ask about. ``run``
     is the outcome tally (see ``hook_log``): it learns the store and the failures of the steps
@@ -100,7 +104,7 @@ def _answer(diagnostics: HookDiagnostics | None = None, run: hook_log.Run | None
             return {}
         stage = "brief"
         try:
-            records, files, mistakes = index.memory_counts()
+            counts = index.memory_counts()
         except Exception as error:
             if diagnostics is not None:
                 diagnostics.report(stage, error)
@@ -108,18 +112,19 @@ def _answer(diagnostics: HookDiagnostics | None = None, run: hook_log.Run | None
         finally:
             stage = "cleanup"
             index.close()
-        if not records:
+        stage = "brief"
+        text = _brief_text(counts)
+        if text is None:
             if run is not None:
                 if index.cold_withheld is None:  # not read: the index was locked
                     run.cause = hook_log.UNKNOWN
                 else:
                     run.cause = hook_log.COLD if index.cold_withheld else hook_log.NO_RECORD
             return {}
-        stage = "brief"
         return {
             "hookSpecificOutput": {
                 "hookEventName": _EVENT,
-                "additionalContext": render_brief(records, files, mistakes),
+                "additionalContext": text,
             }
         }
     except Exception as error:

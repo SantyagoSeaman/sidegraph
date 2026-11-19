@@ -20,7 +20,7 @@ import pytest
 from sidegraph import doctor, githooks, gitio, verify
 from sidegraph.capture import _derive_initiative
 from sidegraph.engine.reader import GraphifyReader
-from sidegraph.store import _ratifier_identity
+from sidegraph.store import _ratifier_identity, git_user_name
 
 NAME = "Алексей Сидоров"
 
@@ -44,13 +44,15 @@ def _git(cwd: Path, *args: str) -> None:
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="the fake git is a sh script")
 
 
-def _fake_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes) -> None:
-    """Put a ``git`` first on PATH that prints ``stdout`` verbatim and exits 0."""
+def _fake_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes, *, exit_code: int = 0
+) -> None:
+    """Put a ``git`` first on PATH that prints ``stdout`` verbatim and exits."""
     bindir = tmp_path / "fakebin"
     bindir.mkdir(exist_ok=True)
     (bindir / "out").write_bytes(stdout)
     script = bindir / "git"
-    script.write_text('#!/bin/sh\nexec cat "$(dirname "$0")/out"\n')
+    script.write_text(f'#!/bin/sh\ncat "$(dirname "$0")/out" && exit {exit_code}\n')
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
 
@@ -80,6 +82,7 @@ def test_the_ratifier_identity_is_the_git_user_name(
     cfg.write_bytes(f"[user]\n\tname = {NAME}\n".encode())
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    assert git_user_name() == NAME
     assert _ratifier_identity(None) == NAME
 
 
@@ -137,6 +140,25 @@ def test_a_garbled_ratifier_name_is_none(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.chdir(tmp_path)
     _fake_git(tmp_path, monkeypatch, b"caf\xe9\n")
     assert _ratifier_identity(None) is None
+
+
+@posix_only
+@pytest.mark.parametrize(("stdout", "exit_code"), [(b"  \n", 0), (b"Misleading name\n", 1)])
+def test_a_git_lookup_without_a_usable_user_name_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes, exit_code: int
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _fake_git(tmp_path, monkeypatch, stdout, exit_code=exit_code)
+    assert git_user_name() is None
+
+
+@posix_only
+def test_a_git_user_name_is_none_without_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert git_user_name() is None
 
 
 @posix_only

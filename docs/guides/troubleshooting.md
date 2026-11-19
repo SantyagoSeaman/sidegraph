@@ -1,12 +1,12 @@
 # Troubleshooting: what Sidegraph tells you, and what to do
 
-> **Start here:** Match the message or check code to the table below, read its cause and run the suggested fix. A store is the committed record data. The index is a disposable local cache. Do not delete the store to clear a warning. [Glossary](../concepts/glossary.md).
+> **Start here:** Match the message or check code to the table below, read its cause and run the suggested fix. The store holds committed records. Its SQLite database holds the record index and local journals. Do not delete the store to clear a warning. [Glossary](../concepts/glossary.md).
 
 For pinning a version in your own commands, see [pinned releases](../getting-started/installation.md#mutable-development-references).
 
 Sidegraph reports store, graph and host problems separately. First match the symptom,
 then inspect the diagnostic that can establish its cause. Keep the committed store.
-The SQLite index is derived and can be rebuilt when it is the damaged component.
+The record index can be rebuilt from the committed store.
 
 | Symptom | Likely cause | First action |
 |---|---|---|
@@ -182,7 +182,7 @@ and others concern the live host rather than stored records.
 
 | Session notice or line | Likely cause | Next action |
 |---|---|---|
-| `store-unreadable` | The selected store cannot open | Follow the [named recovery](#store-unreadable). Remove only a damaged derived index when that is the diagnosed cause. |
+| `store-unreadable` | The selected store cannot open | Follow the [named recovery](#store-unreadable). Back up the database first if the recovery requires removing it. |
 | `pending-ratification` | Proposals await review | Review with `sidegraph-ratify` or the ratify tool. |
 | `graph-borrowed` | This worktree uses the main checkout graph | No repair is required. Build a worktree graph when branch-only code needs to appear. |
 | `stray-store` | A nested empty store hides the intended repository store | Verify that it is empty, then remove only that extra store. See [stray-store](#stray-store). |
@@ -203,10 +203,11 @@ that depends on the exception:
   longer lands here: the store opens without that file and `store-files-skipped` names it. A file
   that cannot be read at all (a permission or I/O error) still does, and `sidegraph-verify` gives
   the details.
-- A damaged or read-only `index.db`: it is derived and safe to delete. Remove
-  `.sidegraph/index.db` and start a new session; it is rebuilt from the committed files. When
-  there is no `index.db` to remove, or the database could not be opened at all (a read-only store
-  directory, a `.sidegraph` that is a plain file), the advice is the generic one below instead.
+- A damaged or read-only `index.db`: back it up before removing it and starting a new
+  session. The record index rebuilds from committed files. Removing the database loses local
+  journals, including Portal advice and operation recovery information. When there is no index
+  to remove, or the database could not be opened at all (a read-only store directory or a
+  `.sidegraph` that is a plain file), the advice is the generic one below instead.
 - A store path that leaves its repository through a link (`leaves its repository through a
   link to …: …`): Sidegraph does not follow it. Replace the link with a real directory, or point
   the link at a directory inside the repository. A store shared between projects needs a wiring

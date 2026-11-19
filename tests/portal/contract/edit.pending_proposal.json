@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "pending_proposal",
+    "message": "Decide on this proposal in the queue first.",
+    "details": {
+      "pending": "01KAA000000000000000000003"
+    }
+  }
+}

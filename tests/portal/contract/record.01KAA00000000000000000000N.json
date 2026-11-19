@@ -1,0 +1,23 @@
+{
+  "record": {
+    "id": "01KAA00000000000000000000N",
+    "statement": "In the restart fixture, reads resumed after 12 seconds.",
+    "status": "accepted",
+    "source": "Local restart fixture",
+    "valid_from": "2026-11-17T09:00:00Z",
+    "supports": [
+      "01KAA00000000000000000000M"
+    ],
+    "provenance": {
+      "source": "human",
+      "author": "Jo Rivera"
+    },
+    "supersedes": "01KAA000000000000000000005"
+  },
+  "history": [],
+  "evidence": [],
+  "keepable_evidence": [],
+  "drifted": false,
+  "pending_evidence": [],
+  "anchors": []
+}

@@ -255,6 +255,78 @@ def test_test_jobs_report_durations() -> None:
         assert "--durations=30 --durations-min=1" in step["run"]
 
 
+def _history_scan_step() -> dict:
+    steps = _load()["jobs"]["lint"]["steps"]
+    return next(step for step in steps if step.get("name") == "Scan committed history for secrets")
+
+
+def _scan_repo_git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+@pytest.mark.parametrize("has_main", [True, False], ids=["origin-main", "no-origin-main"])
+def test_history_scan_starts_where_origin_main_ends(tmp_path: Path, has_main: bool) -> None:
+    """Red against a step that scans the whole history, skips the scan, or trusts the event."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _scan_repo_git(repo, "init", "-q")
+    _scan_repo_git(repo, "config", "user.email", "ci@example.test")
+    _scan_repo_git(repo, "config", "user.name", "CI test")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    _scan_repo_git(repo, "add", ".")
+    _scan_repo_git(repo, "commit", "-qm", "on main")
+    main = _scan_repo_git(repo, "rev-parse", "HEAD")
+    if has_main:
+        _scan_repo_git(repo, "update-ref", "refs/remotes/origin/main", main)
+    (repo / "b.txt").write_text("b\n", encoding="utf-8")
+    _scan_repo_git(repo, "add", ".")
+    _scan_repo_git(repo, "commit", "-qm", "on the branch")
+    # A stand-in for `uv run pre-commit ...`: prove it ran, and report the excluded base.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "uv").write_text(
+        '#!/bin/sh\necho SCAN-RAN "$*"\n'
+        "git for-each-ref --format='%(refname) %(objectname)' refs/secret-scan-base/\n",
+        encoding="utf-8",
+    )
+    (bindir / "uv").chmod(0o755)
+    step = _history_scan_step()
+    assert "env" not in step, "the base must come from the checkout, not from event fields"
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=repo,
+        env={"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SCAN-RAN run pre-commit run gitleaks-history --hook-stage manual --all-files" in (
+        result.stdout
+    )
+    if has_main:
+        assert f"refs/secret-scan-base/base {main}" in result.stdout
+    else:
+        assert "Scanning the full history" in result.stdout
+        assert "refs/secret-scan-base/" not in result.stdout
+
+
+def test_history_scan_hook_excludes_the_scan_base() -> None:
+    config = yaml.safe_load((_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    hooks = [hook for repo in config["repos"] for hook in repo["hooks"]]
+    history = next(hook for hook in hooks if hook.get("alias") == "gitleaks-history")
+    assert "--not --glob=refs/secret-scan-base/*" in history["entry"]
+    assert "--first-parent " not in history["entry"]
+
+
 def test_slim_jobs_fit_the_slim_time_cap() -> None:
     """Red against nothing: guards the slim cap."""
     for path in (_CI, _ROOT / ".github/workflows/session-link-gate.yml"):

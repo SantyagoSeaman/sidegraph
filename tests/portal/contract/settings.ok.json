@@ -1,0 +1,6 @@
+{
+  "theme": "dark",
+  "poll_seconds": 5,
+  "editor_url": "vscode://file/{path}:{line}",
+  "idle_minutes": 30
+}

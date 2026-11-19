@@ -1,0 +1,23 @@
+{
+  "op_key": "00000000-0000-4000-8000-000000000001",
+  "state": "done",
+  "new_record_id": "01KAA00000000000000000000G",
+  "offer_save_as_new": false,
+  "parts": [
+    {
+      "part": "version",
+      "id": "01KAA00000000000000000000G",
+      "outcome": "done_now"
+    },
+    {
+      "part": "close_predecessor",
+      "id": "01KAA000000000000000000005",
+      "outcome": "done_now"
+    },
+    {
+      "part": "bindings",
+      "id": "01KAA00000000000000000000G",
+      "outcome": "done_now"
+    }
+  ]
+}

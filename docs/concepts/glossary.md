@@ -20,7 +20,7 @@ Sidegraph keeps the project's decision graph for AI coding agents. This page def
 | Drift | A signal that anchored code changed or a previous verification no longer applies. It asks for a content check and does not prove the record false. |
 | Live / degraded / orphaned | Binding states. Live resolves at its tier. Degraded means resolution is ambiguous. Orphaned means its target cannot be resolved. A surviving broader anchor can still make the record reachable. |
 | Seed | A file or entity supplied to retrieval to identify the current task's neighborhood. It is an input to the lookup. |
-| Store / index | The store is the authoritative committed record data. The SQLite index is derived local state and can be rebuilt. Commit the store and ignore the index. |
+| Store / index | The store is the authoritative committed record data. The gitignored SQLite database holds the rebuildable record index and local journals. |
 | Format 1 / format 2 | Store layouts. Format 1 uses per-record files and legacy archives. Format 2 also supports hash-keyed shard files. New records still start as individual files. |
 | Shard | A canonical file of typed JSON lines used to pack settled record bodies in format 2. It is authoritative store data, unlike the index. |
 | Session map / TOC | The initial orientation delivered to an agent. Named accepted domains form its table of contents. Hook-delivered maps use a graph-based fallback when no accepted domains exist. Grok MCP instructions then provide only the standing instruction and version. OpenCode has no opening map. |

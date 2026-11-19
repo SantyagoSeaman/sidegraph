@@ -1,0 +1,16 @@
+{
+  "text": "## Sidegraph memory\n",
+  "emitted": true,
+  "chars": 20,
+  "assumptions": [
+    "Fresh session"
+  ],
+  "firing_conditions": [],
+  "prepared": {
+    "synced": false,
+    "adopted_moves": 0
+  },
+  "ids_in_text": [],
+  "budget": 2000,
+  "cut": "The memory map was cut to the host budget."
+}

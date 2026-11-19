@@ -22,7 +22,7 @@ MCP server for any other client.
 [![release](https://img.shields.io/github/v/release/SantyagoSeaman/sidegraph)](https://github.com/SantyagoSeaman/sidegraph/releases)
 [![PyPI](https://img.shields.io/pypi/v/sidegraph)](https://pypi.org/project/sidegraph/)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
-[![MCP tools](https://img.shields.io/badge/MCP_tools-25-blue)](docs/reference/mcp-tools.md)
+[![MCP tools](https://img.shields.io/badge/MCP_tools-27-blue)](docs/reference/mcp-tools.md)
 [![skills](https://img.shields.io/badge/skills-14-blueviolet)](#what-you-can-do)
 
 ## Why
@@ -214,7 +214,7 @@ your repository before you install anything.
 
 ## What you can do
 
-**14 skills · 25 MCP tools · 18 CLI commands · 5 agents · ADR folders and 5 spec-driven workflows**
+**14 skills · 27 MCP tools · 19 CLI commands · 5 agents · ADR folders and 5 spec-driven workflows**
 
 | Ask for | What you get |
 |---|---|
@@ -227,6 +227,12 @@ your repository before you install anything.
 | `/sidegraph:triage-drift` | Records whose code changed, checked: still true, or replaced with a new decision |
 
 In Claude Code these are slash commands; in other agents, ask for the task in words.
+
+**Review it in a browser.** Run `sidegraph-portal`, or ask your agent to "show the portal", to
+open Sidegraph Portal on your machine: the queue of pending proposals with the agent's
+recommendation beside each item that has one, record editing that saves a new version, the decision graph with the
+code each record is anchored to, and Agent view, which shows the text a session would
+receive. The [Portal guide](docs/guides/portal.md) covers each page.
 
 <details>
 <summary><strong>All 14 skills</strong></summary>
@@ -251,7 +257,7 @@ In Claude Code these are slash commands; in other agents, ask for the task in wo
 </details>
 
 <details>
-<summary><strong>All 25 MCP tools</strong></summary>
+<summary><strong>All 27 MCP tools</strong></summary>
 
 | Tool | Purpose |
 |---|---|
@@ -272,6 +278,8 @@ In Claude Code these are slash commands; in other agents, ask for the task in wo
 | `propose_decisions` | Draft decisions and facts from the session for review |
 | `propose_domains` | Draft domains for review |
 | `ratify` | Accept or drop pending proposals |
+| `open_portal` | Open Sidegraph Portal from chat and return its launch link |
+| `advise_ratification` | Save recommendations on pending proposals for Sidegraph Portal |
 | `supersede_decision` | Reverse a decision: add its replacement (an agent's own waits for ratification) |
 | `retire_decision` | Close a duplicate decision, or one whose subject is gone, with a reason |
 | `supersede_fact` | Correct a fact: its replacement is accepted at once |
@@ -286,7 +294,7 @@ In Claude Code these are slash commands; in other agents, ask for the task in wo
 </details>
 
 <details>
-<summary><strong>All 18 CLI commands</strong></summary>
+<summary><strong>All 19 CLI commands</strong></summary>
 
 | Command | Purpose |
 |---|---|
@@ -301,6 +309,7 @@ In Claude Code these are slash commands; in other agents, ask for the task in wo
 | `sidegraph-doctor` | Diagnose the store, the graph and the wiring |
 | `sidegraph-stats` | Local usage report |
 | `sidegraph-viz` | An offline, interactive graph of the store |
+| `sidegraph-portal` | Open the local Sidegraph Portal for an existing store |
 | `sidegraph-blame` | `git blame` joined to the decisions each commit carries |
 | `sidegraph-export-adr` | Export accepted decisions as ADRs in your workflow's format |
 | `sidegraph-export-okf` | Export the store as an Open Knowledge Format bundle |

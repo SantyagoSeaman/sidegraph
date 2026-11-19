@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "pending_evidence",
+    "message": "This record has pending evidence. Decide on it in the queue first.",
+    "details": {
+      "ids": [
+        "01KAA000000000000000000006"
+      ],
+      "queue": true
+    }
+  }
+}

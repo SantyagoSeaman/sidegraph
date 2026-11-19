@@ -2,13 +2,14 @@
 
 > **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
 
-22 console scripts are registered in `pyproject.toml` (`[project.scripts]`): seventeen
+23 console scripts are registered in `pyproject.toml` (`[project.scripts]`): eighteen
 commands documented on this page — fifteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
 (including `sidegraph-prepare-commit-msg`, which doubles as a git hook — see
 [`reference/git-bindings.md`](git-bindings.md) for its installation and mechanism) and the
 guided `sidegraph-bootstrap` in
 [`src/sidegraph/bootstrap/cli.py`](../../src/sidegraph/bootstrap/cli.py) and ADR export in
-[`src/sidegraph/adr_cli.py`](../../src/sidegraph/adr_cli.py) — plus the MCP server
+[`src/sidegraph/adr_cli.py`](../../src/sidegraph/adr_cli.py) and the Portal in
+[`src/sidegraph/portal/`](../../src/sidegraph/portal/) — plus the MCP server
 (`sidegraph-mcp`) and the four hook entry points (`sidegraph-session-start`,
 `sidegraph-stop`, `sidegraph-pre-tool-use`, `sidegraph-subagent-start`; see
 [`reference/hooks.md`](hooks.md)).
@@ -44,8 +45,8 @@ both `--db` and `--graph` against its own `--root` instead.
 
 ## Exit codes and streams
 
-One convention holds for every command on this page except `sidegraph-bootstrap` (below) and
-the hook entry points, whose output contracts are in [`reference/hooks.md`](hooks.md):
+One convention holds for every command on this page except `sidegraph-bootstrap`,
+`sidegraph-portal` (each documented below) and the hook entry points, whose output contracts are in [`reference/hooks.md`](hooks.md):
 
 | Exit | Meaning | Stream |
 |---|---|---|
@@ -53,11 +54,12 @@ the hook entry points, whose output contracts are in [`reference/hooks.md`](hook
 | `1` | an operational error or a refusal: no store, a store or graph that cannot be read, an out-of-range flag value, an I/O error, a busy store, a run that stopped | the message on stderr; stdout carries at most a partial report: a stopped `compact` or `migrate` run, the ids `ratify` processed, `export-adr`'s planned changes, or, under `--json`, one JSON object with an `error` key |
 | `2` | findings: `sidegraph-verify` violations, `sidegraph-doctor` violations (and its findings under `--check`), `sidegraph-sync --check` attention findings; also argparse usage errors (an unknown flag, a missing argument, an invalid choice, a value of the wrong type such as a non-integer `--window`), whose usage text goes to stderr | the findings on stdout, as the report |
 
-A script that treats `2` as "the memory has something to look at" and `1` as "the command did
-not do its job" is right for every command. Two commands keep a wider meaning:
+For commands following this convention, a script can treat `2` as "the memory has something
+to look at" and `1` as "the command did not do its job". Two commands keep a wider meaning:
 `sidegraph-export-adr` exits `2` when its plan holds conflicts (no write is applied, the
 conflicts are reported), and `sidegraph-bootstrap` uses `2` for a resumable, incomplete run
-(its exit codes are listed in its own section). The human-readable error or refusal message is always on stderr.
+(its exit codes are listed in its own section). The human-readable error or refusal message
+is always on stderr for commands following this convention.
 Under `--json`, every command that takes the flag prints exactly one JSON object on stdout on
 exit `0`, `1` and `2`; the exception is an argparse usage error, which exits `2` with stdout
 empty. A script branches on the exit code first, then reads the object. On exit `1` the
@@ -1742,7 +1744,7 @@ plain-text line):
 | `code-drift` | an open (`proposed`/`accepted`) decision's anchored file(s) changed since capture, or, for a record with no capture commit, were touched since the build of the code graph it was written against (the build commit in `provenance.graph_version`, when it is an ancestor of `HEAD`; every file any commit touched since then counts, so a file changed and restored is listed, and the finding says "touched since the graph build"), or an earlier scoped check (including its declared sections) no longer applies; `record_drift_check` can record an explicit current inspection without rewriting the decision (MCP only); when binding statuses are uncomputed or unavailable, excludes committed deletions and says "binding status unknown"; an anchored file with no status at all is set aside while it is unchanged since the check's commit, unless the recorded check required it, so an orphan the check left out does not re-arm it through either the required-file or the outside-scope comparison; such a file that did not exist at the check's commit, or has changed since, still re-arms it; also carries the "N record(s) have no usable commit to compare against — not checkable" (no capture commit and no usable graph build commit, or a graph build that is not in `HEAD`'s history) and git-unavailable notes, in place, when either applies. The default text groups the per-record lines by drifted file (`code-drift: N record(s) in M file group(s)`), numbers each distinct `git diff <old blob> <new blob>` once, and may add `anchored region unchanged; sibling sections of the file may still matter` to a record whose anchored Python function or Markdown section is textually identical at both ends; `--flat` restores one line per record. The hint is a reading aid, never a verdict: it changes no count and no exit code. `--json` adds a sibling `drift_groups` key (`partial`, `notes`, `groups[].records[]` with `basis`, `reason`, `commit_source`, `diff` and `hint`; `capture_commit` is the graph's build commit when `commit_source` is `"graph"`, and the capture commit when it is `"capture"`); `findings` is unchanged |
 | `never-surfaced` | an accepted decision has `0` shows against `N > 0` queries on its anchored file(s) — anchored where people repeatedly work, never once rendered or injected by a hook |
 | `stale-instructions` | an auto-injected agent-instructions file beside the store (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`) still carries the distinctive wording of a **superseded** decision — that file reaches the agent at turn zero, before retrieval, so an abandoned rule surviving there outranks the store's correction by default. Verbatim-ish match on normalized text with length/word floors; superseded records only; no git call. Advisory: it reports a quotation, not a proven contradiction — the file may be narrating history |
-| `unratified-accept` | an **accepted** record whose provenance says `agent` and which carries no ratifier stamp — the signature `SIDEGRAPH_AUTO_ACCEPT=on` leaves in a shared store (one environment's setting bypassing the ratification gate for everyone). Scoped to records created at/after the EARLIER of the store's earliest ratifier stamp and its creation marker (`.sidegraph/stamping_live_since`, written once when a store is genuinely new — never backfilled onto an existing one), so a store predating both reports nothing rather than everything; a store that has never ratified anything but was created by a marker-writing version is still in scope from its own creation, closing the blind window an unratified store would otherwise sit in forever. A stamped record — including one stamped `auto:<policy>` by an auto-ratification policy — and a human-sourced one are never flagged. A **supersession successor** (`supersedes` set) is never flagged either: before 0.29.0 `supersede_decision` wrote every successor accepted at once with no stamp, whoever called it, so those records reproduce the signature with no relation to the env var this check hunts (from 0.29.0 an agent's own `supersede_decision` successor lands `proposed` and is stamped when it is accepted). Narrowed exception: a `supersedes`-bearing record IS still flagged if it carries a `layer`, a `provenance.ref`, or a tier-0 `tag:`/`initiative:` binding absent from its predecessor — neither `supersede_decision` nor `supersede_fact` can produce any of the three, so one present proves the `propose_decisions`/auto-accept path wrote it. (The fact half is defensive only: `supersede_fact` always stamps `source="human"`, so a fact successor never reaches this agent-sourced check, and no draft shape carries `supersedes` on a fact.) Only a MINIMAL superseding draft (none of the three) is indistinguishable from a legitimate successor by the record's own fields, and stays excluded — a known, accepted, narrower trade-off than treating every supersession alike. Advisory: the signature is not proof — verify before concluding |
+| `unratified-accept` | an **accepted** record whose provenance says `agent` and which carries no ratifier stamp — the signature `SIDEGRAPH_AUTO_ACCEPT=on` leaves in a shared store (one environment's setting bypassing the ratification gate for everyone). Scoped to records created at/after the EARLIER of the store's earliest ratifier stamp and its creation marker (`.sidegraph/stamping_live_since`, written once when a store is genuinely new — never backfilled onto an existing one), so a store predating both reports nothing rather than everything; a store that has never ratified anything but was created by a marker-writing version is still in scope from its own creation, closing the blind window an unratified store would otherwise sit in forever. A stamped record — including one stamped `auto:<policy>` by an auto-ratification policy — and a human-sourced one are never flagged. Before 0.29.0, `supersede_decision` could write an accepted, agent-sourced successor without a stamp, so the check flags an otherwise eligible **supersession successor** (`supersedes` set) only if it carries a `layer`, a `provenance.ref`, or a tier-0 `tag:`/`initiative:` binding absent from its predecessor. The older supersede tools could produce none of those signals. Current `supersede_decision` can inherit a layer, and an agent's successor gets a ratifier stamp when accepted. (The fact half is defensive only: `supersede_fact` always stamps `source="human"`, so a fact successor never reaches this agent-sourced check, and no draft shape carries `supersedes` on a fact.) Only a MINIMAL superseding draft (none of the three) is indistinguishable from a legitimate successor by the record's own fields, and stays excluded — a known, accepted, narrower trade-off than treating every supersession alike. Advisory: the signature is not proof — verify before concluding |
 | `duplicate-entity` | two or more committed entity files share one logical identity (legal — see below — but ambiguous); reported once per group, at the winner's (lowest-`entity_id`) file, naming every id in the group and its binding count; names are compared folded to their file's basename, and an entity named by a path (full or partial) of its file beside one named by the basename is not a duplicate — it is listed on the informational `spelling twins` lines |
 | `graph-root-mismatch` | `graphify update` was likely run from a subdirectory instead of the repository root, so every recorded `source_file` is relative to that subdirectory instead — every anchor in the graph will look orphaned until it's rebuilt from the root. Detected from `--graph`: a sample of anchorable `source_file` values that mostly don't exist relative to the repo root, but DO all exist under one specific subdirectory (named in the finding). Silent on a legitimately partial graph (a doc-only corpus, an `--exclude`d build) and on too small a sample to judge safely; needs `--graph` to resolve (missing/unreadable simply skips it) |
 | `snapshot-split` | Two or more accepted domains descend from one covered snapshot domain, so neither holds its frozen membership. Refresh each part: `sidegraph-domains snapshot --refresh --domain <each part>` |
@@ -1898,6 +1900,28 @@ does not read, or a store path that leaves its repository through a link; one
 `store not readable (<path>): <error>` line on stderr, and with `--json` that line as
 `{"error": <message>}` on stdout),
 or an unwritable output path.
+
+## `sidegraph-portal`
+
+Open the local Sidegraph Portal for an existing store. The process serves
+`127.0.0.1` and runs in the foreground until Ctrl+C or the idle timeout.
+
+| Option | Default | Behavior |
+|---|---|---|
+| `--db PATH` | Shared store resolution | Select an existing store directory. Without an explicit path, the portal can find the repository's store from a subdirectory. |
+| `--graph PATH` | The store's default graph, including a linked worktree's borrowed graph when available | Override the graph for a CLI launch. Relative paths resolve from the working directory. |
+| `--port N` | `0` | Bind a loopback port. Use `0` to let the OS choose. Port `80` is unavailable because browsers omit it from the Host header. |
+| `--no-browser` | Off | Print the launch link for manual opening. |
+| `--host-family FAMILY` | `claude` in CLI mode | Select the initial Agent view host. The supported families are `claude`, `codex`, `grok` and `muse`. |
+| `--lifetime-fd N` | Unset | Internal chat-mode launch argument. The inherited read descriptor (Windows handle) keeps the portal tied to the parent process. |
+
+A launch prints `url <URL>` to stdout. Use the full link, including its fragment,
+to open the portal. A sandboxed browser may need the link pasted manually.
+The command exits `0` on Ctrl+C or idle shutdown, `1` with an `error <reason>`
+line on stdout for a missing store or unavailable port, and `2` for a usage error.
+Server logs go to stderr. See [portal settings](configuration.md#portal-settings).
+From chat, use [`open_portal`](mcp-tools.md#open_portal) to get a Portal tied to
+the MCP server's lifetime.
 
 ## `sidegraph-export-adr`
 

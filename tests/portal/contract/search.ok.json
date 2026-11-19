@@ -1,0 +1,23 @@
+{
+  "hits": [
+    {
+      "id": "01KAB123000000000000000001",
+      "type": "decision",
+      "kind": "constraint",
+      "status": "accepted",
+      "domains": [
+        "transport"
+      ],
+      "title": "Keep the retry delay bounded",
+      "match": {
+        "words": [
+          "retry",
+          "bounded"
+        ],
+        "via_anchor": null
+      },
+      "snippet": "Retry the read with a delay capped at 30 seconds."
+    }
+  ],
+  "open_id": null
+}

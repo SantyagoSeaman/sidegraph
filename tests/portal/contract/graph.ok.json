@@ -1,0 +1,92 @@
+{
+  "nodes": [
+    {
+      "id": "01KAB123000000000000000001",
+      "type": "decision",
+      "label": "Keep the retry delay bounded",
+      "title": "decision · accepted",
+      "color": {
+        "background": "#e0913d",
+        "border": "#e0913d",
+        "highlight": {
+          "background": "#e0913d",
+          "border": "#ffffff"
+        }
+      },
+      "shape": "box",
+      "size": 11.5,
+      "opacity": 1.0,
+      "problem": false,
+      "dangling": false,
+      "detail": {
+        "title": "Keep the retry delay bounded",
+        "kind": "constraint",
+        "status": "accepted",
+        "context": "A reader can briefly lose its connection while the service restarts.",
+        "choice": "Retry the read with a delay capped at 30 seconds.",
+        "rejected": "Waiting indefinitely delayed recovery after a restart.",
+        "consequences": "The reader can check for recovery without a tight loop.",
+        "scope": "module"
+      }
+    },
+    {
+      "id": "01KAA000000000000000000009",
+      "type": "entity",
+      "label": "retry_read",
+      "title": "entity · tier 2",
+      "color": {
+        "background": "#8a94a6",
+        "border": "#8a94a6",
+        "highlight": {
+          "background": "#8a94a6",
+          "border": "#ffffff"
+        }
+      },
+      "shape": "dot",
+      "size": 11.5,
+      "opacity": 1.0,
+      "problem": false,
+      "dangling": false,
+      "detail": {
+        "canonical_name": "src/client.py::retry_read",
+        "kind": "concrete",
+        "file_path": "src/client.py",
+        "last_seen_community": "transport"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "01KAB123000000000000000001",
+      "to": "01KAA000000000000000000009",
+      "kind": "anchor",
+      "color": {
+        "color": "#8a94a6",
+        "opacity": 0.7
+      },
+      "width": 4.0,
+      "label": "",
+      "dashes": false,
+      "arrows": "to",
+      "status": "live",
+      "relation": "affects",
+      "weight": 1.0
+    }
+  ],
+  "stats": {
+    "decisions": 1,
+    "facts": 0,
+    "entities": 1,
+    "orphaned_bindings": 0,
+    "degraded_bindings": 0,
+    "dangling_records": 0,
+    "supersede_links": 0,
+    "truncated": 0
+  },
+  "record_domains": {
+    "01KAB123000000000000000001": [
+      "transport"
+    ]
+  },
+  "membership_certified": true
+}

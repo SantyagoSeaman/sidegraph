@@ -2,7 +2,7 @@
 
 > **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
 
-Twenty-five tools, all defined in [`src/sidegraph/server.py`](../../src/sidegraph/server.py) and
+Twenty-seven tools, all defined in [`src/sidegraph/server.py`](../../src/sidegraph/server.py) and
 exposed by the `sidegraph-mcp` stdio server (`FastMCP("sidegraph")`). The server holds one
 process-wide `Store` (path resolved via `$SIDEGRAPH_DIR`, same precedence the CLI and hooks
 use — see [`configuration.md`](configuration.md#store-path-resolution)) and a best-effort
@@ -131,6 +131,8 @@ for recovery from an incomplete operation.
 | [`supersede_domain`](#supersede_domain) | Close an old Domain, write its rename/re-scoped replacement | Renaming/re-scoping a domain, or freeing a mass-dropped community |
 | [`list_proposed`](#list_proposed) | Human-readable listing of pending decisions, facts, *and* domains (bounded; the rest by id) | Before ratifying, in a session or in PR review |
 | [`ratify`](#ratify) | Accept/drop pending proposals of any kind (decisions, facts, domains) | Ratifying from within a session (CLI equivalent: `sidegraph-ratify`) |
+| [`open_portal`](#open_portal) | Open or reuse the local Sidegraph Portal and return its launch link | Opening the Portal from chat |
+| [`advise_ratification`](#advise_ratification) | Save recommendations on pending proposals | Reviewing the Sidegraph Portal queue |
 | [`sync_anchors`](#sync_anchors) | Re-anchor the store against the current graph and report what happened | The diagnostic/heal path, after a `graphify update`; the `heal-anchors` skill's MCP-first path |
 | [`verify_store`](#verify_store) | Bounded integrity lint, text only, with counts by code | CI or ad hoc — checking the store hasn't been hand-corrupted |
 | [`add_anchors`](#add_anchors) | Append bindings to an EXISTING decision or fact | The `heal-anchors` triage flow — "code moved, decision still valid" |
@@ -144,7 +146,7 @@ fields/codes use fixed placeholders. Validation semantics and per-item draft iso
 are unchanged. A malformed outer signature still rejects the whole call.
 
 Raw admission runs before signature coercion. All logical MCP writes, including
-`ratify`, `sync_anchors` and `add_anchors`, apply the finite input
+`ratify`, `advise_ratification`, `sync_anchors` and `add_anchors`, apply the finite input
 shape, string and node policy described below. Unknown write parameter names are omitted
 from errors while valid parameter help remains. Read-tool aliases/help are unchanged.
 The server rejects unsupported tool registrations rather than executing an unguarded
@@ -243,7 +245,7 @@ Every tool carries MCP annotations, so a host can tell what a call does before i
 host with an auto-reviewer (Codex's `approvals_reviewer = auto_review`) reviews a call to a tool
 that has none, because the MCP defaults say "destructive" and "open-world". It skips the review
 for a tool marked read-only, or marked non-destructive and closed-world. Two annotation sets
-cover the 25 tools, defined once in `server.py`:
+cover the 27 tools, defined once in `server.py`:
 
 | Hint | Read-only tools | Every other tool |
 |---|---|---|
@@ -261,11 +263,12 @@ cover the 25 tools, defined once in `server.py`:
 |---|---|
 | Read-only | `list_facts`, `find_entity`, `get_entity_history`, `list_proposed`, `list_domains`, `list_domain_candidates`, `verify_store` |
 | Not read-only: they run the lazy sync | `retrieve_decisions`, `get_task_context`, `query_structure`, `query_decisions`, `drill_down` |
-| Not read-only: they write records | `record_drift_check`, `add_decision`, `supersede_decision`, `retire_decision`, `add_fact`, `supersede_fact`, `propose_decisions`, `ratify`, `add_domain`, `supersede_domain`, `propose_domains`, `sync_anchors`, `add_anchors` |
+| Not read-only: it can start a local process and open a browser | `open_portal` |
+| Not read-only: they write records or advice | `record_drift_check`, `add_decision`, `supersede_decision`, `retire_decision`, `add_fact`, `supersede_fact`, `propose_decisions`, `ratify`, `advise_ratification`, `add_domain`, `supersede_domain`, `propose_domains`, `sync_anchors`, `add_anchors` |
 
-What does not count as a write: `.sidegraph/index.db` is local, gitignored state (the derived
-index, usage statistics, the capture ledger and the session meta), never committed and never
-sent, so a tool that only writes there is still read-only. So is opening the store: the first
+Derived index maintenance and bookkeeping in the gitignored `.sidegraph/index.db` do not
+count as tool writes. The advice journal also lives there, and changing the advice shown in
+the Portal queue counts as a write. Opening the store is read-only for tool classification. The first
 open in a process may create the store's `format` file, its `.gitignore` and its record
 directories, whichever tool comes first.
 
@@ -408,11 +411,11 @@ be surfaced.
 > orphans were `file-not-in-graph`** — the graph was a day older than the files the anchors
 > named, and the names were fine, which is exactly why `reason` exists.
 
-`Decision.scope` is not a parameter here (or on `propose_decisions`) — every decision written
-through the MCP tools lands with the model default, `scope="repo"`. The `global` bucket
-[`get_task_context`](#get_task_context) surfaces (and the `SessionStart` map's "global
-mistakes") only fills from decisions written with `scope="global"` by other means (direct
-store access) — there is currently no tool parameter to set it.
+`add_decision` and [`propose_decisions`](#propose_decisions) write decisions with the model
+default, `scope="repo"`. [`supersede_decision`](#supersede_decision) inherits the predecessor's
+scope. The `global` bucket in [`get_task_context`](#get_task_context) and the `SessionStart` map's
+"global mistakes" can therefore include successors of decisions originally written with
+`scope="global"` through direct store access.
 
 ## `supersede_decision`
 
@@ -432,8 +435,8 @@ supersede_decision(
 ) -> dict
 ```
 
-Writes a replacement `Decision` with `supersedes=old_decision_id`. `source` decides how it
-lands:
+Writes a replacement `Decision` with `supersedes=old_decision_id` and keeps the predecessor's
+`layer` and `scope`. `source` decides how it lands:
 
 - **Omitted, or any value except `"human"`** (the default is `"agent"`): the replacement
   lands `status="proposed"`. The predecessor stays `accepted` and current. The replacement
@@ -2044,6 +2047,45 @@ canonical status fields. An accepted fact has no retire path: supersede its acce
 head when its claim changed. For closed history, follow the
 [status-sensitive recovery](../guides/surviving-refactors.md#reading-and-healing-stale-decisions-warnings).
 Domain drop has its separate accepted-domain exception.
+
+## `open_portal`
+
+```python
+open_portal(open_browser: bool = True)
+```
+
+Open Sidegraph Portal for an existing store. The tool returns the loopback URL as text.
+The agent should always show it as a clickable link, including the fragment. Set
+`open_browser=False` to launch a new Portal without opening a browser. The browser
+preference applies when starting a Portal.
+
+Repeated calls reuse the same URL while the Portal is running. The Portal closes when
+the MCP server exits or the idle timeout expires. The next call starts a new Portal if
+the previous one stopped. When the store is missing, the tool returns setup instructions.
+Use [`sidegraph-portal`](cli.md#sidegraph-portal) to launch it from a terminal.
+
+If the queue contains pending proposals, review them and call
+[`advise_ratification`](#advise_ratification) with your recommendations.
+
+## `advise_ratification`
+
+```python
+advise_ratification(items=[{
+    "id": "<proposal-id>",
+    "verdict": "edit",  # "accept", "reject", or "edit"
+    "reason": "Name the source of the measurement.",
+}])
+```
+
+Save a recommendation for each pending decision, fact or domain in the Sidegraph Portal
+queue. The store must already exist. Advice replaces any previous recommendation for the
+same id and leaves the record's status unchanged. The person reviewing the queue applies
+the verdict. Advice is stored locally, and SessionStart prunes advice older than 30 days.
+Advice qualifies for display while the record is proposed and its canonical body matches
+the version reviewed. Reasons follow the input limits above and are redacted before storage.
+
+The response is a JSON object keyed by proposal id. Each value is `recorded` or a refusal
+beginning with `error:`.
 
 ## `sync_anchors`
 

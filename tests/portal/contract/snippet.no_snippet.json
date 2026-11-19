@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "not_found",
+    "message": "No source snippet is available for this anchor.",
+    "details": {
+      "reason": "snippet_unavailable"
+    }
+  }
+}

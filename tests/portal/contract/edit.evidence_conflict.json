@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "evidence_conflict",
+    "message": "A carried fact has a pending replacement.",
+    "details": {
+      "id": "01KAA000000000000000000005",
+      "pending": "01KAA000000000000000000006"
+    }
+  }
+}

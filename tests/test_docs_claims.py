@@ -304,6 +304,19 @@ def test_environment_variable_claims_match_source_bidirectionally():
     assert lead_sentence in doc_text
 
 
+def test_portal_settings_are_documented() -> None:
+    """The user-level settings reference covers every field of the Portal settings model."""
+    from sidegraph.portal.contract import Settings
+
+    doc = (_ROOT / "docs" / "reference" / "configuration.md").read_text(encoding="utf-8")
+    heading = "## Portal settings"
+    assert heading in doc
+    section = doc.split(heading, 1)[1].split("\n## ", 1)[0]
+    assert "`portal.json`" in section
+    rows = set(re.findall(r"^\| `([a-z_]+)` \|", section, re.M))
+    assert rows == set(Settings.model_fields)
+
+
 # ---------------------------------------------------------------------------
 # 5. cli.md's per-command sections <-> the option strings each entry point's parser defines
 # ---------------------------------------------------------------------------
@@ -562,7 +575,7 @@ def test_t7_the_tool_count_includes_both_decorator_forms():
     )
 
     assert _tool_names_in(ast.parse(source)) == {"bare", "called"}
-    assert len(_mcp_tool_names()) == 25
+    assert len(_mcp_tool_names()) == 27
 
 
 def test_stability_page_schema_version_and_upgrade_sets_match_the_code():

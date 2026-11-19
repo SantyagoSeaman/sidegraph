@@ -1,0 +1,32 @@
+{
+  "rows": [
+    {
+      "id": "01KAB123000000000000000001",
+      "type": "decision",
+      "kind": "constraint",
+      "status": "accepted",
+      "domains": [
+        "transport"
+      ],
+      "title": "Keep the retry delay bounded",
+      "layer": "technical",
+      "anchor_tiers": [
+        2
+      ],
+      "anchor_statuses": [
+        "unchecked"
+      ]
+    },
+    {
+      "id": "01KAA000000000000000000005",
+      "type": "fact",
+      "status": "accepted",
+      "domains": [
+        "transport"
+      ],
+      "title": "In the restart fixture, reads resumed after 12 seconds.",
+      "anchor_tiers": [],
+      "anchor_statuses": []
+    }
+  ]
+}

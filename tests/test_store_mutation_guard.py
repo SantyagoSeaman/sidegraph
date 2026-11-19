@@ -354,6 +354,14 @@ def _case_add_decision(store: Store) -> tuple[str, object]:
     return "INSERT INTO decisions", lambda: store.add_decision(_decision("case-add-decision"))
 
 
+def _case_close_superseded_predecessor(store: Store) -> tuple[str, object]:
+    predecessor = store.add_decision(_decision())
+    successor = _decision(supersedes=predecessor.id)
+    with store._mutation():
+        store._write_decision(successor)
+    return "INSERT INTO decisions", lambda: store.close_superseded_predecessor(successor.id)
+
+
 def _case_upsert_entity(store: Store) -> tuple[str, object]:
     return "INSERT INTO entities", lambda: store.upsert_entity(
         Entity(canonical_name="case-upsert-entity")
@@ -380,9 +388,12 @@ def _case_add_fact(store: Store) -> tuple[str, object]:
 
 def _case_add_binding(store: Store) -> tuple[str, object]:
     entity = store.upsert_entity(Entity(canonical_name="case-binding-entity"))
+    source = store.add_decision(_decision("case-binding-source"))
     decision = store.add_decision(_decision("case-binding-target"))
-    return "INSERT INTO anchor_bindings", lambda: store.add_binding(
-        AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=2)
+    binding = AnchorBinding(record_id=source.id, entity_id=entity.entity_id, tier=2)
+    store.add_binding(binding)
+    return "UPDATE anchor_bindings SET kept_status", lambda: store.add_binding(
+        binding.model_copy(update={"record_id": decision.id}), inherit_retained_from=source.id
     )
 
 
@@ -606,11 +617,36 @@ def _case_record_drift_check(store: Store) -> tuple[str, object]:
     return "INSERT INTO meta", lambda: store.record_drift_check(check)
 
 
+def _case_write_advice(store: Store) -> tuple[str, object]:
+    draft = _proposed_decision(store, "case-write-advice")
+    return "INSERT INTO ratify_advice", lambda: store.write_advice(
+        [(draft.id, "accept", "Reviewed.")], None
+    )
+
+
+def _case_put_operation(store: Store) -> tuple[str, object]:
+    store.put_operation("first", "digest", "draft", None, ["new"])
+    return "UPDATE portal_operations", lambda: store.put_operation(
+        "second", "other", "draft", None, ["replacement"]
+    )
+
+
+def _case_set_operation_state(store: Store) -> tuple[str, object]:
+    store.put_operation("key", "digest", "draft", None, ["new"])
+    return "UPDATE portal_operations", lambda: store.set_operation_state("key", "started")
+
+
+def _case_release_operation(store: Store) -> tuple[str, object]:
+    store.put_operation("key", "digest", "draft", None, ["new"])
+    return "DELETE FROM portal_operations", lambda: store.release_operation("key")
+
+
 # name -> (store) -> (sql_marker, zero-arg thunk to invoke under the marker patch). Setup
 # (creating any prerequisite decision/entity/domain) always happens BEFORE the caller installs
 # the patch, over the real connection -- only the returned thunk is meant to run under it.
 _ROLLBACK_CASES = {
     "add_decision": _case_add_decision,
+    "close_superseded_predecessor": _case_close_superseded_predecessor,
     "retire": _case_retire,
     "record_drift_check": _case_record_drift_check,
     "upsert_entity": _case_upsert_entity,
@@ -630,6 +666,10 @@ _ROLLBACK_CASES = {
     "record_retrieval_events": _case_record_retrieval_events,
     "record_render_event": _case_record_render_event,
     "record_session_transcript": _case_record_session_transcript,
+    "write_advice": _case_write_advice,
+    "put_operation": _case_put_operation,
+    "set_operation_state": _case_set_operation_state,
+    "release_operation": _case_release_operation,
     "_delivery_write": _case_delivery_write,
     "prune_telemetry_events": _case_prune_telemetry_events,
     "compact": _case_compact,
@@ -675,6 +715,8 @@ def test_every_write_method_rolls_back_on_failure(tmp_path, method_name):
         with pytest.raises(RuntimeError):
             thunk()
     assert store._conn.in_transaction is False, method_name
+    if method_name == "add_binding":
+        assert store._conn.execute("SELECT COUNT(*) FROM anchor_bindings").fetchone()[0] == 1
     if method_name == "record_drift_check":
         assert len(list((store.path / "verifications").glob("*.json"))) == 1
         assert store.get_meta("code_drift_cache") is not None
