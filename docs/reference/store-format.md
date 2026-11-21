@@ -583,11 +583,13 @@ A reload marks the store `volatile_stale`, and the next `sidegraph-sync` — ord
 lazy, no `--force` needed — rebuilds every derived field from the graph and clears the
 mark. Until that pass runs, domain membership is empty, entity engine-mappings are unset,
 and every binding reads `live`; the committed files are untouched throughout, which is why
-none of this produces a git diff.
+none of this produces a git diff. A pass during which the index was rebuilt again or marked
+again leaves the mark set, and the next pass runs in full.
 Those reset statuses are placeholders. The rebuild keeps, in the index-only column
 `anchor_bindings.kept_status`, the status the last sync computed for each entity whose
-descriptor is unchanged. Until sync clears the mark, hot-hook record selection and memory
-counts read that column, and leave out a record whose anchor has no kept status. A kept
+descriptor is unchanged. Until sync clears the mark, ordinary hot-hook record selection and memory
+counts read that column and leave out a record whose anchor has no kept status. PreToolUse's
+exact-path lookup serves eligible leaf bindings independently of that column. A kept
 status is the last sync's verdict about the code as that sync saw it, not a fresh one. The
 index remains usable for touches and claims. The column is part of the derived index, not
 of the committed store format.

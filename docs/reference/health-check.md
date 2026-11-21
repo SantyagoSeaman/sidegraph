@@ -33,6 +33,11 @@ Graphify-recorded engine version, and any already observed active MCP evidence. 
 registration is not proof that a running server answered. The workflow never starts a server
 or calls retrieval tools to test connectivity.
 
+With `--host codex`, the collector reads `$CODEX_HOME/config.toml`, or `~/.codex/config.toml`
+when `CODEX_HOME` is unset. The file is outside the preservation fingerprint. The report
+marks entries `present` or `missing` when it can check them. When it cannot, it reports
+`UNKNOWN` with a reason. A present entry can be stale after a hook command changes.
+
 The collector fingerprints the canonical store, index and sidecars, settings, plugin
 manifests, graph inputs, and actual Git index around its process. This is a stable-source
 check, not an atomic snapshot; concurrent writes make preservation evidence unstable without

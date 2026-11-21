@@ -30,8 +30,8 @@ plan would *delete or bypass* — that's where reversal records live.
   for the files and symbols the plan changes — name the symbols in `entities`: their records
   take the budget first. Then mistakes, decisions with evidence, facts and related records.
   This is the budget-bounded view an agent would get mid-work; you're pulling it early.
-- **Area-level plans** ("rework how retrieval budgets work") → `list_domains()` +
-  `drill_down(domain_slug)` — the domain's decisions, mistakes first.
+- **Area-level plans** ("rework how retrieval budgets work") → use the primary call's
+  answer above. Its query already names the area.
 - **The reversal hunt — the step ordinary retrieval doesn't do:** live records answer
   "what is true"; a plan needs "what was *abandoned*". Run two calls:
   `retrieve_decisions(status=["superseded", "rejected"], files=[<the plan's files>])` and

@@ -59,8 +59,8 @@ sandbox that lets them write those two places, or run without one.
 ## Hooks on Grok
 
 Grok Build does not support the `if` field of a hook handler, so it skips a handler that sets one.
-The plugin's Bash handler sets none: it is a shell filter that starts the hook for a shell read
-(`sed`, `grep`, `rg` or `cat`), the same one Claude Code uses. Grok has its own hooks file for
+The plugin's Bash handler uses the same [reader prefilter](../reference/hooks.md#bash-lines)
+as Claude Code. Grok has its own hooks file for
 the host variable and the timeouts.
 
 Grok names its tools differently from Claude Code, and the hook maps
@@ -102,24 +102,21 @@ they saw before.
 This is a stopgap for a gap in Grok, not how Sidegraph is meant to deliver the map, and it is
 narrower than the hook:
 
-- It carries the standing instruction, the version line and the domain table of contents from
-  the store's cache, with the global mistakes and proposals read from the store as they are now,
+- It carries the standing instruction and the version line. A usable domain cache selects the
+  map with global mistakes and proposals read from the store as they are now,
   so a retired or superseded one is not shown. When a `git pull` has changed the record files
   since this clone's index was last built, the server cannot trust the index's rows before its
   first tool call opens the store and refreshes it, so this session's map carries no global
   mistakes or proposals; a later session gets them once a tool call has refreshed the index. It
   has none of the status lines SessionStart adds: no integrity notices, no pending-ratification
   line, no drift line, no stale-graph warning.
-- On a store with no named domains yet, it carries only the standing instruction and the version
-  line, not the community listing SessionStart shows there: building that listing needs the code
-  graph, which is too slow to load before Grok's session starts.
+- Without a usable domain cache, it carries the standing instruction and the version line.
+  Building the hook's community fallback needs the graph, which is too slow for Grok's startup.
 - No store yet means no map: the server does not create `.sidegraph/` to send one. The
   `SessionStart` hook still runs and tells Grok's interface to run `sidegraph-init`.
 - Grok keeps only the first 2,033 characters of a server's instructions (checked on 1.0.70). A
-  longer map is shortened to fit by cutting whole lines from the end of the table, with a note
-  that `list_domains` and `list_proposed` have the rest. Domain lines contain the title,
-  mistake count and any subdomain count; summaries remain available through `list_domains`
-  and `drill_down`.
+  longer map is shortened to fit by cutting whole lines from the end of the map, with a note
+  that `retrieve_decisions` and `list_proposed` have the rest.
 - Grok waits about two seconds for MCP servers before its first request to the model. A server
   that starts later still delivers the map, but after the agent's first tool call instead of
   before its first answer. This happens in the first session after installing, while Sidegraph

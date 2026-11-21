@@ -2,7 +2,7 @@
 
 The worktree has the tracked store and no graph. The hook opens the main checkout's graph, syncs
 it index-only (the worktree's index starts cold, and a sync that wrote canonical files would
-rewrite the tracked store from code that is not the branch's), renders the domain map in memory
+rewrite the tracked store from code that is not the branch's), builds the map cache in memory
 from the store, and adds one line saying whose graph it is reading. The repositories are
 real ones from ``tests.graph_repo_support``.
 see design/superpowers/specs/2026-10-01-worktree-borrowed-graph-design.md (D2, T12-T12c)
@@ -85,16 +85,14 @@ def _communities(checkout: Path) -> list[str]:
         store.close()
 
 
-def test_t12_a_worktree_reads_the_main_graph_renders_its_domains_and_syncs_index_only(
-    main, monkeypatch, capsys
-):
-    """Red against unfixed code (no line, no domain map); mutation M5 skips the sync."""
+def test_t12_a_worktree_reads_the_main_graph_and_syncs_index_only(main, monkeypatch, capsys):
+    """Red if the borrowed line is missing or mutation M5 skips the sync."""
     worktree = add_worktree(main)
     assert git(worktree, "status", "--porcelain") == ""
 
     ctx = _session_start(worktree, monkeypatch, capsys)
 
-    assert "## Domains" in ctx and "Payments" in ctx
+    assert "## Communities" not in ctx
     (line,) = [ln for ln in ctx.splitlines() if ln.startswith(BORROWED_LINE)]
     assert line == (
         "Sidegraph: this worktree has no code graph of its own, so memory reads the main "
@@ -127,7 +125,7 @@ def test_t12e_a_moved_file_rewrites_no_entity_when_session_start_syncs_a_borrowe
     assert _stamp(worktree) is not None  # the sync did run
 
 
-def test_the_domain_map_of_a_borrowed_graph_is_built_from_the_store_every_time(
+def test_the_map_cache_of_a_borrowed_graph_is_built_from_the_store_every_time(
     main, monkeypatch, capsys
 ):
     """A cached map would go stale (a sync that failed, or a record added since): the worktree
@@ -136,24 +134,7 @@ def test_the_domain_map_of_a_borrowed_graph_is_built_from_the_store_every_time(
     worktree = add_worktree(main)
     store = Store(worktree / ".sidegraph")
     try:
-        store.set_meta(
-            TOC_CACHE_KEY,
-            json.dumps(
-                {
-                    "domains": [
-                        {
-                            "slug": "payments",
-                            "title": "Stale cached title",
-                            "summary": "Cached.",
-                            "parent_slug": None,
-                            "mistakes": 0,
-                            "subdomains": 0,
-                        }
-                    ],
-                    "global_mistakes": [],
-                }
-            ),
-        )
+        store.set_meta(TOC_CACHE_KEY, json.dumps({"domains": [], "global_mistakes": []}))
         store.add_decision(
             Decision(
                 title="Never retry the settlement call",
@@ -173,15 +154,13 @@ def test_the_domain_map_of_a_borrowed_graph_is_built_from_the_store_every_time(
     ctx = _session_start(worktree, monkeypatch, capsys)
 
     assert "Never retry the settlement call" in ctx
-    assert "Stale cached title" not in ctx and "Payments" in ctx
+    assert "## Communities" not in ctx  # trusting the stale, domain-less cache would list them
 
 
-def test_the_domain_map_of_a_borrowed_graph_is_counted_with_the_borrowed_reader(
-    main, monkeypatch, capsys
-):
+def test_the_map_cache_is_built_with_the_borrowed_reader(main, monkeypatch, capsys):
     """The worktree builds its map in memory on every start, and its reader is open: with it
-    the mistake count includes the decisions anchored to a whole document, the same number the
-    main checkout shows. Red against a build that passes no reader."""
+    the cached domain counts include decisions anchored to a whole document. Red against a
+    build that passes no reader."""
     import sidegraph.retrieval as retrieval
 
     worktree = add_worktree(main)
@@ -196,7 +175,7 @@ def test_the_domain_map_of_a_borrowed_graph_is_counted_with_the_borrowed_reader(
 
     ctx = _session_start(worktree, monkeypatch, capsys)
 
-    assert "Payments" in ctx
+    assert "## Communities" not in ctx
     assert len(readers) == 1 and readers[0] is not None
     assert Path(readers[0].path).resolve() == (main / GRAPH).resolve()
 
@@ -246,7 +225,7 @@ def test_t12c_the_main_checkout_gets_no_borrowed_line_and_today_s_wording(
     assert BORROWED_LINE not in ctx and "this worktree" not in ctx
     assert "Sidegraph: the code graph is stale (built at " in ctx
     assert "the main checkout's code graph" not in ctx
-    assert "## Domains" in ctx  # the main checkout syncs, so its cache is built
+    assert "## Communities" not in ctx  # the main checkout syncs and builds its cache
 
 
 def test_a_worktree_with_its_own_graph_is_not_borrowing(main, monkeypatch, capsys):

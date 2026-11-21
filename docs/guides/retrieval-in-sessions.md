@@ -8,7 +8,10 @@ code or docs. Ask for the relevant records before choosing an approach.
 
 ## What `SessionStart` injects
 
-The session map gives a short orientation before work. A **domain** is a named area of the project. Accepted domains appear as a table of contents with their titles, mistake counts and subdomain counts. Before domains are named, the hook can show graph communities instead. A community is a cluster of related code or document nodes.
+The session map gives a short orientation before work, including global mistakes, visible
+proposals and status lines. Without a usable domain cache, the hook can also show recorded
+decisions, known facts and graph communities, which cluster related code or document nodes.
+Browse named areas of the project in the Portal or with `list_domains` and `drill_down`.
 
 The standing instruction is:
 
@@ -60,7 +63,7 @@ lists them and reads none: pass the repo-relative path.
 
 Vague, non-task questions ("what does this project do") don't give the tool anything to seed
 on — be concrete about the file or symbol so the retrieval has something to resolve. A call with
-no seeds at all says so, and names the domains you can drill into.
+no seeds at all explains how to name the relevant files or symbols.
 
 When an available graph does not contain an explicitly requested file, the memory read
 also checks exact durable descriptor paths. Eligible decisions and facts can then arrive as

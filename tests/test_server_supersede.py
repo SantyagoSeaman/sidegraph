@@ -148,10 +148,8 @@ def test_supersede_without_anchors_and_predecessor_had_none(tmp_path):
 
 def test_supersede_explicit_ambiguous_anchor_reports_anchors_skipped(tmp_path):
     """Gate finding: the supersede path used to discard `resolve_and_bind`'s per-anchor
-    result entirely, so an ambiguous explicit anchor on a supersede silently produced no
-    Tier-2 leaf AND no feedback about why -- unlike `add_decision`, which has carried
-    `anchors_skipped` since Gate-5 finding S3. `supersede_decision` must return the same
-    per-anchor feedback shape when explicit anchors are passed."""
+    result entirely. Supersession reports the ambiguity for explicit anchors, with the
+    same feedback and degraded bindings as `add_decision`."""
     store = Store(tmp_path / "t.db")
     reader = _ambiguous_reader(tmp_path)
     old = _add_decision_impl(store, None, title="t", kind="adr", context="c", choice="ch")
@@ -170,9 +168,11 @@ def test_supersede_explicit_ambiguous_anchor_reports_anchors_skipped(tmp_path):
     assert out["anchors_skipped"] == [
         {"name": "run", "reason": "ambiguous", "candidates": ["a", "b"]}
     ]
-    # no Tier-2 leaf was created for the ambiguous anchor -- only the Tier-1 community
-    # binding, same shape as add_decision's ambiguous-anchor behavior.
-    assert out["bindings"] == 1
+    assert out["bindings"] == 2
+    assert sorted((b.tier, b.status) for b in store.bindings_for_record(out["id"])) == [
+        (1, "degraded"),
+        (2, "degraded"),
+    ]
 
 
 def test_supersede_closes_predecessor(tmp_path):

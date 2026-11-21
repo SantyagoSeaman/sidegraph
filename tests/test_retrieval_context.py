@@ -7,8 +7,8 @@ from sidegraph.retrieval import (
     RetrievalBudget,
     Seed,
     _fmt_node,
-    _structure_fallback_lines,
     get_task_context,
+    query_structure,
     rank_decisions,
 )
 from sidegraph.schema import (
@@ -65,42 +65,6 @@ PATHLESS_GRAPH = {
 def _pathless_reader(tmp_path):
     p = tmp_path / "pathless.json"
     p.write_text(json.dumps(PATHLESS_GRAPH))
-    return GraphifyReader(p)
-
-
-# Two same-community nodes with deliberately long names/lines (~141 chars each) so a
-# structure_chars budget can fit the first leaf line but overflow on the second WITHOUT
-# forcing node_cap (= structure_chars // 120) below 2 -- see get_task_context's budget
-# fallback (§5 NFR2, "summaries instead of leaves").
-OVERFLOW_GRAPH = {
-    "built_at_commit": "abc123",
-    "nodes": [
-        {
-            "id": "n1",
-            "label": "A" * 120,
-            "norm_label": "a",
-            "file_type": "code",
-            "source_file": "mod.py",
-            "source_location": "L1",
-            "community": "9",
-        },
-        {
-            "id": "n2",
-            "label": "B" * 120,
-            "norm_label": "b",
-            "file_type": "code",
-            "source_file": "mod.py",
-            "source_location": "L2",
-            "community": "9",
-        },
-    ],
-    "links": [{"source": "n1", "target": "n2", "relation": "calls"}],
-}
-
-
-def _overflow_reader(tmp_path):
-    p = tmp_path / "overflow.json"
-    p.write_text(json.dumps(OVERFLOW_GRAPH))
     return GraphifyReader(p)
 
 
@@ -490,7 +454,7 @@ def test_pathless_peripheral_entity_still_feeds_decisions(tmp_path):
     assert any("exception-note" in line for line in ctx.related)  # and resolved ("") too
 
 
-# -- structure-budget fallback: summaries instead of leaves (M5, spec §5 NFR2) -----------
+# -- Structural map cut at the walk limit ----------------------------------------------
 
 
 def _accepted_domain(store, slug, communities, summary="s", *, reader=None):
@@ -515,68 +479,6 @@ def _accepted_domain(store, slug, communities, summary="s", *, reader=None):
             ],
         )
     return accepted
-
-
-def test_structure_overflow_falls_back_to_domain_summary_when_covered(tmp_path):
-    r = _overflow_reader(tmp_path)
-    s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "payments", ["9"], reader=r)
-    ctx = get_task_context(
-        [Seed(file_path="mod.py")],
-        s,
-        r,
-        RetrievalBudget(structure_chars=250, memory_chars=0),
-    )
-    # the first (fitting) leaf line is unaffected...
-    assert any(line.startswith("- A") for line in ctx.structure)
-    # ...the overflowing second leaf never renders as a raw leaf line...
-    assert not any(line.startswith("- B") for line in ctx.structure)
-    # ...instead the domain covering its community fills the leftover budget.
-    assert any("[domain] Payments" in line for line in ctx.structure)
-    assert sum(len(x) for x in ctx.structure) <= 250
-
-
-def test_structure_overflow_old_behavior_without_domains(tmp_path):
-    """No accepted domain covers the overflow node's community -> byte-identical to
-    pre-M5 truncation: the overflow is silently dropped, nothing appended."""
-    r = _overflow_reader(tmp_path)
-    s = Store(tmp_path / "t.db")
-    ctx = get_task_context(
-        [Seed(file_path="mod.py")],
-        s,
-        r,
-        RetrievalBudget(structure_chars=250, memory_chars=0),
-    )
-    assert any(line.startswith("- A") for line in ctx.structure)
-    assert not any(line.startswith("- B") for line in ctx.structure)
-    assert not any("[domain]" in line for line in ctx.structure)
-    assert len(ctx.structure) == 1
-
-
-def test_structure_overflow_fallback_respects_remaining_budget(tmp_path):
-    """A domain whose summary can't fit the leftover budget doesn't render at all (never
-    a budget violation)."""
-    r = _overflow_reader(tmp_path)
-    s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "payments", ["9"], summary="x" * 500, reader=r)
-    ctx = get_task_context(
-        [Seed(file_path="mod.py")],
-        s,
-        r,
-        RetrievalBudget(structure_chars=250, memory_chars=0),
-    )
-    assert not any("[domain]" in line for line in ctx.structure)
-    assert sum(len(x) for x in ctx.structure) <= 250
-
-
-# -- structure-budget fallback: walk saturation (M5 follow-up) ---------------------------
-#
-# `node_cap = structure_chars // 120` truncates the BFS *walk* before any line is rendered.
-# Real `_fmt_node` lines run ~40-80 chars on real corpora -- well under the 120-chars/node
-# the cap assumes -- so the capped subgraph's lines always fit `structure_chars` and the
-# render-overflow trigger above never fires; the cut instead manifests as a silently
-# truncated walk that render overflow can never see. These fixtures use chains of nodes
-# with realistic-length labels so the walk saturates `node_cap` on its own.
 
 
 def _chain_graph(n: int, label_len: int, communities: list[str], fname: str = "mod.py") -> dict:
@@ -608,150 +510,19 @@ def _chain_reader(tmp_path, graph: dict, name: str = "chain.json") -> GraphifyRe
     return GraphifyReader(p)
 
 
-def test_structure_fallback_fires_on_walk_saturation_without_render_overflow(tmp_path):
-    """(a) Realistic-shaped fixture: short ~40-char lines, an 8-node chain in one community.
-    structure_chars=400 -> node_cap=3, so the walk is capped at the first 3 nodes even
-    though all three lines fit comfortably (no render overflow at all). The accepted domain
-    covering the seed's own community still surfaces as a fallback summary line -- the
-    walk-saturation trigger alone."""
+def test_structure_reports_a_capped_walk_without_domain_summaries(tmp_path):
+    """All three retained node lines fit, but the capped walk omits five nodes."""
     g = _chain_graph(8, 20, ["c0"] * 8)
     r = _chain_reader(tmp_path, g)
     s = Store(tmp_path / "t.db")
     _accepted_domain(s, "widgets", ["c0"], reader=r)
-    budget = RetrievalBudget(structure_chars=400, memory_chars=0)
-    ctx = get_task_context([Seed(file_path="mod.py")], s, r, budget)
-
-    leaves = [
-        line
-        for line in ctx.structure
-        if not line.startswith("- [domain]") and not line.startswith("—")
-    ]
-    assert len(leaves) == 3  # node_cap=3 -- the walk-truncated leaves, all fit, none overflow
-    assert any(line.startswith("- [domain] Widgets") for line in ctx.structure)
-    assert any(line.startswith("—") for line in ctx.structure)  # fallback group header
-    assert sum(len(x) for x in ctx.structure) <= 400
-
-
-def test_structure_fallback_silent_when_walk_unsaturated_and_no_overflow(tmp_path):
-    """(b) Big default budget against the tiny FIXTURE graph: the whole connected component
-    (3 nodes) fits well inside node_cap (33), and every rendered line fits structure_chars
-    -- neither trigger fires. Byte-identical to pre-fix behavior even though an accepted
-    domain covers a seed community: proves walk saturation doesn't fire just because a
-    domain happens to exist."""
-    r = GraphifyReader(FIXTURE)
-    s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "trading", ["1"], reader=r)  # covers m_cls/m_fn's community
-    ctx = get_task_context([Seed(file_path="trader/exec.py")], s, r)  # default budget
-    assert not any("[domain]" in line for line in ctx.structure)
-    assert len(ctx.structure) == 3  # m_cls, m_fn, o_fn -- the whole reachable graph, unaffected
-
-
-def test_structure_fallback_dedups_across_both_triggers_and_caps_at_five(tmp_path):
-    """(c) A 10-node chain where structure_chars=900 makes node_cap=7: the walk saturates at
-    7 nodes (n0..n6), and rendering those overflows partway through (n0..n4 fit, n5 doesn't)
-    -- both triggers fire in the same call. n5 (the render-overflow node) deliberately
-    shares its community ("c0") with n0, so that community reaches the fallback candidate
-    list twice: once via the render-overflow node, once via the (uncapped) seed
-    communities. 6 communities have accepted domains covering them (more than the cap of
-    5), so this also proves the cap holds across the combined candidate list."""
-    communities = ["c0", "c1", "c2", "c3", "c4", "c0", "c6", "c7", "c8", "c9"]
-    g = _chain_graph(10, 130, communities)
-    r = _chain_reader(tmp_path, g)
-    s = Store(tmp_path / "t.db")
-    for cid in ["c0", "c1", "c2", "c3", "c6", "c7"]:  # 6 domains, one (c7) must never surface
-        _accepted_domain(s, cid, [cid], reader=r)
-    budget = RetrievalBudget(structure_chars=900, memory_chars=0)
-    ctx = get_task_context([Seed(file_path="mod.py")], s, r, budget)
-
-    domain_lines = [line for line in ctx.structure if line.startswith("- [domain]")]
-    assert len(domain_lines) == 5  # cap holds despite 6 covered domains
-    assert len(set(domain_lines)) == 5  # no line duplicated
-    assert sum(line.startswith("- [domain] C0:") for line in domain_lines) == 1  # deduped
-    assert not any(line.startswith("- [domain] C7:") for line in domain_lines)  # cap excluded it
-    assert sum(len(x) for x in ctx.structure) <= 900
-
-
-def test_structure_fallback_saturation_without_domains_is_noop(tmp_path):
-    """(d) Same walk-saturated fixture as (a), but no accepted domain covers the seed
-    community -> nothing appended, matching the render-overflow trigger's own
-    no-accepted-domains behavior (`test_structure_overflow_old_behavior_without_domains`)."""
-    g = _chain_graph(8, 20, ["c0"] * 8)
-    r = _chain_reader(tmp_path, g)
-    s = Store(tmp_path / "t.db")
-    budget = RetrievalBudget(structure_chars=400, memory_chars=0)
-    ctx = get_task_context([Seed(file_path="mod.py")], s, r, budget)
-    assert not any("[domain]" in line for line in ctx.structure)
-    assert len(ctx.structure) == 3
-
-
-# -- structure-budget fallback: title/summary dedup + group header (M5 polish) -----------
-
-
-def test_structure_fallback_dedupes_when_summary_exactly_equals_title(tmp_path):
-    """Label-bootstrapped domains (`domains.bootstrap_domains`'s labeled path) sometimes
-    have summary == title exactly -- both derive from the same engine label before any
-    real digest exists. The fallback line drops the redundant "": summary" tail rather
-    than repeat the title verbatim."""
-    s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "widgets", ["c0"], summary="Widgets")  # summary == title exactly
-    lines = _structure_fallback_lines(["c0"], s, remaining_budget=1000)
-    body = [line for line in lines if line.startswith("- [domain]")]
-    assert body == ["- [domain] Widgets"]
-    assert not any(": Widgets" in line for line in lines)
-
-
-def test_structure_fallback_keeps_both_parts_when_summary_only_starts_with_title(tmp_path):
-    """A digest summary that merely STARTS WITH the title but continues with more
-    information is NOT deduped -- only EXACT equality collapses to the title alone
-    (unlike `_fmt_decision`'s startswith/prefix rule for decisions: digest summaries
-    legitimately begin with the god-node name and their remainder is informative)."""
-    s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "widgets", ["c0"], summary="Widgets handles settlement retries")
-    lines = _structure_fallback_lines(["c0"], s, remaining_budget=1000)
-    body = [line for line in lines if line.startswith("- [domain]")]
-    assert body == ["- [domain] Widgets: Widgets handles settlement retries"]
-
-
-def test_structure_fallback_prepends_group_header_when_lines_emitted(tmp_path):
-    s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "widgets", ["c0"])
-    lines = _structure_fallback_lines(["c0"], s, remaining_budget=1000)
-    assert lines[0] == (
-        "— named areas covering this neighborhood (map truncated; drill_down for detail):"
+    cuts: list[None] = []
+    text = query_structure(
+        [Seed(file_path="mod.py")], s, r, 400, on_budget_cut=lambda: cuts.append(None)
     )
-    assert len(lines) == 2  # header + the one domain line
 
-
-def test_structure_fallback_omits_header_when_no_room_left(tmp_path):
-    """The header is best-effort, charged against the same leftover budget as the lines:
-    when there's no room left after the domain lines already selected, it's dropped
-    rather than pushing the render over budget."""
-    s = Store(tmp_path / "t.db")
-    _accepted_domain(s, "widgets", ["c0"])
-    exact_line = "- [domain] Widgets: s"
-    lines = _structure_fallback_lines(["c0"], s, remaining_budget=len(exact_line))
-    assert lines == [exact_line]  # exact-fit budget: no room for the header
-
-
-def test_structure_fallback_no_header_when_no_domain_lines_fit(tmp_path):
-    s = Store(tmp_path / "t.db")
-    lines = _structure_fallback_lines(["no-such-community"], s, remaining_budget=1000)
-    assert lines == []
-
-
-def test_structure_fallback_unions_all_accepted_domains_covering_community(tmp_path):
-    """Same "orphan window" shape as bucket C in `rank_decisions` (Gate-5 finding 2, see
-    `store.find_domains_by_community`'s docstring): two ACCEPTED domains can legitimately
-    cover the SAME community at once. The old singular `find_domain_by_community` lookup
-    here only ever surfaced the NEWEST covering domain's summary line -- an OLDER covering
-    domain's summary silently never appeared even though it's still accepted and still
-    covers the community. Both must surface now (deduped by domain id, cap unchanged)."""
-    s = Store(tmp_path / "t.db")
-    older = _accepted_domain(s, "widgets-old", ["c0"], summary="Older widgets summary")
-    newer = _accepted_domain(s, "widgets-new", ["c0"], summary="Newer widgets summary")
-    assert older.domain_id < newer.domain_id  # ULID monotonic -- "older" really is older
-
-    lines = _structure_fallback_lines(["c0"], s, remaining_budget=1000)
-    body = [line for line in lines if line.startswith("- [domain]")]
-    assert any("Older widgets summary" in line for line in body)
-    assert any("Newer widgets summary" in line for line in body)
+    assert cuts == [None]
+    lines = text.splitlines()[1:]
+    assert not any(line.startswith("- [domain]") for line in lines)
+    assert "drill_down" not in text
+    assert len(lines) == 3

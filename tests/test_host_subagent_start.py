@@ -233,10 +233,9 @@ def test_t2_a_codex_subagent_gets_the_same_brief_in_keys_codex_accepts(
 # -- T3: where there is nothing to say, say nothing and write nothing ---------------------------
 
 
-@pytest.mark.parametrize("how", sorted(_REFUSED))
+@pytest.mark.parametrize("how", sorted(_REFUSED.keys() - {"missing-index"}))
 def test_t3_a_refused_index_prints_nothing_and_writes_nothing(tmp_path, monkeypatch, capsys, how):
-    """Red against a raw open that bypasses ``HotIndex``'s guards: a missing index would be
-    created, and a symlinked one written through."""
+    """Guard the quiet format, schema and safety refusals."""
     root, store_dir, elsewhere = _broken_project(tmp_path, how)
     before = _snapshot(root, elsewhere)
     assert _run(monkeypatch, capsys, root, store_dir, CLAUDE_PAYLOAD) == {}

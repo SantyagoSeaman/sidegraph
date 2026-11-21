@@ -24,8 +24,12 @@ no analytics, and it sends no telemetry anywhere.
   (session ids, timestamps, which files' records were already shown, which records the MCP
   tools already sent to each agent, when the last capture reminder fired) is still kept so
   records and reminders are not repeated. Per-agent MCP sent-record rows expire at session
-  start after 30 days even when telemetry is off; compact/clear resets the main agent's rows. It
-  also deletes the per-file delivery claims of the agent whose context was compacted or cleared.
+  start after 30 days even when telemetry is off. Compact and clear reset the MCP sent rows
+  of the agent whose context was compacted or cleared, defaulting to the session's own agent
+  if the notice omits its agent ID. It also deletes the per-file delivery claims of the agent
+  whose context was compacted or cleared. On Claude Code, the index also keeps the tool-use
+  id, session and agent for each Sidegraph MCP read. A later session start prunes caller
+  rows older than one day.
 - **Transcript paths.** The same index keeps, for each session, the path of the transcript file
   the host wrote (`~/.claude/projects/…`, for example), with the session id, host and time. It
   holds the path and nothing from the file; entries older than 30 days are deleted at session

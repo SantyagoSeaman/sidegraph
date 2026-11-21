@@ -65,7 +65,7 @@ def test_backrefs_keep_position_and_only_full_bodies_are_eligible(memory):
     assert after.render_parts()[1].count("[sent earlier] =") == 1
 
 
-def test_named_adr_sent_earlier_gets_no_evidence_line(memory):
+def test_named_adr_sent_earlier_keeps_its_inline_evidence(memory):
     store, entity, records = memory
     adr = records[3]
     store.add_fact(
@@ -84,7 +84,7 @@ def test_named_adr_sent_earlier_gets_no_evidence_line(memory):
     assert any("evidence:" in line for line in fresh.decisions)
     sent = get_task_context(seeds, store, None, budget, already_sent=frozenset({adr.id}))
     assert adr.id in sent.backref_ids
-    assert not any("evidence:" in line for line in sent.decisions)
+    assert any("evidence: measured on the real corpus" in line for line in sent.decisions)
 
 
 def test_degraded_related_and_proposed_records_are_never_sent_bodies(memory):
@@ -128,7 +128,7 @@ def test_degraded_related_and_proposed_records_are_never_sent_bodies(memory):
     assert proposal.id not in ctx.full_body_ids + ctx.backref_ids
 
 
-def test_backref_skips_evidence_but_keeps_proposals_flags_and_order(memory):
+def test_backref_keeps_evidence_proposals_flags_and_order(memory):
     store, entity, records = memory
     gotcha = records[0]
     for status in ("accepted", "proposed"):
@@ -153,13 +153,13 @@ def test_backref_skips_evidence_but_keeps_proposals_flags_and_order(memory):
         file_bound_entity_ids=frozenset({entity.entity_id}),
     )
     assert "[drifted] [file-bound] [sent earlier]" in ctx.mistakes[0]
-    assert not any("accepted supporting evidence" in line for line in ctx.mistakes)
+    assert "accepted supporting evidence" in ctx.mistakes[1]
     assert any("proposed supporting evidence" in line for line in ctx.unratified)
     assert ctx.drift_shown and ctx.file_bound_shown
-    assert records[1].id in ctx.mistakes[1]
+    assert records[1].id in ctx.mistakes[2]
 
 
-def test_freed_budget_admits_new_records(memory):
+def test_backrefs_leave_the_full_body_budget_selection_unchanged(memory):
     store, entity, records = memory
     budget = RetrievalBudget(memory_chars=1100)
     first = rank_decisions([entity], [], [], store, budget)
@@ -167,8 +167,5 @@ def test_freed_budget_admits_new_records(memory):
     second = rank_decisions(
         [entity], [], [], store, budget, already_sent=frozenset(first.full_body_ids)
     )
-    assert set(second.shown_ids) - set(first.shown_ids)
-    common = set(first.shown_ids) & set(second.shown_ids)
-    assert [i for i in first.shown_ids if i in common] == [
-        i for i in second.shown_ids if i in common
-    ]
+    assert second.shown_ids == first.shown_ids
+    assert second.chars_used == first.chars_used

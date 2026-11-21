@@ -16,12 +16,14 @@ from sidegraph.engine.reader import GraphifyReader
 from sidegraph.host import emulation, hooks, launch
 from sidegraph.host.emulation import WIRED_ON, emulate_hook
 from sidegraph.retrieval import DRIFT_CACHE_KEY, TOC_CACHE_KEY
+from sidegraph.schema import DecisionKind, DecisionStatus, Scope
 from sidegraph.store import Store
 from sidegraph.store_layout import requirement_marker_text
 from tests.graph_repo_support import GRAPH, git
 from tests.store_record_support import _decision
 from tests.test_grok_session_map import _initialize
 from tests.test_hook_contention import _make_drift_repo
+from tests.test_hot_index_facts import _fact
 from tests.test_server_tool_emulation import _canonical, _preparation_state, _session_state
 from tests.twin_support import ENTITY_ID, FACT_ID, build_twin_stores
 
@@ -204,6 +206,25 @@ def test_emulate_hook_equals_entry_point(
     if event == "session_start":
         with Store(emulated) as preview_store, Store(real) as real_store:
             assert _preparation_state(preview_store) == _preparation_state(real_store)
+
+
+def test_emulated_read_names_withheld_fact(tmp_path: Path) -> None:
+    _fact(tmp_path)
+    _fact(tmp_path, statement="x" * 600, assert_eligible=False)
+    store_path = tmp_path / ".sidegraph"
+    params = {"file_path": "src/a.py"}
+    expected = _entry_text(store_path, "pre_tool_use", "claude", params)
+    actual = emulate_hook(
+        "pre_tool_use",
+        params,
+        store_path=store_path,
+        reader=None,
+        borrowed_from=None,
+        host_family="claude",
+    )
+    notice = 'Withheld: 1 fact(s) too long to show here; see list_facts(files=["src/a.py"]).'
+    assert notice in actual.text.splitlines()
+    assert actual.text == expected
 
 
 @pytest.mark.parametrize(
@@ -587,17 +608,18 @@ def test_session_start_adopts_a_move_without_session_writes(tmp_path: Path) -> N
 def test_grok_map_cut_at_2000(tmp_path: Path) -> None:
     store_path = tmp_path / ".sidegraph"
     with Store(store_path) as store:
-        store.set_meta(
-            TOC_CACHE_KEY,
-            json.dumps(
-                {
-                    "domains": [
-                        {"title": f"Domain {i}", "summary": "Code decisions.", "mistakes": 1}
-                        for i in range(90)
-                    ]
-                }
-            ),
-        )
+        store.set_meta(TOC_CACHE_KEY, json.dumps({"domains": [{"title": "Payments"}]}))
+        for i in range(10):
+            for status in (DecisionStatus.ACCEPTED, DecisionStatus.PROPOSED):
+                store.add_decision(
+                    _decision(
+                        f"Global rule {i} ({status.value})",
+                        kind=DecisionKind.GOTCHA,
+                        scope=Scope.GLOBAL,
+                        status=status,
+                        choice="x" * 240,
+                    )
+                )
     result = emulate_hook(
         "mcp_instructions",
         {},
@@ -608,7 +630,10 @@ def test_grok_map_cut_at_2000(tmp_path: Path) -> None:
     )
     assert result.text == _initialize(tmp_path, store_path, "grok-shell-sidegraph")
     assert 0 < len(result.text) <= 2000
-    assert "Domain 0" in result.text and "Domain 89" not in result.text
+    assert "## Global mistakes & constraints" in result.text
+    assert result.text.endswith(
+        "… (cut to fit Grok; retrieve_decisions and list_proposed have the rest)"
+    )
 
 
 @pytest.mark.parametrize("event", ["session_start", "stop"])

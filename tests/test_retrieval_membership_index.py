@@ -11,7 +11,6 @@ from sidegraph.retrieval import (
     RetrievalBudget,
     Seed,
     _domain_decisions,
-    _structure_fallback_lines,
     drill_down,
     get_task_context,
     rank_decisions,
@@ -129,23 +128,13 @@ def test_a_node_under_a_capped_path_rule_now_reaches_the_domain_s_decisions(tmp_
     assert d.id in {x.id for x in _domain_decisions(store.get_domain(lib.domain_id), store, reader)}
 
 
-def test_the_related_bucket_reaches_a_domain_through_a_seed_node_it_holds(tmp_path):
-    """Red against the community-only bucket C: no domain lists community 1."""
+def test_the_related_bucket_omits_a_domain_that_holds_the_seed_node(tmp_path):
     store, reader = _setup(tmp_path)
     part = accept(store, "part")
     seed_members(store, reader, part, {"model_invoice"})
     d = _decision(store, "part-wide rule")
     _bind(store, d, store.find_abstract_entity("domain:part"), tier=1)
     ctx = rank_decisions([], [], ["1"], store, RetrievalBudget(), seed_node_ids=["model_invoice"])
-    assert any("part-wide rule" in r for r in ctx.related)
+    assert not any("part-wide rule" in r for r in ctx.related)
     ctx = get_task_context([Seed(file_path="src/pay/model.py")], store, reader)
-    assert any("part-wide rule" in r for r in ctx.related)  # red against a caller not passing them
-
-
-def test_the_structure_fallback_names_a_domain_through_a_node_it_holds(tmp_path):
-    store, reader = _setup(tmp_path)
-    part = accept(store, "part")
-    seed_members(store, reader, part, {"model_invoice"})
-    assert any(
-        "Part" in line for line in _structure_fallback_lines([], store, 1000, ["model_invoice"])
-    )
+    assert not any("part-wide rule" in r for r in ctx.related)

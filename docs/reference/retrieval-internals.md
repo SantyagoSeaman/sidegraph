@@ -56,7 +56,7 @@ render actually deliver on real ADR-scale content instead of dropping it.)
 ### Ranking buckets, and why mistakes come first
 
 Decisions are gathered from seeds outward and ranked into ordered buckets. Each source list
-(a seed entity, community/domain, peripheral entity, or global scope) is sorted by recency
+(a seed entity, community, peripheral entity, or global scope) is sorted by recency
 before it is appended; the implementation does not perform a second global recency sort across
 all sources in the same bucket.
 
@@ -64,7 +64,7 @@ all sources in the same bucket.
 |---|---|---|
 | A | **Known mistakes & gotchas** | `gotcha` / `constraint` / `lesson` decisions bound to a seed entity |
 | B | **Decisions** | `adr` decisions bound to a seed entity |
-| C | **Related** | decisions on the seed's community *and*, when an accepted domain covers that community, the domain's own decisions too — plus peripheral (subgraph-neighbor) entities |
+| C | **Related** | decisions bound to seed communities and peripheral (subgraph-neighbor) entities |
 | D | **Related** | `scope: global` decisions |
 
 ### Named symbols: what you named comes first
@@ -92,25 +92,11 @@ every direct ADR.
 
 ### Bucket C: domains and communities
 
-It also takes every accepted domain that holds one of the seed nodes, so a domain holding
-only part of a community still contributes.
-
-Bucket C does not choose *either* the domain *or* the community — it gathers both, and it
-gathers **every** accepted domain that covers the seed community, not just one. For each seed
-community, `store.find_domains_by_community(cid)` (plural — the singular
-`find_domain_by_community` is only for anchoring's write-time Tier-1 pick) returns every
-currently accepted domain claiming it; each one's paired `domain:<slug>` entity's valid
-decisions are added *in addition to* whatever is still bound to the bare `community:<id>`
-entity. Unioning all covering domains, not just the newest, matters because two accepted
-domains can legitimately cover the same community at once (an "orphan window" between one
-domain's acceptance and a later re-scope) — a decision tier-1-bound to an older covering domain
-must still surface even after a newer domain also claims the community. This is on top of the
-existing reason bucket C looks at the community at all: new anchoring prefers the domain once
-one exists (see [anchoring](../concepts/anchoring.md#domain-aware-tier-1)), but older decisions anchored
-before any domain was ratified are still sitting on the `community:<id>` binding — dropping that
-source would silently make them unretrievable. `add()` dedupes by decision id, so a decision
-reachable through more than one of these sources renders once. A store with no accepted domains
-covering any seed community sees byte-identical output to before this layer existed.
+Bucket C reads the valid decisions bound to the seed communities' `community:<id>`
+entities and to peripheral entities. `add()` deduplicates by decision id. A community
+binding can date from before a domain was accepted or come from a community with no
+accepted domain. Capture can still write a binding to `domain:<slug>` for the Portal and
+`drill_down`. See [domain-aware anchoring](../concepts/anchoring.md#domain-aware-tier-1).
 
 Bucket D uses decisions with `scope="global"`, including successors that inherit it through
 [`supersede_decision`](mcp-tools.md#supersede_decision). `add_decision` and `propose_decisions`
@@ -195,11 +181,12 @@ unrelated question. The render is tiered instead:
   short one-liner with no `context`/`rejected`/`consequences` and no inline evidence,
   regardless of whether those fields are populated. This is also what stops an off-topic
   decision's `rejected`/`consequences` from repeating across unrelated questions — a
-  related entry never renders them. Records reached through community, domain, peripheral
+  related entry never renders them. Records reached through community, peripheral
   or guessed-seed expansion show at most **5** lines, each with `choice` clipped to ~80
   characters and the record's `(id: …)` so it can be expanded with
   `retrieve_decisions(ids=[…])`; any further ones are counted in one closing
-  `- (+N more related not shown: …)` line instead of rendered. Most of these records were
+  `- (+N more related not shown: retrieve_decisions(query=...) to list them)` line.
+  A tight budget can shorten the note to the count. Most of these records were
   measured off-task for the task at hand. Two kinds stay outside that cap and keep the
   plain one-liner (`choice` clipped to ~240 characters, no id): `scope: global` decisions,
   which are repo-wide rules, and the seed's own superseded one-liners, which are its history.
@@ -254,21 +241,11 @@ invisible to this check, and `sidegraph-doctor` counts them as "not checkable".
 
 ### Budget fallback: summaries instead of leaves
 
-The structural map rendered by `query_structure` has its own budget (`structure_chars`) and
-its own overflow behavior. `get_task_context` does not render this block or its domain summaries.
-Before this layer, the map simply stopped emitting leaf lines the instant one didn't fit — the rest of the subgraph was silently dropped, a hard truncation. Now,
-whatever leaves got dropped that way (`overflow_nodes`) get one more chance: their communities
-are mapped to accepted domains (`store.find_domain_by_community`), and up to 5 one-line domain
-summaries (`- [domain] <title>: <summary>`) are rendered into whatever budget is left over,
-instead of wasting it on nothing. This is the "summaries instead of leaves" behavior — when the
-budget is too tight to enumerate every file, the agent still gets *some* orientation, at the
-domain level rather than none at all. A second trigger, walk saturation, cuts the BFS *walk*
-itself before any line ever overflows — there `overflow_nodes` is empty, so the annotated areas
-come instead from the task's own seed communities (the neighborhood's own named areas), not
-literally the nodes that got cut, since the walk never got far enough to know what was
-truncated. No accepted domain covers any candidate community (every store without ratified
-domains, or a cut that happens to land outside a named area) → the fallback contributes nothing,
-and the old truncation behavior is unchanged, byte-for-byte.
+`query_structure` considers at most `max(1, structure_chars // 120)` nodes for the map
+and returns the node lines that fit. The Portal Agent View reports a cut when the
+walk has more nodes or the next node line would exceed the budget. Older versions could
+append domain summaries in the remaining space. `get_task_context` uses the graph walk
+to gather related records and omits the structural map.
 
 ### Thin tools: explicit map and memory
 
@@ -325,6 +302,8 @@ Ordinary verified seed routes take precedence over the marker. Named-entity requ
 ambiguous/directory guesses and graph-present orphan handling keep their existing rules;
 with no graph reader at all, this fallback is unavailable. The file still appears in the
 not-in-graph diagnostic, and proposal policy, history, mistakes-first and budgets still apply.
+PreToolUse also uses exact paths for existing files in a store no sync has checked, including
+when no graph reader is available.
 
 ### Rendering
 
@@ -336,8 +315,8 @@ seeds, rendered as pointers — `- name (file_type) [file_path:line]`, never inl
 Missing sections are omitted; an empty result renders `"No context found."`. When the memory budget
 refused records that were found for the named seeds, the empty answer says how many did not fit
 and to raise `memory_budget` (`budget_chars` for `query_decisions`) instead.
-`get_task_context` calls `render_parts(include_structure=False)`: it omits the map, including
-its domain-summary fallback, while leaving the graph walk and related records unchanged.
+`get_task_context` calls `render_parts(include_structure=False)`. It uses the graph walk
+for related records and omits the map.
 After the rendered text, `get_task_context` appends a `## Not in the code graph` block when a
 seed path is not a file the graph holds, saying why: a file that exists but is missing from a stale graph
 (rebuild it), from a graph with no committed change since its build (the file may be newer than
@@ -371,31 +350,17 @@ exclude the removed records.
 
 ## SessionStart TOC
 
-Two renderers compete for the same `SessionStart` slot, and which one runs depends entirely on
-whether the store has any accepted domains yet:
+The hook uses the shape of `toc_cache` to select its two rendering paths.
 
-- **`render_toc(cache)`** — the real, domain-named table of contents (activated the moment the
-  first domain is ratified — no sync required, see [below](#when-the-toc-goes-live)): one line
-  per accepted domain (title, mistake count,
-  subdomain count when non-zero), then global mistakes, then any proposed
-  global mistakes under `## Unratified proposals`. This is what "the
-  mind model comes alive" means in practice. The per-domain mistake count is what
-  [`drill_down`](#drill_downdomain_slug--the-axis-1-operation) would serve for that domain:
-  the accepted `gotcha`/`lesson`/`constraint` decisions in the union of those tagged to the
-  domain's own `domain:<slug>` entity, those anchored to a code or doc entity that lives in one
-  of its communities, and, when a graph reader is on hand, those anchored to a whole document
-  it covers. Proposed and superseded records are not counted. A TOC built without a reader
-  (the ratify and capture paths) leaves out the document branch until the next sync pass that
-  has one.
-- **`top_tier_map(store, reader)`** — the legacy, nameless fallback: top communities by member
-  count (labeled only by god-node name), global mistakes, then up to 10 other
-  accepted decisions under `## Recorded decisions`, up to 10 accepted facts under
-  `## Known facts`, and the proposals inside the surfacing window under
-  `## Unratified proposals`. The last three are what keep a store that has recorded its first
-  decisions and named no domain yet from showing an agent only engine communities. Runs on
-  demand (no cache) whenever the store has zero accepted domains — a fresh repo, or one that hasn't
-  bootstrapped/ratified any domains yet, sees exactly the same output as before this layer
-  existed.
+- **Cached map (`render_toc(cache)`).** A non-empty `domains` list of objects selects the
+  cached path. The hook reads global mistakes and proposed global mistakes live from the store.
+  Each section appears when it has entries. Browse named domains in the Portal or with
+  `list_domains` and `drill_down`.
+- **On-demand fallback (`top_tier_map(store, reader)`).** With a missing, empty or malformed
+  cache, the hook shows the largest communities by member count when a graph is available.
+  The fallback also shows global mistakes, up to 10 other accepted decisions under
+  `## Recorded decisions`, up to 10 accepted facts under `## Known facts` and proposals
+  within the surfacing window under `## Unratified proposals`.
 
 Neither renderer includes the standing search instruction itself — `host.hooks.session_start`
 prepends it once, at the hook-assembly level, ahead of whichever renderer's text follows, so
@@ -439,18 +404,16 @@ at two points:
    canonical digest and an unchanged digest keeps it. A cache written without a graph reader
    carries no digest and is rebuilt once.
 2. **Every `ratify` call (MCP tool or `sidegraph-ratify` CLI) that actually accepted or dropped
-   at least one domain** — immediately, without waiting for the next sync. This is what makes
-   `bootstrap → ratify` visibly turn the TOC on in the very same session, even when no graph
-   sync is needed.
+   at least one domain** — immediately, without waiting for the next sync.
 
-A decisions-only ratify (no domain ids in the batch) does not rebuild the cache immediately.
-It can change a rendered mistake count; the next completed sync pass, or skipped one that
-finds the store changed, refreshes that count, and so does the count after `add_decision`.
-Domain acceptance is the special case refreshed in the ratify operation itself.
+A decisions-only ratify (no domain ids in the batch) leaves the cache until the next sync
+that detects a store change. Domain counts still belong to the cached data, and an available
+reader includes the same whole-document anchors that `drill_down` includes. Global sections
+read the current store on each hook run.
 
 ## `drill_down(domain_slug)` — the Axis-1 operation
 
-One level deeper than the TOC: `drill_down` returns a domain's full summary, its accepted
+Pass a slug from `list_domains` to `drill_down` to read a domain's full summary, its accepted
 subdomains (title + one-line summary), a capped sample (20) of the code/doc entities currently
 in it (its members in the membership index each sync keeps, deduplicated), and the decisions bound to it —
 mistakes first, same ranking convention as everything else. The decisions are cut at 25 (or
@@ -468,27 +431,15 @@ bindings. A decision reachable only through the whole-document branch of the dri
 
 ## What `SessionStart` injects
 
-Every new session, the `sidegraph-session-start` hook runs a lazy sync (best-effort, see
-[`guides/surviving-refactors.md`](../guides/surviving-refactors.md)) and injects a compact table of
-contents as `additionalContext` — not a full dump of the store. Which of two renderers runs
-depends entirely on whether the store has any **accepted domains** yet (see
-[mind model](../concepts/mind-model.md) and
-[retrieval: SessionStart TOC](../concepts/retrieval.md#sessionstart-toc)).
-On Grok Build the hook still runs, but its text is lost; the MCP server supplies the map
-instead (the cached domain table of contents, or only the standing lines, never the
-`## Communities` fallback below; see the [Grok Build guide](../integrations/grok.md)):
+Every new session, the `sidegraph-session-start` hook runs a best-effort lazy sync and injects
+the opening map as `additionalContext`. A usable cache of accepted domains selects the global
+sections. The on-demand fallback can also show up to eight Graphify communities by member
+count, labeled by their highest-degree node, such as `Trader — 42 entities (community 3)`.
+[SessionStart TOC](#sessionstart-toc) · [Surviving refactors](../guides/surviving-refactors.md)
 
-- **Once at least one domain has been ratified** (`sidegraph-domains bootstrap`/`add` →
-  `sidegraph-ratify` — see [naming your domains](../guides/naming-your-domains.md)), `render_toc()`
-  renders the real, domain-named table of contents: one line per accepted domain (title,
-  mistake count, subdomain count when
-  non-zero). This is the normal steady-state view for any project whose mind model has names
-  in it — most projects, after the first bootstrap/ratify pass.
-- **Before any domain is ratified** — a fresh repo, or one that hasn't bootstrapped/ratified
-  domains yet — `top_tier_map()` is the fallback: the same surrounding shape, but with a
-  nameless `## Communities` section (up to the 8 largest Graphify communities by member
-  count, labeled only by their highest-degree "god" node, e.g. `Trader — 42 entities
-  (community 3)`; omitted entirely if no graph is present) instead of `## Domains`.
+On Grok Build, the MCP server supplies the map through its instructions. With a usable domain
+cache, it can show the global sections. Without one, it sends the standing instruction and
+version. [Grok Build guide](../integrations/grok.md)
 
 Whichever renderer ran, the `sidegraph-session-start` hook prepends the same **standing
 search instruction**, once, ahead of the rest of the text (not inside either renderer — see
@@ -520,13 +471,12 @@ Both renderers also inject:
   decisions scoped `global`, newest first.
 - **Unratified proposals** — proposed records inside the surfacing window, after everything
   accepted (see [proposal visibility](../guides/retrieval-in-sessions.md#why-an-unratified-draft-still-shows-up-and-what-the-tag-means)). The
-  domain map lists proposed global mistakes only. The nameless map lists proposed decisions and
+  cached map lists proposed global mistakes only. The fallback lists proposed decisions and
   facts, up to 10 of each.
 
-The nameless map (no domain ratified yet) has two more sections: **Recorded decisions**, up to
-the 10 most recent accepted decisions that no section above already shows, and **Known facts**,
-up to 10 accepted facts. So the global mistakes are not the only decisions a session sees at
-start. Everything task-scoped is deferred to `get_task_context`.
+The fallback also shows **Recorded decisions**, up to 10 recent accepted decisions absent from
+the other sections, and **Known facts**, up to 10 accepted facts. Request task-scoped records
+with `get_task_context`.
 
 After the map come status lines for problems the integrity checks find. A line appears
 while its problem exists. Problems needing a person can also produce a notice. The
@@ -560,7 +510,7 @@ reads. Three more channels put records in front of an agent, or tell it that rec
 no query. All three read the store's index directly, so each costs a few tens of milliseconds.
 
 - **At the point of reading.** The `PreToolUse` hook runs before a `Read`, `Edit`, `Write` or
-  `Grep` call, and before a Bash line that runs `sed`, `grep`, `rg` or `cat`. When the call names
+  `Grep` call, and before Bash calls admitted by the [reader prefilter](hooks.md#bash-lines). When the call names
   a file that decisions are anchored to, the agent gets that file's top decisions, mistakes first,
   in the same call: two decisions, or three when the first two are mistakes, for at most three
   files per call. Each file is delivered once per agent, and an agent gets ten files in all; the
@@ -582,27 +532,34 @@ no query. All three read the store's index directly, so each costs a few tens of
 
 The first two channels can deliver eligible facts as well as decisions, within the same record
 caps. Facts keep their whole statement and source; fact lines longer than 512 characters are
-withheld whole and remain available through `list_facts`. Within one answer or appended brief,
-a later identical record may say `See above` with its kind, trust marker and ID under each
-applicable file. The first copy remains complete for that surface. No state crosses calls or
-agents, and saved characters do not buy extra records. Existing once-per-file claims remain;
-use `get_task_context` for fuller decision context and `list_facts` for whole facts.
+withheld whole. When a file with withheld facts is shown, a line says how many were withheld
+and points to `list_facts`. Within one answer or appended brief, a later identical record may
+say `See above` with its kind, trust marker and ID under each applicable file. The first copy
+remains complete for that surface. No state crosses calls or agents, and saved characters do
+not buy extra records. Existing once-per-file claims remain. Use `get_task_context` for fuller
+decision context and `list_facts` for whole facts.
 These two channels run on Claude Code and Grok Build (Sidegraph ships no `PreToolUse` hook for Codex or Muse).
 `SubagentStart` delivers its brief on Claude Code, Codex and Muse; Grok Build runs it but does
 not pass the output to the model. The wiring is in the [hooks reference](hooks.md#sidegraph-pre-tool-use).
 
 ## Per-agent MCP sent state
 
-For Codex requests with an announced thread id, `get_task_context` (including nearest
+On Codex, the announced thread id identifies the caller. On Claude Code, the PreToolUse
+hook writes a caller row keyed by tool-use id, and a row for the same session identifies
+the main agent or subagent. For these exact callers, `get_task_context` (including nearest
 records), `query_decisions` and filtered `retrieve_decisions` share a sent set in derived
 `index.db` meta rows, `mcp_sent:<session>:<agent or ->:<record id>`. Only non-proposed full
 record bodies that survive the final output cap qualify: detailed, non-degraded decisions
-in the mistakes/decisions buckets, or full listing records. Previously sent bodies become
-in-place `[sent earlier]` lines, without accepted inline evidence, or compact
-`sent_earlier: true` listing rows; `ids=[...]` always requests full records. The freed budget
-can admit further records. Related lines, facts and proposals are never claimed. State is
+in the mistakes/decisions buckets, or full listing records with no live accepted supporting
+facts. Previously sent bodies can become in-place `[sent earlier]` lines or compact
+`sent_earlier: true` rows. Text bodies shorter than their pointers stay in full. The text legend
+and listing explanation appear when pointer savings cover their cost. `ids=[...]` always
+requests full records. The text memory budget and the listing budget each charge pointers the
+full body's cost. Budgeted inline evidence stays in text answers. Related lines, facts and
+proposals are never claimed. State is
 independent of telemetry; a read or batch-claim failure renders the usual full-body answer
-and claims nothing new. Claude, Grok and unknown callers remain inexact and use no sent
-state. SessionStart expires rows after 30 days and clears the main agent's rows on
-compact/clear, including Codex's canonical rollout and bare-thread aliases, before the
-60-second duplicate-event gate. Other sessions and subagents retain their rows.
+and claims nothing new. Grok and callers without an exact identity use no sent state.
+SessionStart expires sent rows after 30 days. On compact or clear, it resets the rows
+of the agent the notice names (`-` for the session's own agent), including Codex's canonical
+rollout and bare-thread aliases, before the 60-second duplicate-event gate. Other sessions
+and agents retain their rows.

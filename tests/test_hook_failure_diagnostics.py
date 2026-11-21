@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sqlite3
 from contextlib import closing
 
 import pytest
 
-from sidegraph.host import hooks, launch, subagent
+from sidegraph.host import hook_log, hooks, launch, subagent
 from sidegraph.store import Store
 
 
@@ -252,14 +253,12 @@ def test_reporter_does_not_retry_a_failed_write(monkeypatch, capfd, failure):
 
 
 @pytest.mark.parametrize("surface", ["pretool", "subagent"])
-@pytest.mark.parametrize("refusal", ["missing", "stamp", "agent", "format", "symlink"])
+@pytest.mark.parametrize("refusal", ["stamp", "agent", "format", "symlink", "directory"])
 def test_ordinary_index_refusals_are_quiet(project, monkeypatch, capfd, surface, refusal):
     from tests.test_store_requirement import above_running, write_requirement_marker
 
     Store(project).close()
-    if refusal == "missing":
-        (project / "index.db").unlink()
-    elif refusal in ("stamp", "agent"):
+    if refusal in ("stamp", "agent"):
         with closing(sqlite3.connect(project / "index.db")) as conn, conn:
             if refusal == "stamp":
                 conn.execute("UPDATE meta SET value='unsupported' WHERE key='schema_version'")
@@ -268,6 +267,9 @@ def test_ordinary_index_refusals_are_quiet(project, monkeypatch, capfd, surface,
                 conn.execute("CREATE TABLE retrieval_events(session_id TEXT)")
     elif refusal == "format":
         write_requirement_marker(project, above_running())
+    elif refusal == "directory":
+        (project / "index.db").unlink()
+        (project / "index.db").mkdir()
     else:
         original = project / "index.db"
         moved = project.parent / "elsewhere.db"
@@ -290,6 +292,52 @@ def test_ordinary_index_refusals_are_quiet(project, monkeypatch, capfd, surface,
     assert json.loads(captured.out) == {}
     assert captured.err == ""
     assert {p.name: p.read_bytes() for p in project.iterdir() if p.is_file()} == before
+
+
+@pytest.mark.parametrize(
+    ("entry", "event", "tool", "nudge_off"),
+    [
+        (hooks.pre_tool_use, "PreToolUse", "Read", False),
+        (hooks.pre_tool_use, "PreToolUse", "Edit", False),
+        (subagent.subagent_start, "SubagentStart", "Read", False),
+        (hooks.pre_tool_use, "PreToolUse", "Read", True),
+    ],
+    ids=["pretool-read", "pretool-edit", "subagent-delivery", "touch-only"],
+)
+def test_missing_index_logs_a_single_line_only_for_delivery(
+    project, monkeypatch, capfd, entry, event, tool, nudge_off
+):
+    """The touch-only guard fails if a bookkeeping open reports a delivery refusal."""
+    Store(project).close()
+    (project / "index.db").unlink()
+    target = project.parent / "a.py"
+    target.touch()
+    monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "on")
+    if nudge_off:
+        monkeypatch.setenv("SIDEGRAPH_GREP_NUDGE", "off")
+
+    def snapshot():
+        return {
+            p: (p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None)
+            for p in project.parent.rglob("*")
+            if p != project  # creating the allowed log changes its parent directory's mtime
+        }
+
+    before = snapshot()
+    _input(
+        monkeypatch,
+        {"session_id": "s", "tool_name": tool, "tool_input": {"file_path": str(target)}},
+    )
+    entry()
+    captured = capfd.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == ""
+    after = snapshot()
+    if not nudge_off:
+        _, line = after.pop(project / hook_log.LOG_NAME)
+        assert line is not None
+        assert re.fullmatch(rf"\n\d+ {event} empty \d+ no-index", line.decode("ascii"))
+    assert after == before
 
 
 @pytest.mark.parametrize("opener", ["hot", "ro"])

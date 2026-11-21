@@ -7,6 +7,67 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-11-21
+
+### Added
+
+- **The hook says when it withheld a long fact.** A file's records block, and a subagent brief,
+  carry one line counting the facts too long to show and pointing at `list_facts(files=[…])`.
+- **PreToolUse delivers records by exact path.** Existing files outside the last synced graph
+  and existing files in a store no sync has checked can receive records marked `[file-bound]`.
+- **SessionStart and `sidegraph-doctor` say when the store path holds a git directory without a
+  `.git` entry** (`store-git-directory`): Sidegraph runs no git from there; the line names the
+  directory. `sidegraph-doctor --check` exits `2` on it.
+- **The health check reports Codex hook trust.** It names Sidegraph hooks Codex has no trust
+  entry for, and says that an entry goes stale when a hook command changes, which the published
+  plugin's does at every update.
+- **PreToolUse reads.** File records now reach shell reads through `head`, `nl`, `awk`,
+  `git show REV:PATH` and `git grep … -- PATH`, and searches whose literal `glob` names one
+  existing file.
+
+### Changed
+
+- **Provisional MCP return-shape change.** On Claude Code, `get_task_context`, `query_decisions`
+  and filtered `retrieve_decisions` now point to records the caller already received in full
+  from an MCP read in the same session, as on Codex. Text tools use `[sent earlier]`, and
+  filtered listings can return `sent_earlier: true` rows without `choice`. Record selection
+  charges each pointer the full body's cost, and text answers still include budgeted evidence.
+  The new PreToolUse group writes the caller identity, relies on the hook payload's `agent_id`
+  to distinguish subagents, and prints `{}`. Hand-wired setups retain their previous answers
+  until they add the MCP read group from the Claude Code setup guide.
+- `find_entity` reaches `Type.member` with its file through the code graph. A miss now says
+  why in `hint`, and a found answer from another file than the one given says so.
+- **SessionStart map.** Removed the list of named domains and their counts of recorded
+  warnings. Agents did not use the list. A trimmed map has more room for global mistakes and
+  proposals. The store keeps domains for browsing in the Portal or through the domain tools.
+- **Domain browsing and task retrieval.** `get_task_context` and `query_decisions` skip
+  covering domains when building related memory. An empty `get_task_context` answer to a call
+  with no seeds suggests files and symbols. The related overflow line points to `retrieve_decisions`.
+  `query_structure` drops the domain summaries formerly appended to a cut map. Anchor matching
+  in `retrieve_decisions` and the Portal skips domain labels. Use the Portal's
+  domain filter, `list_domains`, or `drill_down` to browse named domains. The `check-plan` and
+  `explain-why` skills look up an area by query.
+- **Dependency refresh.** The published package pins `authlib` 1.9.10, `cachetools` 8.0.2,
+  `certifi` 2026.11.20, `platformdirs` 4.14.8, `pydantic` 2.14.4 and `pyyaml` 6.0.4. An audit
+  of the pinned runtime dependencies found no known vulnerabilities.
+
+### Fixed
+
+- Every hook launch from the Claude Code plugin now sets `SIDEGRAPH_HOST=claude`.
+- On codex-cli 0.171.0, automatic compaction fires `SessionStart` with `source: compact`, so the existing reset clears MCP sent marks.
+- A compaction notice that names a subagent now resets that subagent's own record of full
+  records sent over MCP.
+- When another session or the Portal rebuilds the index during a sync, the index stays marked
+  stale. The next sync recomputes the anchors, and hooks withhold records that would otherwise
+  be delivered through placeholder bindings.
+- An anchor that matches several symbols in one community that no accepted domain covers
+  survives a fresh clone when capture saves a degraded leaf on the name or file-qualified
+  symbol. The clone's first sync rebuilds the community binding from that leaf.
+- A compaction right after session start gets a fresh map. PreToolUse and SubagentStart
+  delivery attempts before the index exists leave a `no-index` line in the run log.
+- **Filtered decision listings keep accepted records ahead of proposals.** Without a query,
+  `retrieve_decisions` applies that order before the `limit` cut.
+
 ## [0.33.0] — 2026-11-18
 
 The Sidegraph Portal: a local page to see, ratify and edit the decision store.
@@ -3565,7 +3626,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.33.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.30.0...v0.31.0

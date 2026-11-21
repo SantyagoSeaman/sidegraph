@@ -413,6 +413,7 @@ _BOUND_CAUSES = (("repeat", "already delivered"), ("cap", "ten-file cap"), ("col
 _OTHER_CAUSES = (
     ("no-entity", "no anchor"),
     ("no-record", "no current record"),
+    ("no-index", "no index yet"),
     ("duplicate", "duplicate start"),
     ("unrecorded", "cause not recorded"),
     ("unknown", "cause unknown"),
@@ -439,7 +440,7 @@ def _dotted(first: str, items: list[str]) -> list[str]:
 def _hook_runs(report: StatsReport) -> list[str]:
     runs = report.hook_runs
     assert runs is not None
-    lines = [f"runs that opened the index, last {_count(report.window_days, 'day')} (run log)"]
+    lines = [f"runs from the log, last {_count(report.window_days, 'day')}"]
     for hook, counts in runs.hooks.items():
         name = "other hooks" if hook == "other" else hook
         first = f"{name}: {_count(counts.runs, 'run')}; delivered on {_n(counts.delivered)}"

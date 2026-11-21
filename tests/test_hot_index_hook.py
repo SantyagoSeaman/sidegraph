@@ -1,7 +1,7 @@
 """The PreToolUse hook on top of ``HotIndex`` (T5, hook half; D3).
 
-Where the handle refuses the index, the hook does nothing: it prints ``{}`` and writes
-nothing anywhere, including through a symlink. And a tool call never creates a store.
+The hook prints ``{}`` on a refused index. A missing index may leave a run log line.
+Other refusals make no writes, including through a symlink. A tool call never creates a store.
 
 see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D2, D3)
 """
@@ -20,7 +20,7 @@ from sidegraph.hot_index import HotIndex
 from tests.test_hot_index import _REFUSED, FILE_A, _broken_project, _fixture_store, _snapshot
 
 
-@pytest.mark.parametrize("how", sorted(_REFUSED))
+@pytest.mark.parametrize("how", sorted(_REFUSED.keys() - {"missing-index"}))
 def test_the_hook_prints_nothing_and_writes_nothing_on_a_refused_index(
     tmp_path, monkeypatch, capsys, how
 ):

@@ -40,7 +40,8 @@ In PowerShell, call a quoted interpreter path with the call operator:
 
 `$KNOWN_HOST` is `claude`, `codex` or `unknown`; the collector refuses any other value.
 Add `--store`, `--graph`, or `--plugin-root` only when the user or host has identified those
-paths. The collector does not scan user profiles or guess a Python from `PATH`. Do not use
+paths. With `--host codex`, the collector reads `$CODEX_HOME/config.toml` for hook trust.
+The collector does not scan user profiles or guess a Python from `PATH`. Do not use
 `uv`, `uvx`, a package installer, or a cached distribution as the launcher: an offline
 launcher can still provision an environment. Never create or repair an environment to make
 this check run.
@@ -65,6 +66,7 @@ Parse the helper's JSON and render a single chat report in this order:
 1. Overall status and preservation status.
 2. The six sections: Plugin and wiring; CLI and runtime versions; Graphify; Store integrity;
    Anchors and entities; Inventory and usage.
+   Under Plugin and wiring, render `host_trust` when present.
    Under Inventory and usage, render `hook_runs` as a table: one row per hook with its runs,
    `delivered`, `empty`, `lock`, `error`, and the p50/p95 milliseconds, plus the window from
    `first_ms` to `last_ms` as dates. `lock` is a delivery another process's lock withheld; say
@@ -76,7 +78,7 @@ Parse the helper's JSON and render a single chat report in this order:
 4. Prioritized, deduplicated manual recommendations with the stated scope and reason. Render a
    structured recommendation as a manual command for later use, using only its `argv`, `cwd`,
    and `env`, and the attached shell's native quoting (including PowerShell syntax). Empty
-   `argv` means path/settings inspection instructions only. Never interpolate paths into a
+   `argv` describes a manual action without a shell command. Never interpolate paths into a
    shell command string and never execute recommendations during this check.
 5. Evidence limitations, including the unmerged-branch coverage limit and the fact that
    observed usage does not measure usefulness or saved effort.
@@ -89,6 +91,11 @@ collector's section or overall status from it. Do not start an MCP server or cal
 retrieval for this check.
 
 If the Sidegraph MCP is not connected, `references/without-the-mcp.md` (next to this file) says how to read memory and check the store from the command line.
+
+On Muse, when the Sidegraph MCP tools are missing, no running server identifies an
+interpreter. Recommend `muse plugins inspect sidegraph`: a capability whose status is
+`review_needed` needs `muse plugins approve sidegraph`, then a new Muse process started from
+the project.
 
 The collector brackets its own process with input fingerprints. If inputs changed or could
 not be read, report preservation as unstable or unverified without blaming the collector.

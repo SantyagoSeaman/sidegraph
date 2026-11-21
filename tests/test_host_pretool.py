@@ -13,6 +13,9 @@ see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.m
 import io
 import json
 from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
 
 import sidegraph.host.hooks as hooks
 from sidegraph.schema import Decision, DecisionKind, DecisionStatus, Provenance
@@ -98,6 +101,100 @@ def test_pretool_pattern_only_grep_names_no_file(tmp_path, monkeypatch, capsys):
     _seed_server_py(db)
     payload = {"session_id": "p3", "tool_name": "Grep", "tool_input": {"pattern": "foo"}}
     assert _run(monkeypatch, capsys, payload, db) == {}
+
+
+@pytest.mark.parametrize(
+    ("path", "glob", "expected"),
+    [
+        (None, "src/a.py", ["src/a.py"]),
+        ("{root}/src", "a.py", ["src/a.py"]),
+        ("src", "a.py", ["src/a.py"]),
+        ("{root}/src", "!a.py", []),
+        (None, "./a.py", []),
+        (None, "src/./a.py", []),
+        (None, "src//a.py", []),
+        (None, r"src/a\.py", []),
+        (None, "src/a[1].py", []),
+        (None, "src/gone.py", []),
+        ("{root}/src", "../a.py", []),
+        (None, "{root}/src/a.py", []),
+        ("missing", "a.py", ["missing"]),
+    ],
+)
+def test_files_named_by_a_single_file_glob(
+    tmp_path: Path, path: str | None, glob: str, expected: list[str]
+) -> None:
+    """The refusal cases guard literal-only globs, including a literal leading ! filename."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for file in (src / "a.py", src / "!a.py", src / "a[1].py", tmp_path / "a.py"):
+        file.touch()
+    escape = src / r"a\.py"
+    escape.parent.mkdir(exist_ok=True)
+    escape.touch()
+    root = str(tmp_path)
+    tool_input = {"pattern": "x", "glob": glob.replace("{root}", root)}
+    if path is not None:
+        tool_input["path"] = path.replace("{root}", root)
+    assert hooks._files_named("Grep", {"cwd": root}, tool_input, root, set()) == expected
+
+
+@pytest.mark.parametrize(
+    ("glob", "expected"), [("a.py", ["pkg/src/a.py"]), ("*.py", []), ("!a.py", [])]
+)
+def test_claude_glob_uses_a_relative_search_directory_from_cwd(
+    tmp_path: Path, glob: str, expected: list[str]
+) -> None:
+    cwd = tmp_path / "pkg"
+    (cwd / "src").mkdir(parents=True)
+    (cwd / "src/a.py").touch()
+    (tmp_path / "src").touch()
+    tool_input = {"pattern": "x", "path": "src", "glob": glob}
+    assert (
+        hooks._files_named("Grep", {"cwd": str(cwd)}, tool_input, str(tmp_path), set()) == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("glob", "expected"),
+    [("src/LINK.py", []), ("SRC/Link.py", []), ("src/Link.py", ["src/target.py"])],
+)
+def test_grep_glob_requires_exact_case(tmp_path: Path, glob: str, expected: list[str]) -> None:
+    """A case-insensitive filesystem lookup alone does not match ripgrep's literal glob."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "target.py").touch()
+    (src / "Link.py").symlink_to("target.py")
+    root = str(tmp_path)
+    assert hooks._files_named("Grep", {"cwd": root}, {"glob": glob}, root, set()) == expected
+
+
+def test_grok_glob_uses_the_tool_working_directory(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").touch()
+    payload = hooks._claude_shaped(
+        {"tool_name": "grep", "tool_input": {"pattern": "x", "glob": "a.py"}, "cwd": str(src)}
+    )
+    assert hooks._files_named(
+        payload["tool_name"], payload, payload["tool_input"], str(tmp_path), set()
+    ) == ["src/a.py"]
+
+
+def test_pretool_delivers_records_for_a_single_file_glob(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "s.db"
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/a.py").touch()
+    _seed_anchored_decision(db, "src/a.py", "Resolve the file named by the search")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    payload = {
+        "session_id": "glob-read",
+        "tool_name": "Grep",
+        "cwd": str(tmp_path),
+        "tool_input": {"pattern": "x", "glob": "src/a.py"},
+    }
+    out = _run(monkeypatch, capsys, payload, db)
+    assert "Resolve the file named by the search" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_pretool_silent_for_other_tools(tmp_path, monkeypatch, capsys):

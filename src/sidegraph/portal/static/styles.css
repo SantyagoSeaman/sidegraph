@@ -91,8 +91,8 @@ code, .mono { font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, mono
 }
 .banner-warn { border-bottom-color: var(--warn-border); background: var(--warn-soft); color: var(--warn-ink); }
 .footer {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 10px 24px;
-  border-top: 1px solid var(--border); background: var(--surface2); font-size: 13px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; padding: 3px 24px;
+  border-top: 1px solid var(--border); background: var(--surface2); font-size: 11px; line-height: 1.4;
 }
 .footer-changed { background: var(--warn-soft); border-top-color: var(--warn-border); }
 .footer-changed strong { color: var(--warn-ink); }
@@ -221,6 +221,18 @@ code, .mono { font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, mono
   background: var(--surface2); color: var(--ink);
 }
 
+/* Three columns: the page is exactly one screen high and the graph and its legend fill it down
+   to the footer. The side columns scroll inside themselves, so a long panel never resizes the graph. */
+@media (min-width: 1101px) {
+  .app:has(.graph-page) { height: 100vh; min-height: 640px; }
+  .main:has(> .graph-page) { display: flex; flex-direction: column; min-height: 0; }
+  .graph-page { flex: 1; min-height: 0; display: flex; flex-direction: column; padding-bottom: 16px; }
+  .graph-layout { flex: 1; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+  .graph-filters, .graph-panel { max-height: 100%; overflow-y: auto; }
+  .graph-main { align-self: stretch; min-height: 0; display: flex; flex-direction: column; }
+  .graph-stage { flex: 1; min-height: 300px; }
+  .graph-stage .graph-canvas { position: absolute; inset: 0; height: auto; }
+}
 @media (max-width: 1100px) {
   .graph-layout { grid-template-columns: 200px minmax(0, 1fr); }
   .graph-panel { grid-column: 1 / -1; position: static; max-height: none; }
@@ -388,6 +400,7 @@ code, .mono { font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, mono
 .queue-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 4px; }
 .queue-marks { display: flex; flex-wrap: wrap; gap: 8px; }
 .queue-marks .btn { padding: 10px 18px; font-size: 14px; text-decoration: none; }
+.btn-accept { color: var(--ok); border-color: var(--ok-border); }
 .btn-accept[aria-pressed="true"] { background: var(--ok-bg); border-color: var(--ok-bg); color: var(--on-accent); font-weight: 600; }
 .btn-reject { color: var(--bad); border-color: var(--bad-border); }
 .btn-reject[aria-pressed="true"] { background: var(--bad); border-color: var(--bad); color: var(--bg); font-weight: 600; }

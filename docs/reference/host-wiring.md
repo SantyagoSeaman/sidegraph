@@ -8,18 +8,11 @@ The four hooks are console scripts. See the [host environment settings](../integ
 
 ### `SessionStart` — `sidegraph-session-start`
 
-Runs a best-effort lazy sync (`maybe_sync`) against the current graph, then injects
-`additionalContext` from one of two renderers, chosen by whether the store has any
-**accepted domains** (see [mind model](../concepts/mind-model.md) and
-[retrieval: SessionStart TOC](../concepts/retrieval.md#sessionstart-toc)):
-
-- **Once at least one domain is ratified**, `render_toc()` renders the real, domain-named
-  table of contents: one line per accepted domain (title, mistake count,
-  subdomain count) — the normal steady-state view once a project's mind model has any names
-  in it.
-- **Before any domain is ratified**, `top_tier_map()` is the fallback — a **phase-1 top-tier
-  map** with a nameless `## Communities` section (the largest communities in the graph by
-  member count, labeled by their god node) in place of `## Domains`.
+Runs a best-effort lazy sync (`maybe_sync`) against the current graph, then injects the opening
+map as `additionalContext`. A usable cache of accepted domains selects the global sections.
+Without that cache, the on-demand fallback also shows `## Communities` when a graph is available.
+It lists the largest communities by member count and labels each by its god node.
+See the [SessionStart map](../concepts/retrieval.md#sessionstart-toc).
 
 Either way, `session_start` prepends the same standing instruction ahead of whichever
 renderer's text follows — added once at the hook-assembly level, not inside either renderer
@@ -34,8 +27,8 @@ renderer's text follows — added once at the hook-assembly level, not inside ei
 > check-plan skill if it is available. If a tool is listed only by name, load it first.
 
 Unlike the `PreToolUse` records block below (which fires only when a `Read`, `Edit`, `Write`,
-`Grep` or `sed`/`grep`/`rg`/`cat` line names a file with records, each file at most once per
-agent), this instruction is unconditional and asks for memory before the search that answers a
+`Grep` or supported Bash read names a file with records), this instruction is unconditional
+and asks for memory before the search that answers a
 question or plans a change, whatever the search tool — bash `find`, MCP structure-query tools, a
 search that names no file — by telling the agent up front, not by gating a specific tool call.
 The call it names for a question or a plan is `retrieve_decisions(query=…)`;
@@ -49,14 +42,13 @@ Both renderers also inject:
 
 - **Global mistakes & constraints** — the most recent `gotcha`/`lesson`/`constraint`
   decisions scoped `global` (not tied to one entity), capped at 10.
-- **Unratified proposals** — proposed records inside the surfacing window, after everything
-  accepted. The domain map lists proposed global mistakes only. The nameless map lists proposed
+- **Unratified proposals** — proposed records inside the surfacing window, after accepted
+  records. The cached path shows proposed global mistakes. The fallback shows proposed
   decisions and facts, up to 10 of each.
 
-The nameless map adds two more sections that the domain map does not have: **Recorded
-decisions** (up to 10 accepted decisions that no section above already shows) and **Known
-facts** (up to 10 accepted facts). So the global mistakes are not the only decisions a session
-sees at start. Everything task-scoped still waits for `get_task_context`.
+The fallback also shows **Recorded decisions** (up to 10 accepted decisions absent from the
+other sections) and **Known facts** (up to 10 accepted facts). Request task-scoped records with
+`get_task_context`.
 
 After the map come status lines from the integrity checks. A line appears while its problem
 exists. Problems needing a person can also produce a top-level `systemMessage`, at most once
@@ -108,31 +100,37 @@ transcript.
 
 ### `PreToolUse` — `sidegraph-pre-tool-use`
 
-Three groups in the snippet (see
+Four groups in the snippet (see
 [`claude-code-setup.md`](../getting-started/claude-code-setup.md#2-add-the-hooks)): matcher
 `Read|Grep|Edit|Write`, matcher `Bash` with one entry that has no `if` and runs a shell filter
-for `sed`, `grep`, `rg` and `cat` (below), and matcher `Agent|Task` (below). When a `Read`,
-`Grep`, `Edit`, `Write` or Bash call names a file that decisions are anchored to, the hook hands
-the agent those records in the same call, as a **non-blocking**, `additionalContext`-only
-`hookSpecificOutput` (the `Agent|Task` group is the exception: it returns `updatedInput`, below):
+for the reader words (below), matcher `Agent|Task` (below), and the Sidegraph MCP
+read group. When a `Read`, `Grep`, `Edit`, `Write` or Bash call names a file that decisions are
+anchored to, the hook hands the agent those records in the same call as a **non-blocking**,
+`additionalContext`-only `hookSpecificOutput`:
 the guard line, then for each file (at most three per call) its top two records, or three when the
-first two are mistakes, each as `- [kind] title — first sentence of the choice (id …)`, and a
-`More: get_task_context(files=[…])` line when records were left out. No `permissionDecision` field is set, so the tool call is never
-denied, escalated, or auto-approved; it only gets annotated with the block, and then runs
-through Claude Code's normal permission flow exactly as it would have otherwise.
+first two are mistakes, each as `- [kind] title — first sentence of the choice (id …)`. A
+`Withheld:` line counts facts too long to show, and a `More: get_task_context(files=[…])` line
+points to remaining renderable records. No `permissionDecision` field is set, so the tool call
+is never denied, escalated, or auto-approved. It only gets annotated with the block, and then
+runs through Claude Code's normal permission flow exactly as it would have otherwise.
 
-Each file is delivered **once per agent**, up to **ten files per agent** (an agent starts its
-ten again after its context is compacted or cleared) (one statement in the store's `meta` table
-counts and inserts, separate from the `Stop` hook's own capture ledger so the guards don't
-consume each other). The session's own agent and every subagent it starts count
+The MCP read group records the caller for `get_task_context`, `query_decisions` and
+`retrieve_decisions` and prints `{}`. [Sidegraph MCP read hook](hooks.md#sidegraph-mcp-reads)
+
+Each agent gets **ten file claims per scope** for ordinary files, exact-path files, and files
+named only by newly supported Bash readers or literal `Grep` globs. Exact-path and expanded
+readers skip files already delivered to the agent. Ordinary reads keep their own first delivery.
+Compaction and clearing reset all allowances for that agent. A single statement in the store's
+`meta` table counts and inserts the claim.
+The session's own agent and every subagent it starts count
 separately, because Claude Code gives a subagent's hook payload its parent's session id and its
 own `agent_id`: without that, the main agent's delivery would have used up the one a subagent
 needed. A call that names no file with records prints `{}`, and no counting form is printed
 anywhere. Set `SIDEGRAPH_GREP_NUDGE=off` to stop delivery at the point of reading, on every tool
-but `Agent` (that has its own switch, below); touch recording is not affected. A Bash line counts only for the regular files that its `sed`, `grep`, `rg` and `cat`
-commands read (`head`, `awk` and `git grep` name nothing), and a Bash read is not a touch event;
-the Bash entry is a shell filter that starts the hook only for a line holding one of those words
-(details in the [hooks reference](hooks.md#bash-lines)). It reads the store's index directly rather
+but `Agent` (that has its own switch, below). Touch recording uses `SIDEGRAPH_TELEMETRY`.
+Bash delivery follows the supported reader commands, and Bash reads produce no touch events.
+`Grep` can name one file through a literal `glob`. See the
+[hooks reference](hooks.md#bash-lines). The hook reads the store's index directly rather
 than opening the store (see the [hooks reference](hooks.md#sidegraph-pre-tool-use)),
 so a call costs a few tens of milliseconds, and in a project with no store it does nothing and
 creates nothing. Like the other hooks, it never crashes or blocks the tool call: any failure (or
@@ -143,24 +141,24 @@ record file, a compaction) record delivery and the `SubagentStart` brief continu
 every anchor whose entity is unchanged, by the status the last sync computed for it. That
 status describes the code as the last sync saw it: when the code changed since, a record
 can still arrive through an anchor the next sync will find gone, as it can between any
-two syncs. A record that reaches a file only through a new or changed anchor waits for
-the next successful sync. A store that no sync has ever checked delivers nothing from
-these two hooks until one completes: `SessionStart` and memory retrieval attempt a lazy
-sync, and without a graph reader that state lasts until a reader and a successful sync
-are available. Touch recording and file claims remain available.
+two syncs. A new or changed anchor for a graph-held file waits for the next successful sync.
+PreToolUse delivers eligible records by exact path for existing files outside the last synced
+graph and for existing files in a store no sync has checked. Those record lines carry
+`[file-bound]`. `SubagentStart` and the Agent brief continue to use checked anchors.
 
 **Subagent briefs.** The third group, matcher `Agent|Task`, runs the same command when the agent
 spawns a subagent. The brief the parent writes is where the task is, so the hook reads the files
 it names (and, one hop away, the files named in a plan or notes document it names), and appends a
 block with the records anchored to them to the brief: per file the top two records, at most six
-lines and 3,000 characters in all, under a header that names the document when a plan named the
-file. It returns the call's own input with only `prompt` changed (`updatedInput`), sets no
-`permissionDecision`, and claims none of the per-agent keys above. **The block reaches the
-subagent, in its first message, but the parent's view of its own `Agent` call does not show it**:
-the parent's transcript keeps the prompt it wrote. It is on by default; set
-`SIDEGRAPH_AGENT_BRIEF=off` to turn it off. In Claude Code's auto mode (`permission_mode: auto`)
-it leaves the call unchanged: that mode reviews a call before hooks run and refuses an input a hook
-changed. The subagent still gets the `SubagentStart` brief and the records of the files it reads.
+lines and 3,000 characters excluding the `Withheld:` line and its newline. The file header names
+the document when a plan named the file. The hook returns the call's own input with only `prompt`
+changed (`updatedInput`), sets no `permissionDecision`, and claims none of the per-agent keys
+above. **The block reaches the subagent, in its first message, but the parent's view of its own
+`Agent` call does not show it**: the parent's transcript keeps the prompt it wrote. It is on by
+default. Set `SIDEGRAPH_AGENT_BRIEF=off` to turn it off. In Claude Code's auto mode
+(`permission_mode: auto`) it leaves the call unchanged. That mode reviews a call before hooks
+run and refuses an input a hook changed. The subagent still gets the `SubagentStart` brief and
+the records of the files it reads.
 Grok Build runs hooks before its permission gate, so it keeps the brief. It was not tested on agent-team teammates or `fork`
 spawns, and Codex does not carry it. See the
 [hooks reference](hooks.md#subagent-briefs).
@@ -195,9 +193,9 @@ any exception inside `stop` prints `{}` (Claude Code proceeds to stop normally);
 inside `pre_tool_use` — or the nudge conditions simply not holding — also prints `{}` (the
 tool call proceeds through the normal permission flow); any exception inside `subagent_start`, or
 nothing anchored to code to describe, prints `{}` (the subagent starts with no brief). A missing
-graph leaves new records without code anchors and gives a shorter map; on a store that no sync
-has ever checked, hot-hook record delivery and briefs remain withheld until sync can run with a
-reader. A missing store is not an error either:
+graph leaves new records without code anchors and gives a shorter map. Before the first sync,
+PreToolUse can deliver tagged records by exact path for existing files. Subagent briefs wait
+for checked bindings. A missing store is not an error either:
 `SessionStart` creates nothing: it sends a `systemMessage` that names the expected path and asks for
 an explicit `sidegraph-init` there, and no hook creates the store, so memory stays off until you run it. An
 env var that points at the wrong path gives an empty store there, so that session has no
@@ -253,12 +251,13 @@ command, and for all of them when it cannot split the command into subcommands (
 variable it cannot resolve, a loop body that uses its variable, `${…}`, a brace group, `case`, a
 heredoc followed by a redirect): four launches for one call. The plugin therefore wires Bash as
 one entry with no `if`. Its command reads the payload and starts `uvx` only when the payload holds
-`sed`, `grep`, `rg` or `cat` followed by a space, a JSON tab or carriage-return escape, a single
-quote or an escaped double quote, after a character that cannot be part of a word or after a JSON
-newline, tab or carriage-return escape; every other command prints `{}` after one `sh`. That is a
-superset of what `sidegraph.bash_paths.read_paths` answers (it answers only for those four command
-words), with one exception: a command word split by quotes (`c'at' file`) names a file for
-`read_paths` and does not pass, because a `case` pattern cannot match every way to split a word.
+`sed`, `grep`, `rg`, `cat`, `head`, `nl`, `awk` or literal `git show` followed by a space,
+a JSON tab or carriage-return escape, a single quote or an escaped double quote, after a
+character that cannot be part of a word or after a JSON newline, tab or carriage-return escape.
+Other commands print `{}` after one `sh`. The parser also recognizes split words such as
+`c'at' file`, a quoted Git subcommand such as `git 'show'`, and extra whitespace between `git`
+and `show`. These spellings alone skip the launch because the prefilter matches the serialized
+hook payload.
 Grok's Bash entry is the same command with
 `SIDEGRAPH_HOST=grok`, and Grok skips handlers that set `if`, so the one form serves both.
 

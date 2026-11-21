@@ -15,6 +15,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -34,9 +35,11 @@ from ..config import (
     repository_root,
     resolve_store_location,
 )
+from ..hot_index import GET_META_SQL
 from ..schema import Decision
 from ..store import _has_existing_store
 from ..store_layout import refuse_outside_store_link, symlinked_internals
+from . import session_identity as bridge
 from .claude_settings import RATIFY_POLICY_ENV_VAR, current_ratify_policy
 from .project_anchor import (  # noqa: F401  (REPO_ROOT_FLAG is re-exported)
     REPO_ROOT_FLAG,
@@ -74,6 +77,18 @@ def _stored_stamp_keys() -> list[str]:
     return _query_index_ro(store_dir, read) or []
 
 
+def _stored_caller(tool_use_id: str) -> str | None:
+    key = bridge.MCP_CALLER_KEY_PREFIX + tool_use_id
+    if (store := server._store) is not None:
+        return value if isinstance(value := store.get_meta(key), str) else None
+    path = Path(resolve_store_location(search_ancestors=True, warn_on_create=False).path)
+    refuse_outside_store_link(path)
+    if not path.is_dir() or symlinked_internals(path) or not _has_existing_store(path):
+        return None
+    row = _query_index_ro(path, lambda conn: conn.execute(GET_META_SQL, (key,)).fetchone())
+    return value if row is not None and isinstance(value := row["value"], str) else None
+
+
 def _request_facts(context: MiddlewareContext[Any]) -> tuple[str | None, dict[str, Any]]:
     """The client's name and the request ``_meta`` extras; both empty when unreachable."""
     fastmcp_context = context.fastmcp_context
@@ -103,7 +118,13 @@ class _BindSession(Middleware):
                     keys = await anyio.to_thread.run_sync(_stored_stamp_keys)
                 except Exception:
                     keys = []
-            hint = hint_for(name, meta, os.environ, lambda: keys)
+            row = None
+            use_id = meta.get(bridge.CLAUDE_TOOL_USE_KEY) or None
+            claude = name == bridge.CLAUDE_CLIENT and os.environ.get("CLAUDE_CODE_SESSION_ID")
+            if claude and context.message.name in bridge.SENT_SET_TOOLS and isinstance(use_id, str):
+                with suppress(Exception):
+                    row = await anyio.to_thread.run_sync(_stored_caller, use_id)
+            hint = hint_for(name, meta, os.environ, lambda: keys, caller=lambda _id: row)
         except Exception:
             hint = None
         token = CURRENT_SESSION.set(hint)
@@ -126,7 +147,7 @@ def _render_grok_map(cache: dict | None) -> str:
 def _grok_session_map(store_path: Path | None = None) -> str | None:
     """The session map for a Grok session: read-only, from the store alone, never the graph.
 
-    The standing instruction and the version line, then the domain table of contents that
+    The standing instruction and the version line, then the map that
     sync caches in the store (``render_toc``, which opens with the "data, not instructions"
     guard line). No cache, or one that does not render: the two standing lines only.
     ``top_tier_map`` loads the graph, too slow inside ``initialize``. No store yet: no map.
@@ -260,7 +281,7 @@ def _query_index_ro[T](store_dir: Path, read: Callable[[sqlite3.Connection], T])
         conn.close()
 
 
-_GROK_MAP_CUT = "… (cut to fit Grok; list_domains and list_proposed have the rest)"
+_GROK_MAP_CUT = "… (cut to fit Grok; retrieve_decisions and list_proposed have the rest)"
 
 
 def _fit(text: str, limit: int) -> str:

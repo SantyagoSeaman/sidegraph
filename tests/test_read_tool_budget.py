@@ -209,7 +209,7 @@ def test_B3_zero_binding_oversized_envelope(tmp_path, monkeypatch, field):
         full = server._find_entity_impl(store, "Small")
         target = full["descriptor"] if field in {"name", "file_path"} else full
         target[field] = '\\"\n' * 20000
-        monkeypatch.setattr(server, "_find_entity_impl", lambda *_args: full)
+        monkeypatch.setattr(server, "_find_entity_impl", lambda *_args, **_kwargs: full)
         out_text = server._find_entity_listing(store, "Small", None, 1)
         out = json.loads(out_text)
         assert len(out_text) <= 4000
@@ -251,7 +251,9 @@ def test_B5_oversized_individual_candidate(tmp_path, monkeypatch):
             {"entity_id": str(ULID()), "canonical_name": "x" * 50000, "file_path": "y" * 50000}
         ]
         monkeypatch.setattr(
-            server, "_find_entity_impl", lambda *_args: {"found": False, "candidates": candidates}
+            server,
+            "_find_entity_impl",
+            lambda *_args, **_kwargs: {"found": False, "candidates": candidates},
         )
         text = server._find_entity_listing(store, "name", None, 4000)
         out = json.loads(text)

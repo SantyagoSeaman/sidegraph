@@ -102,6 +102,18 @@ def test_a_subagent_compaction_resets_only_that_subagent(project, monkeypatch, c
     assert _read(monkeypatch, capsys, project, "src/a.py") == {}
 
 
+def test_a_subagent_compaction_resets_only_its_mcp_sent_rows(project, monkeypatch, capsys):
+    now = datetime.now(UTC).isoformat()
+    rows = {f"mcp_sent:{SESSION}:{agent}:r1": now for agent in ("-", "agent-1", "agent-2")}
+    for key, value in rows.items():
+        project.store.set_meta(key, value)
+
+    _session_start(monkeypatch, capsys, project, "compact", agent="agent-1")
+
+    del rows[f"mcp_sent:{SESSION}:agent-1:r1"]
+    assert project.meta("mcp_sent:%") == rows
+
+
 def test_a_repeated_notice_does_not_reset_again(project, monkeypatch, capsys):
     """Red against a reset on every compact notice: a host that sends the notice twice would
     delete the claims made after the first, and every file would be delivered a second time
@@ -220,13 +232,16 @@ def test_a_reset_that_fails_before_its_stamp_deletes_nothing(project):
     stamp are one transaction, so a failure of the second takes the first back."""
     project.anchored("src/a.py")
     key = f"pretool_file:{SESSION}:-:src/a.py"
-    project.store.set_meta(key, datetime.now(UTC).isoformat())
+    exact_key = f"pretool_file::{SESSION}:-:notes.txt"
+    for claim in (key, exact_key):
+        project.store.set_meta(claim, datetime.now(UTC).isoformat())
     with pytest.raises(sqlite3.IntegrityError):
         project.store.delete_meta_prefix_stamped(
             f"pretool_file:{SESSION}:-:",
             f"pretool_reset:{SESSION}:-:compact",
             None,
             lambda raw: False,
+            extra_prefixes=(f"pretool_file::{SESSION}:-:",),
         )
-    assert key in project.meta("pretool_file:%")
+    assert set(project.meta("pretool_file:%")) == {key, exact_key}
     assert project.meta("pretool_reset:%") == {}

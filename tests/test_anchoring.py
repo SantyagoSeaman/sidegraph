@@ -67,14 +67,55 @@ def test_dedup_reuses_entity_across_decisions(tmp_path):
     assert leaf1.entity_id == leaf2.entity_id  # same durable entity reused
 
 
-def test_ambiguous_degrades_to_community_only(tmp_path):
+def test_ambiguous_shared_community_gets_a_degraded_leaf(tmp_path):
     s = Store(tmp_path / "t.db")
     d = _decision(s)
     reader = FakeReader(ResolveResult(status="ambiguous", candidates=["a", "b"], community="5"))
     bindings = resolve_and_bind(d.id, Descriptor(name="run"), reader, s)
     tiers = {b.tier: b for b in bindings}
-    assert set(tiers) == {1}  # no leaf binding
-    assert tiers[1].status == "degraded"
+    assert set(tiers) == {1, 2}
+    assert tiers[1].status == tiers[2].status == "degraded"
+    leaf = s.get_entity(tiers[2].entity_id)
+    assert leaf.canonical_name == "run"
+    assert leaf.last_seen_node_id is None
+
+
+def test_ambiguous_across_communities_gets_nothing(tmp_path):
+    s = Store(tmp_path / "t.db")
+    d = _decision(s)
+    reader = FakeReader(ResolveResult(status="ambiguous", candidates=["a", "b"], community=None))
+    assert resolve_and_bind(d.id, Descriptor(name="run"), reader, s) == []
+    assert s.bindings_for_record(d.id) == []
+
+
+def test_ambiguous_uncollapsed_writes_no_leaf(tmp_path):
+    s = Store(tmp_path / "t.db")
+    d = _decision(s)
+    reader = FakeReader(ResolveResult(status="ambiguous", candidates=["a", "b"], community="5"))
+    result = resolve_and_bind(d.id, Descriptor(name="run"), reader, s, collapse=False)
+    assert [b.tier for b in result] == [1]
+    assert [b.tier for b in s.bindings_for_record(d.id)] == [1]
+
+
+def test_ambiguous_path_less_ref_never_adopts_a_carrier(tmp_path):
+    s = Store(tmp_path / "t.db")
+    d = _decision(s)
+    carrier = s.get_or_create_entity(Descriptor(name="run", file_path="m.py"))
+    reader = FakeReader(ResolveResult(status="ambiguous", candidates=["a", "b"], community="5"))
+    result = resolve_and_bind(d.id, Descriptor(name="run"), reader, s)
+    assert [b.tier for b in result] == [1]
+    assert carrier.entity_id not in {b.entity_id for b in s.bindings_for_record(d.id)}
+
+
+def test_ambiguous_with_a_file_gets_a_leaf_on_that_file(tmp_path):
+    s = Store(tmp_path / "t.db")
+    d = _decision(s)
+    reader = FakeReader(ResolveResult(status="ambiguous", candidates=["a", "b"], community="5"))
+    result = resolve_and_bind(d.id, Descriptor(name="run", file_path="m.py"), reader, s)
+    tiers = {b.tier: b for b in result}
+    assert set(tiers) == {1, 2}
+    assert tiers[2].status == "degraded"
+    assert s.get_entity(tiers[2].entity_id).descriptor.file_path == "m.py"
 
 
 def test_unresolved_creates_orphaned_leaf(tmp_path):
@@ -86,7 +127,7 @@ def test_unresolved_creates_orphaned_leaf(tmp_path):
     assert bindings[0].tier == 2 and bindings[0].status == "orphaned"
 
 
-def test_ambiguous_real_reader_degrades_to_community(tmp_path):
+def test_ambiguous_real_reader_gets_a_degraded_leaf(tmp_path):
     import json
 
     from sidegraph.engine.reader import GraphifyReader
@@ -119,9 +160,12 @@ def test_ambiguous_real_reader_degrades_to_community(tmp_path):
     d = _decision(s)
     bindings = resolve_and_bind(d.id, Descriptor(name="run"), GraphifyReader(p), s)
     tiers = {b.tier: b for b in bindings}
-    assert set(tiers) == {1}
-    assert tiers[1].status == "degraded"
+    assert set(tiers) == {1, 2}
+    assert tiers[1].status == tiers[2].status == "degraded"
     assert s.get_entity(tiers[1].entity_id).canonical_name == "community:7"
+    leaf = s.get_entity(tiers[2].entity_id)
+    assert leaf.canonical_name == "run"
+    assert leaf.descriptor.file_path is None
 
 
 # -- domain-aware Tier-1 binding (mind-model layer, M2) ----------------------------------
@@ -243,8 +287,7 @@ def test_resolve_and_bind_return_carries_resolve_status_and_candidates(tmp_path)
     assert result.candidates == ["a", "b"]
     # still list-shaped for every existing caller (iteration, indexing, len())
     assert isinstance(result, list)
-    assert len(result) == 1
-    assert result[0].tier == 1
+    assert [b.tier for b in result] == [1, 2]
 
 
 def test_resolve_and_bind_return_status_resolved_has_no_candidates(tmp_path):

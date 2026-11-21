@@ -21,7 +21,9 @@ Sidegraph 0.23.0
 - [gotcha] Include the project in cache keys: Build cache keys from both project and resource name.
 ```
 
-This repository has no named domains, so the map uses communities. Once domains are accepted, the map uses their names instead.
+This scratch repository used the community fallback because it had no named domains. In 0.23.0,
+a usable cache could show domain names. The current opening map uses the cache to select global
+mistakes and proposals.
 
 ## PreToolUse block
 

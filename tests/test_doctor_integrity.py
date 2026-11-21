@@ -68,9 +68,9 @@ def test_t11_each_record_with_every_anchor_orphaned_is_one_finding(tmp_path):
     assert [(f.path, f.detail) for f in findings] == [
         (
             path,
-            f"every code anchor of this record is orphaned ({leaves} leaf anchor(s)); retrieval "
-            "reaches it only through its file or domain — re-anchor it with add_anchors or the "
-            "heal-anchors skill, or supersede it if the code is gone",
+            f"every code anchor of this record is orphaned ({leaves} leaf anchor(s)); "
+            "re-anchor it with add_anchors or the heal-anchors skill, "
+            "or supersede it if the code is gone",
         )
         for path, leaves in expected
     ]

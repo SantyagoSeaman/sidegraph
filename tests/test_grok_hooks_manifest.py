@@ -112,7 +112,7 @@ def test_t2_the_grok_file_is_the_claude_file_with_two_differences(variant: str) 
 
 def test_t8_every_command_sets_the_grok_host(variant: str) -> None:
     commands = _all_commands(_load(_PLUGIN / "grok" / variant))
-    assert len(commands) == 6
+    assert len(commands) == 7
     assert all("SIDEGRAPH_HOST=grok " in c for c in commands)
     assert not any("SIDEGRAPH_HOST=claude" in c for c in commands)
 

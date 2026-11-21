@@ -8,6 +8,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -248,6 +249,58 @@ def _load_json(path: Path) -> tuple[dict[str, Any] | None, str]:
     except (OSError, ValueError, UnicodeError):
         return None, "unreadable_or_malformed"
     return (raw, "available") if isinstance(raw, dict) else (None, "invalid_shape")
+
+
+def _codex_trust(plugin_path: Path, project: Path, config_path: Path) -> dict[str, Any]:
+    hook_name = re.compile(
+        r"(?:^\s*|\b(?:uv run|uvx)\s+(?:[^;&|\n]*\s+)?)"
+        r"sidegraph-(session-start|stop|subagent-start|pre-tool-use)(?![\w-])"
+    )
+
+    def hook_slots(manifest: dict[str, Any]) -> dict[str, list[tuple[int, int]]]:
+        return {
+            re.sub(r"(?<!^)(?=[A-Z])", "_", event).lower(): [
+                (i, j)
+                for i, group in enumerate(groups)
+                for j, hook in enumerate(group["hooks"])
+                if any(hook_name.search(hook.get(key, "")) for key in ("command", "commandWindows"))
+            ]
+            for event, groups in manifest["hooks"].items()
+        }
+
+    try:
+        slots = hook_slots(_load_json(plugin_path / "codex/hooks.json")[0] or {})
+    except (AttributeError, KeyError, TypeError):
+        slots = dict.fromkeys(("session_start", "stop", "subagent_start"), [(0, 0)])
+    unknown = {"status": "UNKNOWN", "items": dict.fromkeys(slots, "UNKNOWN")}
+    try:
+        unknown["reason"] = "project-local Codex hook origin could not be determined"
+        project = project.resolve()
+        local = (project / ".codex/hooks.json").resolve()
+        if not local.is_relative_to(project) or (local.exists() and not local.is_file()):
+            return unknown
+        declaration, status = _load_json(local)
+        if status != "missing" and (declaration is None or any(hook_slots(declaration).values())):
+            return unknown
+        unknown["reason"] = "plugin root is outside the Sidegraph plugin cache layout"
+        parent, marketplace = plugin_path.resolve().parents[:2]
+        cache = config_path.parent.resolve() / "plugins/cache"
+        if parent.name != "sidegraph" or marketplace.parent != cache:
+            return unknown
+        unknown["reason"] = "Codex config is missing, unreadable, or malformed"
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        state = config.get("hooks", {}).get("state", {})
+        prefix = f"sidegraph@{marketplace.name}:codex/hooks.json"
+        items = {}
+        for event, indexes in slots.items():
+            if indexes:
+                keys = [f"{prefix}:{event}:{i}:{j}" for i, j in indexes]
+                hashes = (state.get(key, {}).get("trusted_hash") for key in keys)
+                present = all(isinstance(value, str) for value in hashes)
+                items[event] = "present" if present else "missing"
+        return {"status": "available", "items": items}
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return unknown
 
 
 def _plugin_manifest(root: Path | None) -> tuple[dict[str, Any], Path | None]:
@@ -693,6 +746,25 @@ def collect(
             ["Static configuration does not prove the active MCP server answered."],
         )
     )
+    if host == "codex":
+        home = os.environ.get("CODEX_HOME") or Path.home() / ".codex"
+        config = Path(home).absolute() / "config.toml"
+        trust = _codex_trust(plugin_path, root, config)
+        sections[-1]["evidence"]["host_trust"] = trust
+        sections[-1]["limitations"].append(
+            "A Codex trust entry goes stale when a hook command changes; Codex then lists the "
+            "hook as modified and skips it. The published plugin's commands name the Sidegraph "
+            "version, so every update changes them. This check cannot tell a current entry from "
+            "a stale one: after an update or a wiring change, open /hooks once."
+        )
+        states = trust["items"]
+        missing = ", ".join(event for event, status in states.items() if status == "missing")
+        if missing:
+            action = f"In Codex, open /hooks and trust Sidegraph's hooks: {missing}."
+            reason = "Codex records no trust for these Sidegraph hooks, so it does not run them."
+            recommendations.append(
+                _recommendation("activation", action, reason, f"codex_config={config}", None, root)
+            )
     if reach_data.get("project_only") or reach_data.get("nested_off"):
         recommendations.append(
             _recommendation(

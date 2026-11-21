@@ -25,7 +25,6 @@ from sidegraph.schema import (
     DecisionStatus,
     Descriptor,
     Domain,
-    DomainStatus,
     Entity,
     Provenance,
     Scope,
@@ -345,44 +344,25 @@ def test_a_trailing_slash_on_a_graph_file_is_not_reported_as_missing_from_the_gr
 # -- A14: an empty answer with no seeds ----------------------------------------------------
 
 
-def _domain(store: Store, slug: str, title: str, *, accept: bool = True) -> Domain:
-    d = store.add_domain(
-        Domain(slug=slug, title=title, summary="s", provenance=Provenance(source="manual"))
-    )
-    if accept:
-        store.ratify_domains(accept=[d.domain_id])
-    return d
-
-
-def test_a14_no_seeds_and_nothing_to_say_names_the_accepted_domains(tmp_path):
+def test_a14_no_seeds_explains_how_to_name_files_or_entities(tmp_path):
     reader = make_reader(tmp_path, ["pkg/m.py"])
     store = Store(tmp_path / "d.db")
-    _domain(store, "payments", "Payments")
-    _domain(store, "auth", "Auth")
-    gone = _domain(store, "legacy", "Legacy")
-    heir = store.supersede_domain(
-        gone.domain_id,
+    domain = store.add_domain(
         Domain(
-            slug="legacy",
-            title="Legacy",
-            summary="s",
-            status=DomainStatus.ACCEPTED,
-            supersedes=gone.domain_id,
-            provenance=Provenance(source="manual"),
-        ),
+            slug="payments", title="Payments", summary="s", provenance=Provenance(source="manual")
+        )
     )
-    store.ratify_domains(drop=[heir.domain_id])  # leave the superseded one with no live heir
-    _domain(store, "proposed-only", "Proposed only", accept=False)
+    store.ratify_domains(accept=[domain.domain_id])
 
     out = _call(tmp_path, reader, store=store)
 
     assert out.startswith("No context found.\n\n" + EMPTY + "\n")
+    assert "payments" not in out.lower()
+    assert "drill_down" not in out
     assert _section(out, EMPTY) == [
         "No files or entities were given, so nothing could be matched. Pass files=[…] with the "
-        "repo-relative paths you are working on, or " + NAME_ONLY + ", or drill_down(<slug>) for "
-        "a named area: Auth (auth), Payments (payments)."
+        "repo-relative paths you are working on, or " + NAME_ONLY + "."
     ]
-    assert "Legacy" not in out and "Proposed only" not in out
     store.close()
 
 
@@ -397,20 +377,6 @@ def test_a14_with_no_accepted_domain_the_second_sentence_stops_at_the_name_only_
         + NAME_ONLY
         + "."
     )
-
-
-def test_a14_at_most_twelve_domains_are_listed(tmp_path):
-    reader = make_reader(tmp_path, ["pkg/m.py"])
-    store = Store(tmp_path / "d.db")
-    for i in range(14):
-        _domain(store, f"area-{i:02d}", f"Area {i:02d}")
-
-    out = _call(tmp_path, reader, store=store)
-
-    (line,) = _section(out, EMPTY)
-    assert line.endswith("Area 10 (area-10), Area 11 (area-11), and 2 more.")
-    assert "Area 12" not in line and line.count("(area-") == 12
-    store.close()
 
 
 @pytest.mark.parametrize(

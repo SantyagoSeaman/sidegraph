@@ -40,7 +40,13 @@ from .schema import (
 )
 from .store import _TERMINAL_DECISION_STATUSES, DescriptorLookup, Store
 from .store_layout import DRIFT_CACHE_KEY as DRIFT_CACHE_KEY
-from .store_layout import MEMORY_GUARD_LINE, MISTAKE_KINDS, is_expired, parse_stamp
+from .store_layout import (
+    FILE_BOUND_LEGEND,
+    MEMORY_GUARD_LINE,
+    MISTAKE_KINDS,
+    is_expired,
+    parse_stamp,
+)
 from .store_layout import clip_line as _clip_line
 from .store_layout import proposal_surfaces as _proposal_surfaces
 from .worktree_seeds import has_drive
@@ -48,15 +54,16 @@ from .worktree_seeds import has_drive
 # Store meta key for the precomputed SessionStart TOC (§5/§6, mind-model layer): written by
 # ``sync.sync`` at the end of every completed pass, read by ``host.hooks.session_start``.
 TOC_CACHE_KEY = "toc_cache"
+_REPEATED_BLANK_LINES = re.compile(r"(\n[^\S\n]*\n)(?:[^\S\n]*\n)+")
 
-# One-line domain summaries in the structure-budget fallback and drill_down are truncated
+# One-line summaries in drill_down are truncated
 # to this many characters.
 _TOC_SUMMARY_MAX_CHARS = 100
 
 
 def _truncate_summary(text: str, max_chars: int = _TOC_SUMMARY_MAX_CHARS) -> str:
     """Clip a domain summary to a one-line budget, appending an ellipsis when clipped.
-    Shared by the structure-budget fallback and ``drill_down``."""
+    Used by ``drill_down``."""
     text = text or ""
     if len(text) > max_chars:
         return text[:max_chars].rstrip() + "…"
@@ -226,6 +233,7 @@ class TaskContext:
     full_body_ids: list[str] = field(default_factory=list)
     backref_ids: list[str] = field(default_factory=list)
     backref_shown: bool = False
+    backref_saved: int = 0
     # True when at least one placed line carries the ` [drifted]` marker (drift→supersede
     # D3) — `render()` keys the one legend line on it. Not rendered itself.
     drift_shown: bool = False
@@ -326,15 +334,14 @@ class TaskContext:
         if self.drift_shown:
             legends.append(_DRIFT_LEGEND)
         if self.backref_shown:
-            legends.append(
+            explanation = (
                 "[sent earlier] = this record's full text was sent to you earlier in "
                 "this session; retrieve_decisions(ids=[...]) returns it in full."
             )
+            if self.backref_saved >= len(explanation) + 2:
+                legends.append(explanation)
         if self.file_bound_shown:
-            legends.append(
-                "[file-bound] = declared applicability to the exact requested file; "
-                "the graph cannot verify its symbol anchors. No anchor was rebound."
-            )
+            legends.append(FILE_BOUND_LEGEND)
         legend = "\n\n".join(legends) or None
         hint = _STANDING_SUPERSEDE_HINT if (self.mistakes or self.decisions) else None
         return text, legend, hint
@@ -1128,15 +1135,17 @@ def rank_decisions(
         if backref:
             dtag = " [drifted]" if drifted else ""
             ftag = " [file-bound]" if d.id in file_bound_record_ids else ""
-            line = _plain_prose(
+            pointer = _plain_prose(
                 f"{prefix}[{d.kind.value}]{dtag}{ftag} [sent earlier] {d.title}{_id_suffix(d)}"
             )
-            evidence = False
+            collapse = _REPEATED_BLANK_LINES.sub  # The hard-cap renderer collapses blank runs.
+            savings = len(collapse(r"\1", line)) - len(collapse(r"\1", pointer))
+            backref = savings >= 0
         if capped:
             line += _id_suffix(d)
             evidence = False
         if not add_line(bucket, line):
-            if not detailed or backref:
+            if not detailed:
                 refused.add(d.id)
                 return False
             # Degrade before drop: re-render at the tight tier, but a record *selected for*
@@ -1160,7 +1169,10 @@ def rank_decisions(
             ctx.degraded += 1
             ctx.degraded_ids.append(d.id)
             ctx.delivery_degraded.add(("decision", d.id))
+            backref = False
         if backref:
+            ctx.backref_saved += savings
+            bucket[-1] = line = pointer  # Placement has already charged the full body.
             ctx.backref_ids.append(d.id)
             ctx.backref_shown = True
         elif (
@@ -1293,8 +1305,6 @@ def rank_decisions(
     # CURRENT (post-insertion) position, never its original pre-phase-2 index.
     offset = 0
     for i, d in enumerate(mistake_decisions):
-        if d.id in ctx.backref_ids:
-            continue
         insert_at = i + 1 + offset
         for fact, fact_line in _evidence_candidates(d):
             if place_fact(ctx.mistakes, fact, fact_line, at=insert_at):
@@ -1305,8 +1315,6 @@ def rank_decisions(
     # never takes the budget of a mistake line.
     offset = 0
     for i, d in enumerate(leading_adrs):
-        if d.id in ctx.backref_ids:
-            continue
         insert_at = i + 1 + offset
         for fact, fact_line in _evidence_candidates(d):
             if place_fact(ctx.decisions, fact, fact_line, at=insert_at):
@@ -1317,53 +1325,17 @@ def rank_decisions(
     for e in seed_entities:
         for d in _by_recency([x for x in seed_accepted[e.entity_id] if x.kind == DecisionKind.ADR]):
             add(ctx.decisions, d)
-    # (C) community + peripheral. A seed community can be covered by MORE than one ACCEPTED
-    # domain at once (see store.find_domains_by_community's "orphan window" docstring, Gate-5
-    # finding 2) — every covering domain's paired `domain:<slug>` entity contributes its
-    # valid decisions here, not just the newest (which is all anchoring.resolve_and_bind's
-    # Tier-1 write-time pick — store.find_domain_by_community, singular — ever needs; see
-    # that method's docstring for the asymmetry). New memory anchors to a domain once one
-    # exists, but older decisions bound to the bare `community:<id>` entity before any domain
-    # was ratified must still surface too. `add()`'s `seen` set dedups a decision reachable
-    # via more than one of these sources. No accepted domain covers the community (every
-    # store without ratified domains) -> byte-identical to before this existed (see
-    # docs/concepts/mind-model.md; a prior review pinned this behavior).
+    # (C) Related memory comes through community:<id> bindings and peripheral entities.
+    # Bucket D adds global records. Domain bindings organize the store for people.
+    # The seen set in add() deduplicates records reached through multiple paths.
     related_proposed: list[Decision] = []
-    covered: set[str] = set()
     for cid in seed_communities:
-        # With concrete seeds, domain rows are authoritative. A retained community id may
-        # have been reused by this reader after a failed membership refresh.
-        for domain in () if seed_node_ids else store.find_domains_by_community(cid):
-            covered.add(domain.domain_id)
-            de = store.find_abstract_entity(f"domain:{domain.slug}")
-            if de is not None:
-                accepted, proposed = partition_by_trust(
-                    store.valid_decisions_for_entity(de.entity_id)
-                )
-                for d in _by_recency(accepted):
-                    add(ctx.related, d)
-                related_proposed.extend(proposed)
         ce = store.find_abstract_entity(f"community:{cid}")
         if ce is not None:
             accepted, proposed = partition_by_trust(store.valid_decisions_for_entity(ce.entity_id))
             for d in _by_recency(accepted):
                 add(ctx.related, d)
             related_proposed.extend(proposed)
-    # A seed node that a domain holds outside its listed communities (a snapshot domain's part
-    # of a community, or a node under a capped path rule) brings that domain too.
-    for nid in seed_node_ids:
-        for domain in store.find_domains_for_node(nid):
-            if domain.domain_id in covered:
-                continue
-            covered.add(domain.domain_id)
-            de = store.find_abstract_entity(f"domain:{domain.slug}")
-            if de is not None:
-                accepted, proposed = partition_by_trust(
-                    store.valid_decisions_for_entity(de.entity_id)
-                )
-                for d in _by_recency(accepted):
-                    add(ctx.related, d)
-                related_proposed.extend(proposed)
     for e in peripheral_entities:
         accepted, proposed = partition_by_trust(store.valid_decisions_for_entity(e.entity_id))
         for d in _by_recency(accepted):
@@ -1514,7 +1486,7 @@ def rank_decisions(
         # The short form when the budget has no room for the pointer.
         add_line(
             ctx.related,
-            f"- (+{ctx.related_overflow} more related not shown: drill_down a domain or "
+            f"- (+{ctx.related_overflow} more related not shown: "
             "retrieve_decisions(query=...) to list them)",
         ) or add_line(ctx.related, f"- (+{ctx.related_overflow} more related not shown)")
 
@@ -1538,147 +1510,6 @@ def _fmt_node(n: NodeRef) -> str:
     else:
         ref = f" [{n.file_path}]"
     return f"- {n.name} ({n.file_type}){ref}"
-
-
-# Cap on how many accepted-domain summary lines the structure-budget fallback appends
-# (§5 NFR2, "summaries instead of leaves") — bounded primarily by the leftover char budget,
-# this is just a sane ceiling on line COUNT so one overflow-rich subgraph can't spam the
-# structural map with dozens of one-line domain summaries.
-_STRUCTURE_DOMAIN_FALLBACK_CAP = 5
-
-# Group header prepended to the fallback's domain summary lines (M5 polish) so the agent
-# doesn't mistake them for literal subgraph leaves — charged against the same leftover
-# budget as the lines themselves; see `_structure_fallback_lines`.
-_STRUCTURE_FALLBACK_HEADER = (
-    "— named areas covering this neighborhood (map truncated; drill_down for detail):"
-)
-
-
-def _structure_fallback_candidate_communities(
-    overflow_nodes: list[NodeRef],
-    seed_communities: list[str],
-    walk_saturated: bool,
-) -> list[str]:
-    """Community ids to probe for the structure-budget fallback (NFR2 "summaries instead of
-    leaves"), fed by two independent triggers:
-
-    - **Render overflow**: the structural-map loop in ``_gather_structure`` stops emitting
-      leaf lines the moment one doesn't fit ``budget.structure_chars`` (unchanged, to keep
-      peripheral-entity resolution — and therefore decision gathering — byte-identical to
-      before this existed). ``overflow_nodes`` is everything from that point on, i.e. the
-      leaves that got silently dropped.
-    - **Walk saturation**: ``node_cap = structure_chars // 120`` truncates the BFS *walk*
-      itself before rendering even starts. Real ``_fmt_node`` lines run 40-80 chars — well
-      under the 120-chars/node the cap assumes — so on real corpora the capped subgraph's
-      lines always fit and render overflow never fires; the cut instead manifests as a
-      silently truncated walk that render overflow can never see. When the walk saturated
-      its cap (``len(sub.nodes) >= node_cap``, passed as ``walk_saturated``), the unwalked
-      neighborhood is sourced from the task's own seed communities (``res.seed_communities``
-      — the areas the agent is working in whose neighborhoods got cut).
-
-    Communities aren't deduped here — callers dedup by the DOMAIN a community maps to, since
-    two communities can share one domain. Order is render-overflow first, then (only when
-    saturated) seed communities: it only matters for which domain wins when two communities
-    map to the same one.
-    """
-    ids = [n.community for n in overflow_nodes if n.community]
-    if walk_saturated:
-        ids.extend(seed_communities)
-    return ids
-
-
-def _structure_fallback_candidate_nodes(
-    overflow_nodes: list[NodeRef], seed_node_ids: Sequence[str], walk_saturated: bool
-) -> list[str]:
-    """The node-level twin of :func:`_structure_fallback_candidate_communities`: a domain that
-    holds a node outside its listed communities is found through the node."""
-    ids = [n.node_id for n in overflow_nodes]
-    if walk_saturated:
-        ids.extend(seed_node_ids)
-    return ids
-
-
-def _structure_fallback_lines(
-    community_ids: list[str],
-    store: Store,
-    remaining_budget: int,
-    node_ids: Sequence[str] = (),
-    *,
-    on_budget_cut: Callable[[], None] | None = None,
-) -> list[str]:
-    """Prefer published membership for ``node_ids``. With no node ids, map the legacy
-    ``community_ids`` (see :func:`_structure_fallback_candidate_communities`) to
-    ACCEPTED domains via ``store.find_domains_by_community`` (plural — the SAME bucket-C
-    union ``rank_decisions`` uses, not just the newest covering domain: two accepted
-    domains can legitimately cover the same community at once, an "orphan window" between
-    one domain's acceptance and a later re-scope, see that method's docstring), deduped by
-    domain id and capped at :data:`_STRUCTURE_DOMAIN_FALLBACK_CAP`, and render short
-    summary lines
-    ("[domain] <title>: <summary-one-line>") in the leftover budget instead of wasting it —
-    the single render path shared by both the render-overflow and walk-saturation triggers.
-    A bootstrapped domain's summary is sometimes IDENTICAL to its title (the label-bootstrap
-    path in ``domains.bootstrap_domains`` seeds both from the same engine label before any
-    real digest exists) — when ``summary.strip() == title.strip()`` (exact equality only;
-    a digest that merely *starts with* the title, e.g. the god-node-name fallback, still
-    renders both parts since the remainder is informative), the line drops the redundant
-    "``: summary``" tail and renders the title alone.
-
-    When at least one domain line is emitted, one group header
-    (:data:`_STRUCTURE_FALLBACK_HEADER`) is prepended so the agent doesn't mistake these
-    summaries for literal subgraph leaves — charged against the same ``remaining_budget``
-    as the lines themselves (header + up to 5 lines); if the header doesn't fit alongside
-    the lines already selected, it's dropped and the lines render without it (never a
-    budget violation for the sake of the header).
-
-    No accepted domain covers any candidate community (every store without ratified
-    domains, or one where the cut happens to land outside a named area) -> returns ``[]``,
-    and the caller's ``structure.extend([])`` is a no-op — old truncation behavior,
-    byte-identical (see docs/concepts/mind-model.md).
-    """
-    if remaining_budget <= 0 and on_budget_cut is None:
-        return []
-    seen_domains: set[str] = set()
-    domains: list[Domain] = []
-    for cid in community_ids:
-        for domain in () if node_ids else store.find_domains_by_community(cid):
-            if domain.domain_id in seen_domains:
-                continue
-            seen_domains.add(domain.domain_id)
-            domains.append(domain)
-            if len(domains) >= _STRUCTURE_DOMAIN_FALLBACK_CAP:
-                break
-        if len(domains) >= _STRUCTURE_DOMAIN_FALLBACK_CAP:
-            break
-
-    for nid in node_ids:
-        if len(domains) >= _STRUCTURE_DOMAIN_FALLBACK_CAP:
-            break
-        for domain in store.find_domains_for_node(nid):
-            if domain.domain_id in seen_domains:
-                continue
-            seen_domains.add(domain.domain_id)
-            domains.append(domain)
-            if len(domains) >= _STRUCTURE_DOMAIN_FALLBACK_CAP:
-                break
-
-    lines: list[str] = []
-    used = 0
-    for d in domains:
-        summary = d.summary or ""
-        if summary.strip() == d.title.strip():
-            line = f"- [domain] {d.title}"
-        else:
-            line = f"- [domain] {d.title}: {_truncate_summary(summary)}"
-        if used + len(line) > remaining_budget:
-            if on_budget_cut is not None:
-                on_budget_cut()
-            break
-        used += len(line)
-        lines.append(line)
-
-    if lines and used + len(_STRUCTURE_FALLBACK_HEADER) <= remaining_budget:
-        lines.insert(0, _STRUCTURE_FALLBACK_HEADER)
-    return lines
 
 
 def _gather_structure(
@@ -1705,11 +1536,6 @@ def _gather_structure(
     # Look one node past the cap when reporting cuts. A full walk may fit the cap exactly.
     sub = reader.subgraph(res.seed_node_ids, node_cap + int(on_budget_cut is not None))
     nodes = sub.nodes if on_budget_cut is None else sub.nodes[:node_cap]
-    # The BFS walk itself is capped at `node_cap` nodes; when it fills that cap, the
-    # subgraph was truncated regardless of whether every rendered line happened to fit
-    # `budget.structure_chars` (see `_structure_fallback_candidate_communities`) — the walk
-    # saturation trigger for the NFR2 fallback below.
-    walk_saturated = len(nodes) >= node_cap
     seen_peri: set[str] = set()
     used = 0
     overflow_nodes: list[NodeRef] = []
@@ -1746,22 +1572,6 @@ def _gather_structure(
 
     if on_budget_cut is not None and (overflow_nodes or len(sub.nodes) > node_cap):
         on_budget_cut()
-    if overflow_nodes or walk_saturated:
-        candidate_ids = _structure_fallback_candidate_communities(
-            overflow_nodes, res.seed_communities, walk_saturated
-        )
-        candidate_nodes = _structure_fallback_candidate_nodes(
-            overflow_nodes, res.seed_node_ids, walk_saturated
-        )
-        structure.extend(
-            _structure_fallback_lines(
-                candidate_ids,
-                store,
-                budget.structure_chars - used,
-                candidate_nodes,
-                on_budget_cut=on_budget_cut,
-            )
-        )
     return structure, peripheral
 
 
@@ -1950,9 +1760,7 @@ def top_tier_sections(
     produced the rest of the text), so this renderer stays a pure content formatter.
 
     Global-mistakes lines render at the tight/related tier (plain ``_fmt_decision(d)``,
-    ``detailed=False``) deliberately — this is a TOC, a pointer to call `get_task_context`/
-    `drill_down` for the real payload, not the payload itself (unlike `drill_down`, which IS
-    the "go deeper" call and renders its decisions at the detailed tier — see its docstring).
+    ``detailed=False``) as pointers to ``get_task_context`` for the full records.
     """
     sections: list[MapSection] = []
 
@@ -2027,8 +1835,7 @@ def top_tier_sections(
 
 
 def build_toc(store: Store, reader: GraphifyReader | None = None) -> dict:
-    """Precompute the SessionStart table of contents (§5/§6): accepted domains (title,
-    summary, parent, mistake + subdomain counts) and global mistakes.
+    """Precompute the cache that selects the cached map and feeds its global sections.
     Written to ``store`` meta under :data:`TOC_CACHE_KEY` at the end of ``sync.sync``.
 
     A domain's mistake count is the accepted mistake-kind decisions in
@@ -2143,10 +1950,7 @@ def global_mistakes_from(decisions: Iterable[Decision]) -> dict[str, list[str]]:
 
 
 def render_toc(cache: dict) -> str:
-    """Render :func:`build_toc`'s cached shape as SessionStart ``additionalContext`` — the
-    real domain-named table of contents (§5). Called only when the cache has >= 1 domain;
-    ``host.hooks.session_start`` falls back to :func:`top_tier_map` otherwise (legacy
-    community listing, unchanged behavior for stores with no accepted domains).
+    """Render the cached global sections as a session map starting with its data guard.
 
     Like ``top_tier_map``, this does NOT include the standing "use get_task_context before
     searching" instruction — ``host.hooks.session_start`` prepends that once, at the
@@ -2155,20 +1959,11 @@ def render_toc(cache: dict) -> str:
 
 
 def toc_sections(cache: dict) -> list[MapSection]:
-    """:func:`render_toc`'s sections. A domain's trim rank: a subdomain (``parent_slug`` set)
-    goes first, then a domain with no mistakes, then the rest."""
-    rows = []
-    for d in cache.get("domains") or []:
-        title = d.get("title") or ""
-        mistakes = d.get("mistakes", 0)
-        line = f"- {title} ({mistakes} mistake(s))"
-        subdomains = d.get("subdomains", 0)
-        if subdomains:
-            line += f" · {subdomains} subdomains"
-        rank = 0 if d.get("parent_slug") else 1 if not mistakes else 2
-        rows.append(MapEntry(line, rank))
+    """Return only global sections. Reject invalid domain caches so the caller can fall back."""
+    domains = cache.get("domains")
+    if not isinstance(domains, list) or not all(isinstance(d, dict) for d in domains):
+        raise ValueError("TOC cache: domains is not a list of objects")
     return [
-        MapSection("## Domains", tuple(rows)),
         MapSection(
             "## Global mistakes & constraints",
             tuple(MapEntry(line) for line in cache.get("global_mistakes") or []),

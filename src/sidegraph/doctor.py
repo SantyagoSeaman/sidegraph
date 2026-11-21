@@ -88,6 +88,7 @@ GRAPH_ROOT_MISMATCH = "graph-root-mismatch"
 GRAPH_STALE = "graph-stale"
 ENGINE_VERSION = "engine-version"
 ORPHANED_RECORD = "orphaned-record"
+STORE_GIT_DIRECTORY = "store-git-directory"
 STORE_UNCOMMITTED = "store-uncommitted"
 PLUGIN_OFF_IN_SUBDIRECTORIES = "plugin-off-in-subdirectories"
 REFRESH_HELPER_OUTDATED = "refresh-helper-outdated"
@@ -121,6 +122,7 @@ _FINDING_CODE = {
     "graph-stale": GRAPH_STALE,
     "engine-version": ENGINE_VERSION,
     "orphaned-records": ORPHANED_RECORD,
+    "store-git-directory": STORE_GIT_DIRECTORY,
     "store-uncommitted": STORE_UNCOMMITTED,
     "plugin-off-in-subdirectories": PLUGIN_OFF_IN_SUBDIRECTORIES,
     "refresh-helper-outdated": REFRESH_HELPER_OUTDATED,

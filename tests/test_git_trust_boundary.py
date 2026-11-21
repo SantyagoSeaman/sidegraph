@@ -7,17 +7,19 @@ Every trap here plants a harmless marker script under ``tmp_path``; see
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from sidegraph import gitenv, gitio
+from sidegraph import gitenv, gitio, integrity
 from sidegraph import store as store_mod
 from sidegraph.cli import doctor_main
+from sidegraph.doctor import CHECK_EXEMPT_CODES
 from sidegraph.engine.reader import GraphifyReader
 from sidegraph.gitenv import (
     PROTECTIVE_CONFIG,
@@ -257,7 +259,9 @@ def _commit_all(repo: Path, message: str = "first") -> None:
     raw_git(repo, *_IDENTITY, "commit", "-q", "-m", message)
 
 
-def _planted_clone_at(tmp_path: Path, clone: Path) -> tuple[Path, Path, Path]:
+def _planted_clone_at(
+    tmp_path: Path, clone: Path, *, require_armed: bool = True
+) -> tuple[Path, Path, Path]:
     """A clone at ``clone`` whose committed ``.sidegraph/`` is a real store plus the files of a
     planted git directory. Returns the clone, its store directory and the marker file."""
     command, marker = plant_marker(tmp_path)
@@ -271,30 +275,123 @@ def _planted_clone_at(tmp_path: Path, clone: Path) -> tuple[Path, Path, Path]:
     assert done.returncode == 0, done.stderr
     store_dir = clone / ".sidegraph"
     assert (store_dir / "HEAD").is_file()  # the planted files survived the clone
-    if not trap_is_armed(store_dir, marker):
+    if require_armed and not trap_is_armed(store_dir, marker):
         pytest.skip("this git does not run the planted command")
     return clone, store_dir, marker
 
 
 @pytest.fixture
-def planted_clone(tmp_path: Path) -> tuple[Path, Path, Path]:
-    return _planted_clone_at(tmp_path, tmp_path / "clone")
+def planted_clone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.delenv("PLUGIN_ROOT", raising=False)
+    return _planted_clone_at(tmp_path, tmp_path / "clone", require_armed=False)
 
 
-def test_session_start_does_not_run_a_planted_command(planted_clone, monkeypatch, capsys):
+@pytest.fixture
+def armed_planted_clone(planted_clone: tuple[Path, Path, Path]) -> tuple[Path, Path, Path]:
+    _, store_dir, marker = planted_clone
+    if not trap_is_armed(store_dir, marker):
+        pytest.skip("this git does not run the planted command")
+    return planted_clone
+
+
+def _git_directory_line(path: Path) -> str:
+    return (
+        f"Sidegraph: {os.path.realpath(path)} holds the files of a git directory "
+        "(HEAD, objects/ or commondir) but no .git entry, so Sidegraph runs no git from there "
+        "and skips the checks that need it. Do not run git in that directory: its "
+        "configuration can run a command. Remove these files only once you have confirmed "
+        "nobody needs them."
+    )
+
+
+def test_git_directory_check_names_the_refused_store_on_both_surfaces(planted_clone):
+    _, store_dir, marker = planted_clone
+    inputs = integrity.Inputs(store_dir=store_dir, now=datetime.now(UTC))
+    for surface in ("session", "doctor"):
+        result = integrity.run(inputs, surface)
+        (problem,) = [p for p in result.problems if p.check == "store-git-directory"]
+        assert problem.severity == "degraded"
+        line = _git_directory_line(store_dir)
+        assert problem.line == problem.notice == line
+        found = os.path.realpath(store_dir)
+        assert problem.fix == (
+            f"check what {found} is; remove the git directory files only once you have "
+            "confirmed nobody needs them"
+        )
+        assert problem.findings == ((found, line.removeprefix("Sidegraph: ")),)
+    assert not marker.exists()
+
+
+def test_git_directory_check_names_the_refused_ancestor(tmp_path):
+    (tmp_path / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (tmp_path / "objects").mkdir()
+    store_dir = tmp_path / ".sidegraph"
+    Store(store_dir).close()
+    result = integrity.run(integrity.Inputs(store_dir, datetime.now(UTC)), "doctor")
+    (problem,) = [p for p in result.problems if p.check == "store-git-directory"]
+    assert problem.line == _git_directory_line(tmp_path)
+
+
+def test_git_directory_check_marks_an_ordinary_store_clean(tmp_path):
+    store_dir = _repo(tmp_path / "repo") / ".sidegraph"
+    Store(store_dir).close()
+    result = integrity.run(integrity.Inputs(store_dir, datetime.now(UTC)), "doctor")
+    assert "store-git-directory" in result.clean
+
+
+def test_session_start_reports_the_store_git_directory(planted_clone, monkeypatch, capsys):
     clone, store_dir, marker = planted_clone
+    result = start(monkeypatch, capsys, store_dir, project=clone)
+    line = _git_directory_line(store_dir)
+    assert line in result["hookSpecificOutput"]["additionalContext"]
+    assert line in result["systemMessage"]
+    assert not marker.exists()
+
+
+def test_doctor_check_reports_the_store_git_directory(planted_clone, capsys):
+    _, store_dir, marker = planted_clone
+    status = doctor_main(["--check", "--json", "--db", str(store_dir)])
+    document = json.loads(capsys.readouterr().out)
+    assert document["violations"] == []
+    assert status == 2
+    assert [
+        (finding["code"], finding["path"])
+        for finding in document["findings"]
+        if finding["code"] not in CHECK_EXEMPT_CODES
+    ] == [("store-git-directory", os.path.realpath(store_dir))]
+    assert not marker.exists()
+
+
+def test_session_start_rations_the_store_git_directory_notice(planted_clone, monkeypatch, capsys):
+    clone, store_dir, marker = planted_clone
+    now = datetime.now(UTC)
+    first = start(monkeypatch, capsys, store_dir, project=clone, now=now)
+    second = start(
+        monkeypatch, capsys, store_dir, project=clone, session="s2", now=now + timedelta(hours=1)
+    )
+    line = _git_directory_line(store_dir)
+    assert line in first["systemMessage"]
+    assert line in second["hookSpecificOutput"]["additionalContext"]
+    assert line not in second.get("systemMessage", "")
+    assert not marker.exists()
+
+
+def test_session_start_does_not_run_a_planted_command(armed_planted_clone, monkeypatch, capsys):
+    clone, store_dir, marker = armed_planted_clone
     start(monkeypatch, capsys, store_dir, project=clone)
     assert not marker.exists()
 
 
-def test_doctor_does_not_run_a_planted_command(planted_clone):
-    _, store_dir, marker = planted_clone
+def test_doctor_does_not_run_a_planted_command(armed_planted_clone):
+    _, store_dir, marker = armed_planted_clone
     doctor_main(["--db", str(store_dir)])
     assert not marker.exists()
 
 
-def test_stats_does_not_run_a_planted_command(planted_clone):
-    _, store_dir, marker = planted_clone
+def test_stats_does_not_run_a_planted_command(armed_planted_clone):
+    _, store_dir, marker = armed_planted_clone
     Store(store_dir).close()  # a clone has no index.db (it is gitignored)
     assert not marker.exists()  # opening the store is not what fires the trap
     build_report(store_dir, None, window_days=30, now=datetime.now(UTC))

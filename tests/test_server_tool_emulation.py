@@ -167,6 +167,65 @@ def test_emulate_tool_equals_tool_text(
     assert _mask(actual.text, emulated_path, scenario) == _mask(expected, real_path, scenario)
 
 
+def test_emulate_find_entity_explains_miss_without_reporting_cut(tmp_path: Path) -> None:
+    with Store(tmp_path / "t.db") as store:
+        result = server.emulate_tool(
+            "find_entity",
+            _CASES["find_entity"]["unknown"],
+            store=store,
+            reader=None,
+            borrowed_from=None,
+        )
+    assert result.cut is None
+
+
+def test_emulate_find_entity_uses_graph_on_miss(tmp_path: Path) -> None:
+    reader = GraphifyReader(Path(__file__).parent / "fixtures" / "member_names_python_graph.json")
+    file_path = "src/sidegraph/engine/reader.py"
+    with Store(tmp_path / "t.db") as store:
+        entity = store.upsert_entity(
+            Entity(
+                canonical_name=".graph_version()",
+                descriptor=Descriptor(name=".graph_version()", file_path=file_path),
+                last_seen_node_id="src_sidegraph_engine_reader_graphifyreader_graph_version",
+            )
+        )
+        result = server.emulate_tool(
+            "find_entity",
+            {"name": "GraphifyReader.graph_version", "file_path": file_path},
+            store=store,
+            reader=reader,
+            borrowed_from=None,
+        )
+    assert json.loads(result.text)["entity_id"] == entity.entity_id
+
+
+def test_emulate_find_entity_reports_omitted_same_file_candidates(tmp_path: Path) -> None:
+    reader = GraphifyReader(Path(__file__).parent / "fixtures" / "member_names_python_graph.json")
+    file_path = "src/sidegraph/engine/reader.py"
+    with Store(tmp_path / "t.db") as store:
+        for i in range(40):
+            name = f"Reader{i}.graph_version"
+            store.upsert_entity(
+                Entity(
+                    canonical_name=name,
+                    descriptor=Descriptor(name=name, file_path=file_path),
+                    last_seen_node_id="src_sidegraph_engine_reader_graphifyreader_graph_version",
+                )
+            )
+        result = server.emulate_tool(
+            "find_entity",
+            {"name": "GraphifyReader.graph_version", "file_path": file_path, "budget_chars": 4000},
+            store=store,
+            reader=reader,
+            borrowed_from=None,
+        )
+    out = json.loads(result.text)
+    assert len(out["candidates"]) + out["candidates_omitted"] == 40
+    assert result.cut == out["hint"]
+    assert "Use entity_id." in out["hint"]
+
+
 def _rows(store: Store, table: str) -> list[tuple]:
     return sorted((tuple(row) for row in store._conn.execute(f"SELECT * FROM {table}")), key=repr)
 
@@ -657,7 +716,7 @@ def test_emulate_tool_reports_shortened_decision(
 
 
 @pytest.mark.parametrize("budget", [50, 90])
-def test_emulate_tool_reports_structure_summary_cut(
+def test_emulate_tool_omits_domain_summary_without_reporting_a_cut(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: int
 ) -> None:
     real_path, path = build_twin_stores(tmp_path, "synced")
@@ -670,8 +729,8 @@ def test_emulate_tool_reports_structure_summary_cut(
         )
     assert result.text == expected
     assert "fn_0()" in result.text
-    assert ("Package: Batch processing." in result.text) is (budget == 90)
-    assert result.cut == ("The structural map reached its budget." if budget == 50 else None)
+    assert "Package: Batch processing." not in result.text
+    assert result.cut is None
 
 
 def test_emulate_tool_reports_ambiguous_id_budget_cut(

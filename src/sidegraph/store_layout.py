@@ -58,9 +58,17 @@ if TYPE_CHECKING:
 # committed file on that record's next legitimate (non-community) canonical rewrite.
 SCHEMA_VERSION = "0.6.0"
 
-# Set to "1" on canonical reload and cleared by a completed sync: binding statuses are
-# placeholders until then. Shared by Store and the dependency-light hook index.
+# Incremented with each mark. Sync reads it before the flag so a new mark survives the pass.
+VOLATILE_STALE_GEN_KEY = "volatile_stale_gen"
+# Set to "1" on canonical reload. Sync clears it if no newer mark arrived during the pass.
+# Shared by Store and the dependency-light hook index, which treats reset statuses as placeholders.
 VOLATILE_STALE_KEY = "volatile_stale"
+LAST_SYNCED_KEY = "last_synced_graph_version"
+GRAPH_FILES_STAMP_KEY = "graph_files_stamp"
+FILE_BOUND_LEGEND = (
+    "[file-bound] = declared applicability to the exact requested file; "
+    "the graph cannot verify its symbol anchors. No anchor was rebound."
+)
 # The index-only column of ``anchor_bindings`` that carries a leaf status across a rebuild. A
 # rebuild fills it for the entities whose status a sync had computed and whose descriptor the
 # rebuild did not change; nothing else writes it, and NULL means "not computed". While the

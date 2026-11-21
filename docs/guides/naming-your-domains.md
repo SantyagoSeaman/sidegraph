@@ -2,10 +2,8 @@
 
 > **Start here:** Follow the steps below in order for your current repository. Use the linked reference only when a command or result needs more detail. [Glossary](../concepts/glossary.md).
 
-The practical walkthrough for turning a graph's nameless community structure into the named
-mental model the `SessionStart` TOC and `drill_down` serve from. See
-[mind model](../concepts/mind-model.md) for why this layer exists; this guide is the "do this,
-in this order" version.
+This guide turns a graph's communities into named areas you can browse in the Portal or with
+`list_domains` and `drill_down`. See the [mind model](../concepts/mind-model.md).
 
 ## The fast path: ask your agent
 
@@ -23,7 +21,7 @@ in the repo:
 
 > Name my domains
 
-(or run `/sidegraph:name-domains` directly, or say "give this project a table of contents").
+(or run `/sidegraph:name-domains` directly).
 The skill calls the read-only `list_domain_candidates` MCP tool, studies the result —
 reading the actual code behind an ambiguous candidate rather than trusting a label blindly.
 With roughly 20 or fewer candidates it proposes one sensible set. For a larger result it
@@ -266,13 +264,11 @@ With a [domain snapshot](../reference/store-format.md#the-domain-snapshot), keep
 placeholder `proposed`. An accepted successor of a domain the snapshot covers takes over its
 frozen membership, and with it the communities that membership holds.
 
-## 4. Watch the TOC come alive
+## 4. Browse the accepted domains
 
-`ratify` recomputes the SessionStart TOC cache immediately whenever at least one domain was
-accepted or dropped in that call — no `sidegraph-sync` needed first. Start a new Claude Code
-session in the repo (`claude`) and the `SessionStart` context should now show a `## Domains`
-section listing the domains you just ratified (title, mistake count, and subdomain count
-when non-zero), instead of the nameless "top communities by member count" fallback.
+Open the Portal's graph or run `list_domains` after ratification. To inspect one area's
+summary, members and decisions, pass its slug to `drill_down`. A `ratify` call that accepts or
+drops a domain refreshes the cache that selects the SessionStart map's global sections.
 
 ## 5. After that: agent proposals, and re-running bootstrap
 
@@ -308,8 +304,7 @@ separate step: `sidegraph-import --docs <path>` parses decision-shaped markdown 
 parser is deterministic and LLM-free), then anchors each decision against the current graph —
 so run `graphify update .` right before importing, same as before bootstrapping domains — see
 [`guides/capturing-decisions.md`](capturing-decisions.md#already-have-adrs-import-them) for why
-a stale graph matters here. The two are complementary, not redundant: naming gives the corpus a
-table of contents; import gives it memory.
+a stale graph matters here. Naming gives readers a map of the corpus. Import records its decisions.
 
 On a **document graph** (ADR/SAD markdown, no code), Leiden's clustering tends to put nearly
 every file node into one hub cluster — headings and files reference each other and the corpus's
@@ -343,7 +338,7 @@ member sample diluted by the rest of the corpus.
 - [`sidegraph:manage-domains`](../../plugin/sidegraph/skills/manage-domains/SKILL.md) — the
   escape hatch: add/rename/drop a domain by hand, after the initial naming pass.
 - [Mind model](../concepts/mind-model.md) — the concept this guide is the walkthrough for.
-- [Retrieval](../concepts/retrieval.md#sessionstart-toc) — what changes once domains exist.
+- [SessionStart map](../concepts/retrieval.md#sessionstart-toc) — what an agent sees when it opens a session.
 - [`list_domain_candidates` reference](../reference/mcp-tools.md#list_domain_candidates) — the
   machine half of naming; what the skill calls.
 - [`sidegraph-domains` reference](../reference/cli.md#sidegraph-domains) — full flag reference.

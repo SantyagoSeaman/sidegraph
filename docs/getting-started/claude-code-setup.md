@@ -178,12 +178,21 @@ Add to `.claude/settings.json` (merge into an existing file):
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*[!A-Za-z0-9_]'sed\\t'*|*[!A-Za-z0-9_]'sed\\r'*|*[!A-Za-z0-9_]'sed\\\"'*|*[!A-Za-z0-9_]'sed'\"'\"*|*\\\\[ntr]'sed '*|*\\\\[ntr]'sed\\t'*|*\\\\[ntr]'sed\\r'*|*\\\\[ntr]'sed\\\"'*|*\\\\[ntr]'sed'\"'\"*|*[!A-Za-z0-9_]'grep '*|*[!A-Za-z0-9_]'grep\\t'*|*[!A-Za-z0-9_]'grep\\r'*|*[!A-Za-z0-9_]'grep\\\"'*|*[!A-Za-z0-9_]'grep'\"'\"*|*\\\\[ntr]'grep '*|*\\\\[ntr]'grep\\t'*|*\\\\[ntr]'grep\\r'*|*\\\\[ntr]'grep\\\"'*|*\\\\[ntr]'grep'\"'\"*|*[!A-Za-z0-9_]'rg '*|*[!A-Za-z0-9_]'rg\\t'*|*[!A-Za-z0-9_]'rg\\r'*|*[!A-Za-z0-9_]'rg\\\"'*|*[!A-Za-z0-9_]'rg'\"'\"*|*\\\\[ntr]'rg '*|*\\\\[ntr]'rg\\t'*|*\\\\[ntr]'rg\\r'*|*\\\\[ntr]'rg\\\"'*|*\\\\[ntr]'rg'\"'\"*|*[!A-Za-z0-9_]'cat '*|*[!A-Za-z0-9_]'cat\\t'*|*[!A-Za-z0-9_]'cat\\r'*|*[!A-Za-z0-9_]'cat\\\"'*|*[!A-Za-z0-9_]'cat'\"'\"*|*\\\\[ntr]'cat '*|*\\\\[ntr]'cat\\t'*|*\\\\[ntr]'cat\\r'*|*\\\\[ntr]'cat\\\"'*|*\\\\[ntr]'cat'\"'\"*) printf '%s\\n' \"$p\" | { SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n' ; } ;; *) printf '{}\\n' ;; esac"
+            "command": "p=$(cat); case \"$p\" in *[!A-Za-z0-9_]'sed '*|*[!A-Za-z0-9_]'sed\\t'*|*[!A-Za-z0-9_]'sed\\r'*|*[!A-Za-z0-9_]'sed\\\"'*|*[!A-Za-z0-9_]'sed'\"'\"*|*\\\\[ntr]'sed '*|*\\\\[ntr]'sed\\t'*|*\\\\[ntr]'sed\\r'*|*\\\\[ntr]'sed\\\"'*|*\\\\[ntr]'sed'\"'\"*|*[!A-Za-z0-9_]'grep '*|*[!A-Za-z0-9_]'grep\\t'*|*[!A-Za-z0-9_]'grep\\r'*|*[!A-Za-z0-9_]'grep\\\"'*|*[!A-Za-z0-9_]'grep'\"'\"*|*\\\\[ntr]'grep '*|*\\\\[ntr]'grep\\t'*|*\\\\[ntr]'grep\\r'*|*\\\\[ntr]'grep\\\"'*|*\\\\[ntr]'grep'\"'\"*|*[!A-Za-z0-9_]'rg '*|*[!A-Za-z0-9_]'rg\\t'*|*[!A-Za-z0-9_]'rg\\r'*|*[!A-Za-z0-9_]'rg\\\"'*|*[!A-Za-z0-9_]'rg'\"'\"*|*\\\\[ntr]'rg '*|*\\\\[ntr]'rg\\t'*|*\\\\[ntr]'rg\\r'*|*\\\\[ntr]'rg\\\"'*|*\\\\[ntr]'rg'\"'\"*|*[!A-Za-z0-9_]'cat '*|*[!A-Za-z0-9_]'cat\\t'*|*[!A-Za-z0-9_]'cat\\r'*|*[!A-Za-z0-9_]'cat\\\"'*|*[!A-Za-z0-9_]'cat'\"'\"*|*\\\\[ntr]'cat '*|*\\\\[ntr]'cat\\t'*|*\\\\[ntr]'cat\\r'*|*\\\\[ntr]'cat\\\"'*|*\\\\[ntr]'cat'\"'\"*|*[!A-Za-z0-9_]'head '*|*[!A-Za-z0-9_]'head\\t'*|*[!A-Za-z0-9_]'head\\r'*|*[!A-Za-z0-9_]'head\\\"'*|*[!A-Za-z0-9_]'head'\"'\"*|*\\\\[ntr]'head '*|*\\\\[ntr]'head\\t'*|*\\\\[ntr]'head\\r'*|*\\\\[ntr]'head\\\"'*|*\\\\[ntr]'head'\"'\"*|*[!A-Za-z0-9_]'nl '*|*[!A-Za-z0-9_]'nl\\t'*|*[!A-Za-z0-9_]'nl\\r'*|*[!A-Za-z0-9_]'nl\\\"'*|*[!A-Za-z0-9_]'nl'\"'\"*|*\\\\[ntr]'nl '*|*\\\\[ntr]'nl\\t'*|*\\\\[ntr]'nl\\r'*|*\\\\[ntr]'nl\\\"'*|*\\\\[ntr]'nl'\"'\"*|*[!A-Za-z0-9_]'awk '*|*[!A-Za-z0-9_]'awk\\t'*|*[!A-Za-z0-9_]'awk\\r'*|*[!A-Za-z0-9_]'awk\\\"'*|*[!A-Za-z0-9_]'awk'\"'\"*|*\\\\[ntr]'awk '*|*\\\\[ntr]'awk\\t'*|*\\\\[ntr]'awk\\r'*|*\\\\[ntr]'awk\\\"'*|*\\\\[ntr]'awk'\"'\"*|*[!A-Za-z0-9_]'git show '*|*[!A-Za-z0-9_]'git show\\t'*|*[!A-Za-z0-9_]'git show\\r'*|*[!A-Za-z0-9_]'git show\\\"'*|*[!A-Za-z0-9_]'git show'\"'\"*|*\\\\[ntr]'git show '*|*\\\\[ntr]'git show\\t'*|*\\\\[ntr]'git show\\r'*|*\\\\[ntr]'git show\\\"'*|*\\\\[ntr]'git show'\"'\"*) printf '%s\\n' \"$p\" | { SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n' ; } ;; *) printf '{}\\n' ;; esac"
           }
         ]
       },
       {
         "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SIDEGRAPH_DIR=.sidegraph uvx --from sidegraph --python 3.13 sidegraph-pre-tool-use || printf '{}\\n'"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__sidegraph__get_task_context|mcp__sidegraph__query_decisions|mcp__sidegraph__retrieve_decisions",
         "hooks": [
           {
             "type": "command",
@@ -239,15 +248,15 @@ The env vars are inlined into the command because Claude Code hook entries have 
   entirely. See [`reference/hooks.md`](../reference/hooks.md#sidegraph-stop) for the exact
   nudge text and the substance gate's mechanics.
 - `PreToolUse` hands the agent the records anchored to a file when it reads or edits it — a
-  `Read`, `Grep`, `Edit` or `Write`, or a Bash line whose `sed`, `grep`, `rg` or `cat` names it —
+  `Read`, `Grep`, `Edit` or `Write`, or a Bash line that names it through a supported reader —
   as a non-blocking block: the top two records (three when the first two are mistakes) with their
   ids, and a line naming `get_task_context` for the rest. Each file arrives once per agent, at
   most three files per call and ten per agent (the count starts again for an agent after its
   context is compacted or cleared), and the session's own agent and every subagent it
   starts count separately; a file with no records prints nothing. Bash is wired as one entry with
   no `if`: its command is a shell filter that starts the hook only when the Bash line holds
-  `sed`, `grep`, `rg` or `cat` (the snippet above; see
-  [launcher details](../reference/host-wiring.md#plugin-launchers)). Set `SIDEGRAPH_GREP_NUDGE=off` (alongside the
+  `sed`, `grep`, `rg`, `cat`, `head`, `nl`, `awk` or literal `git show`. See
+  [launcher details](../reference/host-wiring.md#plugin-launchers). Set `SIDEGRAPH_GREP_NUDGE=off` (alongside the
   other env vars in the command) to turn off all of it. See
   [`reference/hooks.md`](../reference/hooks.md#sidegraph-pre-tool-use).
 - The `Agent|Task` group runs that same command when the agent spawns a subagent. It appends the
@@ -259,6 +268,9 @@ The env vars are inlined into the command because Claude Code hook entries have 
   a call before hooks run and refuses an input a hook changed. The subagent still gets the
   `SubagentStart` brief and the records of the files it reads. See
   [`reference/hooks.md`](../reference/hooks.md#subagent-briefs).
+- The MCP read group records the calling agent for `get_task_context`, `query_decisions` and
+  `retrieve_decisions`. The server can then use sent-record pointers for that agent. Add this
+  group when updating an existing hand-wired setup. [MCP read hook](../reference/hooks.md#sidegraph-mcp-reads)
 - `SubagentStart` gives every subagent a short brief, because a subagent gets no `SessionStart`
   context and Explore and Plan agents load no `CLAUDE.md`: the same `get_task_context` call the
   `SessionStart` instruction names, and one sentence on how many records memory holds and on how

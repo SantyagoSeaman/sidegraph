@@ -259,8 +259,8 @@ status flip, never a delete (see the
 
 ## `Domain` — the owned abstraction
 
-`Domain` is a named, described area of the system — the abstraction layer the `SessionStart`
-TOC and `drill_down` are built from (see [mind model](mind-model.md) for the full rationale).
+`Domain` is a named, described area of the system for browsing in the Portal or through
+`list_domains` and `drill_down`. See [mind model](mind-model.md) for the rationale.
 Paired with an abstract `Entity` (`canonical_name=f"domain:{slug}"`, minted at acceptance) so
 `AnchorBinding` machinery works unchanged: Tier-1 decisions bind to the domain entity exactly
 like they'd bind to a `community:<id>` entity.

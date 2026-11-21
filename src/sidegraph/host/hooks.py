@@ -11,9 +11,9 @@ portable core never reaches into host specifics.
   durable decisions via ``propose_decisions`` before the session ends. ``SIDEGRAPH_CAPTURE_
   NUDGE=off`` disables it entirely.
 - ``pre_tool_use`` (M6, FR8.3): deliver the records anchored to a file when an agent
-  reads or edits it (Read, Grep, Edit, Write, and the Bash read commands ``sed``, ``grep``,
-  ``rg``, ``cat``) — a non-blocking ``additionalContext`` block (never denies/blocks the tool
-  call), once per file per agent, at most ten files per agent and three per call. On an
+  reads or edits it (Read, Grep, Edit, Write and supported Bash readers) in a non-blocking
+  ``additionalContext`` block. Each agent gets ten claims per scope, up to three per call.
+  Exact-path and expanded readers skip files that agent already holds. On an
   ``Agent`` (or ``Task``) call it instead appends the records for the files the brief names to
   the brief itself, through ``updatedInput``.
 
@@ -31,7 +31,7 @@ import sqlite3
 import stat
 import sys
 import sysconfig
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NamedTuple
@@ -49,6 +49,7 @@ from ..config import (
     ancestor_store,
 )
 from ..store_layout import (
+    FILE_BOUND_LEGEND,
     HOOK_BUSY_SECONDS,
     MEMORY_GUARD_LINE,
     MISTAKE_KINDS,
@@ -59,6 +60,7 @@ from ..store_layout import (
 from . import hook_log
 from .diagnostics import HookDiagnostics
 from .project_anchor import anchor_to_project, take_repo_root_flag
+from .session_identity import MCP_CALLER_KEY_PREFIX, SENT_SET_TOOLS, caller_row
 
 if TYPE_CHECKING:
     from ..engine.reader import GraphifyReader
@@ -140,13 +142,10 @@ SESSION_START_OUTPUT_BUDGET = 14 * 1024
 
 # The map sections an over-budget SessionStart trims, lowest priority first: the section's
 # heading, the noun for its entries, and the call that lists them all (None: no tool lists that
-# exact set). Inside a section, entries go by their rank, then from the tail (a domain map drops
-# subdomains, then domains with no mistakes, then the rest). Unratified proposals go first (the
-# status line still counts them), then the long lists of areas, then recorded memory, global
+# exact set). Per section, rank then tail. Proposals (status count), communities, records, global
 # mistakes last.
 _MAP_TRIM_ORDER: tuple[tuple[str, str, str | None], ...] = (
     ("## Unratified proposals", "unratified proposal", "list_proposed"),
-    ("## Domains", "domain", "list_domains"),
     ("## Communities", "community", None),
     ("## Known facts", "fact", "list_facts"),
     ("## Recorded decisions", "decision", 'retrieve_decisions(status="accepted")'),
@@ -1070,46 +1069,25 @@ def _session_start_duplicate(
     session_id: str,
     now: datetime,
     diagnostics: HookDiagnostics | None = None,
+    *,
+    source: str | None = None,
 ) -> bool:
-    """True iff ``session_start()`` already ran for ``session_id`` within
-    :data:`_SESSION_START_DEDUPE_SECONDS` of ``now`` (design D7.2), in either direction: a
-    stamp up to that far AHEAD also counts, because a sibling hook that took a later ``now``
-    may have written first. Same session id AND a fresh
-    timestamp -> duplicate, ledger left untouched (so a third rapid call still compares
-    against the ORIGINAL write, not a duplicate's own arrival time); anything else
-    (no prior key, a different session, or an expired window) -> not a duplicate, and the
-    fresh marker is written here as the "else write and emit" half of "same session id AND
-    timestamp < 60s old -> exit silently; else write and emit". Best-effort: any
-    read/parse/write failure (a lock timeout included) is treated as "not a duplicate"
-    (never blocks the session).
-
-    Two steps, because the hook registered twice on one host fires both copies for one
-    session at once. A read followed by a write is two transactions: both copies read the
-    old value, both decide "not a duplicate", both inject the map. So (1) a lock-free read
-    answers a duplicate at once, with no write lock to wait for, and (2) anything else is
-    decided again INSIDE one immediate transaction (``Store.update_meta_if``), where the
-    second copy sees what the first wrote.
-    see design/superpowers/specs/2026-10-02-session-start-dedupe-atomic-design.md (D2)
-
-    A NAIVE-but-parseable ``prev_stamp`` (schema requires aware timestamps, but the
-    ledger is a bare string a hand edit or an older format could still leave naive) is
-    explicitly treated as "not a duplicate" via the ``tzinfo is not None`` guard in
-    :func:`_is_recent_stamp` — the same guard ``capture._fresh`` already
-    applies for its own stamp comparison — rather than ever attempting ``now - prev_dt``
-    (CORRECTION-6, code review): that subtraction raises ``TypeError`` on a naive/aware
-    mismatch, which is NOT a ``ValueError`` the inner ``except`` catches, so it used to
-    escape straight to the outer ``except Exception`` and skip the write entirely — the
-    ledger got stuck on the bad stamp forever, never self-healing. Falling through to the
-    write instead means the very next call is compared against a freshly-written, valid
-    stamp."""
+    """Return whether a recent same-session notice has matching or absent sources."""
+    # see design/superpowers/specs/2026-11-20-pretooluse-coverage-design.md (D8)
 
     def recent_same_session(raw: str | None) -> bool:
-        return raw is not None and _is_recent_stamp(raw, session_id, now)
+        return raw is not None and _is_recent_stamp(raw, session_id, now, source)
 
     def decide(current: str | None) -> str | None:
         # A duplicate found inside the transaction leaves the ledger untouched.
-        return None if recent_same_session(current) else f"{session_id}|{now.isoformat()}"
+        if recent_same_session(current):
+            return None
+        stamp = f"{session_id}|{now.isoformat()}"
+        return f"{stamp}|{source}" if source else stamp
 
+    # A known duplicate needs no writer lock. Recheck under the write transaction so a
+    # concurrent copy can see the first copy's stamp.
+    # see design/superpowers/specs/2026-10-02-session-start-dedupe-atomic-design.md (D2)
     try:
         if recent_same_session(store.get_meta(_SESSION_START_KEY)):
             return True
@@ -1122,7 +1100,7 @@ def _session_start_duplicate(
 
 def _reset_file_claims(store, payload: dict, session_id: str, now: datetime) -> None:
     """After a compaction or a clear, delete the PreToolUse file claims of the agent whose
-    context it was, so that agent starts its ten files again and a file it reads again is
+    context it was, so that agent regains its allowances and a file it reads again is
     delivered again. The agent is the one the payload names (``_agent_identity``, the function
     PreToolUse builds its keys with), ``-`` for the session's own agent.
 
@@ -1146,16 +1124,26 @@ def _reset_file_claims(store, payload: dict, session_id: str, now: datetime) -> 
         # for the reservation while a notice that read its clock later reset and stamped.
         return stamped is not None and abs(now - stamped) < window
 
+    identity = f"{session_id}:{agent}:"
     store.delete_meta_prefix_stamped(
-        f"{_PRETOOL_FILE_KEY_PREFIX}{session_id}:{agent}:", stamp_key, now.isoformat(), repeated
+        _PRETOOL_FILE_KEY_PREFIX + identity,
+        stamp_key,
+        now.isoformat(),
+        repeated,
+        extra_prefixes=(
+            _PRETOOL_EXACT_KEY_PREFIX + identity,
+            _PRETOOL_EXPANDED_KEY_PREFIX + identity,
+        ),
     )
 
 
-def _is_recent_stamp(raw: str, session_id: str, now: datetime) -> bool:
-    """True iff the ledger value ``raw`` (``<session_id>|<iso-timestamp>``) names ``session_id``
-    with an AWARE timestamp less than :data:`_SESSION_START_DEDUPE_SECONDS` from ``now``."""
-    prev_id, _, prev_stamp = raw.partition("|")
+def _is_recent_stamp(raw: str, session_id: str, now: datetime, source: str | None) -> bool:
+    """Match session, a recent aware timestamp, and the source when both notices name one."""
+    prev_id, _, stamp = raw.partition("|")
     if prev_id != session_id:
+        return False
+    prev_stamp, _, prev_source = stamp.partition("|")
+    if prev_source and source and prev_source != source:
         return False
     try:
         prev_dt = datetime.fromisoformat(prev_stamp)
@@ -1164,6 +1152,7 @@ def _is_recent_stamp(raw: str, session_id: str, now: datetime) -> bool:
     # abs(): `now` is taken before the read, so a sibling hook that committed a later stamp
     # first leaves a genuine duplicate a few ms "in the future"; a stamp a whole window or
     # more ahead is not a duplicate.
+    # A naive stamp is stale so the transaction can replace it without an invalid subtraction.
     return (
         prev_dt.tzinfo is not None
         and abs((now - prev_dt).total_seconds()) < _SESSION_START_DEDUPE_SECONDS
@@ -1563,7 +1552,7 @@ def _session_sections(
     borrowed_from: Path | None,
     diagnostics: HookDiagnostics | None = None,
 ) -> list[MapSection] | None:
-    """Read the domain sections, leaving a missing or unusable TOC to the map fallback."""
+    """Read the cached map sections, deferring unusable caches to the community fallback."""
     from ..retrieval import (
         TOC_CACHE_KEY,
         build_toc,
@@ -1572,14 +1561,7 @@ def _session_sections(
         toc_sections,
     )
 
-    # Real TOC (§5): the sync path precomputes named domains into store meta. Read it
-    # when present and non-empty; any accepted domain means the mind model has a name
-    # to show. Malformed/missing cache or zero accepted domains falls back to today's
-    # community-listing map exactly (no accepted domains = no behavior change). The
-    # cache is untrusted (a manual edit, or a shape mismatch from a future/older
-    # version) — render_toc is called under its own try/except so a shape it can't
-    # handle degrades to the legacy map too, rather than escaping to the outer handler
-    # and losing store-only content along with it (never-crash AND graceful-degrade).
+    # A usable, non-empty domains cache selects live globals. Otherwise use top_tier_sections.
     sections = None
     try:
         cache = json.loads(store.get_meta(TOC_CACHE_KEY) or "null")
@@ -1600,10 +1582,6 @@ def _session_sections(
             cache = None
     if isinstance(cache, dict) and cache.get("domains"):
         try:
-            # Domain/initiative summaries remain cache-owned, but the global mistakes
-            # (accepted and unratified) must reflect the live Store even when the graph
-            # is unavailable and lazy sync cannot refresh the cache: a retired or
-            # superseded one must not be served from it.
             try:
                 cache = {**cache, **live_global_mistakes(store)}
             except Exception as error:
@@ -1720,10 +1698,9 @@ def session_start() -> None:
     the notices sent to the human as ``systemMessage``, at most once a day per check — see
     ``sidegraph.integrity`` and design/superpowers/specs/2026-10-02-integrity-self-check-design.md.
 
-    Double-injection dedupe (design D7.2): a session id repeated within
-    :data:`_SESSION_START_DEDUPE_SECONDS` exits silently, since a user's own hook
-    registration can fire this alongside the plugin's for one logical session — see
-    :func:`_session_start_duplicate`.
+    Double-injection dedupe: a repeated notice within :data:`_SESSION_START_DEDUPE_SECONDS`
+    exits silently when the session matches and the sources match or either is absent.
+    A change between named sources delivers a fresh map. See :func:`_session_start_duplicate`.
 
     First of all, before the store opens, it records the commit uv resolved for an ``@main``
     install so the hot-path hooks launch from it, in a ``try`` of its own: whatever happens
@@ -1796,7 +1773,8 @@ def session_start() -> None:
         # Compaction can follow startup inside the duplicate window: reset before that gate.
         if session_id and payload.get("source") in ("compact", "clear"):
             try:
-                store.delete_meta_prefix(f"{_MCP_SENT_KEY_PREFIX}{session_id}:-:")
+                agent = _agent_identity(payload) or "-"
+                store.delete_meta_prefix(f"{_MCP_SENT_KEY_PREFIX}{session_id}:{agent}:")
                 if _host_family() == "codex":
                     rollout = re.fullmatch(
                         r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"
@@ -1805,7 +1783,7 @@ def session_start() -> None:
                         session_id,
                     )
                     if rollout is not None:
-                        store.delete_meta_prefix(f"{_MCP_SENT_KEY_PREFIX}{rollout[1]}:-:")
+                        store.delete_meta_prefix(f"{_MCP_SENT_KEY_PREFIX}{rollout[1]}:{agent}:")
             except Exception as error:
                 diagnostics.report("mcp-sent-reset", error)
             try:
@@ -1817,8 +1795,13 @@ def session_start() -> None:
         # a duplicate SessionStart call for the same session within the window exits
         # silently, same "print {} and return" shape the Stop hook's own one-shot ledger
         # uses. Gated on a real session id (see _session_start_duplicate's docstring).
+        source = payload.get("source")
         if session_id and _session_start_duplicate(
-            store, session_id, datetime.now(UTC), diagnostics
+            store,
+            session_id,
+            datetime.now(UTC),
+            diagnostics,
+            source=source if isinstance(source, str) else None,
         ):
             run.cause = hook_log.DUPLICATE
             print(json.dumps({}))
@@ -1883,6 +1866,7 @@ def session_start() -> None:
                 (*_PRETOOL_PRUNE_PREFIXES, _CAPTURE_REARM_KEY_PREFIX, _MCP_SENT_KEY_PREFIX),
                 older_than=timedelta(days=_PRETOOL_KEY_RETENTION_DAYS),
             )
+            store.prune_meta_prefixes((MCP_CALLER_KEY_PREFIX,), older_than=timedelta(days=1))
         except Exception as error:
             diagnostics.report("telemetry", error)
 
@@ -2259,12 +2243,12 @@ def stop() -> None:
 
 
 # The tools whose calls deliver records (exact-match, inside the hook: `hooks.json`'s matcher is
-# user-editable, so trusting it alone would deliver for any tool in a hand-wired setup). Bash is
-# wired for four read commands only (the manifests' `if` entries); the hook still checks the line.
+# user-editable, so trusting it alone would deliver for any tool in a hand-wired setup). The Bash
+# manifest prefilters for reader words, and the hook extracts any file operands from the line.
 # see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D3)
 _POINT_OF_READ_TOOLS = frozenset({"Read", "Grep", "Edit", "Write", "Bash"})
 
-# One claim per file per agent in the meta table, keyed
+# One claim per file per agent within each scope. The ordinary key is
 # ``pretool_file:<session>:<agent or ->:<repo-relative path>`` with the claim's ISO timestamp as
 # the value (SessionStart expires it after 30 days, and deletes an agent's claims when that
 # agent's context was compacted or cleared). ``-`` stands for the session's own agent: without
@@ -2274,6 +2258,9 @@ _POINT_OF_READ_TOOLS = frozenset({"Read", "Grep", "Edit", "Write", "Bash"})
 # guard.
 # see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D2)
 _PRETOOL_FILE_KEY_PREFIX = "pretool_file:"
+# Both extensions live under the same pruning namespace and have separate claim counts.
+_PRETOOL_EXACT_KEY_PREFIX = "pretool_file::"
+_PRETOOL_EXPANDED_KEY_PREFIX = "pretool_file:::"
 
 # The two one-shot prefixes older versions wrote. Nothing writes them now; SessionStart still
 # clears what is left of them.
@@ -2293,20 +2280,23 @@ _PRETOOL_PRUNE_PREFIXES = (
 # ISO timestamp (the older one-shot keys held "1", which SessionStart also expires).
 _PRETOOL_KEY_RETENTION_DAYS = 30
 
-# At most this many files are delivered to one agent, and at most this many per call. The cap is
+# An agent can claim this many files per scope. The call limit is shared. The claim cap is
 # exact (one SQL statement counts and inserts); the per-call bound is applied before claiming, so
 # the several processes Claude Code spawns for one Bash line cannot add up past it.
 _FILES_PER_AGENT = 10
 _FILES_PER_CALL = 3
 
 # The block is held to HOOK_CONTEXT_MAX_CHARS (Claude Code's 10,000-character cap, see above).
-# Three files of three records each come to about 5,000 characters plus six times the longest
-# path (it appears in the header and the "More" line), so only paths of some 750 characters
-# reach the cap. A file whose block would not fit is left out unclaimed, for a later read.
+# Each path can appear in the header, the Withheld line and the More line. A file whose block
+# would not fit is left out unclaimed, for a later read.
+_PRETOOL_OMITTED_BARE = (
+    "Sidegraph: the records of {count} more file(s) were left out to fit the hook output limit."
+)
 _PRETOOL_OMITTED = (
     "Sidegraph: the records of {count} more file(s) were left out to fit the hook output "
     "limit; get_task_context(files=[…]) returns them."
 )
+_WITHHELD_FACTS = "Withheld: {count} fact(s) too long to show here; see list_facts(files={files})."
 
 # How much of a record the block carries: the title and the first sentence of the choice, each
 # clipped at a word boundary. Two records, or three when the first two are both mistakes.
@@ -2334,7 +2324,7 @@ _AUTO_MODE = "auto"
 
 # The block the Agent branch appends to a brief, and what bounds it: per file two records (a
 # brief covers several files, so not the Read path's two-or-three), then at most six record lines
-# and 3,000 characters for the whole block, whole files dropped from the end.
+# and 3,000 characters for the block excluding its Withheld line, whole files dropped from the end.
 # see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1, D3)
 _BRIEF_OPEN = "--- Recorded decisions for the files in this task (added by Sidegraph) ---"
 _BRIEF_CLOSE = "--- end of Sidegraph records ---"
@@ -2465,7 +2455,10 @@ class _HotOpener:
         self, store_path: str | os.PathLike[str], *, delivery: bool = True
     ) -> HotIndex | None:
         """The shared handle. ``delivery=False`` is the touch row's call: the open it makes when
-        delivery never asked is bookkeeping, so a failure of it is not a withheld delivery."""
+        delivery never asked is bookkeeping, so a failure of it is not a withheld delivery.
+        A missing index counts only for delivery.
+        see design/superpowers/specs/2026-11-20-pretooluse-coverage-design.md (D7)
+        """
         if not self._asked:
             from ..hot_index import HotIndex
 
@@ -2476,14 +2469,22 @@ class _HotOpener:
                 errors.append(error)
                 self.report("index", error)
 
+            def missing() -> None:
+                if self._run is not None and delivery:
+                    self._run.store_dir = store_path
+                    self._run.cause = hook_log.NO_INDEX
+
             self._index = HotIndex.open(
-                store_path, on_error=open_error, busy_timeout_seconds=HOOK_BUSY_SECONDS
+                store_path,
+                on_error=open_error,
+                on_missing=missing,
+                busy_timeout_seconds=HOOK_BUSY_SECONDS,
             )
             # The run log. An error the open reported while still returning a handle (the journal
             # pragma refused because another connection holds the file in WAL) withheld nothing,
             # so the run learns of the errors only when there is no handle. A run is written only
-            # when its delivery used the index or lost it to a lock: an index the hook cannot use
-            # for any other reason (missing, a newer format, a symlink, corrupt) is left exactly
+            # when its delivery used the index, lost it to a lock, or found it missing. An
+            # index the hook cannot use (a newer format, a symlink, corrupt) is left exactly
             # as it was, and a run whose delivery never opened the index (switched off, or an
             # early exit) is not counted, locked or not. Delivery always asks before the touch row.
             if self._run is not None and delivery:
@@ -2704,12 +2705,12 @@ def _answer_record_line(record: Record, seen: list[Record] | None) -> str:
 
 # Whole fact lines only: never clip away the qualifiers or the required source.
 _FACT_LINE_CHARS = 512
+_FILE_BOUND_TAG = " [file-bound]"
 
 
-def _renderable_records(records: Sequence[Record]) -> list[Record]:
-    return [
-        r for r in records if r.record_type != "fact" or len(_record_line(r)) <= _FACT_LINE_CHARS
-    ]
+def _renderable_records(records: Sequence[Record], *, exact_path: bool = False) -> list[Record]:
+    limit = _FACT_LINE_CHARS - (len(_FILE_BOUND_TAG) if exact_path else 0)
+    return [r for r in records if r.record_type != "fact" or len(_record_line(r)) <= limit]
 
 
 def _shown_slice(records: Sequence[Record]) -> Sequence[Record]:
@@ -2722,9 +2723,17 @@ def _shown_slice(records: Sequence[Record]) -> Sequence[Record]:
     return records[:count]
 
 
-def _records_block(rel: str, records: Sequence[Record], *, seen: list[Record] | None = None) -> str:
+def _records_block(
+    rel: str,
+    records: Sequence[Record],
+    *,
+    seen: list[Record] | None = None,
+    withheld: int = 0,
+    exact_path: bool = False,
+    never_synced: bool = False,
+) -> str:
     """The block for one file: a header, the top two records (three when the first two are both
-    mistakes), and a line naming the call that returns the rest when there is a rest.
+    mistakes), a line for withheld facts when present, and a More line for undisplayed records.
 
     ``seen`` optionally references identical full copies from earlier winning file blocks
     in this answer; counts and the remaining-record pointer still use the original records.
@@ -2736,19 +2745,26 @@ def _records_block(rel: str, records: Sequence[Record], *, seen: list[Record] | 
     shown = _shown_slice(records)
     lines = [f"Recorded for {rel} ({len(shown)} of {len(records)}, mistakes first):"]
     lines += [_answer_record_line(r, seen) for r in shown]
-    if len(records) > len(shown):
+    if exact_path:
+        lines[1:] = [line.replace("]", f"]{_FILE_BOUND_TAG}", 1) for line in lines[1:]]
+    more = len(records) > len(shown) and not never_synced
+    if withheld > 0 or more:
         files = json.dumps([rel], ensure_ascii=False)
-        lines.append(f"More: get_task_context(files={files}).")
+        if withheld > 0:
+            lines.append(_WITHHELD_FACTS.format(count=withheld, files=files))
+        if more:
+            lines.append(f"More: get_task_context(files={files}).")
     return "\n".join(lines)
 
 
-def _files_named(tool: object, payload: dict, tool_input: dict, root: str) -> list[str]:
+def _files_named(
+    tool: object, payload: dict, tool_input: dict, root: str, expanded: set[str]
+) -> list[str]:
     """The repo-relative files this call reads or edits, in the order the call names them.
 
-    Read, Edit, Write and Grep name one (``_touch_path``: a directory, a pattern-only Grep and a
-    path outside the root name none). A Bash call names the regular files its ``sed``, ``grep``,
-    ``rg`` and ``cat`` commands read (``bash_paths.read_paths``), resolved from the payload's
-    ``cwd``.
+    Read, Edit, Write and Grep typically name one through ``_touch_path``. Grep can also name
+    one regular file through a literal glob. Bash readers name files through
+    ``bash_paths.read_paths``, starting from the payload's ``cwd``.
     """
     if tool == "Bash":
         command = tool_input.get("command")
@@ -2757,9 +2773,32 @@ def _files_named(tool: object, payload: dict, tool_input: dict, root: str) -> li
         from ..bash_paths import read_paths
 
         cwd = payload.get("cwd")
-        return read_paths(command, cwd if isinstance(cwd, str) and cwd else root, root)
+        ordinary: list[str] = []
+        paths = read_paths(
+            command, cwd if isinstance(cwd, str) and cwd else root, root, ordinary=ordinary
+        )
+        expanded.update(set(paths).difference(ordinary))
+        return list(dict.fromkeys(ordinary + paths))
     rel = _touch_path(tool_input, root)
-    return [rel] if rel else []
+    glob = tool_input.get("glob")
+    if tool != "Grep" or not isinstance(glob, str) or not glob:
+        return [rel] if rel else []
+    cwd = payload.get("cwd")
+    cwd = cwd if isinstance(cwd, str) and cwd else root
+    path = tool_input.get("path")
+    base = os.path.join(cwd, path) if isinstance(path, str) and path else cwd
+    if rel is not None and (tool_input.get("file_path") or not os.path.isdir(base)):
+        return [rel]
+    if any(char in glob for char in "*?[]{}\\"):
+        return []
+    if glob.startswith("!") or Path(glob).anchor or {"", ".", ".."}.intersection(glob.split("/")):
+        return []
+    match = next(Path(base).glob(glob, case_sensitive=True), None)
+    rel = _touch_path({"file_path": str(match)}, root) if match and match.is_file() else None
+    if not rel:
+        return []
+    expanded.add(rel)
+    return [rel]
 
 
 def _journals_showings() -> bool:
@@ -2815,8 +2854,17 @@ def _journal_delivery(
 
 
 def _select_delivery(
-    files: list[str], index: HotIndex, hot: _HotOpener
-) -> tuple[dict[str, list[str]], list[tuple[str, list[Record]]], int] | None:
+    files: list[str], index: HotIndex, hot: _HotOpener, root: str, expanded: set[str]
+) -> (
+    tuple[
+        dict[str, list[str]],
+        list[tuple[str, list[Record]]],
+        int,
+        dict[str, int],
+        tuple[set[str], bool],
+    ]
+    | None
+):
     """Select the files that fit before making any delivery claims."""
     anchored = index.anchored_entities(files)
     if not anchored:
@@ -2830,46 +2878,85 @@ def _select_delivery(
         hot.note(error)
         hot.report("delivery", error)
 
+    def membership_error(error: Exception) -> None:
+        # Older indexes have no membership data. Their ordinary reads can still proceed.
+        if str(error) != "no such table: graph_files":
+            selection_error(error)
+
+    files_exact, never_synced = index.exact_path_files(anchored, on_error=membership_error)
+    if selection_failed and len(anchored) > 1:
+        return None  # Uncertain membership must not shift the three-file selection.
+    files_exact = {rel for rel in files_exact if os.path.isfile(os.path.join(root, rel))}
+    new_reach = files_exact | expanded
+    selection_failed = False  # One anchored file can fall back without shifting selection.
     chosen: list[tuple[str, list[Record]]] = []
+    withheld_by_file: dict[str, int] = {}
     # Room for the guard line and the omission line; a block's length without `seen` is its
     # longest, so the same files fit in every process of one Bash line.
-    room = (
-        HOOK_CONTEXT_MAX_CHARS
-        - len(MEMORY_GUARD_LINE)
-        - len(_PRETOOL_OMITTED.format(count=9999))
-        - 1
-    )
+    omission = _PRETOOL_OMITTED_BARE if never_synced else _PRETOOL_OMITTED
+    room = HOOK_CONTEXT_MAX_CHARS - len(MEMORY_GUARD_LINE) - len(omission.format(count=9999)) - 1
     left_out = 0
-    for rel in dict.fromkeys(files):
+    legend_room = len(FILE_BOUND_LEGEND) + 1
+    for rel in sorted(dict.fromkeys(files), key=new_reach.__contains__):
         if rel not in anchored:
             continue
-        records = _renderable_records(index.records_for(anchored[rel], on_error=selection_error))
+        exact_path = rel in files_exact
+        raw = index.records_for(anchored[rel], exact_path=exact_path, on_error=selection_error)
         if selection_failed:
             # Unknown is not empty: skipping an unreadable early file would let parallel
             # hooks choose different three-file sets. No claims have been made yet.
             return None
+        records = _renderable_records(raw, exact_path=exact_path)
         if records:
-            size = len(_records_block(rel, records)) + 1
+            withheld = len(raw) - len(records)
+            block = _records_block(
+                rel, records, withheld=withheld, exact_path=exact_path, never_synced=never_synced
+            )
+            size = len(block) + 1 + (legend_room if exact_path else 0)
             if size > room:
                 left_out += 1
                 continue
             room -= size
+            if exact_path:
+                legend_room = 0
             chosen.append((rel, records))
+            withheld_by_file[rel] = withheld
             if len(chosen) == _FILES_PER_CALL:
                 break
-    return anchored, chosen, left_out
+    return anchored, chosen, left_out, withheld_by_file, (files_exact, never_synced)
 
 
-def _render_delivery(winning: Sequence[tuple[str, Sequence[Record]]], left_out: int) -> str | None:
+def _render_delivery(
+    winning: Sequence[tuple[str, Sequence[Record]]],
+    left_out: int,
+    *,
+    withheld: Mapping[str, int] | None = None,
+    exact: tuple[set[str] | frozenset[str], bool] = (frozenset(), False),
+) -> str | None:
     """Render the blocks for successful claims and the pointer for omitted files."""
-    omitted = _PRETOOL_OMITTED.format(count=left_out) if left_out else None
+    files_exact, never_synced = exact
+    omission = _PRETOOL_OMITTED_BARE if never_synced else _PRETOOL_OMITTED
+    omitted = omission.format(count=left_out) if left_out else None
     if not winning:
         return omitted
     seen: list[Record] = []
+    withheld = withheld or {}
     lines = [
         MEMORY_GUARD_LINE,
-        *(_records_block(rel, records, seen=seen) for rel, records in winning),
+        *(
+            _records_block(
+                rel,
+                records,
+                seen=seen,
+                withheld=withheld.get(rel, 0),
+                exact_path=rel in files_exact,
+                never_synced=never_synced,
+            )
+            for rel, records in winning
+        ),
     ]
+    if any(rel in files_exact for rel, _ in winning):
+        lines.append(FILE_BOUND_LEGEND)
     if omitted:
         lines.append(omitted)
     return "\n".join(lines)
@@ -2904,60 +2991,66 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
     location = resolve_store_location(
         root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
     )
-    files = _files_named(tool, payload, tool_input, _touch_root(location))
+    root = _touch_root(location)
+    expanded: set[str] = set()
+    files = _files_named(tool, payload, tool_input, root, expanded)
     if not files:
         return None
     index = hot(location.path)
     if index is None:
         return None
 
-    selected = _select_delivery(files, index, hot)
+    selected = _select_delivery(files, index, hot, root, expanded)
     if selected is None:
         return None
-    anchored, chosen, left_out = selected
+    anchored, chosen, left_out, withheld_by_file, exact = selected
 
     agent_id = _agent_identity(payload)
-    prefix = f"{_PRETOOL_FILE_KEY_PREFIX}{session_id}:{agent_id or '-'}:"
+    identity = f"{session_id}:{agent_id or '-'}:"
+    keys = (_PRETOOL_FILE_KEY_PREFIX, _PRETOOL_EXACT_KEY_PREFIX, _PRETOOL_EXPANDED_KEY_PREFIX)
+    prefixes = tuple(p + identity for p in keys)
+    prefix, exact_prefix, expanded_prefix = prefixes
+    scopes = dict.fromkeys(exact[0], exact_prefix) | dict.fromkeys(expanded, expanded_prefix)
     now = datetime.now(UTC).isoformat()
     journal = _journals_showings()
     from ..hot_index import Shown  # already loaded: the index above is a HotIndex
 
     if not chosen and not left_out:
         entity_ids = [entity for rel in dict.fromkeys(files) for entity in anchored.get(rel, ())]
-        hot.empty_because(
-            _cold_or_no_record(
-                index,
-                entity_ids,
-                hot,
-                prefix,
-                [rel for rel in dict.fromkeys(files) if rel in anchored],
-            )
-        )
+        claim_paths = [
+            (scopes.get(rel, prefix), rel, prefixes if rel in scopes else (prefix,))
+            for rel in sorted(dict.fromkeys(files), key=scopes.__contains__)
+            if rel in anchored
+        ]
+        hot.empty_because(_cold_or_no_record(index, entity_ids, hot, claim_paths))
         return None
 
     winning: list[tuple[str, Sequence[Record]]] = []
     refused: list[str] = []
+    repeated = False
     for rel, records in chosen:
         # Claim BEFORE emitting, in one statement that also counts: a crash cannot deliver a
-        # file twice, two parallel reads of one agent cannot both deliver it, and the agent's
-        # eleventh file is refused. The records the block prints are journaled in the same
-        # transaction (the printed slice, not the file's records), so a claim and its showing
-        # commit together.
+        # file twice in one scope, and each scope stops at ten claims. The printed slice is
+        # journaled in the same transaction, so a claim and its showing commit together.
         shown = (
             Shown(session_id, agent_id, [r.decision["id"] for r in _shown_slice(records)])
             if journal
             else None
         )
         try:
-            if index.claim_file(prefix, rel, now, _FILES_PER_AGENT, shown=shown):
+            scope = scopes.get(rel, prefix)
+            if scope != prefix and any(index.has_meta_now(p + rel) for p in prefixes):
+                repeated = True
+                continue
+            if index.claim_file(scope, rel, now, _FILES_PER_AGENT, shown=shown):
                 winning.append((rel, records))
             else:
-                refused.append(rel)
+                refused.append(scope + rel)
         except sqlite3.OperationalError as error:
             hot.note(error)
             hot.report("claim", error)
             break  # contention refusal: deliver what is already claimed, claim no more
-    text = _render_delivery(winning, left_out)
+    text = _render_delivery(winning, left_out, withheld=withheld_by_file, exact=exact)
     if winning:
         _journal_delivery(
             payload,
@@ -2966,8 +3059,8 @@ def _delivery(payload: dict, hot: _HotOpener) -> str | None:
             [(rel, _shown_slice(records)) for rel, records in winning],
             lambda error: hot.report("delivery", error),
         )
-    elif text is None and refused:
-        hot.empty_because(_refusal_cause(index, prefix, refused, hot))
+    elif text is None and (refused or repeated):
+        hot.empty_because(_refusal_cause(index, refused, hot))
     return text
 
 
@@ -2975,8 +3068,7 @@ def _cold_or_no_record(
     index: HotIndex,
     entity_ids: Sequence[str],
     hot: _HotOpener,
-    prefix: str | None = None,
-    files: Sequence[str] = (),
+    claim_paths: Sequence[tuple[str, str, Sequence[str]]] = (),
 ) -> str:
     """Why a call whose files have entities found nothing to hand over: ``cold`` when a record
     the hook would have printed sits behind a binding whose status was not computed, else
@@ -2984,20 +3076,22 @@ def _cold_or_no_record(
     such record and does not wait for a lock. A read that fails, or that another process's
     lock refuses, leaves ``unknown``: the run is not kept waiting to learn why it was empty.
 
-    With ``prefix`` (the Read path, which claims files) the claim rules still win over
+    With ``claim_paths`` (the Read path, which claims files) the claim rules still win over
     ``cold``, as they do on an index that is not cold: ``cap`` when a named file is not held
-    and the agent holds its ten, else ``repeat`` when it holds a named file. These are point
-    reads of the first three named files and never wait for a lock either."""
+    and its scope is full, else ``repeat`` when the agent holds a named file in an eligible
+    scope. These point reads cover the first three named files and never wait for a lock."""
     try:
         if not index.cold_withholds(entity_ids, lambda record: bool(_renderable_records([record]))):
             return hook_log.NO_RECORD
-        if prefix is not None:
-            named = files[:_FILES_PER_CALL]
-            held = [index.has_meta_now(prefix + rel) for rel in named]
-            if not all(held) and index.claims_held_now(prefix) >= _FILES_PER_AGENT:
-                return hook_log.CAP
-            if any(held):
-                return hook_log.REPEAT
+        held = [
+            (scope, any(index.has_meta_now(p + rel) for p in prefixes))
+            for scope, rel, prefixes in claim_paths[:_FILES_PER_CALL]
+        ]
+        scopes = {prefix for prefix, exists in held if not exists}
+        if any(index.claims_held_now(prefix) >= _FILES_PER_AGENT for prefix in scopes):
+            return hook_log.CAP
+        if any(exists for _, exists in held):
+            return hook_log.REPEAT
     except Exception as error:
         if not hook_log.is_lock_error(error):
             hot.report("cause", error)
@@ -3005,14 +3099,14 @@ def _cold_or_no_record(
     return hook_log.COLD
 
 
-def _refusal_cause(index: HotIndex, prefix: str, refused: Sequence[str], hot: _HotOpener) -> str:
+def _refusal_cause(index: HotIndex, refused: Sequence[str], hot: _HotOpener) -> str:
     """Why the claims of a run that delivered nothing were refused: ``repeat`` when this agent
     already holds every refused file, ``cap`` when one of them is a file it does not hold (the
     claim statement refuses both the same way). One point read per refused file, at most three,
     without waiting for a lock; a read that fails or is refused leaves ``unknown``."""
     try:
-        for rel in refused:
-            if not index.has_meta_now(prefix + rel):
+        for key in refused:
+            if not index.has_meta_now(key):
                 return hook_log.CAP
     except Exception as error:
         if not hook_log.is_lock_error(error):
@@ -3029,10 +3123,11 @@ def _brief_plan(
     it printed cannot drift. ``chosen`` is in the order D2 fixes (the brief's files, then the
     hop's) and each file has records.
 
-    Files are taken in order while the record lines stay within six and the whole block within
-    3,000 characters. The first file that does not fit ends the list, with one exception: when
-    only the line cap stops it and a line is left, its first record fills that line (a file whose
-    second record is cut is still the top of its list, and the block shows no per-file counts).
+    Files are taken in order while the record lines stay within six and the block, excluding
+    the Withheld line, within 3,000 characters. The first file that does not fit ends the list,
+    with one exception: when only the line cap stops it and a line is left, its first record
+    fills that line (a file whose second record is cut is still the top of its list, and the
+    block shows no per-file counts).
     A file the character cap stops is dropped whole.
     see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1, D3)
     """
@@ -3051,11 +3146,14 @@ def _brief_plan(
 
 
 def _render_brief(
-    plan: Sequence[tuple[str | None, str, Sequence[Record]]], *, compact: bool = False
+    plan: Sequence[tuple[str | None, str, Sequence[Record]]],
+    *,
+    compact: bool = False,
+    withheld: Mapping[str, frozenset[str]] | None = None,
 ) -> str:
     """The text of a brief for ``plan`` (non-empty): the opening marker, the guard, one group per
     file (the file, labelled with the document that named it when the brief did not, and its
-    records), a line naming the call that returns the rest, and the closing marker."""
+    records), one line for withheld facts when present, the More line, and the closing marker."""
     seen: list[Record] | None = [] if compact else None
     shown = [rel for _, rel, _ in plan]
     groups = [
@@ -3066,20 +3164,29 @@ def _render_brief(
         for doc, rel, top in plan
     ]
     more = f"More: get_task_context(files={json.dumps(shown, ensure_ascii=False)})."
-    return "\n".join(
-        [_BRIEF_OPEN, MEMORY_GUARD_LINE, *(ln for g in groups for ln in g), more, _BRIEF_CLOSE]
-    )
+    lines = [_BRIEF_OPEN, MEMORY_GUARD_LINE, *(ln for g in groups for ln in g)]
+    if withheld and (files := [rel for rel in shown if withheld.get(rel)]):
+        count = len(set().union(*(withheld[rel] for rel in files)))
+        lines.append(
+            _WITHHELD_FACTS.format(count=count, files=json.dumps(files, ensure_ascii=False))
+        )
+    return "\n".join([*lines, more, _BRIEF_CLOSE])
 
 
-def _brief_block(plan: Sequence[tuple[str | None, str, Sequence[Record]]]) -> str | None:
+def _brief_block(
+    plan: Sequence[tuple[str | None, str, Sequence[Record]]],
+    *,
+    withheld: Mapping[str, frozenset[str]] | None = None,
+) -> str | None:
     """The block for a brief, rendered from :func:`_brief_plan`'s groups; ``None`` when the plan
-    is empty (not even the first file fits). ``More:`` names exactly the files shown.
+    is empty (not even the first file fits). The optional ``withheld`` map adds a notice to the
+    final rendering. ``More:`` names exactly the files shown.
     Record lines share the Read path's within-answer references and original full renderer;
     its ``_records_block`` layout is not reused, because a brief covers several files.
     see design/superpowers/specs/2026-10-03-records-in-subagent-briefs-design.md (D1, D3)
     """
     # Selection uses full-body costs; saved space never buys additional records.
-    return _render_brief(plan, compact=True) if plan else None
+    return _render_brief(plan, compact=True, withheld=withheld) if plan else None
 
 
 def _journal_brief(
@@ -3117,20 +3224,26 @@ def _build_agent_brief(
 
     anchored = index.anchored_files()
     chosen: list[tuple[str | None, str, list[Record]]] = []
+    withheld: dict[str, frozenset[str]] = {}
     named: list[str] = []  # the entities of the anchored files the brief names
     for doc, rel in brief_files(prompt, root, anchored, cwd):
         named.extend(anchored.get(rel, ()))
-        records = _renderable_records(
+        raw = (
             index.records_for(anchored[rel], on_error=lambda error: _select_error(hot, error))
             if rel in anchored
             else []
         )
+        records = _renderable_records(raw)
         if records:
             chosen.append((doc, rel, records))
+            if len(raw) > len(records):
+                withheld[rel] = frozenset(r.decision["id"] for r in raw) - {
+                    r.decision["id"] for r in records
+                }
             if len(chosen) == _BRIEF_MAX_LINES:  # every file shown costs a line at least
                 break
     plan = _brief_plan(chosen)
-    block = _brief_block(plan)
+    block = _brief_block(plan, withheld=withheld)
     if block is None:
         if chosen:
             hot.empty_because(hook_log.NO_RECORD)  # the first file's records do not fit
@@ -3201,9 +3314,49 @@ def _agent_brief(payload: dict, hot: _HotOpener, host_family: str) -> dict | Non
     }
 
 
+# Mirrors transcripts._SIDEGRAPH_SERVERS without loading its stats imports.
+_SIDEGRAPH_MCP_SERVERS = frozenset({"sidegraph", "plugin_sidegraph_sidegraph"})
+
+
+def _bind_mcp_caller(payload: dict, hot: _HotOpener) -> bool:
+    """Handle a Sidegraph MCP read without opening the file-delivery path."""
+    parts = tool.split("__") if isinstance(tool := payload.get("tool_name"), str) else []
+    if len(parts) != 3 or parts[0] != "mcp":
+        return False
+    if parts[1] not in _SIDEGRAPH_MCP_SERVERS or parts[2] not in SENT_SET_TOOLS:
+        return False
+    if _host_family() == "grok":
+        return True
+    use_id = payload.get("tool_use_id")
+    session, _ = _session_identity(payload)
+    if not isinstance(use_id, str) or not use_id or not session:
+        return True
+    try:
+        from ..config import resolve_store_location
+        from ..hot_index import HotIndex
+
+        location = resolve_store_location(
+            root=os.environ.get("CLAUDE_PROJECT_DIR"), warn_on_create=False, search_ancestors=True
+        )
+        index = HotIndex.open(
+            location.path,
+            on_error=lambda error: hot.report("index", error),
+            busy_timeout_seconds=HOOK_BUSY_SECONDS,
+        )
+        if index is not None:
+            with contextlib.closing(index):
+                row = caller_row(session, _agent_identity(payload), datetime.now(UTC))
+                index.claim_meta(MCP_CALLER_KEY_PREFIX + use_id, row)
+    except Exception as error:
+        hot.report("mcp-caller", error)
+    return True
+
+
 def _hook_output(payload: dict, hot: _HotOpener) -> dict:
     """What :func:`pre_tool_use` prints: the Agent branch's ``updatedInput`` for a subagent
     spawn, else the Read path's ``additionalContext``, else ``{}``."""
+    if _bind_mcp_caller(payload, hot):
+        return {}
     if payload.get("tool_name") in _AGENT_TOOLS:
         return _agent_brief(payload, hot, _host_family()) or {}
     text = _delivery(payload, hot)
@@ -3218,10 +3371,10 @@ def pre_tool_use() -> None:
 
     Prints a non-blocking ``additionalContext`` block — no ``permissionDecision`` field is
     emitted, so the call never touches the permission decision (it neither allows, denies, nor
-    asks) — for a Read, Grep, Edit, Write, or a Bash line whose ``sed``, ``grep``, ``rg`` or
-    ``cat`` names a file with records. Each file is delivered once per agent (the session's own
-    agent and each subagent separately; see :func:`_agent_identity`), up to ten files per agent
-    and three per call; an agent starts its ten again after its context was compacted or
+    asks) — for a Read, Grep, Edit, Write or supported Bash line that names a file with records.
+    Each agent claims files independently (see :func:`_agent_identity`). Exact-path and expanded
+    readers skip files already held. Each scope allows ten files, with three total per call.
+    An agent regains the allowances after its context was compacted or
     cleared (see :func:`_reset_file_claims`). Switch it off with ``SIDEGRAPH_GREP_NUDGE=off``
     (the name is older than the behaviour; touch recording is not affected). Must never crash
     or block the tool call:

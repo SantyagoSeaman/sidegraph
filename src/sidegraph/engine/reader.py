@@ -1246,8 +1246,7 @@ def open_borrowed_reader(
 ) -> tuple[GraphifyReader, Path] | None:
     """A reader over the main checkout's graph for a linked worktree whose store has no graph of
     its own, with the main checkout root; ``None`` when nothing is borrowable or the graph cannot
-    be read. Never raises. The read tools and SessionStart call it after the store's own graph
-    failed to open, and sync the result index-only (``canonical_writes=False``): the worktree's
+    be read. Never raises. Callers that sync use ``canonical_writes=False``, so the worktree's
     index is derived from the borrowed graph and no tracked file is rewritten. No write path
     borrows. ``opener`` builds the reader from the borrowed graph's path; the MCP server passes its
     :class:`ReaderCache` so the borrowed reader is kept between calls.

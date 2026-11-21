@@ -6,10 +6,10 @@ description: >-
 
 # Name domains
 
-Turn the graph's nameless community structure into a small set of named, described domains —
-the table of contents `SessionStart`/`drill_down` serve from. You are the curator; the core
-MCP tools (`list_domain_candidates`, `propose_domains`, `ratify`) are read-only or
-deterministic and never decide names — you do, from the actual code.
+Turn the graph's communities into a small set of named, described domains people can browse
+in the Portal or with `list_domains` and `drill_down`. Curate the names from the actual code.
+The MCP tools (`list_domain_candidates`, `propose_domains`, `ratify`) read candidates and
+record the chosen set.
 
 **HARD GATE — never call `propose_domains` or `ratify` before the human has explicitly picked
 one of the sets you present.** Silence, "looks good", or your own confidence that a set is
@@ -106,7 +106,7 @@ does not authorize `propose_domains` or `ratify`.
    `ratify(accept=[...], verdict="<the human's words>")` with the returned `domain_id`s whose `ratified_by` is null (under
    `auto-all` the rest are already accepted, and `ratify` would only answer `already
    accepted` for them) —
-   turning the pick into an accepted, TOC-visible set in the same turn (ratify also resolves
+   turning the pick into a live set in the same turn (ratify also resolves
    each domain's `seed_anchors` into members immediately, so `drill_down` shows real
    membership right away, without waiting for a separate sync; on a store that already has a
    domain snapshot, a domain named now gets members only in files the snapshot does not list,
@@ -140,7 +140,7 @@ does not authorize `propose_domains` or `ratify`.
 - `sidegraph-domains bootstrap` (CLI) does the same deterministic candidate selection but skips
   the curation step — it's the scripted/CI alternative, not the recommended path for a human in
   a session. See [naming your domains](../../../../docs/guides/naming-your-domains.md). Run it as
-  `uvx --from sidegraph==0.33.0 --python 3.13 sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
+  `uvx --from sidegraph==0.34.0 --python 3.13 sidegraph-domains bootstrap`, never the copy on `PATH`: [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.
 
 ## See also

@@ -21,6 +21,7 @@ from sidegraph.schema import (
     Scope,
 )
 from sidegraph.store import Store
+from sidegraph.store_layout import MEMORY_GUARD_LINE
 
 
 def _domain(store: Store, slug: str, **overrides) -> Domain:
@@ -337,7 +338,7 @@ def test_build_toc_global_mistakes(tmp_path):
 # -- render_toc ---------------------------------------------------------------------
 
 
-def test_render_toc_renders_domain_title_and_mistake_count():
+def test_render_toc_with_domains_and_no_global_sections_has_only_the_header():
     cache = {
         "domains": [
             {
@@ -346,89 +347,14 @@ def test_render_toc_renders_domain_title_and_mistake_count():
                 "summary": "Handles settlement.",
                 "parent_slug": None,
                 "mistakes": 2,
-                "subdomains": 0,
+                "subdomains": 1,
             },
+            {"title": "Refunds", "parent_slug": "payments", "mistakes": 1},
         ],
         "global_mistakes": [],
+        "unratified": [],
     }
-    text = render_toc(cache)
-    assert "## Domains" in text
-    assert "Payments" in text
-    assert "Handles settlement." not in text
-    assert "(2 mistake(s))" in text
-    # the standing get_task_context instruction now lives at host.hooks.session_start,
-    # prepended once regardless of which renderer produced the rest of the text -- this
-    # renderer itself only needs to still emit its own header.
-    assert "# Sidegraph — project memory" in text
-
-
-def test_render_toc_includes_subdomain_count_when_present():
-    cache = {
-        "domains": [
-            {
-                "slug": "root",
-                "title": "Root",
-                "summary": "s",
-                "parent_slug": None,
-                "mistakes": 0,
-                "subdomains": 2,
-            },
-        ],
-        "global_mistakes": [],
-    }
-    text = render_toc(cache)
-    assert "· 2 subdomains" in text
-
-
-def test_render_toc_omits_subdomain_count_when_zero():
-    cache = {
-        "domains": [
-            {
-                "slug": "leaf",
-                "title": "Leaf",
-                "summary": "s",
-                "parent_slug": None,
-                "mistakes": 0,
-                "subdomains": 0,
-            },
-        ],
-        "global_mistakes": [],
-    }
-    text = render_toc(cache)
-    assert "subdomains" not in text
-
-
-def test_render_toc_subdomain_count_from_build_toc_parent_child(tmp_path):
-    store = Store(tmp_path / "t.db")
-    root = _domain(store, "root")
-    _domain(store, "child-a", parent_id=root.domain_id)
-
-    toc = build_toc(store, None)
-    text = render_toc(toc)
-    root_line = next(line for line in text.splitlines() if line.startswith("- Root"))
-    assert "· 1 subdomains" in root_line
-
-
-def test_render_toc_never_renders_a_summary():
-    long_summary = "x" * 200
-    cache = {
-        "domains": [
-            {
-                "slug": "s",
-                "title": "S",
-                "summary": long_summary,
-                "parent_slug": None,
-                "mistakes": 0,
-                "subdomains": 0,
-            },
-        ],
-        "global_mistakes": [],
-    }
-    text = render_toc(cache)
-    line = next(line for line in text.splitlines() if line.startswith("- S"))
-    assert line == "- S (0 mistake(s))"
-    assert "x" * 10 not in text
-    assert "…" not in text
+    assert render_toc(cache) == MEMORY_GUARD_LINE + "\n# Sidegraph — project memory\n"
 
 
 def test_render_toc_renders_global_mistakes_and_ignores_a_cached_initiatives_key():
@@ -449,31 +375,3 @@ def test_render_toc_empty_cache_still_has_header():
     text = render_toc({"domains": [], "global_mistakes": []})
     assert "# Sidegraph — project memory" in text
     assert "## Domains" not in text
-
-
-def test_render_toc_omits_a_nonidentical_summary():
-    """A domain summary is omitted even when it differs from the title."""
-    cache = {
-        "domains": [
-            {
-                "slug": "widgets",
-                "title": "Widgets",
-                "summary": "Widgets handles settlement",
-                "parent_slug": None,
-                "mistakes": 0,
-                "subdomains": 0,
-            },
-        ],
-        "global_mistakes": [],
-    }
-    text = render_toc(cache)
-    line = next(line for line in text.splitlines() if line.startswith("- Widgets"))
-    assert line == "- Widgets (0 mistake(s))"
-
-
-def test_a_domain_line_keeps_its_subdomain_count():
-    cache = {
-        "domains": [{"title": "Payments", "summary": "Money.", "mistakes": 2, "subdomains": 3}]
-    }
-    line = next(line for line in render_toc(cache).splitlines() if line.startswith("- Payments"))
-    assert line == "- Payments (2 mistake(s)) · 3 subdomains"

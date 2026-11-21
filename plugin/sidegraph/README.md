@@ -51,7 +51,8 @@ have their own install routes: see the
 The MCP server and the hooks run locally. uv starts them from the plugin's configuration:
 
 - **An MCP server** (local stdio) with the tools the agent calls to read and write records.
-- **SessionStart hook:** adds a short map of the project's domains and records to the session.
+- **SessionStart hook:** opens the session with standing instructions, global mistakes,
+  visible proposals and status lines.
   When the code graph has changed, it also re-anchors records to the moved code, which can
   update files in `.sidegraph/`.
 - **PreToolUse hook** on `Read`, `Grep`, `Edit`, `Write` and on `cat`, `grep`, `rg` and `sed`

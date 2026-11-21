@@ -1,9 +1,9 @@
-"""The repo files a Bash read command names: the pure path extractor behind the PreToolUse hook.
+"""The repo files a Bash read command names: the path extractor behind the PreToolUse hook.
 
 The hook runs on a Bash call only to deliver the records of the files the line reads, so it must
-tell, from the text of the line alone, which regular files a ``sed``, ``grep``, ``rg`` or ``cat``
-reads. ``read_paths`` does that and nothing else: no ``Store``, no pydantic, no I/O beyond
-``realpath`` and ``isfile`` on candidate paths. It is deliberately a small reader of shell, not a
+tell which regular files ``sed``, ``grep``, ``rg``, ``cat``, ``head``, ``nl``, ``awk``, ``git show``
+and ``git grep`` read. ``read_paths`` uses the line and filesystem metadata for candidate files
+and repository boundaries. It is deliberately a small reader of shell, not a
 shell: it follows ``cd`` (and what scopes it), skips what a command takes as a pattern or an option
 value, and drops anything it cannot resolve to an existing file inside the root. A line it cannot
 read (an unbalanced quote, a construct it does not model) yields fewer files, never an exception.
@@ -19,7 +19,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
@@ -130,6 +130,31 @@ _RG_LONG = frozenset(
 
 _SPECS: dict[str, _Spec] = {
     "cat": _Spec(),
+    "head": _Spec(short_value=frozenset("nc"), long_value=frozenset({"lines", "bytes"})),
+    "nl": _Spec(
+        short_value=frozenset("bdfhilnsvw"),
+        long_value=frozenset(
+            [
+                "body-numbering",
+                "section-delimiter",
+                "footer-numbering",
+                "header-numbering",
+                "line-increment",
+                "join-blank-lines",
+                "number-format",
+                "number-separator",
+                "starting-line-number",
+                "number-width",
+            ]
+        ),
+    ),
+    "awk": _Spec(
+        takes_pattern=True,
+        short_value=frozenset("Fvf"),
+        long_value=frozenset({"field-separator", "assign", "file"}),
+        short_pattern=frozenset("f"),
+        long_pattern=frozenset({"file"}),
+    ),
     "sed": _Spec(
         takes_pattern=True,
         short_value=frozenset("efl"),
@@ -358,7 +383,7 @@ class _Walk:
     def __init__(self, root: str, home: str) -> None:
         self.root = root  # realpath of the project root
         self.home = home
-        self.found: list[str] = []
+        self.found: list[tuple[str, bool]] = []
 
 
 def _opaque(arg: str) -> bool:
@@ -520,6 +545,7 @@ def _walk_line(text: str, cwd: str | None, walk: _Walk, depth: int) -> None:
             continue
         name = os.path.basename(words[0])
         args = words[1:]
+        candidates: Iterable[tuple[str, str | None]] = ()
         if name == "cd":
             cwd = _change_directory(cwd, args, walk)
         elif name in ("pushd", "popd"):
@@ -529,26 +555,52 @@ def _walk_line(text: str, cwd: str | None, walk: _Walk, depth: int) -> None:
             if script is not None and depth == 0:
                 with contextlib.suppress(_Unreadable):
                     _walk_line(script, cwd, walk, depth + 1)
+        elif name == "git" and args:
+            if args[0] == "grep" and "--" in args:
+                candidates = ((arg, cwd) for arg in args[args.index("--") + 1 :])
+            elif args[0] == "show" and cwd is not None:
+                repo, directory = Path(walk.root), Path(os.path.realpath(cwd))
+                if not directory.is_relative_to(repo) or not os.path.lexists(repo / ".git"):
+                    continue
+                while directory != repo and not os.path.lexists(directory / ".git"):
+                    directory = directory.parent
+                if directory != repo:
+                    continue
+                stop = args.index("--") if "--" in args else len(args)
+                paths = (arg.partition(":")[2] for arg in args[1:stop] if not arg.startswith("-"))
+                candidates = (
+                    (arg, cwd if arg.startswith(("./", "../")) else walk.root)
+                    for arg in paths
+                    if not Path(arg).anchor
+                )
+            else:
+                continue
         elif name in _SPECS:
-            for arg in _positionals(_SPECS[name], args):
-                rel = _resolve(arg, cwd, walk)
-                if rel is not None and rel not in walk.found:
-                    walk.found.append(rel)
+            candidates = ((arg, cwd) for arg in _positionals(_SPECS[name], args))
+        for arg, base in candidates:
+            rel = _resolve(arg, base, walk)
+            if rel is not None:
+                walk.found.append((rel, name in ("sed", "grep", "rg", "cat")))
 
 
-def read_paths(command: str, cwd: str, root: str) -> list[str]:
+def read_paths(
+    command: str, cwd: str, root: str, *, ordinary: list[str] | None = None
+) -> list[str]:
     """The repo-relative regular files that the read commands in ``command`` name, in order.
 
     ``cwd`` is where the host ran the line and ``root`` the project root the names are made
-    relative to. A file counts when a ``cat``, ``sed``, ``grep`` or ``rg`` in the line (after the
-    ``cd`` that precedes it) names it, it exists, and it lies inside ``root``; a directory, an
+    relative to. A file counts when ``cat``, ``sed``, ``grep``, ``rg``, ``head``, ``nl``, ``awk``,
+    ``git show`` or ``git grep`` names an existing file inside ``root``. A directory, an
     unexpanded glob, an argument built from ``$`` or a backtick, and a path outside ``root`` are
     dropped. Never raises: a line it cannot read (an unbalanced quote) gives no files.
+    When supplied, ``ordinary`` collects files in the order the original four readers name them.
     # see design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D4)
     """
     try:
         walk = _Walk(root=os.path.realpath(root), home=os.path.expanduser("~"))
         _walk_line(command, cwd or root, walk, 0)
-        return walk.found
+        if ordinary is not None:
+            ordinary.extend(dict.fromkeys(rel for rel, legacy in walk.found if legacy))
+        return list(dict.fromkeys(rel for rel, _ in walk.found))
     except Exception:
         return []

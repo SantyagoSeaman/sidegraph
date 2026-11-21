@@ -286,7 +286,7 @@ class HookRunCounts(BaseModel):
 
 
 class HookRunStats(BaseModel):
-    """Runs of the delivering hooks that opened the index, per hook. Counts, nothing else."""
+    """Runs of the delivering hooks recorded in the run log, counted per hook."""
 
     hooks: dict[str, HookRunCounts]
 
@@ -298,6 +298,7 @@ _LOG_HOOKS = ("PreToolUse", "SessionStart", "SubagentStart")
 _LOG_CAUSES = (
     "no-entity",
     "no-record",
+    "no-index",
     "cold",
     "repeat",
     "cap",

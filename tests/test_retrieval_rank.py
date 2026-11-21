@@ -565,7 +565,7 @@ def test_rank_global_scope_in_related(tmp_path):
     assert any("glob" in r for r in ctx.related)
 
 
-# -- bucket C learns domains (M5, M2 review PINNED I1) -----------------------------------
+# -- Bucket C community bindings --------------------------------------------------------
 
 
 def _accepted_domain(store, slug, communities, **overrides):
@@ -589,12 +589,9 @@ def test_rank_related_bucket_still_surfaces_legacy_community_binding_alongside_d
     comm_entity = s.get_or_create_abstract_entity("community:7")
     _bound_decision(s, comm_entity.entity_id, "legacy-note", DecisionKind.ADR)
     _accepted_domain(s, "payments", ["7"])
-    domain_entity = s.find_abstract_entity("domain:payments")
-    _bound_decision(s, domain_entity.entity_id, "domain-note", DecisionKind.ADR)
 
     ctx = rank_decisions([], [], ["7"], s, RetrievalBudget())
     assert any("legacy-note" in r for r in ctx.related)
-    assert any("domain-note" in r for r in ctx.related)
 
 
 def test_rank_related_bucket_dedupes_decision_bound_to_both_domain_and_community(tmp_path):
@@ -612,22 +609,18 @@ def test_rank_related_bucket_dedupes_decision_bound_to_both_domain_and_community
     assert len(matches) == 1
 
 
-def test_rank_related_bucket_unions_all_accepted_domains_covering_seed_community(tmp_path):
-    """Gate-5 finding 2 regression: an "orphan window" where two accepted domains cover the
-    SAME community at once (not prevented at write time -- one domain claimed it, then a
-    second one later also claimed it, e.g. before sync narrows things back down). A decision
-    tier-1-bound to the OLDER covering domain must still surface via rank_decisions: with the
-    old (singular, newest-only) `find_domain_by_community` lookup, the older domain's paired
-    entity was never even looked at, and the decision wasn't bound to the bare
-    `community:<id>` entity either, so it silently vanished from `related`."""
+def test_rank_related_bucket_reads_seed_community_without_covering_domains(tmp_path):
     s = Store(tmp_path / "t.db")
-    older = _accepted_domain(s, "payments-old", ["7"])
-    _accepted_domain(s, "payments-new", ["7"])
-    older_entity = s.find_abstract_entity(f"domain:{older.slug}")
-    _bound_decision(s, older_entity.entity_id, "older-domain-note", DecisionKind.ADR)
+    for slug in ("payments-old", "payments-new"):
+        _accepted_domain(s, slug, ["7"])
+        entity = s.find_abstract_entity(f"domain:{slug}")
+        _bound_decision(s, entity.entity_id, f"{slug} domain-note", DecisionKind.ADR)
+    community = s.get_or_create_abstract_entity("community:7")
+    _bound_decision(s, community.entity_id, "community-note", DecisionKind.ADR)
 
     ctx = rank_decisions([], [], ["7"], s, RetrievalBudget())
-    assert any("older-domain-note" in r for r in ctx.related)
+    assert any("community-note" in r for r in ctx.related)
+    assert not any("domain-note" in r for r in ctx.related)
 
 
 def test_rank_related_bucket_unchanged_without_domains(tmp_path):

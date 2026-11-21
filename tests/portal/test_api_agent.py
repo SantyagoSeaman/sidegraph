@@ -13,8 +13,10 @@ from sidegraph.host import launch, mcp_entry
 from sidegraph.portal import contract
 from sidegraph.portal.context import PortalContext
 from sidegraph.retrieval import TOC_CACHE_KEY
+from sidegraph.schema import DecisionKind, Scope
 from sidegraph.store import Store
 from tests.graph_repo_support import GRAPH, head, write_graph
+from tests.store_record_support import _decision
 from tests.test_server_tool_emulation import (
     _canonical,
     _mask,
@@ -23,7 +25,6 @@ from tests.test_server_tool_emulation import (
     _reader,
     _session_state,
 )
-from tests.test_session_start_budget import _ascii_domains
 from tests.twin_support import DECISION_ID, ENTITY_ID, Scenario, build_twin_stores
 
 _API = "/api/agent-view"
@@ -215,13 +216,23 @@ def test_agent_view_links_record_ids_only(
     assert DECISION_ID in hook.ids_in_text
 
 
+def _seed_oversized_session_map(store: Store) -> None:
+    store.set_meta(TOC_CACHE_KEY, json.dumps({"domains": [{"title": "Payments"}]}))
+    for i in range(10):
+        store.add_decision(
+            _decision(
+                f"Global rule {i}", kind=DecisionKind.GOTCHA, scope=Scope.GLOBAL, choice="決" * 240
+            )
+        )
+
+
 def test_session_start_reports_trimmed_map(
     portal_ctx: Callable[..., PortalContext],
     portal_client: Callable[..., TestClient],
 ) -> None:
     ctx = portal_ctx()
     with ctx.request_store() as store:
-        store.set_meta(TOC_CACHE_KEY, json.dumps({"domains": _ascii_domains(400)}))
+        _seed_oversized_session_map(store)
     with portal_client(ctx) as client:
         result = _emulate(client, "hook", {"event": "session_start", "params": {}})
     assert result.budget == 9500
@@ -236,7 +247,7 @@ def test_grok_instructions_report_trimmed_map(
 ) -> None:
     ctx = portal_ctx(host_family="grok")
     with ctx.request_store() as store:
-        store.set_meta(TOC_CACHE_KEY, json.dumps({"domains": _ascii_domains(400)}))
+        _seed_oversized_session_map(store)
     with portal_client(ctx) as client:
         result = _emulate(client, "hook", {"event": "mcp_instructions", "params": {}})
     assert result.budget == 2000 and result.chars <= 2000

@@ -52,7 +52,7 @@ from ulid import ULID
 from . import drift_checks, githooks, maintenance
 from .config import _store_project_root, path_state
 from .freshness import GraphFreshness, staleness_phrase
-from .gitenv import run_git
+from .gitenv import embedded_git_dir, run_git
 from .schema import validate_record_body
 from .store import (
     _TERMINAL_DECISION_STATUSES,
@@ -679,8 +679,9 @@ _TABLE_TYPES = {subdir: record_type for record_type, subdir in SUBDIR_OF.items()
 
 
 def _detect_orphaned_records(inputs: Inputs) -> Problem | None:
-    """Open decisions and facts whose every Tier-2 binding is orphaned: retrieval reaches them
-    only through their file or domain. The rule of ``sync._stale_decisions``, extended to facts.
+    """Open decisions and facts whose every Tier-2 binding is orphaned.
+
+    The rule of ``sync._stale_decisions``, extended to facts.
 
     Severity keys on recent records: a burst of new orphans means anchoring is failing now
     (``degraded``, a notice); old ones are curation debt (``advisory``, a line). Not run while
@@ -707,8 +708,8 @@ def _detect_orphaned_records(inputs: Inputs) -> Problem | None:
             recent += 1
     n = len(orphaned)
     line = (
-        f"Sidegraph: {n} of {open_with_leaf} open record(s) have every code anchor orphaned, "
-        "so retrieval reaches them only through their file or domain. If the graph is stale, "
+        f"Sidegraph: {n} of {open_with_leaf} open record(s) have every code anchor orphaned. "
+        "If the graph is stale, "
         "rebuilding it re-anchors them; otherwise `sidegraph-doctor` lists them and the "
         "heal-anchors skill repairs them."
     )
@@ -718,7 +719,7 @@ def _detect_orphaned_records(inputs: Inputs) -> Problem | None:
         RecordFinding(
             where(table, record_id),
             f"every code anchor of this record is orphaned ({leaves} leaf anchor(s)); "
-            "retrieval reaches it only through its file or domain — re-anchor it with "
+            "re-anchor it with "
             "add_anchors or the heal-anchors skill, or supersede it if the code is gone",
             record_id=record_id,
             record_type={"decisions": "decision", "facts": "fact"}[table],
@@ -852,6 +853,34 @@ def _detect_refresh_helper_outdated(inputs: Inputs) -> Problem | None:
                 "GRAPHIFY_NO_AUTO_REFRESH=1; run `sidegraph-init` to refresh it",
             ),
         ),
+    )
+
+
+# -- 8c store-git-directory -----------------------------------------------------------------
+
+
+def _detect_store_git_directory(inputs: Inputs) -> Problem | None:
+    """Report the directory the git guard refuses when starting from the store."""
+    found = embedded_git_dir(inputs.store_dir)
+    if found is None:
+        return None
+    text = (
+        f"Sidegraph: {found} holds the files of a git directory (HEAD, objects/ or commondir) but "
+        "no .git entry, so Sidegraph runs no git from there and skips the checks that need it. "
+        "Do not run git in that directory: its configuration can run a command. Remove these "
+        "files only once you have confirmed nobody needs them."
+    )
+    return Problem(
+        check="store-git-directory",
+        severity="degraded",
+        summary="git directory files on the store path",
+        fix=(
+            f"check what {found} is; remove the git directory files only once "
+            "you have confirmed nobody needs them"
+        ),
+        line=text,
+        notice=text,
+        findings=((found, text.removeprefix("Sidegraph: ")),),
     )
 
 
@@ -1751,6 +1780,7 @@ CHECKS: tuple[Check, ...] = (
         frozenset({"session", "doctor"}),
         _detect_refresh_helper_outdated,
     ),
+    Check("store-git-directory", frozenset({"session", "doctor"}), _detect_store_git_directory),
     Check("refresh-hook-missing", frozenset({"session"}), _detect_refresh_hook_missing),
     Check(
         "store-uncommitted", frozenset({"session", "doctor", "stats"}), _detect_store_uncommitted

@@ -630,7 +630,7 @@ def test_cold_grok_instructions_read_global_mistakes_live(tmp_path, monkeypatch)
 
     text = mcp_entry._grok_session_map()
 
-    assert text is not None and "- Test" in text
+    assert text is not None and "# Sidegraph — project memory" in text
     assert "RETIRED_SENTINEL" not in text
     assert "KEPT_SENTINEL" in text and "LATE_SENTINEL" in text
     assert server._store is None
@@ -701,8 +701,8 @@ def test_retiring_a_duplicate_keeps_its_anchorless_fact_in_task_context(store: S
 
 
 def _graph(tmp_path, *, twin_trader: bool = False):
-    """``mini_graph.json`` as a reader; ``twin_trader`` adds a second ``Trader`` node in another
-    file, so a bare ``Trader`` anchor is ambiguous and binds only its code community."""
+    """``mini_graph.json`` as a reader. ``twin_trader`` makes the bare ``Trader`` name ambiguous
+    by adding a second ``Trader`` node in another file in the same community."""
     from pathlib import Path
 
     from sidegraph.engine.reader import GraphifyReader
@@ -756,8 +756,8 @@ def test_retiring_a_duplicate_leaves_facts_that_stay_reachable_alone(store: Stor
 
 
 def test_a_fact_bound_only_to_a_code_community_is_carried(store: Store, tmp_path):
-    """An ambiguous fact anchor binds only a derived ``community:*`` entity: no canonical
-    binding file, and file-seeded retrieval does not collect it. That is no route of its own."""
+    """The ``Trader`` file entity exists before the fact is anchored. The ambiguous bare
+    name binds only the derived community, which gives the fact no route of its own."""
     from sidegraph.server import _add_decision_impl, _add_fact_impl
 
     reader = _graph(tmp_path, twin_trader=True)
@@ -973,14 +973,14 @@ def test_retire_refuses_when_no_anchor_can_keep_a_fact_reachable(store: Store):
 def test_a_duplicate_bound_only_to_a_code_community_hands_its_fact_the_kept_anchors(
     store: Store, tmp_path
 ):
-    """A community binding gives a fact no route of its own, so a duplicate holding only one
-    has nothing to give: the fact takes the kept record's anchors."""
+    """Neither the community nor the degraded path-less leaf gives the fact a route.
+    The fact takes the kept record's anchors."""
     from sidegraph.server import _add_decision_impl, _add_fact_impl
 
     reader = _graph(tmp_path, twin_trader=True)
     keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
     dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=[{"name": "Trader"}])
-    assert [b.tier for b in store.bindings_for_record(dup["id"])] == [1]  # community only
+    assert sorted(b.tier for b in store.bindings_for_record(dup["id"])) == [1, 2]
     fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup["id"]])
 
     result = _retire_decision_impl(store, dup["id"], "Duplicate", duplicate_of=keep["id"])
@@ -990,11 +990,75 @@ def test_a_duplicate_bound_only_to_a_code_community_hands_its_fact_the_kept_anch
     assert not _dangling(store, fact["id"])
 
 
+def test_a_name_that_turned_ambiguous_still_hands_the_fact_the_kept_anchors(store, tmp_path):
+    from sidegraph.engine.reader import GraphifyReader
+    from sidegraph.server import _add_decision_impl, _add_fact_impl
+    from sidegraph.sync import sync
+
+    path = _graph(tmp_path).path
+    graph = json.loads(path.read_text())
+    graph["nodes"][0].update(id="old_stub", source_file="")
+    graph["links"][0]["source"] = "old_stub"
+    path.write_text(json.dumps(graph))
+    reader = GraphifyReader(path)
+    keep = _add_decision_impl(store, reader, "Keep", "adr", "C", "R", anchors=_HELPER)
+    anchors = [{"name": "Trader"}]
+    original = _add_decision_impl(store, reader, "Original", "adr", "C", "R", anchors=anchors)
+    sync(store, reader, force=True)
+    leaf = next(b for b in store.bindings_for_record(original["id"]) if b.tier == 2)
+
+    reader = _graph(tmp_path, twin_trader=True)
+    sync(store, reader, force=True)
+    entity = store.get_entity(leaf.entity_id)
+    assert entity.descriptor.file_path is None
+    assert entity.last_seen_node_id == "old_stub"
+    dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=anchors)
+    fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup["id"]])
+    sync(store, reader, force=True)
+
+    _retire_decision_impl(store, dup["id"], "Duplicate", duplicate_of=keep["id"])
+    sync(store, reader, force=True)
+
+    assert _shown(store, reader, fact["id"], "util/misc.py")
+
+
+def test_a_clone_retires_a_duplicate_on_a_resolvable_path_less_stub(store, tmp_path):
+    import shutil
+
+    from sidegraph.engine.reader import GraphifyReader
+    from sidegraph.server import _add_decision_impl, _add_fact_impl, _get_task_context_impl
+    from sidegraph.sync import sync
+
+    path = _graph(tmp_path).path
+    graph = json.loads(path.read_text())
+    graph["nodes"][0].update(id="old_stub", source_file="")
+    graph["links"][0]["source"] = "old_stub"
+    path.write_text(json.dumps(graph))
+    reader = GraphifyReader(path)
+    keep = store.add_decision(_decision(title="Keep", scope=Scope.GLOBAL))
+    anchors = [{"name": "Trader"}]
+    dup = _add_decision_impl(store, reader, "Dup", "adr", "C", "R", anchors=anchors)
+    fact = _add_fact_impl(store, reader, "Ten per minute", "t", supports=[dup["id"]])
+    sync(store, reader, force=True)
+    clone_path = tmp_path / "clone" / ".sidegraph"
+    shutil.copytree(store.path, clone_path, ignore=shutil.ignore_patterns("index.db*"))
+
+    with Store(clone_path) as clone:
+        leaf = next(b for b in clone.bindings_for_record(dup["id"]) if b.tier == 2)
+        assert leaf.status == "live"
+        assert clone.get_entity(leaf.entity_id).last_seen_node_id is None
+        result = _retire_decision_impl(clone, dup["id"], "Duplicate", duplicate_of=keep.id)
+        assert result["status"] == "deprecated"
+        sync(clone, reader, force=True)
+        text = _get_task_context_impl(clone, reader, None, anchors, 4000, 6000)
+        assert fact["statement"] in text
+
+
 # -- which bindings retrieval actually serves a fact through -------------------------------------
 #
-# A standalone fact surfaces through a live or degraded binding to a concrete entity, or, for an
-# exact file seed, through a binding to a concrete entity whose existing file the graph does not
-# index ([file-bound]). Abstract entities (community:*, domain:*, tag:*) only ever seed decisions.
+# A standalone fact can surface through a live binding to a concrete entity or a degraded binding
+# with a file. An exact file seed can also reach an existing file outside the graph ([file-bound]).
+# Abstract entities (community:*, domain:*, tag:*) only ever seed decisions.
 # As evidence, a fact surfaces under a decision that reaches a seed bucket the same way, or under
 # a global decision. Each case below states what retrieval does after the retirement.
 

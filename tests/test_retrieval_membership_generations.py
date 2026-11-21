@@ -4,12 +4,7 @@ from __future__ import annotations
 
 from sidegraph import domain_snapshot
 from sidegraph.engine.reader import GraphifyReader
-from sidegraph.retrieval import (
-    RetrievalBudget,
-    _domain_decisions,
-    _structure_fallback_lines,
-    rank_decisions,
-)
+from sidegraph.retrieval import _domain_decisions
 from sidegraph.server import _drill_down_impl
 from sidegraph.store import Store
 from sidegraph.sync import sync, take_snapshot
@@ -49,8 +44,6 @@ def test_failed_snapshot_refresh_does_not_expand_retained_communities(tmp_path):
         _bind(store, decision, _leaf(store, "lonely", "src/misc/lonely.py", "lonely_fn", "4"))
         domain = store.find_domain_by_slug("docs")
         before = store.domain_member_ids(domain.domain_id)
-        docs_decision = _decision(store, "Docs only")
-        _bind(store, docs_decision, store.find_abstract_entity("domain:docs"), tier=1)
         graph = legacy_graph()
         for node in graph["nodes"]:
             node["community"] = {3: 7, 4: 3}.get(node["community"], node["community"])
@@ -69,11 +62,3 @@ def test_failed_snapshot_refresh_does_not_expand_retained_communities(tmp_path):
         # decisions
         assert not any("Lonely only" in line for line in out["decisions"])
         assert decision.id not in {d.id for d in _domain_decisions(domain, store, reader)}
-        # related
-        context = rank_decisions(
-            [], [], ["3"], store, RetrievalBudget(), seed_node_ids=["lonely_fn"]
-        )
-        assert not any("Docs only" in line for line in context.related)
-        # structure
-        lines = _structure_fallback_lines(["3"], store, 1000, ["lonely_fn"])
-        assert not any("[domain] Docs" in line for line in lines)

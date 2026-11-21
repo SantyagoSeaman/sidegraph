@@ -13,6 +13,7 @@ from sidegraph.host import hook_log
 from sidegraph.hot_index import HotIndex
 from sidegraph.schema import DecisionKind, DecisionStatus
 from sidegraph.store_layout import VOLATILE_STALE_KEY
+from sidegraph.sync import LAST_SYNCED_KEY
 from tests.test_hook_contention import _hook_case, _hook_payload
 from tests.test_hook_outcome_log import _run_hook, _store_dir
 from tests.test_host_pretool_records import SESSION, Project, _payload, _run, _text
@@ -92,18 +93,29 @@ def test_repeat_and_cap_win_over_cold(project, monkeypatch, capsys):
     ]
 
 
-@pytest.mark.parametrize("entry", ["pretool", "subagent"])
-def test_a_never_synced_index_logs_cold(tmp_path, monkeypatch, capsys, entry):
+def test_a_never_synced_index_delivers_by_exact_path(tmp_path, monkeypatch, capsys):
     store_dir, source, transcript, _ = _hook_case(
         tmp_path / "project", monkeypatch, cold=True, telemetry="on"
     )
-    assert _run_hook(entry, monkeypatch, capsys, _hook_payload(entry, source, transcript)) == {}
-    hook = "PreToolUse" if entry == "pretool" else "SubagentStart"
-    assert _log(store_dir) == [(hook, "empty", "cold")]
+    out = _run_hook("pretool", monkeypatch, capsys, _hook_payload("pretool", source, transcript))
+    assert "[gotcha] [file-bound] A useful gotcha" in _text(out)
+    assert _log(store_dir) == [("PreToolUse", "delivered", None)]
+
+
+def test_a_never_synced_subagent_index_logs_cold(tmp_path, monkeypatch, capsys):
+    store_dir, source, transcript, _ = _hook_case(
+        tmp_path / "project", monkeypatch, cold=True, telemetry="on"
+    )
+    assert (
+        _run_hook("subagent", monkeypatch, capsys, _hook_payload("subagent", source, transcript))
+        == {}
+    )
+    assert _log(store_dir) == [("SubagentStart", "empty", "cold")]
 
 
 def _cold(project) -> None:
-    """The index as a rebuild of a never-synced store leaves it: the flag set, nothing kept."""
+    """A rebuild of a synced store with nothing kept."""
+    project.store.set_meta(LAST_SYNCED_KEY, "fixture")
     project.store.set_meta(VOLATILE_STALE_KEY, "1")
 
 

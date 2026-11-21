@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 import sidegraph.host.hooks as hooks
+from sidegraph.host import hook_log
 from sidegraph.hot_index import Record
 from sidegraph.schema import (
     AnchorBinding,
@@ -474,6 +475,8 @@ def _bash(command: str, session: str = SESSION, **extra) -> dict:
         ("ls; cat a.py", ["a.py"]),
         ("cat notes.md a.py", ["a.py"]),
         ("rg -n foo a.py", ["a.py"]),
+        ("head -n 5 a.py", ["a.py"]),
+        ("awk '{print $1}' a.py", ["a.py"]),
     ],
 )
 def test_t4_a_bash_read_command_delivers_the_records_of_the_files_it_names(
@@ -492,8 +495,6 @@ def test_t4_a_bash_read_command_delivers_the_records_of_the_files_it_names(
         "cat notes.md",
         "ls src",
         "git status",
-        "head -n 5 a.py",
-        "awk '{print $1}' a.py",
         "cat src/pkg",
         "cat missing.py",
     ],
@@ -604,10 +605,9 @@ _WAITED_HOOK_PROCESS = """from sidegraph.hot_index import HotIndex
 
 original_open = HotIndex.open.__func__
 
-def waited_open(cls, store_path, *, on_error=None, busy_timeout_seconds=0.0):
-    return original_open(
-        cls, store_path, on_error=on_error, busy_timeout_seconds=1.0
-    )
+def waited_open(cls, store_path, **kwargs):
+    kwargs["busy_timeout_seconds"] = 1.0
+    return original_open(cls, store_path, **kwargs)
 
 HotIndex.open = classmethod(waited_open)
 from sidegraph.host.hooks import pre_tool_use
@@ -922,20 +922,117 @@ def test_record_read_failure_refuses_selection_before_claiming(
     original = HotIndex.records_for
     calls = 0
 
-    def sometimes_locked(self, entity_ids, *, on_error=None):
+    def sometimes_locked(self, entity_ids, *, exact_path=False, on_error=None):
         nonlocal calls
         calls += 1
         if calls == fail_at:
             assert on_error is not None
             on_error(sqlite3.OperationalError("synthetic read contention"))
-            return original(self, entity_ids) if partial else []
-        return original(self, entity_ids, on_error=on_error)
+            return original(self, entity_ids, exact_path=exact_path) if partial else []
+        return original(self, entity_ids, exact_path=exact_path, on_error=on_error)
 
     monkeypatch.setattr(HotIndex, "records_for", sometimes_locked)
     payload = _bash("cat a.py b.py c.py d.py e.py")
     out = _run(monkeypatch, capsys, bash_project, payload)
+    assert calls == fail_at
     assert not out or _files_in(_text(out)) == []
     assert bash_project.meta("pretool_file:%") == {}
     monkeypatch.setattr(HotIndex, "records_for", original)
     retry = _run(monkeypatch, capsys, bash_project, payload)
     assert _files_in(_text(retry)) == ["a.py", "b.py", "c.py"]
+
+
+def test_full_new_shell_allowance_leaves_room_for_old_reader(project, monkeypatch, capsys):
+    paths = [f"new-{i}.py" for i in range(11)]
+    project.anchored("base.py", *paths)
+    for rel in paths[:10]:
+        assert _files_in(_text(_run(monkeypatch, capsys, project, _bash(f"head {rel}")))) == [rel]
+    assert _run(monkeypatch, capsys, project, _bash(f"head {paths[-1]}")) == {}
+    assert _files_in(_text(_run(monkeypatch, capsys, project, _bash("cat base.py")))) == ["base.py"]
+
+
+def test_full_literal_glob_allowance_leaves_room_for_base_read(project, monkeypatch, capsys):
+    paths = [f"glob-{i}.py" for i in range(11)]
+    project.anchored("base.py", *paths)
+    for rel in paths[:10]:
+        grep = _payload("Grep", pattern="x", glob=rel)
+        assert _files_in(_text(_run(monkeypatch, capsys, project, grep))) == [rel]
+    base = _payload("Read", file_path="base.py")
+    assert _files_in(_text(_run(monkeypatch, capsys, project, base))) == ["base.py"]
+    assert _run(monkeypatch, capsys, project, _bash(f"head {paths[-1]}")) == {}
+
+
+def test_a_direct_grep_path_uses_the_ordinary_allowance_even_with_a_glob(
+    project, monkeypatch, capsys
+):
+    project.anchored("base.py")
+    grep = _payload("Grep", path="base.py", pattern="x", glob="base.py")
+    assert _files_in(_text(_run(monkeypatch, capsys, project, grep))) == ["base.py"]
+    assert _run(monkeypatch, capsys, project, _payload("Read", file_path="base.py")) == {}
+
+
+def test_full_expanded_reader_allowance_leaves_room_for_exact_path(project, monkeypatch, capsys):
+    from sidegraph.sync import sync
+    from tests.test_cap_reset import _session_start
+    from tests.test_hook_exact_path import _graph
+
+    paths = [f"new-{i}.py" for i in range(10)]
+    off_graph = "notes.txt"
+    project.anchored(*paths, off_graph)
+    sync(project.store, _graph(project, "v1", [(rel, f"Sym{i}") for i, rel in enumerate(paths, 1)]))
+    for rel in paths:
+        assert _files_in(_text(_run(monkeypatch, capsys, project, _bash(f"head {rel}")))) == [rel]
+    read = _payload("Read", file_path=off_graph)
+    assert "[file-bound]" in _text(_run(monkeypatch, capsys, project, read))
+
+    _session_start(monkeypatch, capsys, project, "compact")
+    head = _bash(f"head {paths[0]}")
+    assert _run(monkeypatch, capsys, project, head)
+    assert _run(monkeypatch, capsys, project, read)
+    assert _session_start(monkeypatch, capsys, project, "compact") == {}
+    assert _run(monkeypatch, capsys, project, head) == {}
+    assert _run(monkeypatch, capsys, project, read) == {}
+
+
+@pytest.mark.parametrize("tool", ["Bash", "Grep"])
+def test_expanded_reader_repeats_a_held_exact_path(project, monkeypatch, capsys, tool):
+    from sidegraph.sync import sync
+    from tests.test_hook_exact_path import _graph
+
+    project.anchored("g.py", "off.txt")
+    sync(project.store, _graph(project, "v1", [("g.py", "Sym1")]))
+    assert _run(monkeypatch, capsys, project, _payload("Read", file_path="off.txt"))
+    payload = (
+        _bash("head off.txt") if tool == "Bash" else _payload("Grep", pattern="x", glob="off.txt")
+    )
+    assert _run(monkeypatch, capsys, project, payload) == {}
+    assert hook_log.read_runs(project.store_dir)[-1].detail == "repeat"
+
+
+def test_literal_glob_repeats_a_held_ordinary_file(project, monkeypatch, capsys):
+    from tests.test_hook_empty_causes import _cold
+
+    project.anchored("g.py")
+    grep = _payload("Grep", pattern="x", glob="g.py")
+    assert _run(monkeypatch, capsys, project, _bash("cat g.py"))
+    assert _run(monkeypatch, capsys, project, grep) == {}
+    assert hook_log.read_runs(project.store_dir)[-1].detail == "repeat"
+
+    assert _run(monkeypatch, capsys, project, _bash("head g.py", session="other"))
+    assert _run(monkeypatch, capsys, project, _bash("cat g.py", session="other"))
+
+    _cold(project)
+    assert _run(monkeypatch, capsys, project, grep) == {}
+    assert hook_log.read_runs(project.store_dir)[-1].detail == "repeat"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("head n0.py n1.py n2.py; cat a.py", ["a.py", "n0.py", "n1.py"]),
+        ("head n0.py; cat a.py b.py c.py n0.py", ["a.py", "b.py", "c.py"]),
+    ],
+)
+def test_old_shell_readers_keep_their_call_order(project, monkeypatch, capsys, command, expected):
+    project.anchored("a.py", "b.py", "c.py", "n0.py", "n1.py", "n2.py")
+    assert _files_in(_text(_run(monkeypatch, capsys, project, _bash(command)))) == expected

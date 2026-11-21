@@ -5,7 +5,7 @@
 Sidegraph exposes its shared skills, MCP tools and two lifecycle hooks through Muse's native
 plugin format:
 
-- **SessionStart** injects the session map (domains, notices) when a Muse session starts.
+- **SessionStart** injects the session map and status lines when a Muse session starts.
 - **SubagentStart** gives a starting subagent a one-line brief that the project keeps a decision
   memory, once the store has records anchored to files.
 
@@ -56,6 +56,9 @@ Review any changed capability before approving it, then restart Muse from the pr
 ```bash
 muse plugins approve sidegraph
 ```
+
+If the Sidegraph tools are missing, `muse plugins inspect sidegraph` shows `review_needed`
+for a capability that needs approval.
 
 The MCP server and both hooks run the published package at the plugin's own version
 (`uvx --from sidegraph==X.Y.Z --python 3.13`), so a Sidegraph update arrives with a plugin update.

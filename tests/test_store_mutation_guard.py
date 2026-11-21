@@ -34,6 +34,7 @@ from sidegraph.schema import (
 )
 from sidegraph.store import Store
 from sidegraph.store_format import marker_text
+from sidegraph.store_layout import VOLATILE_STALE_KEY
 from tests.store_format2_support import format1_store
 from tests.store_record_support import _decision, _domain, _fact
 
@@ -553,6 +554,11 @@ def _case_set_meta(store: Store) -> tuple[str, object]:
     return "INSERT INTO meta", lambda: store.set_meta("case-custom-key", "v1")
 
 
+def _case_replace_graph_files(store: Store) -> tuple[str, object]:
+    store.replace_graph_files(["old.py"], "v1")
+    return "INSERT INTO meta", lambda: store.replace_graph_files(["new.py"], "v2")
+
+
 def _case_compact(store: Store) -> tuple[str, object]:
     old = store.add_decision(_decision("case-compact-old"))
     store.add_decision(_decision("case-compact-new", supersedes=old.id))  # closes `old`
@@ -624,6 +630,15 @@ def _case_write_advice(store: Store) -> tuple[str, object]:
     )
 
 
+def _case_clear_volatile_stale(store: Store) -> tuple[str, object]:
+    from sidegraph.store_layout import VOLATILE_STALE_GEN_KEY
+
+    store.set_meta(VOLATILE_STALE_KEY, "1")
+    seen = store.get_meta(VOLATILE_STALE_GEN_KEY)
+    assert seen is not None
+    return "UPDATE meta SET value = '0'", lambda: store.clear_volatile_stale(seen)
+
+
 def _case_put_operation(store: Store) -> tuple[str, object]:
     store.put_operation("first", "digest", "draft", None, ["new"])
     return "UPDATE portal_operations", lambda: store.put_operation(
@@ -685,7 +700,9 @@ _ROLLBACK_CASES = {
     "delete_meta": _case_delete_meta,
     "supersede_domain": _case_supersede_domain,
     "replace_domain_members": _case_replace_domain_members,
+    "replace_graph_files": _case_replace_graph_files,
     "_invalidate_membership": _case_invalidate_membership,
+    "clear_volatile_stale": _case_clear_volatile_stale,
 }
 
 
@@ -715,6 +732,8 @@ def test_every_write_method_rolls_back_on_failure(tmp_path, method_name):
         with pytest.raises(RuntimeError):
             thunk()
     assert store._conn.in_transaction is False, method_name
+    if method_name == "clear_volatile_stale":
+        assert store.get_meta(VOLATILE_STALE_KEY) == "1"
     if method_name == "add_binding":
         assert store._conn.execute("SELECT COUNT(*) FROM anchor_bindings").fetchone()[0] == 1
     if method_name == "record_drift_check":

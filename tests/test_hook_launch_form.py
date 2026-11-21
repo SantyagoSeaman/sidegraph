@@ -187,7 +187,11 @@ def test_the_claude_manifest_has_exactly_one_bash_entry_with_no_if(manifest: Pat
 
 
 _PATTERNS = re.compile(r'case "\$p" in (.*?)\) (?:printf|o=)')
-_FILTER_WORDS = re.compile(r"'([a-z]+)(?: |\\t)'")
+_FILTER_WORDS = re.compile(r"'([a-z]+(?: [a-z]+)?)(?: |\\t)'")
+
+
+def test_filter_word_extractor_accepts_git_show() -> None:
+    assert "git show" in _FILTER_WORDS.findall("*[!A-Za-z0-9_]'git show '*")
 
 
 def _filter_patterns(command: str) -> str:
@@ -205,20 +209,23 @@ def test_the_filter_words_are_the_commands_bash_paths_answers() -> None:
     """A drift guard: ``read_paths`` answers only for the commands in its spec table, so the
     filter that stands in front of the hook must name exactly those."""
     words = set(_FILTER_WORDS.findall(_filter_patterns(_bash_entry(_CLAUDE))))
-    assert words == set(bash_paths._SPECS)
+    assert words == set(bash_paths._SPECS) | {"git show"}
 
 
-# The one shape of a read that ``read_paths`` answers and the filter does not pass: a word split by
-# quotes. A ``case`` pattern cannot match every way to split a word, so the docs state the
-# exception instead of claiming an unconditional superset.
-_SPLIT_WORD_CASES = {"cat-word-split-by-quotes"}
+# Spellings read_paths answers that the textual filter cannot match.
+_UNFILTERED_READ_CASES = {
+    "cat-word-split-by-quotes",
+    "git-show-two-spaces",
+    "git-show-tab",
+    "git-show-quoted",
+}
 
 
 def _read_cases() -> list[Any]:
     return [
         pytest.param(c, id=i)
         for i, c, _d, expected in CASES
-        if expected and i not in _SPLIT_WORD_CASES
+        if expected and i not in _UNFILTERED_READ_CASES
     ]
 
 
@@ -263,14 +270,11 @@ def test_a_quoted_read_word_or_a_carriage_return_after_it_passes_the_filter(
     assert len(rig.calls()) == 1, (command, rig.calls())
 
 
-def test_the_documented_exception_a_word_split_by_quotes_starts_nothing(tmp_path: Path) -> None:
-    """``c'at' f`` is a ``cat`` for the shell and for ``read_paths`` but not for a ``case``
-    pattern. The docs name this exception, and ``test_bash_paths`` pins that ``read_paths``
-    answers the line; this test fails the day the filter changes, so the docs change with it.
-
-    A guard, red against nothing: the filter never matched a split word.
-    """
-    (command,) = [c for i, c, _d, _e in CASES if i in _SPLIT_WORD_CASES]
+@pytest.mark.parametrize(
+    "command", [pytest.param(c, id=i) for i, c, _d, _e in CASES if i in _UNFILTERED_READ_CASES]
+)
+def test_the_documented_filter_exceptions_start_nothing(command: str, tmp_path: Path) -> None:
+    """Guard the documented split-word and nonliteral ``git show`` spellings."""
     rig = Rig(tmp_path)
     done = rig.run(_bash_entry(_CLAUDE), _bash_payload(command), STUB_OFFLINE_OUT="X")
     assert done.stdout == "{}\n"
@@ -317,6 +321,7 @@ def test_the_superset_guard_bites_when_a_word_leaves_the_filter(tmp_path: Path) 
         'ls "$UNDEF"',
         "echo $(date)",
         "git status --short",
+        "tail -n 5 src/a.py",
     ],
 )
 def test_a_command_with_no_read_word_prints_empty_json_and_starts_nothing(

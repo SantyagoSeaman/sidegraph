@@ -379,6 +379,7 @@ def combine(first: TaskContext, second: TaskContext) -> TaskContext:
         full_body_ids=[*first.full_body_ids, *second.full_body_ids],
         backref_ids=[*first.backref_ids, *second.backref_ids],
         backref_shown=first.backref_shown or second.backref_shown,
+        backref_saved=first.backref_saved + second.backref_saved,
         line_ids={
             key: [*first.line_ids.get(key, []), *second.line_ids.get(key, [])]
             for key in (*first.line_ids, *(k for k in second.line_ids if k not in first.line_ids))

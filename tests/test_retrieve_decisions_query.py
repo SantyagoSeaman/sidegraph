@@ -20,6 +20,7 @@ from sidegraph.schema import (
     DecisionKind,
     DecisionStatus,
     Descriptor,
+    Domain,
     Fact,
     Provenance,
 )
@@ -501,15 +502,41 @@ def test_a_fact_too_large_for_the_budget_is_counted_as_a_fact(store):
     assert answer["hint"].startswith("1 fact matched, but the first one does not fit")
 
 
-def test_a_call_without_a_query_keeps_its_order(store):
-    """Only a query moves proposals behind accepted records. A filtered call without a query
-    is the listing as it was."""
+@pytest.mark.parametrize("filter_name", ["kind", "files", "ids"])
+@pytest.mark.parametrize("limit", [{}, {"limit": 1}], ids=["uncut", "limit-one"])
+def test_a_filtered_call_without_a_query_puts_accepted_first(store, filter_name, limit):
+    """The stability commitment applies the proposal order to raw MCP listings."""
     kept = _add(store, "kept adr", kind="adr", hours_ago=9)
     draft = _add(store, "draft gotcha", status="proposed", hours_ago=1)
+    for decision in (kept, draft):
+        _anchor(store, decision, "thing", "mod.py")
+    filters = {"kind": ["adr", "gotcha"], "files": ["mod.py"], "ids": [draft.id, kept.id]}
 
-    answer = _ask(store, status=["accepted", "proposed"])
+    answer = _ask(store, **{filter_name: filters[filter_name]}, **limit)
 
-    assert _ids(answer["decisions"]) == [draft.id, kept.id]
+    assert _ids(answer["decisions"]) == ([kept.id] if limit else [kept.id, draft.id])
+
+
+def test_a_budget_cut_keeps_the_accepted_record(store):
+    kept = _add(store, "kept adr", kind="adr", choice="x" * 1800, hours_ago=9)
+    draft = _add(store, "draft gotcha", status="proposed", choice="y" * 1800)
+
+    answer = _ask(store, kind=["adr", "gotcha"], budget_chars=4000)
+
+    assert answer["returned"] == 1
+    assert _ids(answer["decisions"]) == [kept.id]
+    assert draft.id in answer["omitted_ids"]
+
+
+def test_no_proposal_answer_is_unchanged(store, monkeypatch):
+    """Red against nothing: the cut answer for an accepted-only pool matches on base and fix."""
+    _add(store, "kept adr", kind="adr", hours_ago=9)
+    _add(store, "kept gotcha", hours_ago=1)
+    filters = {"kind": ["adr", "gotcha"], "limit": 1}
+    ordered = _decision_listing(store, None, **filters)
+    monkeypatch.setattr(server_module, "_accepted_first", lambda groups: groups)
+
+    assert _decision_listing(store, None, **filters) == ordered
 
 
 def test_omitted_decision_ids_are_listed_before_omitted_fact_ids(store):
@@ -831,8 +858,28 @@ def test_a_derived_community_entity_is_not_searched(store):
     assert _ask(store, query="78")["matched"] == 0
 
 
+def test_a_domain_binding_does_not_make_its_label_searchable(store):
+    decision = _add(store, "lock order")
+    domain = store.add_domain(
+        Domain(
+            slug="payments",
+            title="Payments",
+            summary="Settlement.",
+            provenance=Provenance(source="manual"),
+        )
+    )
+    store.ratify_domains(accept=[domain.domain_id])
+    entity = store.find_abstract_entity("domain:payments")
+    assert entity is not None
+    store.add_binding(AnchorBinding(record_id=decision.id, entity_id=entity.entity_id, tier=1))
+    store.set_meta(VOLATILE_STALE_KEY, "0")
+
+    assert decision.id not in store.anchor_names()
+    assert _ask(store, query="payments")["matched"] == 0
+
+
 def test_a_label_is_searched_without_its_scheme(store):
-    """``tag:``, ``initiative:`` and ``domain:`` say what kind of label an anchor is. The
+    """``tag:`` and ``initiative:`` say what kind of label an anchor is. The
     scheme is not part of the name: the word ``tag`` must not find every tagged record."""
     decision = _add(store, "lock order")
     tag = store.get_or_create_abstract_entity("tag:locking")

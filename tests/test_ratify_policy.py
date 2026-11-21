@@ -98,7 +98,7 @@ def store(tmp_path) -> Store:
 # ``retry()`` in ``trader/retry.py``, community 1 -- so `retry()` is ambiguous while
 # `Trader`/`place_order()`/`helper()` stay resolvable exactly as in GOLDEN_GRAPH. Modeled
 # on the repo's existing two-same-label precedent, ``tests/test_anchoring.py``'s
-# ``test_ambiguous_real_reader_degrades_to_community``.
+# ``test_ambiguous_real_reader_gets_a_degraded_leaf``.
 FEATURE_GRAPH: dict = {
     "directed": True,
     "multigraph": False,
@@ -1911,6 +1911,46 @@ def test_cascade_blocks_when_any_fact_in_the_set_is_ineligible(store, tmp_path):
     assert store.get_decision(result.decision_id).status == DecisionStatus.PROPOSED
     assert store.get_fact(good.fact_id).status == DecisionStatus.PROPOSED
     assert store.get_fact(orphan.fact_id).status == DecisionStatus.PROPOSED
+
+
+def test_an_ambiguous_draft_dedups_on_its_title(store, tmp_path):
+    reader = _feature_graph(tmp_path)
+    first = _eligible_decision_draft(title="Retry limits", anchors=[{"name": "retry"}])
+    second = {**first, "choice": "Use a different retry limit"}
+
+    [written] = capture.propose([first], store, reader)
+    [repeated] = capture.propose([second], store, reader)
+
+    assert written.status == "written"
+    assert repeated.status == "deduped"
+
+
+def test_an_inherited_ambiguous_anchor_is_live_after_sync(store, tmp_path):
+    """The first sync re-points the new entity and makes its community binding live.
+    Later captures on that entity keep degraded bindings while the community stays put."""
+    from sidegraph.server import _add_decision_impl, _supersede_decision_impl
+    from sidegraph.sync import sync
+
+    reader = _feature_graph(tmp_path)
+    sync(store, reader, force=True)
+    anchors = [{"name": "retry"}]
+    for title, successor_status in [("First limit", "accepted"), ("Second limit", "proposed")]:
+        original = _add_decision_impl(store, reader, title, "adr", "C", "R", anchors=anchors)
+        assert original["status"] == "accepted"
+        sync(store, reader, force=True)
+
+        successor = _supersede_decision_impl(
+            store,
+            reader,
+            original["id"],
+            title=f"{title} update",
+            kind="adr",
+            context="C",
+            choice="Updated limit",
+            ratify_policy=RatifyPolicy.AUTO_ALL,
+        )
+
+        assert successor["status"] == successor_status
 
 
 def test_initiative_binding_never_masks_a_missing_live_anchor(store, tmp_path, monkeypatch):

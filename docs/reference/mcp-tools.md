@@ -122,7 +122,7 @@ for recovery from an incomplete operation.
 | [`get_task_context`](#get_task_context) | Budgeted, task-scoped memory | Before/while editing specific files or entities (the main read path) |
 | [`query_structure`](#query_structure--query_decisions) | The code map around the given seeds | A cheap follow-up once you already have decision memory and just need the code map |
 | [`query_decisions`](#query_structure--query_decisions) | Task-scoped memory with exact seeds | A cheap follow-up once you already have the structural map |
-| [`drill_down`](#drill_down) | Walk one domain: summary, subdomains, members, decisions (bounded) | After spotting a domain in the `SessionStart` TOC, to go one level deeper |
+| [`drill_down`](#drill_down) | Walk one domain: summary, subdomains, members, decisions (bounded) | After finding its slug with `list_domains` |
 | [`list_domain_candidates`](#list_domain_candidates) | Read-only, path-grouped naming candidates over unclaimed communities (bounded) | The machine half of the `name-domains` skill, before proposing any domain |
 | [`list_domains`](#list_domains) | Full listing of every domain, any status, with lineage | "Show me all domains" — the `manage-domains` skill's general listing tool |
 | [`propose_decisions`](#propose_decisions) | Deterministic write pipeline for distilled drafts, plus attached/standalone facts | End of session, from the `Stop`-hook nudge |
@@ -527,10 +527,10 @@ written as orphaned (as by [`add_anchors`](#add_anchors)) and every one is copie
 `file-not-in-graph` (exact-file retrieval still serves it as `[file-bound]`); a dead one stays
 behind with the duplicate. `anchors_orphaned` lists the copies. An accepted, open fact that
 supports the duplicate and has no other way into retrieval gains the same anchors, so it still
-surfaces for those files, or the kept record's anchors when the duplicate has none to give (a
-global decision, or one bound only to a community, domain or tag); `facts_anchored` lists those
-fact ids. A fact has another way in when it has a `live` or `degraded` anchor of its own to a code
-entity, or an orphaned one naming an existing file the graph does not index (served as
+surfaces for those files, or the kept record's anchors when the duplicate has none to give.
+`facts_anchored` lists those fact ids. A fact has another way in when it has a `live` anchor
+of its own to a code entity, a `degraded` anchor with a file, or an orphaned one naming an
+existing file the graph does not index (served as
 `[file-bound]`), or when another accepted, open decision among its `supports` is global or has
 such an anchor. A binding to a community, domain or tag alone does not count: those surface
 decisions, never a fact. A proposal does not count either, since it can leave the proposal
@@ -718,12 +718,14 @@ all other fields are unchanged. Pass `include_provenance=True` for the full prov
 block. Provenance is removed before the budget cut, so budget-bound answers can fit more
 records. The flag leaves the overview unchanged.
 
-On Codex, when the calling agent is known exactly, a non-proposed record already sent in
-full to that agent by an MCP read in this session is a compact row with `id`, `kind`,
-`status`, `title`, `valid_from` and `sent_earlier: true`. The hint counts only those rows
-actually returned. Asking with `ids=[...]` always requests full records, even after an
-earlier delivery; use `ids=[...]` together with `include_provenance=True` for the full
-record including provenance. The flag alone keeps sent-earlier rows compact.
+On Codex and Claude Code, when the calling agent is known exactly, a non-proposed record
+already sent in full to that agent by an MCP read in this session is a compact row with `id`,
+`kind`, `status`, `title`, `valid_from` and `sent_earlier: true`. Record selection charges the
+full body's cost. The hint explains and counts returned pointers when their savings cover
+the explanation. Listing reads mark full decisions as sent only if they have no live accepted
+supporting facts. Asking with `ids=[...]` always requests full records, even after an earlier
+delivery. Use it with `include_provenance=True` to include provenance. The flag alone keeps
+sent-earlier rows compact.
 
 #### A shortened id
 
@@ -761,9 +763,10 @@ are unchanged. Claude, Grok and unidentified callers keep receiving full filtere
 }
 ```
 
-When cut, `omitted_ids` lists the omitted record ids in pool order (mistakes first: gotchas,
-then lessons and constraints; then newest first). Read them with
-`retrieve_decisions(ids=[...])`. `omitted_ids_unlisted` counts ids that could not fit and
+When cut, `omitted_ids` lists the omitted record ids in pool order. Accepted and other admitted
+statuses precede `proposed`. In a filtered call without `query`, each group puts gotchas first,
+then lessons and constraints, then other kinds, with newest first within a rank. Read omitted
+records with `retrieve_decisions(ids=[...])`. `omitted_ids_unlisted` counts ids that could not fit and
 appears only when positive; neither key appears on an uncut answer.
 
 **Facts that match a query.** A query also returns the facts that hold every word, in their
@@ -814,9 +817,9 @@ The filters combine with AND:
 - **`query`** is split on whitespace; a full match holds every word, in any letter case, in the
   record's `title`, `context`, `choice`, `rejected` or `consequences`, or in the name or the
   file path of an entity behind one of the record's live or degraded bindings, as the store
-  holds them after the last sync. A binding the last sync found orphaned is not searched. A
-  label is found by its name, without the `tag:`, `initiative:` or `domain:` prefix. The code
-  graph is not read for a query, so the answer is the same without one. Such records come
+  holds them after the last sync. A binding the last sync found orphaned is not searched. Tag and
+  initiative names are searched without their prefixes. Anchor matching skips domain bindings.
+  The code graph is not read for a query, so the answer is the same without one. Such records come
   after every record whose own text holds the words, mistakes first among them. A record
   found this way starts with `matched_anchors`, the list of its anchors' names or paths that
   held a word its text does not hold, and a `sent_earlier` row keeps the key. `files=[...]`
@@ -874,9 +877,11 @@ cut the rows as they cut records, and the counts and `omitted_ids` follow the ru
 Under `status`, `kind`, `files` or `ids` the first sentence of the hint reads `No record
 these filters admit holds every word of the query.`
 
-**Order and bounds.** Records come back `gotcha`, then `lesson` and `constraint`
-together, then everything else; within a rank newest `valid_from` first, `id` descending as
-the tie-break. Records are added in that order while the answer stays within `budget_chars` and the count within `limit`. A record is
+**Order and bounds.** Filtered listings place accepted records and other admitted statuses
+before `proposed`. In a filtered call without `query`, each group puts `gotcha` first, then
+`lesson` and `constraint` together, then everything else. Within a rank the newest `valid_from`
+comes first, with descending `id` as the tie-break. Records are added while the answer stays within
+`budget_chars` and the count within `limit`. A record is
 never cut in the middle: the first one that does not fit ends the list, and if even the first
 does not fit, `decisions` is empty and the hint says so. `limit` is clamped to 1..100 and
 `budget_chars` to 4,000..40,000, so no argument turns the call back into a dump.
@@ -885,7 +890,7 @@ In a query answer the groups are placed in this order: the decisions whose own t
 every word, then the facts whose own text does, then the decisions that hold a word only
 through an anchor, then the facts that do. Every record that is not proposed, in any group,
 comes before the proposed ones, each half in the order above; a later group takes only the
-room the ones before it leave. A call without `query` keeps the order it had. Every match is counted and, when it is not returned, listed in `omitted_ids` or
+room the ones before it leave. Every match is counted and, when it is not returned, listed in `omitted_ids` or
 `omitted_fact_ids` as far as the ids fit. When the returned records fill the budget to within
 about a hundred characters, the last of them gives way to that account and is then the first
 id listed.
@@ -1015,11 +1020,14 @@ Looks up an `Entity.entity_id` by name — the tool that lets `get_entity_histor
 without reading the store directly. Tries an exact descriptor match (canonicalized `name` +
 `file_path`) first; if that misses, falls back to a name-only scan across all entities.
 
-- A single match (exact or name-only) is returned as found.
-- No match at all: `{"found": false}`.
+- A single store match (exact or name-only) is returned as found. If the exact lookup
+  misses and the sole name-only match names another file, `hint` says so.
 - Multiple name-only matches (the same name reused across files, with no `file_path` given
-  to disambiguate): never guessed at — returned as `candidates` instead. Re-call with
-  `file_path` set to one of them to resolve.
+  to disambiguate) are returned as `candidates`. Pass `file_path` to narrow by file.
+- On a full miss with a non-blank name, the lookup tries the code graph if available.
+  This lets `Type.member` with its `file_path` reach a method the graph names `.member()`.
+  The tool returns a single named entity as found or offers the matching identities as
+  candidates. Use `entity_id` to distinguish candidates in the same file.
 - Spelling twins of one file (an entity named `src/sidegraph/store.py` beside one named
   `store.py` at that path) answer as one entity, the one named by the basename. Two files
   are never merged. [`get_entity_history`](#get_entity_history) lists the records bound to
@@ -1038,7 +1046,9 @@ listed by `list_facts`). The types of all the bindings come from one read of the
 removed by hand or lost in a merge. Treat it as a dangling anchor, not as a decision to
 fetch. On ambiguity:
 `{"found": false, "candidates": [{"entity_id": str, "canonical_name": str, "file_path": str |
-None}, ...]}`. On no match: `{"found": false}`.
+None}, ...]}`. On no match, the answer is `{"found": false, "hint": ...}`. The hint
+distinguishes a graph match that reached no memory entity, no match for the name as given,
+and a lookup with no graph available.
 
 The answer is one JSON text block, with no output schema or structured copy (`.data` is
 `None` for MCP clients). `budget_chars` is clamped to 4,000..40,000, default 24,000.
@@ -1046,11 +1056,14 @@ Bindings are whole rows. When cut, `omitted` counts the remaining bindings and `
 lists their record ids in binding order, as many as fit; `omitted_ids_unlisted` appears only
 when some ids also do not fit. `hint` points to `get_entity_history(entity_id=...)`,
 `retrieve_decisions(ids=[...])` and `list_facts(ids=[...])`. Ambiguous candidates are bounded
-the same way, with `candidates_omitted` and entity ids in `omitted_ids`; the hint says to pass
-`file_path` to choose one. Oversized entity text (`canonical_name`, `descriptor.name`,
+the same way, with `candidates_omitted` and entity ids in `omitted_ids`. The hint points to
+`file_path` for narrowing by file and to `entity_id` when all candidates share the supplied
+file. Oversized entity text (`canonical_name`, `descriptor.name`,
 `descriptor.file_path`, `last_seen_node_id`; candidate `canonical_name` and `file_path`) is
-clipped with an explicit hint. Entity and record ids are preserved. Uncut ordinary answers
-keep their previous JSON text and carry no remainder fields or hint.
+clipped with an explicit hint. Entity and record ids are preserved. Ordinary uncut answers
+keep their previous JSON shape and carry no remainder fields. A miss or a unique name-only
+match in a different file carries a lookup hint. That hint comes before any omission or
+clipping hint.
 
 ## `get_entity_history`
 
@@ -1142,23 +1155,25 @@ The structural map is not included: call `query_structure` with the same seeds f
 `structure_budget` sets how far the graph walk that finds related records reaches: it
 takes the `structure_budget // 120` nodes outside your seeds that have the most edges
 to them.
-Related decisions on a seed's community also include the decisions of **every** accepted domain
-that currently covers that community (unioned, not just the newest one — more than one accepted
-domain can cover the same community at once) — see
+The related tier reads community bindings and neighbouring entities. The overflow note
+points to `retrieve_decisions(query=...)`. See
 [retrieval: bucket C](../concepts/retrieval.md#bucket-c-domains-and-communities). See
 [`guides/retrieval-in-sessions.md`](../guides/retrieval-in-sessions.md) for how to read the
 output, and [`configuration.md`](configuration.md) for what the two budgets mean and whether
 they're configurable beyond these call-time defaults.
 
-On Codex, Sidegraph knows the calling agent from its thread id. A detailed, non-degraded
-accepted decision that this agent already received in full from an MCP read keeps its rank
-as `- [gotcha] [sent earlier] Title (id: ...)` (with its own kind and any drift/file-bound
-tags). A legend explains that `retrieve_decisions(ids=[...])` reads it again in full.
-Accepted supporting evidence is omitted from that pointer, and the freed memory budget
-goes to further records. Facts, related lines, degraded summaries and proposals do not
-enter the sent set. This also applies to nearest-anchored records. Claude, Grok and callers
-without an exact agent identity keep the usual answer. Compact/clear SessionStart events
-reset the main agent's sent set; deleting the derived index also forgets it.
+Sidegraph identifies Codex agents by thread id and Claude Code agents by a matching
+PreToolUse caller row. A detailed, non-degraded accepted decision that this agent already
+received in full from an MCP read can become an in-place pointer such as
+`- [gotcha] [sent earlier] Title (id: ...)`, with its own kind and any drift/file-bound tags.
+The memory budget charges the full body's cost, and budgeted supporting evidence stays in
+the answer. When the pointers save enough space, a legend explains that
+`retrieve_decisions(ids=[...])` reads the decision again in full.
+Facts, related lines, degraded summaries and proposals do not
+enter the sent set. This also applies to nearest-anchored records. Grok and callers
+without an exact agent identity use no sent state. Compact and clear SessionStart events
+reset the sent set of the agent the notice names. The session's own agent is the default when
+the notice omits `agent_id`. Deleting the derived index also forgets the sent set.
 
 `intent` is a label for what asked — a skill name, say. It is recorded for local statistics
 only (see [`sidegraph-stats`](cli.md#sidegraph-stats)) and never affects what is returned.
@@ -1307,11 +1322,10 @@ answer is exactly `No context found.`, ends with:
 ## Why this is empty
 No files or entities were given, so nothing could be matched. Pass files=[…] with the
 repo-relative paths you are working on, or entities=[{"name": "…"}] when you know a symbol's
-name and not its file, or drill_down(<slug>) for a named area: Auth (auth), Payments (payments).
+name and not its file.
 ```
 
-It names at most 12 accepted domains by title and slug (then `, and N more`), and stops at
-"not its file." when the store has none. A seed with neither a name nor a path (`files=[""]`,
+A seed with neither a name nor a path (`files=[""]`,
 `entities=[{}]`, blanks) counts as no seed. With no code graph the block also says to build it first
 (`graphify update .` with the environment variable `GRAPHIFY_NO_AUTO_REFRESH=1` set). Every other empty answer already says why: a path the
 graph lacks gets the not-in-graph block, a name that matches nothing gets its own line above, and
@@ -1426,21 +1440,20 @@ same lazy-sync behavior, same underlying ranking code (neither duplicates `get_t
 logic).
 
 - `query_structure` renders only the `## Structural map` block. It omits pathless engine
-  artifacts; when leaves overflow its budget, accepted-domain summaries can fill the remaining
-  space (the summaries-instead-of-leaves fallback). No graph reader present → returns
-  `"No structural context found."`/`"No graph reader available; structural map omitted."`
-  rather than crashing — structure inherently needs the graph.
+  artifacts and returns the node lines that fit the walk and character budgets. Portal Agent
+  View reports when node lines were cut. An empty map returns `"No structural context found."`.
+  Without a graph reader the tool returns `"No graph reader available; structural map omitted."`.
 - `query_decisions` renders `## ⚠ Known mistakes & gotchas`, `## Decisions` (with inline
   `evidence:` lines), `## Known facts` (standalone facts), `## Related`, and
   `## Unratified proposals` (proposed records inside the surfacing window, last), with no structural
-  map — internally it still reads the graph for the neighbours of the seeds, whose entities
-  feed bucket C; it never renders the map. Degrades exactly like `get_task_context`:
+  map. The graph walk supplies neighbouring entities to bucket C along with the seeds'
+  community bindings. It degrades like `get_task_context`:
   named-seed resolution needs a reader, but `scope: global` decisions still surface without
   one.
   Over its 40,000-character cap it cuts the records placed last first, as `get_task_context`
   does, so what the ranking put first (a named symbol's records) is cut last.
 
-`query_decisions` uses the same Codex per-agent `[sent earlier]` behavior as
+`query_decisions` uses the same per-agent `[sent earlier]` behavior as
 `get_task_context`, including when the earlier full body came from `retrieve_decisions`.
 A pointer keeps its position and the supersede hint; explicit-id listing calls read it in full.
 
@@ -1471,9 +1484,8 @@ drill_down(
 
 Walk one [`Domain`](../concepts/mind-model.md): its WHY-IT-EXISTS summary, its accepted
 subdomains (title + one-liner), a capped member sample (the domain's members in the membership index each sync keeps,
-up to 20, deduplicated; path-prefix matches ranked first), and the decisions about it (mistakes first) — the
-Axis-1 counterpart to the flat `SessionStart` TOC. The member sample is **pathful-only and
-ranked**: a member with no `source_file` (an engine artifact with nothing to point a human at)
+up to 20, deduplicated; path-prefix matches ranked first), and the decisions about it (mistakes
+first). Find the slug with `list_domains`. The member sample is **pathful-only and ranked**: a member with no `source_file` (an engine artifact with nothing to point a human at)
 is dropped outright, and survivors are ordered members matching `path_prefixes` first, then each
 covered community's god node, then everything else in the reader's own node order — so a big
 domain's sample favors its most informative members rather than whatever happens to sort first.
@@ -2302,12 +2314,11 @@ same way, before any entity is minted, and writes nothing. MCP omits the raw fil
 cause; use `sidegraph-doctor` to identify the binding file to repair. Generic errors retain
 the conservative inspection remedy above.
 
-Per anchor: resolved against the graph via the same `resolve_and_bind` ladder every other
-anchoring tool here uses when a reader is present — an ambiguous name is reported, never
-guessed, and creates no Tier-2 leaf; a resolved name lands a live Tier-2 leaf (+ Tier-1
-domain/community). With no reader, or a name that resolves to nothing, the anchor still
-binds — an orphaned Tier-2 leaf — so a re-anchor request is never silently dropped for lack
-of a graph.
+With a reader, each anchor uses the same `resolve_and_bind` ladder as the other anchoring
+tools. A resolved name lands a live Tier-2 leaf and a Tier-1 domain or community when one is
+known. An ambiguous name is reported and can get a degraded leaf under the
+[shared-community rule](../concepts/anchoring.md#graceful-degradation-ladder-resolved---ambiguous---orphaned).
+With no reader, or a name that resolves to nothing, the anchor binds an orphaned Tier-2 leaf.
 
 **Returns:** `{"record_id": str, "bound": list[dict], "orphaned": list[dict], "ambiguous":
 list[dict]}` — `bound`/`orphaned` entries are `{"entity_id": str, "canonical_name": str,
@@ -2315,8 +2326,11 @@ list[dict]}` — `bound`/`orphaned` entries are `{"entity_id": str, "canonical_n
 `bound` for anchors that resolved to exactly one live graph node, `orphaned` for anchors
 bound with no graph present or that resolved to nothing (never dropped either way).
 `ambiguous` is `{"name": str, "reason": "ambiguous", "candidates": list[str]}` (capped at 5)
-for anchor names that matched more than one graph node — no leaf created, the same
-per-anchor feedback `add_decision`'s `anchors_skipped` gives. Identical path-less external stubs (the per-file stubs newer Graphify emits for an imported name such as `BaseModel`) count as one match. On success, inside a git repository, the result also carries a `commit_hint` ([Commit hint](#commit-hint)); the error dict has none.
+for anchor names that matched more than one graph node. These anchors create no live Tier-2
+leaf and get the same feedback as `add_decision`'s `anchors_skipped`. Identical path-less
+external stubs (the per-file stubs newer Graphify emits for an imported name such as
+`BaseModel`) count as one match. On success, inside a git repository, the result also carries
+a `commit_hint` ([Commit hint](#commit-hint)); the error dict has none.
 
 ## `record_drift_check`
 

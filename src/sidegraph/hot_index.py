@@ -23,6 +23,7 @@ import contextlib
 import json
 import os
 import sqlite3
+import stat
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,8 +34,11 @@ from . import delivery as delivery_ledger
 from .store_layout import (
     DELIVERABLE_STATUSES,
     DESCRIPTOR_CHANGED_PREFIX,
+    GRAPH_FILES_STAMP_KEY,
     INDEX_JOURNAL_PRAGMA,
     KEPT_STATUS_COLUMN,
+    LAST_SYNCED_KEY,
+    LEAF_STATUSES,
     MISTAKE_KINDS,
     VOLATILE_STALE_KEY,
     StoreRequirementError,
@@ -178,6 +182,7 @@ class HotIndex:
         store_path: str | os.PathLike[str],
         *,
         on_error: Callable[[Exception], None] | None = None,
+        on_missing: Callable[[], None] | None = None,
         busy_timeout_seconds: float = BUSY_TIMEOUT_SECONDS,
     ) -> HotIndex | None:
         """The handle for the store at ``store_path``, or ``None`` when ``Store`` would have
@@ -186,7 +191,8 @@ class HotIndex:
         this code's two accepted stamps, the format marker refuses this version,
         ``retrieval_events`` has no ``agent`` column (an index from before per-agent
         hook state), or anything raises while opening. Never creates a file and never writes
-        on open.
+        on open. ``on_missing`` reports the missing-file refusal.
+        # see design/superpowers/specs/2026-11-20-pretooluse-coverage-design.md (D7)
         # see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D2)"""
         root = Path(store_path)
         conn: sqlite3.Connection | None = None
@@ -195,7 +201,15 @@ class HotIndex:
                 return None
             check_store_requirement(root)
             index = root / "index.db"
-            if not index.is_file():
+            # Only absence warrants the callback. Path predicates can hide other I/O errors.
+            try:
+                mode = index.lstat().st_mode
+            except OSError as error:
+                if isinstance(error, FileNotFoundError) and on_missing is not None:
+                    with contextlib.suppress(Exception):
+                        on_missing()
+                return None
+            if not stat.S_ISREG(mode):
                 return None
             # mode=rw never creates the file; quoted like gitio.open_index_ro (a path may
             # hold characters a URI treats as syntax).
@@ -507,19 +521,53 @@ class HotIndex:
             return {}
         return {path: ids for path, ids in self.anchored_files().items() if path in wanted}
 
+    def exact_path_files(
+        self, rel_paths: Iterable[str], *, on_error: Callable[[Exception], None] | None = None
+    ) -> tuple[set[str], bool]:
+        """Return paths eligible for exact lookup and whether the index has never synced.
+
+        see design/superpowers/specs/2026-11-20-pretooluse-coverage-design.md (D4)
+        """
+        try:
+            with self._reading():
+                meta = dict(
+                    self._conn.execute(
+                        "SELECT key, value FROM meta WHERE key IN (?, ?, ?)",
+                        (LAST_SYNCED_KEY, VOLATILE_STALE_KEY, GRAPH_FILES_STAMP_KEY),
+                    )
+                )
+                synced = meta.get(LAST_SYNCED_KEY)
+                if synced is None and meta.get(VOLATILE_STALE_KEY) == "1":
+                    return set(rel_paths), True
+                if synced is not None and meta.get(GRAPH_FILES_STAMP_KEY) == synced:
+                    return {
+                        path
+                        for path in rel_paths
+                        if not self._conn.execute(
+                            "SELECT 1 FROM graph_files WHERE path = ?", (path,)
+                        ).fetchone()
+                    }, False
+        except sqlite3.Error as error:
+            if on_error is not None:
+                with contextlib.suppress(Exception):
+                    on_error(error)
+        return set(), False
+
     def records_for(
         self,
         entity_ids: Sequence[str],
         *,
+        exact_path: bool = False,
         on_error: Callable[[Exception], None] | None = None,
     ) -> list[Record]:
         """Live bound records: accepted mistakes, other decisions, facts, then proposed
         decisions and facts. Decision order is unchanged; fact ties use ascending ids.
 
         Only live/degraded bindings count, and on a cold index only those whose leaf status
-        the rebuild kept as live or degraded. Deduplicate ids within this file's
-        candidate list, never across files. Each record table fails independently, and
-        operational SQL errors use the protected diagnostic callback.
+        the rebuild kept as live or degraded. Exact-path reads accept all leaf statuses.
+        Deduplicate ids within this file's candidate list, never across files. Each record table
+        fails independently, and operational SQL errors use the protected diagnostic callback.
+        see design/superpowers/specs/2026-11-20-pretooluse-coverage-design.md (D4)
         """
         now = datetime.now(UTC)
         mistakes: list[tuple[dict, datetime]] = []
@@ -534,14 +582,16 @@ class HotIndex:
                 with contextlib.suppress(Exception):
                     on_error(error)
 
+        sql = "SELECT data FROM anchor_bindings WHERE entity_id = ?"
+        gate_params = () if exact_path else self._gate_params
+        if not exact_path:
+            sql += f" AND {self._ready_sql}"
+        statuses = LEAF_STATUSES if exact_path else DELIVERABLE_STATUSES
         for entity_id in entity_ids:
             if self.lock_lost:  # a lost wait ends the call: no further read waits again
                 break
             try:
-                rows = self._conn.execute(
-                    f"SELECT data FROM anchor_bindings WHERE entity_id = ? AND {self._ready_sql}",
-                    (entity_id, *self._gate_params),
-                ).fetchall()
+                rows = self._conn.execute(sql, (entity_id, *gate_params)).fetchall()
             except sqlite3.Error as error:
                 report(error)
                 continue
@@ -549,9 +599,7 @@ class HotIndex:
             for (data,) in rows:
                 try:
                     binding = json.loads(data)
-                    if binding.get("status") in DELIVERABLE_STATUSES and isinstance(
-                        binding["record_id"], str
-                    ):
+                    if binding.get("status") in statuses and isinstance(binding["record_id"], str):
                         record_ids.append(binding["record_id"])
                 except (ValueError, TypeError, KeyError, AttributeError):
                     continue

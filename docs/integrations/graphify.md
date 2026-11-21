@@ -143,8 +143,7 @@ upgrading to another version.
 cleanly with Sidegraph: both read `graph.json` read-only, and Sidegraph never needs Graphify's
 server to function — it only ever reads the file directly via `GraphifyReader`. If you
 register both, Sidegraph's `PreToolUse` delivery of records only intercepts
-Claude Code's own `Read`/`Grep`/`Edit`/`Write` calls and Bash `sed`/`grep`/`rg`/`cat` lines (see
-[`claude-code.md`](claude-code.md)), so a direct call to one of Graphify's own MCP tools bypasses
+Claude Code's own `Read`/`Grep`/`Edit`/`Write` calls and [supported Bash reads](../reference/hooks.md#bash-lines), so a direct call to one of Graphify's own MCP tools bypasses
 it entirely — the records of the files that call touches are not handed over the way they are
 for a `Read`.
 

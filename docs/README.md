@@ -25,7 +25,7 @@ If the repository already has ADRs or specs, use the
 
 - [Retrieve context before editing](guides/retrieval-in-sessions.md).
 - [Capture decisions and supporting facts](guides/capturing-decisions.md).
-- [Name domains for the SessionStart table of contents](guides/naming-your-domains.md).
+- [Name domains to organize the project's areas](guides/naming-your-domains.md).
 - [Share and review the store as a team](guides/team-workflow.md).
 - [Review and browse the store in Sidegraph Portal](guides/portal.md).
 
@@ -55,7 +55,7 @@ it is optional background on evidence, limits, and repository fit.
 - [Host feature support](integrations/support.md) — delivery paths and setup links.
 
 - [Decision memory](concepts/decision-memory.md) — what belongs in the store.
-- [Mind model](concepts/mind-model.md) — domains, TOC, and drill-down.
+- [Mind model](concepts/mind-model.md) — the opening map, domains and drill-down.
 - [Data model](concepts/data-model.md) — persisted record shapes.
 - [Anchoring](concepts/anchoring.md) — how records stay attached to code and docs.
 - [Retrieval](concepts/retrieval.md) — ranking, trust quarantine, and budgets.

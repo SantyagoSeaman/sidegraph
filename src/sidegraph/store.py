@@ -99,6 +99,7 @@ from .store_format import (
 )
 from .store_layout import (
     DESCRIPTOR_CHANGED_PREFIX,
+    GRAPH_FILES_STAMP_KEY,
     INDEX_JOURNAL_PRAGMA,
     INDEX_STAMPS,
     KEPT_STATUS_COLUMN,
@@ -106,6 +107,7 @@ from .store_layout import (
     LEGACY_DEFAULTS,
     NOT_A_FILE_REASON,
     SHARDS_SUBDIR,
+    VOLATILE_STALE_GEN_KEY,
     VOLATILE_STALE_KEY,
     InterruptedMigrationError,
     LegacyStoreError,
@@ -129,6 +131,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 )""",
+    "CREATE TABLE IF NOT EXISTS graph_files (path TEXT PRIMARY KEY) WITHOUT ROWID",
     """CREATE TABLE IF NOT EXISTS entities (
     entity_id TEXT PRIMARY KEY,
     canonical_name TEXT NOT NULL,
@@ -387,6 +390,10 @@ MEMBERSHIP_POPULATED_KEY = "domain_membership_populated"
 _LARGE_PAGE_CACHE_KIB = 65536
 
 _CANONICAL_DIGEST_KEY = "canonical_digest"
+_BUMP_STALE_GEN_SQL = (
+    "INSERT INTO meta (key, value) VALUES (?, '1') "
+    "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1"
+)
 
 # Meta key: JSON list of the canonical files the last reload left out: a record-identity
 # problem (design/superpowers/specs/2026-09-29-record-identity-design.md D3, D4), a parse error
@@ -2525,6 +2532,7 @@ class Store:
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (key, value),
                 )
+            self._conn.execute(_BUMP_STALE_GEN_SQL, (VOLATILE_STALE_GEN_KEY,))
 
     def invalidate_domain_membership(self) -> None:
         """What ``sidegraph-domains snapshot`` calls after it writes the file: the same
@@ -3157,6 +3165,7 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+        self._conn.execute(_BUMP_STALE_GEN_SQL, (VOLATILE_STALE_GEN_KEY,))
         self._keep_leaf_statuses(kept)
         self._uncertify_membership()
         self._conn.execute("DELETE FROM meta WHERE key = ?", (MEMBERSHIP_POPULATED_KEY,))
@@ -4360,10 +4369,11 @@ class Store:
         """Record id -> the names a query can find the record by: the ``canonical_name`` and
         the descriptor ``file_path`` of every entity behind one of its searchable bindings, in
         binding order, each once. A label (an abstract entity: ``tag:<slug>``,
-        ``initiative:<name>``, ``domain:<slug>``) is given without its scheme, which says what
+        ``initiative:<name>``) is given without its scheme, which says what
         kind of label it is and is not part of its name. A record with no such binding has no
         entry. Read-only: one pass over ``entities`` and ``anchor_bindings`` inside one read
         snapshot, so a caller pays no read per record and gets one point in time.
+        Query matching skips ``domain:<slug>`` bindings, which organize the store for people.
 
         A binding is searchable when its status is ``live`` or ``degraded``, the statuses a
         record is delivered through (``valid_decisions_for_entity``). On a cold index
@@ -4426,6 +4436,8 @@ class Store:
                 label = body["canonical_name"]
                 if isinstance(label, str):
                     if body.get("kind") == "abstract":
+                        if label.startswith("domain:"):
+                            continue
                         label = label.partition(":")[2] or label
                     found.append(label)
                 path = (body.get("descriptor") or {}).get("file_path")
@@ -5374,6 +5386,7 @@ class Store:
         not index (``orphan_reason`` says :data:`FILE_BOUND_ORPHAN`; served as ``[file-bound]``
         for that exact file). An abstract entity (``community:*``, ``domain:*``, ``tag:*``)
         seeds decisions only, never standalone facts or their evidence, so it never counts.
+        A degraded binding without a file is an ambiguous name and seeds nothing.
 
         ``served_now=False`` asks instead whether :meth:`_carry_bindings` from this record
         would give a target such a route, now or once the next sync heals it: any orphaned
@@ -5383,6 +5396,8 @@ class Store:
             if entity is None or entity.kind != EntityKind.CONCRETE or entity.descriptor is None:
                 continue
             if b.status in ("live", "degraded"):
+                if b.status == "degraded" and entity.descriptor.file_path is None:
+                    continue
                 return True
             if b.status != "orphaned":
                 continue
@@ -6613,6 +6628,18 @@ class Store:
         """
         return self.get_meta(_CANONICAL_DIGEST_KEY)
 
+    def clear_volatile_stale(self, seen: str) -> None:
+        """Clear the stale mark only for the generation the sync saw (``"0"`` if absent).
+
+        see design/superpowers/specs/2026-11-20-retrieval-anchor-sync-fixes-design.md (C)
+        """
+        with self._mutation():
+            self._conn.execute(
+                "UPDATE meta SET value = '0' WHERE key = ? AND "
+                "COALESCE((SELECT value FROM meta WHERE key = ?), '0') = ?",
+                (VOLATILE_STALE_KEY, VOLATILE_STALE_GEN_KEY, seen),
+            )
+
     def set_meta(self, key: str, value: str) -> None:
         if key == "schema_version":
             raise ValueError(
@@ -6624,6 +6651,17 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+            if key == VOLATILE_STALE_KEY and value == "1":
+                self._conn.execute(_BUMP_STALE_GEN_SQL, (VOLATILE_STALE_GEN_KEY,))
+
+    def replace_graph_files(self, paths: Iterable[str], stamp: str) -> None:
+        """Replace the graph's file membership and stamp in a single index mutation."""
+        with self._mutation(), self._savepoint():
+            self._conn.execute("DELETE FROM graph_files")
+            self._conn.executemany(
+                "INSERT INTO graph_files (path) VALUES (?)", ((path,) for path in sorted(paths))
+            )
+            self.set_meta(GRAPH_FILES_STAMP_KEY, stamp)
 
     def claim_meta(self, key: str, value: str) -> bool:
         """Set ``key`` only if it is absent; True iff this call set it.
@@ -6737,24 +6775,24 @@ class Store:
         stamp_key: str,
         stamp_value: str,
         skip: Callable[[str | None], bool],
+        extra_prefixes: Sequence[str] = (),
     ) -> int | None:
         """Delete the derived keys under a literal prefix once per stamp, in ONE transaction.
 
         Under the writer reservation: read ``stamp_key``; when ``skip(its value)`` is true,
-        change nothing and return ``None``; otherwise delete every key under ``prefix`` (as
+        change nothing and return ``None``; otherwise delete every key under the prefixes (as
         ``delete_meta_prefix`` does), set ``stamp_key`` to ``stamp_value`` and return how many
         keys went. The read, the deletion and the stamp commit or roll back together. Two
         callers that arrive at once therefore cannot both find no stamp: the second waits for
-        the reservation and then reads the first one's. ``stamp_key`` must lie outside
-        ``prefix``.
+        the reservation and reads the first one's. ``stamp_key`` must lie outside every prefix.
         """
-        if stamp_key.startswith(prefix):
+        if stamp_key.startswith((prefix, *extra_prefixes)):
             raise ValueError("the stamp key must lie outside the prefix it guards")
         with self._mutation():
             row = self._conn.execute(GET_META_SQL, (stamp_key,)).fetchone()
             if skip(row["value"] if row is not None else None):
                 return None
-            deleted = self.delete_meta_prefix(prefix)
+            deleted = sum(self.delete_meta_prefix(scope) for scope in (prefix, *extra_prefixes))
             self._conn.execute(
                 "INSERT INTO meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

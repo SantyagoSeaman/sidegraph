@@ -938,13 +938,12 @@ def _resolve_anchors(
 
     ``ambiguous`` (Gate-5 finding S3) is
     ``[{"name", "reason": "ambiguous", "candidates": [...capped 5]}]`` — matched more than
-    one node, so NO leaf was created.
+    one node. An eligible shared-community anchor can get a degraded leaf.
 
     ``orphaned`` is the entity summary of every leaf bound for an anchor that resolved to
-    NOTHING. That leaf IS written (``anchoring.resolve_and_bind``: "created when resolved
-    or unresolved"), deliberately. ``valid_decisions_for_entity``, ``drill_down`` and the
-    PreToolUse hook skip orphaned bindings; no Tier-1 community fallback is created
-    (there is no resolved node to take a community from). Exact missing-file applicability
+    NOTHING. That leaf is written with status ``orphaned``. ``valid_decisions_for_entity``,
+    ``drill_down`` and the PreToolUse hook skip orphaned bindings. No Tier-1 community
+    fallback is created because there is no resolved node. Exact missing-file applicability
     can still deliver eligible records as ``[file-bound]``, without verifying the anchor.
     Reporting it is the whole point: an unresolved anchor used to come back as
     ``bindings: 1``, an entity summary and an empty ``anchors_skipped`` — indistinguishable from
@@ -956,9 +955,8 @@ def _resolve_anchors(
     ``bound``/``orphaned``/``ambiguous`` separately — one vocabulary for one fact.
 
     ``resolve_and_bind`` already carries the ``reader.resolve()`` outcome on its return
-    value (``anchoring.AnchorResolution``), so this never re-resolves a ref just to learn
-    why no leaf binding was created. With no reader nothing can be ambiguous, but no anchor
-    is dropped either: each named one binds an orphaned Tier-2 leaf (``_bind_orphaned``, as
+    value (``anchoring.AnchorResolution``), so this reads the outcome directly. With no
+    reader, each named anchor binds an orphaned Tier-2 leaf (``_bind_orphaned``, as
     ``propose_decisions`` does) and is reported in ``orphaned`` with reason ``"no-graph"``;
     the next sync heals it once a graph holds the name.
     """
@@ -1816,10 +1814,10 @@ def retire_decision(id: str, reason: str, duplicate_of: str | None = None) -> di
     (``"file-not-in-graph"``, still served for that exact file), never a dead one.
     ``anchors_orphaned`` lists them (``{"entity_id", "canonical_name", "tier", "reason"}``). An
     accepted fact that supports the duplicate and has no other route into retrieval (no anchor
-    of its own to a code entity that is live, degraded, or orphaned on an existing file outside
-    the graph; no other accepted, open decision that is global or has one; a community, domain
-    or tag binding never counts) gains the same anchors, or the kept record's when the
-    duplicate has none to give; ``facts_anchored`` lists those fact ids.
+    of its own to a code entity that is live, degraded with a file, or orphaned on an existing
+    file outside the graph; no other accepted, open decision that is global or has one; a
+    community, domain or tag binding never counts) gains the same anchors, or the kept
+    record's when the duplicate has none to give. ``facts_anchored`` lists those fact ids.
 
     The record is never deleted. Default retrieval, ``get_task_context`` and the hooks stop
     serving it; ``get_entity_history`` and ``retrieve_decisions(status="deprecated")`` still
@@ -2385,7 +2383,7 @@ def _compact(row: dict) -> dict:
 
 
 def _accepted_first(groups: list[list[dict]]) -> list[list[dict]]:
-    """The groups of a query answer in the order they are placed: the records of every group
+    """The groups of a filtered answer in the order they are placed: the records of every group
     that are not proposals, then the proposals of every group. Unratified memory never
     outranks accepted memory, whichever group it matched in
     (``docs/reference/stability.md``); within each half the groups and their own order stand.
@@ -3061,7 +3059,6 @@ def _listing_hint(
     echo: str | None,
     has_query: bool,
     history_hint: bool,
-    sent_earlier: int = 0,
     sentences: int = 3,
     main_omitted: int | None = None,
     facts_omitted: int = 0,
@@ -3158,11 +3155,6 @@ def _listing_hint(
         if unlisted:
             text += f" {unlisted} more are not listed."
         parts.append(text)
-    if sent_earlier:
-        parts.append(
-            f"{sent_earlier} records were sent to you earlier in this session and are shown "
-            "as rows with sent_earlier; read one again with retrieve_decisions(ids=[...])."
-        )
     return " ".join(parts) or None
 
 
@@ -3437,7 +3429,7 @@ def _decision_listing_result(
                 miss = _query_miss(match.words, match._seen, need, filtered)
     else:
         _rank_listing(pool)
-        groups = [pool]
+        groups = _accepted_first([pool])
 
     def shaped(rows: list[dict]) -> list[dict]:
         """Rows as the answer shows them. A fact is never a sent-earlier row (design D2)."""
@@ -3454,13 +3446,6 @@ def _decision_listing_result(
                 | ({"expired": True} if d.get("expired") else {})
                 if _is_fact_row(d)
                 else {"matched_words": held_by[d["id"]]} | _compact(d)
-                for d in rows
-            ]
-        if not wanted_ids:
-            rows = [
-                _compact(d) | {"sent_earlier": True}
-                if not _is_fact_row(d) and d["id"] in sent and d["status"] != "proposed"
-                else d
                 for d in rows
             ]
         if not include_provenance:
@@ -3511,10 +3496,24 @@ def _decision_listing_result(
     # partial answer are not records sent in full, so none of them is claimed.
     if partial is not None:
         return text, []
+    if sent and not wanted_ids:
+        answer, compact = json.loads(text), 0
+        for i, row in enumerate(answer["decisions"]):
+            if row["id"] in sent and row["status"] != "proposed":
+                details = {k: row[k] for k in ("matched_history", "matched_anchors") if k in row}
+                answer["decisions"][i] = details | _compact(row) | {"sent_earlier": True}
+                compact += 1
+        if compact:
+            hint = (answer["hint"] or "") + (
+                f" {compact} records were sent to you earlier in this session and are shown "
+                "as rows with sent_earlier; read one again with retrieve_decisions(ids=[...])."
+            )
+            expanded = _dump(answer | {"hint": hint.lstrip()})
+            text = expanded if len(expanded) <= len(text) else _dump(answer)
     return text, [
         d["id"]
         for d in returned
-        if not _is_fact_row(d) and d["status"] != "proposed" and not d.get("sent_earlier")
+        if not _is_fact_row(d) and d["status"] != "proposed" and d["id"] not in sent
     ]
 
 
@@ -3610,7 +3609,6 @@ def _bounded_records(
                 echo=echo if echoed else None,
                 has_query=has_query,
                 history_hint=history_hint,
-                sent_earlier=sum(bool(d.get("sent_earlier")) for d in over[:k]),
                 sentences=sentences,
                 main_omitted=matched - k_main,
                 facts_omitted=fact_total - k_fact,
@@ -3722,9 +3720,10 @@ def retrieve_decisions(
     """List decisions from the store, bounded. The answer is one JSON object in one text block.
 
     With no narrowing filter you get an overview: the total, counts by status and kind, and the
-    newest records as compact rows. Pass a filter to get full records, mistakes first
-    (gotchas, then lessons and constraints), then newest first. On Codex, a record already sent
-    in full to the calling agent in this session becomes a compact row with
+    newest records as compact rows. Pass a filter to get full records, with proposed records
+    after all other records. Without a query, each of those groups starts with gotchas, then
+    lessons and constraints, then other kinds, newest first per rank. On Codex and Claude Code,
+    a record already sent in full to the calling agent in this session becomes a compact row with
     ``sent_earlier: true``; ``ids=[...]`` always requests full records. Proposed records never
     become sent-earlier rows. Answers are cut at ``limit`` (default 25, max 100) or ``budget_chars``
     (default 24000, max 40000), whichever comes first; ``hint`` says what cut the list or why
@@ -3745,9 +3744,10 @@ def retrieve_decisions(
     ``query`` is your question in a few words. For a full match the
     ``query`` words must all occur in a record: in its text, or in the name or path of the code
     it is anchored to through a live or degraded anchor, so a symbol or file name finds its
-    records. Records that
-    hold every word in their own text come first. A record found through an anchor starts with
-    ``matched_anchors``, the anchors that held the word. When only history holds every word and
+    records. Within each status group, decisions whose own text holds every word come before
+    decisions found through an anchor. Each of those two match groups follows the kind and
+    recency order above. A record found through an anchor starts with ``matched_anchors``,
+    the anchors that held the word. When only history holds every word and
     a live record replaced it, that record is the answer and ``matched_history`` names the
     history record. When no record holds every word, the answer is a partial answer
     (``"match": "partial"``): compact rows of the records whose text holds at least half of
@@ -3755,13 +3755,12 @@ def retrieve_decisions(
     record: read the ones that are about your question with ``ids=[...]``. A query of one or
     two words has no partial form. A query also returns the facts whose ``statement`` or
     ``source`` hold every word, or hold it through an anchor, under ``facts``
-    (``facts_matched`` counts them). They come after the decisions that hold every word in
-    their own text and take the room the records before them leave; ``kind`` keeps
-    them out. A fact whose ``valid_to`` has passed is expired and history too, shown with
-    ``include_superseded=True``. Read an omitted fact with ``list_facts(ids=[...])`` (ids in
-    ``omitted_fact_ids``). In a query answer proposed records come after every record that
-    is not proposed. Every match is counted, returned or not: one that had no room is in
-    ``omitted_ids`` or ``omitted_fact_ids``.
+    (``facts_matched`` counts them). Within each status group they come after the decisions
+    that hold every word in their own text and take the room the records before them leave.
+    ``kind`` keeps them out. A fact whose ``valid_to`` has passed is expired and history too,
+    shown with ``include_superseded=True``. Read an omitted fact with ``list_facts(ids=[...])``
+    (ids in ``omitted_fact_ids``). Every match is counted, returned or not: one that had no room
+    is in ``omitted_ids`` or ``omitted_fact_ids``.
     ``ids`` returns those records, superseded ones too. An id may be shortened to its first 8
     or more characters, in either letter case: it then reads the one record it starts, and
     ``id_lookup`` and ``hint`` say which full id it resolved to. A prefix that starts several
@@ -3792,7 +3791,17 @@ def retrieve_decisions(
             sent=sent,
             include_provenance=include_provenance,
         )
-        if not claims or _claim_sent(store, prefix, [i for i in full_ids if i not in sent]):
+        if claims and full_ids:
+            supporting = store.facts_by_supported_decision()
+            full_ids = [
+                rid
+                for rid in full_ids
+                if not any(
+                    f.status == DecisionStatus.ACCEPTED and not is_expired(f.valid_to)
+                    for f in supporting.get(rid, ())
+                )
+            ]
+        if not claims or _claim_sent(store, prefix, full_ids):
             break
         sent, claims = frozenset(), False
     # An overview (no narrowing filter) is a glance at the store, not a question: no row.
@@ -3979,8 +3988,35 @@ def list_facts(
     return ToolResult(content=text)
 
 
-def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
-    """Testable core: exact descriptor match first, then a name-only fallback scan.
+_FIND_ENTITY_NO_RECORD = (
+    "The code graph holds this name, but this lookup found no memory entity for it. An entity "
+    "stored under another spelling of the name is not ruled out."
+)
+_FIND_ENTITY_UNKNOWN_NAME = (
+    "Neither memory nor the code graph matches this name as given. find_entity takes a code "
+    "name: a symbol, Type.member with its file_path (a member is not found without its file), "
+    "or a file path. To search records by topic, use retrieve_decisions(query=...)."
+)
+_FIND_ENTITY_NO_GRAPH = (
+    "Memory has no entity for this name as given, and no code graph was available to check "
+    "other spellings (Graphify names a method .member(), not Type.member). find_entity takes a "
+    "code name: a symbol, Type.member with its file_path, or a file path. To search records by "
+    "topic, use retrieve_decisions(query=...)."
+)
+_FIND_ENTITY_OTHER_FILE = (
+    "The exact lookup found nothing in the file_path you gave; this is the only entity of this "
+    "name, in the file its descriptor names."
+)
+
+
+def _find_entity_impl(
+    store: Store,
+    name: str,
+    file_path: str | None = None,
+    *,
+    load_reader: Callable[[], GraphifyReader | None] | None = None,
+) -> dict:
+    """Match the exact descriptor, then the name, then consult the graph on a full miss.
 
     Never guesses: a name reused across files with no ``file_path`` to disambiguate comes
     back as ``candidates`` rather than an arbitrary pick. Spelling twins of one file
@@ -3988,11 +4024,30 @@ def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
     basename entity; two files stay ``candidates``.
     """
     entity = store.find_entity(name, file_path)
+    hint = None
     if entity is None:
         candidates = store.find_identities_by_name(name)
         if len(candidates) == 1:
             entity = candidates[0]
-        elif len(candidates) > 1:
+            other_file = entity.descriptor.file_path if entity.descriptor else None
+            if file_path and other_file and file_path != other_file:
+                hint = _FIND_ENTITY_OTHER_FILE
+        elif not candidates:
+            if not name.strip():
+                return {"found": False, "hint": _FIND_ENTITY_UNKNOWN_NAME}
+            res = None
+            with contextlib.suppress(Exception):
+                if load_reader is not None and (reader := load_reader()) is not None:
+                    res = resolve_seeds([Seed(name=name, file_path=file_path)], reader, store)
+            if res is None:
+                return {"found": False, "hint": _FIND_ENTITY_NO_GRAPH}
+            if not (pool := sorted(res.seed_entities, key=lambda e: e.entity_id)):
+                hint = _FIND_ENTITY_NO_RECORD if res.seed_node_ids else _FIND_ENTITY_UNKNOWN_NAME
+                return {"found": False, "hint": hint}
+            named = [e for e in pool if e.entity_id in res.named_entity_ids]
+            entity = named[0] if len(named) == 1 else None
+            candidates = named or pool
+        if entity is None:
             return {
                 "found": False,
                 "candidates": [
@@ -4004,8 +4059,6 @@ def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
                     for c in candidates
                 ],
             }
-    if entity is None:
-        return {"found": False}
 
     bindings = store.bindings_for_entity(entity.entity_id)
     types = store.record_types(b.record_id for b in bindings)
@@ -4024,15 +4077,22 @@ def _find_entity_impl(store, name: str, file_path: str | None = None) -> dict:
             }
             for b in bindings
         ],
+        **({"hint": hint} if hint else {}),
     }
 
 
 def _find_entity_listing(
-    store: Store, name: str, file_path: str | None = None, budget_chars: int = 24000
+    store: Store,
+    name: str,
+    file_path: str | None = None,
+    budget_chars: int = 24000,
+    *,
+    load_reader: Callable[[], GraphifyReader | None] | None = None,
 ) -> str:
     """Bound the wire lookup, preserving identities and whole binding/candidate rows."""
     budget = max(_LISTING_BUDGET_MIN, min(_LISTING_BUDGET_MAX, budget_chars))
-    full = _find_entity_impl(store, name, file_path)
+    full = _find_entity_impl(store, name, file_path, load_reader=load_reader)
+    same_file = file_path and all(c["file_path"] == file_path for c in full.get("candidates", []))
     clipped: list[str] = []
     fields = [(full, "canonical_name"), (full, "last_seen_node_id")]
     if full.get("descriptor"):
@@ -4054,7 +4114,7 @@ def _find_entity_listing(
 
     def answer(k: int, shown: list[dict]) -> dict:
         out = {**full, key: shown}
-        hints = []
+        hints = [full["hint"]] if "hint" in full else []
         if k < total:
             out[omitted_key] = total - k
             out["omitted_ids"] = []
@@ -4066,9 +4126,8 @@ def _find_entity_listing(
                     "or list_facts(ids=[...]) (ids in omitted_ids)."
                 )
             else:
-                hints.append(
-                    f"{total - k} more candidates not shown; pass file_path to choose one."
-                )
+                step = ". Use entity_id." if same_file else "; pass file_path to choose one."
+                hints.append(f"{total - k} more candidates not shown{step}")
             if budget < _LISTING_BUDGET_MAX:
                 hints.append(f"Raise budget_chars (max {_LISTING_BUDGET_MAX}).")
         hints += [f"Bounded: the entity {field} was clipped." for field in clipped]
@@ -4110,13 +4169,18 @@ def find_entity(name: str, file_path: str | None = None, budget_chars: int = 240
     Tries an exact descriptor match (canonicalized name + file_path) first; if that misses,
     falls back to a name-only scan across all entities. A single name-only match is
     returned as found; multiple matches are ambiguous and returned as ``candidates``
-    (never guessed at) — pass ``file_path`` to disambiguate.
+    (never guessed at) — pass ``file_path`` to disambiguate; candidates that share one file
+    are told apart only by their ``entity_id``.
+    On a full miss the code graph is asked, so ``Type.member`` with its
+    ``file_path`` reaches a method Graphify names ``.member()``. A unique name-only match in another
+    file than ``file_path`` carries a hint that says so.
 
     Returns ``{"found": True, "entity_id", "canonical_name", "descriptor", ...
     "last_seen_node_id", "bindings": [{"record_id", "record_type", "tier", "status"}, ...]}``
     (``record_type`` is ``"decision"`` or ``"fact"``, or ``"unknown"`` for a binding whose record
     exists in neither table) when resolved to exactly one entity;
-    ``{"found": False}`` when nothing matches; or
+    ``{"found": False, "hint": ...}`` when nothing matches, the hint saying whether the
+    code graph holds the name; or
     ``{"found": False, "candidates": [{"entity_id", "canonical_name", "file_path"}, ...]}``
     when the name alone is ambiguous. One text block, bounded by ``budget_chars``
     (default 24000, maximum 40000); ``omitted_ids`` names the remainder, and
@@ -4124,7 +4188,14 @@ def find_entity(name: str, file_path: str | None = None, budget_chars: int = 240
     with an explicit hint; identity and record ids are preserved.
     """
     store = _get_store()
-    answer = _find_entity_listing(store, name, file_path, budget_chars)
+
+    def _borrowed() -> GraphifyReader | None:
+        borrowed = open_borrowed_reader(store.path, opener=_READERS.get)
+        return borrowed[0] if borrowed else None
+
+    answer = _find_entity_listing(
+        store, name, file_path, budget_chars, load_reader=lambda: _load_reader(store) or _borrowed()
+    )
     # It names a thing, so it is asking; it returns no record bodies, so nothing was delivered.
     _record_listing(store, "find_entity", [])
     return ToolResult(content=answer)
@@ -4648,8 +4719,6 @@ def _budget_missed(dropped: int, knob: str, budget: int) -> str:
     )
 
 
-# "Why this is empty": at most this many accepted domains are named.
-_EMPTY_DOMAINS_LISTED = 12
 _EMPTY_HEADING = "## Why this is empty"
 
 
@@ -4681,15 +4750,11 @@ def _worktrees_provider(
     return call
 
 
-def _empty_block(store, *, graph_missing: bool = False) -> str:
-    """The "## Why this is empty" block: a call that gave no files and no entities, and so had
-    nothing to match. Names the accepted domains (name and slug) as places to start. With no
+def _empty_block(*, graph_missing: bool = False) -> str:
+    """Give seed guidance for an empty call. With no
     code graph to match against it also says to build one first.
     # see design/superpowers/specs/2026-10-02-tolerant-seeds-design.md (D6)
     """
-    domains = sorted(
-        store.iter_domains(DomainStatus.ACCEPTED), key=lambda d: (d.title.lower(), d.slug)
-    )
     text = "No files or entities were given, so nothing could be matched."
     if graph_missing:
         text += (
@@ -4700,11 +4765,6 @@ def _empty_block(store, *, graph_missing: bool = False) -> str:
         " Pass files=[…] with the repo-relative paths you are working on, or "
         'entities=[{"name": "…"}] when you know a symbol\'s name and not its file'
     )
-    if domains:
-        named = ", ".join(f"{d.title} ({d.slug})" for d in domains[:_EMPTY_DOMAINS_LISTED])
-        extra = len(domains) - _EMPTY_DOMAINS_LISTED
-        named += f", and {extra} more" if extra > 0 else ""
-        text += f", or drill_down(<slug>) for a named area: {named}"
     return f"{_EMPTY_HEADING}\n{text}."
 
 
@@ -4908,7 +4968,7 @@ def _build_task_context(
                 blocks.append(_no_graph_block(store))
         with contextlib.suppress(Exception):
             if not seeds and text == _NO_CONTEXT:
-                blocks.append(_empty_block(store, graph_missing=reader is None))
+                blocks.append(_empty_block(graph_missing=reader is None))
         near_block = empty_near_block = ""
         with contextlib.suppress(Exception):
             # The records of the second retrieval are known only now: a bound record it shows is
@@ -7606,8 +7666,7 @@ def drill_down(domain_slug: str, limit: int = 25, budget_chars: int = 24000) -> 
     ``domain:<slug>`` entity, decisions anchored to an entity whose node is a member or lies
     in one of its communities, AND decisions anchored to a document whose file the domain
     covers (so an imported ADR surfaces under the domain covering that doc's headings, even on a doc
-    corpus where the file node hubs into a different community) — the Axis-1 counterpart to
-    the flat SessionStart TOC (call this after spotting a domain there to go one level deeper).
+    corpus where the file node hubs into a different community). Get the slug from ``list_domains``.
 
     The answer is one JSON object in one text block. ``decisions`` is cut at ``limit`` (default
     25, max 100) or ``budget_chars`` (default 24000, max 40000), whichever comes first; the
@@ -7954,7 +8013,7 @@ def emulate_tool(
             result, _, _ = _build_drill_down(store, reader, args["domain_slug"], limit, budget)
             text = _dump(result)
         case "find_entity":
-            text = _find_entity_listing(store, **args)
+            text = _find_entity_listing(store, **args, load_reader=lambda: reader)
         case "get_entity_history":
             text = _entity_history_listing(store, **args)
         case "list_domains":
@@ -7984,7 +8043,8 @@ def emulate_tool(
             or result.get("unresolved_omitted")
             or result.get("id_lookup_omitted")
             or result.get("truncated")
-            or (name == "find_entity" and result.get("hint"))
+            or (name == "find_entity" and result.get("candidates_omitted"))
+            or (name == "find_entity" and "clipped" in (hint or ""))
             or (name == "drill_down" and result.get("found") and result.get("hint"))
         )
         else None
@@ -8030,11 +8090,11 @@ def _add_anchors_impl(
     fields are otherwise immutable outside real status/``valid_to`` transitions).
 
     Per anchor: resolved against the graph via ``resolve_and_bind`` when ``reader`` is
-    present (same ladder every other anchoring tool here uses) — an ambiguous name is
-    reported, never guessed, and creates no Tier-2 leaf; a resolved name lands a live
-    Tier-2 leaf (+ Tier-1 domain/community). With no reader, or a name that resolves to
-    nothing, the anchor still binds — an orphaned Tier-2 leaf via ``_bind_orphaned`` — so
-    a re-anchor request is never silently dropped for lack of a graph.
+    present (same ladder every other anchoring tool here uses). An ambiguous name is
+    reported and can get a degraded leaf under the shared-community rule. A resolved
+    name lands a live Tier-2 leaf (+ Tier-1 domain/community). With no reader, or a name
+    that resolves to nothing, the anchor binds an orphaned Tier-2 leaf via
+    ``_bind_orphaned``.
     """
     if store.get_decision(record_id) is None and store.get_fact(record_id) is None:
         return {"error": "unknown record"}
@@ -8112,8 +8172,8 @@ def add_anchors(record_id: str, anchors: list[dict]) -> dict:
     ``bound`` for anchors that resolved to exactly one live graph node, ``orphaned`` for
     anchors bound with no graph present or that resolved to nothing (never dropped either
     way). ``ambiguous`` is ``{"name", "reason": "ambiguous", "candidates"}`` (capped at 5)
-    for anchor names that matched more than one graph node — no leaf created, the same
-    per-anchor feedback ``add_decision``'s ``anchors_skipped`` gives.
+    for anchor names that matched more than one graph node. These anchors create no live
+    Tier-2 leaf and get the same feedback as ``add_decision``'s ``anchors_skipped``.
     """
     return _add_anchors_impl(_get_store(), _load_reader(), record_id, anchors)
 

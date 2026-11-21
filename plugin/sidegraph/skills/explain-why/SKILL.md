@@ -34,9 +34,8 @@ Three shapes of why-question, three entry points:
   entity, newest first, *regardless of status* (a proposal the surfacing policy withholds is
   left out). Ambiguity comes back as `candidates`,
   never a guess — re-call with `file_path`.
-- **An area or theme** ("why do we do payments this way") → `list_domains()` for the
-  slug, then `drill_down(domain_slug)` — the domain's summary, member sample, and its
-  decisions, mistakes first.
+- **An area or theme** ("why do we do payments this way") →
+  `retrieve_decisions(query="<the area's words>")`.
 
 A record tagged `[drifted]` needs content review: code changed or a prior check no longer
 applies — verify it against the current code before presenting it as current truth (and if it no longer

@@ -106,10 +106,11 @@ def test_session_start_relative_store_anchors_to_claude_project_dir_and_graph_fo
     assert (project_dir / "sub" / "s.db").exists()  # store opened under project dir
 
 
-def test_session_start_renders_domain_toc_when_cache_present(tmp_path, monkeypatch, capsys):
-    from sidegraph.retrieval import TOC_CACHE_KEY
-    from sidegraph.schema import Domain, Provenance
+def test_session_start_with_domain_cache_shows_global_mistakes(tmp_path, monkeypatch, capsys):
+    from sidegraph.retrieval import TOC_CACHE_KEY, build_toc
+    from sidegraph.schema import DecisionKind, Domain, Provenance, Scope
     from sidegraph.store import Store
+    from tests.store_record_support import _decision
 
     db = tmp_path / "s.db"
     store = Store(db)
@@ -122,37 +123,23 @@ def test_session_start_renders_domain_toc_when_cache_present(tmp_path, monkeypat
         )
     )
     store.ratify_domains(accept=[d.domain_id])
-    # Simulate a prior sync pass having precomputed the cache (sync itself is exercised
-    # elsewhere; this test isolates session_start's read-and-render behavior).
-    store.set_meta(
-        TOC_CACHE_KEY,
-        json.dumps(
-            {
-                "domains": [
-                    {
-                        "slug": "payments",
-                        "title": "Payments",
-                        "summary": "Handles settlement and refunds.",
-                        "parent_slug": None,
-                        "mistakes": 3,
-                        "subdomains": 0,
-                    }
-                ],
-                "global_mistakes": [],
-            }
-        ),
+    store.add_decision(
+        _decision("Never retry settlement", kind=DecisionKind.GOTCHA, scope=Scope.GLOBAL)
     )
+    store.set_meta(TOC_CACHE_KEY, json.dumps(build_toc(store)))
+    store.close()
 
     monkeypatch.setenv("SIDEGRAPH_DB", str(db))
-    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))  # reader=None
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     hooks.session_start()
     out = json.loads(capsys.readouterr().out)
     ctx = out["hookSpecificOutput"]["additionalContext"]
-    assert "## Domains" in ctx
-    assert "Payments" in ctx
-    assert "Handles settlement and refunds." not in ctx
-    assert "(3 mistake(s))" in ctx
+    assert "## Domains" not in ctx
+    assert "mistake(s)" not in ctx
+    assert "## Communities" not in ctx
+    assert "## Global mistakes & constraints" in ctx
+    assert "Never retry settlement" in ctx
 
 
 def test_session_start_augments_stale_domain_cache_with_live_unratified_memory(
@@ -168,6 +155,7 @@ def test_session_start_augments_stale_domain_cache_with_live_unratified_memory(
         Scope,
     )
     from sidegraph.store import Store
+    from tests.store_record_support import _decision
 
     db = tmp_path / "s.db"
     store = Store(db)
@@ -180,6 +168,7 @@ def test_session_start_augments_stale_domain_cache_with_live_unratified_memory(
         )
     )
     store.ratify_domains(accept=[domain.domain_id])
+    store.add_decision(_decision("Record settlement policy"))
     proposal = store.add_decision(
         Decision(
             title="Recheck global retry policy",
@@ -219,12 +208,10 @@ def test_session_start_augments_stale_domain_cache_with_live_unratified_memory(
     hooks.session_start()
 
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "Cached accepted summary." not in ctx
-    assert "(7 mistake(s))" in ctx
-    assert "Live domain summary." not in ctx
+    assert "## Domains" not in ctx
+    assert "Record settlement policy" not in ctx
     assert "## Unratified proposals" in ctx
     assert f"[unratified] {proposal.title}" in ctx
-    assert ctx.index("Payments") < ctx.index("## Unratified proposals")
 
 
 def test_session_start_instruction_names_the_real_call_and_the_deferred_tool(
@@ -291,6 +278,7 @@ def test_session_start_does_not_build_the_whole_toc_to_read_the_unratified_list(
     from sidegraph.retrieval import TOC_CACHE_KEY
     from sidegraph.schema import Domain, Provenance
     from sidegraph.store import Store
+    from tests.store_record_support import _decision
 
     db = tmp_path / "s.db"
     store = Store(db)
@@ -303,6 +291,7 @@ def test_session_start_does_not_build_the_whole_toc_to_read_the_unratified_list(
         )
     )
     store.ratify_domains(accept=[d.domain_id])
+    store.add_decision(_decision("Record settlement policy"))
     store.set_meta(
         TOC_CACHE_KEY,
         json.dumps(
@@ -335,13 +324,14 @@ def test_session_start_does_not_build_the_whole_toc_to_read_the_unratified_list(
     hooks.session_start()
 
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "## Domains" in ctx  # the cached map still rendered
+    assert "# Sidegraph — project memory" in ctx
+    assert "Record settlement policy" not in ctx
     assert calls == []
 
 
-def test_session_start_standing_instruction_precedes_domain_toc(tmp_path, monkeypatch, capsys):
+def test_session_start_standing_instruction_precedes_cached_map(tmp_path, monkeypatch, capsys):
     """F2: the standing "use get_task_context before searching" instruction must be at the
-    very top of the injected context, ahead of the real domain TOC render path."""
+    very top of the injected context, ahead of the cached map."""
     from sidegraph.retrieval import TOC_CACHE_KEY
     from sidegraph.schema import Domain, Provenance
     from sidegraph.store import Store
@@ -383,7 +373,7 @@ def test_session_start_standing_instruction_precedes_domain_toc(tmp_path, monkey
     out = json.loads(capsys.readouterr().out)
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert ctx.startswith(hooks.STANDING_SEARCH_INSTRUCTION)
-    assert ctx.index(hooks.STANDING_SEARCH_INSTRUCTION) < ctx.index("## Domains")
+    assert ctx.index(hooks.STANDING_SEARCH_INSTRUCTION) < ctx.index("# Sidegraph — project memory")
 
 
 def test_session_start_standing_instruction_precedes_fallback_map(tmp_path, monkeypatch, capsys):
@@ -468,6 +458,26 @@ def test_session_start_malformed_toc_shape_degrades_to_legacy_map_not_empty(
     assert out != {}  # never degrades all the way to a blank payload
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert "## Communities" in ctx  # legacy map rendered, not a crash
+
+
+def test_session_start_malformed_toc_keeps_repo_decisions(tmp_path, monkeypatch, capsys):
+    from sidegraph.retrieval import TOC_CACHE_KEY
+    from sidegraph.store import Store
+    from tests.store_record_support import _decision
+
+    db = tmp_path / "s.db"
+    with Store(db) as store:
+        store.add_decision(_decision("Keep settlement and refunds separate"))
+        store.set_meta(TOC_CACHE_KEY, json.dumps({"domains": "bad-shape"}))
+
+    monkeypatch.setenv("SIDEGRAPH_DB", str(db))
+    monkeypatch.setenv("SIDEGRAPH_GRAPH", str(tmp_path / "no-graph.json"))
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    hooks.session_start()
+
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "## Recorded decisions" in ctx
+    assert "Keep settlement and refunds separate" in ctx
 
 
 def _store_with_pending(tmp_path):
@@ -569,9 +579,11 @@ def test_session_start_malformed_graph_degrades_to_store_only(tmp_path, monkeypa
 # -- D7.2: double-injection dedupe (E7 observation) ----------------------------------------
 
 
-def _run_session_start(monkeypatch, capsys, db, session_id=None):
+def _run_session_start(monkeypatch, capsys, db, session_id=None, *, source=None):
     monkeypatch.setenv("SIDEGRAPH_DIR", str(db))
     payload = {"session_id": session_id} if session_id is not None else {}
+    if source is not None:
+        payload["source"] = source
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     hooks.session_start()
     return json.loads(capsys.readouterr().out)
@@ -584,6 +596,56 @@ def test_second_session_start_within_window_same_session_is_silent(tmp_path, mon
 
     second = _run_session_start(monkeypatch, capsys, db, session_id="dup-1")
     assert second == {}  # the duplicate exits silently
+
+
+@pytest.mark.parametrize(
+    ("first_source", "second_source", "delivered"),
+    [
+        ("startup", "compact", True),
+        ("compact", "compact", False),
+        (None, "compact", False),
+        (None, None, False),
+        ("startup", None, False),
+    ],
+    ids=["new-source", "same-source", "old-ledger", "both-absent", "incoming-absent"],
+)
+def test_session_start_duplicate_respects_the_notice_source(
+    tmp_path, monkeypatch, capsys, first_source, second_source, delivered
+):
+    """The four duplicate guards keep same-source and two-field ledger compatibility."""
+    from sidegraph.host import hook_log
+    from sidegraph.store import Store
+
+    now = datetime(2026, 11, 20, 9, tzinfo=UTC)
+    instant = now
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant
+
+    monkeypatch.setattr(hooks, "datetime", Clock)
+    db = _existing_store(tmp_path / ".sidegraph")
+    if first_source is None and second_source is not None:
+        with Store(db) as store:
+            store.set_meta(hooks._SESSION_START_KEY, f"same|{now.isoformat()}")
+    else:
+        first = _run_session_start(monkeypatch, capsys, db, "same", source=first_source)
+        assert "hookSpecificOutput" in first
+    before = hook_log.read_runs(db)
+    instant += timedelta(seconds=5)
+    second = _run_session_start(monkeypatch, capsys, db, "same", source=second_source)
+    rows = hook_log.read_runs(db)
+    assert len(rows) == len(before) + 1
+    assert rows[:-1] == before
+    row = rows[-1]
+    assert row.hook == "SessionStart"
+    if delivered:
+        assert "hookSpecificOutput" in second
+        assert (row.outcome, row.detail) == ("delivered", None)
+    else:
+        assert second == {}
+        assert (row.outcome, row.detail) == ("empty", "duplicate")
 
 
 def test_session_start_emits_for_a_different_session_id(tmp_path, monkeypatch, capsys):
@@ -815,7 +877,7 @@ def test_sent_state_reset_precedes_duplicate_gate(tmp_path, monkeypatch, capsys,
     monkeypatch.setenv("SIDEGRAPH_GRAPH", str(FIXTURE))
     if codex:
         monkeypatch.setenv("SIDEGRAPH_HOST", "codex")
-    payload = {"session_id": thread if codex else canonical, "source": "startup"}
+    payload = {"session_id": thread if codex else canonical, "source": source}
     if codex:
         payload["transcript_path"] = str(tmp_path / f"{canonical}.jsonl")
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
@@ -839,7 +901,6 @@ def test_sent_state_reset_precedes_duplicate_gate(tmp_path, monkeypatch, capsys,
             return instant + timedelta(seconds=1)
 
     monkeypatch.setattr(hooks, "datetime", Clock)
-    payload["source"] = source
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     hooks.session_start()
     assert json.loads(capsys.readouterr().out) == {}
@@ -866,3 +927,19 @@ def test_session_start_expires_sent_state_with_telemetry_off(tmp_path, monkeypat
     with Store(db) as store:
         assert store.get_meta("mcp_sent:old:-:r") is None
         assert store.get_meta("mcp_sent:current:-:r") is not None
+
+
+def test_t10_session_start_prunes_day_old_caller_rows(tmp_path, monkeypatch, capsys):
+    from sidegraph.store import Store
+
+    db = _existing_store(tmp_path / ".sidegraph")
+    now = datetime.now(UTC)
+    fresh = f"{(now - timedelta(hours=12)).isoformat()}|prune|a7"
+    with Store(db) as store:
+        store.set_meta("mcp_caller:old", f"{(now - timedelta(days=2)).isoformat()}|prune|-")
+        store.set_meta("mcp_caller:fresh", fresh)
+        store.set_meta("mcp_sent:keep:-:r", (now - timedelta(days=2)).isoformat())
+    _run_session_start(monkeypatch, capsys, db, "prune", source="startup")
+    with Store(db) as store:
+        assert store.meta_with_prefix("mcp_caller:") == {"mcp_caller:fresh": fresh}
+        assert store.get_meta("mcp_sent:keep:-:r") is not None

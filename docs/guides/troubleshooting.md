@@ -55,8 +55,9 @@ If `claude mcp list` shows `sidegraph` as failed to connect, see
 its own version, `sidegraph==X.Y.Z`.
 
 For Codex, `codex mcp list` should show the `sidegraph` server, and `/hooks` should list its
-hooks as trusted. If the hooks fail to start on Windows, update Codex: they need a release that
-supports `commandWindows`.
+hooks as trusted. The `sidegraph:health-check` skill reports a hook Codex has no trust entry for;
+after an update, review the hooks in `/hooks`. If the hooks fail to start on Windows, update
+Codex: they need a release that supports `commandWindows`.
 
 Inside the Git Bash that runs the Claude Code hooks, check again:
 
@@ -154,6 +155,7 @@ explains JSON output, exit codes and skipped evidence.
 | `domain-slug-conflict` | One slug is held by more than one live domain, usually after two branches each added a domain under it. | Keep one domain: drop the others with `sidegraph-ratify --drop <id>`, or supersede one under a different slug. `--check` fails on it. |
 | `graph-stale` | HEAD differs from the graph build commit and a covered file changed or appeared. | [Rebuild the graph](#graph-stale) from the root with the refresh guard, then sync. |
 | `engine-version` | The graph uses an untested engine version, or its store needs the matching migration. | Read the finding, pin a tested Graphify release and follow the [engine guidance](#engine-version). |
+| `store-git-directory` | The store path leads to Git directory files without a `.git` entry. | Check what the directory is and who uses it. See [Git directory files on the store path](#store-git-directory). |
 | `store-uncommitted` | Canonical store files have remained outside commits. | Review the store diff and commit the canonical changes in the same pull request as the work. Keep the derived index ignored. See [commit guidance](#store-uncommitted). |
 | `plugin-off-in-subdirectories` | Claude project scope leaves nested launches without Sidegraph. | Enable the plugin in root local settings or user settings after reviewing the scope. See [scope recovery](#plugin-off-in-subdirectories). |
 | `refresh-helper-outdated` | A Git hook uses an older refresh helper. | Run `sidegraph-init` to refresh the helper while preserving the recorded hook choice. See [helper recovery](#refresh-helper-outdated). |
@@ -189,6 +191,7 @@ and others concern the live host rather than stored records.
 | `graph-missing` | No readable graph was found | Build the graph from the repository root. See [graph-missing](#graph-missing). |
 | `orphaned-records` | One or more open records lost all concrete anchors | Inspect the corresponding `orphaned-record` doctor findings. |
 | `store-files-skipped` | Canonical files could not be indexed | Run `sidegraph-verify`, resolve the named files and reopen the store. |
+| `store-git-directory` | The store path leads to Git directory files without a `.git` entry | Inspect the named directory. See [Git directory files on the store path](#store-git-directory). |
 | `refresh-hook-missing` | No Git hook keeps a graph current | Choose `sidegraph-init --hooks` or `--no-hooks`. See [hook setup](#refresh-hook-missing). |
 | `branch-only-records` | Records remain only on unmerged branches | Merge the intended branch through the normal pull request flow. |
 | `version-skew` | A newer Sidegraph is installed on this machine than the session runs, or the plugin copy is older than the runtime | Update the plugin as the line says ([version checks](#version-skew)), then start a new session. |
@@ -314,8 +317,8 @@ Its domain snapshot also sets the minimum version, which clears this line.
 
 ### orphaned-records
 
-Open decisions and facts whose every leaf anchor is orphaned: retrieval reaches them only through
-their file or domain. If the graph is stale, rebuilding it re-anchors them. Otherwise
+This check finds open decisions and facts whose leaf anchors are all orphaned. If the graph is
+stale, rebuilding it re-anchors them. Otherwise
 `sidegraph-doctor` lists each record as an `orphaned-record` finding, and the
 `sidegraph:heal-anchors` skill walks the
 [status-sensitive recovery](surviving-refactors.md#reading-and-healing-stale-decisions-warnings):
@@ -420,6 +423,16 @@ is how a hooks-manager setup (Husky, lefthook, pre-commit) clears it. A hook cou
 would run it and the call would run: the file is executable and the helper's name is on a line
 that does not start with `#`, so a comment that names it, or a hook without the executable bit,
 leaves the reminder on. It has no doctor finding, because a CI checkout has no hooks.
+
+### store-git-directory
+
+The store directory or one of its ancestors holds `HEAD` and either `objects/` or `commondir`,
+with no `.git` entry. Git can recognize this layout as a Git directory, including in a bare
+repository. Sidegraph keeps memory available and skips Git calls that would start from the
+refused path, including those needed for `store-uncommitted` and `branch-only-records`.
+Avoid running Git in the reported directory because its configuration can run a command.
+Check what the directory is and remove the Git files only once you have confirmed nobody
+needs them.
 
 ### store-uncommitted
 
@@ -600,13 +613,14 @@ not reported: nothing was switched off.
 
 Run `sidegraph-stats` and read the `HOOK RUNS` block. `not synced`: the index was rebuilt
 and no sync has checked that anchor yet; any `get_task_context` call, a new session or
-`sidegraph-sync` runs one. On a project with no code graph a sync cannot run, and these
-hooks deliver nothing; `get_task_context` still answers. `ten-file cap`: the agent was
-handed its ten files; `get_task_context(files=[…])` returns the rest, and the count starts
-again after a compaction. `already delivered`: the agent got that file's records earlier in
-the session. `no anchor` and `no current record`: nothing is recorded for that file, or
-what was recorded is superseded or its anchor is gone (`sidegraph-doctor` lists orphaned
-records).
+`sidegraph-sync` runs one when the graph is available. Before the first sync, PreToolUse
+can deliver `[file-bound]` records for existing files by exact path, including in projects
+without a graph. Subagent briefs wait for checked bindings. A `ten-file cap` means the file's
+allowance is full. `get_task_context(files=[…])` returns the rest. Compaction resets all file
+allowances. `already delivered` means the agent got that file's records earlier in the session.
+Ordinary reads still get their first ordinary delivery. `no anchor` and `no current record` mean
+the file has no record available. The record may have been superseded or its anchor may be gone.
+`sidegraph-doctor` lists orphaned records.
 
 ## How a notice behaves
 

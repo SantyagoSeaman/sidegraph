@@ -224,9 +224,10 @@ follows the same tick.
 **Records.** A table with the same search and filters for status, kind, domain, layer and code
 anchors. Tick "Search history too" to search closed records too.
 
-Search matches each word you type as a part of the record's text, or of the name or path of an
-anchor it is bound to. A record must match every word. When none does, the closest partial
-matches are listed. It is the matching `retrieve_decisions(query=...)` uses, with one
+Records and Graph search match each word against record text and searchable anchor names or
+paths. Anchor matching skips domain labels. Use the domain filter to browse by label. A record
+must match every word. When none does, the search lists the closest partial matches. It is the
+matching `retrieve_decisions(query=...)` uses, with one
 difference: that tool leaves out some proposals, depending on its settings, and the Portal
 shows all of them. Typing the first eight or more characters of a record id in the search box
 opens that record when only one record's id starts with them; keep typing otherwise.

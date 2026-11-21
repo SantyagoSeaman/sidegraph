@@ -318,7 +318,11 @@ def test_a_descriptor_changed_in_place_is_not_kept(tmp_path, monkeypatch, capsys
     _reload_hot_pair(root, record)
     assert _kept_by_name(root)["kept"] == [None]
     assert _titles(root, entities) == ([], True)
-    assert _read(tmp_path, monkeypatch, capsys, "elsewhere.py", "changed-descriptor") == {}
+    out = _read(tmp_path, monkeypatch, capsys, "elsewhere.py", "changed-descriptor")
+    assert (
+        "[gotcha] [file-bound] Legitimate live memory"
+        in out["hookSpecificOutput"]["additionalContext"]
+    )
     conn = sqlite3.connect(root / "index.db")
     try:
         marks = conn.execute("SELECT COUNT(*) FROM meta WHERE key LIKE 'descriptor_changed:%'")
@@ -350,7 +354,7 @@ def test_a_kept_status_is_the_last_syncs_verdict_until_the_next_sync(tmp_path, m
     """This test documents a behaviour; it is not a defect to fix. A kept status is what the
     last sync computed, against the graph that sync saw. When the code changes after that sync
     (here the symbol leaves the graph) and a rebuild follows, the hook still delivers through
-    the anchor, exactly as an index that is not cold does, until the next sync finds it gone.
+    the anchor until the next sync, which hands the file to the exact-path rule.
     Red against a rebuild that checks the graph, which this design does not do."""
     from sidegraph.engine.reader import GraphifyReader
     from sidegraph.sync import sync
@@ -374,7 +378,11 @@ def test_a_kept_status_is_the_last_syncs_verdict_until_the_next_sync(tmp_path, m
         assert statuses == {"orphaned"}
     finally:
         store.close()
-    assert _read(tmp_path, monkeypatch, capsys, "live.py", "after-the-sync") == {}
+    after = _read(tmp_path, monkeypatch, capsys, "live.py", "after-the-sync")
+    assert (
+        "[gotcha] [file-bound] Legitimate live memory"
+        in after["hookSpecificOutput"]["additionalContext"]
+    )
 
 
 def test_the_cause_check_follows_the_delivery_rules(tmp_path, monkeypatch):

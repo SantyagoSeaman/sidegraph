@@ -223,7 +223,7 @@ your repository before you install anything.
 | `/sidegraph:import-adrs` | Your existing ADRs and specs turned into records anchored to the code |
 | `/sidegraph:record-decision` | A decision, lesson, constraint or gotcha written down and anchored where it belongs |
 | `/sidegraph:ratify-decisions` | The agent's pending proposals, one by one, with a recommendation for each |
-| `/sidegraph:name-domains` | The code graph turned into named areas: a table of contents every session starts from |
+| `/sidegraph:name-domains` | Name areas of the code graph for browsing in the Portal |
 | `/sidegraph:triage-drift` | Records whose code changed, checked: still true, or replaced with a new decision |
 
 In Claude Code these are slash commands; in other agents, ask for the task in words.

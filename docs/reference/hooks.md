@@ -204,20 +204,23 @@ Behavior:
    under `$CLAUDE_PROJECT_DIR` is looked up in the parent directories, up to the repository
    root, so a session started in a subdirectory opens the repository's store and creates no
    second one. Every hook resolves the store this way. When the payload names a session, the
-   hook first clears `mcp_sent:<session>:-:` when `source` is `compact` or `clear`: earlier
-   full bodies are no longer in the main agent's context. It also clears the `pretool_file:`
-   claims of the agent the notice names (`-` for the session's own agent), once per notice: a
-   repeat of the notice within 60 seconds changes nothing. That agent's ten files start again,
+   hook first clears the `mcp_sent:` rows of the agent the notice names (`-` for the
+   session's own agent) when `source` is `compact` or `clear`. The earlier full bodies have
+   left that agent's context. It also clears the `pretool_file:` claims of the agent the
+   notice names (`-` for the session's own agent), once per notice: a repeat of the notice
+   within 60 seconds changes nothing. All file allowances start again for that agent,
    and a file it reads again is delivered again. Codex resets both its canonical
    `rollout-<ts>-<threadId>` key and the verified bare-thread alias. Other sessions and
-   subagents keep their state. This best-effort reset runs even within the duplicate window.
-   The hook then checks the store's `session_start` ledger: a start for the same session within
-   60 seconds of the recorded one, before or after it, is a duplicate (the hook registered
-   twice on one host, for example the plugin and a hand-written project hook), and it prints
-   `{}` and returns before anything below runs. The check is a read that takes no write lock,
-   so a readable, already-stamped duplicate exits immediately. A start that is not a duplicate
+   agents keep their state. This best-effort reset runs even within the duplicate window.
+   The hook then checks the store's `session_start` ledger. A notice for the same session within
+   60 seconds of the recorded one is a duplicate if the sources match or either source is absent.
+   A change between named sources, such as `startup` to `compact`, delivers a fresh map.
+   A duplicate prints `{}` and returns before anything below runs. The check takes no write
+   lock, so a readable, already-stamped duplicate exits immediately. A start that is not a duplicate
    decides again and stamps the ledger in one write transaction. Stamping remains best-effort:
    if overlapping copies both encounter a busy write, both may emit the standing map.
+   When two registrations run different Sidegraph versions, an older copy can emit again
+   after a newer copy has stamped the source.
    If the store cannot be opened, the hook does not print `{}` (see
    [A store that cannot open](#a-store-that-cannot-open)): memory is off for the session and the
    person is told. Only a lock another process holds keeps the silent `{}`.
@@ -231,18 +234,12 @@ Behavior:
    still lets the map render un-synced. A borrowed graph is synced index-only
    (`canonical_writes=False`): the worktree's cold index is derived from it, and no tracked file is
    rewritten, because the moved rung abstains.
-4. Reads the `toc_cache` meta key (see
-   [`configuration.md`](configuration.md#domain-sync-and-the-toc-cache)). If it parses to a
-   dict with a non-empty `domains` list — i.e. the store has at least one accepted
-   [`Domain`](../concepts/mind-model.md) — renders `retrieval.render_toc(cache)`: the real,
-   domain-named table of contents. Otherwise (no cache, empty/malformed cache, or zero accepted
-   domains) falls back to `retrieval.top_tier_map(store, reader)`, computed fresh on demand —
-   byte-identical to pre-mind-model-layer behavior for a store with no accepted domains. Either
-   way, the render is wrapped in its own `try/except` so a cache shape it can't handle degrades
-   to `top_tier_map` rather than escaping to the outer handler below. For a borrowed graph the
-   cache is not read: the domain map is built in memory from the store every time
-   (`retrieval.build_toc` over the store, with the borrowed graph's reader so the mistake count
-   matches the main checkout's) and rendered the same way, so it is never older than the store.
+4. Reads `toc_cache` from store metadata. A non-empty list of domain objects selects the
+   cached path, which shows live global mistakes and proposed global mistakes. A missing,
+   empty or malformed cache takes the on-demand community fallback, which can also show
+   recorded decisions and known facts. For a borrowed graph, `retrieval.build_toc` builds
+   the cache in memory from the worktree's store using the borrowed reader.
+   See [Domain sync and the TOC cache](configuration.md#domain-sync-and-the-toc-cache).
 5. Prepends the standing search instruction (`hooks.STANDING_SEARCH_INSTRUCTION`) ahead of
    whichever renderer's text came out of step 4, followed by the version line and a blank line
    each — added once here, at the hook-assembly level, so `render_toc`/`top_tier_map` themselves
@@ -257,7 +254,7 @@ Behavior:
    > check-plan skill if it is available. If a tool is listed only by name, load it first.
 
    Unlike the `PreToolUse` records block below (the files a `Read`, `Edit`, `Write`, `Grep` or
-   `sed`/`grep`/`rg`/`cat` line names, each at most once per agent), this line is unconditional
+   supported [Bash read](#bash-lines) names), this line is unconditional
    and asks for memory before the search that answers a question or plans a change, whatever
    the search tool — `find`, an MCP structure query, a search that names no file — not just
    before the calls that name a file with records. It orders the call before the search only
@@ -315,7 +312,7 @@ raises costs only its own line.
    > with the ratify MCP tool or sidegraph-ratify.
 
    This is store-only information — it renders identically with or without a graph present,
-   and is independent of the TOC/domain rendering in step 4. See
+   and is independent of the map rendering in step 4. See
    [`guides/capturing-decisions.md`](../guides/capturing-decisions.md) for what "ratification"
    means and the `sidegraph:ratify-decisions` skill (triggered by this exact line) for the
    in-session walkthrough.
@@ -345,8 +342,8 @@ raises costs only its own line.
    `N` counts the whole store; the `[drifted]` tags (see
    [`concepts/retrieval.md`](../concepts/retrieval.md)) mark only the records a given
    retrieval call actually surfaces — the line says where each lives. A duplicate
-   SessionStart (the step-1 dedupe) exits before this step, so one logical session runs
-   one refresh.
+   SessionStart (the step-1 dedupe) exits before this step, so repeated copies of one notice
+   run one refresh.
 
 8. **Borrowed-graph and stale-graph lines.** When the graph is borrowed, one line says whose
    graph the map and the structure come from (own `try/except`, same never-cost-the-map guard as
@@ -474,9 +471,9 @@ raises costs only its own line.
     (`N` of `M`). Not printed while the index has been reloaded and not yet synced, because
     until then every anchor reads live. Verbatim:
 
-    > Sidegraph: N of M open record(s) have every code anchor orphaned, so retrieval reaches them
-    > only through their file or domain. If the graph is stale, rebuilding it re-anchors them;
-    > otherwise `sidegraph-doctor` lists them and the heal-anchors skill repairs them.
+    > Sidegraph: N of M open record(s) have every code anchor orphaned. If the graph is stale,
+    > rebuilding it re-anchors them; otherwise `sidegraph-doctor` lists them and the heal-anchors
+    > skill repairs them.
 
 13. **Skipped-files line.** When the last reload left store files out of the index (a record
     whose id does not match its file name, for example), one line names the first and counts the
@@ -505,7 +502,18 @@ raises costs only its own line.
 
     It also sends a notice for the person. See
     [`refresh-helper-outdated`](../guides/troubleshooting.md#refresh-helper-outdated).
-15. **Refresh-hook line.** When no git hook keeps the graph fresh, one line tells the model to
+15. **Git-directory line.** When the git guard refuses the store path, the line names the
+    directory `X` it found. Verbatim:
+
+    > Sidegraph: X holds the files of a git directory (HEAD, objects/ or commondir) but no .git
+    > entry, so Sidegraph runs no git from there and skips the checks that need it. Do not run
+    > git in that directory: its configuration can run a command. Remove these files only once
+    > you have confirmed nobody needs them.
+
+    It also sends a notice for the person. See
+    [`store-git-directory`](../guides/troubleshooting.md#store-git-directory).
+
+16. **Refresh-hook line.** When no git hook keeps the graph fresh, one line tells the model to
     ask the person rather than install it. The check runs only with a graph at the main
     checkout's `graphify-out/graph.json` in a git repository, and stays quiet when the person
     answered no (`sidegraph.graphRefresh` is `false`). A call to the helper added by hand to the
@@ -518,7 +526,7 @@ raises costs only its own line.
     It also sends a notice for the person. See
     [`refresh-hook-missing`](../guides/troubleshooting.md#refresh-hook-missing).
 
-16. **Uncommitted-store line.** When store files have gone uncommitted for 24 hours, one line
+17. **Uncommitted-store line.** When store files have gone uncommitted for 24 hours, one line
     gives how many, how old the oldest is and what kinds they are. Files that are fully staged do
     not count. Verbatim, with `K` the kinds (for example `2 decision file(s), 1 binding file(s)`):
 
@@ -528,7 +536,7 @@ raises costs only its own line.
     The age reads `D days` from 48 hours on. See
     [`store-uncommitted`](../guides/troubleshooting.md#store-uncommitted).
 
-17. **Branch-only line.** When open records exist only on local branches that are not merged into
+18. **Branch-only line.** When open records exist only on local branches that are not merged into
     the default branch, one line counts them and names up to three branches. The scan has a time
     budget. When it runs out, the line says `at least N` and adds that the scan did not look at
     every branch. Verbatim, with `B` the default branch and `W` the branch names with their
@@ -541,11 +549,11 @@ raises costs only its own line.
     for the person follows only when a branch holding records has gone untouched for more than a
     week. See [`branch-only-records`](../guides/troubleshooting.md#branch-only-records).
 
-18. **Deprecated auto-accept line.** When `SIDEGRAPH_AUTO_ACCEPT=on` is present in the hook's
+19. **Deprecated auto-accept line.** When `SIDEGRAPH_AUTO_ACCEPT=on` is present in the hook's
     environment, a line and notice explain its replacement. See
     [deprecated-auto-accept](../guides/troubleshooting.md#deprecated-auto-accept) for the migration.
 
-19. **Store-not-migrated line.** When the store uses the pre-0.17 layout (a format marker below
+20. **Store-not-migrated line.** When the store uses the pre-0.17 layout (a format marker below
     major 2) and holds at least one record, one line points at the migration. Verbatim:
 
     > Sidegraph: the store uses the pre-0.17 layout, one file per record. Run
@@ -555,7 +563,7 @@ raises costs only its own line.
     It also sends a notice for the person. See
     [`store-not-migrated`](../guides/troubleshooting.md#store-not-migrated).
 
-20. **Maintenance-due line.** When a format-2 store has work for `sidegraph-compact` (more than
+21. **Maintenance-due line.** When a format-2 store has work for `sidegraph-compact` (more than
     200 per-record files, an archive segment it can remove, a misplaced or duplicated shard line,
     or a stray shard file), one line names the reasons, joined by "; ". Verbatim, with `R` the
     reasons:
@@ -587,10 +595,9 @@ Under both limits the output is unchanged. Over either, these steps run in order
 
 1. Whole map entries are dropped, never part of a line, section by section in this order:
    1. `## Unratified proposals` (the pending-ratification status line still counts them);
-   2. `## Domains`: subdomains first, then domains with no mistakes, then the rest from the tail;
-   3. `## Communities`;
-   4. `## Known facts`, then `## Recorded decisions`;
-   5. `## Global mistakes & constraints`.
+   2. `## Communities`;
+   3. `## Known facts`, then `## Recorded decisions`;
+   4. `## Global mistakes & constraints`.
 
    Each list goes from its tail. A section left with no entries loses its heading. Any dropped
    entry that fits in the room left is then put back, most valuable first, so one very long
@@ -608,10 +615,9 @@ The standing instruction, the version line, the status lines and the notices sur
 and 2 whole. When any map entry was omitted, the context ends with one line that counts them and
 names the call that lists each kind, for example:
 
-> Sidegraph: 312 map entries omitted to fit the hook output limit: 300 domains (list_domains),
-> 12 unratified proposals (list_proposed).
+> Sidegraph: 2 map entries omitted to fit the hook output limit: 2 unratified proposals (list_proposed).
 
-The calls named are `list_proposed`, `list_domains`, `list_facts`,
+The calls named are `list_proposed`, `list_facts`,
 `retrieve_decisions(status="accepted")` for recorded decisions and
 `retrieve_decisions(kind=["gotcha", "constraint", "lesson"])` for global mistakes. Communities
 are counted with no call: none lists the map's top communities.
@@ -636,7 +642,8 @@ The key set is exactly those two, because Codex rejects other top-level keys. Wi
 the output has the shape it always had.
 
 Which checks send notices: `store-unreadable` (always), `graph-stale`, `stray-store`,
-`store-files-skipped`, `refresh-helper-outdated`, `refresh-hook-missing`, `store-uncommitted`,
+`store-files-skipped`, `refresh-helper-outdated`, `store-git-directory`, `refresh-hook-missing`,
+`store-uncommitted`,
 `version-skew`,
 `path-skew`, `plugin-off-in-subdirectories` when a
 nested directory with its own `enabledPlugins` leaves the plugin off (case (b)),
@@ -954,24 +961,24 @@ the hook hands it those records, in the same tool call, as a non-blocking `addit
 block. The agent does not have to fetch them: the earlier form of this hook asked for a second
 step (call `get_task_context`, which for a deferred tool means loading it first), and in the field
 study the one nudge that named a record worked while the five that named counts did not. The
-tools it covers are `Read`, `Grep`, `Edit` and `Write`, and four Bash read commands: `sed`,
-`grep`, `rg` and `cat`.
+tools it covers are `Read`, `Grep`, `Edit` and `Write`, plus supported Bash reads. See [Bash lines](#bash-lines).
 
 **It reads the index, not the store.** This hook runs before every `Read`, `Grep`, `Edit` and
-`Write` and every Bash line that contains one of those four commands, so it opens
+`Write` and Bash lines admitted by the reader prefilter, so it opens
 `<store>/index.db` directly through a raw SQLite handle instead of constructing a `Store`: it
 loads nothing beyond the standard library, and it never walks the record files. It uses the index
 as the last full open left it (`SessionStart`, the MCP server or a CLI rebuilds the index from
-the record files when they changed); it never rebuilds, repairs or creates anything, and its
+the record files when they changed). The hook never rebuilds, repairs or creates the index. Its
 only write besides the usage journal is one line of [the run log](#the-hook-run-log). When it
-cannot use the index it prints `{}` and writes nothing (apart from a `lock` line in the run log
-when the open lost to another process's lock), whichever of these holds: the index is
-missing; a store-owned entry (`index.db`, its `-journal`, `-wal` and
-`-shm` files, or a record directory) is a symlink, the same refusal `Store` makes; the store path leaves its repository through a link; the store's format marker refuses this version; its
-`schema_version` stamp is not the one its store's marker calls for (`0.6.0`, or
-`0.6.0+requires` for a format-1 store with a minimum Sidegraph version; `0.7.0+format2` for a
-[format-2 store](store-format.md#format-2-packed-shards)); `retrieval_events` has no `agent` column (an
-index created before per-agent hook state); or opening it fails. Until a `Store` opens and
+cannot use the index it prints `{}`. Delivery can also record `empty … no-index` when the index
+is missing, or `lock` when the open lost to another process's lock. The hook refuses a
+missing index, a symlinked store-owned entry (`index.db`, its `-journal`, `-wal` and
+`-shm` files, or a record directory), a store path that leaves its repository through a link,
+or a store format the current version does not support. It also refuses an index whose
+`schema_version` stamp differs from the expected stamp, whose `retrieval_events` table lacks
+the `agent` column, or that cannot be opened. The expected stamp is `0.6.0` for format 1,
+`0.6.0+requires` for format 1 with a minimum Sidegraph version, and `0.7.0+format2` for
+[format 2](store-format.md#format-2-packed-shards). Until a `Store` opens and
 repairs it, the hook keeps printing `{}`. `Store` repairs some of these and refuses the rest:
 
 - **Repaired** by the next `Store` open (a `SessionStart`, a `sidegraph-*` command, or the first
@@ -1000,9 +1007,9 @@ Two consequences are visible:
   still create a missing store, only in the cases [configuration.md](configuration.md) lists.
 - A record that arrives mid-session (a `git pull`) can be missing from the block until the next
   MCP tool call, which re-checks the record files before it runs, or the next session.
-  `get_task_context` sees it. Once the index is rebuilt, such a record is delivered when its
-  anchor's entity was already checked by a sync; a record on a new anchor waits for the next
-  sync.
+  `get_task_context` sees it. Once the index is rebuilt, ordinary delivery uses the last sync's
+  status for unchanged anchors. New anchors on that route wait for the next sync. Eligible
+  exact-path records can reach PreToolUse on the first read.
 
 Behavior, in order — any `{}` below means the tool call proceeds through Claude Code's normal
 permission flow, untouched:
@@ -1019,16 +1026,28 @@ permission flow, untouched:
    → print `{}`.
 4. No session identity in the payload → print `{}`.
 5. The call names no file with records → print `{}`, without opening the index when it names no
-   file at all. `Read`, `Edit`, `Write` and `Grep` name the one file in `file_path`/`path` (a
-   directory, a pattern-only `Grep` and a path outside the project root name none, and a `Write`
-   that creates a file has no records yet). A Bash line names the regular files that its `sed`,
-   `grep`, `rg` and `cat` commands read (see [Bash lines](#bash-lines)).
-6. For each of the first **three** files of the call that have records, in the order the call
-   names them, the hook claims the file for this agent **before emitting**, with one statement
-   that also counts: it inserts `pretool_file:<session>:<agent>:<path>` into `store.meta` only if
-   the agent holds fewer than **ten** such keys. A file already claimed by this agent (an earlier
-   call, or the other process Claude Code started for the same Bash line), or an agent already at
-   its ten, loses the claim and the file gets nothing. `<agent>` is the `agent_id`, or `-` for the
+   file at all. `Read`, `Edit`, `Write` and `Grep` take a file named by `file_path` or `path`.
+   A `Write` that creates a file has no records yet. A `Grep` without a direct file can name one
+   existing regular file inside the project root through a literal `glob`. A relative search
+   `path` that resolves to a directory from the tool's working directory is treated as a
+   search directory. The `glob` must be relative, match the exact case of every component,
+   use single slashes between components, and contain no `.` or `..` component, glob
+   metacharacter (`*?[]{}`), backslash escape or leading `!`.
+   A supplied search directory is the base, resolved from the tool's working directory
+   when relative. With no search directory, the base is the payload's `cwd` or the project root.
+   A pattern-only `Grep`, a directory by itself, or a path outside the root names no file.
+   Bash lines take files from supported commands. See [Bash lines](#bash-lines).
+6. The hook chooses up to **three** files with records. Ordinary files keep the order in
+   which the call's ordinary readers name them. Files reached through exact paths, added shell
+   readers or literal `Grep` globs fill any remaining slots.
+   The hook claims each file for this agent **before emitting**. One statement counts and inserts
+   the claim. Each agent can claim **ten** files per scope in `store.meta`: ordinary
+   (`pretool_file:`), exact-path (`pretool_file::`), and added shell readers and literal `Grep`
+   globs together (`pretool_file:::`). A file named only by an added reader or a glob uses that
+   scope even when its records arrive by exact path. In Bash, `sed`, `grep`, `rg` and `cat` are
+   the ordinary readers. Exact-path and expanded readers skip files already held in any scope.
+   An ordinary reader can still deliver a file on its first ordinary claim. A full scope refuses
+   fresh claims in that scope. `<agent>` is the `agent_id`, or `-` for the
    session's own agent, so the main agent's keys do not start with any subagent's prefix. The value
    is the claim's ISO timestamp. These keys are deliberately **not** the `Stop` hook's
    `capture_sessions` ledger, so the guards can't consume each other.
@@ -1072,25 +1091,45 @@ word-boundary clips. Facts use a distinct line:
 - [fact] <complete statement> — Source: <complete source> (id <ULID>)
 ```
 
-For a proposal, `[unratified]` follows `[fact]`. Fact whitespace is normalized; statement,
-source and id are otherwise kept whole. A fact line longer than **512 characters**, including
-its labels, separators and id, is omitted before file selection and record caps. A later shorter
-fact may fill the slot. An oversize-only file claims nothing and spends no file quota. The local
-shown/total counts and `More:` concern only renderable candidates; they do not count facts
-withheld by this size rule. To retrieve full facts, including omitted ids, use
-`list_facts(files=["path"])` within its normal listing budget, or `list_facts(ids=["id"])`
-when the id is known. `get_task_context` also has text clips and is not a full-fact export.
+For a proposal, `[unratified]` follows `[fact]` and any `[file-bound]` tag. Fact whitespace is
+normalized. The statement, source and id are otherwise kept whole. A fact line longer than
+**512 characters**, including
+its labels, separators, id and any `[file-bound]` tag, is omitted before file selection and
+record caps. A later shorter fact may fill the slot. An oversize-only file prints nothing,
+claims nothing and spends no file quota. The shown/total counts and `More:` concern only
+renderable candidates. When a displayed file has facts withheld by the size rule, one line
+counts them before `More:`.
 
-Standalone and supporting facts need their own live or degraded file binding; a `supports`
-link alone does not inherit a decision's anchor. Binding statuses must be computed by a
-sync; after an index rebuild the hook reads the status the last sync computed for each unchanged
-entity. Superseded, rejected and expired decisions never appear. Facts must be accepted or a
-surfaced proposal, not expired: a `valid_to` still ahead is live, as it is for a decision, and
-one that has passed excludes the fact. Orphaned
-or uncomputed bindings deliver neither kind. Malformed fact rows are skipped individually;
+```text
+Withheld: {count} fact(s) too long to show here; see list_facts(files={files}).
+```
+
+`{files}` is a JSON array containing the file's repo-relative path. The line counts toward the
+hook output limit. To retrieve full facts, including omitted ids, use `list_facts(files=["path"])`
+within its normal listing budget, or `list_facts(ids=["id"])` when the id is known.
+`get_task_context` also has text clips and is not a full-fact export.
+
+Standalone and supporting facts need their own file binding. A `supports` link alone does not
+inherit a decision's anchor. For files held by the last synced graph, the hook uses live or
+degraded bindings. After an index rebuild it reads the status the last sync computed for
+each unchanged entity. Superseded, rejected and expired decisions never appear. Facts must be
+accepted or a surfaced proposal. A fact or decision expires when its `valid_to` passes.
+Malformed fact rows are skipped individually;
 a failed fact-table query preserves available decisions and uses the hook's protected diagnostic.
 
-The guard line comes once, first, and `More:` appears only when renderable records were left out.
+**Exact-path delivery.** PreToolUse checks durable anchors by exact path for existing files
+the index confirms are outside the last synced graph, or when no sync has checked the store. Each
+record line, including `See above` references, carries `[file-bound]` immediately after its kind.
+The legend appears once after the delivered blocks.
+
+> [file-bound] = declared applicability to the exact requested file; the graph cannot verify its symbol anchors. No anchor was rebound.
+
+The tag marks unverified applicability. These records receive no code-drift check. On a
+never-synced store, the output omits `More:` and the omitted-files notice has no
+`get_task_context` pointer.
+
+The guard line comes once, first. On a synced store, `More:` appears only when renderable records
+were left out.
 This hook's per-file order differs from `get_task_context(files=[f])`, which orders per entity:
 the `More:` line promises more context, not the same sequence. Decisions and facts independently
 anchored to several files can reach one agent once per file. Within one answer, a later
@@ -1124,7 +1163,7 @@ id, so a key on the session alone let the main agent's delivery use up the one e
 needed, and the subagents read anchored files blind. A subagent never receives the `SessionStart`
 map (the [`SubagentStart` brief](#sidegraph-subagent-start) tells it memory exists, and nothing
 more), so its own first read of an anchored file is where memory can reach it with a record. The
-cap of ten files per agent bounds what one agent can be handed. After a compaction or a clear
+three ten-file allowances bound what one agent can be handed. After a compaction or a clear
 the earlier blocks are gone from that agent's context, so its claims are deleted and the bound
 applies to the new context. The earlier decision-only field replay measured about 3,200
 characters at the median recipient and 7,700 at the 90th percentile; those measurements do not
@@ -1134,12 +1173,13 @@ processes Claude Code starts for one Bash line cannot add up past it. `SessionSt
 compact/clear reset on the same terms, the `Stop` hook's `capture_rearm:` keys on the same
 terms, the MCP per-agent `mcp_sent:` rows (even with telemetry off), and the two one-shot
 prefixes older versions wrote, `pretool_nudge:` and `pretool_nudge_path:`, which nothing writes
-now (`Store.prune_meta_prefixes`).
+now (`Store.prune_meta_prefixes`). A later non-duplicate `SessionStart` also deletes
+`mcp_caller:` rows older than one day.
 
 **A character cap.** The block is held to 9,500 characters, under Claude Code's 10,000-character
-cap on `additionalContext` (see [Output size budget](#output-size-budget)). Three files of three
-records come to about 5,000 characters plus six times the longest path, so only paths of some
-750 characters reach it. A file whose block would not fit is left out before claiming, so a later
+cap on `additionalContext` (see [Output size budget](#output-size-budget)). A path can appear in
+its file header and in both the `Withheld:` and `More:` lines. Across three files, that is up to
+nine path occurrences. A file whose block would not fit is left out before claiming, so a later
 read still delivers it, and the block ends with one line:
 
 > Sidegraph: the records of N more file(s) were left out to fit the hook output limit;
@@ -1148,8 +1188,9 @@ read still delivers it, and the block ends with one line:
 ### Bash lines
 
 The plugin wires Bash as one `Bash` entry with no `if`. Its command is a shell filter: it reads
-the payload, and starts the hook only when the payload holds `sed`, `grep`, `rg` or `cat` followed
-by a space, a JSON tab or carriage-return escape, a single quote or an escaped double quote, after a
+the payload and starts the hook when it holds `sed`, `grep`, `rg`, `cat`, `head`, `nl`, `awk`
+or literal `git show` followed by a space, a JSON tab or carriage-return escape, a single quote
+or an escaped double quote, after a
 character that cannot be part of a word or after a JSON escape for a newline, tab or carriage
 return. Any other Bash line prints `{}` after one `sh` (a few
 milliseconds), so a line without a read word starts no hook process at all.
@@ -1162,27 +1203,33 @@ its `if` (a quoted variable it cannot resolve such as `echo "$PATH"`, a loop bod
 variable, `${…}`, `{ …; }`, `case`, a heredoc followed by a redirect, `Y=$(…); echo $Y`): that was
 four launches for one call, 1.76 launches per Bash call over a field audit. The filter starts at
 most one, and only for a line that names a read word. It is a superset of the lines the hook
-answers, with one exception: `read_paths` answers only when a command word's basename is one of
-those four, and such a word appears in the payload after a non-word character and before a space,
-a tab, a carriage return or a quote, unless the word is split by quotes (`c'at' file`), which a
-`case` pattern cannot match in general and which the filter leaves unanswered. The filter can launch for a line
-that then names no file (`echo cat file`, `git grep x`), which prints `{}` as before. It needs no
+answers, except for spellings such as a word split by quotes (`c'at' file`), a quoted
+Git subcommand (`git 'show' HEAD:src/a.py`), or extra whitespace between `git` and `show`.
+The filter can launch for a line that then names no file (`echo cat file`, `git grep x`),
+which prints `{}` as before. It needs no
 Claude Code version beyond the one that runs hooks at all; Claude Code runs hook commands through
 a POSIX shell (Git Bash on native Windows).
 
-`sidegraph.bash_paths.read_paths(command, cwd, root)` decides which files a line reads, as a pure
-function over the text of the line. It splits the line into simple commands on newlines, `;`,
+`sidegraph.bash_paths.read_paths(command, cwd, root)` decides which files a line reads, using the line
+and the filesystem. It splits the line into simple commands on newlines, `;`,
 `&&`, `||`, `|` and `&`, drops heredoc bodies and every redirect with its target, follows `cd` (a
 `cd` inside `( … )` does not leak out, and after `cd -`, `cd ~`, a bare `cd`, `pushd`, `popd` or a
 `cd` to a variable the directory is unknown, so relative paths are not resolved until the line
 ends), skips what comes before a command word (`VAR=value` assignments, the keywords `{`, `do`,
 `then`, `else`, `!`, `if`, `while`, `until` and `time`, and the wrappers `timeout`, `env`, `sudo`,
 `command`, `nice` and `nohup` with their options), and reads one level into `bash -c`, `sh -c` and
-`zsh -c`. For `cat` every operand is a file; for `sed`, `grep` and `rg` the first operand is the
-script or pattern unless `-e`, `-f` or `--regexp` supplies it, and the values of options such as
-`-A`, `-g` or `--include` are not files. It keeps only existing regular files inside the project
-root: a directory, an unexpanded glob, an operand with `$` or a backtick in it, a path that a
-symlink resolves out of the root, and any other command (`head`, `awk`, `git grep`) name nothing.
+`zsh -c`. It takes file operands from `cat`, `head` and `nl` after skipping options and
+their values. For `sed`, `grep`, `rg` and `awk`, it also skips the pattern or program. An
+option such as `awk -f` supplies the program and its value is skipped as well.
+
+`git show REV:PATH` takes paths before the first `--` when the project root holds a `.git` entry
+and the working directory is inside it with no closer `.git` entry. Absolute paths are skipped.
+Paths starting with `./` or `../` resolve from the working directory. Other paths resolve
+from the repository root. `git grep` takes
+explicit paths after `--` and resolves them from the working directory. The parser keeps existing
+regular files inside the project root and skips unexpanded globs, variables and substitutions.
+A symlink whose target is outside the root is skipped. Unlisted commands such as `tail` and
+`less` name no files.
 
 No `permissionDecision` field is ever set — this hook cannot allow, deny, or ask; it only
 annotates the call with context and lets Claude Code's normal permission flow run as it would
@@ -1191,7 +1238,8 @@ have anyway.
 The hook also records a **touch event** for every `Read`, `Grep`, `Edit` and `Write` that
 names a file inside the project root — separately from delivery, and unchanged by it: a Bash read
 is not a touch. The path is normalized to repo-relative before
-it is stored, relative to the directory the store's path was anchored to: for a session started in
+it is stored. Touch events use `file_path` or `path` and are relative to the directory the
+store's path was anchored to. For a session started in
 `R/sub` that opens `R/.sidegraph`, that is `R`, so a touch of `R/sub/a.py` reads `sub/a.py` and
 joins the anchors; a pattern-only `Grep`, a directory, or a path outside the root records
 nothing. This is what lets the journal answer whether memory arrived before the agent
@@ -1289,12 +1337,15 @@ is left out.
 
 **How big.** At most two records per file (a brief covers several files, so this is not the
 three of the first read of a file), at most **six** record lines and **3,000** characters for the
-whole block. Files are taken in order, whole, and the first one that would pass either cap ends the
-list. One exception: when only the line cap stops it and a line is left, the file's first record
-fills the last line, so the sixth line is never wasted on a file that missed by one. A file the
-character cap stops is dropped whole. `More:` names exactly the files shown. The lines are the ones
-the Read path prints: the existing decision line or a complete `[fact]` statement and source,
-with the same ordering, proposal markers and 512-character fact-line admission rule above.
+whole block excluding the `Withheld:` line. Files are taken in order, whole, and the first one
+that would pass either cap ends the list. One exception: when only the line cap stops it and a
+line is left, the file's first record fills the last line, so the sixth line is never wasted on a
+file that missed by one. A file the character cap stops is dropped whole. `More:` names exactly
+the files shown. The brief uses the Read path's decision lines and complete `[fact]` statements
+and sources, with the same ordering, proposal markers and 512-character fact-line admission rule.
+If any shown file has withheld facts, the brief adds one `Withheld:` line before `More:`. It
+counts distinct withheld facts across those files and lists their paths in brief order. The line
+and its newline are outside the 3,000-character cap.
 The character cap drops a whole file group and stops; later shorter groups are not backfilled.
 Selection and character admission use full-body costs. Only the final rendering compacts
 identical repeated snapshots with the same references as the Read path; saved space never
@@ -1332,6 +1383,19 @@ nothing beyond the standard library, like the rest of this hook.
 
 Grok Build gets it too: its `spawn_subagent` tool maps to `Agent`. Codex has no `PreToolUse`
 carrier for this yet.
+
+### Sidegraph MCP reads
+
+On Claude Code, the MCP read group handles `get_task_context`, `query_decisions` and
+`retrieve_decisions`. It records the tool-use id, session and agent in the existing derived
+index so the MCP server can identify the caller. It prints `{}` and adds no hook run-log
+entry. A later non-duplicate `SessionStart` prunes caller rows older than one day.
+The Grok copy of the group prints `{}` without writing a caller row.
+
+Hand-wired setups can copy the MCP read group from the Claude Code setup guide. It matches
+`mcp__sidegraph__get_task_context`, `mcp__sidegraph__query_decisions` and
+`mcp__sidegraph__retrieve_decisions` and uses the same command as `Read|Grep|Edit|Write`.
+[Claude Code setup](../getting-started/claude-code-setup.md)
 
 ## `sidegraph-subagent-start`
 
@@ -1386,9 +1450,9 @@ outside the count.
 
 **It reads the index, not the store,** like [`sidegraph-pre-tool-use`](#sidegraph-pre-tool-use):
 it opens `<store>/index.db` through the same raw SQLite handle, loads nothing beyond the
-standard library, never rebuilds, repairs or creates anything, and writes nothing but one line of
-[the run log](#the-hook-run-log) when it used the index or lost it to a lock. It prints `{}`
-in every case that hook does nothing in (a missing, symlinked, wrong-version or unreadable
+standard library, and never rebuilds, repairs or creates the index. It can write one line of
+[the run log](#the-hook-run-log) when it used the index, lost it to a lock or found it missing.
+It prints `{}` for the same index refusals (a missing, symlinked, wrong-version or unreadable
 index), and in these:
 
 - `$SIDEGRAPH_SUBAGENT_BRIEF == "off"`;
@@ -1421,10 +1485,11 @@ Some lines carry a fifth field. On an `empty` line it is the cause:
 |---|---|---|
 | `no-entity` | PreToolUse | no file the call names has an anchored entity |
 | `no-record` | PreToolUse, SubagentStart | an anchor is there, and no record that would be handed over |
-| `cold` | PreToolUse, SubagentStart | a record that would have been handed over was left out because no sync has checked that anchor: the store was never synced, or its index was rebuilt and the anchor is new or changed |
+| `no-index` | PreToolUse, SubagentStart | delivery found a store without an index |
+| `cold` | PreToolUse, SubagentStart | a record that would have surfaced was left out while its anchor awaited sync. PreToolUse can deliver eligible records by exact path in this state |
 | `repeat` | PreToolUse | every file with records was already delivered to this agent |
-| `cap` | PreToolUse | a file with records was refused: the agent holds its ten files |
-| `duplicate` | SessionStart | a second `SessionStart` for one session within 60 seconds |
+| `cap` | PreToolUse | a file with records was refused because its allowance is full |
+| `duplicate` | SessionStart | a second notice for the same session within 60 seconds, with matching sources or either source absent |
 | `unknown` | PreToolUse, SubagentStart | the cause was not read: another process held the index lock, and a hook does not wait to learn why it had nothing to deliver |
 
 One cause per run; when several apply, the one furthest along is written (`cap`, then
@@ -1451,10 +1516,10 @@ is missing, a symlink or not a regular file, it lacks that exact line (deleted, 
 `index.db`, or indented), or it holds any negation line (`!…`).
 
 The log is written only next to a store. `sidegraph-pre-tool-use` and `sidegraph-subagent-start`
-write a line only for a run whose delivery opened the index (a run with delivery switched off, or
-one that stopped before opening it, is not counted, locked or not) and that used the index or lost
-it to a lock: an index they cannot use for any other reason (missing, a newer format, a symlink,
-corrupt) is left exactly as it was. `sidegraph-session-start` opens the whole store, so it also
+count a run when its delivery used the index, lost it to a lock, or found it missing.
+Delivery switched off, touch-only recording and early exits before the delivery attempt leave
+no line. Other refusals such as a newer format, a symlink or a corrupt index leave no run-log line.
+`sidegraph-session-start` opens the whole store, so it also
 logs `error` when the store refuses to open, except for a store that needs a newer Sidegraph,
 which it leaves as it was.
 

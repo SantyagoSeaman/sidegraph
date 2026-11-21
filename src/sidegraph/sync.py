@@ -83,14 +83,16 @@ from .store import (
 )
 from .store_layout import (
     DRIFT_MEMO_KEY,
+    GRAPH_FILES_STAMP_KEY,
     REBIND_DONE_KEY,
     REBIND_PENDING_KEY,
+    VOLATILE_STALE_GEN_KEY,
     snapshot_signature,
     stamp_cache,
 )
+from .store_layout import LAST_SYNCED_KEY as LAST_SYNCED_KEY
 from .verify import _run_git
 
-LAST_SYNCED_KEY = "last_synced_graph_version"
 # Derived meta (design/superpowers/specs/2026-09-29-sync-pending-moves-and-shared-
 # communities-design.md D1): the entities a pass left as ``moved_uncommitted`` plus the git
 # HEAD it saw, as ``{"head": <sha or null>, "entity_ids": [...]}``. Committing the rename
@@ -1909,7 +1911,13 @@ def sync(
     # the flag git-native design §3 introduced for exactly that event ("the next
     # sidegraph-sync / lazy sync rebuilds volatile state") — set on every reload since, and
     # read here for the first time.
+    # Read before the flag so a later mark keeps the next ordinary pass from skipping.
+    stale_gen = store.get_meta(VOLATILE_STALE_GEN_KEY) or "0"
     volatile_stale = store.get_meta(VOLATILE_STALE_KEY) == "1"
+    # The derived file table must never fail a sync.
+    with contextlib.suppress(Exception):
+        if store.get_meta(GRAPH_FILES_STAMP_KEY) != stamp:
+            store.replace_graph_files(reader.source_files(), stamp)
     # Read BEFORE the ladder snapshots the entities: the pass acknowledges this value, never a
     # later one, so an orphan born while it runs keeps the next ordinary pass from skipping.
     rebind_gen = store.get_meta(REBIND_PENDING_KEY) or "0"
@@ -2033,7 +2041,8 @@ def sync(
     # the TOC is a render of that state, not part of it. Clearing after build_toc instead
     # let a persistent TOC failure leave the half-state "version stamped but flag set",
     # which the gate below reads as "heal me" on every single retrieval call.
-    store.set_meta(VOLATILE_STALE_KEY, "0")
+    # A later stale mark belongs to the next pass.
+    store.clear_volatile_stale(stale_gen)
     store.set_meta(REBIND_DONE_KEY, rebind_gen)
     # TOC precompute (§5/§6): recomputed AFTER the domain-community refresh above and the
     # last_synced stamp, so it reflects this pass's own updates; written on every completed

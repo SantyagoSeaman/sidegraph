@@ -13,15 +13,18 @@ read tools (`get_task_context`, `retrieve_decisions`, `query_structure`, `query_
 project-relative one, applied in the main checkout: a store at `.config/sidegraph` borrows
 `<main>/.config/graphify-out/graph.json`.
 
-The borrowed graph is **synced index-only**. A worktree's `index.db` is gitignored and starts
-cold, and what makes retrieval work there is derived from the graph: each domain's `communities`,
-the Tier-1 community bindings, the entities' `last_seen_*` mapping. Left cold, `drill_down` showed
-a fraction of the decisions the main checkout shows and `get_task_context` lost its `## Related`
+`find_entity` can also borrow the graph on a full miss. It reads the graph without syncing.
+
+When a caller syncs the borrowed graph, the sync is **index-only**. A worktree's `index.db`
+is gitignored and starts cold, and what makes retrieval work there is derived from the graph:
+each domain's `communities`, the Tier-1 community bindings, the entities' `last_seen_*`
+mapping. Left cold, `drill_down` showed a fraction of the decisions the main checkout shows
+and `get_task_context` lost its `## Related`
 section. So the lazy sync runs against the borrowed graph, and it never rewrites a tracked file:
 the one step of a sync that can, the moved rung (it follows a renamed file by rewriting
 `entities/<id>.json`), abstains, because its evidence, the old path gone and the move in HEAD's
 history, would come from the main checkout and not from the branch. A worktree keeps its tracked store
-byte-identical to what git checked out. `SessionStart` builds the domain map in memory from the
+byte-identical to what git checked out. `SessionStart` builds the map cache in memory from the
 store every time, instead of trusting a cached one, and says whose graph it reads:
 
 > Sidegraph: this worktree has no code graph of its own, so memory reads the main checkout's
@@ -97,9 +100,9 @@ the `/graphify` skill's `--update` form).
   itself start a rebuild.
 - **Where the output goes.** The last rebuild's output is `sidegraph-graph-refresh.log` in the
   common git directory (`.git/` in a normal clone).
-- **No `sidegraph-sync` in the hook.** The next memory call notices the new graph version and
-  re-anchors before it answers, the same lazy check described below. Chaining `sidegraph-sync`
-  into a hook would race the background rebuild.
+- **No `sidegraph-sync` in the hook.** The next read that runs lazy sync notices the new graph
+  version and re-anchors before it answers. Chaining `sidegraph-sync` into a hook would race the
+  background rebuild.
 - **It never replaces a hook.** The block goes right after the hook's shebang line, so a
   foreign hook that ends in `exit` or `exec` cannot skip it, and every other byte of the file
   stays as it was. A second `--hooks` leaves the files byte-identical. A hook that is a
@@ -124,11 +127,9 @@ the main checkout rebuilds twice on every commit (Graphify's lock serialises the
 reports it when it finds one, and never touches it; `graphify hook uninstall` removes it and
 leaves Sidegraph's block as it was.
 
-The lazy check keeps the store honest whichever way the graph was rebuilt: `graph_version` is
-compared on every read path (`get_task_context`, `SessionStart`), so a graph that was rebuilt in
-the background, or by hand, is caught by the next read, which re-syncs before serving context
-(entities remembered under `pending_uncommitted_moves` are still re-verified once `HEAD` has
-moved).
+The store compares `graph_version` on reads that run lazy sync, such as `get_task_context`
+and `SessionStart`. The next such read after a rebuild re-syncs before serving context.
+It also re-verifies entities under `pending_uncommitted_moves` once `HEAD` has moved.
 
 A graph that was **never rebuilt** is a different case, and the lazy check cannot see it: it
 compares `graph.json` with the store's last sync, so a graph that stopped at an old commit

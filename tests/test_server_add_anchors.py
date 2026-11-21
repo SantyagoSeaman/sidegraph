@@ -6,14 +6,16 @@ here through the testable core ``_add_anchors_impl``."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
 
-from sidegraph.engine.reader import ResolveResult
+from sidegraph.engine.reader import GraphifyReader, ResolveResult
 from sidegraph.schema import Decision, DecisionKind, Fact, Provenance
-from sidegraph.server import _add_anchors_impl
+from sidegraph.server import _add_anchors_impl, _add_decision_impl
 from sidegraph.store import Store
+from tests.test_ratify_policy import _feature_graph
 
 
 class FakeReader:
@@ -131,6 +133,48 @@ def test_add_anchors_unknown_record_returns_error_dict(tmp_path):
     store = Store(tmp_path / "srv.db")
     out = _add_anchors_impl(store, None, "01NOPE", anchors=[{"name": "x"}])
     assert out == {"error": "unknown record"}
+
+
+@pytest.mark.parametrize("legacy_twin", [False, True], ids=["same-entity", "legacy-twin"])
+def test_ambiguous_reanchor_keeps_the_existing_binding(tmp_path, legacy_twin):
+    store = Store(tmp_path / "t.db")
+    full_reader = _feature_graph(tmp_path)
+    full_graph = json.loads(full_reader.path.read_text())
+    full_graph["nodes"] = [node for node in full_graph["nodes"] if node["id"] != "r_fn_b"]
+    single_graph = tmp_path / "single_retry.json"
+    single_graph.write_text(json.dumps(full_graph))
+    anchor = {"name": "retry", "file_path": "trader/retry.py"}
+    captured = _add_decision_impl(
+        store,
+        GraphifyReader(single_graph),
+        "Keep retry",
+        "adr",
+        "c",
+        "r",
+        anchors=[{**anchor, "relation": "deprecates"}],
+    )
+    rid = captured["id"]
+    leaf = next(b for b in store.bindings_for_record(rid) if b.tier == 2)
+    store.add_binding(leaf.model_copy(update={"weight": 0.35}))
+    if legacy_twin:
+        entity = store.get_entity(leaf.entity_id)
+        twin = store.upsert_entity(
+            entity.model_copy(update={"entity_id": "01AAAAAAAAAAAAAAAAAAAAAAAA"})
+        )
+        assert store.resolve_descriptor("retry", "trader/retry.py").entity_id == twin.entity_id
+    canonical = store.path / "bindings" / f"{rid}.json"
+    before = canonical.read_bytes()
+
+    answer = _add_anchors_impl(store, full_reader, rid, [anchor])
+
+    assert canonical.read_bytes() == before
+    leaf = next(b for b in store.bindings_for_record(rid) if b.tier == 2)
+    assert (leaf.relation, leaf.weight, leaf.status) == ("deprecates", 0.35, "live")
+    assert answer["bound"] == []
+    assert len(answer["ambiguous"]) == 1
+    [ambiguous] = answer["ambiguous"]
+    assert (ambiguous["name"], ambiguous["reason"]) == ("retry", "ambiguous")
+    assert set(ambiguous["candidates"]) == {"r_fn_a", "r_fn_b"}
 
 
 def test_add_anchors_duplicate_anchor_does_not_double_bind(tmp_path):

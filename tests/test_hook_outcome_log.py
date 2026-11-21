@@ -935,9 +935,12 @@ def test_pre_tool_use_logs_the_outcome_of_failures_after_the_open(
         patch.setattr(HotIndex, "anchored_entities", raising(ValueError("x")))
         _run_hook("pretool", monkeypatch, capsys, {**payload, "session_id": "b"})
 
-    def records_refused(self: HotIndex, ids, *, on_error=None):
-        if on_error is not None:
-            on_error(_busy_error())
+    exact_calls: list[bool] = []
+
+    def records_refused(self: HotIndex, ids, *, exact_path=False, on_error=None):
+        exact_calls.append(exact_path)
+        assert on_error is not None
+        on_error(_busy_error())
         return []
 
     with monkeypatch.context() as patch:  # selection on the Read path
@@ -947,6 +950,7 @@ def test_pre_tool_use_logs_the_outcome_of_failures_after_the_open(
         patch.setattr(HotIndex, "records_for", records_refused)
         _run_hook("pretool", monkeypatch, capsys, agent_payload("d"))
 
+    assert exact_calls == [False, False]
     assert [r.outcome for r in _rows(store_dir)] == ["lock", "error", "lock", "lock"]
 
 

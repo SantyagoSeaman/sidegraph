@@ -20,7 +20,9 @@ you can drop the prefix and use the bare `sidegraph-*` names.
 **Proves:** the MCP server points at this repository, and the opening map arrives on hosts that support it.
 
 1. Start a fresh interactive agent session in the repository.
-2. On Claude Code, Codex and Muse, confirm that the opening context mentions Sidegraph or its domain map. On Grok Build, check its MCP instructions. OpenCode has no opening-map check.
+2. On Claude Code, Codex and Muse, confirm that the opening context shows the Sidegraph version
+   and project memory heading. On Grok Build, check its MCP instructions. OpenCode has no
+   opening-map check.
 3. Ask the agent to call `get_task_context` for one existing file.
 
 On the Claude Code plugin, the first session after an install or an update downloads the pinned

@@ -58,7 +58,9 @@ def _brief_text(counts: tuple[int, int, int]) -> str | None:
 def _answer(diagnostics: HookDiagnostics | None = None, run: hook_log.Run | None = None) -> dict:
     """The hook's output: the brief, or ``{}`` where there is nothing to ask about. ``run``
     is the outcome tally (see ``hook_log``): it learns the store and the failures of the steps
-    that deliver."""
+    that deliver, including a missing index.
+    see design/superpowers/specs/2026-11-20-pretooluse-coverage-design.md (D7)
+    """
     stage = "payload"
     try:
         if os.environ.get("SIDEGRAPH_SUBAGENT_BRIEF") == "off":
@@ -88,12 +90,19 @@ def _answer(diagnostics: HookDiagnostics | None = None, run: hook_log.Run | None
             if diagnostics is not None:
                 diagnostics.report("index", error)
 
+        def missing() -> None:
+            if run is not None:
+                run.store_dir = location.path
+                run.cause = hook_log.NO_INDEX
+
         index = HotIndex.open(
-            location.path, on_error=open_error, busy_timeout_seconds=HOOK_BUSY_SECONDS
+            location.path,
+            on_error=open_error,
+            on_missing=missing,
+            busy_timeout_seconds=HOOK_BUSY_SECONDS,
         )
         # The run log (see ``_HotOpener.__call__``): errors count only when there is no handle,
-        # and a run is tallied when it used the index or lost it to a lock; an index that cannot
-        # be used for any other reason is left exactly as it was.
+        # and a run is tallied when it used the index, lost it to a lock, or found it missing.
         if run is not None:
             if index is None:
                 for error in errors:

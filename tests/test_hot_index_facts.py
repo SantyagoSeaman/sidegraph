@@ -11,13 +11,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from sidegraph.host import hooks
-from sidegraph.hot_index import HotIndex
+from sidegraph.hot_index import HotIndex, Record
 from sidegraph.retrieval import _live_facts
 from sidegraph.schema import DecisionKind, Fact, Provenance
 from sidegraph.store import Store
 from sidegraph.store_layout import VOLATILE_STALE_KEY
 from tests.store_format2_support import format1_store
 from tests.test_hot_index import _Seeder
+
+_WITHHELD_A = 'Withheld: 1 fact(s) too long to show here; see list_facts(files=["src/a.py"]).'
 
 
 @pytest.fixture
@@ -621,6 +623,165 @@ def test_oversized_fact_does_not_hide_later_short_fact(fact_project, monkeypatch
     assert _journal(fact_project, "inject") == [("src/a.py", short.id)]
 
 
+def test_read_names_withheld_fact_after_displayed_fact(fact_project, monkeypatch, capfd):
+    short = _fact(fact_project)
+    long = _fact(fact_project, statement="x" * 600, assert_eligible=False)
+    output = _call(
+        monkeypatch,
+        capfd,
+        {
+            "session_id": "facts",
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(fact_project / "src/a.py")},
+        },
+    )
+    lines = output["hookSpecificOutput"]["additionalContext"].splitlines()
+    assert lines[-2:] == [
+        f"- [fact] {short.statement} — Source: {short.source} (id {short.id})",
+        _WITHHELD_A,
+    ]
+    assert all(long.id not in line for line in lines)
+    assert _journal(fact_project, "inject") == [("src/a.py", short.id)]
+
+
+def test_read_names_withheld_fact_before_more(fact_project, monkeypatch, capfd):
+    for age in range(3):
+        _fact(fact_project, age_days=age, assert_eligible=age == 0)
+    _fact(fact_project, statement="x" * 600, assert_eligible=False)
+    output = _call(
+        monkeypatch,
+        capfd,
+        {
+            "session_id": "facts",
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(fact_project / "src/a.py")},
+        },
+    )
+    lines = output["hookSpecificOutput"]["additionalContext"].splitlines()
+    assert lines[-5] == "Recorded for src/a.py (2 of 3, mistakes first):"
+    assert all(line.startswith("- [fact]") for line in lines[-4:-2])
+    assert lines[-2:] == [_WITHHELD_A, 'More: get_task_context(files=["src/a.py"]).']
+
+
+def test_read_room_includes_withheld_line(fact_project, monkeypatch, capfd):
+    short = _fact(fact_project)
+    _fact(fact_project, statement="x" * 600, assert_eligible=False)
+    block_without_notice = (
+        "Recorded for src/a.py (1 of 1, mistakes first):\n"
+        f"- [fact] {short.statement} — Source: {short.source} (id {short.id})"
+    )
+    monkeypatch.setattr(
+        hooks,
+        "HOOK_CONTEXT_MAX_CHARS",
+        len(hooks.MEMORY_GUARD_LINE)
+        + len(hooks._PRETOOL_OMITTED.format(count=9999))
+        + len(block_without_notice)
+        + 2,
+    )
+    output = _call(
+        monkeypatch,
+        capfd,
+        {
+            "session_id": "facts",
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(fact_project / "src/a.py")},
+        },
+    )
+    assert output["hookSpecificOutput"]["additionalContext"] == hooks._PRETOOL_OMITTED.format(
+        count=1
+    )
+    assert _journal(fact_project, "inject") == []
+
+
+def test_brief_names_withheld_fact_and_keeps_groups(fact_project, monkeypatch, capfd):
+    _fact(fact_project)
+    _fact(fact_project, paths=("src/b.py",))
+    payload = {
+        "session_id": "facts",
+        "tool_name": "Agent",
+        "tool_input": {"prompt": "Inspect src/a.py src/b.py"},
+    }
+    control = _call(monkeypatch, capfd, payload)["hookSpecificOutput"]["updatedInput"]["prompt"]
+    _fact(fact_project, statement="x" * 600, assert_eligible=False)
+    output = _call(monkeypatch, capfd, payload)["hookSpecificOutput"]["updatedInput"]["prompt"]
+    assert output.count(_WITHHELD_A) == 1
+    assert f'{_WITHHELD_A}\nMore: get_task_context(files=["src/a.py", "src/b.py"]).' in output
+    assert output.replace(_WITHHELD_A + "\n", "") == control
+
+
+@pytest.mark.parametrize("extra_long", [False, True], ids=["shared", "distinct"])
+def test_brief_counts_shared_withheld_fact_once(fact_project, monkeypatch, capfd, extra_long):
+    _fact(fact_project)
+    _fact(fact_project, paths=("src/b.py",))
+    _fact(fact_project, paths=("src/a.py", "src/b.py"), statement="x" * 600, assert_eligible=False)
+    if extra_long:
+        _fact(fact_project, statement="y" * 600, assert_eligible=False)
+    count = 2 if extra_long else 1
+    read = _call(
+        monkeypatch,
+        capfd,
+        {
+            "session_id": "facts",
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(fact_project / "src/a.py")},
+        },
+    )["hookSpecificOutput"]["additionalContext"]
+    assert read.splitlines()[-1] == (
+        f'Withheld: {count} fact(s) too long to show here; see list_facts(files=["src/a.py"]).'
+    )
+    output = _call(
+        monkeypatch,
+        capfd,
+        {
+            "session_id": "facts",
+            "tool_name": "Agent",
+            "tool_input": {"prompt": "Inspect src/a.py src/b.py"},
+        },
+    )["hookSpecificOutput"]["updatedInput"]["prompt"]
+    assert [line for line in output.splitlines() if line.startswith("Withheld:")] == [
+        f"Withheld: {count} fact(s) too long to show here; "
+        'see list_facts(files=["src/a.py", "src/b.py"]).'
+    ]
+
+
+@pytest.mark.parametrize("require_notice", [False, True], ids=["selection", "size-with-notice"])
+def test_brief_withheld_line_is_outside_exact_character_cap(
+    fact_project, monkeypatch, capfd, require_notice
+):
+    """Selection passes on base and goes red when the notice is measured inside the cap."""
+    paths = ("src/a.py", "src/b.py", "src/c.py")
+    plan = []
+    for path in paths:
+        facts = [
+            _fact(fact_project, paths=(path,), statement="x" * 400, assert_eligible=False)
+            for _ in range(1 if path == paths[-1] else 2)
+        ]
+        plan.append(
+            (None, path, [Record(fact.model_dump(mode="json"), False, "fact") for fact in facts])
+        )
+    records = plan[-1][2]
+    # Measure one extra record's fixed labels and ID, then fill the remaining room with its body.
+    data = {**records[0].decision, "statement": ""}
+    records.append(Record(data, False, "fact"))
+    room = 3000 - len(hooks._render_brief(plan))
+    _fact(fact_project, paths=(paths[-1],), statement="y" * room, assert_eligible=False)
+    _fact(fact_project, statement="x" * 600, assert_eligible=False)
+    prompt = "Inspect src/a.py src/b.py src/c.py"
+    output = _call(
+        monkeypatch,
+        capfd,
+        {"session_id": "facts", "tool_name": "Agent", "tool_input": {"prompt": prompt}},
+    )["hookSpecificOutput"]["updatedInput"]["prompt"]
+    block = output[len(prompt) + 2 :]
+    notice = _WITHHELD_A + "\n"
+    assert all(f"\n{path}:\n" in block for path in paths)
+    if require_notice:
+        assert block.count(notice) == 1
+        assert len(block) == 3000 + len(notice)
+    else:
+        assert len(block.replace(notice, "")) == 3000
+
+
 def test_support_link_does_not_inherit_the_decision_anchor(fact_project):
     fact = _fact(fact_project, supporting=True, paths=("src/b.py",))
     store = Store(fact_project / ".sidegraph")
@@ -678,6 +839,7 @@ def test_mixed_agent_character_cap_drops_whole_group_and_journals_only_final_pla
         store.set_meta(VOLATILE_STALE_KEY, "0")
     finally:
         store.close()
+    _fact(fact_project, paths=("src/c.py",), statement="x" * 600, assert_eligible=False)
     later = _fact(fact_project, paths=("src/d.py",), assert_eligible=False)
     before = _canonical(fact_project)
     prompt = "Inspect src/a.py src/b.py src/c.py src/d.py"
@@ -697,6 +859,7 @@ def test_mixed_agent_character_cap_drops_whole_group_and_journals_only_final_pla
     )
     assert "src/a.py:" in block and "src/b.py:" in block
     assert "src/c.py:" not in block and "src/d.py:" not in block
+    assert "Withheld:" not in block
     assert later.id not in block and decision.id not in block
     # With the complete next group, the block would exceed the cap; no line was truncated.
     plan = [

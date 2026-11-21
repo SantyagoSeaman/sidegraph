@@ -29,31 +29,28 @@ accumulated experience without loading its entire history at once.
 Through the shipped v1 loop, the decision half was retrievable, but the structural half an
 agent walked was still **nameless**: Leiden clusters (`community:19`) and god-node labels, with
 no prose explaining what a cluster of files is *for*. The mind-model layer closes that gap:
-**`Domain`** is a named, described area of the system — the abstraction layer the agent
-answers a top-level question *from*, before it ever reads a leaf file.
+**`Domain`** is a named, described area of the system that people can browse in the Portal.
 
-## Top-down: TOC → drill_down → leaves
+## Project overview, domains and task context
 
-The read path now has three altitudes, and the point is to answer from the highest altitude
-that suffices:
+The project overview, domain tools and task tools answer different questions.
 
-1. **`SessionStart` TOC** — the accepted domains, each with a title, a mistake count,
-   and a subdomain count (see
-   [retrieval](retrieval.md#sessionstart-toc)). This is what an agent reads before touching
-   anything — "what areas does this project have, and what should I already know about each."
-   The mistake count is what `drill_down` would serve for the domain: the accepted `gotcha`,
-   `lesson` and `constraint` decisions in the union described under `drill_down` below, so a
-   gotcha anchored to a leaf entity that lives in the domain is counted too. Proposed and
-   superseded records are not.
-2. **`drill_down(domain_slug)`** — walk one domain: its full summary, its accepted subdomains,
+1. **Project overview** — browse named areas of the project in the Portal's graph or with
+   `list_domains`. The agent's opening map carries the standing instruction, version, global
+   mistakes and constraints, visible proposals and status lines. Without a usable domain cache,
+   the hook also shows the largest graph communities, recorded decisions and known facts.
+   See the [SessionStart map](retrieval.md#sessionstart-toc).
+2. **`drill_down(domain_slug)`** — get a slug from `list_domains` and browse a domain's full
+   summary, its accepted subdomains,
    a capped sample of the code/doc entities that currently belong to it, and the decisions
    about it (mistakes first). Its `decisions` list is the **union** of decisions tagged
    directly to the `domain:<slug>` entity,
-   decisions anchored to any code/doc entity that lives in one of the domain's communities
-   (a community-membership join, deduplicated), and decisions anchored to a whole *document*
+   decisions anchored to a code or document entity whose current node is a domain member
+   or whose last-seen community belongs to the domain when it has no recorded node, and
+   decisions anchored to a whole *document*
    entity whose file_path is one of the domain's covered files — so a gotcha anchored to a leaf
    entity in the domain, or an imported ADR that anchored to a doc rather than the domain
-   abstraction, *does* surface here, and is counted in the TOC. The document branch
+   abstraction, surfaces here. The document branch
    matters specifically on doc corpora: `sidegraph-import --docs` anchors an ADR to the
    document's own file-level node, but Graphify clusters every doc file-level node into one hub
    community, so that node's community is essentially never among the domain's `communities`
@@ -61,17 +58,13 @@ that suffices:
    it, but matching on file_path against the domain's covered headings closes the gap. It's
    scoped to whole-document anchors only, so a code corpus (where one file spans many
    communities) can't have a decision on an unrelated function in that file falsely surface just
-   because the file is touched. This is the Axis-1 operation: go one level deeper into a named
-   area before naming files for `get_task_context` or requesting their map with `query_structure`.
+   because the file is touched.
 3. **`get_task_context` / `query_structure` / `query_decisions`** — the seeded, budgeted leaf
    read path (unchanged from the shipped v1 loop), for when the agent already knows the
    files/entities it is about to touch.
 
-An agent that only ever reaches for step 3 still gets a working tool — domains are additive,
-not a prerequisite. But once domains exist, steps 1–2 let an agent answer "what does this
-project look like" *without reading a single file*, which is the actual founding niche: a
-queryable mental model loaded before the first grep, not an index that only pays off once you
-already know what you're looking for.
+Agents retrieve memory through the files, symbols and query words of the task. People can
+browse the project's named areas in the Portal or through the domain tools.
 
 ## Domain lifecycle
 
@@ -157,7 +150,7 @@ Three ways to group decisions across entities exist now, and they answer differe
 | | Question it answers | Shape | Lifecycle |
 |---|---|---|---|
 | **Tag** (`tag:<slug>`) | "which decisions carry this cross-cutting label?" | a bare slug, no prose | none — get-or-create, no ratification, no supersession |
-| **Domain** | "what is this named area of the system, and what do I need to know about it?" | slug + title + required WHY-IT-EXISTS summary + optional parent/communities/path_prefixes | full record: proposed → accepted, append-only supersession to revise |
+| **Domain** | "what should I know when browsing this area of the project?" | slug + title + required WHY-IT-EXISTS summary + optional parent/communities/path_prefixes | full record: proposed → accepted, append-only supersession to revise |
 | **Initiative** (`initiative:<label>`) | "which decisions belong to this piece of work?" | a Tier-0 label on captured decisions | flat grouping, no ratification gate of its own |
 
 A tag is the cheapest of the three — free-form text slugified into a durable entity at capture
@@ -165,7 +158,7 @@ A tag is the cheapest of the three — free-form text slugified into a durable e
 manage. Reach for it when you want to say "these decisions are all about performance" without
 describing *why performance work exists here* — that's what a domain's summary is for. A
 domain is the only one of the three that is itself ratified content: it has a required summary,
-it can be superseded, and it is what the TOC and `drill_down` are built from. An initiative
+it can be superseded, and it organizes the Portal graph and `drill_down` results. An initiative
 groups decisions around a unit of *work* (a branch, a project) rather than a unit of the
 *system*. It is an abstract entity and binding only, with no record of its own and no
 description; nothing renders a description-first view of it the way `drill_down` does for a
@@ -175,6 +168,6 @@ domain.
 
 - [Data model](data-model.md) — the `Domain` record's fields.
 - [Anchoring](anchoring.md) — domain-aware Tier-1 binding.
-- [Retrieval](retrieval.md) — the TOC, `drill_down`, and the budget fallback.
+- [Retrieval](retrieval.md) — the opening map, `drill_down`, and task budgets.
 - [Naming your domains](../guides/naming-your-domains.md) — the practical bootstrap → ratify
   walkthrough.

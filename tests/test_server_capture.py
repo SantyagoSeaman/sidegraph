@@ -261,8 +261,11 @@ def test_add_decision_impl_reports_ambiguous_anchor_in_anchors_skipped(tmp_path)
     assert out["anchors_skipped"] == [
         {"name": "run", "reason": "ambiguous", "candidates": ["a", "b"]}
     ]
-    # no Tier-2 leaf was created for the ambiguous anchor -- only the Tier-1 community binding
-    assert out["bindings"] == 1
+    assert out["bindings"] == 2
+    assert sorted((b.tier, b.status) for b in store.bindings_for_record(out["id"])) == [
+        (1, "degraded"),
+        (2, "degraded"),
+    ]
 
 
 def test_add_decision_impl_ambiguous_candidates_capped_at_five(tmp_path):

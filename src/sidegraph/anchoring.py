@@ -5,8 +5,8 @@ and create AnchorBindings across tiers with graceful degradation (see
 docs/concepts/anchoring.md):
 
 - resolved   -> Tier-2 leaf (live) + Tier-1 domain/community (live)
-- ambiguous  -> Tier-1 domain/community only (degraded, unless a domain covers it — see
-                below); no leaf
+- ambiguous  -> Tier-1 domain (live) or shared community (degraded), with a degraded
+                Tier-2 leaf for an eligible shared-community anchor
 - unresolved -> Tier-2 leaf (orphaned); no community
 
 Depends only on the engine-seam interface (reader.resolve -> ResolveResult) and the Store —
@@ -141,8 +141,8 @@ class AnchorResolution(list[AnchorBinding]):
     it always returned (every existing caller iterates/indexes/``len()``s it as a plain
     list — this stays a drop-in) but additionally carries the underlying
     ``reader.resolve()`` outcome, so a caller that wants per-anchor feedback (Gate-5 finding
-    S3: "ambiguous" anchors reported back to the human/agent) doesn't have to re-resolve the
-    same ref a second time just to learn WHY no leaf binding was created.
+    S3: "ambiguous" anchors reported back to the human/agent) can report why the ref was
+    ambiguous from its status and candidates.
 
     ``status`` is ``engine.reader.ResolveResult``'s (``"resolved"`` | ``"ambiguous"`` |
     ``"unresolved"``); ``candidates`` is only non-empty when ambiguous, so a collapsed stub
@@ -196,7 +196,8 @@ def resolve_and_bind(
     effective_community = result.community
     node_rejected = False
 
-    # Tier-2 leaf (concrete entity) — created when resolved or unresolved (orphaned).
+    # Tier-2 leaf (concrete entity) — live if resolved, orphaned if unresolved.
+    # Eligible ambiguous refs get a degraded leaf in the community branch below.
     if result.status in ("resolved", "unresolved"):
         # find+mint half only (design D3): Store.get_or_create_entity runs the lookup and
         # the mint atomically (Task 2), closing finding 2's TOCTOU for this call site. It is
@@ -305,6 +306,34 @@ def resolve_and_bind(
                         )
                     )
                 )
+                # A clone needs a durable leaf to re-derive its community. Preserve the
+                # collapse=False contract, decline path-less adoption, and leave any
+                # existing binding to this identity alone.
+                if result.status == "ambiguous" and collapse:
+                    known = store.resolve_descriptor(ref.name, ref.file_path)
+                    held = {b.entity_id for b in store.bindings_for_record(record_id)}
+                    # Skip the identity scan when the community is the only binding.
+                    held.discard(comm.entity_id)
+                    if known is None or (
+                        known.descriptor is not None
+                        and known.descriptor.file_path == ref.file_path
+                        and (
+                            not held
+                            or held.isdisjoint(m.entity_id for m in store.identity_members(known))
+                        )
+                    ):
+                        leaf = store.get_or_create_entity(ref)
+                        bindings.append(
+                            store.add_binding(
+                                AnchorBinding(
+                                    record_id=record_id,
+                                    entity_id=leaf.entity_id,
+                                    tier=2,
+                                    status="degraded",
+                                    relation=effective_relation,
+                                )
+                            )
+                        )
 
     return AnchorResolution(
         bindings, result.status, result.candidates if result.status == "ambiguous" else []

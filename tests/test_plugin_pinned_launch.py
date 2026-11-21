@@ -62,7 +62,7 @@ _EMPTY_GUARD = "echo '{}'"
 # a quote or a JSON-escaped double quote. Never a bare substring.
 _BASH_PATTERNS = "|".join(
     pattern
-    for word in ("sed", "grep", "rg", "cat")
+    for word in ("sed", "grep", "rg", "cat", "head", "nl", "awk", "git show")
     for before in ("*[!A-Za-z0-9_]", "*\\\\[ntr]")
     for pattern in (
         *(f"{before}'{word}{after}'*" for after in (" ", "\\t", "\\r", '\\"')),
@@ -111,10 +111,7 @@ def _body(host: str, event: str) -> str:
     first with its output held back, the online launch (output held back too) when that fails, then
     the fallback."""
     guard = _SESSION_GUARD if event == "SessionStart" else _EMPTY_GUARD
-    if host == "grok":
-        prefix = "SIDEGRAPH_HOST=grok "
-    else:
-        prefix = "SIDEGRAPH_HOST=claude " if event == "SessionStart" else ""
+    prefix = f"SIDEGRAPH_HOST={host} "
     off = f"{prefix}{_LAUNCH} --offline {_ENTRY[event]} --repo-root"
     on = f"{prefix}{_LAUNCH} {_ENTRY[event]} --repo-root"
     return (
@@ -330,8 +327,15 @@ def test_t8_the_claude_manifest_wires_bash_as_one_filtered_entry(manifest: Path)
     entry with no ``if`` runs a shell filter that starts ``uvx`` only on a read word. The
     ``Agent|Task`` group, which hands a subagent's brief its records, runs the Read command."""
     groups = _load(manifest)["hooks"]["PreToolUse"]
-    assert [g.get("matcher") for g in groups] == ["Read|Grep|Edit|Write", "Bash", "Agent|Task"]
-    read_group, bash_group, agent_group = groups
+    assert [g.get("matcher") for g in groups] == [
+        "Read|Grep|Edit|Write",
+        "Bash",
+        "Agent|Task",
+        "mcp__plugin_sidegraph_sidegraph__get_task_context|"
+        "mcp__plugin_sidegraph_sidegraph__query_decisions|"
+        "mcp__plugin_sidegraph_sidegraph__retrieve_decisions",
+    ]
+    read_group, bash_group, agent_group, mcp_group = groups
     assert [h.get("if") for h in read_group["hooks"]] == [None]
     (bash,) = bash_group["hooks"]
     assert bash["type"] == "command"
@@ -339,6 +343,7 @@ def test_t8_the_claude_manifest_wires_bash_as_one_filtered_entry(manifest: Path)
     assert f'case "$p" in {_BASH_PATTERNS})' in bash["command"]
     assert [h.get("if") for h in agent_group["hooks"]] == [None]
     assert agent_group["hooks"][0]["command"] == read_group["hooks"][0]["command"]
+    assert mcp_group["hooks"] == read_group["hooks"]
 
 
 # --- the commands, run ---------------------------------------------------------------------
@@ -411,9 +416,7 @@ def test_every_public_command_runs_the_pin_from_the_project_directory(
         "--repo-root",
     ]
     assert sum(line.startswith("@@host ") for line in lines) == 1
-    assert lines[marker] == (
-        "@@host " + {"claude": "claude" if event == "SessionStart" else "", "grok": "grok"}[host]
-    )
+    assert lines[marker] == f"@@host {host}"
     assert Path(lines[marker + 1].removeprefix("@@pwd ")).resolve() == project.resolve()
 
 

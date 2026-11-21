@@ -168,7 +168,7 @@ CASES: list[tuple[str, str, str, list[str]]] = [
     ),
     ("wrapper-then-bash-c", "sudo bash -c 'cat src/a.py'", ".", ["src/a.py"]),
     ("wrapper-then-cd", "if cd src; then cat a.py; fi", ".", ["src/a.py"]),
-    ("wrapper-then-an-unwired-command", "sudo head src/a.py", ".", []),
+    ("wrapper-then-an-unwired-command", "sudo less src/a.py", ".", []),
     ("wrapper-with-no-command", "timeout 5", ".", []),
     ("time-with-no-command", "time", ".", []),
     ("env-with-no-command", "env A=1", ".", []),
@@ -244,11 +244,33 @@ CASES: list[tuple[str, str, str, list[str]]] = [
     ("symlink-out-of-the-root", "cat src/escape.py", ".", []),
     ("symlink-inside-the-root-resolves", "cat src/alias.py", ".", ["src/a.py"]),
     # -- commands that are not wired extract nothing ------------------------------------------
-    ("awk-not-wired", "awk '{print $1}' src/a.py", ".", []),
-    ("head-not-wired", "head -n 5 src/a.py", ".", []),
+    ("awk-reads", "awk '{print $1}' src/a.py", ".", ["src/a.py"]),
+    ("head-reads", "head -n 5 src/a.py", ".", ["src/a.py"]),
+    ("head-n", "head -n 20 src/a.py", ".", ["src/a.py"]),
+    ("head-numeric", "head -50 src/a.py", ".", ["src/a.py"]),
+    ("head-pipe-reads-nothing", "echo x | head -5", ".", []),
+    ("nl-ba", "nl -ba src/a.py | sed -n 1,5p", ".", ["src/a.py"]),
+    ("awk-program", "awk 'NR<5' src/a.py", ".", ["src/a.py"]),
+    ("awk-f-value-is-not-read", "awk -f src/b.py src/a.py", ".", ["src/a.py"]),
+    ("awk-assignment-operand", "awk '{print}' n=1 src/a.py", ".", ["src/a.py"]),
+    ("git-show-rev-path", "git show HEAD:src/a.py | sed -n 1,3p", "src", ["src/a.py"]),
+    ("git-show-dot-relative", "git show HEAD:./a.py", "src", ["src/a.py"]),
+    ("git-show-two-spaces", "git  show HEAD:src/a.py", ".", ["src/a.py"]),
+    ("git-show-tab", "git\tshow HEAD:src/a.py", ".", ["src/a.py"]),
+    ("git-show-quoted", "git 'show' HEAD:src/a.py", ".", ["src/a.py"]),
+    ("git-show-worktree-file", "git show HEAD:src/a.py", ".", ["src/a.py"]),
+    ("git-show-no-colon", "git show HEAD", ".", []),
+    ("git-show-after-dashdash", "git show HEAD -- x:src/a.py", ".", []),
+    ("git-show-absolute-path", f"git show HEAD:{ROOT}/src/a.py", ".", []),
+    ("git-show-without-git-dir", "git show HEAD:src/a.py", ".", []),
+    ("git-grep-after-dashdash", "git grep -n foo -- src/a.py", ".", ["src/a.py"]),
+    ("git-grep-no-dashdash", "git grep -n foo src/a.py", ".", []),
+    ("git-C-unread", "git -C src show HEAD:a.py", ".", []),
+    ("git-show-nested-repo", "git show HEAD:a.py", "src", []),
+    ("timeout-head", "timeout 5 head src/a.py", ".", ["src/a.py"]),
     ("tail-not-wired", "tail -f src/a.py", ".", []),
     ("less-not-wired", "less src/a.py", ".", []),
-    ("git-grep-not-wired", "git grep foo -- src/a.py", ".", []),
+    ("git-grep-reads", "git grep foo -- src/a.py", ".", ["src/a.py"]),
     ("echo-not-wired", "echo src/a.py", ".", []),
     # -- input that is not a command line -----------------------------------------------------
     ("empty", "", ".", []),
@@ -291,9 +313,23 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     [pytest.param(c, d, e, id=i) for i, c, d, e in CASES],
 )
 def test_the_files_a_line_reads(
-    tree: tuple[Path, Path], command: str, cwd: str, expected: list[str]
+    tree: tuple[Path, Path],
+    command: str,
+    cwd: str,
+    expected: list[str],
+    request: pytest.FixtureRequest,
 ) -> None:
+    """The empty-result cases guard unsupported spellings and repository boundaries."""
     root, outside = tree
+    case = request.node.callspec.id
+    if case == "git-show-worktree-file":
+        (root / ".git").write_text("gitdir: /elsewhere/worktree\n")
+    elif case.startswith("git-") and case != "git-show-without-git-dir":
+        (root / ".git").mkdir()
+    if case == "git-show-nested-repo":
+        (root / cwd / ".git").mkdir()
+    if case in {"git-show-nested-repo", "git-C-unread"}:
+        (root / "a.py").touch()  # an incorrect repository-root resolution would find this file
     line = command.replace(ROOT, str(root)).replace(OUTSIDE, str(outside))
     assert read_paths(line, str(root / cwd), str(root)) == expected
 

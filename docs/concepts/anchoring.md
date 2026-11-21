@@ -50,7 +50,7 @@ See [implementation details](../reference/anchoring-internals.md#domain-aware-ti
 |---|---|---|
 | 0 | Semantic/abstract — an owning initiative, or a cross-cutting tag | Naming `initiative=` at capture, or a non-empty slug in `tags=[...]` |
 | 1 | Group — the entity's Leiden community, or (once ratified) the accepted domain covering it | Whenever the resolved (or ambiguous-but-shared) node has a community |
-| 2 | Leaf — the concrete code/doc entity itself | Whenever the name+file resolves uniquely, or fails outright |
+| 2 | Leaf — the concrete code/doc entity itself | A unique match, an unresolved name, or an ambiguous match under the shared-community rule below |
 
 ## Graceful degradation ladder: resolved -> ambiguous -> orphaned
 
@@ -60,11 +60,14 @@ drives different bindings:
 | Resolve status | Tier-2 leaf | Tier-1 community |
 |---|---|---|
 | **resolved** (unique match) | created, `live` | created if the node has a community, `live` |
-| **ambiguous** (multiple matches) | **none created** | created only if *all* candidates share one community, `degraded` |
+| **ambiguous** (multiple matches) | created, `degraded`, when all candidates share one community that no accepted domain covers, `collapse=True`, the ref does not adopt one file's entity, and the record holds no binding to that identity | created if all candidates share one community and no accepted domain covers it, `degraded` at capture and `live` once sync re-points the entity |
 | **unresolved** (no match) | created, `orphaned` | none (no community to fall back to) |
 
 The Tier-0 initiative binding does not depend on the resolve status: it is decision-level, made
 once by the write path, `live`, whenever an initiative is named.
+
+The degraded leaf retains the name or file-qualified ref without selecting a candidate. A fresh
+clone's first sync uses that leaf to rebuild the derived community binding.
 
 An ambiguous match with candidates spanning different communities gets **no community binding**.
 The one exception is an accepted domain that holds every candidate: the group binding then goes to

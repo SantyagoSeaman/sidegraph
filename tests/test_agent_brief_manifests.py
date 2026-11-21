@@ -71,6 +71,19 @@ def test_t8_a_claude_carrier_wires_agent_and_task_to_the_shared_command(
 
 
 @pytest.mark.parametrize(
+    ("label", "config"), _claude_carriers(), ids=[label for label, _ in _claude_carriers()]
+)
+def test_t16_all_claude_carriers_wire_the_mcp_reads(label: str, config: dict) -> None:
+    server = "sidegraph" if label == "claude-code-setup.md" else "plugin_sidegraph_sidegraph"
+    tools = ("get_task_context", "query_decisions", "retrieve_decisions")
+    groups = config["hooks"]["PreToolUse"]
+    bridge = [group for group in groups if group.get("matcher", "").startswith("mcp__")]
+    assert len(bridge) == 1, label
+    assert bridge[0]["matcher"] == "|".join(f"mcp__{server}__{tool}" for tool in tools), label
+    assert bridge[0]["hooks"] == groups[0]["hooks"], label
+
+
+@pytest.mark.parametrize(
     "manifest", _CODEX_MANIFESTS, ids=lambda p: p.relative_to(_PLUGIN).as_posix()
 )
 def test_t8_the_codex_manifests_do_not_carry_it(manifest: Path) -> None:

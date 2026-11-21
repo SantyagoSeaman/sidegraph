@@ -43,12 +43,52 @@ def test_second_read_uses_backrefs_and_keeps_hint(memory, tool):
     }
 
 
-def test_second_read_uses_freed_budget(memory):
+def test_second_read_preserves_the_base_budget_selection(memory):
     store, _, records = memory
     with caller():
         first = read(store, budget=1100)
         second = read(store, budget=1100)
-    assert any(d.id in second and d.id not in first for d in records)
+    assert "[sent earlier]" in second
+    assert [d.id for d in records if d.id in second] == [d.id for d in records if d.id in first]
+    assert len(second) <= len(first)
+
+
+@pytest.mark.parametrize("tool", ["get_task_context", "query_decisions"])
+@pytest.mark.parametrize("overflow", [True, False], ids=["related-overflow", "multiline-body"])
+def test_text_pointer_legend_uses_only_rendered_savings(tmp_path, monkeypatch, tool, overflow):
+    from sidegraph.schema import AnchorBinding, Descriptor, Entity
+    from tests.test_server_decision_listing import _add
+    from tests.test_server_nearest_anchored import _repo
+
+    repo = _repo(tmp_path, ["core/a.py", "net/b.py"], calls=[("core/a.py", "net/b.py")], fillers=0)
+    seed = repo.store.upsert_entity(
+        Entity(canonical_name="fn_0", descriptor=Descriptor(name="fn_0", file_path="core/a.py"))
+    )
+    if overflow:
+        held = _add(repo.store, "Short rule", kind="adr", choice="Do it.", context="C" * 60)
+        for index in range(7):
+            repo.record("net/b.py", f"Related {index}")
+    else:
+        held = _add(
+            repo.store,
+            "Fsync",
+            kind="adr",
+            choice="Fsync",
+            context="A paragraph.\n\n\nAnother paragraph.".ljust(136, "x"),
+        )
+    repo.store.add_binding(
+        AnchorBinding(record_id=held.id, entity_id=seed.entity_id, status="live", tier=2)
+    )
+    monkeypatch.setattr(server, "_get_store", lambda: repo.store)
+    monkeypatch.setattr(server, "_synced_reader", lambda: (repo.reader, None))
+    read_tool = getattr(server, tool)
+    with caller():
+        first = read_tool(files=["core/a.py"])
+        second = read_tool(files=["core/a.py"])
+    assert ("more related not shown" in first) is overflow
+    assert f"[sent earlier] {held.title}" in second
+    assert len(second) <= len(first)
+    assert "[sent earlier] =" not in second
 
 
 @pytest.mark.parametrize(
@@ -132,24 +172,50 @@ def test_sent_state_failure_renders_original_and_records_once(memory, monkeypatc
     assert not recorded[0].backref_ids
 
 
-def test_nearest_only_backrefs_and_cap_keep_one_legend(tmp_path, monkeypatch):
+def test_short_nearest_backrefs_do_not_expand_the_answer(tmp_path):
     from tests.test_server_nearest_anchored import _area
 
     repo = _area(tmp_path)
     with caller():
         first = repo.call(files=["core/a.py"], structure_budget=119)
         second = repo.call(files=["core/a.py"], structure_budget=119)
+    assert "## Nearest anchored records" in first
+    assert "[sent earlier]" in second
+    assert len(second) <= len(first)
+
+
+def test_capped_nearest_backrefs_keep_exactly_one_legend(tmp_path, monkeypatch):
+    from sidegraph.schema import AnchorBinding
+    from tests.test_server_decision_listing import _add
+    from tests.test_server_nearest_anchored import _area
+
+    repo = _area(tmp_path)
+    for index in range(2):
+        record = _add(
+            repo.store,
+            f"Detailed neighbour {index}: {'long title ' * 12}",
+            context="long context " * 18,
+        )
+        repo.store.add_binding(
+            AnchorBinding(
+                record_id=record.id,
+                entity_id=repo._entities["net/c.py"].entity_id,
+                status="live",
+                tier=2,
+            )
+        )
+    hard_cap = server._hard_cap
+    with caller():
+        first = repo.call(files=["core/a.py"], structure_budget=119)
+        second = repo.call(files=["core/a.py"], structure_budget=119)
         assert "## Nearest anchored records" in first
-        assert "[sent earlier]" in second
         assert second.count("[sent earlier] =") == 1
-        hard_cap = server._hard_cap
 
         def cap(*args, **kwargs):
             return hard_cap(*args, **kwargs, cap=len(second) - 100)
 
-        with monkeypatch.context() as patch:
-            patch.setattr(server, "_hard_cap", cap)
-            cut = repo.call(files=["core/a.py"], structure_budget=119)
+        monkeypatch.setattr(server, "_hard_cap", cap)
+        cut = repo.call(files=["core/a.py"], structure_budget=119)
     assert "[output cut" in cut
     assert " [sent earlier] " in cut
     assert cut.count("[sent earlier] =") == 1
@@ -205,6 +271,83 @@ def test_listing_full_records_are_backreferenced_by_context(memory, monkeypatch)
     for d in records:
         if d.id != row["id"]:
             assert f"{d.title}: Choose this" in ctx
+
+
+def test_listing_without_supporting_evidence_does_not_replace_it_in_context(memory, monkeypatch):
+    from sidegraph.schema import Fact
+
+    store, _, records = memory
+    decision = records[0]
+    fact = store.add_fact(
+        Fact(
+            statement="Listing does not carry this supporting fact",
+            source="measurement",
+            status="accepted",
+            supports=[decision.id],
+            provenance=decision.provenance,
+            valid_from=decision.valid_from,
+        )
+    )
+    with caller():
+        row = listing(monkeypatch, store, status="accepted", limit=1)["decisions"][0]
+        assert row["id"] == decision.id
+        assert row["choice"] == decision.choice
+        assert store.get_meta(f"mcp_sent:s1:-:{decision.id}") is None
+        answer = read(store)
+    assert f"evidence: {fact.statement}" in answer
+
+
+def test_second_listing_keeps_the_base_budget_selection(memory, monkeypatch):
+    from tests.test_server_decision_listing import _add
+
+    store, _, _ = memory
+    for i in range(3):
+        _add(store, f"Bounded listing {i}", context="context " * 220, choice="choice " * 180)
+    with caller():
+        first = listing(monkeypatch, store, query="Bounded listing", budget_chars=4000)
+        second = listing(monkeypatch, store, query="Bounded listing", budget_chars=4000)
+    assert 0 < len(first["decisions"]) < 3
+    assert [row["id"] for row in first["decisions"]] == [row["id"] for row in second["decisions"]]
+    assert all(row.get("sent_earlier") for row in second["decisions"])
+    assert len(server._dump(second)) <= len(server._dump(first))
+
+
+def test_listing_omits_the_explanation_when_the_pointer_saves_too_little(memory, monkeypatch):
+    from tests.test_server_decision_listing import _add
+
+    store, _, _ = memory
+    decision = _add(store, "Short listing", choice="Short choice " * 4)
+    # Exercise the size guard with a full row that lacks the current optional wire fields.
+    row = decision.model_dump(mode="json", include={*server._ROW_KEYS, "choice"})
+    monkeypatch.setattr(server, "_retrieve_decisions_impl", lambda *args, **kwargs: [row])
+    with caller():
+        first = listing(monkeypatch, store, status="accepted")
+        second = listing(monkeypatch, store, status="accepted")
+    assert second["decisions"][0]["sent_earlier"] is True
+    assert first["hint"] is None and second["hint"] is None
+    assert len(server._dump(second)) <= len(server._dump(first))
+
+
+def test_listing_reads_support_only_for_unclaimed_decisions(memory, monkeypatch):
+    store, _, _ = memory
+    support = store.facts_by_supported_decision
+    reads = 0
+
+    def counted_support():
+        nonlocal reads
+        reads += 1
+        return support()
+
+    monkeypatch.setattr(store, "facts_by_supported_decision", counted_support)
+    with caller(exact=False):
+        listing(monkeypatch, store, status="accepted", limit=1)
+    assert reads == 0
+    with caller():
+        listing(monkeypatch, store, status="accepted", limit=1)
+        assert reads == 1
+        second = listing(monkeypatch, store, status="accepted", limit=1)
+    assert second["decisions"][0]["sent_earlier"] is True
+    assert reads == 1
 
 
 @pytest.mark.parametrize("limit,budget", [(1, 24000), (100, 4000)])

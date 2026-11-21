@@ -222,11 +222,14 @@ the same way any other entity does.
 
 ## Multi-anchor at capture
 
-`resolve_and_bind(record_id, ref, reader, store, relation=None)` resolves one
+`resolve_and_bind(record_id, ref, reader, store, relation=None, *, collapse=True)` resolves one
 `Descriptor` against the current graph and can create up to two bindings for it in one call:
 
-- **Tier-2 (leaf)** — the concrete entity itself, when the resolve either succeeded or failed
-  outright (not when ambiguous).
+- **Tier-2 (leaf)** — the concrete entity itself, `live` for a unique match and `orphaned`
+  when the ref matches nothing. An ambiguous ref gets a `degraded` leaf when all candidates
+  share one community that no accepted domain covers, `collapse=True`, the ref does not
+  adopt one file's entity, and the record holds no binding to that identity, including spelling
+  twins.
 - **Tier-1 (group)** — the entity's Leiden community, whenever one is known — see
   [domain-aware Tier-1](#domain-aware-tier-1) below for what actually gets bound once a domain
   has claimed that community.
@@ -253,7 +256,7 @@ the bare `community:<id>` entity — `store.find_domain_by_community(result.comm
 checked first, and only falls through to the legacy `community:<id>` entity when no accepted
 domain claims that community. A domain-covered Tier-1 binding is always `status="live"`: once a
 domain has claimed the community, Tier-1 confidence comes from the domain's curation, not from
-whether this particular leaf resolved cleanly (an ambiguous-but-shared-community leaf still
+whether this particular ref resolved cleanly (an ambiguous-but-shared-community ref still
 gets a `live` domain binding, where the legacy path would have marked it `degraded`).
 
 A store without any ratified domains behaves *exactly* as before this existed — the
@@ -261,7 +264,8 @@ domain check is a no-op fallthrough until at least one domain is accepted and co
 community in question. New memory automatically lands on durable, named abstractions once
 domains are named; decisions anchored before that point keep their `community:<id>` binding
 (not migrated), and retrieval still finds them via the [community
-fallback](../concepts/retrieval.md#bucket-c-domains-and-communities).
+fallback](../concepts/retrieval.md#bucket-c-domains-and-communities). The Portal and `drill_down`
+read the domain binding when browsing that area.
 
 The two Tier-1 outcomes differ in durability, not just naming: a domain-covered binding points
 at the domain's own `domain:<slug>` entity, which is a committed, human-named identity; the
@@ -355,15 +359,14 @@ for the full mechanics.
 
 Once a domain is accepted, new anchoring at capture time (`resolve_and_bind`) prefers it over
 the bare `community:<id>` entity: if an anchor's current community is covered by an accepted
-domain, the Tier-1 binding goes to the domain's `domain:<slug>` entity instead. Decisions bound
-to the community before the domain existed are not migrated, but retrieval still surfaces them
-under the community fallback — see
-[retrieval](../concepts/retrieval.md#bucket-c-domains-and-communities).
+domain, the Tier-1 binding goes to the domain's `domain:<slug>` entity for browsing in the
+Portal and `drill_down`. Related memory still surfaces decisions directly bound to the seed
+community. See [retrieval](../concepts/retrieval.md#bucket-c-domains-and-communities).
 
 **Membership is computed once per sync and kept per node.** Each pass writes every accepted domain's
 members into the local index, and everything that asks "is this in the domain" reads it: drill-down
-members, the decisions a domain gathers, the Tier-1 domain a new decision binds to, retrieval's
-related bucket. A domain's members are the nodes of its communities plus the nodes under its path
+members, the decisions a domain gathers, and the Tier-1 domain a new decision binds to.
+A domain's members are the nodes of its communities plus the nodes under its path
 prefixes. With a [domain snapshot](store-format.md#the-domain-snapshot), a covered
 domain's members come from the snapshot, and a change to its rules changes nothing for the files the snapshot lists until a refresh. A file the snapshot does not list (a new one) is still matched against the domain's path prefixes. Before all of
 this, a community that holds code and documents is split in two: Graphify 0.9.62 and later link a

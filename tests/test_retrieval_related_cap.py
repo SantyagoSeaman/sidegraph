@@ -78,7 +78,10 @@ def test_related_bucket_shows_at_most_the_cap_and_counts_the_rest(tmp_path):
     assert len(shown) == _RELATED_LINE_CAP
     # Recency order inside the source is kept: the newest records are the ones shown.
     assert all(f"note {i}:" in shown[i] for i in range(_RELATED_LINE_CAP))
-    assert ctx.related[-1].startswith(f"- (+{extra} more related")
+    assert (
+        ctx.related[-1]
+        == "- (+3 more related not shown: retrieve_decisions(query=...) to list them)"
+    )
     assert ctx.related_overflow == extra
     assert set(ctx.shown_ids) == {d.id for d in records[:_RELATED_LINE_CAP]}
     # Records left out by the cap were not refused by the budget.

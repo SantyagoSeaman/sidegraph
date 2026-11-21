@@ -2,7 +2,7 @@
 
 > **Start here:** Read the opening explanation, then follow only the detail needed for your current task. [Glossary](glossary.md).
 
-The read path is multi-altitude, budget-bounded, and task-aware: a cheap named map at session
+The read path is multi-altitude, budget-bounded, and task-aware: a short map at session
 start, a one-level-deeper walk on demand, and a precise, seeded pull when the agent is about to
 do work. Implemented in [`src/sidegraph/retrieval.py`](../../src/sidegraph/retrieval.py); wired
 into Claude Code via [`src/sidegraph/host/hooks.py`](../../src/sidegraph/host/hooks.py) and
@@ -11,7 +11,10 @@ exposed as MCP tools in [`src/sidegraph/server.py`](../../src/sidegraph/server.p
 
 ## SessionStart TOC
 
-The session map orients the agent before a task. With accepted domains, it lists their titles, mistake counts and subdomain counts. Without named domains, it uses graph communities and recorded decisions. Global mistakes and visible proposals can also appear.
+The session map orients the agent with global mistakes, constraints and visible proposals.
+Without a usable cache of accepted domains, the hook also shows the largest graph communities,
+recorded decisions and known facts. Browse named domains in the Portal or with `list_domains`
+and `drill_down`.
 
 The host adds the standing instruction:
 
@@ -74,7 +77,8 @@ See [the detailed contract](../reference/retrieval-internals.md#ranking-buckets-
 
 ### Bucket C: domains and communities
 
-Related records can come from the target's named domain or its graph community. They are area context and may not apply to every file in that area.
+Related records can come from the seed communities and nearby entities. Domain bindings
+organize records for browsing in the Portal and with `drill_down`.
 
 See [the detailed contract](../reference/retrieval-internals.md#bucket-c-domains-and-communities).
 
@@ -98,7 +102,8 @@ See [the detailed contract](../reference/retrieval-internals.md#the-drifted-mark
 
 ### Budget fallback: summaries instead of leaves
 
-When the detailed map does not fit, `query_structure` can show a higher-level summary. Follow a named domain or ask for fewer files to narrow the result.
+When the map reaches its budget, `query_structure` returns the node lines that fit. The Portal's
+Agent View reports the cut. Earlier versions could fill remaining space with domain summaries.
 
 See [the detailed contract](../reference/retrieval-internals.md#budget-fallback-summaries-instead-of-leaves).
 
@@ -138,8 +143,9 @@ An agent does not always call `get_task_context`, and a subagent starts without 
 context. So the read path has three more channels, all wired as hooks and all reading the
 store's index directly (see [hooks](../reference/hooks.md)):
 
-- **At the point of reading.** When a `Read`, `Edit`, `Write` or `Grep` call, or a Bash `sed`,
-  `grep`, `rg` or `cat` line, names a file that decisions are anchored to, the `PreToolUse` hook
+- **At the point of reading.** When a `Read`, `Edit`, `Write`, `Grep` or
+  [supported Bash read](../reference/hooks.md#bash-lines) names a file with anchored decisions,
+  the `PreToolUse` hook
   hands the agent the top decisions for that file in the same tool call, mistakes first. Each file
   is delivered once per agent; the count starts again after the agent's context is compacted
   or cleared. `SIDEGRAPH_GREP_NUDGE=off` stops it.

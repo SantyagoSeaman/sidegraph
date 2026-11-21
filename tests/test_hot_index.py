@@ -14,6 +14,7 @@ design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import inspect
 import json
@@ -953,6 +954,63 @@ _REFUSED = {
     "corrupt-file": _break_corrupt,
     "empty-file": _break_empty_file,
 }
+
+
+@pytest.mark.parametrize(
+    ("refusal", "expected"),
+    [
+        ("missing", ["missing"]),
+        ("callback-raises", ["missing"]),
+        ("format", []),
+        ("symlink", []),
+        ("directory", []),
+    ],
+)
+def test_open_calls_on_missing_only_after_requirement_and_symlink_checks(
+    tmp_path, refusal, expected
+):
+    """The format and symlink cases guard the order of the refusal checks."""
+    store = tmp_path / "store"
+    store.mkdir()
+    if refusal == "format":
+        write_requirement_marker(store, above_running())
+    elif refusal == "directory":
+        (store / "index.db").mkdir()
+    elif refusal == "symlink":
+        try:
+            (store / "index.db").symlink_to(tmp_path / "missing.db")
+        except OSError:
+            pytest.skip("Symlinks unavailable on this Windows runner")
+    events = []
+
+    def on_missing():
+        events.append("missing")
+        if refusal == "callback-raises":
+            raise RuntimeError("on_missing is best effort")
+
+    assert HotIndex.open(store, on_missing=on_missing, on_error=events.append) is None
+    assert events == expected
+
+
+@pytest.mark.parametrize("errnum", [errno.EACCES, errno.EIO])
+def test_open_does_not_report_unreadable_index_metadata_as_missing(tmp_path, monkeypatch, errnum):
+    """Path predicates on Python 3.14 also return False for metadata errors other than ENOENT."""
+    index = tmp_path / "index.db"
+    index.touch()
+
+    def unreadable(stat):
+        def check(path, *args, **kwargs):
+            if path in (index, str(index)):
+                raise OSError(errnum, "index metadata unavailable")
+            return stat(path, *args, **kwargs)
+
+        return check
+
+    monkeypatch.setattr(os, "stat", unreadable(os.stat))
+    monkeypatch.setattr(os, "lstat", unreadable(os.lstat))
+    missing = []
+    assert HotIndex.open(tmp_path, on_missing=lambda: missing.append(True)) is None
+    assert not missing
 
 
 def _broken_project(tmp_path: Path, how: str) -> tuple[Path, Path, Path]:

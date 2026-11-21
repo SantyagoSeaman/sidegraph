@@ -11,11 +11,16 @@ Simulates a clone by deleting `index.db` on an already-populated store and reope
 from __future__ import annotations
 
 import json
+import shutil
 
+from sidegraph import server
+from sidegraph.anchoring import resolve_and_bind
 from sidegraph.engine.reader import GraphifyReader
+from sidegraph.schema import Descriptor
 from sidegraph.server import _propose_decisions_impl, _ratify_impl
 from sidegraph.store import Store
 from sidegraph.sync import sync
+from tests.graph_fixtures import node, reader_of
 
 GRAPH = {
     "built_at_commit": "vFresh",
@@ -117,3 +122,68 @@ def test_fresh_clone_regenerates_community_binding_index_only(tmp_path):
     # -- and the canonical snapshot never moved, across the ENTIRE clone+sync cycle ------
     after = _canonical_snapshot(store_path)
     assert after == before
+
+
+def test_fresh_clone_keeps_an_ambiguous_shared_community_anchor(tmp_path, monkeypatch):
+    reader = reader_of(
+        tmp_path, node("a", "dup()", "a.py", community=7), node("b", "dup()", "b.py", community=7)
+    )
+    store_path = tmp_path / "source" / ".sidegraph"
+    clone_path = tmp_path / "clone" / ".sidegraph"
+    title = "Conserve retries"
+    with Store(store_path) as store:
+        rid = server._add_decision_impl(store, reader, title, "gotcha", "C", "R")["id"]
+        resolve_and_bind(rid, Descriptor(name="dup"), reader, store)
+    shutil.copytree(store_path, clone_path, ignore=shutil.ignore_patterns("index.db*"))
+
+    with Store(clone_path) as clone:
+        before = _canonical_snapshot(clone_path)
+        sync(clone, reader)
+        assert _canonical_snapshot(clone_path) == before
+        rows = [
+            (b.tier, b.status, clone.get_entity(b.entity_id).canonical_name)
+            for b in clone.bindings_for_record(rid)
+        ]
+        assert sorted(rows) == [(1, "live", "community:7"), (2, "degraded", "dup")]
+        [canonical_binding] = json.loads(before[f"bindings/{rid}.json"][0])
+        assert canonical_binding["tier"] == 2
+        assert clone.get_entity(canonical_binding["entity_id"]).canonical_name == "dup"
+
+        text = server._get_task_context_impl(clone, reader, None, [{"name": "dup"}], 4000, 6000)
+        assert title not in text
+        assert "ambiguous" in text and "`dup" in text
+        monkeypatch.setattr(server, "_get_store", lambda: clone)
+        answer = json.loads(server.retrieve_decisions(query="dup").content[0].text)
+        assert [row["id"] for row in answer["decisions"]] == [rid]
+
+
+def test_fresh_clone_keeps_a_file_qualified_ambiguous_anchor(tmp_path, monkeypatch, capsys):
+    import sidegraph.host.hooks as hooks
+    from tests.test_host_pretool_records import _payload, _text
+
+    reader = reader_of(
+        tmp_path,
+        node("a", "dup()", "a.py", community=7),
+        node("b", "dup()", "a.py", community=7, location="L4"),
+    )
+    store_path = tmp_path / "source" / ".sidegraph"
+    clone_root = tmp_path / "clone"
+    clone_path = clone_root / ".sidegraph"
+    with Store(store_path) as store:
+        rid = server._add_decision_impl(store, reader, "Conserve retries", "gotcha", "C", "R")["id"]
+        resolve_and_bind(rid, Descriptor(name="dup", file_path="a.py"), reader, store)
+    shutil.copytree(store_path, clone_path, ignore=shutil.ignore_patterns("index.db*"))
+
+    with Store(clone_path) as clone:
+        sync(clone, reader)
+        raw, _ = server._decision_listing_result(clone, reader, files=["a.py"])
+        assert [row["id"] for row in json.loads(raw)["decisions"]] == [rid]
+
+    path = clone_root / "a.py"
+    path.write_text("def dup():\n    pass\n\ndef dup():\n    pass\n")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(clone_root))
+    monkeypatch.setenv("SIDEGRAPH_DIR", str(clone_path))
+    payload = {"cwd": str(clone_root), **_payload("Read", file_path=str(path))}
+    monkeypatch.setattr(hooks, "_read_payload", lambda: payload)
+    hooks.pre_tool_use()
+    assert rid in _text(json.loads(capsys.readouterr().out))

@@ -47,11 +47,12 @@ OUTCOMES = (DELIVERED, EMPTY, LOCK, ERROR)
 NO_ENTITY = "no-entity"  # no file the call names has an anchored entity
 NO_RECORD = "no-record"  # an entity is there, and no record that can be handed over
 COLD = "cold"  # a record was left out: the index is cold and its binding's status not computed
+NO_INDEX = "no-index"  # the store is there and its index is missing
 REPEAT = "repeat"  # every file with records was already delivered to this agent
 CAP = "cap"  # a file with records was refused: the agent already holds its ten files
-DUPLICATE = "duplicate"  # a second SessionStart for one session inside the duplicate window
+DUPLICATE = "duplicate"  # a recent SessionStart for the same session and compatible source
 UNKNOWN = "unknown"  # the cause was not read: another process held the lock, and no run waits
-CAUSES = (NO_ENTITY, NO_RECORD, COLD, REPEAT, CAP, DUPLICATE, UNKNOWN)
+CAUSES = (NO_ENTITY, NO_RECORD, NO_INDEX, COLD, REPEAT, CAP, DUPLICATE, UNKNOWN)
 # On a ``lock`` line: the run handed over at least one record before the lock refused the rest.
 PARTIAL = "partial"
 # A reader keeps a detail it does not know (a newer writer's), within this shape.
@@ -206,8 +207,8 @@ def record(
 class Run:
     """One hook invocation: what it saw while delivering, written once by :meth:`finish`.
 
-    ``store_dir`` is set by the hook when it has resolved a store whose index it used or lost to a
-    lock; a run that never did writes nothing. :meth:`note` is called for the errors of the
+    PreToolUse and SubagentStart set ``store_dir`` when delivery used the index, lost it to a
+    lock or found it missing. :meth:`note` is called for the errors of the
     delivery steps only (opening the index, selecting records, claiming a file), never for
     bookkeeping such as the touch row.
     """

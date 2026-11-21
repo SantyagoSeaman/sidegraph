@@ -13,7 +13,7 @@ time instead of as a batch pick — plus two tools `name-domains` has no need fo
 `list_domains` (full listing, any status) and `supersede_domain` (rename/re-scope).
 
 **Same gate as everywhere else in Sidegraph: `propose_domains`/`add_domain` land
-`status=proposed`; nothing is live/TOC-visible until `ratify` accepts it** (`propose_domains`
+`status=proposed` and become live when `ratify` accepts them** (`propose_domains`
 under `SIDEGRAPH_RATIFY_POLICY=auto-all` may accept an eligible draft at write time — check
 its `ratified_by`). Don't skip straight
 to `ratify` on a guess — confirm the specific change with the human first when it's ambiguous
@@ -82,7 +82,7 @@ supersede_domain(
 ```
 
 It writes the successor and closes the old domain (`status -> superseded`: retrievable
-history, no longer live/TOC-visible) when the successor is accepted — same one-gate rule as
+history) when the successor is accepted — same one-gate rule as
 everywhere else: the successor lands `status=proposed`, so `ratify(accept=[<new_domain_id>], verdict="<the human's words>")`
 (once the human says so) is what makes the rename live and retires the old (accepted) domain; dropping the successor
 leaves the old domain untouched. Only an accepted domain can be superseded, one pending
@@ -161,6 +161,6 @@ include a note for frozen membership or a split.
 - [`docs/guides/naming-your-domains.md`](../../../../docs/guides/naming-your-domains.md) —
   background on bootstrap idempotency, mass-drop recovery, and the CLI equivalents
   (`sidegraph-domains add`, `sidegraph-ratify`).
-- CLI commands run as `uvx --from sidegraph==0.33.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
+- CLI commands run as `uvx --from sidegraph==0.34.0 --python 3.13 <command>`, at the plugin's pinned version, never the copy on `PATH`:
   [running the CLIs beside the plugin](../../../../docs/reference/cli.md#running-the-clis-beside-the-plugin).
   Inside a Sidegraph checkout, use `uv run --project <checkout> --package sidegraph --frozen --no-active <cli>` instead.

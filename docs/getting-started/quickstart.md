@@ -155,6 +155,5 @@ Run the short [verification checklist](../guides/verifying-your-setup.md). If yo
 `sidegraph:setup` skill, it offers to [name domains](../guides/naming-your-domains.md) once
 as soon as wiring is verified, before optional configuration questions, when the graph has
 communities and no accepted or proposed domains exist. Later ordinary sessions do not
-repeat that offer; you can request domain naming directly at any time. The resulting table
-of contents reaches Claude Code, Codex and Muse through SessionStart, Grok Build through the
-MCP server's instructions, and OpenCode through explicit MCP calls.
+repeat that offer; you can request domain naming directly at any time. Browse the resulting
+domains in the Portal or run `list_domains` to find the slug for `drill_down`.

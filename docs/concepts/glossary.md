@@ -11,9 +11,9 @@ Sidegraph keeps the project's decision graph for AI coding agents. This page def
 | Tier 2 / leaf | An anchor to a concrete code or document entity, such as a function or heading. |
 | Tier 1 / group | An anchor to a named domain or a graph community. It keeps area-level context reachable. |
 | Tier 0 / abstract | An anchor to a semantic grouping, such as a tag or initiative. |
-| Domain | A human-named area of the project with a title, purpose and membership rules. Accepted domains form the session's table of contents. |
+| Domain | A human-named area of the project with a title, purpose and membership rules. Accepted domains organize the Portal's graph and can be browsed with `list_domains` and `drill_down`. |
 | Community | A cluster of related graph nodes computed by the engine. Its numeric ID can change after rebuilding. It is not a durable project name. |
-| God node | The engine's representative or hub node for a community. Before domains are named, this may label an area in the session map. |
+| God node | The engine's representative or hub node for a community. It can label a community in the hook's fallback map. |
 | Ratify | Review a proposal and accept or reject it. With no configured policy, proposals wait for a human. Setup offers an opt-in policy that can accept eligible proposals and stamp that provenance. |
 | Proposed / accepted | Proposed means awaiting a trust decision. Accepted means ratified. A visible proposal is marked unratified, so visibility does not imply acceptance. |
 | Supersede | Replace a record with a successor while retaining the predecessor and its history. Use this when a decision or fact changes. |
@@ -23,7 +23,7 @@ Sidegraph keeps the project's decision graph for AI coding agents. This page def
 | Store / index | The store is the authoritative committed record data. The gitignored SQLite database holds the rebuildable record index and local journals. |
 | Format 1 / format 2 | Store layouts. Format 1 uses per-record files and legacy archives. Format 2 also supports hash-keyed shard files. New records still start as individual files. |
 | Shard | A canonical file of typed JSON lines used to pack settled record bodies in format 2. It is authoritative store data, unlike the index. |
-| Session map / TOC | The initial orientation delivered to an agent. Named accepted domains form its table of contents. Hook-delivered maps use a graph-based fallback when no accepted domains exist. Grok MCP instructions then provide only the standing instruction and version. OpenCode has no opening map. |
+| Session map / TOC | The agent's opening instructions, version, global mistakes, visible proposals and status lines. With no usable domain cache, the hook can also show communities, recorded decisions and facts. Grok then provides the standing instruction and version only. OpenCode has no opening map. |
 | Hook | A host event handler that can deliver context or a capture reminder. Which events reach the agent depends on the host. |
 | Capture | Writing durable decisions or facts from work, including proposals awaiting review. |
 | Descriptor | The name and optional file path used to resolve an entity against the current graph. |

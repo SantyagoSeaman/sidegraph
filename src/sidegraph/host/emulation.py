@@ -187,14 +187,17 @@ def _hot_hook_text(
         tool = payload["tool_name"]
         if not isinstance(tool, str) or tool not in hooks._POINT_OF_READ_TOOLS:
             return None
-        files = hooks._files_named(tool, payload, payload["tool_input"], root)
+        expanded: set[str] = set()
+        files = hooks._files_named(tool, payload, payload["tool_input"], root, expanded)
         if not files or (index := hot(store_path)) is None:
             return None
-        selected = hooks._select_delivery(files, index, hot)
+        selected = hooks._select_delivery(files, index, hot, root, expanded)
         if selected is None:
             return None
-        _, fresh_claims, left_out = selected
-        return hooks._render_delivery(fresh_claims, left_out)
+        _, fresh_claims, left_out, withheld_by_file, exact = selected
+        return hooks._render_delivery(
+            fresh_claims, left_out, withheld=withheld_by_file, exact=exact
+        )
     finally:
         hot.close()
 

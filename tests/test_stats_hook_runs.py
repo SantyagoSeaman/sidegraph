@@ -52,7 +52,7 @@ def _runs() -> HookRunStats:
 
 
 BLOCK = """\
-HOOK RUNS   runs that opened the index, last 30 days (run log)
+HOOK RUNS   runs from the log, last 30 days
             PreToolUse: 8,168 runs; delivered on 353 (3 cut short by a lock)
               a record was bound on 2,580 since 2026-11-13: delivered 350 ·
               already delivered 1,200 · ten-file cap 330 · not synced 700
@@ -192,6 +192,7 @@ def test_the_command_reads_the_run_log_beside_the_store(tmp_path, capsys, monkey
     hook_log.record(store_dir, "PreToolUse", "empty", 18, "cap")
     hook_log.record(store_dir, "PreToolUse", "delivered", 20)
     hook_log.record(store_dir, "PreToolUse", "empty", 18, "no-entity")
+    hook_log.record(store_dir, "PreToolUse", "empty", 18, "no-index")
     hook_log.record(store_dir, "PreToolUse", "lock", 510, "partial")
 
     def snapshot() -> dict[str, tuple[int, bytes]]:
@@ -204,12 +205,17 @@ def test_the_command_reads_the_run_log_beside_the_store(tmp_path, capsys, monkey
     before = snapshot()
     assert stats_main([]) == 0
     text = capsys.readouterr().out
-    assert "PreToolUse: 4 runs; delivered on 2 (1 cut short by a lock)" in text
+    assert "PreToolUse: 5 runs; delivered on 2 (1 cut short by a lock)" in text
     assert "a record was bound on 3: delivered 2 · ten-file cap 1" in text
     assert "other runs: no anchor 1" in text
+    assert "no index yet 1" in text
     assert stats_main(["--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["hook_runs"]["hooks"]["PreToolUse"]["empty"] == {"cap": 1, "no-entity": 1}
+    assert payload["hook_runs"]["hooks"]["PreToolUse"]["empty"] == {
+        "cap": 1,
+        "no-entity": 1,
+        "no-index": 1,
+    }
     assert snapshot() == before  # a read: no file was written, created or removed
 
     monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "off")

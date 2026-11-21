@@ -209,6 +209,7 @@ def test_registry_order_is_the_sessionstart_line_order():
         "orphaned-records",
         "store-files-skipped",
         "refresh-helper-outdated",
+        "store-git-directory",
         "refresh-hook-missing",
         "store-uncommitted",
         "branch-only-records",
@@ -791,8 +792,8 @@ def test_t5_three_recent_records_with_every_leaf_orphaned_are_degraded(store):
     problem = _orphaned(store)
     assert problem.severity == "degraded"
     assert problem.line == (
-        "Sidegraph: 3 of 3 open record(s) have every code anchor orphaned, so retrieval reaches "
-        "them only through their file or domain. If the graph is stale, rebuilding it "
+        "Sidegraph: 3 of 3 open record(s) have every code anchor orphaned. "
+        "If the graph is stale, rebuilding it "
         "re-anchors them; otherwise `sidegraph-doctor` lists them and the heal-anchors skill "
         "repairs them."
     )
@@ -866,8 +867,8 @@ def test_orphaned_findings_are_one_per_record_sorted_by_id_with_full_paths(store
     details = {row.path: row.detail for row in problem.record_findings}
     assert details[expected[0][0]] == (
         f"every code anchor of this record is orphaned ({expected[0][1]} leaf anchor(s)); "
-        "retrieval reaches it only through its file or domain — re-anchor it with add_anchors "
-        "or the heal-anchors skill, or supersede it if the code is gone"
+        "re-anchor it with add_anchors or the heal-anchors skill, "
+        "or supersede it if the code is gone"
     )
 
 

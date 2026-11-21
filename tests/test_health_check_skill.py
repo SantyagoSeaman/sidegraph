@@ -1513,3 +1513,302 @@ def test_collect_still_reads_a_store_link_that_stays_inside_the_repository(
     assert inventory["evidence"]["canonical_counts"]["decisions"] == 1
     integrity = next(s for s in report["sections"] if s["name"] == "store_integrity")
     assert "link" not in str(integrity["evidence"]["index"]["reason"])
+
+
+_CODEX_EVENTS = ("session_start", "stop", "subagent_start")
+_CODEX_LIMITATION = (
+    "A Codex trust entry goes stale when a hook command changes; Codex then lists the hook as "
+    "modified and skips it. The published plugin's commands name the Sidegraph version, so every "
+    "update changes them. This check cannot tell a current entry from a stale one: after an "
+    "update or a wiring change, open /hooks once."
+)
+
+
+@pytest.fixture
+def codex_wiring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    project, store = _sandbox(tmp_path, monkeypatch)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    plugin = tmp_path / "plugins/cache/sidegraph/sidegraph/0.0.0"
+    shutil.copytree(_ROOT / "plugin/sidegraph", plugin)
+    collector = _collector()
+
+    def report(**overrides):
+        return collector.collect(
+            **{
+                "project": project,
+                "store": store,
+                "plugin_root": plugin,
+                "host": "codex",
+                **overrides,
+            }
+        )
+
+    return collector, report, project, plugin
+
+
+def _trust_toml(*keys: str) -> str:
+    return "".join(f'[hooks.state."{key}"]\ntrusted_hash = "synthetic-hash"\n' for key in keys)
+
+
+def _state_key(event: str, *, marketplace: str = "sidegraph", slot: str = "0:0") -> str:
+    return f"sidegraph@{marketplace}:codex/hooks.json:{event}:{slot}"
+
+
+def _codex_recommendations(report: dict) -> list[dict]:
+    return [
+        item
+        for item in report["recommendations"]
+        if item["action"].startswith("In Codex, open /hooks")
+    ]
+
+
+def test_codex_trust_reports_missing_events_and_manual_action(tmp_path, codex_wiring):
+    _, collect, _, _ = codex_wiring
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _trust_toml(_state_key("session_start"), _state_key("stop")), encoding="utf-8"
+    )
+    report = collect()
+    section = report["sections"][0]
+    assert section["evidence"]["host_trust"]["items"] == {
+        "session_start": "present",
+        "stop": "present",
+        "subagent_start": "missing",
+    }
+    assert _CODEX_LIMITATION in section["limitations"]
+    (rec,) = _codex_recommendations(report)
+    assert rec["action"] == "In Codex, open /hooks and trust Sidegraph's hooks: subagent_start."
+    assert (
+        rec["reason"]
+        == "Codex records no trust for these Sidegraph hooks, so it does not run them."
+    )
+    assert rec["scope"] == f"codex_config={config}" and rec["argv"] == []
+
+
+def test_codex_trust_reports_present_without_manual_action(tmp_path, codex_wiring):
+    _, collect, _, _ = codex_wiring
+    (tmp_path / "config.toml").write_text(
+        _trust_toml(*map(_state_key, _CODEX_EVENTS)), encoding="utf-8"
+    )
+    report = collect()
+    section = report["sections"][0]
+    assert section["evidence"]["host_trust"]["items"] == dict.fromkeys(_CODEX_EVENTS, "present")
+    assert _CODEX_LIMITATION in section["limitations"]
+    assert _codex_recommendations(report) == []
+
+
+@pytest.mark.parametrize("config", [None, "broken = ["], ids=["missing", "malformed"])
+def test_unavailable_codex_config_is_unknown(tmp_path, codex_wiring, config):
+    _, collect, _, _ = codex_wiring
+    if config is not None:
+        (tmp_path / "config.toml").write_text(config, encoding="utf-8")
+    report = collect()
+    assert len(report["sections"]) == 6
+    section = report["sections"][0]
+    trust = section["evidence"]["host_trust"]
+    assert trust["status"] == "UNKNOWN" and trust["reason"]
+    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+    assert _CODEX_LIMITATION in section["limitations"]
+    assert _codex_recommendations(report) == []
+
+
+@pytest.mark.parametrize("manifest", ["hooks.json", "hooks.public.json"])
+def test_project_local_codex_wiring_is_unknown(tmp_path, codex_wiring, manifest):
+    _, collect, project, plugin = codex_wiring
+    (tmp_path / "config.toml").write_text(
+        _trust_toml(*map(_state_key, _CODEX_EVENTS)), encoding="utf-8"
+    )
+    (project / ".codex").mkdir()
+    source = plugin / "codex" / manifest
+    if not source.exists():  # the public tree ships the twin as hooks.json
+        source = plugin / "codex" / "hooks.json"
+    shutil.copyfile(source, project / ".codex/hooks.json")
+    report = collect()
+    trust = report["sections"][0]["evidence"]["host_trust"]
+    assert trust["status"] == "UNKNOWN" and "project" in trust["reason"]
+    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+    assert _codex_recommendations(report) == []
+
+
+@pytest.mark.parametrize("host", ["claude", "unknown"])
+def test_codex_trust_reader_is_not_called_for_other_hosts(codex_wiring, monkeypatch, host):
+    """Green on base. Fails if the reader is called even without a Codex host."""
+    collector, collect, _, _ = codex_wiring
+
+    def unexpected(*args):
+        raise AssertionError("read Codex trust outside the Codex host")
+
+    monkeypatch.setattr(collector, "_codex_trust", unexpected, raising=False)
+    report = collect(host=host)
+    assert "host_trust" not in report["sections"][0]["evidence"]
+
+
+def test_codex_trust_does_not_report_config_values(tmp_path, codex_wiring):
+    """Green on base. Guards disclosure of real config values in the new report."""
+    _, collect, _, _ = codex_wiring
+    canary = "health-check-private-value-canary"
+    (tmp_path / "config.toml").write_text(
+        _trust_toml(_state_key("stop")) + f'[mcp_servers.x.env]\nTOKEN = "{canary}"\n',
+        encoding="utf-8",
+    )
+    report = json.dumps(collect())
+    assert canary not in report and "synthetic-hash" not in report
+
+
+def test_health_check_skill_documents_codex_and_muse_trust():
+    skill = " ".join((_COLLECTOR.parents[1] / "SKILL.md").read_text().split())
+    assert "reads `$CODEX_HOME/config.toml` for hook trust" in skill
+    assert "render `host_trust`" in skill
+    assert "muse plugins inspect sidegraph" in skill
+    assert "`review_needed` needs `muse plugins approve sidegraph`" in skill
+
+
+def test_codex_trust_checks_marketplace_and_slot_and_refuses_unknown_origin(tmp_path, codex_wiring):
+    _, collect, _, plugin = codex_wiring
+    (tmp_path / "config.toml").write_text(
+        _trust_toml(
+            _state_key("session_start"),
+            _state_key("subagent_start"),
+            _state_key("stop", marketplace="former"),
+            _state_key("stop", slot="1:0"),
+        ),
+        encoding="utf-8",
+    )
+    trust = collect()["sections"][0]["evidence"]["host_trust"]
+    assert trust["items"] == {
+        "session_start": "present",
+        "stop": "missing",
+        "subagent_start": "present",
+    }
+    outside = tmp_path / "plain-plugin"
+    shutil.copytree(plugin, outside)
+    trust = collect(plugin_root=outside)["sections"][0]["evidence"]["host_trust"]
+    assert trust["status"] == "UNKNOWN" and trust["reason"]
+    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+
+
+def test_codex_trust_uses_declared_handler_positions(tmp_path, codex_wiring):
+    _, collect, _, plugin = codex_wiring
+    manifest = plugin / "codex/hooks.json"
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    stop = raw["hooks"]["Stop"][0]["hooks"][0]
+    raw["hooks"]["Stop"] = [{"hooks": []}, {"hooks": [stop, stop]}]
+    manifest.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+    (tmp_path / "config.toml").write_text(
+        _trust_toml(_state_key("stop", slot="1:0"), _state_key("stop", slot="1:1")),
+        encoding="utf-8",
+    )
+    trust = collect()["sections"][0]["evidence"]["host_trust"]
+    assert trust["items"]["stop"] == "present"
+
+
+@pytest.mark.parametrize("layout", ["directory-link", "file-link", "nonregular"])
+def test_codex_project_hook_read_stays_inside_project(tmp_path, codex_wiring, monkeypatch, layout):
+    collector, collect, project, _ = codex_wiring
+    declaration = project / ".codex/hooks.json"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "hooks.json").write_text('{"hooks":{}}\n', encoding="utf-8")
+    try:
+        if layout == "directory-link":
+            declaration.parent.symlink_to(outside, target_is_directory=True)
+        else:
+            declaration.parent.mkdir()
+            if layout == "file-link":
+                declaration.symlink_to(outside / "hooks.json")
+            else:
+                declaration.mkdir()
+    except OSError:
+        pytest.skip("cannot create the synthetic link on this filesystem")
+    load_json = collector._load_json
+
+    def reject_unsafe_read(path):
+        assert path not in {declaration, outside / "hooks.json"}, "unsafe project hook read"
+        return load_json(path)
+
+    monkeypatch.setattr(collector, "_load_json", reject_unsafe_read)
+    report = collect()
+    trust = report["sections"][0]["evidence"]["host_trust"]
+    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+    assert "project" in trust["reason"]
+    assert _codex_recommendations(report) == []
+
+
+def test_codex_local_hook_check_distinguishes_unrelated_and_unreadable(
+    tmp_path, codex_wiring, monkeypatch
+):
+    collector, collect, project, _ = codex_wiring
+    (tmp_path / "config.toml").write_text("[hooks.state]\n", encoding="utf-8")
+    declaration = project / ".codex/hooks.json"
+    declaration.parent.mkdir()
+    declaration.write_text(
+        json.dumps({"hooks": {"Stop": [{"hooks": [{"command": "echo sidegraph-stop"}]}]}}) + "\n",
+        encoding="utf-8",
+    )
+    report = collect()
+    assert report["sections"][0]["evidence"]["host_trust"]["items"] == dict.fromkeys(
+        _CODEX_EVENTS, "missing"
+    )
+    load_json = collector._load_json
+    monkeypatch.setattr(
+        collector,
+        "_load_json",
+        lambda path: (None, "unreadable_or_malformed") if path == declaration else load_json(path),
+    )
+    report = collect()
+    trust = report["sections"][0]["evidence"]["host_trust"]
+    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+    assert _codex_recommendations(report) == []
+
+
+def test_codex_trust_ignores_other_commands_in_the_same_event(tmp_path, codex_wiring):
+    _, collect, _, plugin = codex_wiring
+    manifest = plugin / "codex/hooks.json"
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    raw["hooks"]["Stop"][0]["hooks"].append({"type": "command", "command": "echo sidegraph-stop"})
+    manifest.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+    (tmp_path / "config.toml").write_text(_trust_toml(_state_key("stop")), encoding="utf-8")
+    assert collect()["sections"][0]["evidence"]["host_trust"]["items"]["stop"] == "present"
+
+
+def test_codex_trust_does_not_invent_hooks_for_an_empty_manifest(tmp_path, codex_wiring):
+    _, collect, _, plugin = codex_wiring
+    (plugin / "codex/hooks.json").write_text('{"hooks":{}}\n', encoding="utf-8")
+    (tmp_path / "config.toml").write_text("[hooks.state]\n", encoding="utf-8")
+    report = collect()
+    assert report["sections"][0]["evidence"]["host_trust"]["items"] == {}
+    assert _codex_recommendations(report) == []
+
+
+def test_codex_trust_resolves_home_alias_with_default_plugin_root(
+    tmp_path, codex_wiring, monkeypatch
+):
+    collector, collect, _, plugin = codex_wiring
+    alias = tmp_path / "profile-alias"
+    try:
+        alias.symlink_to(tmp_path, target_is_directory=True)
+    except OSError:
+        pytest.skip("cannot create the synthetic home alias on this filesystem")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", alias.name)
+    monkeypatch.setattr(
+        collector,
+        "__file__",
+        str(
+            alias
+            / plugin.relative_to(tmp_path)
+            / _COLLECTOR.relative_to(_ROOT / "plugin/sidegraph")
+        ),
+    )
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _trust_toml(_state_key("session_start"), _state_key("stop")), encoding="utf-8"
+    )
+    report = collect(plugin_root=None)
+    assert report["sections"][0]["evidence"]["host_trust"]["items"] == {
+        "session_start": "present",
+        "stop": "present",
+        "subagent_start": "missing",
+    }
+    (rec,) = _codex_recommendations(report)
+    assert rec["scope"] == f"codex_config={alias / 'config.toml'}"
